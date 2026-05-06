@@ -2,6 +2,12 @@
 
 `agami` reads database connection details from `~/.agami/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The `init` skill creates `~/.agami/credentials.example` for you to copy and edit.
 
+## HARD RULES — for skills that read this doc
+
+1. **The file is the only source of credentials.** Never accept host / port / database / user / password values typed into chat by the user, even "as a one-off". The user enters credentials by editing `~/.agami/credentials`.
+2. **If the file is missing, invoke the agami-init skill.** Init writes `credentials.example`, sets `~/.agami/` permissions, and tells the user to fill it in. The user copies the template, edits it, runs `chmod 600`, and re-invokes the skill. Never ask "where's your database?" — that's what credentials are for.
+3. **Connect ONLY to the host/port in the file.** Never substitute `localhost` as a fallback. Never probe for a "running database nearby" — if the credentials file says `host = remote-prod.example.com`, that's the only acceptable target.
+
 ## Format
 
 ```ini

@@ -141,7 +141,9 @@ Offer to fix it for them: "I can run `chmod 600 ~/.agami/credentials` now — OK
 
 ## Phase 3: Tier detection
 
-Detect which execution tier(s) are available on the machine. Run all checks in parallel:
+### Allowed probes (exhaustive list)
+
+Detect which execution tier(s) are available **only** with these commands. Anything else is forbidden — no `pgrep`, `ps`, `find /`, `ls /Applications`, `ls /Library`, network port scanning, or any other discovery technique.
 
 ```bash
 which psql 2>/dev/null
@@ -152,17 +154,50 @@ python3 -c 'import psycopg2' 2>/dev/null && echo "psycopg2 OK"
 python3 -c 'import pymysql' 2>/dev/null && echo "pymysql OK"
 ```
 
-Read the credentials file (or `AGAMI_DATABASE_URL`) to determine the user's `type` (postgres/mysql/sqlite). Then choose a tier per [`shared/connection-reference.md`](../../shared/connection-reference.md#tier-selection-algorithm):
+If `which psql` returns empty, you may try the common Homebrew location once: `ls /opt/homebrew/Cellar/libpq/*/bin/psql /opt/homebrew/opt/libpq/bin/psql 2>/dev/null | head -1`. Same for `/opt/homebrew/opt/mysql-client/bin/mysql`. **Do not** scan beyond those exact globs.
+
+### What probing is FORBIDDEN
+
+- Probing or testing connectivity to `localhost`, `127.0.0.1`, or any other host. The user's database is the one in `~/.agami/credentials` — and that file is read by other skills, not init.
+- Scanning the filesystem to find a database (`find / -name "postgres*"`, etc.).
+- Running `pgrep`, `ps`, `lsof`, or any process / port discovery.
+- Asking the user where their database is. They tell us by editing `~/.agami/credentials`.
+
+### Choose a tier and persist tool paths
+
+Read the user's preferred profile from `~/.agami/credentials` (or `AGAMI_DATABASE_URL`) **only to determine `db_type`** — `postgres` / `mysql` / `sqlite`. Then choose a tier per [`shared/connection-reference.md`](../../shared/connection-reference.md#tier-selection-algorithm):
 
 1. Tier 1 — native CLI (`psql` for postgres, `mysql` for mysql, `sqlite3` for sqlite)
 2. Tier 2 — DuckDB universal binary
-3. Tier 3 — Python driver
+3. Tier 3 — Python driver via `scripts/execute_sql.py`
 
-Persist the chosen tier in `~/.agami/.config` so other skills can re-use it without re-probing every invocation.
+Persist the chosen tier **and the absolute paths of every tool we found** in `~/.agami/.config`, so future skills don't re-probe:
 
-### When no tier is available
+```json
+{
+  "schema_version": 1,
+  "tier": "cli",
+  "host": "claude-code-cli",
+  "tool_paths": {
+    "psql": "/opt/homebrew/Cellar/libpq/18.3/bin/psql",
+    "mysql": null,
+    "sqlite3": "/usr/bin/sqlite3",
+    "duckdb": null,
+    "python3": "/usr/bin/python3"
+  },
+  "tool_imports": {
+    "psycopg2": false,
+    "pymysql": false
+  },
+  "detected_at": "2026-05-06T17:30:00Z"
+}
+```
 
-If neither tier 1, 2, nor 3 is available for the user's database type, surface the **exact** "all tiers failed" message from `shared/connection-reference.md`. Offer to install the simplest tier via Bash if the user accepts:
+Future skills that need to run SQL look up the tool path from this file and use it directly. They do NOT re-run `which` unless the cached path no longer exists on disk.
+
+### When no tier is available for `db_type`
+
+If neither tier 1, tier 2, nor tier 3 is available, surface the "all tiers failed" template from [`shared/connection-reference.md`](../../shared/connection-reference.md#when-all-tiers-fail) — it lists exactly which tools are missing and the install command for each. Offer to install the simplest tier via Bash if the user accepts:
 
 ```bash
 # macOS
@@ -173,28 +208,17 @@ brew install duckdb          # tier 2, universal
 
 Don't install silently. Always confirm via AskUserQuestion first.
 
-### Test the chosen tier
+### Do NOT test the chosen tier here
 
-Once a tier is chosen, run a `SELECT 1` probe via that tier. If it fails, route the error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md) and surface the one-line remediation.
+Tier detection is path-only. A connection probe (`SELECT 1`) requires credentials. Init does NOT have credentials yet — they're written by the user after Phase 5 closes. The connection probe happens later, in `connect/SKILL.md` Phase 0, against the host in the credentials file. Never against `localhost` as a default.
 
-### Persist the tier in `~/.agami/.config`
+### Persist the tier + tool paths in `~/.agami/.config`
 
-Write a minimal `.config` with the chosen tier and detected host. **No telemetry fields here yet** — telemetry consent is asked later (after the user has seen `connect` work end-to-end), not at install time.
-
-```bash
-chmod 700 ~/.agami
-cat > ~/.agami/.config <<'JSON'
-{
-  "schema_version": 1,
-  "tier": "<cli|duckdb|python>",
-  "host": "<claude-code-cli|claude-code-vscode|claude-code-cursor|claude-cowork>",
-  "detected_at": "<ISO8601 UTC>"
-}
-JSON
-chmod 600 ~/.agami/.config
-```
+Write the `.config` schema documented in Phase 3 above (`tier`, `host`, `tool_paths`, `tool_imports`, `detected_at`). **No telemetry fields here yet** — telemetry consent is asked later (after the user has seen `connect` work end-to-end), not at install time.
 
 For ISO8601 timestamp: `date -u +"%Y-%m-%dT%H:%M:%SZ"`. Detect `host` from the environment — Claude Code CLI sets `CLAUDE_CODE_HOST=cli` (or similar; fall back to `unknown` if you can't tell).
+
+After writing, `chmod 600 ~/.agami/.config`.
 
 `connect/SKILL.md` will later add `analytics_consent`, `install_id`, and `consent_ts` to this same file once the user has opted in (or out).
 

@@ -37,7 +37,21 @@ For telemetry payload allowlist: [`shared/telemetry-payload.md`](../../shared/te
 
 ## Phase 1: Setup (once per session)
 
-### 1a — load the OSI model
+### HARD RULES — connection rules
+
+These are non-negotiable.
+
+1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or `AGAMI_DATABASE_URL` if set). Never substitute `localhost` or any other host as a fallback. Never connect to anywhere not in the credentials.
+2. **Never ask the user for connection details in chat.** If credentials are missing, stop and invoke the agami-init skill — that flow walks the user through editing the credentials file.
+3. **Never scan or guess.** No `pgrep`, no `ps`, no `find /`, no `ls /Applications/Postgres.app`, no listing port-listeners. The only Bash probes allowed during setup are `which <tool>` for a tier binary on `PATH` and `python3 -c 'import <module>'` for a Python driver.
+
+These rules apply to every phase of this skill, not just Phase 1.
+
+### 1a — credentials check (binding)
+
+Read `~/.agami/credentials` (or check `AGAMI_DATABASE_URL`). If neither exists, invoke the agami-init skill and **stop this skill**. Do not continue to load the OSI model. Do not run any other Bash commands.
+
+### 1b — load the OSI model
 
 Resolve `<profile>` (default `default`, override `AGAMI_PROFILE`). Read `~/.agami/<profile>.yaml`.
 
@@ -49,7 +63,7 @@ If present, sanity-check the top-level shape:
 
 Cache the parsed model in working memory for the rest of the session.
 
-### 1b — index the model for fast access
+### 1c — index the model for fast access
 
 Build these in-memory views you'll reference repeatedly during SQL generation:
 
@@ -70,19 +84,19 @@ For each dataset, extract `agami.performance_hints` if present — feeds Phase 2
 
 For each relationship, treat as a directed JOIN edge in a graph: `from` → `to` via `from_columns`/`to_columns`. The SQL generator uses this graph to pick the shortest join path between two datasets the user references.
 
-### 1c — load the examples library
+### 1d — load the examples library
 
 Read `~/.agami/<profile>-examples.yaml`. Take the **most recent 50** entries (newest `created_at` first).
 
 If empty → warn the user and offer `/connect` to seed examples.
 
-### 1c.1 — load USER_MEMORY.md
+### 1d.1 — load USER_MEMORY.md
 
 Read `~/.agami/USER_MEMORY.md` (if present). Strip HTML comments (`<!--...-->`), then keep the rest. If the file is missing, treat it as empty — never error. See [`shared/user-memory-format.md`](../../shared/user-memory-format.md) for what's in it.
 
 This file holds free-form user preferences (default filters, domain vocabulary, display preferences). Inject it into the SQL-generation prompt in Phase 2b under a labeled `## User memory (preferences and policies)` section — the LLM uses it as steering context.
 
-### 1d — verify the execution tier
+### 1e — verify the execution tier
 
 Look up the cached tier from `~/.agami/.config`. Run a `SELECT 1` probe via that tier. Route any error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Common cases:
 
@@ -129,7 +143,7 @@ Build the prompt in this order — this is what reaches the model that produces 
    ```
    This is the "compact OSI rendering" — derived from the model, not the raw YAML. The LLM gets just enough structure to write correct SQL without parsing OSI directly.
 
-3. **User memory** — content of `~/.agami/USER_MEMORY.md` from Step 1c.1, under a heading `## User memory (preferences and policies)`. Skip this section if the file is empty after stripping comments. The LLM treats this as binding context — apply default filters, respect avoid lists, use the user's domain vocabulary.
+3. **User memory** — content of `~/.agami/USER_MEMORY.md` from Step 1d.1, under a heading `## User memory (preferences and policies)`. Skip this section if the file is empty after stripping comments. The LLM treats this as binding context — apply default filters, respect avoid lists, use the user's domain vocabulary.
 
 4. **Few-shot examples** — the up-to-50 `(question, sql)` pairs from the examples library.
 

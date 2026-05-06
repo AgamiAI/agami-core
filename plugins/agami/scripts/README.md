@@ -1,11 +1,29 @@
-# Optional Python sample scripts
+# Python helpers
 
-The files in this directory are **samples**, not runtime dependencies. The `agami` skill itself does not require Python on your machine — it drives execution via Bash + native CLIs (`psql`, `mysql`, `sqlite3`) or [DuckDB](https://duckdb.org/) as a universal fallback. See [`../shared/connection-reference.md`](../shared/connection-reference.md) for the tier model.
+Two categories of Python scripts ship with agami:
 
-These scripts are here for two reasons:
+- **Runtime helpers** (used by the skill): `execute_sql.py`. The agami skill itself runs this when tier 3 (Python driver) is selected — that's when the user has Python + a driver but no native CLI and no DuckDB. Bundled in every Desktop zip and on the marketplace install path.
+- **Optional samples** (`sample_*.py`): one-off reference scripts you can copy into your own toolchain. Not required for the skill to work.
 
-1. **Reference** — if you prefer to introspect / chart / send telemetry from Python (e.g., wiring agami into your own toolchain), copy these into your project as starting points.
-2. **Tier 3 fallback** — users who already have Python + the right driver, but no native CLI and no DuckDB binary, can call these directly. The `init` skill detects this case and points the user here.
+## Runtime helpers
+
+| Script | What it does | Requires |
+|---|---|---|
+| `execute_sql.py` | Reads `~/.agami/credentials`, opens a connection, runs ONE SQL statement, emits RFC 4180 CSV on stdout. Supports postgres / mysql / sqlite. Hard-exits with a clear message if credentials are missing — never asks in chat. | One of: `psycopg2-binary` (postgres), `pymysql` (mysql); sqlite uses stdlib |
+
+The agami skill calls it via:
+
+```bash
+# Single-line SQL via --sql
+python3 scripts/execute_sql.py --profile default --sql "SELECT COUNT(*) FROM orders"
+
+# Multi-line / quote-heavy SQL via --sql-file (preferred for anything non-trivial)
+python3 scripts/execute_sql.py --profile default --sql-file /tmp/agami-query.sql
+```
+
+Exit codes are documented in `execute_sql.py`'s docstring. The skill routes non-zero exits through the DB error classifier in `../shared/db_error_classifier.md`.
+
+## Optional samples
 
 | Script | What it does | Requires |
 |---|---|---|

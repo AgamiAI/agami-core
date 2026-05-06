@@ -35,11 +35,24 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 ## Phase 0: Preflight
 
-1. Verify `~/.agami/credentials` exists (or `AGAMI_DATABASE_URL` is set). If neither: invoke the `init` skill first.
-2. Apply the credentials chmod check from [`init/SKILL.md`](../init/SKILL.md#permissions-enforcement). Refuse to proceed if too permissive.
+### HARD RULES — read before doing anything
+
+These are non-negotiable. They override every other instruction in this file when they conflict.
+
+1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or, if set, in `AGAMI_DATABASE_URL`). Never connect to anything else. Never probe `localhost` "to see if there's a database running there" unless the credentials file explicitly says `host = localhost`. Never substitute defaults for missing credential fields.
+2. **Never ask the user for host / port / database / user / password values in chat.** Not even "as a temporary thing while we set up". Credentials live in `~/.agami/credentials` only — that's the contract.
+3. **Never scan or guess.** No `pgrep`, no `ps`, no `find /` for databases, no `ls /Applications/Postgres.app`, no `ls /Library/PostgreSQL`, no listing port-listeners, no testing connections to common hostnames. The only acceptable Bash probes in this phase are `which <tool>` (to find a CLI binary on `PATH`) and `python3 -c 'import <module>'` (to test a driver). Nothing else.
+4. **If credentials are missing, STOP this skill and invoke `init`.** Do not run introspection. Do not start tier detection. Do not write a temporary credentials file from values the user types. Tell the user in one short sentence "Your credentials file is missing — I'll re-run setup so you can enter them in the file" and hand off to `init`.
+
+If you find yourself reaching for any command that doesn't fit the rules above, stop and re-read this section.
+
+### Preflight steps
+
+1. **Credentials check (binding)**: read `~/.agami/credentials` if present, OR check `AGAMI_DATABASE_URL` env var. If neither exists, invoke `init` and **stop this skill**. Do not continue. Do not probe anything.
+2. Apply the credentials chmod check from the agami-init skill's permissions-enforcement section. Refuse to proceed if too permissive.
 3. Resolve `<profile>` (default: `default`, override with `AGAMI_PROFILE`). The OSI `semantic_model[].name` MUST equal `<profile>`.
-4. Resolve `db_type` from credentials (`postgres` | `mysql` | `sqlite`).
-5. Look up the cached execution tier from `~/.agami/.config`. If absent, run tier detection per [`init/SKILL.md`](../init/SKILL.md#phase-3-tier-detection).
+4. Resolve `db_type`, `host`, `port`, `database`, `user`, `password` from the credentials file's `[<profile>]` section (or parse from `AGAMI_DATABASE_URL`). Never substitute a value that's missing — surface a clear "your credentials file is missing field X for profile Y; please add it" message and stop.
+5. Look up the cached execution tier and tool paths from `~/.agami/.config`. If absent, run tier detection per the init skill's Phase 3.
 6. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch. **Hand-edits the user made (descriptions, ai_context, choice_fields, metrics) MUST be preserved** — re-introspection only updates what the DB unambiguously tells us (table list, columns, types, PK, FK).
 
 ---

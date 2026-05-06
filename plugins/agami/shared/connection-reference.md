@@ -2,6 +2,15 @@
 
 How `agami` connects to your database. Used by the `connect`, `query-database`, and `save-correction` skills.
 
+## HARD RULES — read first
+
+These are non-negotiable. Skills that read this document must follow them under every circumstance.
+
+1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or `AGAMI_DATABASE_URL`). Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
+2. **Never ask the user for connection details in chat.** Credentials live in `~/.agami/credentials` only. If the file is missing, invoke the agami-init skill (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
+3. **Never scan or guess.** Tool detection is `which <tool>` and `python3 -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `~/.agami/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
+4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
+
 ## Contents
 - Execution Tiers (pick highest available)
 - Tier 1 — Native CLI tool
@@ -30,31 +39,40 @@ How `agami` connects to your database. Used by the `connect`, `query-database`, 
 
 ### Tier-selection algorithm
 
-At first run (and re-checked when the user explicitly asks), probe tiers in order. Pseudocode:
+Tier detection runs **once**, in the agami-init skill's Phase 3. The result (chosen tier + absolute paths of every detected tool) is persisted in `~/.agami/.config.tool_paths`. Every subsequent skill invocation reads the cached paths — they do NOT re-probe.
+
+Init's tier-selection pseudocode:
 
 ```text
 db_type := credentials → type   (e.g., "postgres")
 
-# Tier 1: native CLI
-cli := which(cli_for_type[db_type])        # e.g., `which psql`
-if cli is not null: return cli_runner(cli)
+# Detect every tier in parallel and cache the absolute path of each.
+tool_paths := {
+  psql:    which("psql")  || ls /opt/homebrew/Cellar/libpq/*/bin/psql /opt/homebrew/opt/libpq/bin/psql,
+  mysql:   which("mysql") || ls /opt/homebrew/opt/mysql-client/bin/mysql,
+  sqlite3: which("sqlite3"),
+  duckdb:  which("duckdb"),
+  python3: which("python3"),
+}
+tool_imports := {
+  psycopg2: python_import_ok("psycopg2"),
+  pymysql:  python_import_ok("pymysql"),
+}
 
-# Tier 2: DuckDB (only if db_type is in {postgres, mysql, sqlite, duckdb, file})
-if db_type in duckdb_supported and which("duckdb"):
-    return duckdb_runner()
+# Pick the highest tier with the right tool for db_type.
+if db_type == "postgres" and tool_paths.psql:                return tier=cli
+if db_type == "mysql"    and tool_paths.mysql:               return tier=cli
+if db_type == "sqlite"   and tool_paths.sqlite3:             return tier=cli
+if db_type in {postgres, mysql, sqlite} and tool_paths.duckdb: return tier=duckdb
+if db_type == "postgres" and tool_imports.psycopg2:          return tier=python
+if db_type == "mysql"    and tool_imports.pymysql:           return tier=python
+if db_type == "sqlite"   and tool_paths.python3:             return tier=python  # stdlib
 
-# Tier 3: Python driver
-driver := python_import_ok(driver_for_type[db_type])
-if driver: return python_runner(driver)
-
-# DuckDB available to install? Offer it.
-if db_type in duckdb_supported:
-    offer_to_install_duckdb()   # AskUserQuestion, don't install silently
-    if user_accepts: install_duckdb(); return duckdb_runner()
-
-# Nothing worked
-explain_options_and_ask()
+# Nothing worked.
+offer_install()  # AskUserQuestion — never install silently
 ```
+
+Other skills look up `tier` and `tool_paths.<tool>` from `~/.agami/.config` and use them directly. They do not re-run `which`. If the cached path no longer exists on disk (`! -x "$path"`), they offer to re-detect — they do NOT silently scan or fall back to localhost.
 
 ### When all tiers fail
 
@@ -125,9 +143,19 @@ CSV output: append `-csv` or wrap in `COPY (<query>) TO '/dev/stdout' (FORMAT CS
 
 ---
 
-## Tier 3 — Python driver (optional)
+## Tier 3 — Python driver
 
-Used when neither tier 1 nor tier 2 is available, but Python with the right driver is. See **Python Driver Fallback** below for per-database imports and sample code. Optional sample scripts live in [`plugins/agami/scripts/`](../scripts/).
+Used when neither tier 1 nor tier 2 is available, but Python with the right driver is. The agami skill ships a runtime helper for this:
+
+```bash
+python3 plugins/agami/scripts/execute_sql.py --profile <profile> --sql-file /tmp/agami-query.sql
+```
+
+`execute_sql.py` reads `~/.agami/credentials` itself, opens a connection via `psycopg2` / `pymysql` / `sqlite3` based on the profile's `type` field, runs the SQL, emits RFC 4180 CSV on stdout. Exit codes communicate the failure category (config, driver missing, connect error, execution error). See [`plugins/agami/scripts/README.md`](../scripts/README.md) for full usage.
+
+Skills should always use `--sql-file` for non-trivial SQL. The `--sql` flag is fine for short statements; `--sql-file` avoids any shell-quoting issues for SQL containing single quotes, backticks, `$`, or backslashes.
+
+The "Python Driver Fallback" section further down shows the inline `python3 -c '...'` form that does the same thing without the helper — useful only if `execute_sql.py` isn't bundled (e.g., a legacy install). Prefer `execute_sql.py`.
 
 ---
 
