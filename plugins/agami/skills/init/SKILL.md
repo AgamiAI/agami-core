@@ -118,6 +118,10 @@ Then say something like:
 
 If the user asks for help editing it, walk them through the fields per [`shared/credentials-format.md`](../../shared/credentials-format.md).
 
+### Seed `~/.agami/USER_MEMORY.md` if missing
+
+If `~/.agami/USER_MEMORY.md` does not exist, write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md) → "Default seed") via the Write tool, `chmod 600`. This file holds free-form user preferences (default filters, domain vocabulary, display preferences) that every other agami skill loads on each invocation. Don't overwrite an existing file — the user may have edited it.
+
 ### Permissions enforcement
 
 Whenever this skill (or any other agami skill) reads `~/.agami/credentials`, verify perms:
@@ -173,112 +177,49 @@ Don't install silently. Always confirm via AskUserQuestion first.
 
 Once a tier is chosen, run a `SELECT 1` probe via that tier. If it fails, route the error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md) and surface the one-line remediation.
 
----
+### Persist the tier in `~/.agami/.config`
 
-## Phase 4: Telemetry opt-in (one-time)
-
-If `~/.agami/.config` already has `analytics_consent` set (true or false), **skip this phase**. Only ask once.
-
-Use **AskUserQuestion** with this exact question and three options. The text matters — read it back to yourself before sending. Do not paraphrase the "what we send / never send" lists.
-
-> **Help us improve agami by sending anonymous usage stats?**
->
-> What we send:
-> - Counts of installs, queries, errors (no content)
-> - Database type (postgres/mysql/sqlite), OS, which host (Claude Code / Cowork)
-> - Latency percentiles
-> - A random install ID — not tied to you
->
-> What we never send:
-> - Your queries, your schema, your data
-> - Your hostname, paths, credentials
-> - Anything we couldn't read out loud at a conference
->
-> You can change your mind any time.
-
-Options:
-- `Yes (Recommended)` — "Send anonymous usage stats. Helps us prioritize fixes."
-- `No` — "Don't send anything. Skill works the same."
-- `Read more` — "Open `docs/privacy.md` and the full payload allowlist."
-
-If `Read more`: open [`docs/privacy.md`](../../../../docs/privacy.md) and [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md), then re-prompt with just `Yes (Recommended)` / `No`.
-
-### Persist the choice
-
-Write `~/.agami/.config` (JSON, chmod 600). Generate a UUIDv4 install_id only on `Yes`:
+Write a minimal `.config` with the chosen tier and detected host. **No telemetry fields here yet** — telemetry consent is asked later (after the user has seen `connect` work end-to-end), not at install time.
 
 ```bash
 chmod 700 ~/.agami
 cat > ~/.agami/.config <<'JSON'
 {
   "schema_version": 1,
-  "analytics_consent": <true|false>,
-  "install_id": "<uuid4 if consent, null if not>",
   "tier": "<cli|duckdb|python>",
   "host": "<claude-code-cli|claude-code-vscode|claude-code-cursor|claude-cowork>",
-  "consent_ts": "<ISO8601 UTC>"
+  "detected_at": "<ISO8601 UTC>"
 }
 JSON
 chmod 600 ~/.agami/.config
 ```
 
-For UUID generation: `python3 -c 'import uuid; print(uuid.uuid4())'` or `uuidgen | tr '[:upper:]' '[:lower:]'`.
+For ISO8601 timestamp: `date -u +"%Y-%m-%dT%H:%M:%SZ"`. Detect `host` from the environment — Claude Code CLI sets `CLAUDE_CODE_HOST=cli` (or similar; fall back to `unknown` if you can't tell).
 
-For ISO8601 timestamp: `date -u +"%Y-%m-%dT%H:%M:%SZ"`.
-
-Detect `host` from the environment — Claude Code CLI sets `CLAUDE_CODE_HOST=cli` (or similar — check what's actually present and fall back to `unknown` if you can't tell).
-
-### Sending the install event (only if consent = true)
-
-Right after writing `.config` with `analytics_consent: true`, send one event:
-
-```bash
-install_id=$(jq -r .install_id ~/.agami/.config)
-ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-curl -sS -m 5 -X POST https://analytics.agami.ai/v1/events \
-  -H "Content-Type: application/json" \
-  -d "$(cat <<JSON
-{
-  "schema_version": 1,
-  "events": [{
-    "event_type": "install",
-    "install_id": "$install_id",
-    "db_type": "$db_type",
-    "os": "$(uname -s | tr '[:upper:]' '[:lower:]')",
-    "host": "$host",
-    "tier": "$tier",
-    "client_version": "1.0.0",
-    "timestamp": "$ts"
-  }]
-}
-JSON
-)" || true
-```
-
-Build the payload **only** from the allowlist in [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md). If you find yourself reaching for any other field, stop — there's nothing else to send.
-
-Failure-tolerant: `|| true` so a network blip doesn't break setup.
+`connect/SKILL.md` will later add `analytics_consent`, `install_id`, and `consent_ts` to this same file once the user has opted in (or out).
 
 ---
 
-## Phase 5: Email opt-in (deferred until first successful query)
+## Phase 4: Deferred opt-ins (no prompts here)
 
-Don't prompt for email at install time. The post-install opt-in (F15) lives in the `query-database` skill — it asks **after** the user's first successful query, when they've felt the value. State lives at `~/.agami/.optins`.
+`init` does not ask for telemetry or email opt-in. Both are asked later, when the user has felt the value of the skill:
 
-Don't do anything in Phase 5 during this skill. Just note for the user (in the closing message) that they'll be asked once for email updates after their first real query.
+- **Telemetry consent** — asked by `connect/SKILL.md` after the demo query succeeds. Asking at `init` time is too early; the user hasn't seen anything work yet.
+- **Email updates** — asked by `query-database/SKILL.md` after the user's first real successful query.
+
+Don't do anything in this phase. Just mention in the closing message below that the user will be asked once about each (separately) after the first interaction.
 
 ---
 
-## Phase 6: Hand-off
+## Phase 5: Hand-off
 
 When all phases done, end with a short status + next step:
 
 > ✓ `~/.agami/` ready (chmod 700)
 > ✓ Credentials template written to `~/.agami/credentials.example`
 > ✓ Tier detected: psql (tier 1)
-> ✓ Telemetry: enabled (or: disabled — your call)
 >
-> Next: edit `~/.agami/credentials` with your DB connection, then ask me a question like "how many orders did we ship last month?". I'll introspect your schema on the first query.
+> Next: edit `~/.agami/credentials` with your DB connection, then ask me a question like "how many orders did we ship last month?". I'll introspect your schema on the first query, then ask if you'd like to share anonymous usage stats.
 
 If the user already has credentials and just ran `init` to verify, skip the "edit credentials" line and prompt them to ask a question directly.
 
@@ -288,5 +229,3 @@ If the user already has credentials and just ran `init` to verify, skip the "edi
 
 - All credential reads route through the chmod check in Phase 2. Refuse on world-readable.
 - All SQL runs route through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Surface one-line remediations, not raw stacktraces.
-- All telemetry POSTs use `|| true` — never block the user on a network failure.
-- Don't write `~/.agami/.config` until the user has answered the opt-in. If they Ctrl-C in the middle, the next run re-prompts.

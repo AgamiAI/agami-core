@@ -82,6 +82,7 @@ Compare the original SQL (from `query_log.jsonl`) to the corrected SQL. Identify
 | `relationship` | The JOIN `ON` clause changed to use different columns, OR a JOIN was added between two datasets where none existed | "join should be on customer_id, not user_id"; "products → categories via category_id" |
 | `field_metadata` | Description / unit / type-implication of one field changed — but no SQL structure change beyond the literal value or a CAST | "amount is in cents, divide by 100"; "is_active means 1, not true"; "description for status should say…" |
 | `new_metric` | The corrected SQL defines a reusable aggregation that didn't exist in the model — typically the user is teaching us a business metric | "MRR = SUM(price) WHERE plan_type='subscription'"; "active customers means is_active AND last_login > 30 days ago" |
+| `user_preference` | A general policy that should apply to **every** future query — not specific to this question. Trigger phrases: "from now on", "always", "never", "by default", "I prefer", "stop showing me…" | "always exclude test users where email matches @example.com"; "default time window is last 30 days unless I say otherwise"; "never include cancelled orders"; "I prefer line charts for time-series" |
 | `mixed` | More than one of the above | "wrong join AND amount needs /100" |
 
 ### How to classify
@@ -99,6 +100,7 @@ When ambiguous, **AskUserQuestion**:
 > - **A join correction** — relationships in the model need updating
 > - **A column meaning change** — e.g., amount is in cents, status means something specific
 > - **A new business metric** — let's add this as a reusable metric
+> - **A general preference** — apply this to every future query (saves to USER_MEMORY.md, not the model)
 
 The user's answer determines Phase 4 routing.
 
@@ -150,9 +152,21 @@ Add a new entry to top-level `metrics[]`:
 
 **Always reference fields by `<dataset_name>.<field_name>`** in the metric expression — that's the OSI convention. Strip any WHERE clauses that are about specific user filtering (e.g., `WHERE customer_id = 42`) — keep only the WHERE clauses that are part of the metric's definition (e.g., `WHERE plan_type = 'subscription'` for MRR).
 
+#### `user_preference` edit
+
+A `user_preference` correction does NOT touch the OSI semantic model. It lands in `~/.agami/USER_MEMORY.md` (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)). Steps:
+
+1. **Read** `~/.agami/USER_MEMORY.md` (it exists — `init` seeds it).
+2. **Pick the right section** (`Default filters`, `Naming and synonyms`, `Display preferences`, or `Avoid`) based on the policy's nature. Add a new section if none of the four fits — keep this rare.
+3. **Append the new bullet** under that section, in plain English (the user's wording, lightly cleaned). Don't paraphrase aggressively — preserve their voice.
+4. **Show the user the diff** (per Phase 4b below) before writing.
+5. **Strip nothing** — USER_MEMORY.md is intentionally free-form, not schema-validated. The validator (Phase 4c) is a no-op for `user_preference` corrections; the OSI model is unchanged.
+
+The user's bullet should be self-contained — anyone reading USER_MEMORY.md should understand the policy without seeing the original conversation.
+
 #### `mixed` edit
 
-Apply each individual edit as above. Show the user the combined diff in 4b before validating.
+Apply each individual edit as above. Show the user the combined diff in 4b before validating. If the mix includes a `user_preference`, that part skips the validator (USER_MEMORY.md isn't validated); the OSI-model parts still go through the validator.
 
 ### 4b — show the diff to the user, get approval
 

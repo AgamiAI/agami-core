@@ -1,20 +1,29 @@
 <!DOCTYPE html>
 <!--
-  agami chart template — used by query-database SKILL.md.
+  agami report template — used by query-database/SKILL.md.
 
-  The skill reads this file, replaces the {{...}} placeholders with the
-  result-set values, and writes the output to ~/.agami/charts/<ts>.html.
+  The skill reads this file, substitutes the {{...}} placeholders, and writes
+  the result to ~/.agami/charts/<ts>.html. The output is fully self-contained:
+  opens from file:// in any browser, no server, no relative-path dependencies.
 
-  Placeholders:
-    {{TITLE}}        — chart title (string, no quotes around the placeholder)
-    {{CHART_TYPE}}   — one of: bar | line | pie | doughnut | scatter
-    {{LABELS}}       — JSON array of x-axis labels (strings)
-    {{DATASETS}}     — JSON array of Chart.js dataset objects
-    {{GENERATED_AT}} — ISO8601 timestamp
-    {{SQL}}          — the SQL that produced the data (for the footer)
+  Per-chart placeholders the skill must substitute every time:
+    {{TITLE}}            — the user's question, or a tight summary
+    {{INSIGHTS}}         — one short paragraph of plain-English insight (HTML-escaped)
+    {{CHART_TYPE}}       — bar | line | pie | doughnut | scatter
+    {{LABELS}}           — JSON array of x-axis (or pie) labels
+    {{DATASETS}}         — JSON array of Chart.js dataset objects
+    {{TABLE_HEADERS}}    — JSON array of column header strings
+    {{TABLE_ROWS}}       — JSON array of arrays — one inner array per row
+    {{SQL}}              — the executed SQL (HTML-escaped: & → &amp;, < → &lt;, > → &gt;)
+    {{GENERATED_AT}}     — ISO8601 UTC timestamp
 
-  After substitution the file is fully self-contained: opens from file://
-  in any browser, no server required.
+  Logo placeholders (substituted with the FULL SVG XML content from the
+  sibling files at chart-render time):
+    {{AGAMI_LOGO_DARK_TEXT}}   — contents of shared/agami-logo-dark.svg  (used on light backgrounds)
+    {{AGAMI_LOGO_LIGHT_TEXT}}  — contents of shared/agami-logo-light.svg (used on dark backgrounds)
+
+  The SKILL.md walkthrough for chart rendering is in
+  query-database/SKILL.md → Phase 4d.
 -->
 <html lang="en">
 <head>
@@ -25,18 +34,24 @@
   <style>
     :root {
       --bg: #ffffff;
+      --bg-elev: #fafafa;
       --fg: #1a1a1a;
       --muted: #6b7280;
       --border: #e5e7eb;
       --accent: #2563eb;
+      --row-zebra: rgba(0, 0, 0, 0.025);
+      --code-bg: rgba(0, 0, 0, 0.04);
     }
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #0f172a;
+        --bg-elev: #131c2f;
         --fg: #f1f5f9;
         --muted: #94a3b8;
         --border: #1e293b;
         --accent: #60a5fa;
+        --row-zebra: rgba(255, 255, 255, 0.03);
+        --code-bg: rgba(255, 255, 255, 0.04);
       }
     }
     * { box-sizing: border-box; }
@@ -48,69 +63,157 @@
       color: var(--fg);
       line-height: 1.5;
     }
-    .wrap { max-width: 960px; margin: 0 auto; }
-    header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
-    h1 { font-size: 20px; font-weight: 600; margin: 0; }
-    .brand { font-size: 12px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
-    .meta { font-size: 12px; color: var(--muted); margin-bottom: 24px; }
-    .chart-card {
+    .wrap { max-width: 1040px; margin: 0 auto; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 8px;
+    }
+    .logo a { display: inline-block; line-height: 0; text-decoration: none; }
+    .logo svg { display: block; height: 28px; width: auto; }
+    .logo-light-mode { display: inline-block; }
+    .logo-dark-mode { display: none; }
+    @media (prefers-color-scheme: dark) {
+      .logo-light-mode { display: none; }
+      .logo-dark-mode { display: inline-block; }
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0;
+      flex: 1;
+      text-align: right;
+    }
+    .meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 28px;
+      text-align: right;
+    }
+    section { margin-bottom: 28px; }
+    .card {
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 24px;
-      background: var(--bg);
+      background: var(--bg-elev);
     }
-    .chart-canvas { position: relative; height: 480px; }
+    .insights { font-size: 16px; }
+    .insights p:first-child { margin-top: 0; }
+    .insights p:last-child { margin-bottom: 0; }
+    .chart-canvas { position: relative; height: 460px; }
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    th {
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: transparent;
+    }
+    tbody tr:nth-child(even) td { background: var(--row-zebra); }
+    td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+    details > summary {
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+      list-style: none;
+      user-select: none;
+    }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before {
+      content: "▸";
+      display: inline-block;
+      width: 1em;
+      transition: transform 120ms ease;
+    }
+    details[open] > summary::before { transform: rotate(90deg); }
+    .sql pre {
+      margin-top: 12px;
+      background: var(--code-bg);
+      padding: 14px 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      white-space: pre;
+      color: var(--fg);
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
     footer {
-      margin-top: 24px;
+      margin-top: 32px;
       padding-top: 16px;
       border-top: 1px solid var(--border);
       font-size: 12px;
       color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
-    footer pre {
-      background: rgba(0, 0, 0, 0.04);
-      padding: 12px 16px;
-      border-radius: 8px;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--fg);
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
-      font-size: 12px;
-    }
-    @media (prefers-color-scheme: dark) {
-      footer pre { background: rgba(255, 255, 255, 0.04); }
-    }
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--fg); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
+      <div class="logo">
+        <a href="https://agami.ai" target="_blank" rel="noopener" aria-label="agami">
+          <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+          <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+        </a>
+      </div>
       <h1>{{TITLE}}</h1>
-      <span class="brand">agami</span>
     </header>
-    <div class="meta">Generated {{GENERATED_AT}}</div>
+    <p class="meta">Generated {{GENERATED_AT}}</p>
 
-    <div class="chart-card">
+    <section class="insights card">
+      <p>{{INSIGHTS}}</p>
+    </section>
+
+    <section class="card">
       <div class="chart-canvas"><canvas id="chart"></canvas></div>
-    </div>
+    </section>
 
-    <footer>
+    <section class="card">
+      <div class="table-wrap"><table id="data-table"><thead></thead><tbody></tbody></table></div>
+    </section>
+
+    <section class="sql card">
       <details>
-        <summary style="cursor: pointer;">SQL</summary>
+        <summary>SQL</summary>
         <pre>{{SQL}}</pre>
       </details>
+    </section>
+
+    <footer>
+      <span>Self-contained — no data leaves your machine.</span>
+      <a href="https://agami.ai" target="_blank" rel="noopener">agami.ai</a>
     </footer>
   </div>
 
   <script>
-    const ctx = document.getElementById('chart').getContext('2d');
-    // The skill substitutes these three placeholders with valid JSON.
+    // The skill substitutes these placeholders with valid JSON.
     const labels = {{LABELS}};
     const datasets = {{DATASETS}};
     const chartType = "{{CHART_TYPE}}";
+    const tableHeaders = {{TABLE_HEADERS}};
+    const tableRows = {{TABLE_ROWS}};
 
-    // Default dataset polish — Chart.js defaults look fine but a touch more deliberate here.
+    // ---- Chart ----
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899'];
     datasets.forEach((ds, i) => {
       if (!ds.backgroundColor) {
@@ -129,7 +232,7 @@
       }
     });
 
-    new Chart(ctx, {
+    new Chart(document.getElementById('chart').getContext('2d'), {
       type: chartType,
       data: { labels, datasets },
       options: {
@@ -147,6 +250,39 @@
           x: { grid: { display: false } },
         },
       },
+    });
+
+    // ---- Table ----
+    function isNumericCol(rows, idx) {
+      for (const r of rows) {
+        const v = r[idx];
+        if (v === null || v === undefined || v === '') continue;
+        if (typeof v === 'number') continue;
+        if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v.replace(/,/g, ''))) continue;
+        return false;
+      }
+      return true;
+    }
+    const numericCols = tableHeaders.map((_, i) => isNumericCol(tableRows, i));
+    const thead = document.querySelector('#data-table thead');
+    const trHead = document.createElement('tr');
+    tableHeaders.forEach((h, i) => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      if (numericCols[i]) th.classList.add('numeric');
+      trHead.appendChild(th);
+    });
+    thead.appendChild(trHead);
+    const tbody = document.querySelector('#data-table tbody');
+    tableRows.forEach(row => {
+      const tr = document.createElement('tr');
+      row.forEach((cell, i) => {
+        const td = document.createElement('td');
+        td.textContent = cell == null ? '' : String(cell);
+        if (numericCols[i]) td.classList.add('numeric');
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
     });
   </script>
 </body>

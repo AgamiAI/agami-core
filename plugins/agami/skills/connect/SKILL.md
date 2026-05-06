@@ -206,10 +206,13 @@ Skip patterns that don't fit the user's schema (e.g., no time field → no "last
 
 ### 4a — generate
 
+First, **load `~/.agami/USER_MEMORY.md`** (strip HTML comments). Per [`shared/user-memory-format.md`](../../shared/user-memory-format.md), this file holds default filters, domain vocabulary, and avoid rules the user wants applied to every query.
+
 For each example:
 - Build `(question, sql)` using the model from Phase 3.
 - Reference fields by their **OSI dataset.field name** (which equals the DB column name in the simple introspect case).
 - Use SQL safety rules from [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md) and dialect-specific syntax from [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
+- **Apply USER_MEMORY policies.** If USER_MEMORY says "exclude test users where email matches @example.com", every seed example that touches `customers` includes that filter. If it says "default time window: last 30 days", date-relevant examples honor that default.
 
 ### 4b — EXPLAIN-validate each
 
@@ -270,13 +273,98 @@ Branch:
 - **No** → invoke `/save-correction` with the user's feedback (which may also update the OSI model — see save-correction/SKILL.md).
 - **Skip** → leave example as-is.
 
-Surface: `✓ Demo run complete. You're set up — ask me a question about your data.`
+Surface: `✓ Demo run complete.`
 
 ---
 
-## Phase 6: Telemetry (if opted in)
+## Phase 6: Telemetry opt-in (one-time, after demo succeeds)
 
-If `~/.agami/.config` has `analytics_consent: true`, append a `connect` event to `~/.agami/.telemetry-queue.jsonl` using ONLY the allowlisted fields per [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md). Don't flush yet — that happens daily from `query-database`.
+This is the **first** moment the user sees the skill produce real value. Ask for analytics consent here — not at install time.
+
+If `~/.agami/.config` already has an `analytics_consent` field set (true or false), **skip this phase entirely**. Only ask once.
+
+Otherwise, use **AskUserQuestion** with this exact question and three options. The text matters — read it back to yourself before sending. Do not paraphrase the "what we send / never send" lists.
+
+> **You just saw agami work end-to-end. Help us improve it by sending anonymous usage stats?**
+>
+> What we send:
+> - Counts of installs, queries, errors (no content)
+> - Database type (postgres/mysql/sqlite), OS, which host (Claude Code / Cowork)
+> - Latency percentiles
+> - A random install ID — not tied to you
+>
+> What we never send:
+> - Your queries, your schema, your data
+> - Your hostname, paths, credentials
+> - Anything we couldn't read out loud at a conference
+>
+> You can change your mind any time.
+
+Options:
+- `Yes (Recommended)` — "Send anonymous usage stats. Helps us prioritize fixes."
+- `No` — "Don't send anything. Skill works the same."
+- `Read more` — "Open `docs/privacy.md` and the full payload allowlist."
+
+If `Read more`: open [`docs/privacy.md`](../../../../docs/privacy.md) and [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md), then re-prompt with just `Yes (Recommended)` / `No`.
+
+### 6a — persist the choice into the existing `~/.agami/.config`
+
+`init/SKILL.md` already wrote a base `.config` with `tier` and `host`. Update it in place — don't overwrite the existing fields.
+
+```bash
+install_id=""
+if [ "$CONSENT" = "true" ]; then
+  install_id=$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
+fi
+ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Merge new fields into the existing .config (preserve tier + host)
+python3 - <<PY
+import json, pathlib
+p = pathlib.Path.home() / ".agami" / ".config"
+cfg = json.loads(p.read_text()) if p.exists() else {"schema_version": 1}
+cfg["analytics_consent"] = $CONSENT_BOOL
+cfg["install_id"] = "$install_id" if "$install_id" else None
+cfg["consent_ts"] = "$ts"
+p.write_text(json.dumps(cfg, indent=2))
+PY
+chmod 600 ~/.agami/.config
+```
+
+(Substitute `$CONSENT_BOOL` with literal `true` or `false` based on the user's choice.)
+
+### 6b — send the install event (only if consent is true)
+
+```bash
+if [ "$CONSENT" = "true" ]; then
+  curl -sS -m 5 -X POST https://analytics.agami.ai/v1/events \
+    -H "Content-Type: application/json" \
+    -d "$(cat <<JSON
+{
+  "schema_version": 1,
+  "events": [{
+    "event_type": "install",
+    "install_id": "$install_id",
+    "db_type": "$db_type",
+    "os": "$(uname -s | tr '[:upper:]' '[:lower:]')",
+    "host": "$host",
+    "tier": "$tier",
+    "client_version": "1.0.0",
+    "timestamp": "$ts"
+  }]
+}
+JSON
+)" || true
+fi
+```
+
+Build the payload **only** from the allowlist in [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md). If you find yourself reaching for any other field, stop — there's nothing else to send.
+
+Failure-tolerant: `|| true` so a network blip doesn't break the connect flow.
+
+### 6c — queue the connect event (only if consent is true)
+
+After the install event sends, append a `connect` event to `~/.agami/.telemetry-queue.jsonl` using only the allowlisted fields. Don't flush yet — that happens daily from `query-database`.
 
 ---
 
@@ -286,6 +374,7 @@ If `~/.agami/.config` has `analytics_consent: true`, append a `connect` event to
 ✓ ~/.agami/<profile>.yaml — OSI v0.1.1 semantic model (validated)
 ✓ ~/.agami/<profile>-examples.yaml — <N> NL→SQL examples
 ✓ Demo query verified
+✓ Telemetry: <enabled | disabled — your call>
 
 You're ready. Ask me anything — e.g. "show top 10 active customers by spend".
 ```

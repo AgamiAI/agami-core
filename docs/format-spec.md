@@ -7,12 +7,15 @@ Specs for every file `agami` reads or writes inside `~/.agami/`.
 | `~/.agami/credentials` | INI (chmod 600) | User-edited |
 | `~/.agami/<profile>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML | Skill-written, user-editable |
 | `~/.agami/<profile>-examples.yaml` | Agami-bespoke YAML | Skill-written (seeds) + append-only via `/save-correction` |
+| `~/.agami/USER_MEMORY.md` | Free-form Markdown | Seeded by `init`, edited by user or appended by `/save-correction` |
 | `~/.agami/.config` | JSON (chmod 600) | Skill-managed |
 | `~/.agami/.optins` | JSON (chmod 600) | Skill-managed |
 | `~/.agami/.telemetry-queue.jsonl` | JSONL | Skill-managed |
 | `~/.agami/query_log.jsonl` | JSONL append-only | Skill-written, never sent |
 | `~/.agami/charts/<ts>.html` | Chart.js HTML | Skill-written |
 | `~/.agami/exports/<ts>.csv` | RFC 4180 CSV | Skill-written |
+
+`USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives alongside credentials, and persists across hosts (CLI / Cowork / Desktop) the same way credentials do.
 
 `<profile>` matches the section name in `~/.agami/credentials` (default: `default`).
 
@@ -193,7 +196,34 @@ examples:
 
 ---
 
-## 4. Internal state files
+## 4. User memory (free-form Markdown)
+
+`~/.agami/USER_MEMORY.md` holds free-form preferences and policies that don't belong in the OSI semantic model — default filters, domain vocabulary, display preferences, hard avoids. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
+
+Seeded by `init` on first run with section hints (HTML comments). User edits by hand, OR `/save-correction` appends a bullet when it classifies a correction as `user_preference` ("from now on, always exclude test users where email matches @example.com").
+
+Full spec: [`plugins/agami/shared/user-memory-format.md`](../plugins/agami/shared/user-memory-format.md).
+
+~~~markdown
+# agami user memory
+
+## Default filters
+- Exclude rows where customers.email LIKE '%@example.com'
+- Default time window: last 30 days unless the question specifies otherwise
+
+## Naming and synonyms
+- "active" means is_active = true AND status = 'live'
+- "MRR" = SUM(price) WHERE plan_type = 'subscription'
+
+## Display preferences
+- Currency: USD with 2 decimals
+- Dates: ISO format (2026-05-06), not relative ("today")
+
+## Avoid
+- Don't query the _audit schema
+~~~
+
+## 5. Internal state files
 
 ### `~/.agami/.config`
 
@@ -233,10 +263,10 @@ One JSON event per line, each conforming to the allowlist in [`plugins/agami/sha
 
 ---
 
-## 5. Chart artifacts (`~/.agami/charts/<ts>.html`)
+## 6. Chart artifacts (`~/.agami/charts/<ts>.html`)
 
 Self-contained Chart.js v4 HTML, rendered from [`plugins/agami/shared/chart-template.html`](../plugins/agami/shared/chart-template.html) with placeholders substituted (`{{TITLE}}`, `{{CHART_TYPE}}`, `{{LABELS}}`, `{{DATASETS}}`, `{{GENERATED_AT}}`, `{{SQL}}`). Open in any browser.
 
-## 6. CSV exports (`~/.agami/exports/<ts>.csv`)
+## 7. CSV exports (`~/.agami/exports/<ts>.csv`)
 
 Standard RFC 4180 CSV. UTF-8, no BOM.
