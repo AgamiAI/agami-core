@@ -1,0 +1,13 @@
+{
+  "name": "agami",
+  "description": "Ask plain-English questions of your Postgres or MySQL database. Local-first: your credentials, schema, and query results never leave your machine. Save corrections that improve future answers, and render rich Chart.js charts.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Agami AI",
+    "email": "skills@agami.ai",
+    "url": "https://agami.ai"
+  },
+  "homepage": "https://github.com/AgamiAI/LiteBi",
+  "repository": "https://github.com/AgamiAI/LiteBi",
+  "license": "MIT"
+}

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<!--
+  agami chart template — used by query-database SKILL.md.
+
+  The skill reads this file, replaces the {{...}} placeholders with the
+  result-set values, and writes the output to ~/.agami/charts/<ts>.html.
+
+  Placeholders:
+    {{TITLE}}        — chart title (string, no quotes around the placeholder)
+    {{CHART_TYPE}}   — one of: bar | line | pie | doughnut | scatter
+    {{LABELS}}       — JSON array of x-axis labels (strings)
+    {{DATASETS}}     — JSON array of Chart.js dataset objects
+    {{GENERATED_AT}} — ISO8601 timestamp
+    {{SQL}}          — the SQL that produced the data (for the footer)
+
+  After substitution the file is fully self-contained: opens from file://
+  in any browser, no server required.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{TITLE}} — agami</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #1a1a1a;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --fg: #f1f5f9;
+        --muted: #94a3b8;
+        --border: #1e293b;
+        --accent: #60a5fa;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; }
+    header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+    h1 { font-size: 20px; font-weight: 600; margin: 0; }
+    .brand { font-size: 12px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+    .meta { font-size: 12px; color: var(--muted); margin-bottom: 24px; }
+    .chart-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      background: var(--bg);
+    }
+    .chart-canvas { position: relative; height: 480px; }
+    footer {
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    footer pre {
+      background: rgba(0, 0, 0, 0.04);
+      padding: 12px 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--fg);
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+      font-size: 12px;
+    }
+    @media (prefers-color-scheme: dark) {
+      footer pre { background: rgba(255, 255, 255, 0.04); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>{{TITLE}}</h1>
+      <span class="brand">agami</span>
+    </header>
+    <div class="meta">Generated {{GENERATED_AT}}</div>
+
+    <div class="chart-card">
+      <div class="chart-canvas"><canvas id="chart"></canvas></div>
+    </div>
+
+    <footer>
+      <details>
+        <summary style="cursor: pointer;">SQL</summary>
+        <pre>{{SQL}}</pre>
+      </details>
+    </footer>
+  </div>
+
+  <script>
+    const ctx = document.getElementById('chart').getContext('2d');
+    // The skill substitutes these three placeholders with valid JSON.
+    const labels = {{LABELS}};
+    const datasets = {{DATASETS}};
+    const chartType = "{{CHART_TYPE}}";
+
+    // Default dataset polish — Chart.js defaults look fine but a touch more deliberate here.
+    const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899'];
+    datasets.forEach((ds, i) => {
+      if (!ds.backgroundColor) {
+        if (chartType === 'pie' || chartType === 'doughnut') {
+          ds.backgroundColor = labels.map((_, j) => palette[j % palette.length]);
+        } else {
+          ds.backgroundColor = palette[i % palette.length];
+        }
+      }
+      if (!ds.borderColor && chartType !== 'pie' && chartType !== 'doughnut') {
+        ds.borderColor = palette[i % palette.length];
+      }
+      if (chartType === 'line') {
+        ds.tension = ds.tension ?? 0.3;
+        ds.fill = ds.fill ?? false;
+      }
+    });
+
+    new Chart(ctx, {
+      type: chartType,
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            display: datasets.length > 1 || chartType === 'pie' || chartType === 'doughnut',
+            position: 'bottom',
+          },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: (chartType === 'pie' || chartType === 'doughnut') ? {} : {
+          y: { beginAtZero: true, grid: { color: 'rgba(127,127,127,0.15)' } },
+          x: { grid: { display: false } },
+        },
+      },
+    });
+  </script>
+</body>
+</html>

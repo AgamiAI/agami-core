@@ -1,0 +1,48 @@
+# Integration test fixtures for the agami OSS skill.
+#
+# Spins up a Postgres and a MySQL container with the same seed schema
+# (a small "shop" model: customers, orders, products, order_items) so we
+# can verify the introspection + query path against both dialects without
+# Python on the test machine.
+#
+# Usage:
+#   docker compose -f tests/integration/docker-compose.yml up -d
+#   ./tests/integration/test_postgres_e2e_cli.sh
+#   ./tests/integration/test_mysql_e2e_cli.sh
+#   docker compose -f tests/integration/docker-compose.yml down -v
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: agami-test-postgres
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: agami_test
+      POSTGRES_PASSWORD: agami_test_pw
+    ports:
+      - "55432:5432"
+    volumes:
+      - ./fixtures/postgres-init.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agami_test -d shop"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    container_name: agami-test-mysql
+    environment:
+      MYSQL_DATABASE: shop
+      MYSQL_USER: agami_test
+      MYSQL_PASSWORD: agami_test_pw
+      MYSQL_ROOT_PASSWORD: root_pw
+    ports:
+      - "53306:3306"
+    volumes:
+      - ./fixtures/mysql-init.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u agami_test -pagami_test_pw"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

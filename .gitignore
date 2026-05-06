@@ -1,0 +1,31 @@
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python (only used by optional sample scripts and tests)
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Cloudflare Worker (services/telemetry-endpoint)
+node_modules/
+.wrangler/
+.dev.vars
+
+# User-local agami state should NEVER appear in this repo
+.agami/
+
+# Test artifacts
+tests/integration/.tmp/
+tests/integration/*.log
+
+# Dotenv (only for local dev, never committed)
+.env
+.env.local
