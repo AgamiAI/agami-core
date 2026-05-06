@@ -2,7 +2,7 @@
 name: init
 description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), writes a credentials.example template, detects which database execution tier is available (psql/mysql native CLI, DuckDB binary, or Python driver), and walks the user through one-time opt-in prompts for anonymous usage stats and email updates. Re-run any time to verify state, switch profiles, or change opt-in choices."
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami', wants to add or switch a database connection, or asks to change their telemetry / email preferences. Auto-invoked by the connect and query-database skills if the .agami directory or credentials file is missing."
-argument-hint: "[verify | reconfigure-analytics | switch-profile <name>]"
+argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
 ---
 
 # agami init

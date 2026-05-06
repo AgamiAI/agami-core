@@ -1,8 +1,8 @@
 ---
 name: connect
-description: "Introspects the user's database and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model at $HOME/.agami/<profile>.yaml. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB) at $HOME/.agami/<profile>-examples.yaml, then runs an engagement-moment demo query so the user immediately sees the skill working. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
+description: "Introspects the user's database and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model at the per-profile YAML file inside the .agami home directory. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB) at the per-profile examples file, then runs an engagement-moment demo query so the user immediately sees the skill working. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
 when_to_use: "Auto-invoked by query-database the first time it runs (when the semantic model YAML is missing). Invoke explicitly when the user says 'connect to my database', 'introspect the schema', 'reload schema', 'add a new database', or after the user changes their schema and wants the model refreshed. Requires init to have run first (credentials must exist)."
-argument-hint: "[reintrospect | profile <name>]"
+argument-hint: "[reintrospect | profile NAME]"
 ---
 
 # agami connect
