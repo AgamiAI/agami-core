@@ -2,34 +2,47 @@
 <!--
   agami report template — used by query-database/SKILL.md.
 
-  The skill reads this file, substitutes the {{...}} placeholders, and writes
-  the result to ~/.agami/charts/<ts>.html. The output is fully self-contained:
-  opens from file:// in any browser, no server, no relative-path dependencies.
+  The skill substitutes the {{...}} placeholders below and writes the result
+  to ~/.agami/charts/<ts>.html. The output is fully self-contained: opens
+  from file:// in any browser, no server, no relative-path dependencies.
 
-  Per-chart placeholders the skill must substitute every time:
-    {{TITLE}}            — the user's question, or a tight summary
-    {{INSIGHTS}}         — one short paragraph of plain-English insight (HTML-escaped)
-    {{CHART_TYPE}}       — bar | line | pie | doughnut | scatter
-    {{LABELS}}           — JSON array of x-axis (or pie) labels
-    {{DATASETS}}         — JSON array of Chart.js dataset objects
-    {{TABLE_HEADERS}}    — JSON array of column header strings
-    {{TABLE_ROWS}}       — JSON array of arrays — one inner array per row
-    {{SQL}}              — the executed SQL (HTML-escaped: & → &amp;, < → &lt;, > → &gt;)
+  ONE HTML file = ONE coherent report. Broad questions decompose into
+  multiple sub-questions; each sub-question becomes a "section" with its
+  own chart + table + insight + SQL. All sections live in the same file
+  and tell one narrative.
+
+  Per-report placeholders the skill MUST substitute every time:
+    {{REPORT_TITLE}}     — the user's original question (or a tight title)
+    {{REPORT_SUMMARY}}   — 1-3 sentence executive summary across all sections
     {{GENERATED_AT}}     — ISO8601 UTC timestamp
+    {{SECTIONS_JSON}}    — JSON array of section objects (see schema below)
+    {{AGAMI_LOGO_DARK_TEXT}}   — full SVG content of shared/agami-logo-dark.svg  (light bg)
+    {{AGAMI_LOGO_LIGHT_TEXT}}  — full SVG content of shared/agami-logo-light.svg (dark bg)
 
-  Logo placeholders (substituted with the FULL SVG XML content from the
-  sibling files at chart-render time):
-    {{AGAMI_LOGO_DARK_TEXT}}   — contents of shared/agami-logo-dark.svg  (used on light backgrounds)
-    {{AGAMI_LOGO_LIGHT_TEXT}}  — contents of shared/agami-logo-light.svg (used on dark backgrounds)
+  SECTIONS_JSON schema — array of these objects, one per section:
+    {
+      "title":         "string — the sub-question or section heading",
+      "insights":      "string — 1-3 sentence insight for this section",
+      "chart_type":    "bar | line | pie | doughnut | scatter | null",
+      "labels":        ["..."],                  // null if chart_type is null
+      "datasets":      [{label, data, ...}],     // null if chart_type is null
+      "table_headers": ["col1", "col2", ...],
+      "table_rows":    [[v, v, ...], ...],
+      "sql":           "string — the SQL that produced this section's data"
+    }
 
-  The SKILL.md walkthrough for chart rendering is in
-  query-database/SKILL.md → Phase 4d.
+  Use chart_type: null when the data shape doesn't support a chart
+  (single-row scalars, categorical-only results). The section still renders
+  with its insight + table + SQL.
+
+  A SINGLE-section report is just a SECTIONS_JSON with one element.
+  The chat can keep showing one tight insight; the file is the report.
 -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>{{TITLE}} — agami</title>
+  <title>{{REPORT_TITLE}} — agami</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
     :root {
@@ -64,12 +77,12 @@
       line-height: 1.5;
     }
     .wrap { max-width: 1040px; margin: 0 auto; }
-    header {
+    header.report-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 24px;
-      margin-bottom: 8px;
+      margin-bottom: 12px;
     }
     .logo a { display: inline-block; line-height: 0; text-decoration: none; }
     .logo svg { display: block; height: 28px; width: auto; }
@@ -79,30 +92,68 @@
       .logo-light-mode { display: none; }
       .logo-dark-mode { display: inline-block; }
     }
-    h1 {
-      font-size: 22px;
+    h1.report-title {
+      font-size: 24px;
       font-weight: 600;
       margin: 0;
       flex: 1;
       text-align: right;
     }
-    .meta {
+    .report-summary {
+      font-size: 16px;
+      color: var(--fg);
+      margin: 8px 0 4px;
+    }
+    .report-meta {
       font-size: 12px;
       color: var(--muted);
-      margin-bottom: 28px;
-      text-align: right;
+      margin-bottom: 32px;
     }
-    section { margin-bottom: 28px; }
+    .toc {
+      margin: 16px 0 32px;
+      padding: 16px 20px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 14px;
+    }
+    .toc-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .toc ol { margin: 0; padding-left: 20px; }
+    .toc li { margin: 4px 0; }
+    .toc a { color: var(--fg); text-decoration: none; }
+    .toc a:hover { color: var(--accent); }
+
+    section.report-section {
+      margin: 32px 0 48px;
+      padding-top: 8px;
+      border-top: 2px solid var(--border);
+    }
+    section.report-section:first-of-type { border-top: none; padding-top: 0; }
+    section.report-section > h2 {
+      font-size: 19px;
+      font-weight: 600;
+      margin: 0 0 12px;
+    }
+    .section-insights {
+      font-size: 15px;
+      margin: 0 0 20px;
+    }
     .card {
       border: 1px solid var(--border);
       border-radius: 12px;
-      padding: 24px;
+      padding: 20px;
       background: var(--bg-elev);
+      margin-bottom: 16px;
     }
-    .insights { font-size: 16px; }
-    .insights p:first-child { margin-top: 0; }
-    .insights p:last-child { margin-bottom: 0; }
-    .chart-canvas { position: relative; height: 460px; }
+    .chart-canvas { position: relative; height: 380px; }
     .table-wrap { overflow-x: auto; }
     table {
       width: 100%;
@@ -110,37 +161,43 @@
       font-size: 14px;
     }
     th, td {
-      padding: 10px 12px;
+      padding: 9px 12px;
       text-align: left;
       border-bottom: 1px solid var(--border);
       white-space: nowrap;
     }
     th {
       font-weight: 600;
-      font-size: 12px;
-      letter-spacing: 0.04em;
+      font-size: 11px;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--muted);
-      background: transparent;
     }
     tbody tr:nth-child(even) td { background: var(--row-zebra); }
     td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
-    details > summary {
-      cursor: pointer;
-      font-size: 13px;
+    .table-truncated {
+      font-size: 12px;
       color: var(--muted);
-      letter-spacing: 0.02em;
+      margin-top: 8px;
+      text-align: right;
+    }
+    details.sql > summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
       list-style: none;
       user-select: none;
     }
-    details > summary::-webkit-details-marker { display: none; }
-    details > summary::before {
+    details.sql > summary::-webkit-details-marker { display: none; }
+    details.sql > summary::before {
       content: "▸";
       display: inline-block;
       width: 1em;
       transition: transform 120ms ease;
     }
-    details[open] > summary::before { transform: rotate(90deg); }
+    details.sql[open] > summary::before { transform: rotate(90deg); }
     .sql pre {
       margin-top: 12px;
       background: var(--code-bg);
@@ -169,35 +226,25 @@
 </head>
 <body>
   <div class="wrap">
-    <header>
+    <header class="report-header">
       <div class="logo">
         <a href="https://agami.ai" target="_blank" rel="noopener" aria-label="agami">
           <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
           <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
         </a>
       </div>
-      <h1>{{TITLE}}</h1>
+      <h1 class="report-title" id="report-title"></h1>
     </header>
-    <p class="meta">Generated {{GENERATED_AT}}</p>
 
-    <section class="insights card">
-      <p>{{INSIGHTS}}</p>
-    </section>
+    <p class="report-summary" id="report-summary"></p>
+    <p class="report-meta">Generated <span id="report-generated-at"></span></p>
 
-    <section class="card">
-      <div class="chart-canvas"><canvas id="chart"></canvas></div>
-    </section>
+    <nav class="toc" id="toc" hidden>
+      <span class="toc-label">In this report</span>
+      <ol id="toc-list"></ol>
+    </nav>
 
-    <section class="card">
-      <div class="table-wrap"><table id="data-table"><thead></thead><tbody></tbody></table></div>
-    </section>
-
-    <section class="sql card">
-      <details>
-        <summary>SQL</summary>
-        <pre>{{SQL}}</pre>
-      </details>
-    </section>
+    <main id="report-body"></main>
 
     <footer>
       <span>Self-contained — no data leaves your machine.</span>
@@ -206,53 +253,14 @@
   </div>
 
   <script>
-    // The skill substitutes these placeholders with valid JSON.
-    const labels = {{LABELS}};
-    const datasets = {{DATASETS}};
-    const chartType = "{{CHART_TYPE}}";
-    const tableHeaders = {{TABLE_HEADERS}};
-    const tableRows = {{TABLE_ROWS}};
+    // ---- Skill-substituted placeholders ----
+    const reportTitle = {{REPORT_TITLE_JSON}};
+    const reportSummary = {{REPORT_SUMMARY_JSON}};
+    const generatedAt = "{{GENERATED_AT}}";
+    const sections = {{SECTIONS_JSON}};
 
-    // ---- Chart ----
+    // ---- Helpers ----
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899'];
-    datasets.forEach((ds, i) => {
-      if (!ds.backgroundColor) {
-        if (chartType === 'pie' || chartType === 'doughnut') {
-          ds.backgroundColor = labels.map((_, j) => palette[j % palette.length]);
-        } else {
-          ds.backgroundColor = palette[i % palette.length];
-        }
-      }
-      if (!ds.borderColor && chartType !== 'pie' && chartType !== 'doughnut') {
-        ds.borderColor = palette[i % palette.length];
-      }
-      if (chartType === 'line') {
-        ds.tension = ds.tension ?? 0.3;
-        ds.fill = ds.fill ?? false;
-      }
-    });
-
-    new Chart(document.getElementById('chart').getContext('2d'), {
-      type: chartType,
-      data: { labels, datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: {
-            display: datasets.length > 1 || chartType === 'pie' || chartType === 'doughnut',
-            position: 'bottom',
-          },
-          tooltip: { mode: 'index', intersect: false },
-        },
-        scales: (chartType === 'pie' || chartType === 'doughnut') ? {} : {
-          y: { beginAtZero: true, grid: { color: 'rgba(127,127,127,0.15)' } },
-          x: { grid: { display: false } },
-        },
-      },
-    });
-
-    // ---- Table ----
     function isNumericCol(rows, idx) {
       for (const r of rows) {
         const v = r[idx];
@@ -263,26 +271,161 @@
       }
       return true;
     }
-    const numericCols = tableHeaders.map((_, i) => isNumericCol(tableRows, i));
-    const thead = document.querySelector('#data-table thead');
-    const trHead = document.createElement('tr');
-    tableHeaders.forEach((h, i) => {
-      const th = document.createElement('th');
-      th.textContent = h;
-      if (numericCols[i]) th.classList.add('numeric');
-      trHead.appendChild(th);
-    });
-    thead.appendChild(trHead);
-    const tbody = document.querySelector('#data-table tbody');
-    tableRows.forEach(row => {
-      const tr = document.createElement('tr');
-      row.forEach((cell, i) => {
-        const td = document.createElement('td');
-        td.textContent = cell == null ? '' : String(cell);
-        if (numericCols[i]) td.classList.add('numeric');
-        tr.appendChild(td);
+    function el(tag, attrs = {}, ...children) {
+      const e = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (k === 'class') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else if (k === 'html') e.innerHTML = v;
+        else if (v !== undefined && v !== null) e.setAttribute(k, v);
+      }
+      children.flat().forEach(c => {
+        if (c == null) return;
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
       });
-      tbody.appendChild(tr);
+      return e;
+    }
+    function slugify(s, fallback) {
+      const slug = (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50);
+      return slug || fallback;
+    }
+
+    // ---- Header ----
+    document.title = reportTitle + ' — agami';
+    document.getElementById('report-title').textContent = reportTitle;
+    if (reportSummary && reportSummary.trim()) {
+      document.getElementById('report-summary').textContent = reportSummary;
+    } else {
+      document.getElementById('report-summary').remove();
+    }
+    document.getElementById('report-generated-at').textContent = generatedAt;
+
+    // ---- Table of contents (only if 2+ sections) ----
+    if (sections.length > 1) {
+      const tocList = document.getElementById('toc-list');
+      sections.forEach((sec, i) => {
+        const id = 'section-' + (i + 1) + '-' + slugify(sec.title || '', 'untitled');
+        const li = el('li', {}, el('a', { href: '#' + id, text: sec.title || ('Section ' + (i + 1)) }));
+        tocList.appendChild(li);
+      });
+      document.getElementById('toc').hidden = false;
+    }
+
+    // ---- Sections ----
+    const body = document.getElementById('report-body');
+    sections.forEach((sec, i) => {
+      const idx = i + 1;
+      const sectionId = 'section-' + idx + '-' + slugify(sec.title || '', 'untitled');
+      const sectionEl = el('section', { class: 'report-section', id: sectionId });
+
+      // Heading
+      sectionEl.appendChild(el('h2', { text: sec.title || ('Section ' + idx) }));
+
+      // Insights
+      if (sec.insights && sec.insights.trim()) {
+        sectionEl.appendChild(el('p', { class: 'section-insights', text: sec.insights }));
+      }
+
+      // Chart card
+      if (sec.chart_type) {
+        const chartCard = el('div', { class: 'card' });
+        const chartCanvas = el('div', { class: 'chart-canvas' });
+        const canvas = el('canvas', { id: 'chart-' + idx });
+        chartCanvas.appendChild(canvas);
+        chartCard.appendChild(chartCanvas);
+        sectionEl.appendChild(chartCard);
+      }
+
+      // Table card
+      if (sec.table_headers && sec.table_headers.length > 0 && sec.table_rows) {
+        const tableCard = el('div', { class: 'card' });
+        const wrap = el('div', { class: 'table-wrap' });
+        const table = el('table');
+        const thead = el('thead');
+        const trHead = el('tr');
+        const numericCols = sec.table_headers.map((_, c) => isNumericCol(sec.table_rows, c));
+        sec.table_headers.forEach((h, c) => {
+          const th = el('th', { text: h });
+          if (numericCols[c]) th.classList.add('numeric');
+          trHead.appendChild(th);
+        });
+        thead.appendChild(trHead);
+        const tbody = el('tbody');
+        const visibleRows = sec.table_rows.slice(0, 200);
+        visibleRows.forEach(row => {
+          const tr = el('tr');
+          row.forEach((cell, c) => {
+            const td = el('td', { text: cell == null ? '' : String(cell) });
+            if (numericCols[c]) td.classList.add('numeric');
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        table.appendChild(thead);
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        tableCard.appendChild(wrap);
+        if (sec.table_rows.length > visibleRows.length) {
+          tableCard.appendChild(el('p', {
+            class: 'table-truncated',
+            text: 'Showing first ' + visibleRows.length + ' of ' + sec.table_rows.length + ' rows.'
+          }));
+        }
+        sectionEl.appendChild(tableCard);
+      }
+
+      // SQL
+      if (sec.sql) {
+        const det = el('details', { class: 'sql card' });
+        det.appendChild(el('summary', { text: 'SQL' }));
+        det.appendChild(el('pre', { text: sec.sql }));
+        sectionEl.appendChild(det);
+      }
+
+      body.appendChild(sectionEl);
+    });
+
+    // ---- Charts (after DOM is built so canvases exist) ----
+    sections.forEach((sec, i) => {
+      if (!sec.chart_type) return;
+      const datasets = (sec.datasets || []).map((ds, di) => {
+        const out = Object.assign({}, ds);
+        if (!out.backgroundColor) {
+          if (sec.chart_type === 'pie' || sec.chart_type === 'doughnut') {
+            out.backgroundColor = (sec.labels || []).map((_, j) => palette[j % palette.length]);
+          } else {
+            out.backgroundColor = palette[di % palette.length];
+          }
+        }
+        if (!out.borderColor && sec.chart_type !== 'pie' && sec.chart_type !== 'doughnut') {
+          out.borderColor = palette[di % palette.length];
+        }
+        if (sec.chart_type === 'line') {
+          out.tension = out.tension ?? 0.3;
+          out.fill = out.fill ?? false;
+        }
+        return out;
+      });
+      const ctx = document.getElementById('chart-' + (i + 1)).getContext('2d');
+      new Chart(ctx, {
+        type: sec.chart_type,
+        data: { labels: sec.labels || [], datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              display: datasets.length > 1 || sec.chart_type === 'pie' || sec.chart_type === 'doughnut',
+              position: 'bottom',
+            },
+            tooltip: { mode: 'index', intersect: false },
+          },
+          scales: (sec.chart_type === 'pie' || sec.chart_type === 'doughnut') ? {} : {
+            y: { beginAtZero: true, grid: { color: 'rgba(127,127,127,0.15)' } },
+            x: { grid: { display: false } },
+          },
+        },
+      });
     });
   </script>
 </body>

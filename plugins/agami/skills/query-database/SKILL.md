@@ -213,73 +213,114 @@ Lead with one sentence. Don't restate the SQL or the question.
 
 Right-align numeric columns. Format per Phase 3c. Wide tables (> 8 cols) → vertical layout, warn user.
 
-### 4c — Always render the HTML report (unless result is a 1×1 scalar)
+### 4c — Build ONE coherent HTML report (one file, N sections)
 
-**Rule:** if the result has at least 2 rows OR at least 2 columns, ALWAYS render the HTML report. Don't ask. The report contains the chart, the data table, the insights, and the SQL — one self-contained file the user can open or share. Skip the report only when the result is a single scalar (1 row × 1 column, e.g., `SELECT COUNT(*) FROM orders` returning `42`) — for those, the chat answer is enough.
+The output is **one self-contained HTML file** at `~/.agami/charts/<ts>.html`, no matter how broad the question is. Broad questions decompose into multiple sub-questions; each sub-question becomes a **section** inside the same file. Each section has its own chart + table + insight + SQL. **Never write multiple HTML files for one user question. Never open multiple browser tabs.**
 
-#### 4c.i — pick the chart type from column types
+Skip the report only when the result is a single 1×1 scalar (e.g., `SELECT COUNT(*) FROM orders` returning `42`) — for those, the chat answer is enough.
 
-Read `agami.type` for each result column. Mapping:
+#### 4c.i — decompose the question into sections
 
-| Result shape | Chart |
+If the user asked something narrow ("top 5 customers by spend"), produce **one** section. Done.
+
+If the user asked something broad ("how is the business doing", "tell me about our customers", "how did we do last quarter"), break it into **2–5 sub-questions** that together tell a narrative. Pick the dimensions that matter for that schema. Examples:
+
+- "How is the business doing?" →
+  1. Revenue trend over the last 12 months
+  2. Top 5 customers by spend this quarter
+  3. Order count by status this quarter
+  4. Top 5 products by revenue this quarter
+
+- "Tell me about our customers" →
+  1. Customer count by region
+  2. Top 10 customers by lifetime spend
+  3. New customers per month
+  4. Active vs inactive split
+
+Choose sub-questions that:
+- Each map to ONE SQL query
+- Each return a result shape that produces a useful chart (or a small table when no chart applies)
+- Don't repeat the same data sliced differently — pick distinct angles
+- Are bounded — never more than 5 sections in v1; if the schema invites more, ship the top 4–5 and add a "What else can I look at?" follow-up
+
+When in doubt about how broad the user wants to go, ask via AskUserQuestion before generating: "I can answer this as a focused query or build a 4-section report. Which?"
+
+#### 4c.ii — pick a chart type per section
+
+For each section's SQL result, read `agami.type` for each result column and pick:
+
+| Result shape | `chart_type` |
 |---|---|
 | 1 categorical (`string`) + 1 numeric | `bar` (use `pie` / `doughnut` if ≤ 6 categories) |
 | 1 time (`timestamp` / `date`) + 1+ numeric | `line` |
 | 2 numeric | `scatter` |
-| 1 categorical + multiple numeric | grouped `bar` |
-| Categorical-only or single column | no chart applies — see 4c.iii |
+| 1 categorical + multiple numeric | grouped `bar` (still `bar`) |
+| Categorical-only / single-column / 1×1 scalar | `null` — section still renders without a chart |
 
-If the user explicitly says `--chart pie|line|doughnut|scatter` (or "render as a line chart"), honor that override.
+If the user override-says `--chart pie|line|...` for the **whole** report, apply it to every section that supports a chart.
 
-#### 4c.ii — build the placeholder values
+#### 4c.iii — build the SECTIONS_JSON
+
+For each section, build an object:
+
+```json
+{
+  "title":         "<sub-question or short heading>",
+  "insights":      "<1-3 sentence plain-English insight for this section>",
+  "chart_type":    "bar | line | pie | doughnut | scatter | null",
+  "labels":        ["<x-axis or pie labels>"],
+  "datasets":      [{"label": "<header>", "data": [<numeric values>]}],
+  "table_headers": ["<col1>", "<col2>", ...],
+  "table_rows":    [[<v>, <v>, ...], ...],
+  "sql":           "<SQL that produced this section's data, NOT HTML-escaped — the template handles it>"
+}
+```
+
+When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). The template skips the chart card cleanly.
+
+The whole report's `SECTIONS_JSON` is a JSON array of these objects.
+
+#### 4c.iv — assemble the report-level placeholders
 
 ```text
-TITLE         = the user's question (or a tight summary)
-INSIGHTS      = the 1-3 sentence insight from 4a, HTML-escaped
-CHART_TYPE    = one of bar | line | pie | doughnut | scatter
-LABELS        = JSON array of x-axis (or pie) labels
-DATASETS      = JSON array of Chart.js dataset objects:
-                [{ "label": "<numeric column header>", "data": [<numeric values>] }, ...]
-TABLE_HEADERS = JSON array of column header strings (e.g. ["name", "spend"])
-TABLE_ROWS    = JSON array of arrays — one inner array per row, in display order
-SQL           = the executed SQL, HTML-escape & < >
-GENERATED_AT  = ISO8601 UTC
+REPORT_TITLE_JSON   = JSON-stringified user's original question (e.g., "\"How is our business doing?\"")
+REPORT_SUMMARY_JSON = JSON-stringified executive summary, 1-3 sentences across all sections
+                      (omit / empty string if there's only 1 section — section's own insight covers it)
+GENERATED_AT        = ISO8601 UTC timestamp
+SECTIONS_JSON       = the JSON array built in 4c.iii
 AGAMI_LOGO_DARK_TEXT  = entire SVG content of shared/agami-logo-dark.svg
 AGAMI_LOGO_LIGHT_TEXT = entire SVG content of shared/agami-logo-light.svg
 ```
 
-#### 4c.iii — when no chart applies (categorical-only or single-column results)
+`REPORT_TITLE_JSON` and `REPORT_SUMMARY_JSON` are JSON-stringified because the template embeds them inside `<script>` (as JS string literals). All other text values inside `SECTIONS_JSON` are also JSON-stringified by `JSON.stringify` of the array — that handles escaping for you.
 
-The report still ships — table + insights + SQL. For the chart placeholders, use a no-op fallback that produces an empty chart card:
-
-```text
-CHART_TYPE = "bar"
-LABELS     = []
-DATASETS   = []
-```
-
-Chart.js will render an empty canvas, which the CSS hides cleanly. The user gets the table + insights + SQL without an awkward "no chart" message.
-
-#### 4c.iv — render the HTML
+#### 4c.v — render
 
 1. Read [`shared/chart-template.html`](../../shared/chart-template.html).
 2. Read [`shared/agami-logo-dark.svg`](../../shared/agami-logo-dark.svg) and [`shared/agami-logo-light.svg`](../../shared/agami-logo-light.svg). Substitute their full contents into `{{AGAMI_LOGO_DARK_TEXT}}` and `{{AGAMI_LOGO_LIGHT_TEXT}}` respectively.
-3. Substitute the per-chart placeholders.
-4. Write the result via the **Write tool** to `~/.agami/charts/<ts>.html`.
+3. Substitute the report-level placeholders.
+4. Write the result via the **Write tool** to `~/.agami/charts/<ts>.html`. **One file. No matter how many sections.**
 
-Surface the file path. On hosts that support inline artifacts, also embed as a Claude artifact block.
+#### 4c.vi — surface in chat
 
-#### 4c.v — CSV export (`--csv` or "export this")
+After writing the file:
+- For a **single-section** report: surface the section's insight + the markdown table (Phases 4a + 4b). End with "Full report at `~/.agami/charts/<ts>.html`."
+- For a **multi-section** report: surface the executive summary + a tight bulleted list of section titles. **Don't** repeat each section's table in the chat. End with "Full report at `~/.agami/charts/<ts>.html` (N sections)."
 
-Even with the HTML report, the user might still want a flat CSV. If they pass `--csv` or say "export this":
+On hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
+
+#### 4c.vii — CSV export (`--csv` or "export this")
+
+Even with the HTML report, the user might still want flat CSVs. If they pass `--csv` or say "export this":
+
+- Single-section report → one CSV at `~/.agami/exports/<ts>.csv`.
+- Multi-section report → one CSV per section at `~/.agami/exports/<ts>-<section-slug>.csv`. Surface all paths.
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)
 mkdir -p ~/.agami/exports
-# write header + rows, RFC 4180 escaping
+# write header + rows per section, RFC 4180 escaping
 ```
-
-Surface the CSV path.
 
 ### 4d — follow-up suggestions
 
