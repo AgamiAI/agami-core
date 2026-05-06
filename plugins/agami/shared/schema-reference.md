@@ -1,318 +1,532 @@
-# Semantic Model — YAML Format Reference
+# Semantic Model — OSI v0.1.1 Reference
 
-This document defines the YAML format for the `~/.agami/<dbname>.yaml` semantic model written by the `connect` skill. One file per database, single-user. The format is intentionally compact — all table, entity, measure, metric, and relationship information lives inline in one file.
+The agami semantic model is **strictly conformant to Open Semantic Interchange (OSI) v0.1.1**. The canonical spec lives at [github.com/open-semantic-interchange/OSI](https://github.com/open-semantic-interchange/OSI). The JSON schema is bundled at [`osi-schema.json`](osi-schema.json) so the validator works offline.
 
-If you provide your own format (sample files, a spec, or a different structure like dbt / JSON Schema), the skill uses your format instead and does not reference this document.
+This document is the reference the agami skills (connect, query-database, save-correction) read. It documents (a) the OSI v0.1.1 shape, applied to agami's single-database use case, and (b) where Agami-specific data lives — under `custom_extensions` per [`agami-osi-extensions.md`](agami-osi-extensions.md).
+
+The validator at [`plugins/agami/scripts/validate_semantic_model.py`](../scripts/validate_semantic_model.py) is the source of truth — every model is validated before being written to disk. **No OSI-breaking change is ever persisted.**
 
 ## Contents
-- File Structure
-- Top-level fields
-- Tables
-- Columns
-- Entities
-- Measures (per-table)
-- Metrics (cross-table)
-- Relationships
-- Performance hints
-- Validation Rules
+
+- [File layout](#file-layout)
+- [Top-level shape](#top-level-shape)
+- [Datasets](#datasets)
+- [Fields](#fields)
+- [Relationships](#relationships)
+- [Metrics](#metrics)
+- [`custom_extensions`](#custom_extensions)
+- [Validation rules](#validation-rules)
+- [Worked example](#worked-example)
 
 ---
 
-## File Structure
+## File layout
 
 ```
 ~/.agami/
-├── credentials                         # connection details (chmod 600)
-├── <dbname>.yaml                       # semantic model — this document's spec
-├── <dbname>-examples.yaml              # NL→SQL few-shot examples (managed by skill)
-├── charts/<ts>.html                    # rendered charts
-├── exports/<ts>.csv                    # CSV exports
-└── query_log.jsonl                     # local query log
+├── credentials                      # INI, chmod 600
+├── <profile>.yaml                   # OSI semantic model — this document's spec
+├── <profile>-examples.yaml          # NL→SQL examples, agami-bespoke (not OSI)
+└── ...
 ```
 
-`<dbname>` matches the profile name in `~/.agami/credentials` (default: `default`).
+`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One model per profile, single-user.
+
+The examples library (`<profile>-examples.yaml`) is a **bespoke agami format** for few-shot prompts and is documented in [`format-spec.md`](../../../docs/format-spec.md). It is intentionally not OSI — OSI doesn't model NL→SQL examples.
 
 ---
 
-## Top-level fields
+## Top-level shape
 
 ```yaml
-database_name: salesforce
-database_type: PostgreSQL
-description: >-
-  Salesforce CRM data: accounts, contacts, opportunities, leads, tasks, events.
-  Used for donor management and pipeline tracking.
-fiscal_year_start_month: 7        # optional, default 1
-glossary:                         # optional
-  CRM: Customer Relationship Management
-  ARR: Annual Recurring Revenue
+version: "0.1.1"
 
-upfront_queries:                  # optional — example questions surfaced to the user
-  - How many open opportunities do we have?
-  - What is the total pipeline value by stage?
-  - Show me the top 10 accounts by revenue.
+semantic_model:
+  - name: shop                                # required, unique identifier
+    description: E-commerce shop database.    # optional
+    ai_context:                               # optional, string OR structured
+      instructions: "Use this for sales analytics across orders, customers, products."
+      synonyms: [shop, store]
 
-tables:
-  - <see Tables section below>
+    datasets:                                 # required, ≥ 1
+      - <see Datasets section>
 
-metrics:
-  <see Metrics section below>
+    relationships:                            # optional
+      - <see Relationships section>
+
+    metrics:                                  # optional
+      - <see Metrics section>
+
+    custom_extensions:                        # optional — per-model agami metadata
+      - vendor_name: COMMON
+        data: '{"agami": {"profile": "default", "db_type": "postgres", "introspect_meta": {"introspected_at": "2026-05-06T12:00:00Z", "tier": "cli", "source_db_version": "PostgreSQL 16.2"}}}'
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `database_name` | string | yes | Logical name (matches credentials profile) |
-| `database_type` | string | yes | `PostgreSQL`, `MySQL`, `SQLite`, etc. |
-| `description` | string | yes | What this database contains — helps the LLM understand the domain |
-| `fiscal_year_start_month` | int | no | 1-12, default 1 (January) |
-| `glossary` | dict | no | Abbreviation/term → full form |
-| `upfront_queries` | list[string] | no | Example questions for the user UI |
-| `tables` | list | yes | Table definitions |
-| `metrics` | dict | no | Cross-table derived metrics |
+| Field | Required | Description |
+|---|---|---|
+| `version` | yes | Always `"0.1.1"` (string, quoted) |
+| `semantic_model` | yes | **Array** with exactly one element in agami's case (OSI permits multiple models per file; agami uses one) |
+| `semantic_model[].name` | yes | Identifier (matches the credential profile name) |
+| `semantic_model[].description` | no | Plain English summary the LLM uses as domain context |
+| `semantic_model[].ai_context` | no | String, OR `{instructions, synonyms[], examples[]}` |
+| `semantic_model[].datasets` | yes | List of datasets (≥ 1) |
+| `semantic_model[].relationships` | no | List of named relationships |
+| `semantic_model[].metrics` | no | List of cross-dataset metrics |
+| `semantic_model[].custom_extensions` | no | Agami metadata — see [`agami-osi-extensions.md`](agami-osi-extensions.md) |
 
 ---
 
-## Tables
+## Datasets
 
-Each table is one entry in the top-level `tables` list.
+A dataset is a fact or dimension table.
 
 ```yaml
-tables:
-  - table_name: opportunities
-    schema_name: public
-    label: opportunities
-    display_name: Opportunities
-    description: >-
-      Tracks sales opportunities in the CRM pipeline. Each record represents a
-      potential deal with a dollar amount, stage, and expected close date.
-      Opportunities are linked to accounts via account_id.
-
-    columns:
-      id:
-        type: string
-        description: Unique identifier for the opportunity record.
-        primary_key: true
-      account_id:
-        type: string
-        description: Foreign key linking to the accounts table.
-        foreign_key:
-          table: public.accounts
-          column: id
-      stage_name:
-        type: string
-        description: Current stage in the sales pipeline.
-        choice_field:
-          Prospecting: Prospecting
-          Qualification: Qualification
-          Closed Won: Closed Won
-          Closed Lost: Closed Lost
-      amount:
-        type: decimal
-        description: Dollar value of the opportunity.
-      is_won:
-        type: boolean
-        description: Whether the opportunity has been won.
-      created_date:
-        type: timestamp
-        description: When the record was created.
-      close_date:
-        type: date
-        description: Expected or actual close date.
-
-    entities:
-      - name: Opportunity
-        plural: Opportunities
-        description: A potential sales deal in the pipeline.
-        status: active
-        maps_to: [id]
-        aggregated: false
-
-    measures:
-      total_opportunities:
-        description: Total number of unique opportunities.
-        other_names: [opportunity count, deal count]
-        calculation: COUNT(DISTINCT id)
-        tracked_by: Date
-        units: opportunities
-        aggregation: count
-      total_pipeline_value:
-        description: Sum of dollar amounts across all opportunities.
-        other_names: [pipeline value, total deal value]
-        calculation: SUM(amount)
-        tracked_by: Date
-        units: dollars
-        currency: USD
-        aggregation: sum
-      win_rate:
-        description: Percentage of closed opportunities that were won.
-        other_names: [close rate, conversion rate]
-        calculation: >-
-          SUM(CASE WHEN is_won = true THEN 1 ELSE 0 END) * 100.0 /
-          NULLIF(SUM(CASE WHEN stage_name IN ('Closed Won','Closed Lost') THEN 1 ELSE 0 END), 0)
-        tracked_by: Date
-        units: "%"
-        aggregation: ratio
-
-    relationships:
-      - from_column: account_id
-        to_table: public.accounts
-        to_column: id
-        join_type: LEFT JOIN
-        description: Links each opportunity to its parent account.
+datasets:
+  - name: orders                          # required, unique within model
+    source: shop.public.orders            # required: database.schema.table
+    primary_key: [id]                     # optional, supports composite
+    unique_keys:                          # optional
+      - [order_number]
+      - [customer_id, placed_at]
+    description: Customer orders.         # optional
+    ai_context:                           # optional, string or structured
+      synonyms: [orders, purchases, sales]
+    fields:                               # optional, see Fields section
+      - <field>
+    custom_extensions:                    # optional — per-dataset agami extensions
+      - vendor_name: COMMON
+        data: '{"agami": {"performance_hints": {"estimated_row_count": 6, "indexes": [["customer_id"], ["placed_at"]]}}}'
 ```
 
-### Table fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `table_name` | string | yes | Exact table name in the database |
-| `schema_name` | string | yes | Exact schema name (e.g., `public`) |
-| `label` | string | yes | Internal reference (usually = table_name) |
-| `display_name` | string | yes | Human-readable name (Title Case) |
-| `description` | string | yes | Business description (empty string OK for skeleton) |
-| `columns` | dict | yes | Column definitions keyed by column name |
-| `entities` | list | no | Business entity classifications (empty list OK) |
-| `measures` | dict | no | Aggregation definitions (empty dict OK) |
-| `relationships` | list | no | FK joins to other tables (empty list OK) |
-| `performance_hints` | dict | no | See Performance hints section |
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Identifier (use the source table name verbatim) |
+| `source` | yes | `database.schema.table` (or a SQL view name) — the physical reference |
+| `primary_key` | no | Array of column names (single or composite) |
+| `unique_keys` | no | Array of column-list arrays (each can be simple or composite) |
+| `description` | no | Plain English summary — high leverage for NL→SQL |
+| `ai_context` | no | Synonyms, instructions, examples — the LLM reads these |
+| `fields` | no | Row-level attributes (see [Fields](#fields)) |
+| `custom_extensions` | no | Agami performance hints, etc. (see [agami-osi-extensions.md](agami-osi-extensions.md)) |
 
 ---
 
-## Columns
+## Fields
 
-Each column is keyed under `columns`:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | yes | `string`, `integer`, `decimal`, `timestamp`, `date`, `boolean` |
-| `description` | string | yes | What this column stores |
-| `primary_key` | bool | no | `true` if primary key |
-| `foreign_key` | dict | no | `{table: "schema.table", column: "col"}` |
-| `choice_field` | dict | no | `{stored_value: display_label}` for enum-like fields |
-
----
-
-## Entities
-
-A list of business-level concepts mapped to columns. Use entities to give the LLM richer NL → SQL hints.
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | yes | Entity name (singular) |
-| `plural` | string | yes | Plural form |
-| `description` | string | yes | What this entity represents |
-| `status` | string | yes | `active` or `inactive` |
-| `maps_to` | list[string] | yes | Column names in this table |
-| `aggregated` | bool | yes | `false` for record-level, `true` for grouping (e.g., status, category) |
-
----
-
-## Measures (per-table)
-
-Per-table aggregations expressed in SQL. Keyed by measure name.
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `description` | string | yes | What the measure calculates |
-| `other_names` | list[string] | no | Aliases for NLU matching |
-| `calculation` | string | yes | SQL expression (no `FROM`/`WHERE`) |
-| `tracked_by` | string | no | Usually `Date` |
-| `units` | string | yes | Unit label (`dollars`, `%`, `incidents`, …) |
-| `currency` | string | no | `USD` for monetary measures |
-| `aggregation` | string | yes | `count`, `sum`, `average`, `ratio` |
-| `cuts` | dict | no | Dimensional breakdowns with allowed values |
-
----
-
-## Metrics (cross-table)
-
-Top-level `metrics` dict for derivations that span multiple tables.
+Fields are row-level attributes — what other systems call columns. Each field is **expression-based** (OSI requires this even for plain column references). The expression supports multiple dialects.
 
 ```yaml
-metrics:
-  contacts_per_account:
-    metric_type: derived
-    description: Average number of contacts associated with each account.
-    other_names: [contact density, avg contacts per account]
-    tracked_by: Date
-    calculation: COUNT(DISTINCT contacts.id) / COUNT(DISTINCT accounts.id)
-    base_metrics: [total_contacts, total_accounts]
-    units: contacts
-    aggregation: average
-
-  revenue_per_account:
-    metric_type: derived
-    description: Average opportunity revenue per account.
-    tracked_by: Date
-    calculation: SUM(opportunities.amount) / COUNT(DISTINCT accounts.id)
-    base_metrics: [total_pipeline_value, total_accounts]
-    units: dollars
-    currency: USD
-    aggregation: average
+fields:
+  - name: amount                          # required, unique within dataset
+    expression:                           # required
+      dialects:
+        - dialect: ANSI_SQL               # required: ANSI_SQL | SNOWFLAKE | MDX | TABLEAU | DATABRICKS
+          expression: amount              # required: scalar SQL expression (no aggregations)
+    dimension:                            # optional
+      is_time: false
+    label: Amount                         # optional, free-form category label
+    description: Order amount in dollars. # optional
+    ai_context:
+      synonyms: [order amount, total]
+    custom_extensions:                    # ← Agami stores type info here per agami-osi-extensions.md
+      - vendor_name: COMMON
+        data: '{"agami": {"type": "decimal", "unit": "dollars"}}'
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `metric_type` | string | yes | Always `derived` |
-| `description` | string | yes | What this metric calculates |
-| `other_names` | list[string] | no | Aliases for NLU matching |
-| `tracked_by` | string | no | Usually `Date` |
-| `calculation` | string | yes | SQL expression with `table.column` refs |
-| `base_metrics` | list[string] | yes | Per-table measures this depends on |
-| `units` | string | yes | Unit label |
-| `currency` | string | no | `USD` for monetary metrics |
-| `aggregation` | string | yes | `count`, `sum`, `average`, `ratio` |
+### Simple column reference
+
+```yaml
+- name: customer_id
+  expression:
+    dialects:
+      - dialect: ANSI_SQL
+        expression: customer_id
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"type": "integer"}}'
+```
+
+### Computed field
+
+```yaml
+- name: full_name
+  expression:
+    dialects:
+      - dialect: ANSI_SQL
+        expression: first_name || ' ' || last_name
+  description: Customer full name.
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"type": "string"}}'
+```
+
+### Time dimension
+
+```yaml
+- name: placed_at
+  expression:
+    dialects:
+      - dialect: ANSI_SQL
+        expression: placed_at
+  dimension:
+    is_time: true
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"type": "timestamp"}}'
+```
+
+### Multi-dialect expression
+
+When the same logical field needs different SQL syntax per dialect:
+
+```yaml
+- name: email_normalized
+  expression:
+    dialects:
+      - dialect: ANSI_SQL
+        expression: LOWER(email)
+      - dialect: SNOWFLAKE
+        expression: LOWER(email)::VARCHAR
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"type": "string"}}'
+```
+
+### Choice field (enum-like)
+
+Stored values mapped to display labels via the `agami.choice_field` extension:
+
+```yaml
+- name: status
+  expression:
+    dialects:
+      - dialect: ANSI_SQL
+        expression: status
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"type": "string", "choice_field": {"pending": "Pending", "shipped": "Shipped", "delivered": "Delivered", "cancelled": "Cancelled"}}}'
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Unique within the dataset |
+| `expression` | yes | `{dialects: [{dialect, expression}]}` — at least one dialect entry |
+| `dimension` | no | `{is_time: bool}` — flag for time-based filtering |
+| `label` | no | Free-form category label |
+| `description` | no | Plain English |
+| `ai_context` | no | Synonyms / instructions for the LLM |
+| `custom_extensions` | no | **Agami stores `type`, `choice_field`, `unit`, `original_type` here** |
 
 ---
 
 ## Relationships
 
-Inside each table's `relationships` list. The skill auto-detects FKs during introspection and validates them via live `LEFT JOIN` orphan checks (see [`fk-validation.md`](fk-validation.md)).
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `from_column` | string | yes | Column on this table |
-| `to_table` | string | yes | `schema.table` reference |
-| `to_column` | string | yes | Column on target table |
-| `join_type` | string | yes | `LEFT JOIN`, `INNER JOIN`, `RIGHT JOIN` |
-| `description` | string | no | What the join expresses |
-
----
-
-## Performance hints
-
-Optional `performance_hints` per table, populated during introspection for large tables.
+Foreign-key joins between datasets. **Top-level under `semantic_model[]`** (not nested under datasets like in some other formats).
 
 ```yaml
-performance_hints:
-  estimated_row_count: 50000000
-  recommended_filters:
-    - column: created_date
-      reason: partition key
-    - column: account_id
-      reason: indexed FK
-  selective_filters:
-    - is_active = true
-  indexes:
-    - [created_date]
-    - [account_id, stage_name]
+relationships:
+  - name: orders_to_customers              # required, unique within model
+    from: orders                            # required: dataset name on the many side
+    to: customers                           # required: dataset name on the one side
+    from_columns: [customer_id]             # required: array, FK column(s) in `from`
+    to_columns: [id]                        # required: array, PK/UK column(s) in `to`
+    ai_context:
+      synonyms: ["who placed the order"]
+    custom_extensions:                      # ← Agami stores live FK validation here
+      - vendor_name: COMMON
+        data: '{"agami": {"fk_validation": {"validated_at": "2026-05-06T12:00:00Z", "orphan_count": 0, "total_rows": 6, "orphan_ratio": 0.0}}}'
 ```
 
-The `query-database` skill consults these hints to flag HIGH/MEDIUM/LOW risk per query and prompt for filters when missing.
+Composite-key example:
+
+```yaml
+- name: order_lines_to_products
+  from: order_lines
+  to: products
+  from_columns: [product_id, variant_id]
+  to_columns: [id, variant_id]
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Unique within model |
+| `from` | yes | Dataset name (must exist in `datasets[]`) |
+| `to` | yes | Dataset name (must exist in `datasets[]`) |
+| `from_columns` | yes | Array, ≥ 1 element, same length as `to_columns` |
+| `to_columns` | yes | Array, ≥ 1 element |
+| `ai_context` | no | Synonyms / instructions |
+| `custom_extensions` | no | Agami's FK validation result (see [agami-osi-extensions.md](agami-osi-extensions.md)) |
 
 ---
 
-## Validation Rules
+## Metrics
 
-Enforced by the `connect` skill before writing the file:
+Cross-dataset aggregations. Top-level under `semantic_model[]`.
 
-1. Every `foreign_key.table` must reference an existing `schema.table_name` in the model
-2. Every `foreign_key.column` must exist in the referenced table's columns
-3. Every relationship's `to_table` must exist; `from_column`/`to_column` must exist in respective tables
-4. Every entity's `maps_to` entries must be valid column names in that table
-5. No two tables can have the same `label` value
-6. Every table must have at least one column
-7. Metric `base_metrics` should reference existing per-table measure names
-8. Choice field keys must be strings (quote numeric values: `"1": Critical`)
+```yaml
+metrics:
+  - name: total_revenue                    # required, unique within model
+    expression:                            # required, dialect-aware
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(orders.amount)
+    description: Total revenue from all orders.
+    ai_context:
+      synonyms: [total sales, revenue, gross]
+```
 
-Validation failures abort the write — the skill surfaces specific errors so you can fix them before committing the model to disk.
+```yaml
+- name: revenue_per_customer
+  expression:
+    dialects:
+      - dialect: ANSI_SQL
+        expression: SUM(orders.amount) / NULLIF(COUNT(DISTINCT customers.id), 0)
+  description: Average revenue per customer.
+```
+
+OSI metrics span multiple datasets. **Reference fields by `dataset_name.field_name`** in the SQL expression. The expression is a complete SQL fragment (with aggregation), unlike field expressions which must be scalar.
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Unique within model |
+| `expression` | yes | Same shape as field expression, but allows aggregations |
+| `description` | no | What it measures |
+| `ai_context` | no | Synonyms / examples (the LLM matches "revenue", "total sales", etc. to this metric) |
+| `custom_extensions` | no | Reserved for future agami metric metadata |
+
+---
+
+## `custom_extensions`
+
+OSI's exit hatch. Per-vendor JSON-string payloads. Agami uses `vendor_name: COMMON` with a top-level `agami` key inside the JSON. The full list of agami extension keys lives in [`agami-osi-extensions.md`](agami-osi-extensions.md). The validator refuses any agami extension key not listed there.
+
+Other vendors' extensions (`SNOWFLAKE`, `DBT`, `SALESFORCE`, `DATABRICKS`) pass through untouched — agami doesn't read them but doesn't strip them either.
+
+```yaml
+custom_extensions:
+  - vendor_name: COMMON
+    data: '{"agami": {"type": "decimal"}}'        # agami reads this
+  - vendor_name: DBT
+    data: '{"materialized": "table", "tags": ["daily"]}'   # agami preserves but ignores
+```
+
+---
+
+## Validation rules
+
+Run by `plugins/agami/scripts/validate_semantic_model.py` before any write. **The validator's verdict is binding.** A model that fails validation is never persisted.
+
+1. **JSON Schema** — the entire document must validate against [`osi-schema.json`](osi-schema.json). Structural breaches (missing required fields, wrong types, unknown top-level keys) abort.
+2. **Unique names** — within one model: dataset names unique; field names unique within each dataset; metric names unique; relationship names unique.
+3. **Relationship references** — every `relationships[].from` and `to` must match a `datasets[].name`. `from_columns` and `to_columns` must be the same length.
+4. **Field references in metrics** — every `dataset_name.field_name` token in a metric expression must resolve. (Best-effort regex match — full SQL parsing is out of scope for v1.)
+5. **Choice field shape** — if `agami.choice_field` is present, all keys and values must be strings. Quote numeric stored values: `"1": "Critical"`.
+6. **`agami.type` value** — must be one of `string | integer | decimal | timestamp | date | boolean`.
+7. **Unknown agami extension keys** — any sub-key of the `agami` JSON object not listed in [`agami-osi-extensions.md`](agami-osi-extensions.md) is rejected.
+
+Optional (warnings, not errors): SQL expression parses cleanly via `sqlglot` if installed.
+
+---
+
+## Worked example
+
+A small "shop" database — what `connect/SKILL.md` writes after introspecting the integration-test fixture at `tests/integration/fixtures/postgres-init.sql`.
+
+```yaml
+version: "0.1.1"
+
+semantic_model:
+  - name: shop
+    description: E-commerce shop — customers, orders, products, order items.
+    ai_context:
+      instructions: "Use this model for sales analytics. Most questions ask about orders, customers, or revenue."
+      synonyms: [shop, store, ecommerce]
+
+    custom_extensions:
+      - vendor_name: COMMON
+        data: '{"agami": {"profile": "default", "db_type": "postgres", "introspect_meta": {"introspected_at": "2026-05-06T12:00:00Z", "tier": "cli", "source_db_version": "PostgreSQL 16.2"}}}'
+
+    datasets:
+      - name: customers
+        source: shop.public.customers
+        primary_key: [id]
+        unique_keys:
+          - [email]
+        description: People who buy things.
+        fields:
+          - name: id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: email
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: email }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string"}}'
+          - name: name
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: name }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string"}}'
+          - name: region
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: region }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string", "choice_field": {"NA": "North America", "EU": "Europe", "APAC": "Asia-Pacific"}}}'
+          - name: is_active
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: is_active }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "boolean"}}'
+          - name: created_at
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: created_at }] }
+            dimension: { is_time: true }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "timestamp"}}'
+
+      - name: orders
+        source: shop.public.orders
+        primary_key: [id]
+        description: Customer orders.
+        fields:
+          - name: id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: customer_id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: customer_id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: status
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string", "choice_field": {"pending": "Pending", "shipped": "Shipped", "delivered": "Delivered", "cancelled": "Cancelled"}}}'
+          - name: placed_at
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: placed_at }] }
+            dimension: { is_time: true }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "timestamp"}}'
+          - name: shipped_at
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: shipped_at }] }
+            dimension: { is_time: true }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "timestamp"}}'
+
+      - name: products
+        source: shop.public.products
+        primary_key: [id]
+        unique_keys:
+          - [sku]
+        fields:
+          - name: id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: sku
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: sku }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string"}}'
+          - name: name
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: name }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string"}}'
+          - name: category
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: category }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string"}}'
+          - name: unit_price
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: unit_price }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "decimal", "unit": "dollars"}}'
+          - name: is_active
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: is_active }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "boolean"}}'
+
+      - name: order_items
+        source: shop.public.order_items
+        primary_key: [id]
+        fields:
+          - name: id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: order_id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: order_id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: product_id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: product_id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: quantity
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: quantity }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: unit_price
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: unit_price }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "decimal", "unit": "dollars"}}'
+
+    relationships:
+      - name: orders_to_customers
+        from: orders
+        to: customers
+        from_columns: [customer_id]
+        to_columns: [id]
+
+      - name: order_items_to_orders
+        from: order_items
+        to: orders
+        from_columns: [order_id]
+        to_columns: [id]
+
+      - name: order_items_to_products
+        from: order_items
+        to: products
+        from_columns: [product_id]
+        to_columns: [id]
+
+    metrics:
+      - name: total_revenue
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(order_items.quantity * order_items.unit_price)
+        description: Total revenue across all order items.
+        ai_context:
+          synonyms: [revenue, total sales, gross]
+
+      - name: total_customers
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(DISTINCT customers.id)
+        description: Distinct customer count.
+```
+
+This validates clean against `osi-schema.json` and the agami extension rules.
+
+---
+
+## Migration note
+
+Versions of agami before 1.0 used a bespoke `tables` / `columns` / `entities` / `measures` schema. As of v1.0 (this release) the format is OSI-only. Existing pre-OSI models are not auto-migrated — re-run `@agami connect reintrospect` to regenerate in the new format. The semantic content (descriptions, choice fields, hand-edits) is recovered from the source DB and the user's prior `<dbname>-examples.yaml` corrections.

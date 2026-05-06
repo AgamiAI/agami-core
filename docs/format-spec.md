@@ -1,41 +1,30 @@
 # Format specs
 
-Specs for every file `agami` reads or writes inside `~/.agami/`. Three formats:
+Specs for every file `agami` reads or writes inside `~/.agami/`.
 
-1. **Credentials INI** — `~/.agami/credentials`
-2. **Semantic model YAML** — `~/.agami/<dbname>.yaml`
-3. **Examples library YAML** — `~/.agami/<dbname>-examples.yaml`
+| File | Format | Owner |
+|---|---|---|
+| `~/.agami/credentials` | INI (chmod 600) | User-edited |
+| `~/.agami/<profile>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML | Skill-written, user-editable |
+| `~/.agami/<profile>-examples.yaml` | Agami-bespoke YAML | Skill-written (seeds) + append-only via `/save-correction` |
+| `~/.agami/.config` | JSON (chmod 600) | Skill-managed |
+| `~/.agami/.optins` | JSON (chmod 600) | Skill-managed |
+| `~/.agami/.telemetry-queue.jsonl` | JSONL | Skill-managed |
+| `~/.agami/query_log.jsonl` | JSONL append-only | Skill-written, never sent |
+| `~/.agami/charts/<ts>.html` | Chart.js HTML | Skill-written |
+| `~/.agami/exports/<ts>.csv` | RFC 4180 CSV | Skill-written |
 
-Plus three internal state files (`.config`, `.optins`, `.telemetry-queue.jsonl`) and an append-only log (`query_log.jsonl`).
-
-## File layout
-
-```
-~/.agami/
-├── credentials                      # INI, chmod 600 (user-edited)
-├── credentials.example              # INI, chmod 644 (skill-written template)
-├── <dbname>.yaml                    # YAML semantic model (skill-written, user-editable)
-├── <dbname>-examples.yaml           # YAML few-shot examples (skill-written, append-only via /save-correction)
-├── .config                          # JSON, chmod 600 (skill-managed: tier choice + telemetry consent + install_id)
-├── .optins                          # JSON, chmod 600 (skill-managed: post-install email opt-in state)
-├── .telemetry-queue.jsonl           # JSONL queue of pending events (skill-managed)
-├── .telemetry-last-flush            # Unix timestamp of last successful flush
-├── query_log.jsonl                  # JSONL append-only log (skill-written, never sent anywhere)
-├── charts/<ts>.html                 # Chart.js charts (skill-written)
-└── exports/<ts>.csv                 # CSV exports (skill-written)
-```
-
-`<dbname>` matches the profile name in credentials (default: `default`).
+`<profile>` matches the section name in `~/.agami/credentials` (default: `default`).
 
 ---
 
 ## 1. Credentials INI
 
-See [`plugins/agami/shared/credentials-format.md`](../plugins/agami/shared/credentials-format.md) for the authoritative spec. Summary:
+See [`plugins/agami/shared/credentials-format.md`](../plugins/agami/shared/credentials-format.md). `chmod 600` is enforced by the `init` skill.
 
 ```ini
 [default]
-type     = postgres            # postgres | mysql | sqlite
+type     = postgres
 host     = localhost
 port     = 5432
 database = mydb
@@ -43,76 +32,133 @@ user     = myuser
 password = mypassword
 ```
 
-`chmod 600` is required (skill refuses to read otherwise).
-
 ---
 
-## 2. Semantic model YAML
+## 2. Semantic model — OSI v0.1.1
 
-See [`plugins/agami/shared/schema-reference.md`](../plugins/agami/shared/schema-reference.md) for the full spec. Top-level shape:
+The semantic model file is **strictly conformant to Open Semantic Interchange v0.1.1**. The OSI spec lives at [github.com/open-semantic-interchange/OSI](https://github.com/open-semantic-interchange/OSI); the JSON schema is bundled at [`plugins/agami/shared/osi-schema.json`](../plugins/agami/shared/osi-schema.json) so validation works offline.
+
+Every write to this file is gated by the validator at [`plugins/agami/scripts/validate_semantic_model.py`](../plugins/agami/scripts/validate_semantic_model.py). **No OSI-breaking change is ever persisted.**
+
+For the full reference: [`plugins/agami/shared/schema-reference.md`](../plugins/agami/shared/schema-reference.md).
+For Agami's `custom_extensions` conventions: [`plugins/agami/shared/agami-osi-extensions.md`](../plugins/agami/shared/agami-osi-extensions.md).
+
+### Worked example — minimal OSI-conformant model
 
 ```yaml
-database_name: shop
-database_type: PostgreSQL
-description: >-
-  E-commerce shop database — customers, orders, products, order items.
-fiscal_year_start_month: 1            # optional
-glossary: {}                          # optional
-upfront_queries:                      # optional
-  - How many orders shipped last month?
-  - Top 10 customers by revenue?
+version: "0.1.1"
 
-tables:
-  - table_name: customers
-    schema_name: public
-    label: customers
-    display_name: Customers
-    description: ""
-    columns:
-      id:           { type: integer, description: "", primary_key: true }
-      email:        { type: string,  description: "" }
-      name:         { type: string,  description: "" }
-      region:       { type: string,  description: "" }
-      created_at:   { type: timestamp, description: "" }
-    entities: []
-    measures: {}
-    relationships: []
+semantic_model:
+  - name: shop
+    description: E-commerce shop database.
+    ai_context:
+      instructions: "Use this for sales analytics across orders, customers, and products."
+      synonyms: [shop, store, ecommerce]
 
-  - table_name: orders
-    schema_name: public
-    label: orders
-    display_name: Orders
-    description: ""
-    columns:
-      id:           { type: integer, description: "", primary_key: true }
-      customer_id:  { type: integer, description: "", foreign_key: { table: public.customers, column: id } }
-      status:       { type: string,  description: "" }
-      placed_at:    { type: timestamp, description: "" }
-      shipped_at:   { type: timestamp, description: "" }
-    entities: []
-    measures: {}
+    custom_extensions:
+      - vendor_name: COMMON
+        data: '{"agami": {"profile": "default", "db_type": "postgres", "introspect_meta": {"introspected_at": "2026-05-06T12:00:00Z", "tier": "cli", "source_db_version": "PostgreSQL 16.2"}}}'
+
+    datasets:
+      - name: customers
+        source: shop.public.customers
+        primary_key: [id]
+        unique_keys: [[email]]
+        description: People who buy things.
+        fields:
+          - name: id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: email
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: email }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string"}}'
+          - name: region
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: region }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string", "choice_field": {"NA": "North America", "EU": "Europe", "APAC": "Asia-Pacific"}}}'
+          - name: created_at
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: created_at }] }
+            dimension: { is_time: true }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "timestamp"}}'
+
+      - name: orders
+        source: shop.public.orders
+        primary_key: [id]
+        fields:
+          - name: id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: customer_id
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: customer_id }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "integer"}}'
+          - name: status
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "string", "choice_field": {"pending": "Pending", "shipped": "Shipped", "delivered": "Delivered"}}}'
+          - name: amount
+            expression: { dialects: [{ dialect: ANSI_SQL, expression: amount }] }
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "decimal", "unit": "dollars"}}'
+
     relationships:
-      - { from_column: customer_id, to_table: public.customers, to_column: id, join_type: LEFT JOIN, description: "" }
+      - name: orders_to_customers
+        from: orders
+        to: customers
+        from_columns: [customer_id]
+        to_columns: [id]
 
-metrics: {}
+    metrics:
+      - name: total_revenue
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(orders.amount)
+        description: Total revenue across all orders.
+        ai_context:
+          synonyms: [revenue, total sales, gross]
 ```
 
-The skill auto-generates the skeleton during `connect`. You can hand-edit it any time — descriptions, entities, and measures are the highest-leverage things to fill in (the LLM uses them as NL→SQL hints).
+### Why OSI
 
-Validation rules:
-- Every FK target table must exist in the model
-- Every FK column must exist in the target table
-- No two tables share a `label`
-- Every table has at least one column
+- **Vendor-neutral.** A model written by agami can be loaded by Snowflake, Tableau, dbt, or any other OSI-aware consumer.
+- **Stable spec.** OSI v0.1.1 was finalized in January 2026 by Snowflake, Salesforce, dbt Labs, and others. We track it.
+- **Type info via extensions.** OSI itself doesn't model column types — agami stores them under `custom_extensions[].vendor_name=COMMON` with a top-level `agami` key. Vanilla OSI consumers ignore the extensions; agami reads them. See [`agami-osi-extensions.md`](../plugins/agami/shared/agami-osi-extensions.md).
+
+### Validation rules
+
+Run by [`plugins/agami/scripts/validate_semantic_model.py`](../plugins/agami/scripts/validate_semantic_model.py) before any write:
+
+1. **JSON Schema** (Layer 1) — entire document validates against `osi-schema.json`. Missing required fields, wrong types, unknown keys, bad enum values all fail here.
+2. **Unique names** (Layer 2) — datasets unique within model; fields unique within dataset; metrics unique; relationships unique.
+3. **Relationship refs** (Layer 2) — `from`/`to` match real datasets; `from_columns`/`to_columns` same length.
+4. **Agami extension allowlist** (Layer 2) — every key under `custom_extensions[].vendor_name=COMMON.agami` must be documented in `agami-osi-extensions.md`. Unknown keys fail.
+5. **`agami.type` value** (Layer 2) — must be one of `string | integer | decimal | timestamp | date | boolean`.
+6. **Choice field shape** (Layer 2) — `choice_field` keys and values must be strings.
+7. **SQL parse** (Layer 3, optional) — warning, not error. Requires `sqlglot` installed.
+
+The validator's verdict is **binding**. Exit 0 → write. Exit 1 → don't write.
 
 ---
 
-## 3. Examples library YAML
+## 3. Examples library YAML (agami-bespoke, NOT OSI)
+
+Few-shot NL→SQL pairs loaded by `query-database` (most-recent 50). Appended to by `/save-correction`.
 
 ```yaml
-# ~/.agami/shop-examples.yaml
-# Few-shot NL→SQL examples loaded by query-database.
-# New corrections are appended by /save-correction.
+# ~/.agami/<profile>-examples.yaml
 
 examples:
   - question: How many orders are there?
@@ -120,21 +166,11 @@ examples:
     source: seed
     created_at: 2026-05-06T12:00:00Z
 
-  - question: Orders by status
-    sql: |-
-      SELECT status, COUNT(*) AS count
-      FROM orders
-      GROUP BY status
-      ORDER BY count DESC
-    source: seed
-    created_at: 2026-05-06T12:00:00Z
-
   - question: Top 5 customers by spend
     sql: |-
-      SELECT c.name, SUM(i.quantity * i.unit_price) AS spend
+      SELECT c.name, SUM(o.amount) AS spend
       FROM customers c
       JOIN orders o ON o.customer_id = c.id
-      JOIN order_items i ON i.order_id = o.id
       GROUP BY c.id, c.name
       ORDER BY spend DESC
       LIMIT 5
@@ -144,18 +180,16 @@ examples:
     confirmed_at: 2026-05-07T18:30:00Z
 ```
 
-Fields:
-
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `question` | string | yes | The NL question that triggers this example |
-| `sql` | string | yes | The corrected SQL |
+| `question` | string | yes | NL question that triggers this example |
+| `sql` | string | yes | Reference SQL |
 | `source` | enum | yes | `seed` (auto-generated by `connect`) or `correction` (saved by `/save-correction`) |
 | `created_at` | ISO8601 | yes | When the example was added |
-| `confirmed` | bool | no | `true` if the user explicitly confirmed it (e.g., demo-query "Yes") |
+| `confirmed` | bool | no | `true` if the user explicitly confirmed it |
 | `confirmed_at` | ISO8601 | no | When confirmed |
 
-The query-database skill loads at most 50 entries (newest `created_at` first) into each query's prompt context. Older entries stay in the file but stop being loaded — when you save a 51st correction, it pushes out the oldest seed.
+**Why bespoke?** OSI doesn't model NL→SQL examples. The examples library is an agami implementation detail and intentionally not OSI.
 
 ---
 
@@ -174,8 +208,6 @@ The query-database skill loads at most 50 entries (newest `created_at` first) in
 }
 ```
 
-Hand-edit if you want to flip `analytics_consent` from true to false (or vice versa).
-
 ### `~/.agami/.optins`
 
 ```json
@@ -187,50 +219,24 @@ Hand-edit if you want to flip `analytics_consent` from true to false (or vice ve
 }
 ```
 
-Existence of this file gates the post-install email prompt — once written, the skill never re-prompts.
-
 ### `~/.agami/.telemetry-queue.jsonl`
 
-One JSON event per line, each conforming to the allowlist in [`plugins/agami/shared/telemetry-payload.md`](../plugins/agami/shared/telemetry-payload.md). Flushed via `curl` to `analytics.agami.ai/v1/events` once per day. After a successful flush, the queue is truncated.
+One JSON event per line, each conforming to the allowlist in [`plugins/agami/shared/telemetry-payload.md`](../plugins/agami/shared/telemetry-payload.md). Flushed daily.
 
 ### `~/.agami/query_log.jsonl`
 
 ```jsonl
 {"ts":"2026-05-06T15:14:00Z","question":"how many orders shipped in May","sql":"SELECT ...","row_count":4,"execution_ms":250,"tier":"cli","risk":"LOW","error_kind":null,"feedback":"good"}
-{"ts":"2026-05-06T15:15:30Z","question":"top customers","sql":"SELECT ...","row_count":5,"execution_ms":310,"tier":"cli","risk":"LOW","error_kind":null,"feedback":null}
 ```
 
-**Local-only** — never sent anywhere. Records every query, the SQL, the latency, the tier used, the risk class, the error kind (if any), and inferred feedback (drill-down → `good`, rephrase → `bad`).
-
-You can grep / aggregate this file in your own pipelines if you want personal analytics. The skill doesn't touch it beyond appending.
+**Local-only** — never sent. Records every query. Grep / aggregate it in your own tooling if you want personal analytics.
 
 ---
 
 ## 5. Chart artifacts (`~/.agami/charts/<ts>.html`)
 
-Self-contained HTML files with Chart.js v4 (loaded from CDN at view time). Each file is the rendered output of `plugins/agami/shared/chart-template.html` with placeholders substituted. Open in any browser.
-
-```html
-<!-- structure (abbreviated) -->
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Top customers — agami</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-</head>
-<body>
-  <h1>Top customers</h1>
-  <canvas id="chart"></canvas>
-  <script>
-    const labels = ["Carol Chen", "Bob Brown", "Dave Davis"];
-    const datasets = [{ label: "Spend", data: [148.95, 45.0, 39.98] }];
-    const chartType = "bar";
-    new Chart(document.getElementById('chart'), { type: chartType, data: { labels, datasets } });
-  </script>
-</body>
-</html>
-```
+Self-contained Chart.js v4 HTML, rendered from [`plugins/agami/shared/chart-template.html`](../plugins/agami/shared/chart-template.html) with placeholders substituted (`{{TITLE}}`, `{{CHART_TYPE}}`, `{{LABELS}}`, `{{DATASETS}}`, `{{GENERATED_AT}}`, `{{SQL}}`). Open in any browser.
 
 ## 6. CSV exports (`~/.agami/exports/<ts>.csv`)
 
-Standard RFC 4180 CSV. Header row first, then body. Encoding UTF-8 with no BOM.
+Standard RFC 4180 CSV. UTF-8, no BOM.

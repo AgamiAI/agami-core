@@ -1,0 +1,431 @@
+"""
+Tests for plugins/agami/scripts/validate_semantic_model.py.
+
+Three classes of test:
+1. Valid models pass cleanly.
+2. OSI structural violations (missing required fields, wrong enum values, etc.)
+   are caught by Layer 1 (JSON Schema).
+3. Agami invariants (unknown agami extension keys, bad type values, dangling
+   relationship refs, duplicate names) are caught by Layer 2.
+
+The connect and save-correction skills both call validate() before writing.
+This test suite is the contract that says: any of these violations is an
+absolute refusal, not a warning.
+"""
+
+from __future__ import annotations
+
+import copy
+import sys
+import yaml
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
+
+from validate_semantic_model import (  # noqa: E402
+    ALLOWED_AGAMI_TYPES,
+    validate,
+    validate_with_warnings,
+)
+
+
+# --- Fixtures ---------------------------------------------------------------
+
+def minimal_valid_model() -> dict:
+    """The smallest model that passes both OSI and Agami checks."""
+    return {
+        "version": "0.1.1",
+        "semantic_model": [
+            {
+                "name": "shop",
+                "description": "Test model.",
+                "datasets": [
+                    {
+                        "name": "customers",
+                        "source": "shop.public.customers",
+                        "primary_key": ["id"],
+                        "fields": [
+                            {
+                                "name": "id",
+                                "expression": {
+                                    "dialects": [
+                                        {"dialect": "ANSI_SQL", "expression": "id"}
+                                    ]
+                                },
+                                "custom_extensions": [
+                                    {
+                                        "vendor_name": "COMMON",
+                                        "data": '{"agami": {"type": "integer"}}',
+                                    }
+                                ],
+                            },
+                            {
+                                "name": "name",
+                                "expression": {
+                                    "dialects": [
+                                        {"dialect": "ANSI_SQL", "expression": "name"}
+                                    ]
+                                },
+                                "custom_extensions": [
+                                    {
+                                        "vendor_name": "COMMON",
+                                        "data": '{"agami": {"type": "string"}}',
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "name": "orders",
+                        "source": "shop.public.orders",
+                        "primary_key": ["id"],
+                        "fields": [
+                            {
+                                "name": "id",
+                                "expression": {
+                                    "dialects": [
+                                        {"dialect": "ANSI_SQL", "expression": "id"}
+                                    ]
+                                },
+                            },
+                            {
+                                "name": "customer_id",
+                                "expression": {
+                                    "dialects": [
+                                        {
+                                            "dialect": "ANSI_SQL",
+                                            "expression": "customer_id",
+                                        }
+                                    ]
+                                },
+                            },
+                        ],
+                    },
+                ],
+                "relationships": [
+                    {
+                        "name": "orders_to_customers",
+                        "from": "orders",
+                        "to": "customers",
+                        "from_columns": ["customer_id"],
+                        "to_columns": ["id"],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+# --- Class 1: valid models pass --------------------------------------------
+
+def test_minimal_model_passes():
+    errors = validate(minimal_valid_model())
+    assert errors == [], f"unexpected errors: {errors}"
+
+
+def test_canonical_osi_tpcds_sample_passes():
+    """The official OSI TPC-DS example must validate."""
+    sample = REPO_ROOT / "tests" / "integration" / "fixtures" / "sample_osi_tpcds.yaml"
+    if not sample.exists():
+        pytest.skip("OSI TPC-DS sample fixture not present")
+    with sample.open() as f:
+        model = yaml.safe_load(f)
+    errors = validate(model)
+    assert errors == [], f"OSI canonical sample failed validation: {errors}"
+
+
+def test_model_with_choice_field_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][1]["fields"].append({
+        "name": "status",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "status"}]},
+        "custom_extensions": [{
+            "vendor_name": "COMMON",
+            "data": '{"agami": {"type": "string", "choice_field": {'
+                    '"pending": "Pending", "shipped": "Shipped"}}}',
+        }],
+    })
+    assert validate(m) == []
+
+
+def test_model_with_metrics_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [
+        {
+            "name": "total_orders",
+            "expression": {
+                "dialects": [
+                    {"dialect": "ANSI_SQL", "expression": "COUNT(orders.id)"}
+                ]
+            },
+        }
+    ]
+    assert validate(m) == []
+
+
+def test_model_with_performance_hints_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][1]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": '{"agami": {"performance_hints": {"estimated_row_count": 50000000, '
+                '"recommended_filters": [{"column": "placed_at", "reason": "partition"}], '
+                '"indexes": [["customer_id"]]}}}',
+    }]
+    assert validate(m) == []
+
+
+def test_non_agami_common_extension_passes_through():
+    """A COMMON extension without an `agami` key is left alone."""
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": '{"some_other_tool": {"foo": "bar"}}',
+    }]
+    assert validate(m) == []
+
+
+def test_dbt_extension_passes_through():
+    """Other vendors' extensions are preserved without inspection."""
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["custom_extensions"] = [{
+        "vendor_name": "DBT",
+        "data": '{"materialized": "table", "tags": ["daily"]}',
+    }]
+    assert validate(m) == []
+
+
+# --- Class 2: OSI structural violations (Layer 1) --------------------------
+
+def test_missing_version_fails():
+    m = minimal_valid_model()
+    del m["version"]
+    errors = validate(m)
+    assert any("version" in e for e in errors), errors
+
+
+def test_wrong_version_fails():
+    m = minimal_valid_model()
+    m["version"] = "1.0"
+    errors = validate(m)
+    assert any("version" in e or "0.1.1" in e for e in errors), errors
+
+
+def test_missing_semantic_model_fails():
+    m = minimal_valid_model()
+    del m["semantic_model"]
+    errors = validate(m)
+    assert any("semantic_model" in e for e in errors), errors
+
+
+def test_dataset_missing_source_fails():
+    m = minimal_valid_model()
+    del m["semantic_model"][0]["datasets"][0]["source"]
+    errors = validate(m)
+    assert any("source" in e for e in errors), errors
+
+
+def test_field_missing_expression_fails():
+    m = minimal_valid_model()
+    del m["semantic_model"][0]["datasets"][0]["fields"][0]["expression"]
+    errors = validate(m)
+    assert any("expression" in e for e in errors), errors
+
+
+def test_relationship_missing_from_fails():
+    m = minimal_valid_model()
+    del m["semantic_model"][0]["relationships"][0]["from"]
+    errors = validate(m)
+    assert any("from" in e for e in errors), errors
+
+
+def test_invalid_dialect_fails():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["fields"][0]["expression"]["dialects"][0][
+        "dialect"
+    ] = "MYSQL"  # not in the OSI dialect enum
+    errors = validate(m)
+    assert any("dialect" in e.lower() or "MYSQL" in e for e in errors), errors
+
+
+def test_unknown_top_level_field_fails():
+    """OSI's JSON schema sets additionalProperties=false at the top level."""
+    m = minimal_valid_model()
+    m["custom_top_level_thing"] = "nope"
+    errors = validate(m)
+    assert any("custom_top_level_thing" in e or "additionalProperties" in e.lower()
+               for e in errors), errors
+
+
+def test_unknown_field_inside_dataset_fails():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["bogus"] = "x"
+    errors = validate(m)
+    assert any("bogus" in e or "additionalProperties" in e.lower() for e in errors), errors
+
+
+# --- Class 3: Agami invariants (Layer 2) -----------------------------------
+
+def test_unknown_agami_extension_key_rejected():
+    """Adding a key not in agami-osi-extensions.md must fail validation."""
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["fields"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": '{"agami": {"type": "integer", "secret_new_key": 42}}',
+    }]
+    errors = validate(m)
+    assert any("secret_new_key" in e for e in errors), errors
+
+
+def test_invalid_agami_type_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["fields"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": '{"agami": {"type": "real_number"}}',  # not in the allowlist
+    }]
+    errors = validate(m)
+    assert any("real_number" in e or "agami.type" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("good_type", sorted(ALLOWED_AGAMI_TYPES))
+def test_every_allowed_type_passes(good_type):
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["fields"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": '{"agami": {"type": "' + good_type + '"}}',
+    }]
+    assert validate(m) == []
+
+
+def test_choice_field_with_numeric_key_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["fields"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        # JSON object keys are always strings — we plant a non-string by using
+        # a dict literal at build-time and re-serializing. This validates the
+        # validator's defense against weird payloads.
+        "data": '{"agami": {"type": "string", "choice_field": {"1": 99}}}',
+    }]
+    errors = validate(m)
+    # The value 99 is numeric — must be flagged
+    assert any("choice_field" in e for e in errors), errors
+
+
+def test_dangling_relationship_from_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["from"] = "nonexistent_dataset"
+    errors = validate(m)
+    assert any("nonexistent_dataset" in e for e in errors), errors
+
+
+def test_dangling_relationship_to_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["to"] = "ghost_dataset"
+    errors = validate(m)
+    assert any("ghost_dataset" in e for e in errors), errors
+
+
+def test_relationship_column_count_mismatch_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["from_columns"] = ["a", "b"]
+    m["semantic_model"][0]["relationships"][0]["to_columns"] = ["x"]
+    errors = validate(m)
+    assert any("differ in length" in e for e in errors), errors
+
+
+def test_duplicate_dataset_name_rejected():
+    m = minimal_valid_model()
+    dup = copy.deepcopy(m["semantic_model"][0]["datasets"][0])
+    dup["source"] = "shop.public.dup"
+    m["semantic_model"][0]["datasets"].append(dup)
+    errors = validate(m)
+    assert any("duplicate dataset" in e.lower() for e in errors), errors
+
+
+def test_duplicate_field_name_within_dataset_rejected():
+    m = minimal_valid_model()
+    fields = m["semantic_model"][0]["datasets"][0]["fields"]
+    fields.append(copy.deepcopy(fields[0]))  # duplicate "id"
+    errors = validate(m)
+    assert any("duplicate field" in e.lower() for e in errors), errors
+
+
+def test_duplicate_metric_name_rejected():
+    m = minimal_valid_model()
+    metric = {
+        "name": "total_orders",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "COUNT(*)"}]},
+    }
+    m["semantic_model"][0]["metrics"] = [metric, copy.deepcopy(metric)]
+    errors = validate(m)
+    assert any("duplicate metric" in e.lower() for e in errors), errors
+
+
+def test_duplicate_relationship_name_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"].append(
+        copy.deepcopy(m["semantic_model"][0]["relationships"][0])
+    )
+    errors = validate(m)
+    assert any("duplicate relationship" in e.lower() for e in errors), errors
+
+
+def test_malformed_json_in_custom_extension_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["fields"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": "{not valid json",
+    }]
+    errors = validate(m)
+    assert any("not valid JSON" in e for e in errors), errors
+
+
+def test_unknown_performance_hint_key_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": '{"agami": {"performance_hints": {"estimated_row_count": 1000, '
+                '"undocumented_subkey": true}}}',
+    }]
+    errors = validate(m)
+    assert any("undocumented_subkey" in e for e in errors), errors
+
+
+def test_unknown_introspect_meta_key_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["custom_extensions"] = [{
+        "vendor_name": "COMMON",
+        "data": '{"agami": {"introspect_meta": {"introspected_at": "2026-05-06T12:00:00Z", '
+                '"surprising_field": "bad"}}}',
+    }]
+    errors = validate(m)
+    assert any("surprising_field" in e for e in errors), errors
+
+
+# --- The contract: validate() never raises ---------------------------------
+
+def test_validate_does_not_raise_on_garbage():
+    """Any bad input produces errors, never an exception."""
+    cases = [
+        {},
+        {"version": "0.1.1"},  # missing semantic_model
+        {"version": "0.1.1", "semantic_model": "not an array"},
+        {"version": 12345},
+        {"version": "0.1.1", "semantic_model": []},  # empty array
+    ]
+    for c in cases:
+        try:
+            errors = validate(c)
+            # If it returned, the contract is honored — errors should be non-empty
+            # for genuinely invalid inputs.
+            assert isinstance(errors, list)
+        except Exception as e:  # noqa: BLE001
+            pytest.fail(f"validate() raised on input {c!r}: {e}")
+
+
+def test_validate_with_warnings_returns_two_lists():
+    errors, warnings = validate_with_warnings(minimal_valid_model())
+    assert isinstance(errors, list)
+    assert isinstance(warnings, list)

@@ -1,21 +1,24 @@
 ---
 name: connect
-description: "Introspects the user's database, writes a semantic model YAML at $HOME/.agami/<dbname>.yaml (tables, columns, FK relationships, entity hints), generates seed NL-to-SQL few-shot examples at $HOME/.agami/<dbname>-examples.yaml (each validated via EXPLAIN), and runs an engagement-moment demo query so the user immediately sees the skill working. Re-introspects on demand when the schema drifts."
+description: "Introspects the user's database and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model at $HOME/.agami/<profile>.yaml. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB) at $HOME/.agami/<profile>-examples.yaml, then runs an engagement-moment demo query so the user immediately sees the skill working. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
 when_to_use: "Auto-invoked by query-database the first time it runs (when the semantic model YAML is missing). Invoke explicitly when the user says 'connect to my database', 'introspect the schema', 'reload schema', 'add a new database', or after the user changes their schema and wants the model refreshed. Requires init to have run first (credentials must exist)."
 argument-hint: "[reintrospect | profile <name>]"
 ---
 
 # agami connect
 
-You are setting up the agami semantic model for the user's database. Goal: by the end of this skill, the user has a working `~/.agami/<dbname>.yaml` and `~/.agami/<dbname>-examples.yaml`, and they've seen one demo query execute successfully end-to-end.
+You are setting up the agami semantic model for the user's database. Goal: by the end, there is a **strict OSI v0.1.1 model** at `~/.agami/<profile>.yaml`, a seeded examples library at `~/.agami/<profile>-examples.yaml`, and the user has seen one demo query execute end-to-end.
 
-This skill orchestrates three things:
+This skill orchestrates four phases:
 
-1. **Introspect** the database schema — tables, columns, primary/foreign keys, basic stats. Writes `~/.agami/<dbname>.yaml` per [`shared/schema-reference.md`](../../shared/schema-reference.md).
-2. **Seed prompt examples** — generate 8–15 NL→SQL few-shot pairs covering common query patterns. Each is validated via EXPLAIN before write. Writes `~/.agami/<dbname>-examples.yaml`.
-3. **Demo query** — pick an FK-spanning question, execute it, ask the user "does this look right? Yes / No / Skip". This is the engagement moment — the user feels the value within their first minute.
+1. **Introspect** — pull tables / columns / PK / FK from `information_schema` via the chosen execution tier.
+2. **Build the OSI model** — assemble the YAML strictly to the OSI v0.1.1 spec, with Agami metadata (column types, choice fields, performance hints) packed under `custom_extensions[].vendor_name: COMMON` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
+3. **Validate, then write** — run the validator at `plugins/agami/scripts/validate_semantic_model.py`. If it fails, **DO NOT WRITE THE FILE.** Surface the errors and stop.
+4. **Seed examples + run demo query** — generate few-shot pairs, EXPLAIN-validate each, then pick one for the engagement-moment Yes/No/Skip prompt.
 
-For schema YAML format: [`shared/schema-reference.md`](../../shared/schema-reference.md).
+For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
+For the bundled JSON schema: [`shared/osi-schema.json`](../../shared/osi-schema.json).
+For Agami's documented `custom_extensions`: [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
 For introspection SQL: [`shared/introspect-queries.md`](../../shared/introspect-queries.md).
 For FK validation: [`shared/fk-validation.md`](../../shared/fk-validation.md).
 For SQL dialect rules: [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
@@ -26,114 +29,165 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
 - **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Mark exactly one option `(Recommended)` first.
-- **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Generated 10 examples`, etc.).
+- **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 
 ---
 
 ## Phase 0: Preflight
 
 1. Verify `~/.agami/credentials` exists (or `AGAMI_DATABASE_URL` is set). If neither: invoke the `init` skill first.
-2. Read the credentials chmod-check from [`init/SKILL.md`](../init/SKILL.md#permissions-enforcement). Refuse to proceed if too permissive.
-3. Resolve the database type and `dbname` from the credentials (`type`, `database` fields, or DSN). The default profile is `[default]`; honor `AGAMI_PROFILE` if set.
-4. Look up the chosen execution tier from `~/.agami/.config` (set by `init`). If absent, re-run tier detection per [`init/SKILL.md`](../init/SKILL.md#phase-3-tier-detection).
-5. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch (preserving existing `description` strings as a courtesy if the user has hand-edited them).
+2. Apply the credentials chmod check from [`init/SKILL.md`](../init/SKILL.md#permissions-enforcement). Refuse to proceed if too permissive.
+3. Resolve `<profile>` (default: `default`, override with `AGAMI_PROFILE`). The OSI `semantic_model[].name` MUST equal `<profile>`.
+4. Resolve `db_type` from credentials (`postgres` | `mysql` | `sqlite`).
+5. Look up the cached execution tier from `~/.agami/.config`. If absent, run tier detection per [`init/SKILL.md`](../init/SKILL.md#phase-3-tier-detection).
+6. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch. **Hand-edits the user made (descriptions, ai_context, choice_fields, metrics) MUST be preserved** — re-introspection only updates what the DB unambiguously tells us (table list, columns, types, PK, FK).
 
 ---
 
 ## Phase 1: Introspect
 
-If `~/.agami/<dbname>.yaml` already exists and `$ARGUMENTS` is not `reintrospect`:
-- Briefly tell the user "I already have a model for `<dbname>` at `~/.agami/<dbname>.yaml`. Want to re-introspect, just verify it works, or move on to seeding examples?"
-- AskUserQuestion: `Re-introspect` / `Verify and continue (Recommended)` / `Skip to examples`.
+If `~/.agami/<profile>.yaml` exists and `$ARGUMENTS` is not `reintrospect`:
+- "I already have a model for `<profile>` at `~/.agami/<profile>.yaml`. What would you like to do?"
+- AskUserQuestion: `Re-introspect from DB` / `Verify and continue (Recommended)` / `Skip to seeding examples`.
 
-Otherwise, run introspection.
+Otherwise, run introspection. For every step, use the SQL from [`shared/introspect-queries.md`](../../shared/introspect-queries.md), executed via the chosen tier:
 
-### Step 1a — list tables
+### 1a — list tables
 
-Run the SQL from [`shared/introspect-queries.md`](../../shared/introspect-queries.md) (Postgres or MySQL section, matching the DB type) via the chosen tier. Filter system schemas per [`shared/connection-reference.md → System Schema Exclusions`](../../shared/connection-reference.md#system-schema-exclusions).
+Filter system schemas per [`shared/connection-reference.md → System Schema Exclusions`](../../shared/connection-reference.md#system-schema-exclusions). Surface: `Found <N> tables across <K> schema(s).`
 
-Surface a one-liner: `Found 12 tables across 1 schema.`
+### 1b — for each table, pull columns + PK + FK + row count
 
-### Step 1b — for each table, pull columns + PK + FK
+Use the per-dialect queries from [`shared/introspect-queries.md`](../../shared/introspect-queries.md).
 
-Use the per-dialect queries from [`shared/introspect-queries.md`](../../shared/introspect-queries.md). Map source types to the simple set in `schema-reference.md` ("Type mapping" section). Fill out:
+For each column: capture `name`, `data_type` (raw DB type), nullability. Map to the simple OSI-extension type set (`string | integer | decimal | timestamp | date | boolean`) using the type mapping table at the bottom of `introspect-queries.md`. Keep the raw DB type as `agami.original_type`.
 
-```yaml
-tables:
-  - table_name: orders
-    schema_name: public
-    label: orders
-    display_name: Orders
-    description: ""
-    columns:
-      id:
-        type: integer
-        description: ""
-        primary_key: true
-      customer_id:
-        type: integer
-        description: ""
-        foreign_key:
-          table: public.customers
-          column: id
-      ...
-    relationships:
-      - from_column: customer_id
-        to_table: public.customers
-        to_column: id
-        join_type: LEFT JOIN
-        description: ""
-    entities: []
-    measures: {}
-```
+For each table: capture row count from `pg_stat_user_tables` (Postgres) or `information_schema.tables.table_rows` (MySQL). Tables with > 100k rows get a `agami.performance_hints` extension; tables ≤ 100k don't need one.
 
-Leave `description` empty for now — you'll fill these in Step 1d.
+### 1c — FK validation (live join check)
 
-### Step 1c — FK validation (live join check)
+Run the orphan-ratio query from [`shared/fk-validation.md`](../../shared/fk-validation.md) against every detected FK. Drop any with > 5% orphans. For each FK that survives, record the result as a `agami.fk_validation` extension on the resulting `relationships[]` entry.
 
-Run the orphan-ratio check from [`shared/fk-validation.md`](../../shared/fk-validation.md) on every detected FK. Drop any FK with > 5% orphans (likely a stale reference or denormalization, not a real relationship). Surface a one-liner: `12 foreign keys (1 dropped after orphan check).`
+If the database had **zero declared FKs**, run heuristic FK inference per `fk-validation.md` and ask:
 
-If the database had **zero declared FKs** (common with auto-generated schemas), run heuristic FK inference per [`shared/fk-validation.md`](../../shared/fk-validation.md) and ask the user before writing inferred FKs to the model:
-
-> I detected 4 likely foreign-key relationships from column-name conventions:
+> I detected N likely foreign-key relationships from column-name conventions:
 > - `orders.customer_id` → `customers.id` (1 orphan in 2403 rows)
-> - `order_items.order_id` → `orders.id` (0 orphans)
 > - …
 >
 > Add these to the model?
 
 AskUserQuestion: `Add all (Recommended)` / `Add only zero-orphan ones` / `Skip — let me edit by hand later`.
 
-### Step 1d — light enrichment (table descriptions)
+### 1d — light enrichment (table descriptions)
 
-For each table, generate a one-line plain-English `description` based on the table name and its column list. Don't make stuff up — if you're unsure, leave it as "". Examples:
-
+For each table, generate a one-line plain-English `description`. Don't make stuff up — leave empty if unsure. Examples:
 - `orders` (with customer_id, status, placed_at, shipped_at) → "Customer orders with placement and shipment dates."
-- `users` (with email, name, created_at) → "Application users."
-- `_audit_log` (with table_name, op, ts) → "" (don't guess at internal tables).
+- `_audit_log` → leave empty.
 
-This is a best-effort pass — the user can edit `~/.agami/<dbname>.yaml` directly and the next query will pick up the changes.
-
-### Step 1e — validate
-
-Run the validation rules from [`shared/schema-reference.md → Validation Rules`](../../shared/schema-reference.md#validation-rules):
-
-1. Every FK target table exists in the model.
-2. Every FK column exists in the target table.
-3. No two tables share a `label`.
-4. Every table has at least one column.
-
-If any rule fails: surface the specific failure ("orders.customer_id references public.customers but no such table is in the model") and stop. Do not write a broken model.
-
-### Step 1f — write `~/.agami/<dbname>.yaml`
-
-Use the Write tool. Surface: `✓ Wrote ~/.agami/<dbname>.yaml (12 tables, 47 columns, 11 relationships).`
+This is a best-effort pass; the user can hand-edit `~/.agami/<profile>.yaml` and the changes will survive future re-introspections (Phase 0.6).
 
 ---
 
-## Phase 2: Seed prompt examples
+## Phase 2: Build the OSI model
 
-Generate **8–15** NL→SQL examples covering this distribution of query patterns. Aim for at least one example per pattern that maps to the user's schema.
+Assemble the YAML structure **strictly** per [`shared/schema-reference.md`](../../shared/schema-reference.md). Every model you emit must match this exact shape:
+
+```yaml
+version: "0.1.1"
+
+semantic_model:
+  - name: <profile>
+    description: <plain-English summary>
+    ai_context:
+      instructions: <how the LLM should use this model>
+      synonyms: [...]
+
+    custom_extensions:
+      - vendor_name: COMMON
+        data: '{"agami": {"profile": "<profile>", "db_type": "<db_type>", "introspect_meta": {"introspected_at": "<ISO>", "tier": "<cli|duckdb|python>", "source_db_version": "<version string>"}}}'
+
+    datasets:
+      - name: <table_name>                                # use the source table name verbatim
+        source: <database>.<schema>.<table>               # ALWAYS three-part. For sqlite use file_basename.main.<table>.
+        primary_key: [<col>, ...]                         # array (composite-friendly); omit if no PK
+        unique_keys:                                       # optional, list of arrays
+          - [<col>]
+        description: <plain English or empty string>
+        ai_context:
+          synonyms: [...]
+        fields:
+          - name: <column_name>
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: <column_name>               # for plain references; computed expressions allowed
+            dimension:
+              is_time: <true if timestamp/date else false>
+            description: <empty string is OK>
+            custom_extensions:
+              - vendor_name: COMMON
+                data: '{"agami": {"type": "<simple_type>", "original_type": "<DB native type>"}}'
+        custom_extensions:
+          - vendor_name: COMMON
+            data: '{"agami": {"performance_hints": {...}}}'   # only when row count > 100k
+
+    relationships:
+      - name: <from>_to_<to>                              # snake_case auto-generated, must be unique
+        from: <from_dataset_name>
+        to: <to_dataset_name>
+        from_columns: [<col>, ...]
+        to_columns: [<col>, ...]
+        custom_extensions:
+          - vendor_name: COMMON
+            data: '{"agami": {"fk_validation": {"validated_at": "<ISO>", "orphan_count": 0, "total_rows": <n>, "orphan_ratio": 0.0}}}'
+
+    metrics: []                                            # empty on first introspect; user adds these via /save-correction
+```
+
+### Hard rules when building
+
+1. **Every field must have an `expression.dialects[]` with at least one entry.** Even for plain column references — write `expression: { dialects: [{ dialect: ANSI_SQL, expression: <column_name> }] }`. No exceptions.
+2. **`agami.type` is mandatory** on every field. If the DB native type is exotic and you can't map it, default to `string` and put the original in `agami.original_type`.
+3. **Relationships are top-level** under the model. Never nest them inside datasets. Each one needs a unique `name` (use `<from>_to_<to>`; suffix with `_<col>` if multiple FK pairs share `from`+`to`).
+4. **`from_columns` and `to_columns` MUST have the same length.** Composite keys are arrays.
+5. **`source` must be three-part dotted notation.** `database.schema.table` — never bare table name.
+6. **Don't invent `custom_extensions` keys.** Only emit the keys documented in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md). Adding a new key requires updating that doc + the validator's allowlist + a test.
+7. **Reintrospect preserves hand-edits.** When `$ARGUMENTS == reintrospect` and an existing model file is at `~/.agami/<profile>.yaml`:
+   - Read the existing model first.
+   - For each existing field: keep its `description`, `ai_context`, and any `agami.choice_field` / `agami.unit` extensions. Refresh only `agami.type` / `agami.original_type` from the DB.
+   - For each existing dataset: keep its `description`, `ai_context`. Refresh `agami.performance_hints` from the DB.
+   - For each existing relationship: keep it as-is if both endpoints still exist. Drop if the underlying FK is gone.
+   - Keep all existing `metrics[]` entries — those are user-authored and we never lose them.
+
+---
+
+## Phase 3: Validate, then write
+
+This phase is the keystone. **No model file is ever written without passing the validator.**
+
+### 3a — run the validator
+
+```bash
+python3 plugins/agami/scripts/validate_semantic_model.py /tmp/agami-staging-<profile>.yaml
+```
+
+(Stage the YAML at `/tmp/agami-staging-<profile>.yaml` first — never write to `~/.agami/<profile>.yaml` until validation passes.)
+
+### 3b — handle the result
+
+- **Exit 0** (PASSED): rename the staging file to `~/.agami/<profile>.yaml`, `chmod 600`, surface `✓ Validator passed. Wrote ~/.agami/<profile>.yaml (<N> datasets, <M> fields, <K> relationships).`
+- **Exit 1** (FAILED): surface the validator's error list verbatim. **Do NOT write the model.** Tell the user "I built a model but it failed OSI validation. Here's what's wrong: …" and offer to attempt a fix or stop. Re-validate after every edit until clean. The staging file remains at `/tmp/agami-staging-<profile>.yaml` for inspection.
+- **Exit 2** (TOOLING ERROR — missing dependencies, missing schema): surface the error and ask the user to install `pyyaml` and `jsonschema`.
+
+### 3c — never bypass
+
+If the validator can't be run for any reason (missing Python, missing dependencies, missing schema file), **DO NOT WRITE THE MODEL**. Tell the user the validator is unavailable and offer to install the dependencies. The model file at `~/.agami/<profile>.yaml` is the source of truth for every future query — a broken model breaks every query that follows.
+
+---
+
+## Phase 4: Seed prompt examples
+
+Generate **8–15** NL→SQL examples covering this distribution:
 
 | # | Pattern | Example shape |
 |---|---------|---------------|
@@ -145,47 +199,33 @@ Generate **8–15** NL→SQL examples covering this distribution of query patter
 | 6 | JOIN (2 tables) | "Total spend per customer" |
 | 7 | JOIN (3 tables) | "Top 10 products by revenue" |
 | 8 | Boolean filter | "Active customers only" |
-| 9 | Combined (filter + group + sort + limit) | "Top 5 active customers by spend last 30 days" |
-| 10 | Aggregate measure | "Average order size" |
+| 9 | Combined | "Top 5 active customers by spend last 30 days" |
+| 10 | Aggregate | "Average order size" |
 
-Skip patterns that don't fit the user's schema (e.g., no date column → no "last month" example).
+Skip patterns that don't fit the user's schema (e.g., no time field → no "last month" example).
 
-### Step 2a — generate
+### 4a — generate
 
-For each example, build the `(question, sql)` pair using the model from Phase 1. Use the SQL safety rules from [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md) and the dialect-specific syntax from [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
+For each example:
+- Build `(question, sql)` using the model from Phase 3.
+- Reference fields by their **OSI dataset.field name** (which equals the DB column name in the simple introspect case).
+- Use SQL safety rules from [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md) and dialect-specific syntax from [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
 
-### Step 2b — validate via EXPLAIN
+### 4b — EXPLAIN-validate each
 
-For every generated SQL, run `EXPLAIN <sql>` against the live DB through the chosen tier:
-
-```sql
--- Postgres
-EXPLAIN <sql>;
-
--- MySQL
-EXPLAIN <sql>;
-
--- SQLite
-EXPLAIN QUERY PLAN <sql>;
-```
-
-If EXPLAIN fails:
+Before adding to the YAML, run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the chosen tier. If EXPLAIN fails:
 1. Read the error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
-2. Make **one** auto-fix attempt (typically a column-name typo or missing alias).
+2. Make ONE auto-fix attempt (typically a column-name typo or missing alias).
 3. If still failing, move that example to `~/.agami/.rejected/` (with the error) and continue. Don't block.
 
-This is the EXPLAIN-validate-then-write contract — only well-formed examples land in the YAML.
+### 4c — write `~/.agami/<profile>-examples.yaml`
 
-### Step 2c — write `~/.agami/<dbname>-examples.yaml`
-
-Format:
+This file is **NOT OSI** — it's an agami-bespoke few-shot library. Format:
 
 ```yaml
-# ~/.agami/<dbname>-examples.yaml
-# Few-shot examples for NL→SQL. Loaded by the query-database skill.
-# New corrections are appended here by /save-correction.
-#
-# Format: list of {question, sql} pairs.
+# ~/.agami/<profile>-examples.yaml
+# NL → SQL few-shot examples loaded by the query-database skill.
+# Corrections appended by /save-correction.
 
 examples:
   - question: How many orders are there?
@@ -201,87 +241,64 @@ examples:
       ORDER BY count DESC
     source: seed
     created_at: 2026-05-06T12:00:00Z
-  ...
 ```
 
-`source` is `seed` for examples generated here, `correction` for ones added by `/save-correction`. `created_at` is ISO8601 UTC. The query-database skill caps loaded examples at 50 most-recent (newest first); seeds count toward that cap.
+`source` is `seed` here, `correction` for entries added by `/save-correction`. The query-database skill loads at most 50 most-recent.
 
-Surface: `✓ Generated 10 examples (1 rejected, see ~/.agami/.rejected/). Saved to ~/.agami/<dbname>-examples.yaml.`
+Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Saved to ~/.agami/<profile>-examples.yaml.`
 
 ---
 
-## Phase 3: Demo query — the engagement moment
+## Phase 5: Demo query — engagement moment
 
-Pick **one** question from Phase 2 that:
-1. Spans at least 2 tables (uses a JOIN).
-2. Returns a small result (≤ 20 rows) so it displays cleanly in chat.
+Pick **one** example from Phase 4 that:
+1. Spans ≥ 2 datasets via a relationship (uses a JOIN).
+2. Returns ≤ 20 rows so it displays cleanly.
 3. Is unambiguously interesting (a "top N", a "by category" breakdown, a recency filter).
 
-Tell the user what you picked and why:
+Tell the user what you picked and why. Show the generated SQL. Execute via the chosen tier. Render result as a markdown table.
 
-> Here's a demo question to test that everything's wired up:
->
-> **"Top 5 customers by total spend"**
->
-> Generated SQL:
-> ```sql
-> SELECT c.name, SUM(i.quantity * i.unit_price) AS total_spend
-> FROM customers c
-> JOIN orders o ON o.customer_id = c.id
-> JOIN order_items i ON i.order_id = o.id
-> GROUP BY c.id, c.name
-> ORDER BY total_spend DESC
-> LIMIT 5
-> ```
-
-Execute the SQL via the chosen tier. Render the result as a markdown table.
-
-Then **ask via AskUserQuestion**:
+Then **AskUserQuestion**:
 
 > Does this result look right?
-> - **Yes (Recommended)** — confirms the example, marks it as good in `~/.agami/<dbname>-examples.yaml`
-> - **No** — opens correction flow: ask the user what's wrong, take their corrected SQL, append via `/save-correction`
+> - **Yes (Recommended)** — confirms the example, marks it `confirmed: true` in `~/.agami/<profile>-examples.yaml`
+> - **No** — opens the correction flow: ask the user what's wrong, take their corrected SQL, route through `/save-correction`
 > - **Skip** — moves on, doesn't change the example
 
-Handle each branch:
+Branch:
+- **Yes** → set `confirmed: true` and `confirmed_at: <ISO>` on the example.
+- **No** → invoke `/save-correction` with the user's feedback (which may also update the OSI model — see save-correction/SKILL.md).
+- **Skip** → leave example as-is.
 
-- **Yes** → update the example in `~/.agami/<dbname>-examples.yaml`: add `confirmed: true` and `confirmed_at: <ISO ts>`.
-- **No** → tell the user "Tell me what's off, or paste the correct SQL." Capture their reply. If they paste SQL, validate via EXPLAIN, replace the example's `sql` field, set `source: correction`. If they describe what's wrong in NL, regenerate SQL based on their feedback, EXPLAIN-validate, replace.
-- **Skip** → leave the example as-is.
-
-Either way, surface: `✓ Demo run complete. You're set up — ask me a question about your data.`
+Surface: `✓ Demo run complete. You're set up — ask me a question about your data.`
 
 ---
 
-## Phase 4: Telemetry (if opted in)
+## Phase 6: Telemetry (if opted in)
 
-If `~/.agami/.config` has `analytics_consent: true`, append a `connect` event to `~/.agami/.telemetry-queue.jsonl`. Build the payload using ONLY the allowlisted fields per [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md):
-
-```json
-{"event_type": "connect", "install_id": "...", "db_type": "postgres", "os": "darwin", "host": "claude-code-cli", "tier": "cli", "client_version": "1.0.0", "timestamp": "..."}
-```
-
-Don't flush yet — that happens daily from `query-database`.
+If `~/.agami/.config` has `analytics_consent: true`, append a `connect` event to `~/.agami/.telemetry-queue.jsonl` using ONLY the allowlisted fields per [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md). Don't flush yet — that happens daily from `query-database`.
 
 ---
 
 ## Closing message
 
 ```
-✓ ~/.agami/<dbname>.yaml — semantic model
-✓ ~/.agami/<dbname>-examples.yaml — 10 NL→SQL examples
+✓ ~/.agami/<profile>.yaml — OSI v0.1.1 semantic model (validated)
+✓ ~/.agami/<profile>-examples.yaml — <N> NL→SQL examples
 ✓ Demo query verified
 
 You're ready. Ask me anything — e.g. "show top 10 active customers by spend".
 ```
 
-If the user wants to edit the model by hand, point them at `~/.agami/<dbname>.yaml` directly. The next query picks up changes automatically.
-
 ---
 
 ## Error handling
 
-- All credential reads → chmod check from `init/SKILL.md`. Refuse on world-readable.
-- All SQL execution → route exceptions through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Surface one-line remediations.
-- EXPLAIN failures during seeding → one auto-fix retry, then move to `~/.agami/.rejected/`. Don't block.
-- Validation failures → specific error + don't write the file. The user can fix the cause and re-run.
+| Symptom | Action |
+|---|---|
+| Credentials chmod wrong | Refuse, offer to `chmod 600` |
+| Cached tier no longer works | Re-detect, update `~/.agami/.config` |
+| Introspection SQL fails | Route through `db_error_classifier.md`, surface the one-line remediation |
+| **Validator fails** | **Refuse to write `~/.agami/<profile>.yaml`. Show errors verbatim. Stage at `/tmp/agami-staging-<profile>.yaml`. Loop on edits + re-validate.** |
+| EXPLAIN fails for a seed example | Auto-fix once → if still bad, move to `~/.agami/.rejected/`. Don't block the connect flow. |
+| Reintrospect would lose hand-edits | Phase 2 hard rule #7 — preserve descriptions, ai_context, choice_fields, metrics. |
