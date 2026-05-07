@@ -81,11 +81,13 @@ Options (mark exactly one Recommended, place it first):
 | label | description |
 |---|---|
 | `PostgreSQL (Recommended)` | Postgres, Supabase, Neon, RDS Postgres, Aurora Postgres, Cloud SQL, Timescale. |
+| `Redshift` | Amazon Redshift (provisioned cluster or Serverless). Speaks Postgres wire protocol; psql works. Default port 5439, SSL required. |
+| `Snowflake` | Snowflake. Uses `snowsql` CLI or `snowflake-connector-python`. Account identifier instead of host. |
 | `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
 | `SQLite` | A local `.db` / `.sqlite` file. |
-| `Paste a connection URL` | If you already have a DSN string (e.g. from Supabase / Neon / Railway dashboards). |
+| `Paste a connection URL` | If you already have a DSN string (e.g. from Supabase / Neon / Railway dashboards). Accepts `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `sqlite:///abs/path` and the `+driver` SQLAlchemy variants. |
 
-Bind the chosen type to `$DB_TYPE` (one of `postgres` | `mysql` | `sqlite` | `dsn`). The "Paste a connection URL" path generates a `url = ...` placeholder; the user pastes their full DSN into the file directly.
+Bind the chosen type to `$DB_TYPE` (one of `postgres` | `redshift` | `snowflake` | `mysql` | `sqlite` | `dsn`). The "Paste a connection URL" path generates a `url = ...` placeholder; the user pastes their full DSN into the file directly.
 
 ### 2b — Pick a profile name
 
@@ -140,6 +142,42 @@ password = your-password
 # url = postgresql://user:pass@host:5432/db
 # url = postgresql+asyncpg://user:pass@host:5432/db   # +driver suffix is stripped
 # Query params like ?sslmode=require are honored automatically.
+```
+
+**If `$DB_TYPE = redshift`**, append (same shape as postgres but with Redshift defaults):
+
+```ini
+[$PROFILE_NAME]
+type     = redshift
+host     = your-cluster.<region>.redshift.amazonaws.com   # or <wg>.<acct>.<region>.redshift-serverless.amazonaws.com
+port     = 5439
+database = your-database
+user     = your-username
+password = your-password
+sslmode  = require                       # required by Redshift
+
+# OR — use a DSN URL (port 5439 + sslmode=require auto-applied):
+# url = redshift://user:pass@your-cluster.us-west-2.redshift.amazonaws.com:5439/db
+```
+
+**If `$DB_TYPE = snowflake`**, append:
+
+```ini
+[$PROFILE_NAME]
+type      = snowflake
+account   = xy12345.us-east-1.aws        # or xy12345 / myorg-myaccount; do NOT add .snowflakecomputing.com
+user      = your-username
+password  = your-password                # OR set authenticator instead (see below)
+warehouse = COMPUTE_WH                   # optional but recommended
+database  = ANALYTICS                    # optional
+schema    = PUBLIC                       # optional
+role      = ANALYST_ROLE                 # optional
+
+# For SSO (e.g. Okta / Azure AD), comment out password and use:
+# authenticator = externalbrowser
+
+# OR — DSN form (path is /database/schema; query params carry warehouse/role):
+# url = snowflake://user:pass@xy12345.us-east-1.aws/ANALYTICS/PUBLIC?warehouse=COMPUTE_WH&role=ANALYST_ROLE
 ```
 
 **If `$DB_TYPE = mysql`**, append:

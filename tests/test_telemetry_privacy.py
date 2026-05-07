@@ -46,6 +46,10 @@ EXPECTED_ALLOWED_FIELDS = frozenset({
     "timestamp",
 })
 
+EXPECTED_ALLOWED_DB_TYPES = frozenset({
+    "postgres", "redshift", "mysql", "snowflake", "sqlite",
+})
+
 
 def test_allowed_fields_match_doc():
     """

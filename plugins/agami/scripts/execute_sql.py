@@ -137,6 +137,8 @@ def _load_credentials(profile: str) -> dict[str, str]:
 # Schemes we accept. Strip "+driver" suffixes (e.g. postgresql+asyncpg, postgres+psycopg2).
 _POSTGRES_SCHEMES = {"postgres", "postgresql"}
 _MYSQL_SCHEMES = {"mysql", "mariadb"}
+_REDSHIFT_SCHEMES = {"redshift"}        # speaks Postgres wire protocol; port 5439, SSL required
+_SNOWFLAKE_SCHEMES = {"snowflake"}      # native CLI (snowsql) + snowflake-connector-python
 
 
 def _parse_dsn(dsn: str) -> dict[str, str]:
@@ -147,6 +149,10 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
       postgresql+psycopg://, postgres+asyncpg:// — all map to type=postgres.
       mysql://, mariadb://, mysql+pymysql:// — all map to type=mysql.
       sqlite:///absolute/path/to.db — maps to type=sqlite.
+      redshift://user:pass@cluster.region.redshift.amazonaws.com:5439/db — type=redshift
+      snowflake://user:pass@account.region.cloud/database/schema?warehouse=wh&role=r
+        — type=snowflake. The path is `/database` or `/database/schema`. Query
+        params (warehouse, role, application, authenticator) are carried over.
 
     Cloud Postgres providers (Supabase, Neon, RDS, etc.) frequently use the
     SQLAlchemy-style `postgresql+asyncpg://...` form. We accept it.
@@ -163,9 +169,18 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
     if base_scheme in _POSTGRES_SCHEMES:
         db_type = "postgres"
         default_port = 5432
+    elif base_scheme in _REDSHIFT_SCHEMES:
+        # Redshift speaks Postgres wire protocol → reuse postgres execution path.
+        # The only thing that's different is the default port (5439 vs 5432) and
+        # that SSL is required by default.
+        db_type = "redshift"
+        default_port = 5439
     elif base_scheme in _MYSQL_SCHEMES:
         db_type = "mysql"
         default_port = 3306
+    elif base_scheme in _SNOWFLAKE_SCHEMES:
+        db_type = "snowflake"
+        default_port = 443  # Snowflake is HTTPS-only; port not used by snowsql/connector
     elif base_scheme == "sqlite":
         # sqlite:///absolute/path or sqlite:relative/path
         path = dsn[len("sqlite://"):]
@@ -177,10 +192,30 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
     else:
         sys.stderr.write(
             f"Unsupported scheme {raw_scheme!r}. "
-            f"Supported: postgresql[+driver], postgres[+driver], "
-            f"mysql[+driver], mariadb, sqlite.\n"
+            f"Supported: postgresql[+driver], postgres[+driver], redshift, "
+            f"mysql[+driver], mariadb, snowflake, sqlite.\n"
         )
         sys.exit(2)
+
+    # Snowflake's URL is account-shaped, not host:port. The "hostname" portion
+    # of `snowflake://user:pw@xy12345.us-east-1.aws/MYDB/PUBLIC` is the account
+    # identifier, and the path holds DATABASE[/SCHEMA].
+    if db_type == "snowflake":
+        path_parts = (u.path or "").lstrip("/").split("/")
+        out = {
+            "type": "snowflake",
+            "account": u.hostname or "",
+            "user": urllib.parse.unquote(u.username or ""),
+            "password": urllib.parse.unquote(u.password or ""),
+            "database": path_parts[0] if path_parts and path_parts[0] else "",
+        }
+        if len(path_parts) > 1 and path_parts[1]:
+            out["schema"] = path_parts[1]
+        # Carry warehouse, role, application, authenticator from query params
+        if u.query:
+            for k, v in urllib.parse.parse_qsl(u.query):
+                out[k.lower()] = v
+        return out
 
     out: dict[str, str] = {
         "type": db_type,
@@ -195,6 +230,10 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
     if u.query:
         for k, v in urllib.parse.parse_qsl(u.query):
             out[k.lower()] = v
+
+    # Redshift defaults: SSL required if not explicitly set
+    if db_type == "redshift" and "sslmode" not in out:
+        out["sslmode"] = "require"
 
     return out
 
@@ -269,6 +308,50 @@ def _execute_mysql(creds: dict[str, str], sql: str) -> int:
     return 0
 
 
+def _execute_snowflake(creds: dict[str, str], sql: str) -> int:
+    """Tier-3 path for Snowflake using snowflake-connector-python."""
+    try:
+        import snowflake.connector  # type: ignore
+    except ImportError:
+        return _err(
+            "snowflake-connector-python not installed. "
+            "Run: pip install snowflake-connector-python",
+            code=3,
+        )
+    _require(creds, "account", "user")
+    if not (creds.get("password") or creds.get("authenticator")):
+        return _err(
+            "Snowflake profile is missing 'password' or 'authenticator'. "
+            "Add one to ~/.agami/credentials.",
+            code=2,
+        )
+    conn_kwargs: dict[str, Any] = {
+        "account": creds["account"],
+        "user": creds["user"],
+        "client_session_keep_alive": False,
+        "login_timeout": 15,
+    }
+    for k in ("password", "warehouse", "database", "schema", "role", "authenticator"):
+        if creds.get(k):
+            conn_kwargs[k] = creds[k]
+    try:
+        conn = snowflake.connector.connect(**conn_kwargs)
+    except Exception as e:
+        return _err(f"Snowflake connect failed: {e}", code=4)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        _write_cursor_csv(cur)
+    except Exception as e:
+        return _err(f"Snowflake execution error: {e}", code=5)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return 0
+
+
 def _execute_sqlite(creds: dict[str, str], sql: str) -> int:
     import sqlite3  # always available in stdlib
     _require(creds, "path")
@@ -322,11 +405,23 @@ def main() -> int:
         return _err(f"Credentials profile [{profile}] is missing the 'type' field.")
     if db_type == "postgres":
         return _execute_postgres(creds, sql)
+    if db_type == "redshift":
+        # Redshift speaks Postgres wire protocol; psycopg2 connects fine.
+        # The credentials dict has type=redshift, but _execute_postgres reads
+        # host/port/etc. directly so the type field doesn't matter.
+        if "sslmode" not in creds:
+            creds = {**creds, "sslmode": "require"}
+        return _execute_postgres(creds, sql)
     if db_type == "mysql":
         return _execute_mysql(creds, sql)
     if db_type == "sqlite":
         return _execute_sqlite(creds, sql)
-    return _err(f"Unsupported db type {db_type!r}. Supported: postgres, mysql, sqlite.")
+    if db_type == "snowflake":
+        return _execute_snowflake(creds, sql)
+    return _err(
+        f"Unsupported db type {db_type!r}. "
+        f"Supported: postgres, redshift, mysql, sqlite, snowflake."
+    )
 
 
 if __name__ == "__main__":

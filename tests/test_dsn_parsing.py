@@ -114,6 +114,85 @@ def test_url_encoded_username():
     assert out["user"] == "my@user"
 
 
+# --- Redshift --------------------------------------------------------------
+
+def test_redshift_dsn():
+    out = _parse_dsn(
+        "redshift://readonly:secret@my-cluster.abc123.us-west-2.redshift.amazonaws.com:5439/analytics"
+    )
+    assert out["type"] == "redshift"
+    assert out["host"] == "my-cluster.abc123.us-west-2.redshift.amazonaws.com"
+    assert out["port"] == "5439"
+    assert out["user"] == "readonly"
+    assert out["password"] == "secret"
+    assert out["database"] == "analytics"
+    # Redshift defaults SSL to require
+    assert out["sslmode"] == "require"
+
+
+def test_redshift_default_port():
+    out = _parse_dsn("redshift://u:p@cluster.us-west-2.redshift.amazonaws.com/db")
+    assert out["port"] == "5439"
+
+
+def test_redshift_explicit_sslmode_not_overridden():
+    out = _parse_dsn("redshift://u:p@host:5439/db?sslmode=verify-full")
+    assert out["sslmode"] == "verify-full"
+
+
+# --- Snowflake -------------------------------------------------------------
+
+def test_snowflake_full_url():
+    out = _parse_dsn(
+        "snowflake://myuser:mypass@xy12345.us-east-1.aws/MYDB/PUBLIC"
+        "?warehouse=COMPUTE_WH&role=ANALYST_ROLE"
+    )
+    assert out["type"] == "snowflake"
+    assert out["account"] == "xy12345.us-east-1.aws"
+    assert out["user"] == "myuser"
+    assert out["password"] == "mypass"
+    assert out["database"] == "MYDB"
+    assert out["schema"] == "PUBLIC"
+    assert out["warehouse"] == "COMPUTE_WH"
+    assert out["role"] == "ANALYST_ROLE"
+    # Snowflake doesn't use host/port — those keys must be absent
+    assert "host" not in out
+    assert "port" not in out
+
+
+def test_snowflake_account_only():
+    """Short account locator (legacy AWS US-West-2 form)."""
+    out = _parse_dsn("snowflake://u:p@xy12345/MYDB?warehouse=WH")
+    assert out["account"] == "xy12345"
+    assert out["database"] == "MYDB"
+    assert "schema" not in out
+    assert out["warehouse"] == "WH"
+
+
+def test_snowflake_no_schema():
+    out = _parse_dsn("snowflake://u:p@xy12345.us-east-1.aws/MYDB")
+    assert out["account"] == "xy12345.us-east-1.aws"
+    assert out["database"] == "MYDB"
+    assert "schema" not in out
+
+
+def test_snowflake_org_account_form():
+    """Newer org-account identifier."""
+    out = _parse_dsn("snowflake://u:p@myorg-myaccount/ANALYTICS/PUBLIC")
+    assert out["account"] == "myorg-myaccount"
+    assert out["database"] == "ANALYTICS"
+
+
+def test_snowflake_authenticator_via_query():
+    """SSO setups pass authenticator=externalbrowser."""
+    out = _parse_dsn(
+        "snowflake://user@example.com:@xy12345.us-east-1.aws/MYDB"
+        "?authenticator=externalbrowser&warehouse=WH"
+    )
+    assert out["user"] == "user@example.com"
+    assert out["authenticator"] == "externalbrowser"
+
+
 # --- SQLite ----------------------------------------------------------------
 
 def test_sqlite_absolute_path():

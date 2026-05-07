@@ -13,7 +13,7 @@ Telemetry payloads must contain ONLY these fields. Any other field causes the cl
 | `schema_version` | int | Always `1` for v1 | `1` |
 | `event_type` | enum | One of: `install`, `connect`, `query`, `correction`, `chart`, `error`, `update_check` | `query` |
 | `install_id` | UUIDv4 | Random per-install, generated on first opt-in. Never tied to a user. | `f47ac10b-58cc-4372-a567-0e02b2c3d479` |
-| `db_type` | enum | One of: `postgres`, `mysql`, `sqlite` | `postgres` |
+| `db_type` | enum | One of: `postgres`, `redshift`, `mysql`, `snowflake`, `sqlite` | `postgres` |
 | `os` | enum | One of: `darwin`, `linux`, `windows` | `darwin` |
 | `host` | enum | One of: `claude-code-cli`, `claude-code-vscode`, `claude-code-cursor`, `claude-cowork` | `claude-code-cli` |
 | `error_kind` | enum (optional) | Only when `event_type = error`. One of: `auth`, `dsn`, `network`, `permission`, `column_not_found`, `table_not_found`, `syntax`, `timeout`, `driver_missing`, `other` | `column_not_found` |

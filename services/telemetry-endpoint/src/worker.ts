@@ -42,7 +42,9 @@ const ALLOWED_EVENT_TYPES = new Set<string>([
   "install", "connect", "query", "correction", "chart", "error", "update_check",
 ]);
 
-const ALLOWED_DB_TYPES = new Set<string>(["postgres", "mysql", "sqlite"]);
+const ALLOWED_DB_TYPES = new Set<string>([
+  "postgres", "redshift", "mysql", "snowflake", "sqlite",
+]);
 
 const ALLOWED_OS = new Set<string>(["darwin", "linux", "windows"]);
 

@@ -105,15 +105,85 @@ Same `url = …` shortcut. If the provider's URL has `?sslmode=require` (or othe
 url = postgresql://user:pass@ep-cool-darkness.us-east-2.aws.neon.tech/neondb?sslmode=require
 ```
 
+### Redshift
+
+Per-field form:
+
+```ini
+[main]
+type     = redshift
+host     = my-cluster.abc123.us-west-2.redshift.amazonaws.com
+port     = 5439
+database = analytics
+user     = readonly
+password = ...
+sslmode  = require
+```
+
+Or DSN form (port 5439 and `sslmode=require` are auto-applied for `redshift://`):
+
+```ini
+[main]
+url = redshift://readonly:pass@my-cluster.abc123.us-west-2.redshift.amazonaws.com:5439/analytics
+```
+
+Redshift Serverless uses a different host: `<workgroup>.<account>.<region>.redshift-serverless.amazonaws.com`.
+
+### Snowflake
+
+Per-field form (recommended — Snowflake has more required parameters than other DBs):
+
+```ini
+[main]
+type      = snowflake
+account   = xy12345.us-east-1.aws
+user      = myuser
+password  = mypassword
+warehouse = COMPUTE_WH
+database  = ANALYTICS
+schema    = PUBLIC
+role      = ANALYST_ROLE
+```
+
+DSN form (path is `/database/schema`; query params carry the rest):
+
+```ini
+[main]
+url = snowflake://myuser:mypass@xy12345.us-east-1.aws/ANALYTICS/PUBLIC?warehouse=COMPUTE_WH&role=ANALYST_ROLE
+```
+
+For SSO, replace `password` with `authenticator = externalbrowser` (or your specific SAML provider value):
+
+```ini
+[main]
+type          = snowflake
+account       = xy12345.us-east-1.aws
+user          = myuser@example.com
+authenticator = externalbrowser
+warehouse     = COMPUTE_WH
+database      = ANALYTICS
+```
+
+Account identifier formats Snowflake accepts:
+
+- `xy12345` — short locator (legacy AWS US-West-2)
+- `xy12345.us-east-1` — locator + region (AWS)
+- `xy12345.us-east-1.aws` — locator + region + cloud
+- `myorg-myaccount` — newer org-account format (recommended by Snowflake)
+
+The connector / snowsql appends `.snowflakecomputing.com` automatically — don't include it in the `account` field yourself.
+
 ## Required fields per `type`
 
-| `type` | Required fields |
-|---|---|
-| `postgres` | `host`, `port`, `database`, `user`, `password` |
-| `mysql` | `host`, `port`, `database`, `user`, `password` |
-| `sqlite` | `path` |
+| `type` | Required fields | Notes |
+|---|---|---|
+| `postgres` | `host`, `port`, `database`, `user`, `password` | |
+| `redshift` | `host`, `port`, `database`, `user`, `password` | Same shape as Postgres. Default port 5439. SSL required (`sslmode = require` is the default). |
+| `mysql` | `host`, `port`, `database`, `user`, `password` | |
+| `snowflake` | `account`, `user`, `password` (or `authenticator`) | `host`/`port` not used. Optional: `warehouse`, `database`, `schema`, `role`. |
+| `sqlite` | `path` | |
 
-Optional in all profiles: `schema` (default `public` for Postgres), `sslmode` (Postgres), `ssl` (MySQL).
+Optional in all profiles: `schema` (default `public` for Postgres / `PUBLIC` for Snowflake), `sslmode` (Postgres / Redshift), `ssl` (MySQL).
 
 **Or just use `url = ...`** instead of all individual fields — see the "Paste a full DSN" section below.
 

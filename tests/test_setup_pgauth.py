@@ -212,6 +212,127 @@ password = SUPER_SECRET_PASSWORD_DO_NOT_LEAK
     assert "SUPER_SECRET_PASSWORD_DO_NOT_LEAK" not in captured.err
 
 
+def test_redshift_writes_pgpass_entry(tmp_agami_home):
+    """Redshift speaks Postgres wire protocol → uses .pgpass like postgres."""
+    setup_pgauth, agami = tmp_agami_home
+    _write_credentials(agami, """
+[main]
+type     = redshift
+host     = my-cluster.abc123.us-west-2.redshift.amazonaws.com
+port     = 5439
+database = analytics
+user     = readonly
+password = redshiftpw
+sslmode  = require
+""")
+    setup_pgauth.materialize(["main"])
+    pgpass = (agami / ".pgpass")
+    assert pgpass.exists()
+    body = pgpass.read_text()
+    assert "my-cluster.abc123.us-west-2.redshift.amazonaws.com:5439:analytics:readonly:redshiftpw" in body
+    # No snowflake config should be written for a redshift profile
+    assert not (agami / ".snowsql.cnf").exists()
+
+
+def test_snowflake_writes_snowsql_config(tmp_agami_home):
+    setup_pgauth, agami = tmp_agami_home
+    _write_credentials(agami, """
+[warehouse_main]
+type      = snowflake
+account   = xy12345.us-east-1.aws
+user      = myuser
+password  = snowpw
+warehouse = COMPUTE_WH
+database  = ANALYTICS
+schema    = PUBLIC
+role      = ANALYST_ROLE
+""")
+    setup_pgauth.materialize(["warehouse_main"])
+    cfg = agami / ".snowsql.cnf"
+    assert cfg.exists()
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+    body = cfg.read_text()
+    # snowsql section header uses the profile name
+    assert "[connections.warehouse_main]" in body
+    # snowsql expects accountname / username / password / etc. (not the
+    # postgres-style host/user)
+    assert "accountname = xy12345.us-east-1.aws" in body
+    assert "username = myuser" in body
+    assert "password = snowpw" in body
+    assert "warehousename = COMPUTE_WH" in body
+    assert "dbname = ANALYTICS" in body
+    assert "schemaname = PUBLIC" in body
+    assert "rolename = ANALYST_ROLE" in body
+    # No .pgpass should be written for a snowflake profile
+    assert not (agami / ".pgpass").exists()
+
+
+def test_snowflake_with_authenticator_and_no_password(tmp_agami_home):
+    """SSO setup: authenticator instead of password."""
+    setup_pgauth, agami = tmp_agami_home
+    _write_credentials(agami, """
+[sso]
+type          = snowflake
+account       = xy12345.us-east-1.aws
+user          = me@example.com
+authenticator = externalbrowser
+warehouse     = COMPUTE_WH
+""")
+    setup_pgauth.materialize(["sso"])
+    body = (agami / ".snowsql.cnf").read_text()
+    assert "authenticator = externalbrowser" in body
+    # Password line must NOT appear (we didn't have one)
+    assert "password = " not in body
+
+
+def test_mixed_pg_redshift_mysql_snowflake(tmp_agami_home):
+    """Each type lands in its own auth file; agnostic to mixed credentials."""
+    setup_pgauth, agami = tmp_agami_home
+    _write_credentials(agami, """
+[pg]
+type = postgres
+host = pg.example.com
+port = 5432
+database = pgdb
+user = u
+password = p1
+
+[rs]
+type = redshift
+host = my-cluster.us-west-2.redshift.amazonaws.com
+port = 5439
+database = rsdb
+user = u
+password = p2
+sslmode = require
+
+[mysql_main]
+type = mysql
+host = mysql.example.com
+port = 3306
+database = mydb
+user = u
+password = p3
+
+[snow]
+type = snowflake
+account = xy12345
+user = u
+password = p4
+""")
+    setup_pgauth.materialize(["pg", "rs", "mysql_main", "snow"])
+    pgpass = (agami / ".pgpass").read_text()
+    mysqlcnf = (agami / ".mysql.cnf").read_text()
+    snowcnf = (agami / ".snowsql.cnf").read_text()
+    # Postgres + Redshift both end up in .pgpass
+    assert "p1" in pgpass and "p2" in pgpass
+    # Mysql in its own file
+    assert "p3" in mysqlcnf
+    # Snowflake in its own file
+    assert "[connections.snow]" in snowcnf
+    assert "p4" in snowcnf
+
+
 def test_atomic_write_does_not_leave_tempfile(tmp_agami_home):
     setup_pgauth, agami = tmp_agami_home
     _write_credentials(agami, """

@@ -57,6 +57,11 @@ CREDENTIALS_PATH = AGAMI_HOME / "credentials"
 CONFIG_PATH = AGAMI_HOME / ".config"
 PGPASS_PATH = AGAMI_HOME / ".pgpass"
 MYSQL_CNF_PATH = AGAMI_HOME / ".mysql.cnf"
+# Snowflake's official CLI (snowsql) reads from ~/.snowsql/config — agami
+# writes its own copy in ~/.agami/ so the password file stays alongside the
+# other agami creds with chmod 600. The skill invokes snowsql with
+# `--config <path>` to point at this file.
+SNOWSQL_CONFIG_PATH = AGAMI_HOME / ".snowsql.cnf"
 
 
 def _load_section(profile: str) -> dict[str, str]:
@@ -174,6 +179,45 @@ def _write_mysql_cnf(profile_sections: dict[str, str]) -> None:
     _atomic_write(MYSQL_CNF_PATH, contents, mode=0o600)
 
 
+# --- snowsql config -------------------------------------------------------
+
+def _build_snowsql_section(profile: str, creds: dict[str, str]) -> str:
+    """Build a [connections.<profile>] section for snowsql config.
+
+    snowsql reads `[connections.<name>]` blocks via `snowsql -c <name>`.
+    Required: account, user, password (or authenticator). Optional:
+    warehouse, database, schema, role.
+    """
+    lines = [f"[connections.{profile}]"]
+    if creds.get("account"):
+        lines.append(f"accountname = {creds['account']}")
+    if creds.get("user"):
+        lines.append(f"username = {creds['user']}")
+    if creds.get("password"):
+        lines.append(f"password = {creds['password']}")
+    if creds.get("authenticator"):
+        lines.append(f"authenticator = {creds['authenticator']}")
+    if creds.get("warehouse"):
+        lines.append(f"warehousename = {creds['warehouse']}")
+    if creds.get("database"):
+        lines.append(f"dbname = {creds['database']}")
+    if creds.get("schema"):
+        lines.append(f"schemaname = {creds['schema']}")
+    if creds.get("role"):
+        lines.append(f"rolename = {creds['role']}")
+    return "\n".join(lines)
+
+
+def _write_snowsql_config(profile_sections: dict[str, str]) -> None:
+    AGAMI_HOME.mkdir(mode=0o700, exist_ok=True)
+    body = []
+    for profile in sorted(profile_sections):
+        body.append(profile_sections[profile])
+        body.append("")  # blank line between sections
+    contents = "\n".join(body).rstrip() + "\n" if body else ""
+    _atomic_write(SNOWSQL_CONFIG_PATH, contents, mode=0o600)
+
+
 # --- atomic write ---------------------------------------------------------
 
 def _atomic_write(path: Path, contents: str, mode: int) -> None:
@@ -195,17 +239,28 @@ def _atomic_write(path: Path, contents: str, mode: int) -> None:
 # --- main -----------------------------------------------------------------
 
 def materialize(profiles: list[str]) -> int:
-    """Read credentials for the given profiles; write .pgpass and .mysql.cnf as needed."""
+    """Read credentials for the given profiles; write the right auth files.
+
+    Per-type routing:
+      postgres / redshift → ~/.agami/.pgpass entry (Redshift speaks Postgres
+        wire protocol; psql/.pgpass work as-is, port 5439 vs 5432)
+      mysql → ~/.agami/.mysql.cnf section
+      snowflake → ~/.agami/.snowsql.cnf [connections.<profile>] section
+      sqlite → no auth file (file path is in credentials directly)
+    """
     pg_lines: dict[str, str] = {}
     mysql_sections: dict[str, str] = {}
+    snowsql_sections: dict[str, str] = {}
 
     for profile in profiles:
         creds = _load_section(profile)
         db_type = creds.get("type", "").lower()
-        if db_type == "postgres":
+        if db_type in ("postgres", "redshift"):
             pg_lines[profile] = _build_pgpass_line(creds)
         elif db_type == "mysql":
             mysql_sections[profile] = _build_mysql_section(profile, creds)
+        elif db_type == "snowflake":
+            snowsql_sections[profile] = _build_snowsql_section(profile, creds)
         elif db_type == "sqlite":
             pass  # no auth file needed for sqlite
         else:
@@ -217,6 +272,8 @@ def materialize(profiles: list[str]) -> int:
         _write_pgpass(pg_lines)
     if mysql_sections:
         _write_mysql_cnf(mysql_sections)
+    if snowsql_sections:
+        _write_snowsql_config(snowsql_sections)
     return 0
 
 

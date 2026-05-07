@@ -56,7 +56,9 @@ ALLOWED_EVENT_TYPES: frozenset[str] = frozenset({
     "install", "connect", "query", "correction", "chart", "error", "update_check",
 })
 
-ALLOWED_DB_TYPES: frozenset[str] = frozenset({"postgres", "mysql", "sqlite"})
+ALLOWED_DB_TYPES: frozenset[str] = frozenset({
+    "postgres", "redshift", "mysql", "snowflake", "sqlite",
+})
 
 ALLOWED_OS: frozenset[str] = frozenset({"darwin", "linux", "windows"})
 

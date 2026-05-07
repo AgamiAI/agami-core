@@ -48,33 +48,40 @@ Tier detection runs **once**, in the agami-init skill's Phase 3. The result (cho
 Init's tier-selection pseudocode:
 
 ```text
-db_type := credentials → type   (e.g., "postgres")
+db_type := credentials → type   (e.g., "postgres", "redshift", "snowflake")
 
 # Detect every tier in parallel and cache the absolute path of each.
 tool_paths := {
   psql:    which("psql")  || ls /opt/homebrew/Cellar/libpq/*/bin/psql /opt/homebrew/opt/libpq/bin/psql,
   mysql:   which("mysql") || ls /opt/homebrew/opt/mysql-client/bin/mysql,
+  snowsql: which("snowsql"),
   sqlite3: which("sqlite3"),
   duckdb:  which("duckdb"),
   python3: which("python3"),
 }
 tool_imports := {
-  psycopg2: python_import_ok("psycopg2"),
-  pymysql:  python_import_ok("pymysql"),
+  psycopg2:                    python_import_ok("psycopg2"),
+  pymysql:                     python_import_ok("pymysql"),
+  snowflake_connector_python:  python_import_ok("snowflake.connector"),
 }
 
 # Pick the highest tier with the right tool for db_type.
-if db_type == "postgres" and tool_paths.psql:                return tier=cli
-if db_type == "mysql"    and tool_paths.mysql:               return tier=cli
-if db_type == "sqlite"   and tool_paths.sqlite3:             return tier=cli
-if db_type in {postgres, mysql, sqlite} and tool_paths.duckdb: return tier=duckdb
-if db_type == "postgres" and tool_imports.psycopg2:          return tier=python
-if db_type == "mysql"    and tool_imports.pymysql:           return tier=python
-if db_type == "sqlite"   and tool_paths.python3:             return tier=python  # stdlib
+# postgres / redshift share psql + psycopg2 (Redshift speaks Postgres wire protocol)
+if db_type in {postgres, redshift} and tool_paths.psql:                  return tier=cli
+if db_type == "mysql"    and tool_paths.mysql:                           return tier=cli
+if db_type == "snowflake" and tool_paths.snowsql:                        return tier=cli
+if db_type == "sqlite"   and tool_paths.sqlite3:                         return tier=cli
+if db_type in {postgres, redshift, mysql, sqlite} and tool_paths.duckdb: return tier=duckdb
+if db_type in {postgres, redshift} and tool_imports.psycopg2:            return tier=python
+if db_type == "mysql"    and tool_imports.pymysql:                       return tier=python
+if db_type == "snowflake" and tool_imports.snowflake_connector_python:   return tier=python
+if db_type == "sqlite"   and tool_paths.python3:                         return tier=python  # stdlib
 
 # Nothing worked.
 offer_install()  # AskUserQuestion — never install silently
 ```
+
+DuckDB's `postgres_scanner` extension can also scan Redshift over the wire (since Redshift is Postgres-protocol-compatible). DuckDB cannot scan Snowflake natively in v1.1.
 
 Other skills look up `tier` and `tool_paths.<tool>` from `~/.agami/.config` and use them directly. They do not re-run `which`. If the cached path no longer exists on disk (`! -x "$path"`), they offer to re-detect — they do NOT silently scan or fall back to localhost.
 
@@ -165,14 +172,16 @@ The "Python Driver Fallback" section further down shows the inline `python3 -c '
 
 ## Connection Defaults
 
-| Database | Default Port | CLI Tool | Python Driver |
-|----------|-------------|----------|---------------|
-| PostgreSQL | 5432 | `psql` | `psycopg2` (`pip install psycopg2-binary`) |
-| MySQL / MariaDB | 3306 | `mysql` | `pymysql` (`pip install pymysql`) |
-| SQLite | N/A (file) | `sqlite3` | built-in `sqlite3` |
-| DuckDB | N/A (file) | `duckdb` | built-in or `pip install duckdb` |
+| Database | Default Port | CLI Tool | Python Driver | SSL |
+|---|---|---|---|---|
+| PostgreSQL | 5432 | `psql` | `psycopg2` (`pip install psycopg2-binary`) | `prefer` (default) |
+| **Redshift** | **5439** | `psql` (Redshift speaks Postgres wire protocol) | `psycopg2` | **`require`** (default for Redshift) |
+| MySQL / MariaDB | 3306 | `mysql` | `pymysql` (`pip install pymysql`) | optional |
+| **Snowflake** | 443 (HTTPS) | `snowsql` | `snowflake-connector-python` (`pip install snowflake-connector-python`) | TLS always (managed by client) |
+| SQLite | N/A (file) | `sqlite3` | built-in `sqlite3` | n/a |
+| DuckDB | N/A (file) | `duckdb` | built-in or `pip install duckdb` | n/a |
 
-v1 supports Postgres + MySQL end-to-end. SQLite works via DuckDB. Other databases (Snowflake, BigQuery, SQL Server, Oracle, Databricks, Redshift, ClickHouse) are deferred — track the v1.1+ roadmap.
+v1.1 supports Postgres + Redshift + MySQL + Snowflake + SQLite end-to-end. SQLite also works via DuckDB. Other databases (BigQuery, SQL Server, Oracle, Databricks, ClickHouse) are deferred — track the v1.2+ roadmap.
 
 ---
 
@@ -201,6 +210,65 @@ PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
 - Set `PGSSLMODE` from the credentials profile's `sslmode` field. Cloud Postgres providers (Supabase, Neon, RDS in many configs) **require** SSL — set `sslmode = require` in `~/.agami/credentials` or use a DSN with `?sslmode=require` and the parser will pick it up. Default is `prefer` which works for both SSL-required and non-SSL servers.
 
 **Supabase pooler**: the SQLAlchemy-style DSN that Supabase shows (`postgresql+asyncpg://...`) is accepted as-is in the `url = ...` credentials field — see [`credentials-format.md → Supabase`](credentials-format.md). The `+asyncpg` driver suffix is stripped before connecting.
+
+### Redshift
+
+Redshift speaks the PostgreSQL wire protocol, so **psql works as-is**. The only differences from regular Postgres:
+
+- Default port is **5439** (not 5432)
+- SSL is **required** by default (`sslmode=require`)
+- The hostname is the cluster's full DNS — `<cluster>.<region>.redshift.amazonaws.com` for provisioned clusters, or `<workgroup>.<account>.<region>.redshift-serverless.amazonaws.com` for Redshift Serverless.
+
+`scripts/setup_pgauth.py` writes a `.pgpass` line for Redshift profiles the same as for postgres profiles — no special handling needed.
+
+```bash
+# Same invocation as postgres, just with the Redshift host/port and sslmode=require.
+PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="require" \
+  psql -h "$host" -p 5439 -U "$user" -d "$database" -c "$SQL" --csv
+```
+
+`type = redshift` in the credentials profile (or a `redshift://` DSN) sets the right defaults. For psycopg2 (tier 3) the connection params are identical to postgres; agami's `execute_sql.py` routes `type=redshift` through the postgres execution path.
+
+### Snowflake
+
+Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI (`snowsql`) or the `snowflake-connector-python` Python driver.
+
+#### Tier 1 — `snowsql`
+
+`scripts/setup_pgauth.py` writes a `~/.agami/.snowsql.cnf` config file with a `[connections.<profile>]` block per Snowflake profile in your credentials. The skill invokes snowsql with `--config` pointing at it:
+
+```bash
+# Ensure the snowsql config exists (idempotent).
+python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
+
+# Run a query — snowsql reads the password from the config silently.
+snowsql --config "$HOME/.agami/.snowsql.cnf" -c "$PROFILE" \
+        -q "$SQL" -o output_format=csv -o header=true -o friendly=false -o timing=false
+```
+
+The `-o output_format=csv -o header=true` flags produce parseable output. `-o friendly=false -o timing=false` strips the human-friendly banner and timing line so the CSV is clean.
+
+Install snowsql: see <https://docs.snowflake.com/en/user-guide/snowsql-install-config>. macOS: download from Snowflake's website (Homebrew formula isn't official).
+
+#### Tier 3 — `snowflake-connector-python`
+
+```bash
+pip install snowflake-connector-python
+python3 "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --profile "$PROFILE" --sql-file /tmp/agami-q.sql
+```
+
+`execute_sql.py` handles Snowflake natively when `type=snowflake`. Connection params: `account`, `user`, `password` (or `authenticator` for SSO), `warehouse`, `database`, `schema`, `role`. All optional except `account` and `user`; either `password` or `authenticator` is required.
+
+#### Account identifier formats
+
+Snowflake's `account` field is **not** a hostname. Examples:
+
+- `xy12345` — short locator (legacy, AWS US-West-2)
+- `xy12345.us-east-1` — locator + region (AWS)
+- `xy12345.us-east-1.aws` — locator + region + cloud
+- `myorg-myaccount` — newer org-account format (recommended by Snowflake)
+
+The connector / snowsql appends `.snowflakecomputing.com` automatically. Use whatever your Snowflake admin gave you.
 
 ### MySQL / MariaDB
 

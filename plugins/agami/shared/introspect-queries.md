@@ -188,6 +188,120 @@ GROUP BY table_schema, table_name, index_name;
 
 ---
 
+## Redshift
+
+Redshift speaks the Postgres wire protocol, so the **Postgres queries above mostly work as-is**, with three tweaks:
+
+1. Use `pg_catalog.svv_table_info` for accurate row-count estimates — Redshift's `pg_stat_user_tables` is unreliable.
+   ```sql
+   SELECT schema, "table" AS table_name, tbl_rows AS estimated_row_count
+   FROM pg_catalog.svv_table_info
+   WHERE schema NOT IN ('pg_catalog', 'information_schema')
+   ORDER BY tbl_rows DESC;
+   ```
+2. Use `pg_catalog.svv_columns` if you want sort-key / dist-key info that informs `agami.performance_hints`:
+   ```sql
+   SELECT schema_name, table_name, column_name, data_type, ordinal_position
+   FROM pg_catalog.svv_columns
+   WHERE schema_name NOT IN ('pg_catalog', 'information_schema');
+   ```
+3. Skip the `pg_indexes` query — Redshift doesn't have traditional indexes (sort keys / dist keys take their place; pull those from `svv_columns` if needed).
+
+Foreign keys behave the same (`information_schema.table_constraints`) but are advisory in Redshift — the engine doesn't enforce them, so an FK relationship may have orphans that wouldn't exist in a strictly-enforced Postgres. Run the live join check from [`fk-validation.md`](fk-validation.md) anyway.
+
+---
+
+## Snowflake
+
+Snowflake's metadata lives in `INFORMATION_SCHEMA` (per-database) and the account-wide `SNOWFLAKE.ACCOUNT_USAGE` views. Prefer `INFORMATION_SCHEMA` (faster, no role/grant hassle) unless you specifically need the account-wide view.
+
+### List tables (excluding system schemas)
+
+```sql
+SELECT
+  TABLE_SCHEMA,
+  TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_TYPE = 'BASE TABLE'
+  AND TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
+ORDER BY TABLE_SCHEMA, TABLE_NAME;
+```
+
+### Columns for a table
+
+```sql
+SELECT
+  COLUMN_NAME,
+  DATA_TYPE,
+  IS_NULLABLE,
+  COLUMN_DEFAULT,
+  CHARACTER_MAXIMUM_LENGTH,
+  NUMERIC_PRECISION,
+  NUMERIC_SCALE,
+  ORDINAL_POSITION
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = '{schema}'
+  AND TABLE_NAME = '{table}'
+ORDER BY ORDINAL_POSITION;
+```
+
+### Primary keys
+
+Snowflake exposes constraints via `SHOW PRIMARY KEYS`:
+
+```sql
+SHOW PRIMARY KEYS IN SCHEMA "{database}"."{schema}";
+-- Output columns: created_on, database_name, schema_name, table_name, column_name, key_sequence, ...
+```
+
+`INFORMATION_SCHEMA.TABLE_CONSTRAINTS` is also available but `SHOW` is the conventional path.
+
+### Foreign keys
+
+```sql
+SHOW IMPORTED KEYS IN SCHEMA "{database}"."{schema}";
+-- Output columns: pk_database_name, pk_schema_name, pk_table_name, pk_column_name,
+--                 fk_database_name, fk_schema_name, fk_table_name, fk_column_name, ...
+```
+
+Snowflake foreign keys are **not enforced** by default (informational only) — same caveat as Redshift. Run the live join check before trusting them.
+
+### Row-count estimates
+
+```sql
+SELECT
+  TABLE_SCHEMA,
+  TABLE_NAME,
+  ROW_COUNT AS estimated_row_count,
+  BYTES,
+  CLUSTERING_KEY
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_TYPE = 'BASE TABLE'
+  AND TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
+ORDER BY ROW_COUNT DESC;
+```
+
+`ROW_COUNT` and `BYTES` are maintained by Snowflake's metadata service — accurate without a scan. `CLUSTERING_KEY` informs `agami.performance_hints.recommended_filters`.
+
+### Database / schema discovery
+
+If you don't know which database/schema to introspect:
+
+```sql
+SHOW DATABASES;
+SHOW SCHEMAS IN DATABASE "{database}";
+```
+
+Skip `SNOWFLAKE`, `SNOWFLAKE_SAMPLE_DATA`, and any schema named `INFORMATION_SCHEMA` from the introspection scope.
+
+### Snowflake-only quirks
+
+- **Identifier casing**: by default, unquoted identifiers in Snowflake are uppercased. `customers` becomes `CUSTOMERS`. When generating SQL against a Snowflake-introspected model, keep identifiers uppercase unless they were originally created with double-quotes.
+- **No `pg_indexes` analog** — Snowflake clusters via `CLUSTERING_KEY` instead. Surface this in `agami.performance_hints` rather than `indexes`.
+- **`SHOW` results are session-scoped** — they aren't queryable via JOIN like an `information_schema` view. The skill captures the output from a single run and parses CSV.
+
+---
+
 ## SQLite
 
 ### List tables
