@@ -256,8 +256,23 @@ One JSON event per line, each conforming to the allowlist in [`plugins/agami/sha
 ### `~/.agami/query_log.jsonl`
 
 ```jsonl
-{"ts":"2026-05-06T15:14:00Z","question":"how many orders shipped in May","sql":"SELECT ...","row_count":4,"execution_ms":250,"tier":"cli","risk":"LOW","error_kind":null,"feedback":"good"}
+{"ts":"2026-05-07T15:14:00Z","question":"how many orders shipped in May","sql":"SELECT ...","row_count":4,"execution_ms":250,"tier":"cli","risk":"LOW","error_kind":null,"feedback":"good","chart_path":"/Users/me/.agami/charts/20260507-141500.html"}
 ```
+
+Fields per line:
+
+| Field | Type | Description |
+|---|---|---|
+| `ts` | ISO8601 UTC | When the query ran |
+| `question` | string | The user's NL question |
+| `sql` | string | The executed SQL |
+| `row_count` | integer | Rows returned (post-filter, pre-truncation) |
+| `execution_ms` | integer | Wall-clock latency |
+| `tier` | enum | `cli` / `duckdb` / `python` |
+| `risk` | enum | `LOW` / `MEDIUM` / `HIGH` (large-table risk classifier) |
+| `error_kind` | enum or null | Set when execution failed; one of the 9 classifier kinds |
+| `feedback` | enum or null | `good` / `bad` / null (set retroactively by follow-up signals) |
+| `chart_path` | string or null | Absolute path of the HTML report from Phase 4e, or null if the query returned a 1×1 scalar that didn't get a report. Read by `query-database`'s reopen-intent flow (Phase 2a.1) |
 
 **Local-only** — never sent. Records every query. Grep / aggregate it in your own tooling if you want personal analytics.
 

@@ -120,11 +120,41 @@ This rule applies to every retry, every fallback, every regenerate. The chat pro
 
 ### 2a — classify the input
 
-If `$ARGUMENTS` looks like:
-- A question (contains `?` or starts with how/what/show/list/which/count/give/get/find/total/average/top/which) → save it.
-- Empty → ask the user; suggest 2-3 questions from the model's `ai_context.examples` if present, or inferred from `datasets[].description`.
-- Flag-only (`--csv` / `--chart bar`) → re-run the previous query with the flag applied.
-- Follow-up like "make that a chart" → see Phase 4e.
+Check intents in this order. The first match wins; only that branch runs.
+
+1. **Reopen-last-chart intent** (handled in 2a.1 below). Triggered by short messages that ask to re-display the most recent chart without re-running SQL. Trigger phrases:
+   - "reopen", "reopen the chart", "reopen that"
+   - "open the last chart", "open that again", "open my last report"
+   - "show me that chart again", "show me the last chart", "show that"
+   - "open the previous chart", "show that report"
+   - Any message ≤ 8 words that combines an open-verb (open / show / see / view / display) with a chart-noun (chart / report / it / that / last / again).
+
+   If matched → jump to **2a.1** and skip Phases 2b–4.
+
+2. **A question** (contains `?` or starts with how/what/show/list/which/count/give/get/find/total/average/top/which AND isn't matched by the reopen intent above) → save it as the user's data question. Continue to 2b.
+
+3. **Empty** → ask the user; suggest 2-3 questions from the model's `ai_context.examples` if present, or inferred from `datasets[].description`.
+
+4. **Flag-only** (`--csv` / `--chart bar`) → re-run the previous query with the flag applied.
+
+5. **Follow-up like "make that a chart"** → see Phase 4e.
+
+### 2a.1 — Reopen-last-chart flow (no new SQL)
+
+If the user's intent is to re-display the most recent chart:
+
+1. Read the last entry of `~/.agami/query_log.jsonl` (each line is a JSON object — take the last non-empty line).
+2. Look at the `chart_path` field. Possible cases:
+   - **`chart_path` set AND the file exists on disk** → run `open <path>` (macOS), `xdg-open <path>` (Linux), or `start <path>` (Windows). Surface a one-liner in chat:
+     ```
+     Reopened: ~/.agami/charts/20260507-150912.html
+     ```
+     Done. Skip every other phase. Don't re-execute SQL. Don't re-render. Don't add 5 follow-ups (this is a UI action, not a fresh answer).
+   - **`chart_path` is null** (last query was a 1×1 scalar that didn't render a chart) → surface: "The last answer didn't render a chart (it was a single number). Ask me a new question and I'll generate a fresh report."
+   - **`chart_path` set but the file is missing** (user deleted `~/.agami/charts/`) → surface: "The chart file is gone — `<path>` no longer exists. Ask me the question again and I'll regenerate it."
+   - **Query log empty or missing** → surface: "I don't have any prior queries to reopen. Ask me a question first."
+
+This phase neither logs anything new to `query_log.jsonl` nor sends telemetry — re-opening an existing artifact isn't a query event.
 
 ### 2b — assemble the prompt for the SQL generator
 
@@ -448,7 +478,7 @@ Append one line to `~/.agami/query_log.jsonl`:
 
 ```json
 {
-  "ts": "2026-05-06T15:14:00Z",
+  "ts": "2026-05-07T15:14:00Z",
   "question": "<NL question>",
   "sql": "<executed SQL>",
   "row_count": 5,
@@ -456,9 +486,12 @@ Append one line to `~/.agami/query_log.jsonl`:
   "tier": "cli",
   "risk": "LOW",
   "error_kind": null,
-  "feedback": null
+  "feedback": null,
+  "chart_path": "/Users/me/.agami/charts/20260507-141500.html"
 }
 ```
+
+`chart_path` is the **absolute** path of the HTML report written in Phase 4e — or `null` if no report was rendered (the result was a 1×1 scalar). Phase 2a.1 reads this field to power the reopen-intent flow.
 
 **Local-only** — never sent. The user owns it.
 
