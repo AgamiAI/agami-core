@@ -279,12 +279,12 @@ Then **AskUserQuestion**:
 
 > Does this result look right?
 > - **Yes (Recommended)** — confirms the example, marks it `confirmed: true` in `~/.agami/<profile>-examples.yaml`
-> - **No** — opens the correction flow: ask the user what's wrong, take their corrected SQL, route through `/save-correction`
+> - **No** — opens the correction flow: ask the user what's wrong, take their corrected SQL, route through the save-correction skill (don't say "/save-correction" to the user — phrase it as "let me know what's wrong and I'll save it as a correction")
 > - **Skip** — moves on, doesn't change the example
 
 Branch:
 - **Yes** → set `confirmed: true` and `confirmed_at: <ISO>` on the example.
-- **No** → invoke `/save-correction` with the user's feedback (which may also update the OSI model — see save-correction/SKILL.md).
+- **No** → invoke the save-correction skill with the user's feedback (which may also update the OSI model — see save-correction/SKILL.md). When telling the user about it, say "let me know what's wrong and I'll save it as a correction" — never tell them to type `/save-correction` since that slash command isn't reliably surfaced across Claude Code hosts.
 - **Skip** → leave example as-is.
 
 Surface: `✓ Demo run complete.`

@@ -76,7 +76,7 @@ Three paths:
 
 1. **User edits the file directly.** They open `~/.agami/USER_MEMORY.md` in their editor, write a bullet under a section, save. The next query picks it up.
 
-2. **`/save-correction` classifier identifies a `user_preference`.** During Phase 3 of save-correction, if the user's feedback reads like a general policy ("from now on, always …"; "I prefer …"; "never include …"), the classifier routes it to USER_MEMORY.md instead of the semantic model or examples library. The skill picks the right section, appends a bullet, shows the diff, gets approval before writing.
+2. **The `save-correction` skill classifier identifies a `user_preference`.** During Phase 3 of save-correction, if the user's feedback reads like a general policy ("from now on, always …"; "I prefer …"; "never include …"), the classifier routes it to USER_MEMORY.md instead of the semantic model or examples library. The skill picks the right section, appends a bullet, shows the diff, gets approval before writing.
 
 3. **Explicit "remember this" in a query session.** The user says "remember that test users have @example.com emails". query-database's Phase 4d follow-up logic catches this phrasing and offers to add it to USER_MEMORY.md.
 

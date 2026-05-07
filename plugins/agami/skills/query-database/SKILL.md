@@ -26,6 +26,16 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 For chart template: [`shared/chart-template.html`](../../shared/chart-template.html).
 For telemetry payload allowlist: [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md).
 
+## Invocation conventions
+
+Across Claude Code hosts, **only `/init` is reliably surfaced as a slash command in the autocomplete**. The other agami skills (this one, connect, save-correction) are model-invoked from natural language via their `when_to_use` matching. **Never tell the user to "type `/connect`" or "type `/save-correction`"** — those slash commands aren't dependable. Always phrase guidance as the natural-language trigger:
+
+- Re-introspect the schema → "say 'reload the schema'" or "say 'reintrospect my database'"
+- Save a correction → "say 'save this as a correction'" or "say 'remember this'"
+- Ask a data question → just type the question
+
+`/init` IS a reliable slash command and can be referenced directly.
+
 ## Conversation style
 
 - **One question per turn unless they're truly bundled.**
@@ -90,7 +100,7 @@ For each relationship, treat as a directed JOIN edge in a graph: `from` → `to`
 
 Read `~/.agami/<profile>-examples.yaml`. Take the **most recent 50** entries (newest `created_at` first).
 
-If empty → warn the user and offer `/connect` to seed examples.
+If empty → warn the user, e.g. "I don't have any few-shot examples for this database yet — answers may be lower quality. Say 'introspect the schema' or 'connect to my database' and I'll seed the examples library." (Don't tell them to type a slash command — only `/init` is consistently surfaced as a slash command across hosts. Other skills are best invoked via natural language so the `when_to_use` matcher routes correctly.)
 
 ### 1d.1 — load USER_MEMORY.md
 
@@ -472,7 +482,7 @@ These are templates, not rules — adjust to the schema. If a slot doesn't fit, 
 
 **When the user is replying to follow-ups**: if the user's next message is a single digit `1`–`5` or a numbered form like `1.` / `1)` / `#1`, treat it as the n-th follow-up from the previous reply. Auto-fill the question text and re-enter Phase 2 with that question. Free-form replies are a fresh question. Genuinely ambiguous replies (`yes`, `do that`) get one short clarifier inline ("which of the 5?") — never via AskUserQuestion.
 
-**`/save-correction` is NOT a follow-up bullet.** When the user expresses dissatisfaction with the answer, the skill suggests `/save-correction` inline (one short sentence) outside the numbered list. The numbered list stays focused on **what to ask next**, not how to fix what we just said.
+**Saving a correction is NOT a follow-up bullet.** When the user expresses dissatisfaction with the answer, the skill suggests it inline as a single sentence outside the numbered list, in plain language: *"If that's not the answer you wanted, say 'save this as a correction' and I'll update the examples library."* (Don't tell them to type `/save-correction` — only `/init` is reliably surfaced as a slash command across hosts. Natural-language phrases like "save this as a correction" / "remember this" / "use this SQL next time" route to the save-correction skill via its `when_to_use` matching.) The numbered list stays focused on **what to ask next**, not how to fix what we just said.
 
 ### 4g — CSV export (`--csv` or "export this")
 
@@ -562,8 +572,8 @@ End with:
 | Symptom | Action |
 |---|---|
 | `~/.agami/<profile>.yaml` missing | Invoke `connect` |
-| Model file fails to parse as YAML | Surface error, suggest `connect reintrospect` |
-| `version` ≠ `"0.1.1"` | Warn but proceed; suggest `connect reintrospect` to upgrade |
+| Model file fails to parse as YAML | Surface error; tell the user "say 'reload the schema' to re-introspect from your DB" (the connect skill handles it) |
+| `version` ≠ `"0.1.1"` | Warn but proceed; suggest "say 'reload the schema'" to regenerate the model in the latest format |
 | Credentials chmod wrong | Refuse, offer `chmod 600` |
 | Cached tier broken | Re-detect, update `.config` |
 | SQL has DDL/DML | Refuse, regenerate |

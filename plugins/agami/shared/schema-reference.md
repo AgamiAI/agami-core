@@ -529,4 +529,4 @@ This validates clean against `osi-schema.json` and the agami extension rules.
 
 ## Migration note
 
-Versions of agami before 1.0 used a bespoke `tables` / `columns` / `entities` / `measures` schema. As of v1.0 (this release) the format is OSI-only. Existing pre-OSI models are not auto-migrated — re-run `@agami connect reintrospect` to regenerate in the new format. The semantic content (descriptions, choice fields, hand-edits) is recovered from the source DB and the user's prior `<dbname>-examples.yaml` corrections.
+Versions of agami before 1.0 used a bespoke `tables` / `columns` / `entities` / `measures` schema. As of v1.0 (this release) the format is OSI-only. Existing pre-OSI models are not auto-migrated — say "reload the schema" (or "re-introspect my database") and the connect skill regenerates in the new format. The semantic content (descriptions, choice fields, hand-edits) is recovered from the source DB and the user's prior `<profile>-examples.yaml` corrections.

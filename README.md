@@ -285,11 +285,13 @@ When the answer's slightly off:
 You: top customers should rank by lifetime spend, not just last 30 days
 [agami regenerates and shows the corrected query]
 
-You: /save-correction
-[agami appends the (question, corrected_sql) pair to ~/.agami/<dbname>-examples.yaml]
+You: save this as a correction
+[agami classifies the correction, optionally updates the OSI semantic
+ model with the new knowledge, and appends a new example to ~/.agami/
+ <profile>-examples.yaml]
 ```
 
-The next time you (or anyone using your `~/.agami/`) asks a similar question, the corrected SQL is in the prompt as a few-shot example.
+Just say "save this as a correction" / "remember this" / "use this SQL next time" — natural language. Agami's `when_to_use` matching routes the request to the save-correction skill. The next time you (or anyone using your `~/.agami/`) asks a similar question, the corrected SQL is in the prompt as a few-shot example.
 
 ### Render a chart
 
@@ -338,8 +340,8 @@ There are 11 fields. None of them contain query text, schema content, result dat
 | `mysql: command not found` | `brew install mysql` (or DuckDB) |
 | `psycopg2 not importable` (you didn't ask for tier 3) | Ignore — tier 1 or 2 should cover you |
 | `connection refused` on a remote DB | Check VPN / firewall, then `psql -h <host> -p <port> -U <user>` directly to confirm |
-| "I don't have a model for `<dbname>`" | Run `@agami connect` to introspect the schema |
-| The generated SQL keeps using a column that doesn't exist | The model is stale. Run `@agami connect reintrospect` |
+| "I don't have a model for `<profile>`" | Tell agami "introspect my schema" or "connect to my database" — natural language; the connect skill picks it up |
+| The generated SQL keeps using a column that doesn't exist | The model is stale. Tell agami "re-introspect the schema" or "reload the schema" — the connect skill will refresh from the DB while preserving your hand-edits |
 | Query times out on a large table | Add a date filter or `LIMIT`; the skill flags HIGH-risk scans before running |
 | Want to switch profiles | `AGAMI_PROFILE=staging` then re-ask the question |
 
