@@ -54,7 +54,7 @@ Read `~/.agami/credentials` (or check `AGAMI_DATABASE_URL`). If neither exists, 
 
 ### 1b — load the OSI model
 
-Resolve `<profile>` (default `default`, override `AGAMI_PROFILE`). Read `~/.agami/<profile>.yaml`.
+Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback). Read `~/.agami/<profile>.yaml`.
 
 If missing → invoke the `connect` skill.
 

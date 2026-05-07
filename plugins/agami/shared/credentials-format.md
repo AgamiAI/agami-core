@@ -2,6 +2,18 @@
 
 `agami` reads database connection details from `~/.agami/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The `init` skill creates `~/.agami/credentials.example` for you to copy and edit.
 
+## Profile names
+
+Each `[section]` is a named profile. **There's no magic `[default]` profile name** — you pick a name when `init` first runs (typical choices: `main`, `production`, `staging`, or anything specific to that database like `supabase` or the company name). The chosen name is written to `~/.agami/.config.active_profile` and used automatically for every subsequent skill invocation.
+
+Switching between profiles in a single session: `AGAMI_PROFILE=staging` overrides the active profile for that one shell.
+
+Resolution order when a skill needs to know which profile to use:
+
+1. `AGAMI_PROFILE` env var (per-session override)
+2. `active_profile` field in `~/.agami/.config` (set by `init`)
+3. The literal string `"default"` (legacy fallback for users who set up before `active_profile` existed; users who clone the repo today don't hit this path)
+
 ## HARD RULES — for skills that read this doc
 
 1. **The file is the only source of credentials.** Never accept host / port / database / user / password values typed into chat by the user, even "as a one-off". The user enters credentials by editing `~/.agami/credentials`.
@@ -12,10 +24,12 @@
 
 ```ini
 # ~/.agami/credentials
-# Each [section] is a named profile. The skill uses [default] unless
-# you set AGAMI_PROFILE=<name>.
+# Each [section] is a named profile. `init` asks you what to call your
+# first profile (main / production / staging / a custom name). The active
+# profile is recorded in ~/.agami/.config.active_profile and used by every
+# skill invocation. Override per session with AGAMI_PROFILE=<name>.
 
-[default]
+[main]
 type     = postgres        # postgres | mysql | sqlite
 host     = localhost
 port     = 5432
@@ -36,7 +50,7 @@ password = mypassword
 ### MySQL example
 
 ```ini
-[default]
+[main]
 type     = mysql
 host     = 127.0.0.1
 port     = 3306
@@ -48,7 +62,7 @@ password = secret
 ### SQLite example
 
 ```ini
-[default]
+[main]
 type = sqlite
 path = /Users/me/data/local.db
 ```
@@ -58,7 +72,7 @@ path = /Users/me/data/local.db
 If you have a connection string from your database provider — Supabase, Neon, RDS, Railway, etc. — paste it directly into a `url = ...` field and skip the per-field setup. The skill parses it into host / port / user / password / database internally.
 
 ```ini
-[default]
+[main]
 url = postgresql://user:pass@host:5432/dbname
 ```
 
@@ -75,7 +89,7 @@ postgresql://postgres.<project_ref>:<password>@aws-1-<region>.pooler.supabase.co
 Drop it into the `url` field. Optionally add `sslmode = require` (Supabase requires SSL; the default `prefer` works too):
 
 ```ini
-[default]
+[main]
 url     = postgresql://postgres.odzuxljstuccrblqcevo:<your-password>@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres
 sslmode = require
 ```
@@ -87,7 +101,7 @@ If your DSN comes from an app that uses asyncpg or psycopg2 (e.g. `postgresql+as
 Same `url = …` shortcut. If the provider's URL has `?sslmode=require` (or other query params), they're parsed and merged into the connection settings — no extra fields needed.
 
 ```ini
-[default]
+[main]
 url = postgresql://user:pass@ep-cool-darkness.us-east-2.aws.neon.tech/neondb?sslmode=require
 ```
 
@@ -128,11 +142,13 @@ When set, `~/.agami/credentials` is ignored. Useful for piping in from 1Password
 
 ## Profile selection
 
-By default the skill uses `[default]`. Switch with:
+The active profile is the one `init` recorded in `~/.agami/.config.active_profile` when you first set up. Override per shell session with:
 
 ```bash
 AGAMI_PROFILE=staging   # uses [staging] section
 ```
+
+To permanently change the active profile, edit `~/.agami/.config` and update `active_profile` (or re-run `init` and pick again).
 
 The skill writes `~/.agami/<profile>.yaml` for the semantic model — one per profile, so multiple databases live side by side.
 

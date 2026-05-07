@@ -46,7 +46,31 @@ from typing import Any
 
 
 CREDENTIALS_PATH = Path.home() / ".agami" / "credentials"
+CONFIG_PATH = Path.home() / ".agami" / ".config"
 ALLOWED_PERMS = (0o600, 0o400)
+
+
+def _resolve_default_profile() -> str:
+    """Pick the default profile when --profile isn't passed and AGAMI_PROFILE is unset.
+
+    Resolution order:
+      1. AGAMI_PROFILE env var
+      2. active_profile field in ~/.agami/.config
+      3. The literal string "default" (legacy fallback)
+    """
+    env = os.environ.get("AGAMI_PROFILE")
+    if env:
+        return env
+    if CONFIG_PATH.exists():
+        try:
+            import json as _json
+            cfg = _json.loads(CONFIG_PATH.read_text())
+            active = cfg.get("active_profile")
+            if isinstance(active, str) and active:
+                return active
+        except (OSError, ValueError):
+            pass
+    return "default"
 
 
 def _err(msg: str, *, code: int = 2) -> int:
@@ -276,7 +300,11 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description="Tier-3 Python SQL executor for agami. Reads credentials, runs SQL, emits CSV.",
     )
-    p.add_argument("--profile", default=os.environ.get("AGAMI_PROFILE", "default"))
+    p.add_argument(
+        "--profile",
+        default=None,
+        help="Credentials profile to use. Defaults to AGAMI_PROFILE env, then .config.active_profile, then 'default'.",
+    )
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--sql", help="SQL statement (use --sql-file for SQL with special characters)")
     src.add_argument("--sql-file", help="Path to a file containing one SQL statement")
@@ -287,10 +315,11 @@ def main() -> int:
     else:
         sql = args.sql
 
-    creds = _load_credentials(args.profile)
+    profile = args.profile or _resolve_default_profile()
+    creds = _load_credentials(profile)
     db_type = creds.get("type", "").lower()
     if not db_type:
-        return _err(f"Credentials profile [{args.profile}] is missing the 'type' field.")
+        return _err(f"Credentials profile [{profile}] is missing the 'type' field.")
     if db_type == "postgres":
         return _execute_postgres(creds, sql)
     if db_type == "mysql":

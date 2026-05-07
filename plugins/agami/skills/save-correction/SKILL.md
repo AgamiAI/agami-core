@@ -24,20 +24,24 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 ## Phase 1: Identify the correction
 
-### 1a — find the most recent query
+### 1a — resolve the active profile
+
+Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback). All `~/.agami/<profile>.yaml` and `~/.agami/<profile>-examples.yaml` paths in this skill use the resolved name.
+
+### 1b — find the most recent query
 
 Read the last entry in `~/.agami/query_log.jsonl`. Need `question` and `sql`.
 
 If the log is empty: "I don't have a recent query to attach this correction to. Ask the question first, then save the correction." Stop.
 
-### 1b — get the corrected SQL
+### 1c — get the corrected SQL
 
 Determine what the user gave:
 - **They pasted SQL** (`$ARGUMENTS` looks like a SELECT, contains `FROM` / `JOIN` / `GROUP BY`) → use directly as the corrected SQL.
 - **They described what's wrong** ("the join should be on customer_id, not user_id"; "amount is in cents") → regenerate SQL using the OSI model + the original question + their feedback as additional context. Same prompt assembly as `query-database` Phase 2b.
 - **No arguments and no recent feedback** → ask: "Paste the corrected SQL, or tell me what's wrong with the result."
 
-### 1c — EXPLAIN-validate the corrected SQL
+### 1d — EXPLAIN-validate the corrected SQL
 
 Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached tier from `~/.agami/.config`. Same validate-then-save contract as `connect/SKILL.md` Phase 4b:
 

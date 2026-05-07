@@ -68,7 +68,33 @@ mkdir -p ~/.agami
 chmod 700 ~/.agami
 ```
 
-If `~/.agami/credentials` does not already exist (and `AGAMI_DATABASE_URL` is unset), write `~/.agami/credentials.example` using the **Write tool** with this exact content (substituting only the placeholder comments — keep section names, field names, and indentation as-is):
+### 2a — Pick a profile name for the first database (only when no credentials yet)
+
+Skip this step if `~/.agami/credentials` already exists OR if `AGAMI_DATABASE_URL` is set. Otherwise, ask the user what to name their first database connection. **Use AskUserQuestion** with this exact shape:
+
+> What should I call this database connection? You'll use this name to switch between databases later (e.g. `AGAMI_PROFILE=production`).
+
+Options (mark exactly one Recommended, place it first):
+
+| label | description |
+|---|---|
+| `main (Recommended)` | Generic catch-all name. Good if you only have one database. |
+| `production` | If this is your prod / live database. |
+| `staging` | If this is a staging / dev / pre-prod database. |
+| (Other auto-provided) | The user types any short lowercase name — e.g. `supabase`, `analytics`, the company name. |
+
+After the user picks (or types), validate the chosen name:
+
+- Lowercase letters, digits, dashes, underscores only.
+- 1–32 characters.
+- Strip any leading/trailing whitespace; lowercase the input.
+- If invalid, surface a tight error ("name must be lowercase letters/digits/dashes/underscores, 1–32 chars") and re-ask.
+
+Bind this validated name to a variable `$PROFILE_NAME`. The next two sub-phases use it as the section name and the `active_profile` field.
+
+### 2b — Write `~/.agami/credentials.example`
+
+Write `~/.agami/credentials.example` using the **Write tool** with this content. The `[default]` section in the template below is a *placeholder* — substitute it with `[$PROFILE_NAME]` (the validated name from 2a). Keep all field names, indentation, and the comment header verbatim.
 
 ```ini
 # ~/.agami/credentials
@@ -93,7 +119,7 @@ If `~/.agami/credentials` does not already exist (and `AGAMI_DATABASE_URL` is un
 #                mysql://, mysql+pymysql://, mariadb://, sqlite:///abs/path.
 #       Query params like ?sslmode=require are honored automatically.
 
-[default]
+[$PROFILE_NAME]   # ← the name the user chose in Phase 2a (e.g. [main], [supabase])
 type     = postgres        # postgres | mysql | sqlite
 host     = localhost
 port     = 5432
@@ -197,6 +223,7 @@ Persist the chosen tier **and the absolute paths of every tool we found** in `~/
   "schema_version": 1,
   "tier": "cli",
   "host": "claude-code-cli",
+  "active_profile": "main",
   "tool_paths": {
     "psql": "/opt/homebrew/Cellar/libpq/18.3/bin/psql",
     "mysql": null,
@@ -208,9 +235,17 @@ Persist the chosen tier **and the absolute paths of every tool we found** in `~/
     "psycopg2": false,
     "pymysql": false
   },
-  "detected_at": "2026-05-06T17:30:00Z"
+  "detected_at": "2026-05-07T17:30:00Z"
 }
 ```
+
+Set `active_profile` to the name the user picked in Phase 2a (e.g. `main`, `supabase`, `production`). All other agami skills resolve the active profile in this order:
+
+1. `AGAMI_PROFILE` environment variable (highest priority — explicit per-session override)
+2. `active_profile` from this `.config` file (set by `init` once)
+3. The literal string `"default"` (legacy fallback for users who set up before this field existed)
+
+If the user later wants to add another database connection, they edit `~/.agami/credentials` to add a new section, then either set `AGAMI_PROFILE=<name>` for that session or re-run `init switch-profile <name>` to update `active_profile` permanently.
 
 Future skills that need to run SQL look up the tool path from this file and use it directly. They do NOT re-run `which` unless the cached path no longer exists on disk.
 

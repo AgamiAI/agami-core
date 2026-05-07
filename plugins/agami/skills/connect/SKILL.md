@@ -50,7 +50,7 @@ If you find yourself reaching for any command that doesn't fit the rules above, 
 
 1. **Credentials check (binding)**: read `~/.agami/credentials` if present, OR check `AGAMI_DATABASE_URL` env var. If neither exists, invoke `init` and **stop this skill**. Do not continue. Do not probe anything.
 2. Apply the credentials chmod check from the agami-init skill's permissions-enforcement section. Refuse to proceed if too permissive.
-3. Resolve `<profile>` (default: `default`, override with `AGAMI_PROFILE`). The OSI `semantic_model[].name` MUST equal `<profile>`.
+3. Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback). The OSI `semantic_model[].name` MUST equal the resolved `<profile>`.
 4. Resolve `db_type`, `host`, `port`, `database`, `user`, `password` from the credentials file's `[<profile>]` section (or parse from `AGAMI_DATABASE_URL`). Never substitute a value that's missing — surface a clear "your credentials file is missing field X for profile Y; please add it" message and stop.
 5. Look up the cached execution tier and tool paths from `~/.agami/.config`. If absent, run tier detection per the init skill's Phase 3.
 6. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch. **Hand-edits the user made (descriptions, ai_context, choice_fields, metrics) MUST be preserved** — re-introspection only updates what the DB unambiguously tells us (table list, columns, types, PK, FK).
