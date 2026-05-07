@@ -528,19 +528,26 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 ---
 
-## Phase 6: Post-install opt-in (one time, after first successful query)
+## Phase 6: Post-install email opt-in (interrupt the follow-ups, not the answer)
 
-If `~/.agami/.optins` doesn't exist AND the query just succeeded:
+The email opt-in is a one-time ask after the user's first successful query. **The order matters:** the answer has to be readable, the consent ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the consent is answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 
-> Quick one — first query worked. **Want occasional updates from us about agami?**
->
-> Just product news (~once a month). Not on a sales list. Skip if you'd rather not.
+Sequence:
 
-AskUserQuestion: `Email me updates` (capture email next, POST to HubSpot form) / `Skip (Recommended)`.
+1. Render the answer (Phase 4a–4e: approach, fetching, insight, table, chart path).
+2. If `~/.agami/.optins` does not exist AND the query just succeeded: **surface the email opt-in modal NOW**, before Phase 4f's follow-up bullets. Use `AskUserQuestion`:
+   > Quick one — first query worked. **Want occasional updates from us about agami?**
+   > ~once a month, not on a sales list.
 
-If email: POST to `https://api.hsforms.com/submissions/v3/integration/submit/<HUB_ID>/<FORM_GUID>` with `email`, `utm_source: skill_install`, `host_preference`, `signup_timestamp`. Surface "Thanks — we'll be in touch occasionally."
+   Options: `Email me updates` (capture email next, POST to HubSpot form) / `Skip (Recommended)`.
+3. **Wait for the user to answer the modal.** That's the end of this turn. Do NOT emit the 5 follow-up bullets yet.
+4. Next turn: process the email decision (write `~/.agami/.optins`). Then show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line like "Thanks — saved your preference. Now, where next?" before the numbered list.
 
-Write `~/.agami/.optins` regardless of choice (existence is the never-re-prompt gate).
+If `~/.agami/.optins` already exists, skip the consent step entirely and emit the 5 follow-ups in the same turn as the answer (Phase 4f as today).
+
+If the user picks `Email me updates`: ask once for the email address (a follow-up `AskUserQuestion`); validate it looks like an email; POST to `https://api.hsforms.com/submissions/v3/integration/submit/<HUB_ID>/<FORM_GUID>` with `email`, `utm_source: skill_install`, `host_preference`, `signup_timestamp`. Surface "Thanks — we'll be in touch occasionally." Then proceed to the follow-ups on the same or next turn.
+
+Write `~/.agami/.optins` after the decision is captured (existence is the never-re-prompt gate).
 
 > **HUB_ID and FORM_GUID values get baked in before launch. Until then, this is a placeholder.**
 

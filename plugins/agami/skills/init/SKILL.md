@@ -22,6 +22,36 @@ This skill is idempotent — running it again with no args verifies state and su
 
 ---
 
+## Phase −1: Plan-mode check (before anything else)
+
+agami's setup needs to make edits — write `~/.agami/credentials.example`, run `mkdir`, materialize `.pgpass`, etc. None of that works in Claude Code's **Plan mode**, which restricts the assistant to read-only tools.
+
+Detect plan mode via two signals:
+
+1. **System-reminder context.** When plan mode is active, the host injects a `<system-reminder>` saying so into the conversation. If the latest such reminder is in scope and indicates plan mode is active, treat that as confirmed.
+2. **Optional probe.** If the system context is ambiguous, attempt one no-op Bash: `echo agami-plan-probe`. If it succeeds, edits will succeed. If it fails because of plan mode, the failure is the signal.
+
+If plan mode is active, **stop the skill and ask the user to switch** via AskUserQuestion. Do not proceed to Phase 0 yet.
+
+> agami's setup needs to write files in `~/.agami/` and run a few commands. **Plan mode is active**, which blocks edits. Switch modes?
+
+Options (mark exactly one Recommended, place it first):
+
+| label | description |
+|---|---|
+| `Default mode (Recommended)` | Switch to default mode — agami will ask for permission per command (you can approve once and the host caches the allow). |
+| `Auto-accept edits` | Switch to auto-accept-edits mode — agami runs without per-command prompts. Use if you trust the skill. |
+| `Stay in plan mode` | Don't run setup. I'll show you the plan only, no actual changes. |
+
+After the user picks, surface a one-liner reminder of the keystroke (`Shift+Tab` cycles modes in Claude Code) so they know how to flip. Then:
+
+- **`Default mode` or `Auto-accept edits`** → wait for the user to actually press Shift+Tab. Don't try to flip the mode programmatically — the skill can't. Ask them to confirm "I've switched, continue" before proceeding.
+- **`Stay in plan mode`** → continue, but emit only a written plan (no file writes, no Bash). Tell the user: "I'll describe what I would do; re-invoke me out of plan mode when you're ready to actually run it."
+
+If the user is NOT in plan mode (signal #1 absent and the probe succeeds), skip this phase silently and go to Phase 0.
+
+---
+
 ## Phase 0: Decide what to do based on `$ARGUMENTS`
 
 - **No arguments**: Run the full first-run flow (Phases 1–5).
@@ -131,32 +161,38 @@ Write `~/.agami/credentials.example` using the **Write tool**. Pick the body **b
 **If `$DB_TYPE = postgres`**, append:
 
 ```ini
+# Postgres profile — fill in below. localhost is fine for a local DB.
 [$PROFILE_NAME]
 type     = postgres
-host     = your-host.example.com         # localhost for a local DB
+host     = your-host.example.com
 port     = 5432
 database = your-database-name
 user     = your-username
 password = your-password
-# sslmode = require                       # uncomment for cloud DBs (Supabase / Neon / RDS)
+# Uncomment the next line for cloud DBs (Supabase / Neon / RDS):
+# sslmode = require
 
-# OR — comment out the per-field block above and use a DSN URL instead:
-# url = postgresql://user:pass@host:5432/db
-# url = postgresql+asyncpg://user:pass@host:5432/db   # +driver suffix is stripped
+# OR — comment out the per-field block above and paste a DSN URL instead:
+# Accepts postgresql://, postgres://, postgresql+asyncpg://, postgresql+psycopg2://
 # Query params like ?sslmode=require are honored automatically.
+# url = postgresql://user:pass@host:5432/db
 ```
 
 **If `$DB_TYPE = redshift`**, append (same shape as postgres but with Redshift defaults):
 
 ```ini
+# Redshift profile.
+# Provisioned cluster host:    your-cluster.<region>.redshift.amazonaws.com
+# Redshift Serverless host:    <wg>.<acct>.<region>.redshift-serverless.amazonaws.com
+# Default port is 5439. SSL is required.
 [$PROFILE_NAME]
 type     = redshift
-host     = your-cluster.<region>.redshift.amazonaws.com   # or <wg>.<acct>.<region>.redshift-serverless.amazonaws.com
+host     = your-cluster.example.region.redshift.amazonaws.com
 port     = 5439
 database = your-database
 user     = your-username
 password = your-password
-sslmode  = require                       # required by Redshift
+sslmode  = require
 
 # OR — use a DSN URL (port 5439 + sslmode=require auto-applied):
 # url = redshift://user:pass@your-cluster.us-west-2.redshift.amazonaws.com:5439/db
@@ -165,17 +201,24 @@ sslmode  = require                       # required by Redshift
 **If `$DB_TYPE = snowflake`**, append:
 
 ```ini
+# Snowflake profile.
+# Account formats: xy12345  (legacy)
+#                  xy12345.us-east-1.aws  (locator + region + cloud)
+#                  myorg-myaccount  (newer org-account form)
+# Do NOT add .snowflakecomputing.com — the connector appends it.
+# Required: account, user, password (or authenticator).
+# Optional: warehouse, database, schema, role.
 [$PROFILE_NAME]
 type      = snowflake
-account   = xy12345.us-east-1.aws        # or xy12345 / myorg-myaccount; do NOT add .snowflakecomputing.com
+account   = your-account-locator
 user      = your-username
-password  = your-password                # OR set authenticator instead (see below)
-warehouse = COMPUTE_WH                   # optional but recommended
-database  = ANALYTICS                    # optional
-schema    = PUBLIC                       # optional
-role      = ANALYST_ROLE                 # optional
+password  = your-password
+warehouse = COMPUTE_WH
+database  = ANALYTICS
+schema    = PUBLIC
+role      = ANALYST_ROLE
 
-# For SSO (e.g. Okta / Azure AD), comment out password and use:
+# For SSO (Okta / Azure AD / etc.), remove the password line above and use:
 # authenticator = externalbrowser
 
 # OR — DSN form (path is /database/schema; query params carry warehouse/role):
@@ -185,9 +228,10 @@ role      = ANALYST_ROLE                 # optional
 **If `$DB_TYPE = mysql`**, append:
 
 ```ini
+# MySQL profile. localhost is fine for a local DB.
 [$PROFILE_NAME]
 type     = mysql
-host     = your-host.example.com         # localhost for a local DB
+host     = your-host.example.com
 port     = 3306
 database = your-database-name
 user     = your-username

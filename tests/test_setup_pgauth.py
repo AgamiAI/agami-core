@@ -212,6 +212,31 @@ password = SUPER_SECRET_PASSWORD_DO_NOT_LEAK
     assert "SUPER_SECRET_PASSWORD_DO_NOT_LEAK" not in captured.err
 
 
+def test_inline_comments_in_credentials_are_stripped(tmp_agami_home):
+    """Regression: configparser default leaves '# comment' as part of value,
+    so `account = xy12345 # locator + region` parses to 'xy12345 # locator + region'
+    and Snowflake/Postgres/MySQL try to use the junk as a hostname/account
+    and hang. Both execute_sql.py and setup_pgauth.py must strip inline
+    comments via inline_comment_prefixes=('#', ';')."""
+    setup_pgauth, agami = tmp_agami_home
+    _write_credentials(agami, """
+[snow]
+type      = snowflake             ; trailing ;-comment
+account   = lcqyuhw-qn23838       # or xy12345.us-east-1.aws
+user      = myuser                # the analyst account
+password  = realpassword
+warehouse = COMPUTE_WH
+""")
+    setup_pgauth.materialize(["snow"])
+    body = (agami / ".snowsql.cnf").read_text()
+    # The accountname value must NOT contain the '#' or anything after it
+    assert "accountname = lcqyuhw-qn23838" in body
+    assert "or xy12345" not in body
+    # Same for username
+    assert "username = myuser" in body
+    assert "the analyst account" not in body
+
+
 def test_redshift_writes_pgpass_entry(tmp_agami_home):
     """Redshift speaks Postgres wire protocol → uses .pgpass like postgres."""
     setup_pgauth, agami = tmp_agami_home

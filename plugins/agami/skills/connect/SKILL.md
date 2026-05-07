@@ -1,6 +1,6 @@
 ---
 name: connect
-description: "Introspects the user's database and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model at the per-profile YAML file inside the .agami home directory. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB) at the per-profile examples file, then runs an engagement-moment demo query so the user immediately sees the skill working. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
+description: "Introspects the user's database and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model at the per-profile YAML file inside the .agami home directory. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB) at the per-profile examples file, then runs one demo query so the user immediately sees the skill working. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
 when_to_use: "Auto-invoked by query-database the first time it runs (when the semantic model YAML is missing). Invoke explicitly when the user says 'connect to my database', 'introspect the schema', 'reload schema', 'add a new database', or after the user changes their schema and wants the model refreshed. Requires init to have run first (credentials must exist)."
 argument-hint: "[reintrospect | profile NAME]"
 ---
@@ -16,7 +16,7 @@ This skill orchestrates four phases:
 1. **Introspect** — pull tables / columns / PK / FK from `information_schema` via the chosen execution tier.
 2. **Build the OSI model** — assemble the YAML strictly to the OSI v0.1.1 spec, with Agami metadata (column types, choice fields, performance hints) packed under `custom_extensions[].vendor_name: COMMON` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
 3. **Validate, then write** — run the validator at `plugins/agami/scripts/validate_semantic_model.py`. If it fails, **DO NOT WRITE THE FILE.** Surface the errors and stop.
-4. **Seed examples + run demo query** — generate few-shot pairs, EXPLAIN-validate each, then pick one for the engagement-moment Yes/No/Skip prompt.
+4. **Seed examples + run demo query** — generate few-shot pairs, EXPLAIN-validate each, then pick one to run as a demo and ask the user Yes / No / Skip.
 
 For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
 For the bundled JSON schema: [`shared/osi-schema.json`](../../shared/osi-schema.json).
@@ -66,6 +66,27 @@ If you find yourself reaching for any command that doesn't fit the rules above, 
 ---
 
 ## Phase 1: Introspect
+
+### Phase 1.0 — set expectations before kicking off
+
+Introspecting can take a while, especially against cloud DBs. Tell the user **before** the first probe so they don't think the skill has hung. The estimate depends on the database type:
+
+| db_type | Typical setup time | Why |
+|---|---|---|
+| `sqlite` | < 5 seconds | Local file, instant metadata. |
+| `postgres` (local) | 5–15 seconds | Local network, fast `information_schema` queries. |
+| `postgres` (cloud — Supabase / Neon / RDS) | 15–60 seconds | Network round-trip per query, plus FK validation join checks. |
+| `mysql` | 10–30 seconds | Similar to postgres. |
+| `redshift` | 30–120 seconds | Cloud + Redshift's metadata can be slow to return. |
+| **`snowflake`** | **60–180 seconds** | Cold warehouse spin-up + per-table SHOW commands + EXPLAIN-validation against the live warehouse. Sometimes longer for accounts with many schemas. |
+
+Surface a one-liner like:
+
+> Setting up your `<profile>` connection — this typically takes **<low>–<high> seconds** for `<db_type>` (introspecting tables, validating relationships, generating examples). I'll narrate as I go.
+
+Then proceed.
+
+### Phase 1.1 — existing-model check
 
 If `~/.agami/<profile>.yaml` exists and `$ARGUMENTS` is not `reintrospect`:
 - "I already have a model for `<profile>` at `~/.agami/<profile>.yaml`. What would you like to do?"
@@ -273,7 +294,9 @@ Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Sa
 
 ---
 
-## Phase 5: Demo query — engagement moment
+## Phase 5: Run a demo query
+
+Pick one of the seed examples and run it end-to-end. The user gets to verify the skill works against their actual data before they start asking real questions. Show the result, ask Yes / No / Skip on the example. **Do NOT use the phrase "engagement moment" anywhere the user can see — it's internal phasing and looks marketing-speak in a chat.**
 
 Pick **one** example from Phase 4 that:
 1. Spans ≥ 2 datasets via a relationship (uses a JOIN).
@@ -298,9 +321,16 @@ Surface: `✓ Demo run complete.`
 
 ---
 
-## Phase 6: Telemetry opt-in (one-time, after demo succeeds)
+## Phase 6: Telemetry opt-in, THEN follow-up suggestions (correct order matters)
 
-This is the **first** moment the user sees the skill produce real value. Ask for analytics consent here — not at install time.
+This is the first moment the user sees the skill produce real value. Ask for analytics consent here — not at install time. **And — important — the telemetry consent has to fully resolve BEFORE the user sees any "what to ask next" follow-up suggestions.** If they see follow-ups and *then* the consent modal pops up, they lose context for the follow-ups. The flow:
+
+1. **Phase 5 demo finishes.** User answered Yes / No / Skip on the demo example.
+2. Surface a one-line closing for the demo: `✓ Demo run complete.`
+3. **Phase 6 (this phase): ask telemetry consent NOW.** AskUserQuestion modal. End the turn here. Do not yet emit follow-up suggestions about what to query next — the user is in a "decide about telemetry" mode.
+4. **Next turn:** the user answered consent. Process it (write `~/.agami/.config`, send install event if opted in). Then **Phase 7 below** surfaces follow-up suggestions ("Now that you're set up, here are five things you could ask…"). These are the *first* five suggestions the user sees post-setup.
+
+If `~/.agami/.config` already has an `analytics_consent` field set (true or false), **skip Phase 6 entirely** (only ask once) and go straight to Phase 7's follow-up suggestions.
 
 If `~/.agami/.config` already has an `analytics_consent` field set (true or false), **skip this phase entirely**. Only ask once.
 
@@ -389,7 +419,13 @@ After the install event sends, append a `connect` event to `~/.agami/.telemetry-
 
 ---
 
-## Closing message
+## Phase 7: Post-setup follow-up suggestions (only after telemetry decision is recorded)
+
+Show **five** numbered suggestions for things the user can ask now, drawn from the schema we just introspected. This phase fires only after Phase 6's consent has been answered (or skipped because `analytics_consent` was already set). Format follows the same shape as `query-database`'s Phase 4f — five numbered bullets, plain markdown, no AskUserQuestion modal.
+
+Pick suggestions that show off the schema's distinctive shape. If the model has tables like `orders` and `customers`, suggest things grounded in those. If it's a content/CRM schema, pick something domain-relevant. Keep each under 80 characters.
+
+Format exactly:
 
 ```
 ✓ ~/.agami/<profile>.yaml — OSI v0.1.1 semantic model (validated)
@@ -397,8 +433,18 @@ After the install event sends, append a `connect` event to `~/.agami/.telemetry-
 ✓ Demo query verified
 ✓ Telemetry: <enabled | disabled — your call>
 
-You're ready. Ask me anything — e.g. "show top 10 active customers by spend".
+Now that you're set up, here are five things you could ask:
+
+1. <a count question grounded in a real table — "How many orders shipped last month?">
+2. <a top-N grouped question — "Top 10 customers by total spend">
+3. <a time-series — "Revenue trend over the last 6 months">
+4. <a comparison or breakdown — "Order count by status this quarter">
+5. <a broader narrative — "How is the business doing this quarter?">
+
+Reply with a number, or ask anything else.
 ```
+
+Then end the turn. The user picking a number routes the chosen question into `query-database` for a real answer.
 
 ---
 

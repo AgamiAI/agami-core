@@ -76,7 +76,10 @@ def _load_section(profile: str) -> dict[str, str]:
         )
         sys.exit(2)
 
-    cfg = configparser.ConfigParser()
+    # Strip inline comments so values don't carry trailing "# notes" — see
+    # execute_sql.py for the same fix and why it matters (configparser default
+    # leaves "xy12345 # locator..." as the value).
+    cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     cfg.read(CREDENTIALS_PATH)
     if profile not in cfg:
         sys.stderr.write(
@@ -85,7 +88,7 @@ def _load_section(profile: str) -> dict[str, str]:
         )
         sys.exit(2)
 
-    section = {k: v for k, v in cfg[profile].items()}
+    section = {k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[profile].items()}
     if "url" in section and section["url"]:
         from_dsn = _parse_dsn(section["url"])
         merged = dict(from_dsn)
@@ -294,7 +297,7 @@ def main() -> int:
         if not CREDENTIALS_PATH.exists():
             sys.stderr.write("~/.agami/credentials is missing.\n")
             return 2
-        cfg = configparser.ConfigParser()
+        cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
         cfg.read(CREDENTIALS_PATH)
         profiles = cfg.sections()
     else:

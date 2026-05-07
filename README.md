@@ -331,6 +331,19 @@ There are 11 fields. None of them contain query text, schema content, result dat
 
 ---
 
+## Reduce permission prompts (optional)
+
+Claude Code prompts for permission the first time it runs a Bash command pattern. If you're tired of clicking "allow" for the same agami commands every session, copy the recommended allowlist into `~/.claude/settings.local.json`:
+
+```bash
+# One-time setup — copies the agami-friendly allowlist to your user-scope settings
+cp <plugin-install-path>/.claude/settings.local.example.json ~/.claude/settings.local.json
+```
+
+Or merge selectively into your existing `~/.claude/settings.local.json`. The file is gitignored — your allowlist stays local.
+
+The example covers the common agami invocation shapes: `psql` / `mysql` / `snowsql` with auth files, `execute_sql.py` / `setup_pgauth.py` / `validate_semantic_model.py` script calls, `mkdir`/`chmod` on `~/.agami/`, and `open` on chart files. It does NOT auto-allow arbitrary `psql` / `mysql` invocations against your DB — only the wrapper scripts that read credentials safely.
+
 ## Troubleshooting
 
 | Symptom | Fix |

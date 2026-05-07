@@ -298,7 +298,50 @@
     } else {
       document.getElementById('report-summary').remove();
     }
-    document.getElementById('report-generated-at').textContent = generatedAt;
+    // Human-readable timestamp. The skill MAY pre-format `generatedAt`, but if
+    // it passed an ISO string we still want it pretty rather than 2026-05-07T12:24:52Z.
+    function formatGeneratedAt(s) {
+      if (!s) return '';
+      const d = new Date(s);
+      if (isNaN(d.getTime())) return s;  // not parseable as a date; show as-is
+      try {
+        return d.toLocaleString(undefined, {
+          year: 'numeric', month: 'short', day: 'numeric',
+          hour: 'numeric', minute: '2-digit',
+        });
+      } catch (e) {
+        return d.toString();
+      }
+    }
+    document.getElementById('report-generated-at').textContent = formatGeneratedAt(generatedAt);
+
+    // Auto-prettify any cell value that looks like an ISO date / timestamp.
+    // This is a SAFETY NET — the skill is supposed to format dates in 3c
+    // before passing them in `table_rows` and `labels`. But in case it forgets,
+    // the table rendering does a last-mile rescue so users never see raw ISO.
+    const ISO_DATE_RE     = /^\d{4}-\d{2}-\d{2}$/;
+    const ISO_TIME_RE     = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
+    function maybePrettifyDate(value) {
+      if (typeof value !== 'string') return value;
+      const s = value.trim();
+      if (!s) return value;
+      if (ISO_DATE_RE.test(s)) {
+        const d = new Date(s + 'T00:00:00');
+        if (!isNaN(d.getTime())) {
+          return d.toLocaleDateString(undefined,
+            { year: 'numeric', month: 'short', day: 'numeric' });
+        }
+      } else if (ISO_TIME_RE.test(s)) {
+        const d = new Date(s);
+        if (!isNaN(d.getTime())) {
+          return d.toLocaleString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit',
+          });
+        }
+      }
+      return value;
+    }
 
     // ---- Table of contents (only if 2+ sections) ----
     if (sections.length > 1) {
@@ -355,7 +398,8 @@
         visibleRows.forEach(row => {
           const tr = el('tr');
           row.forEach((cell, c) => {
-            const td = el('td', { text: cell == null ? '' : String(cell) });
+            const display = cell == null ? '' : String(maybePrettifyDate(cell));
+            const td = el('td', { text: display });
             if (numericCols[c]) td.classList.add('numeric');
             tr.appendChild(td);
           });
@@ -407,9 +451,12 @@
         return out;
       });
       const ctx = document.getElementById('chart-' + (i + 1)).getContext('2d');
+      // Same safety-net prettification for axis labels — if the skill passed
+      // raw ISO strings, we render "May 7, 2026" instead of "2026-05-07".
+      const prettyLabels = (sec.labels || []).map(maybePrettifyDate);
       new Chart(ctx, {
         type: sec.chart_type,
-        data: { labels: sec.labels || [], datasets },
+        data: { labels: prettyLabels, datasets },
         options: {
           responsive: true,
           maintainAspectRatio: false,

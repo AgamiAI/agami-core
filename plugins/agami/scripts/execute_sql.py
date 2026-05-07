@@ -107,7 +107,12 @@ def _load_credentials(profile: str) -> dict[str, str]:
         )
         sys.exit(2)
 
-    cfg = configparser.ConfigParser()
+    # IMPORTANT: enable inline-comment stripping for both `#` and `;`. Without
+    # this, a credentials line like `account = xy12345  # locator + region`
+    # parses as `xy12345  # locator + region` (the comment becomes part of the
+    # value), which then gets fed to Snowflake/Postgres/MySQL as a junk
+    # hostname/account and the connection hangs or fails confusingly.
+    cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     cfg.read(CREDENTIALS_PATH)
     if profile not in cfg:
         sys.stderr.write(
@@ -116,7 +121,7 @@ def _load_credentials(profile: str) -> dict[str, str]:
         )
         sys.exit(2)
 
-    section = {k: v for k, v in cfg[profile].items()}
+    section = {k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[profile].items()}
 
     # If the profile has `url = ...` (e.g. a Supabase / Neon / RDS DSN), parse it
     # and merge with any per-field overrides (sslmode, etc.) defined alongside.
