@@ -163,6 +163,20 @@ Then say something like:
 
 If the user asks for help editing it, walk them through the fields per [`shared/credentials-format.md`](../../shared/credentials-format.md).
 
+### 2c — Materialize provider-native auth files (after the user saves credentials)
+
+Once `~/.agami/credentials` exists with real values (the user has copied the template, filled it in, and `chmod 600`-ed it), invoke the auth-file generator. This writes provider-native auth files (`~/.agami/.pgpass` for postgres profiles, `~/.agami/.mysql.cnf` for mysql profiles) that psql/mysql read silently. **The whole point** is that subsequent skill invocations can run psql/mysql WITHOUT the password appearing in any visible Bash command line:
+
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --all
+```
+
+(Or `--profile <name>` for one specific profile.)
+
+The generator is idempotent and safe to re-run. Auth files are chmod 600. **Without these files, the psql/mysql tier-1 invocations would have to put the password on the command line — that's forbidden per [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md). Always run setup_pgauth.py before the first tier-1 query.**
+
+If the user hasn't yet saved real credentials (just the template is there), skip this step — the generator will fail on placeholder values, and we'll re-run after the user fills in their connection details.
+
 ### Seed `~/.agami/USER_MEMORY.md` if missing
 
 If `~/.agami/USER_MEMORY.md` does not exist, write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md) → "Default seed") via the Write tool, `chmod 600`. This file holds free-form user preferences (default filters, domain vocabulary, display preferences) that every other agami skill loads on each invocation. Don't overwrite an existing file — the user may have edited it.

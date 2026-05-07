@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""
+Materialize provider-native auth files from ~/.agami/credentials so the
+agami skill can run psql / mysql WITHOUT ever putting the password on the
+command line.
+
+Why this exists: invoking psql via `export PGPASSWORD='<literal>' psql ...`
+puts the password in the visible Bash command. Hosts (Cursor, Claude Code,
+Cowork) render Bash tool calls in their UI, so the password leaks into the
+chat transcript. The fix is provider-native auth files that psql / mysql
+read automatically:
+
+    ~/.agami/.pgpass         (chmod 600) — postgres "host:port:db:user:password"
+    ~/.agami/.mysql.cnf      (chmod 600) — mysql "[client_<profile>]\\npassword=..."
+
+Skills then run:
+    PGPASSFILE=~/.agami/.pgpass psql -h ... -p ... -U ... -d ... -c "$SQL" --csv
+    mysql --defaults-file=~/.agami/.mysql.cnf --defaults-group-suffix=_<profile> ...
+
+The visible Bash command contains NO password. The auth files are chmod 600,
+same protection as `~/.agami/credentials` itself.
+
+Usage:
+    # Materialize for the active profile (init invokes it like this):
+    python3 setup_pgauth.py
+
+    # Or specify a profile:
+    python3 setup_pgauth.py --profile staging
+
+    # Or all profiles in the credentials file at once:
+    python3 setup_pgauth.py --all
+
+The script is idempotent. It rewrites the auth files atomically, never appends
+duplicate entries, never echoes credentials to stdout/stderr.
+
+Exit codes:
+    0  success
+    2  configuration error (missing credentials, bad profile)
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from execute_sql import _parse_dsn  # reuse DSN parsing logic  # noqa: E402
+
+AGAMI_HOME = Path.home() / ".agami"
+CREDENTIALS_PATH = AGAMI_HOME / "credentials"
+CONFIG_PATH = AGAMI_HOME / ".config"
+PGPASS_PATH = AGAMI_HOME / ".pgpass"
+MYSQL_CNF_PATH = AGAMI_HOME / ".mysql.cnf"
+
+
+def _load_section(profile: str) -> dict[str, str]:
+    """Load credentials for one profile, parsing url= if present.
+
+    Returns a dict with at least {type, host, port, database, user, password}
+    for postgres/mysql, or {type, path} for sqlite.
+    """
+    if not CREDENTIALS_PATH.exists():
+        sys.stderr.write(
+            "~/.agami/credentials is missing. Run the agami init skill to set it up.\n"
+        )
+        sys.exit(2)
+
+    cfg = configparser.ConfigParser()
+    cfg.read(CREDENTIALS_PATH)
+    if profile not in cfg:
+        sys.stderr.write(
+            f"Profile [{profile}] not found in ~/.agami/credentials. "
+            f"Sections present: {cfg.sections()}\n"
+        )
+        sys.exit(2)
+
+    section = {k: v for k, v in cfg[profile].items()}
+    if "url" in section and section["url"]:
+        from_dsn = _parse_dsn(section["url"])
+        merged = dict(from_dsn)
+        for k, v in section.items():
+            if k == "url":
+                continue
+            merged[k] = v
+        return merged
+    return section
+
+
+def _resolve_default_profile() -> str:
+    """Active profile resolution (mirrors execute_sql._resolve_default_profile)."""
+    env = os.environ.get("AGAMI_PROFILE")
+    if env:
+        return env
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+            active = cfg.get("active_profile")
+            if isinstance(active, str) and active:
+                return active
+        except (OSError, ValueError):
+            pass
+    return "default"
+
+
+# --- pgpass ---------------------------------------------------------------
+
+def _pgpass_escape(value: str) -> str:
+    """Escape `:` and `\\` per the pgpass file format."""
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
+def _build_pgpass_line(creds: dict[str, str]) -> str:
+    parts = [
+        creds.get("host", ""),
+        str(creds.get("port", 5432)),
+        creds.get("database", "*"),
+        creds.get("user", ""),
+        creds.get("password", ""),
+    ]
+    return ":".join(_pgpass_escape(p) for p in parts)
+
+
+def _write_pgpass(profile_lines: dict[str, str]) -> None:
+    """Write ~/.agami/.pgpass with one line per postgres profile.
+
+    profile_lines maps profile name → pgpass-format line. The profile name
+    is written as a comment above each line for traceability.
+    """
+    AGAMI_HOME.mkdir(mode=0o700, exist_ok=True)
+    body = []
+    for profile, line in sorted(profile_lines.items()):
+        body.append(f"# profile: {profile}")
+        body.append(line)
+    contents = "\n".join(body) + "\n" if body else ""
+    _atomic_write(PGPASS_PATH, contents, mode=0o600)
+
+
+# --- mysql cnf -----------------------------------------------------------
+
+def _build_mysql_section(profile: str, creds: dict[str, str]) -> str:
+    """Build a [client_<profile>] section for ~/.my.cnf-style file.
+
+    psql honors PGPASSFILE; mysql honors --defaults-file with
+    --defaults-group-suffix=_<profile> which reads [client_<profile>].
+    """
+    suffix = profile  # group is [client_<profile>] when --defaults-group-suffix=_<profile>
+    lines = [f"[client_{suffix}]"]
+    if creds.get("host"):
+        lines.append(f"host={creds['host']}")
+    if creds.get("port"):
+        lines.append(f"port={creds['port']}")
+    if creds.get("user"):
+        lines.append(f"user={creds['user']}")
+    if creds.get("password"):
+        lines.append(f"password={creds['password']}")
+    if creds.get("database"):
+        lines.append(f"database={creds['database']}")
+    return "\n".join(lines)
+
+
+def _write_mysql_cnf(profile_sections: dict[str, str]) -> None:
+    AGAMI_HOME.mkdir(mode=0o700, exist_ok=True)
+    body = []
+    for profile in sorted(profile_sections):
+        body.append(profile_sections[profile])
+        body.append("")  # blank line between sections
+    contents = "\n".join(body).rstrip() + "\n" if body else ""
+    _atomic_write(MYSQL_CNF_PATH, contents, mode=0o600)
+
+
+# --- atomic write ---------------------------------------------------------
+
+def _atomic_write(path: Path, contents: str, mode: int) -> None:
+    """Atomic write: temp file in same dir + rename, with chmod set before rename."""
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(contents)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# --- main -----------------------------------------------------------------
+
+def materialize(profiles: list[str]) -> int:
+    """Read credentials for the given profiles; write .pgpass and .mysql.cnf as needed."""
+    pg_lines: dict[str, str] = {}
+    mysql_sections: dict[str, str] = {}
+
+    for profile in profiles:
+        creds = _load_section(profile)
+        db_type = creds.get("type", "").lower()
+        if db_type == "postgres":
+            pg_lines[profile] = _build_pgpass_line(creds)
+        elif db_type == "mysql":
+            mysql_sections[profile] = _build_mysql_section(profile, creds)
+        elif db_type == "sqlite":
+            pass  # no auth file needed for sqlite
+        else:
+            sys.stderr.write(
+                f"Profile [{profile}] has unsupported type {db_type!r}; skipping.\n"
+            )
+
+    if pg_lines:
+        _write_pgpass(pg_lines)
+    if mysql_sections:
+        _write_mysql_cnf(mysql_sections)
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description=(
+            "Materialize provider-native auth files (.pgpass / .mysql.cnf) from "
+            "~/.agami/credentials so psql / mysql can run without exposing passwords "
+            "on the Bash command line."
+        )
+    )
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--profile", help="Profile name (default: AGAMI_PROFILE / .config.active_profile / 'default')")
+    g.add_argument("--all", action="store_true", help="Materialize all profiles in the credentials file")
+    args = p.parse_args()
+
+    if args.all:
+        if not CREDENTIALS_PATH.exists():
+            sys.stderr.write("~/.agami/credentials is missing.\n")
+            return 2
+        cfg = configparser.ConfigParser()
+        cfg.read(CREDENTIALS_PATH)
+        profiles = cfg.sections()
+    else:
+        profiles = [args.profile or _resolve_default_profile()]
+
+    return materialize(profiles)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
