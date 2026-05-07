@@ -7,6 +7,8 @@ argument-hint: "[corrected SQL or NL feedback]"
 
 # agami save-correction
 
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** The only working slash command for agami is `/init` (bare). Never tell the user to type `/agami:save-correction`, `/save-correction`, `/agami:init`, or any other slash form — those don't exist. Phrase guidance as natural language ("say 'save this as a correction'", "say 'remember this'") and the relevant skill's `when_to_use` will catch it.
+
 You are recording a user correction. Goal: persist the fix so similar questions get better answers next time.
 
 This skill does two things, in this order:

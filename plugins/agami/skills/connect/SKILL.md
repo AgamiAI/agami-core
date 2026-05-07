@@ -7,6 +7,8 @@ argument-hint: "[reintrospect | profile NAME]"
 
 # agami connect
 
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** The only working slash command for agami is `/init` (bare). Never tell the user to type `/agami:connect`, `/connect`, `/agami connect reintrospect`, or any other slash form — those don't exist. Phrase guidance as natural language ("say 'reload the schema'") and the connect skill's `when_to_use` will catch it.
+
 You are setting up the agami semantic model for the user's database. Goal: by the end, there is a **strict OSI v0.1.1 model** at `~/.agami/<profile>.yaml`, a seeded examples library at `~/.agami/<profile>-examples.yaml`, and the user has seen one demo query execute end-to-end.
 
 This skill orchestrates four phases:

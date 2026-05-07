@@ -7,6 +7,8 @@ argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
 
 # agami init
 
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** The only working slash command for agami is `/init` (bare). Never tell the user to type `/agami:init`, `/agami:connect`, `/connect`, `/save-correction`, or any other slash form — those don't exist in users' installations. Use natural-language phrasing for everything except `/init`.
+
 You are walking the user through the one-time setup for `agami`. The goal: by the end of this skill, the user has a working `~/.agami/credentials` file, knows which execution tier their machine supports, and has made conscious choices about telemetry and email opt-ins.
 
 This skill is idempotent — running it again with no args verifies state and surfaces any drift (missing creds, wrong file permissions, no tier available, etc.).

@@ -28,13 +28,13 @@ For telemetry payload allowlist: [`shared/telemetry-payload.md`](../../shared/te
 
 ## Invocation conventions
 
-Across Claude Code hosts, **only `/init` is reliably surfaced as a slash command in the autocomplete**. The other agami skills (this one, connect, save-correction) are model-invoked from natural language via their `when_to_use` matching. **Never tell the user to "type `/connect`" or "type `/save-correction`"** — those slash commands aren't dependable. Always phrase guidance as the natural-language trigger:
+**Read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) before suggesting any slash command in chat.** The short version: only `/init` (bare) works as a slash command. **Never** tell the user to type `/agami:init`, `/agami:connect`, `/connect`, `/query-database`, `/save-correction`, or any colon-prefixed `/agami:<X>` form — those don't exist in users' installations.
+
+For everything except `/init`, phrase guidance as natural language and the skill's `when_to_use` matcher routes correctly:
 
 - Re-introspect the schema → "say 'reload the schema'" or "say 'reintrospect my database'"
 - Save a correction → "say 'save this as a correction'" or "say 'remember this'"
 - Ask a data question → just type the question
-
-`/init` IS a reliable slash command and can be referenced directly.
 
 ## Conversation style
 
