@@ -68,9 +68,28 @@ mkdir -p ~/.agami
 chmod 700 ~/.agami
 ```
 
-### 2a — Pick a profile name for the first database (only when no credentials yet)
+### 2a — Ask the database type
 
-Skip this step if `~/.agami/credentials` already exists OR if `AGAMI_DATABASE_URL` is set. Otherwise, ask the user what to name their first database connection. **Use AskUserQuestion** with this exact shape:
+Skip this whole sub-phase if `~/.agami/credentials` already exists OR if `AGAMI_DATABASE_URL` is set. Otherwise, ask the user what kind of database they're connecting to **before** asking for a profile name. The answer determines which placeholder fields go into the template — it's confusing to write a postgres skeleton if the user has a MySQL database.
+
+Use **AskUserQuestion** with this exact shape:
+
+> What kind of database are you connecting to?
+
+Options (mark exactly one Recommended, place it first):
+
+| label | description |
+|---|---|
+| `PostgreSQL (Recommended)` | Postgres, Supabase, Neon, RDS Postgres, Aurora Postgres, Cloud SQL, Timescale. |
+| `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
+| `SQLite` | A local `.db` / `.sqlite` file. |
+| `Paste a connection URL` | If you already have a DSN string (e.g. from Supabase / Neon / Railway dashboards). |
+
+Bind the chosen type to `$DB_TYPE` (one of `postgres` | `mysql` | `sqlite` | `dsn`). The "Paste a connection URL" path generates a `url = ...` placeholder; the user pastes their full DSN into the file directly.
+
+### 2b — Pick a profile name
+
+Now ask what to call this connection:
 
 > What should I call this database connection? You'll use this name to switch between databases later (e.g. `AGAMI_PROFILE=production`).
 
@@ -90,51 +109,82 @@ After the user picks (or types), validate the chosen name:
 - Strip any leading/trailing whitespace; lowercase the input.
 - If invalid, surface a tight error ("name must be lowercase letters/digits/dashes/underscores, 1–32 chars") and re-ask.
 
-Bind this validated name to a variable `$PROFILE_NAME`. The next two sub-phases use it as the section name and the `active_profile` field.
+Bind this validated name to `$PROFILE_NAME`.
 
-### 2b — Write `~/.agami/credentials.example`
+### 2c — Write `~/.agami/credentials.example` (per-DB-type template)
 
-Write `~/.agami/credentials.example` using the **Write tool** with this content. The `[default]` section in the template below is a *placeholder* — substitute it with `[$PROFILE_NAME]` (the validated name from 2a). Keep all field names, indentation, and the comment header verbatim.
+Write `~/.agami/credentials.example` using the **Write tool**. Pick the body **based on `$DB_TYPE` from 2a** and substitute `[$PROFILE_NAME]` for the section header. The shared header (top comment block) is the same for every type; the active section differs.
+
+**Shared header (always written first):**
 
 ```ini
 # ~/.agami/credentials
-# Copy this file to ~/.agami/credentials, fill in your values,
-# and run: chmod 600 ~/.agami/credentials
-#
-# This file holds the connection details for the databases
-# agami can talk to. Each [section] is a named profile.
-# Default profile is [default]. Switch with: AGAMI_PROFILE=<name>
-#
+# Fill in your values and run: chmod 600 ~/.agami/credentials
 # Format reference: plugins/agami/shared/credentials-format.md
-#
-# Two equivalent ways to set up a profile:
-#
-#   (a) Per-field — host, port, database, user, password
-#       (good for local Postgres / self-hosted databases)
-#
-#   (b) DSN-style `url = ...` — paste a connection string
-#       (Supabase / Neon / Railway / RDS / etc.)
-#       Accepts: postgresql://, postgres://, postgresql+asyncpg://,
-#                postgresql+psycopg2://, postgresql+psycopg://,
-#                mysql://, mysql+pymysql://, mariadb://, sqlite:///abs/path.
-#       Query params like ?sslmode=require are honored automatically.
+# Switch profiles with AGAMI_PROFILE=<name>.
+```
 
-[$PROFILE_NAME]   # ← the name the user chose in Phase 2a (e.g. [main], [supabase])
-type     = postgres        # postgres | mysql | sqlite
-host     = localhost
+**If `$DB_TYPE = postgres`**, append:
+
+```ini
+[$PROFILE_NAME]
+type     = postgres
+host     = your-host.example.com         # localhost for a local DB
 port     = 5432
-database = mydb
-user     = myuser
-password = mypassword
+database = your-database-name
+user     = your-username
+password = your-password
+# sslmode = require                       # uncomment for cloud DBs (Supabase / Neon / RDS)
 
-# --- Additional profile examples (uncomment and edit) ---
+# OR — comment out the per-field block above and use a DSN URL instead:
+# url = postgresql://user:pass@host:5432/db
+# url = postgresql+asyncpg://user:pass@host:5432/db   # +driver suffix is stripped
+# Query params like ?sslmode=require are honored automatically.
+```
 
-# [supabase]
-# url     = postgresql://postgres.<project_ref>:<password>@aws-1-<region>.pooler.supabase.com:5432/postgres
-# sslmode = require
+**If `$DB_TYPE = mysql`**, append:
 
-# [neon]
-# url = postgresql://user:pass@ep-cool-darkness.us-east-2.aws.neon.tech/neondb?sslmode=require
+```ini
+[$PROFILE_NAME]
+type     = mysql
+host     = your-host.example.com         # localhost for a local DB
+port     = 3306
+database = your-database-name
+user     = your-username
+password = your-password
+
+# OR — use a DSN URL:
+# url = mysql://user:pass@host:3306/db
+# url = mysql+pymysql://user:pass@host:3306/db
+```
+
+**If `$DB_TYPE = sqlite`**, append:
+
+```ini
+[$PROFILE_NAME]
+type = sqlite
+path = /absolute/path/to/your/database.db
+```
+
+**If `$DB_TYPE = dsn`**, append:
+
+```ini
+[$PROFILE_NAME]
+url = paste-your-connection-string-here
+# Examples:
+#   postgresql://user:pass@host:5432/db
+#   postgresql+asyncpg://postgres.<ref>:<pw>@aws-1-<region>.pooler.supabase.com:5432/postgres
+#   mysql://user:pass@host:3306/db
+#   sqlite:///absolute/path.db
+# +driver suffixes (asyncpg, psycopg2, pymysql) are stripped.
+# Query params like ?sslmode=require are honored.
+```
+
+**Always** finish the file with a small "additional profiles" section so the user can see how to add more later (commented examples; one block, doesn't need to be type-specific):
+
+```ini
+
+# --- Additional profile examples (uncomment, edit, and add) ---
 
 # [staging]
 # type     = postgres
@@ -163,7 +213,7 @@ Then say something like:
 
 If the user asks for help editing it, walk them through the fields per [`shared/credentials-format.md`](../../shared/credentials-format.md).
 
-### 2c — Materialize provider-native auth files (after the user saves credentials)
+### 2d — Materialize provider-native auth files (after the user saves credentials)
 
 Once `~/.agami/credentials` exists with real values (the user has copied the template, filled it in, and `chmod 600`-ed it), invoke the auth-file generator. This writes provider-native auth files (`~/.agami/.pgpass` for postgres profiles, `~/.agami/.mysql.cnf` for mysql profiles) that psql/mysql read silently. **The whole point** is that subsequent skill invocations can run psql/mysql WITHOUT the password appearing in any visible Bash command line:
 

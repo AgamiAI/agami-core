@@ -242,12 +242,23 @@ After 2 retries with no success, stop. Don't loop.
 
 Parse the CSV stdout. Header row = column names. Body rows = data.
 
-Format numeric columns per their `agami.type` and `agami.unit`:
-- `decimal` + `unit: dollars` → `$148.95` (currency formatting, 2 decimals)
-- `decimal` + `unit: percent` → `12.4%`
-- `integer` → `1,234` (commas)
-- `timestamp` / `date` → human-readable (`May 6, 2026, 12:00 PM`)
-- otherwise → as-is
+Format every cell per its column's `agami.type` (and `agami.unit` if present). The same formatting applies to **every** downstream surface — chat markdown table (4d), HTML `table_rows` (4e.iii), AND chart `labels` (4e.iii). Format once here in 3c; downstream phases consume the already-formatted values.
+
+| `agami.type` | `agami.unit` | Format |
+|---|---|---|
+| `decimal` | `dollars` | `$148.95` (currency, 2 decimals, locale grouping) |
+| `decimal` | `percent` | `12.4%` (1 decimal) |
+| `decimal` | (other / none) | `1,234.56` (commas, 2 decimals) |
+| `integer` | — | `1,234` (commas, no decimals) |
+| `date` | — | **`May 6, 2026`** (`MMM D, YYYY`) — never raw ISO `2026-05-06`, never epoch numbers |
+| `timestamp` | — | **`May 6, 2026 3:14 PM`** (`MMM D, YYYY h:mm A`) — never raw ISO with `T` separator, never microsecond precision |
+| `boolean` | — | `Yes` / `No` (or `true` / `false` if the user prefers — read USER_MEMORY) |
+| `string` (with `choice_field`) | — | the choice's display label, not the stored value |
+| `string` (other) | — | as-is |
+
+**Hard rule for dates: never display ISO timestamps like `2026-05-07T15:14:00.000Z`, epoch seconds, or any other machine-format string.** Cell values OR chart-axis labels — both must be human-readable. If the column shows months only (typical for time-series charts grouped by month), use `MMM YYYY` (e.g. `May 2026`); for daily granularity use `MMM D` if all data is in the current year, else `MMM D, YYYY`. The skill is responsible for inferring the right grain from the data.
+
+If the user has stated a date-format preference in `~/.agami/USER_MEMORY.md` (e.g. "use ISO dates" or "use DD/MM/YYYY"), respect that. The defaults above apply only when USER_MEMORY is silent.
 
 If row count > 1000:
 - Truncate display to 1000.
@@ -367,6 +378,14 @@ For each section, build an object:
 ```
 
 When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). The template skips the chart card cleanly.
+
+**Use the formatted values from Phase 3c — not the raw CSV strings.** Specifically:
+
+- `labels` for time-series line charts must be human-readable date labels (`May 2026`, `Q2 2026`, `May 7`, `May 7, 2026`) — NOT raw ISO timestamps like `2026-05-07T15:14:00.000Z` and NOT epoch numbers. The granularity follows the SQL grouping (monthly bucket → `MMM YYYY`, daily → `MMM D` or `MMM D, YYYY`).
+- `labels` for categorical charts use the choice-field display label (e.g. `Closed Won`, not the stored value `closed_won`).
+- `table_rows` cells use the formatted values across the board: `$148.95` not `148.95`, `May 7, 2026 3:14 PM` not `2026-05-07T15:14:00Z`, `Yes` not `true`.
+
+`datasets[].data` is the **only** place raw numeric values belong (Chart.js needs numbers, not formatted strings, to draw the chart). Currency / percent formatting on the chart itself happens via the template's tooltip callbacks, not by passing pre-formatted strings.
 
 The whole report's `SECTIONS_JSON` is a JSON array of these objects.
 
