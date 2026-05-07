@@ -29,9 +29,10 @@ For telemetry payload allowlist: [`shared/telemetry-payload.md`](../../shared/te
 ## Conversation style
 
 - **One question per turn unless they're truly bundled.**
-- **Use AskUserQuestion for every multi-choice prompt** (chart type, save correction, post-install opt-in).
+- **Use AskUserQuestion sparingly** — only when the user must pick before the skill can proceed (large-table HIGH-risk approval, the post-install email opt-in, the demo-query Yes/No/Skip in connect). **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
 - **Insights, not narration** — lead with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
 - **Round numbers in prose**, exact in the table.
+- **Don't echo the SQL in chat prose** — that's enforced as a hard rule in Phase 2. Don't paste the raw Bash CSV — Phase 3.
 
 ---
 
@@ -110,13 +111,19 @@ If the cached tier doesn't work, re-run tier detection per [`init/SKILL.md → P
 
 ## Phase 2: Generate SQL
 
+### HARD RULE — never echo SQL in chat prose
+
+The generated SQL belongs in two places only: (1) the Bash invocation that executes it (which the host shows as a collapsible tool call — outside our control), and (2) the collapsible "SQL" section of the HTML report written in Phase 4. **Never paste, quote, or summarize the SQL in the assistant's narrated text.** No `SELECT ...` lines, no fenced ```sql blocks, no "I'm running this query: ..." prose. Users get the SQL by clicking the SQL details element in the HTML report.
+
+This rule applies to every retry, every fallback, every regenerate. The chat prose stays focused on approach, fetching, and insight.
+
 ### 2a — classify the input
 
 If `$ARGUMENTS` looks like:
 - A question (contains `?` or starts with how/what/show/list/which/count/give/get/find/total/average/top/which) → save it.
 - Empty → ask the user; suggest 2-3 questions from the model's `ai_context.examples` if present, or inferred from `datasets[].description`.
 - Flag-only (`--csv` / `--chart bar`) → re-run the previous query with the flag applied.
-- Follow-up like "make that a chart" → see Phase 4d.
+- Follow-up like "make that a chart" → see Phase 4e.
 
 ### 2b — assemble the prompt for the SQL generator
 
@@ -175,6 +182,10 @@ For each dataset touched by the SQL, look up its `agami.performance_hints`:
 
 ## Phase 3: Execute
 
+### HARD RULE — never paste raw output in chat
+
+The Bash result (CSV stdout, stderr, exit code) is for the skill to parse, not for the user to read. **Never paste the raw CSV / TSV from the Bash result into the assistant's response text.** No "Here's what came back: …", no markdown code-fence dumps of the result. Parse internally, then surface the polished output per Phase 4. The host shows the Bash tool call as a collapsible — that's enough provenance for users who want to dig.
+
 ### 3a — run the SQL
 
 Invoke the tier-specific command from [`shared/connection-reference.md → CLI Connection Commands`](../../shared/connection-reference.md#cli-connection-commands). Wrap in a high-resolution timer to capture latency in ms.
@@ -219,21 +230,55 @@ If row count == 0:
 
 ## Phase 4: Present
 
-### 4a — insight first (in chat)
+The chat reply follows this **strict order**, with NO other content interleaved (no SQL, no Bash output, no "let me know if…" filler):
 
-Lead with one sentence. Don't restate the SQL or the question.
+  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4e HTML report path → 4f Numbered follow-ups → (optional 4g CSV path)
 
-### 4b — markdown table (in chat)
+Each step is short. The whole reply should fit in a typical chat viewport without scrolling.
 
-Right-align numeric columns. Format per Phase 3c. Wide tables (> 8 cols) → vertical layout, warn user.
+### 4a — Approach (one sentence, plain English)
 
-### 4c — Build ONE coherent HTML report (one file, N sections)
+Open with a single sentence describing **how** you'll answer, in plain English. No SQL keywords (`SELECT`, `JOIN`, `GROUP BY`). No table or column names — describe the dimensions in user-language. Examples:
+
+- "I'll group orders by status across the last 30 days and rank by count."
+- "I'll pull total spend per customer and sort to find the top 5."
+- "I'll compare this month's revenue to last month's, broken down by region."
+
+For multi-section reports (broad questions), the approach sentence describes the narrative across all sections: "I'll cover four angles — revenue trend, top customers, order status, and region split."
+
+### 4b — Fetching (one sentence, counts only)
+
+Right after the approach, one sentence about the data we just pulled, in counts and dimensions. Examples:
+
+- "Pulled 6 rows across 4 statuses."
+- "Pulled 247 orders spanning the last 30 days."
+- "Pulled 12 monthly buckets with revenue totals."
+
+For multi-section: "Pulled data for 4 sections (12 + 5 + 6 + 3 rows)."
+
+### 4c — Insight first
+
+One sentence stating the answer. Lead with the most surprising or actionable finding. Examples:
+
+- "**Carol Chen** is the top spender at **$148.95** — about 3x the next customer."
+- "Revenue is up **12% MoM**; the surge came from EU customers."
+- "60% of orders shipped on time this month, up from 48% last month."
+
+For multi-section: a 1–3 sentence executive summary across all sections (the same summary that goes into `REPORT_SUMMARY` for the HTML).
+
+### 4d — Markdown table (single-section reports only)
+
+Render the rows as a GitHub-flavored markdown table. Right-align numeric columns. Format numbers per Phase 3c (commas, currency, percentages, ISO dates). Wide tables (> 8 cols) → vertical layout, with a one-line note "wide table — see HTML for the full grid".
+
+**Multi-section reports skip the table in chat.** The chat already has the insight; the per-section tables live in the HTML report. Multi-section chat output is: approach + fetching + summary + a short bulleted list of section titles + HTML path + 5 follow-ups. No tables in chat.
+
+### 4e — Build ONE coherent HTML report (one file, N sections)
 
 The output is **one self-contained HTML file** at `~/.agami/charts/<ts>.html`, no matter how broad the question is. Broad questions decompose into multiple sub-questions; each sub-question becomes a **section** inside the same file. Each section has its own chart + table + insight + SQL. **Never write multiple HTML files for one user question. Never open multiple browser tabs.**
 
 Skip the report only when the result is a single 1×1 scalar (e.g., `SELECT COUNT(*) FROM orders` returning `42`) — for those, the chat answer is enough.
 
-#### 4c.i — decompose the question into sections
+#### 4e.i — decompose the question into sections
 
 If the user asked something narrow ("top 5 customers by spend"), produce **one** section. Done.
 
@@ -259,7 +304,7 @@ Choose sub-questions that:
 
 When in doubt about how broad the user wants to go, ask via AskUserQuestion before generating: "I can answer this as a focused query or build a 4-section report. Which?"
 
-#### 4c.ii — pick a chart type per section
+#### 4e.ii — pick a chart type per section
 
 For each section's SQL result, read `agami.type` for each result column and pick:
 
@@ -273,7 +318,7 @@ For each section's SQL result, read `agami.type` for each result column and pick
 
 If the user override-says `--chart pie|line|...` for the **whole** report, apply it to every section that supports a chart.
 
-#### 4c.iii — build the SECTIONS_JSON
+#### 4e.iii — build the SECTIONS_JSON
 
 For each section, build an object:
 
@@ -294,7 +339,7 @@ When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). Th
 
 The whole report's `SECTIONS_JSON` is a JSON array of these objects.
 
-#### 4c.iv — assemble the report-level placeholders
+#### 4e.iv — assemble the report-level placeholders
 
 ```text
 REPORT_TITLE_JSON   = JSON-stringified user's original question (e.g., "\"How is our business doing?\"")
@@ -308,14 +353,14 @@ AGAMI_LOGO_LIGHT_TEXT = entire SVG content of shared/agami-logo-light.svg
 
 `REPORT_TITLE_JSON` and `REPORT_SUMMARY_JSON` are JSON-stringified because the template embeds them inside `<script>` (as JS string literals). All other text values inside `SECTIONS_JSON` are also JSON-stringified by `JSON.stringify` of the array — that handles escaping for you.
 
-#### 4c.v — render
+#### 4e.v — render
 
 1. Read [`shared/chart-template.html`](../../shared/chart-template.html).
 2. Read [`shared/agami-logo-dark.svg`](../../shared/agami-logo-dark.svg) and [`shared/agami-logo-light.svg`](../../shared/agami-logo-light.svg). Substitute their full contents into `{{AGAMI_LOGO_DARK_TEXT}}` and `{{AGAMI_LOGO_LIGHT_TEXT}}` respectively.
 3. Substitute the report-level placeholders.
 4. Write the result via the **Write tool** to `~/.agami/charts/<ts>.html`. **One file. No matter how many sections.**
 
-#### 4c.vi — surface in chat
+#### 4e.vi — surface in chat
 
 After writing the file:
 - For a **single-section** report: surface the section's insight + the markdown table (Phases 4a + 4b). End with "Full report at `~/.agami/charts/<ts>.html`."
@@ -323,7 +368,40 @@ After writing the file:
 
 On hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
 
-#### 4c.vii — CSV export (`--csv` or "export this")
+### 4f — Numbered follow-up suggestions (always 5)
+
+End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list. Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
+
+Format exactly:
+
+```
+What next?
+1. <follow-up question 1>
+2. <follow-up question 2>
+3. <follow-up question 3>
+4. <follow-up question 4>
+5. <follow-up question 5>
+
+Reply with a number, or ask anything else.
+```
+
+**Picking the 5 questions** — aim for distinct angles, not 5 variations of the same question:
+
+| Slot | Pattern | Example for "Top 5 customers by spend" |
+|---|---|---|
+| 1 | Drill into the top result | "Drill into Carol Chen's order history" |
+| 2 | Compare across time | "How did this list look 3 months ago?" |
+| 3 | Slice by another dimension | "Top 5 customers by region" |
+| 4 | Inverse / negative angle | "Customers with no orders in the last 90 days" |
+| 5 | Adjacent metric | "Average order value per customer" |
+
+These are templates, not rules — adjust to the schema. If a slot doesn't fit, replace with a more interesting angle. Keep each follow-up under 80 characters.
+
+**When the user is replying to follow-ups**: if the user's next message is a single digit `1`–`5` or a numbered form like `1.` / `1)` / `#1`, treat it as the n-th follow-up from the previous reply. Auto-fill the question text and re-enter Phase 2 with that question. Free-form replies are a fresh question. Genuinely ambiguous replies (`yes`, `do that`) get one short clarifier inline ("which of the 5?") — never via AskUserQuestion.
+
+**`/save-correction` is NOT a follow-up bullet.** When the user expresses dissatisfaction with the answer, the skill suggests `/save-correction` inline (one short sentence) outside the numbered list. The numbered list stays focused on **what to ask next**, not how to fix what we just said.
+
+### 4g — CSV export (`--csv` or "export this")
 
 Even with the HTML report, the user might still want flat CSVs. If they pass `--csv` or say "export this":
 
@@ -336,14 +414,7 @@ mkdir -p ~/.agami/exports
 # write header + rows per section, RFC 4180 escaping
 ```
 
-### 4d — follow-up suggestions
-
-After a successful query, offer 2-3 follow-ups via AskUserQuestion when natural:
-- "Drill into <top result>"
-- "Compare to last month"
-- "Save this as a correction" (only if the user expressed dissatisfaction — don't preempt)
-
-Don't suggest "render a chart" anymore — chart is always rendered (4c). Don't always show follow-ups — only when the question has natural ones.
+Surface the path(s) inline — they don't replace 4f, they appear before it.
 
 ---
 
@@ -367,7 +438,7 @@ Append one line to `~/.agami/query_log.jsonl`:
 
 **Local-only** — never sent. The user owns it.
 
-If the user takes a positive follow-up action (drill-down, export, chart), set `feedback: "good"` retroactively on the previous entry. If they rephrase the same question, set `feedback: "bad"`.
+If the user takes a positive follow-up action — picking one of the 5 numbered follow-ups, requesting an export, drilling into a row — set `feedback: "good"` retroactively on the previous entry. If they rephrase the same question or say something dissatisfied ("that's wrong", "no, I meant…"), set `feedback: "bad"`.
 
 ---
 
