@@ -361,13 +361,36 @@ AGAMI_LOGO_LIGHT_TEXT = entire SVG content of shared/agami-logo-light.svg
 3. Substitute the report-level placeholders.
 4. Write the result via the **Write tool** to `~/.agami/charts/<ts>.html`. **One file. No matter how many sections.**
 
-#### 4e.vi — surface in chat
+#### 4e.vi — auto-open the file in the user's default browser
 
-After writing the file:
-- For a **single-section** report: surface the section's insight + the markdown table (Phases 4a + 4b). End with "Full report at `~/.agami/charts/<ts>.html`."
-- For a **multi-section** report: surface the executive summary + a tight bulleted list of section titles. **Don't** repeat each section's table in the chat. End with "Full report at `~/.agami/charts/<ts>.html` (N sections)."
+Immediately after writing the HTML, run **once**:
 
-On hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
+```bash
+open ~/.agami/charts/<ts>.html
+```
+
+(macOS — substitute `xdg-open` on Linux, `start` on Windows.) The browser launches automatically. The user doesn't have to click anything to see the report.
+
+Failure-tolerant: if `open` exits non-zero (e.g. headless Linux without a default browser), fall through silently — the path is still printed in chat (per 4e.vii) and the user can open it manually.
+
+#### 4e.vii — surface in chat
+
+After writing the file and triggering `open`:
+
+- For a **single-section** report: surface the section's insight + the markdown table (Phases 4c + 4d). End with the chart's path as **plain text** (NOT a markdown link):
+  ```
+  Chart: ~/.agami/charts/20260507-150912.html
+  ```
+- For a **multi-section** report: surface the executive summary + a tight bulleted list of section titles. **Don't** repeat each section's table in the chat. End with:
+  ```
+  Report (N sections): ~/.agami/charts/20260507-150912.html
+  ```
+
+**Do NOT format the path as `[Open chart](file://...)` or any other clickable markdown link.** Some hosts (notably VS Code's Claude Code chat sandbox) only route workspace-relative paths through their click handler; `file://` URLs and absolute paths outside the workspace die silently. A fake-clickable link is worse UX than a plain path the user knows they can `open` from their terminal.
+
+If you genuinely detect that you're running in Claude Desktop (which has a working preview pane via path clicks), you may format the path as ``Open `~/.agami/charts/<ts>.html` `` (backticks, not a link) — Desktop users get the click-to-preview experience naturally.
+
+For hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
 
 ### 4f — Numbered follow-up suggestions (always 5)
 
