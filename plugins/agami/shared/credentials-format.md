@@ -53,6 +53,44 @@ type = sqlite
 path = /Users/me/data/local.db
 ```
 
+### Paste a full DSN (`url = ...`)
+
+If you have a connection string from your database provider — Supabase, Neon, RDS, Railway, etc. — paste it directly into a `url = ...` field and skip the per-field setup. The skill parses it into host / port / user / password / database internally.
+
+```ini
+[default]
+url = postgresql://user:pass@host:5432/dbname
+```
+
+`url` accepts every variation listed below. `+driver` suffixes (used by SQLAlchemy / asyncpg / psycopg2) are stripped — you can paste your app's DSN as-is.
+
+### Supabase
+
+The pooler-mode DSN Supabase shows you (under Project Settings → Database → Connection pooling) usually looks like:
+
+```
+postgresql://postgres.<project_ref>:<password>@aws-1-<region>.pooler.supabase.com:5432/postgres
+```
+
+Drop it into the `url` field. Optionally add `sslmode = require` (Supabase requires SSL; the default `prefer` works too):
+
+```ini
+[default]
+url     = postgresql://postgres.odzuxljstuccrblqcevo:<your-password>@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres
+sslmode = require
+```
+
+If your DSN comes from an app that uses asyncpg or psycopg2 (e.g. `postgresql+asyncpg://...`), paste it as-is — the `+asyncpg` / `+psycopg2` / `+psycopg` driver suffix is recognized and stripped.
+
+### Neon, Railway, Render, RDS, etc.
+
+Same `url = …` shortcut. If the provider's URL has `?sslmode=require` (or other query params), they're parsed and merged into the connection settings — no extra fields needed.
+
+```ini
+[default]
+url = postgresql://user:pass@ep-cool-darkness.us-east-2.aws.neon.tech/neondb?sslmode=require
+```
+
 ## Required fields per `type`
 
 | `type` | Required fields |
@@ -62,6 +100,8 @@ path = /Users/me/data/local.db
 | `sqlite` | `path` |
 
 Optional in all profiles: `schema` (default `public` for Postgres), `sslmode` (Postgres), `ssl` (MySQL).
+
+**Or just use `url = ...`** instead of all individual fields — see the "Paste a full DSN" section below.
 
 ## File permissions (enforced)
 

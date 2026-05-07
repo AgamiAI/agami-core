@@ -177,13 +177,19 @@ v1 supports Postgres + MySQL end-to-end. SQLite works via DuckDB. Other database
 ### PostgreSQL
 ```bash
 # Execute a query and return CSV
-PGPASSWORD="$password" psql -h "$host" -p "$port" -U "$user" -d "$database" -c "$SQL" --csv
+PGPASSWORD="$password" PGSSLMODE="${sslmode:-prefer}" \
+  psql -h "$host" -p "$port" -U "$user" -d "$database" -c "$SQL" --csv
 
 # Execute from a file
-PGPASSWORD="$password" psql -h "$host" -p "$port" -U "$user" -d "$database" -f query.sql --csv
+PGPASSWORD="$password" PGSSLMODE="${sslmode:-prefer}" \
+  psql -h "$host" -p "$port" -U "$user" -d "$database" -f query.sql --csv
 ```
 
-**Security**: Always use `PGPASSWORD` env var, never `-p password` flag (visible in `ps`).
+**Security / SSL**:
+- Always use `PGPASSWORD` env var, never `-p password` flag (visible in `ps`).
+- Set `PGSSLMODE` from the credentials profile's `sslmode` field. Cloud Postgres providers (Supabase, Neon, RDS in many configs) **require** SSL — set `sslmode = require` in `~/.agami/credentials` or use a DSN with `?sslmode=require` and the parser will pick it up. Default is `prefer` which works for both SSL-required and non-SSL servers.
+
+**Supabase pooler**: the SQLAlchemy-style DSN that Supabase shows (`postgresql+asyncpg://...`) is accepted as-is in the `url = ...` credentials field — see [`credentials-format.md → Supabase`](credentials-format.md). The `+asyncpg` driver suffix is stripped before connecting.
 
 ### MySQL / MariaDB
 ```bash

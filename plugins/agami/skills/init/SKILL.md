@@ -80,6 +80,18 @@ If `~/.agami/credentials` does not already exist (and `AGAMI_DATABASE_URL` is un
 # Default profile is [default]. Switch with: AGAMI_PROFILE=<name>
 #
 # Format reference: plugins/agami/shared/credentials-format.md
+#
+# Two equivalent ways to set up a profile:
+#
+#   (a) Per-field — host, port, database, user, password
+#       (good for local Postgres / self-hosted databases)
+#
+#   (b) DSN-style `url = ...` — paste a connection string
+#       (Supabase / Neon / Railway / RDS / etc.)
+#       Accepts: postgresql://, postgres://, postgresql+asyncpg://,
+#                postgresql+psycopg2://, postgresql+psycopg://,
+#                mysql://, mysql+pymysql://, mariadb://, sqlite:///abs/path.
+#       Query params like ?sslmode=require are honored automatically.
 
 [default]
 type     = postgres        # postgres | mysql | sqlite
@@ -90,6 +102,13 @@ user     = myuser
 password = mypassword
 
 # --- Additional profile examples (uncomment and edit) ---
+
+# [supabase]
+# url     = postgresql://postgres.<project_ref>:<password>@aws-1-<region>.pooler.supabase.com:5432/postgres
+# sslmode = require
+
+# [neon]
+# url = postgresql://user:pass@ep-cool-darkness.us-east-2.aws.neon.tech/neondb?sslmode=require
 
 # [staging]
 # type     = postgres
