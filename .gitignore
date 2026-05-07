@@ -22,6 +22,11 @@ node_modules/
 # User-local agami state should NEVER appear in this repo
 .agami/
 
+# Claude Code per-user settings (permissions allowlist, etc.)
+# .claude/settings.json is committed (shared defaults).
+# .claude/settings.local.json is per-user and must NOT be committed.
+.claude/settings.local.json
+
 # Test artifacts
 tests/integration/.tmp/
 tests/integration/*.log
