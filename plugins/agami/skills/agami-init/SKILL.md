@@ -86,18 +86,26 @@ Use **AskUserQuestion** with this exact shape:
 
 > What kind of database are you connecting to?
 
-**No `(Recommended)` marker on this question** — the user picks based on what they actually have, not on a preference. List PostgreSQL first because it's the most common, but the user's choice is purely a fact about their environment.
+**No `(Recommended)` marker on this question** — the user picks based on what they actually have, not on a preference. **Cap at 4 hard options + Other** so AskUserQuestion fits on one screen without the awkward "split into DB type 1 / DB type 2" UX.
 
 | label | description |
 |---|---|
-| `PostgreSQL` | Postgres, Supabase, Neon, RDS Postgres, Aurora Postgres, Cloud SQL, Timescale. |
-| `Redshift` | Amazon Redshift (provisioned cluster or Serverless). Speaks Postgres wire protocol; psql works. Default port 5439, SSL required. |
-| `Snowflake` | Snowflake. Uses `snowsql` CLI or `snowflake-connector-python`. Account identifier instead of host. |
+| `PostgreSQL` | Postgres + everything Postgres-compatible: Supabase, Neon, RDS, Aurora, Cloud SQL, Timescale, and **Amazon Redshift** (Postgres wire protocol — same psql tool, port 5439, SSL required by default). |
 | `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
+| `Snowflake` | Snowflake. Uses `snowsql` CLI or `snowflake-connector-python`. Account identifier instead of host. |
 | `SQLite` | A local `.db` / `.sqlite` file. |
-| `Paste a connection URL` | If you already have a DSN string (e.g. from Supabase / Neon / Railway dashboards). Accepts `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `sqlite:///abs/path` and the `+driver` SQLAlchemy variants. |
+| `Other (Other field)` | Anything else, or paste a DSN string. Accepts `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `sqlite:///abs/path` and the `+driver` SQLAlchemy variants. |
 
-Bind the chosen type to `$DB_TYPE` (one of `postgres` | `redshift` | `snowflake` | `mysql` | `sqlite` | `dsn`). The "Paste a connection URL" path generates a `url = ...` placeholder; the user pastes their full DSN into the file directly.
+Bind the chosen type to `$DB_TYPE` (one of `postgres` | `mysql` | `snowflake` | `sqlite` | `dsn` | `other`).
+
+**Routing the chosen option:**
+
+- `PostgreSQL` → `$DB_TYPE = postgres`, but if the user later enters port `5439` or a hostname matching `*.redshift.*.amazonaws.com`, transparently re-bind to `redshift` (different sslmode default, different port). The `psql` tool works either way.
+- `MySQL`, `Snowflake`, `SQLite` → straight pass-through.
+- `Other` → parse the user's free-form input:
+  - If it parses as a DSN (starts with `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `sqlite://`, etc.) → treat as `dsn`, write `url = ...` in credentials, derive `db_type` from the scheme.
+  - If it's a plain word like `bigquery`, `clickhouse`, `databricks`, `oracle`, `mssql` → tell the user that database isn't supported in v1.1 and point at the v1.2 roadmap. Don't write credentials for an unsupported type.
+  - If it's a free-form description ("I have an internal tool", "MongoDB") → similar — surface "I don't have first-class support for that yet; only Postgres/MySQL/Snowflake/Redshift/SQLite for v1.1." Don't write.
 
 ### 2b — Pick a profile name
 
