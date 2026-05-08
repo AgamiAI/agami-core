@@ -30,7 +30,7 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 ## Conversation style
 
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
-- **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Mark exactly one option `(Recommended)` first.
+- **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. **Use `(Recommended)` only when there's a genuine recommendation.** For fact-of-environment questions ("which database type?", "which schemas should I introspect?"), don't mark any option Recommended — the user picks what they have.
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 
 ---

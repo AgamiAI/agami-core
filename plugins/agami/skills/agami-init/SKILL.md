@@ -16,7 +16,7 @@ This skill is idempotent — running it again with no args verifies state and su
 ## Conversation style
 
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
-- **Use AskUserQuestion for every choice** — never bullet-list options inline. Mark exactly one option `(Recommended)` first.
+- **Use AskUserQuestion for every choice** — never bullet-list options inline. **Use `(Recommended)` only when there's a genuine recommendation** (e.g. "skip telemetry" is a privacy default we'd suggest). Don't mark it for fact-of-environment questions like "what database do you have?" — the user picks what they have, and labeling one option Recommended is misleading.
 - **Keep prompts short** — 2-4 lines per question max.
 - **Plain English over jargon** — for telemetry / privacy, sound like a human.
 
@@ -86,11 +86,11 @@ Use **AskUserQuestion** with this exact shape:
 
 > What kind of database are you connecting to?
 
-Options (mark exactly one Recommended, place it first):
+**No `(Recommended)` marker on this question** — the user picks based on what they actually have, not on a preference. List PostgreSQL first because it's the most common, but the user's choice is purely a fact about their environment.
 
 | label | description |
 |---|---|
-| `PostgreSQL (Recommended)` | Postgres, Supabase, Neon, RDS Postgres, Aurora Postgres, Cloud SQL, Timescale. |
+| `PostgreSQL` | Postgres, Supabase, Neon, RDS Postgres, Aurora Postgres, Cloud SQL, Timescale. |
 | `Redshift` | Amazon Redshift (provisioned cluster or Serverless). Speaks Postgres wire protocol; psql works. Default port 5439, SSL required. |
 | `Snowflake` | Snowflake. Uses `snowsql` CLI or `snowflake-connector-python`. Account identifier instead of host. |
 | `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
