@@ -174,6 +174,34 @@ Options:
 
 In both cases, write to `chmod 600`. Format and content rules: see [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
 
+### Phase 1.5 — optional: data-model document upload
+
+Many users have an existing artifact describing their schema — an ERD, a data dictionary, a "what each table means" Confluence page. Feeding it to the description generator is a big lift on accuracy with zero extra introspect work.
+
+Ask **once**, low-friction:
+
+**AskUserQuestion**:
+
+> Got a data-model document I can read for additional context? Things like an ERD diagram, data dictionary, schema doc, or anything else that explains what your tables are for.
+>
+> Drag-and-drop a file here, or paste a path. **PDF, PNG / JPG, plain text, markdown, or CSV** all work. For Excel or Word docs, save them as PDF first (File → Save As PDF) — it's the fastest way and works in every editor.
+
+Options:
+- `Yes — I'll attach it now (Other field)` — user pastes a path or drags a file into chat.
+- `Skip — no doc to share (Recommended)` — proceed to introspection.
+
+If the user provides a path:
+
+1. Use the `Read` tool against the path. Claude's `Read` handles PDFs (with `pages` for large files), images (multimodal — can see diagrams), markdown, plain text, and CSV natively. No format-specific parsing logic needed in the skill.
+2. If the file is `.xlsx` / `.docx` / another binary office format, surface a one-liner: "I can't read `.xlsx` / `.docx` directly. Save it as PDF (File → Save As PDF) and re-attach, or paste the relevant content as text and I'll use it as-is." Don't block — proceed without the doc.
+3. If the file is huge (> 50 pages PDF or > 100KB markdown), trim to a summary: read the first 20 pages, surface "Loaded the first 20 pages of <name>; let me know if there's a specific section I should focus on." For tabular data (CSV with > 200 rows), keep only the first 50 rows + the header.
+4. Stash the loaded content in a working-memory variable: `$DATA_MODEL_DOC_TEXT` (or for images, the multimodal block).
+5. **Phase 1d's description-generation prompt** receives this content under a labeled heading: `## User-provided data-model document` (placed BEFORE the schema's tables/columns/sample rows so the LLM treats it as a domain prior, similar to ORGANIZATION.md).
+
+The doc is **never written to disk** — it lives only in the description-generation prompt's context, then is discarded. Same privacy posture as the per-table sample rows from Phase 1d.i.
+
+If the user uploads but the file is unreadable (corrupted PDF, unreachable path, etc.), surface "Couldn't read `<path>` — proceeding without it. You can always re-introspect later if you want to retry." Don't block.
+
 ### 1a — list tables (within `selected_schemas` only)
 
 Filter to the `selected_schemas` from Phase 1.3. (System schemas are already filtered by Phase 1.2's discovery query, so they're not in `selected_schemas`.)
@@ -191,13 +219,17 @@ Adapt the `IN (...)` clause for MySQL / Snowflake / SQLite (SQLite always intros
 
 Surface: `Found <N> tables across <K> schema(s).`
 
-### 1b — for each table, pull columns + PK + FK + row count
+### 1b — for each table, pull columns + PK + FK + row count + indexes
 
 Use the per-dialect queries from [`shared/introspect-queries.md`](../../shared/introspect-queries.md).
 
 For each column: capture `name`, `data_type` (raw DB type), nullability. Map to the simple OSI-extension type set (`string | integer | decimal | timestamp | date | boolean`) using the type mapping table at the bottom of `introspect-queries.md`. Keep the raw DB type as `agami.original_type`.
 
-For each table: capture row count from `pg_stat_user_tables` (Postgres) or `information_schema.tables.table_rows` (MySQL). Tables with > 100k rows get a `agami.performance_hints` extension; tables ≤ 100k don't need one.
+For each table:
+- **Row count** from `pg_stat_user_tables` (Postgres) or `information_schema.tables.table_rows` (MySQL). Tables with > 100k rows get a `agami.performance_hints` extension; tables ≤ 100k don't need one.
+- **Indexes** via the index-discovery query (Postgres `pg_indexes`, MySQL `information_schema.statistics`, Snowflake doesn't have traditional indexes — use clustering keys instead, SQLite `PRAGMA index_list`). Capture each index as a list of column names. Skip auto-generated PK indexes (the PK is already in `primary_key`). Persist as `agami.performance_hints.indexes: [[col1], [col2, col3], ...]`.
+  - **Why we capture indexes**: the SQL generator in agami-query-database (Phase 2b) uses this to prefer indexed columns for `WHERE` filters and `JOIN` conditions on large tables. A query that filters on an indexed column runs in milliseconds; the same query on an un-indexed column scans the whole table. The LLM doesn't know which columns are indexed unless we tell it.
+  - **For all tables, not just > 100k rows**: even on smaller tables, knowing which columns are indexed informs join planning. The `agami.performance_hints` extension is created for any table with indexes, even if `estimated_row_count` is small. (Earlier guidance was "only if > 100k" — overruling that here for indexes specifically.)
 
 **Progress narration (Phase F):** print one line per table as it completes, so the user can see the skill working through their schema. Format:
 
@@ -227,6 +259,39 @@ If the database had **zero declared FKs**, run heuristic FK inference per `fk-va
 
 AskUserQuestion: `Add all (Recommended)` / `Add only zero-orphan ones` / `Skip — let me edit by hand later`.
 
+### 1c.5 — detect `agami.choice_field` (low-cardinality scan)
+
+For each candidate column in each introspected dataset, run the low-cardinality detection query from [`shared/introspect-queries.md → Choice-field detection`](../../shared/introspect-queries.md#choice-field-detection-low-cardinality-scan). If the column has ≤ 20 distinct non-null values, capture them as a `choice_field` map under the field's `agami` extension.
+
+**Candidate selection** (apply all):
+
+- `agami.type` is `string` or `integer`
+- Not in the dataset's `primary_key`
+- Not in any FK's `from_columns` (foreign-key values aren't enums even when finite)
+- Column name matches enum-y patterns (`status`, `state`, `type`, `kind`, `category`, `priority`, `tier`, `level`, `mode`, `flag`, `role`, `phase`, `stage`) **OR** the name is ≤ 32 chars and not in the free-text exclusion list (`name`, `description`, `notes`, `comment`, `body`, `content`, `email`, `address`, `url`, `path`, `slug`, `title`, `subject`, `message`)
+
+**For tables with `estimated_row_count > 10_000_000`**, sample first per the introspect-queries doc — don't scan the full column.
+
+**Output.** For each detected choice_field, write into the field's `custom_extensions` JSON:
+
+```yaml
+- name: status
+  expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"type": "string", "choice_field": {"pending": "pending", "shipped": "shipped", "delivered": "delivered", "cancelled": "cancelled"}}}'
+```
+
+Display labels default to the stored value (`label = value`). Don't invent prettier labels — that's a `field_metadata` correction the user can apply later via agami-save-correction.
+
+**Progress narration:** print one line per detected choice_field so the user sees what was found:
+
+```
+[choice_field] public.orders.status — 4 values: pending, shipped, delivered, cancelled
+```
+
+If a candidate column has > 20 distinct values, skip silently. Don't narrate misses.
+
 ### 1d — auto-generate descriptions (per-schema batched, evidence-grounded)
 
 Generate a one-line `description` for **every table and every column** in the selected schemas. Without descriptions, NL→SQL quality drops sharply on large schemas — this pass is mandatory, not optional.
@@ -247,9 +312,10 @@ The sample is **never written to disk and never sent in telemetry.** It lives in
 
 Process schemas one at a time. For each schema, build a prompt with:
 
+- The user-provided data-model document from Phase 1.5 (`$DATA_MODEL_DOC_TEXT`, or multimodal image block if it's a diagram), if present — placed **first** so it acts as the dominant domain prior. Header: `## User-provided data-model document`.
+- The user's `~/.agami/<profile>/ORGANIZATION.md` (if non-empty) — domain context for the database. Header: `## Organization context`.
 - The schema's tables, columns (with types), FKs, choice-field hints
 - The 5 sample rows per table
-- The user's `~/.agami/<profile>/ORGANIZATION.md` (if non-empty) — feeds in as a domain prior
 
 Ask the model to emit, for each table:
 - A 1-line `description` summarizing what the table holds
@@ -281,6 +347,78 @@ If a schema fails validation, the staging file stays at `/tmp/agami-staging-<pro
 - Don't invent business semantics not supported by sample rows (e.g., don't claim a `status` column is "active vs cancelled" if the samples only show `pending`).
 - Don't translate column names ("`amt`" → "amount") — keep descriptions about what the column *means*, not what it's *named*.
 - The user can hand-edit any `~/.agami/<profile>/<schema>.yaml` and the changes will survive future re-introspections (Phase 2 hard rule #8 — preserve descriptions, ai_context, choice_fields, metrics).
+
+### 1e — detect units (`agami.unit`) + currency ask
+
+After descriptions but before metric suggestions, scan numeric fields for unit hints. Three categories of unit can be inferred or asked for:
+
+#### 1e.i — auto-detect (no user prompt)
+
+For each `decimal` or `integer` field, infer unit from:
+
+- **Percent**: column name ends with `_pct`, `_percent`, `_rate`, `_ratio` AND sample values are between 0 and 100 (or 0 and 1). Set `agami.unit: "percent"`.
+- **Duration**: column name ends with `_seconds`, `_sec`, `_secs`, `_ms`, `_milliseconds`, `_minutes`, `_min`, `_hours`, `_hrs`, `_days`. Set `agami.unit: "<seconds|ms|minutes|hours|days>"` matching the suffix.
+- **Bytes**: column name ends with `_bytes`, `_kb`, `_mb`, `_gb`. Set `agami.unit: "<bytes|kb|mb|gb>"`.
+
+These don't need user input — the unit is unambiguous from naming convention.
+
+#### 1e.ii — currency ask (one prompt per profile)
+
+For each numeric field whose name suggests a money amount — `amount`, `price`, `cost`, `revenue`, `total`, `subtotal`, `fee`, `tax`, `discount`, `paid`, `balance`, `salary`, `wage`, `payment`, `charge`, or anything ending in `_usd`, `_eur`, `_gbp`, etc. (the suffix is the answer; skip the prompt for those) — collect the field into a list of currency-candidates.
+
+If the candidate list is non-empty AND there's no per-column suffix giving the answer, ask the user **once per profile** (not per column):
+
+**AskUserQuestion**:
+
+> I detected `<N>` numeric fields that look like money amounts: `<table.field>, <table.field>, ...`. **What currency are these in?**
+>
+> Pick one — I'll annotate every field with the right unit so charts and totals format correctly.
+
+Options: `USD` / `EUR` / `GBP` / `JPY` / `INR` / `Other (Other field — e.g., AUD, CAD, CHF)` / `Mixed — different fields use different currencies, I'll edit by hand`
+
+If the user picks a single currency, set `agami.unit: "<CURRENCY_CODE>"` (lowercase ISO 4217: `usd`, `eur`, `gbp`, etc.) on every detected money column. If "Mixed", skip — no auto-annotation, surface a one-liner ("OK, leaving currency fields unannotated. Edit by hand or save as a correction later.")
+
+#### 1e.iii — record and continue
+
+The unit annotation is part of `agami.unit` per the existing extension allowlist; no schema changes needed. Phase 4 (chart rendering) and Phase 3c (cell formatting) in agami-query-database already use `agami.unit` for currency / percent / duration formatting.
+
+### 1f — suggest metrics (user-confirmed only — never auto-write)
+
+agami-query-database treats `metrics[]` as canonical aggregations the user wants reused across queries (e.g., `total_revenue` is `SUM(orders.amount)` filtered to non-cancelled). Metrics drift fast across domains, so we don't auto-detect — but we do **suggest** plausible ones during introspection so the user can pick.
+
+#### 1f.i — generate candidates
+
+Per schema, propose **3–7 candidate metrics** based on:
+
+- Numeric fields named like aggregates (`amount`, `revenue`, `cost`, `quantity`, `count`) — propose a SUM metric and (if the field has multiple decimals) an AVG metric.
+- Tables that look fact-shaped (have FKs to dimension tables, time field, numeric measures) — propose `count_<table>` (`COUNT(*) FROM <table>`) as a baseline metric.
+- Time fields — for tables with timestamps, propose a `daily_<count|sum>_<x>` metric grouped by day, especially if the table looks high-traffic (`> 100k` rows).
+- ORGANIZATION.md hints — if it defines vocabulary like "MRR" or "active user", propose a metric matching that definition.
+- The user-uploaded data-model document (Phase 1.5) — if it lists KPIs by name, propose those.
+
+For each candidate, include:
+- A snake_case `name` (e.g. `total_revenue`, `count_orders`, `avg_order_value`)
+- The aggregation expression in ANSI_SQL referencing `<dataset>.<field>`
+- A 1-line description
+- 2-3 synonyms
+
+#### 1f.ii — confirm with the user, batch-style
+
+**AskUserQuestion** with the candidate list as multi-select:
+
+> I'd suggest adding these metrics to your model — they're reusable aggregations the skill will use whenever you ask about them by name (or synonym). Pick which ones make sense for your domain.
+
+Options: one option per candidate (pre-checked when the candidate is grounded in ORGANIZATION.md or the data-model doc; un-checked otherwise). Plus `None — skip metric suggestions for now (Recommended if you're not sure)`.
+
+For each metric the user picks: write into the schema yaml's `metrics[]`. Validate before write (the per-schema yaml must still pass OSI). If a metric fails validation (e.g., references a non-existent column), drop it silently and surface a one-liner: "Skipped `<name>` — couldn't validate against your model."
+
+If the user picks "None", write nothing. They can add metrics later via agami-save-correction (`new_metric` correction kind).
+
+#### 1f.iii — what NOT to suggest
+
+- Don't suggest metrics that depend on choice_field literals you didn't detect (e.g., don't propose `MRR = SUM(price) WHERE plan='subscription'` if you never saw `plan='subscription'` in the choice_field detection).
+- Don't suggest more than 7 candidates — the AskUserQuestion gets cluttered. Pick the highest-confidence ones.
+- Don't propose metrics that span multiple schemas in the multi-schema case unless `cross_schema_relationships` already wires the join. Cross-schema metrics belong in `index.yaml` (future) — for now, scope each metric to a single schema.
 
 ---
 
@@ -434,22 +572,27 @@ If the validator can't be run for any reason (missing Python, missing dependenci
 
 ## Phase 4: Seed prompt examples
 
-Generate **8–15** NL→SQL examples covering this distribution:
+Generate **10–15** NL→SQL examples covering this distribution. The bias is intentionally toward multi-table joins — that's where NL→SQL gets hard, and seed examples covering 3- and 4-table joins lift answer quality on real questions far more than another COUNT(*) example.
 
-| # | Pattern | Example shape |
-|---|---------|---------------|
-| 1 | Count rows | "How many orders are there?" |
-| 2 | Filter + count | "How many orders are still pending?" |
-| 3 | GROUP BY | "Orders by status" |
-| 4 | Date range | "Orders placed last month" |
-| 5 | Top N | "Top 5 customers by order count" |
-| 6 | JOIN (2 tables) | "Total spend per customer" |
-| 7 | JOIN (3 tables) | "Top 10 products by revenue" |
-| 8 | Boolean filter | "Active customers only" |
-| 9 | Combined | "Top 5 active customers by spend last 30 days" |
-| 10 | Aggregate | "Average order size" |
+| # | Pattern | Min tables | Example shape |
+|---|---------|---|---------------|
+| 1 | Count rows | 1 | "How many orders are there?" |
+| 2 | Filter + count | 1 | "How many orders are still pending?" |
+| 3 | GROUP BY | 1 | "Orders by status" |
+| 4 | Date range | 1 | "Orders placed last month" |
+| 5 | Top N (single table) | 1 | "Top 5 statuses by order count" |
+| 6 | JOIN (2 tables) | 2 | "Total spend per customer" |
+| 7 | JOIN (3 tables) | 3 | "Top 10 products by revenue" |
+| 8 | **JOIN (3 tables) + filter** | **3** | **"Top 10 customers by spend on shipped orders this quarter"** |
+| 9 | **JOIN (4 tables)** | **4** | **"Revenue per category per region last 90 days"** (orders → order_items → products → categories) |
+| 10 | **JOIN (4 tables) + GROUP BY two dimensions** | **4** | **"Order count by customer-segment and product-category last quarter"** |
+| 11 | Boolean filter | 1 | "Active customers only" |
+| 12 | Aggregate | 1 | "Average order size" |
+| 13 | Combined (filter + JOIN + GROUP BY + ORDER BY) | 2-3 | "Top 5 active customers by spend last 30 days" |
 
-Skip patterns that don't fit the user's schema (e.g., no time field → no "last month" example).
+**Hard rule: at least 3 examples must touch ≥ 3 tables, and at least 1 must touch ≥ 4 tables** — when the user's schema supports it (i.e., the relationships graph is deep enough). If the schema only has 2 tables connected by FKs, skip patterns 7-10 and document why in the staging log: "schema only has 2 connected tables; skipped multi-join examples".
+
+Skip patterns that don't fit the user's schema (e.g., no time field → no "last month" example; no boolean column → no #11). The 3- and 4-table patterns require enough relationships in the graph to traverse — use the relationships from Phase 1c when picking which tables to join.
 
 ### 4a — generate
 

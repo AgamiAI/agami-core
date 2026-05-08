@@ -249,11 +249,13 @@ Full spec: [`plugins/agami/shared/user-memory-format.md`](../plugins/agami/share
 ```json
 {
   "schema_version": 1,
-  "email_optin": true,
-  "email": "alice@example.com",
+  "github_star_asked": true,
+  "github_star_response": "yes_opened",
   "ts": "2026-05-07T18:30:00Z"
 }
 ```
+
+`github_star_response` is one of `yes_opened` (user clicked through to GitHub), `maybe_later`, or `already_starred`. Existence of the file is the never-re-prompt gate — we ask exactly once, after the user's first successful query.
 
 ### `~/.agami/.telemetry-queue.jsonl`
 

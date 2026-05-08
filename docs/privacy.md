@@ -28,11 +28,10 @@ These never leave your machine, opt-in or not:
 - **Schema content** — table names, column names, descriptions, sample data
 - **Hostnames, IPs, paths beyond `~/.agami/`**
 
-There is no skill code that reads any of these and ships them anywhere. You can grep the source — every outbound `curl` in the SKILL.md files goes to either:
+There is no skill code that reads any of these and ships them anywhere. You can grep the source — the only outbound `curl` in the SKILL.md files goes to:
 - `analytics.agami.ai/v1/events` (telemetry, opt-in only) — sends only the 11 allowlisted fields
-- `api.hsforms.com/.../<form-id>` (HubSpot form, opt-in only) — sends an email address you typed
 
-That's it.
+That's it. The post-install GitHub-star ask opens `https://github.com/AgamiAI/LiteBi` in your browser — agami doesn't observe whether you actually star, and no email or other identifying data is ever sent.
 
 ---
 
@@ -177,17 +176,14 @@ We do not log IP addresses alongside `install_id`. IPs hit the rate limiter and 
 
 ---
 
-## Email opt-in (separate from telemetry)
+## GitHub-star ask (separate from telemetry)
 
-After your first successful query, the `agami-query-database` skill asks once whether you want occasional product-update emails. **Default is skip.** This is a separate question from the analytics opt-in — you can opt into one and not the other.
+After your first successful query, the `agami-query-database` skill asks once whether you want to star us on GitHub. **No email collection, no list, no follow-up** — just a one-click ask. Three response options:
 
-If you opt in with an email, the skill POSTs to a HubSpot form at `api.hsforms.com/submissions/v3/integration/submit/<HUB_ID>/<FORM_GUID>` with:
+- **Yes — open GitHub now** — opens `https://github.com/AgamiAI/LiteBi` in your default browser. You decide whether to actually star.
+- **Maybe later** — closes the prompt; we never ask again.
+- **Already starred — thank you!** — closes the prompt; we never ask again.
 
-- `email`
-- `utm_source` (always `skill_install`)
-- `host_preference` (`claude-code-cli` / etc.)
-- `signup_timestamp`
+Nothing about your response leaves your machine. agami can't observe whether you starred (we have no signal-collection on the GitHub side, and a star is public anyway). The decision lives in `~/.agami/.optins` so we don't ask twice. To re-prompt, delete that file and ask any agami skill a question.
 
-Your email lives in HubSpot under our standard subscriber list (subject to HubSpot's privacy policy). Unsubscribe at any time via the link in any email we send. We never sell or share email addresses.
-
-State persists at `~/.agami/.optins`. To re-prompt (e.g., to change your email), delete that file and ask any agami skill a question.
+This is a separate question from the analytics opt-in — you can opt into one and not the other.

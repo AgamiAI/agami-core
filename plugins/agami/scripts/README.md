@@ -29,10 +29,10 @@ Exit codes are documented in `execute_sql.py`'s docstring. The skill routes non-
 |---|---|---|
 | `sample_introspect_postgres.py` | Connects to Postgres, dumps `information_schema` to YAML matching [`schema-reference.md`](../shared/schema-reference.md) | `psycopg2-binary` |
 | `sample_introspect_mysql.py` | Same, for MySQL | `pymysql` |
-| `sample_render_chart.py` | Substitutes `chart-template.html` placeholders programmatically | stdlib only |
+| `render_chart.py` | Substitutes `chart-template.html` placeholders programmatically. Used by the agami-query-database SKILL to produce HTML reports (Phase 4e). | stdlib only |
 | `sample_send_telemetry.py` | Builds + POSTs a telemetry payload, enforcing the allowlist from [`telemetry-payload.md`](../shared/telemetry-payload.md) | stdlib only |
 
-## Install dependencies (only if you want tier 3)
+## Install dependencies (only if you want the Python driver path)
 
 ```bash
 pip install psycopg2-binary pymysql
@@ -48,12 +48,11 @@ python sample_introspect_postgres.py \
   --host localhost --port 5432 --db shop --user agami_test --password agami_test_pw \
   --out ~/.agami/shop.yaml
 
-# Render a chart
-python sample_render_chart.py \
+# Render a chart (single section)
+python render_chart.py \
   --title "Top customers" \
-  --type bar \
-  --labels '["Carol Chen","Dave Davis","Bob Brown"]' \
-  --datasets '[{"label":"Spend","data":[148.95,93.96,45.0]}]' \
+  --summary "" \
+  --section '{"title":"Top customers by spend","insights":"Carol Chen leads at $148.95.","chart_type":"bar","labels":["Carol Chen","Dave Davis","Bob Brown"],"datasets":[{"label":"Spend","data":[148.95,93.96,45.0]}],"table_headers":["Customer","Spend"],"table_rows":[["Carol Chen",148.95],["Dave Davis",93.96],["Bob Brown",45.0]]}' \
   --out ~/.agami/charts/top-customers.html
 
 # Send a telemetry event (only if you've opted in)

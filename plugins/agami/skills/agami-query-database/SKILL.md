@@ -15,7 +15,7 @@ This skill orchestrates:
 2. **Generate SQL** — compose a prompt from the OSI structure (datasets/fields/relationships/metrics + Agami extensions for type info / choice fields / performance hints), produce one SQL statement, run safety checks.
 3. **Execute** — run via the chosen tool; auto-retry on classified errors; risk-assess large-table queries.
 4. **Present** — markdown table; CSV via `--csv` or "export this"; Chart.js HTML via `--chart` or "make that a chart".
-5. **Log + post-install opt-in + telemetry** — write `~/.agami/query_log.jsonl`, prompt for email opt-in once after first success, flush telemetry queue.
+5. **Log + post-install GitHub-star ask + telemetry** — write `~/.agami/query_log.jsonl`, ask the user (once, after first successful query) to star us on GitHub, flush telemetry queue.
 
 For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
 For Agami's `custom_extensions`: [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
@@ -40,7 +40,7 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 ## Conversation style
 
 - **One question per turn unless they're truly bundled.**
-- **Use AskUserQuestion sparingly** — only when the user must pick before the skill can proceed (large-table HIGH-risk approval, the post-install email opt-in, the demo-query Yes/No/Skip in agami-connect). **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
+- **Use AskUserQuestion sparingly** — only when the user must pick before the skill can proceed (large-table HIGH-risk approval, the post-install GitHub-star ask, the demo-query Yes/No/Skip in agami-connect). **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
 - **Insights, not narration** — lead with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
 - **Round numbers in prose**, exact in the table.
 - **Don't echo the SQL in chat prose** — that's enforced as a hard rule in Phase 2. Don't paste the raw Bash CSV — Phase 3.
@@ -214,7 +214,7 @@ Users can override the threshold by writing `always use full-schema mode` (or si
 
 Build the prompt in this order:
 
-1. **System** — "You are a SQL generator. Write one valid SQL statement for `<DB_TYPE>` (dialect: ANSI_SQL with `<DB_TYPE>`-specific tweaks per dialect-rules.md) that answers the user's question. Output ONLY the SQL, no commentary."
+1. **System** — "You are a SQL generator. Write one valid SQL statement for `<DB_TYPE>` (dialect: ANSI_SQL with `<DB_TYPE>`-specific tweaks per dialect-rules.md) that answers the user's question. Output ONLY the SQL, no commentary. **When filtering or joining on a large table** (`estimated_row_count > 100k`), prefer columns that appear in that table's `Indexes:` list — index lookups are orders of magnitude faster than full scans. For composite indexes `(a, b, c)`, only the left-prefix is index-eligible (`WHERE a = ?` uses the index, `WHERE b = ?` doesn't)."
 
 2. **Schema context** — render the merged OSI model as compact text the LLM can reason over. The shape matters:
    ```
@@ -224,6 +224,9 @@ Build the prompt in this order:
        Synonyms: <ai_context.synonyms>
        Fields:
          <field.name>  type=<agami.type>  expr=<expression>  [time]  [choices: a,b,c]
+       Indexes (prefer these for WHERE / JOIN on this dataset):
+         (col1)
+         (col1, col2)         # composite — left-prefix matches
        Performance hints: <if present, list recommended_filters and selective_filters>
 
    Relationships:
@@ -569,26 +572,33 @@ When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). Th
 
 The whole report's `SECTIONS_JSON` is a JSON array of these objects.
 
-#### 4e.iv — assemble the report-level placeholders
+#### 4e.iv — render via `render_chart.py` (do NOT inline-substitute through the Write tool)
 
-```text
-REPORT_TITLE_JSON   = JSON-stringified user's original question (e.g., "\"How is our business doing?\"")
-REPORT_SUMMARY_JSON = JSON-stringified executive summary, 1-3 sentences across all sections
-                      (omit / empty string if there's only 1 section — section's own insight covers it)
-GENERATED_AT        = ISO8601 UTC timestamp
-SECTIONS_JSON       = the JSON array built in 4c.iii
-AGAMI_LOGO_DARK_TEXT  = entire SVG content of shared/agami-logo-dark.svg
-AGAMI_LOGO_LIGHT_TEXT = entire SVG content of shared/agami-logo-light.svg
+The HTML report is produced by a Python helper that reads the template + SVG logos once and substitutes placeholders. **Do not Read the template + Write the rendered HTML through the LLM** — that path costs ~30KB of token I/O per query and is the dominant slowness in chart rendering.
+
+Instead:
+
+1. Build the sections JSON file at `/tmp/agami-sections-<ts>.json`. The shape is the JSON array built in 4e.iii — a list of section objects (`title`, `insights`, `chart_type`, `labels`, `datasets`, `table_headers`, `table_rows`, `sql`).
+
+2. Run the renderer:
+
+```bash
+ts=$(date +%Y%m%d-%H%M%S)
+mkdir -p ~/.agami/charts
+python3 "$AGAMI_PLUGIN_ROOT/scripts/render_chart.py" \
+  --title "$USER_QUESTION" \
+  --summary "$EXECUTIVE_SUMMARY" \
+  --sections-file "/tmp/agami-sections-$ts.json" \
+  --out "$HOME/.agami/charts/$ts.html"
 ```
 
-`REPORT_TITLE_JSON` and `REPORT_SUMMARY_JSON` are JSON-stringified because the template embeds them inside `<script>` (as JS string literals). All other text values inside `SECTIONS_JSON` are also JSON-stringified by `JSON.stringify` of the array — that handles escaping for you.
+The helper reads `shared/chart-template.html` + the two logo SVGs once, validates each section, runs `template.replace(...)` for each placeholder, and writes the file. Stdlib only — no extra deps.
 
-#### 4e.v — render
+3. Delete the temp sections file: `rm -f /tmp/agami-sections-<ts>.json`.
 
-1. Read [`shared/chart-template.html`](../../shared/chart-template.html).
-2. Read [`shared/agami-logo-dark.svg`](../../shared/agami-logo-dark.svg) and [`shared/agami-logo-light.svg`](../../shared/agami-logo-light.svg). Substitute their full contents into `{{AGAMI_LOGO_DARK_TEXT}}` and `{{AGAMI_LOGO_LIGHT_TEXT}}` respectively.
-3. Substitute the report-level placeholders.
-4. Write the result via the **Write tool** to `~/.agami/charts/<ts>.html`. **One file. No matter how many sections.**
+`--summary` is the executive summary used for multi-section reports; for single-section reports pass an empty string and the section's own insight covers it. `--title` is the user's original question.
+
+If the user pinned a chart type via `--chart bar` (etc.), the LLM still chooses per section — the flag from 2a is hint, not override. Multi-section reports often need different chart types per section.
 
 #### 4e.vi — auto-open the file in the user's default browser
 
@@ -711,28 +721,40 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 ---
 
-## Phase 6: Post-install email opt-in (interrupt the follow-ups, not the answer)
+## Phase 6: Post-install GitHub-star ask (interrupt the follow-ups, not the answer)
 
-The email opt-in is a one-time ask after the user's first successful query. **The order matters:** the answer has to be readable, the consent ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the consent is answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
+A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 
 Sequence:
 
 1. Render the answer (Phase 4a–4e: approach, fetching, insight, table, chart path).
-2. If `~/.agami/.optins` does not exist AND the query just succeeded: **surface the email opt-in modal NOW**, before Phase 4f's follow-up bullets. Use `AskUserQuestion`:
-   > Quick one — first query worked. **Want occasional updates from us about agami?**
-   > ~once a month, not on a sales list.
+2. If `~/.agami/.optins` does not exist AND the query just succeeded: **surface the GitHub-star ask NOW**, before Phase 4f's follow-up bullets. Use `AskUserQuestion`:
 
-   Options: `Email me updates` (capture email next, POST to HubSpot form) / `Skip (Recommended)`.
+   > Quick one — first query worked. **If this was useful, would you star us on GitHub?**
+   >
+   > It's the only signal we have that we're on the right track. No email, no list, no follow-up — just a click. github.com/AgamiAI/LiteBi
+
+   Options:
+   - `Yes — open GitHub now` — runs `open https://github.com/AgamiAI/LiteBi` (macOS), `xdg-open` (Linux), `start` (Windows) and surfaces a one-line "Thanks — opening GitHub. Star is in the top-right when you get there." (Failure-tolerant: if the open command fails, fall through with the URL printed in chat.)
+   - `Maybe later (Recommended)` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/LiteBi if you change your mind."
+   - `Already starred — thank you!` — surface "🙏 thanks for the early support" and write `.optins`.
 3. **Wait for the user to answer the modal.** That's the end of this turn. Do NOT emit the 5 follow-up bullets yet.
-4. Next turn: process the email decision (write `~/.agami/.optins`). Then show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line like "Thanks — saved your preference. Now, where next?" before the numbered list.
+4. Next turn: process the decision (write `~/.agami/.optins`). Then show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.
 
-If `~/.agami/.optins` already exists, skip the consent step entirely and emit the 5 follow-ups in the same turn as the answer (Phase 4f as today).
+If `~/.agami/.optins` already exists, skip the ask entirely and emit the 5 follow-ups in the same turn as the answer (Phase 4f as today).
 
-If the user picks `Email me updates`: ask once for the email address (a follow-up `AskUserQuestion`); validate it looks like an email; POST to `https://api.hsforms.com/submissions/v3/integration/submit/<HUB_ID>/<FORM_GUID>` with `email`, `utm_source: skill_install`, `host_preference`, `signup_timestamp`. Surface "Thanks — we'll be in touch occasionally." Then proceed to the follow-ups on the same or next turn.
+`~/.agami/.optins` shape (chmod 600):
 
-Write `~/.agami/.optins` after the decision is captured (existence is the never-re-prompt gate).
+```json
+{
+  "schema_version": 1,
+  "github_star_asked": true,
+  "github_star_response": "yes_opened" | "maybe_later" | "already_starred",
+  "ts": "2026-05-08T15:30:00Z"
+}
+```
 
-> **HUB_ID and FORM_GUID values get baked in before launch. Until then, this is a placeholder.**
+The existence of the file (with `github_star_asked: true`) is the never-re-prompt gate. We deliberately don't track whether the user actually starred — that's their call and we can't observe it from a local skill anyway.
 
 ---
 
@@ -772,4 +794,4 @@ End with:
 | HIGH-risk query without filter | Block, AskUserQuestion |
 | Chart for empty result | Skip the chart, just show empty-result message |
 | Telemetry POST fails | Silent — keep events in queue, retry next flush |
-| HubSpot POST fails | Tell user "Thanks" anyway, save consent locally |
+| Browser open fails for the GitHub-star ask | Tell user "Couldn't open the browser — the link is github.com/AgamiAI/LiteBi". Save the response anyway. |

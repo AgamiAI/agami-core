@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sample report renderer.
+HTML report renderer for agami-query-database.
 
 Reads plugins/agami/shared/chart-template.html, substitutes every placeholder
 (including the inline agami logos from shared/agami-logo-{dark,light}.svg),
@@ -8,12 +8,16 @@ and writes a self-contained HTML file containing one or more sections. Each
 section has its own chart + table + insight + SQL — but they all live in
 the same file. Stdlib only.
 
-The agami skill itself does this via the Read + Write tools — no script needed.
-This file exists so users with their own automation can import or copy it.
+The agami-query-database SKILL invokes this script in Phase 4e instead of
+doing template substitution through the LLM's Read + Write tools — that
+path costs ~30KB of token I/O per query (template + two SVG logos) and is
+the dominant slowness in chart rendering. Calling this script keeps the
+LLM's job to producing a small JSON sections file, and the cheap shell
+substitution lives here.
 
 Usage (single section — backwards compatible with the old chart):
 
-    python sample_render_chart.py \\
+    python render_chart.py \\
         --title "Top customers" \\
         --summary "Carol Chen leads at $148.95, ahead of the next customer by 3x." \\
         --section '{
@@ -30,7 +34,7 @@ Usage (single section — backwards compatible with the old chart):
 
 Usage (multi-section narrative):
 
-    python sample_render_chart.py \\
+    python render_chart.py \\
         --title "How is the business doing?" \\
         --summary "Revenue up 12% QoQ; Carol Chen is the top customer; pending orders growing." \\
         --sections-file my-report.json \\

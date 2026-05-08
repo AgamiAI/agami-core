@@ -1,6 +1,6 @@
 ---
 name: agami-init
-description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), writes a credentials.example template, detects which database tool is available (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver), and walks the user through one-time opt-in prompts for anonymous usage stats and email updates. Re-run any time to verify state, switch profiles, or change opt-in choices."
+description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), writes a credentials.example template, and detects which database tool is available (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver). Re-run any time to verify state, switch profiles, or change telemetry preference."
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami', wants to add or switch a database connection, or asks to change their telemetry / email preferences. Auto-invoked by the connect and query-database skills if the .agami directory or credentials file is missing."
 argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
 ---
@@ -434,10 +434,10 @@ After writing, `chmod 600 ~/.agami/.config`.
 
 ## Phase 4: Deferred opt-ins (no prompts here)
 
-`init` does not ask for telemetry or email opt-in. Both are asked later, when the user has felt the value of the skill:
+`agami-init` does not ask for telemetry or any other opt-in. Both are asked later, when the user has felt the value of the skill:
 
-- **Telemetry consent** — asked by `agami-connect/SKILL.md` after the demo query succeeds. Asking at `init` time is too early; the user hasn't seen anything work yet.
-- **Email updates** — asked by `agami-query-database/SKILL.md` after the user's first real successful query.
+- **Telemetry consent** — asked by `agami-connect/SKILL.md` after the demo query succeeds. Asking at install time is too early; the user hasn't seen anything work yet.
+- **GitHub star** — asked by `agami-query-database/SKILL.md` after the user's first real successful query. No email collection, no list — just a one-click ask.
 
 Don't do anything in this phase. Just mention in the closing message below that the user will be asked once about each (separately) after the first interaction.
 

@@ -41,7 +41,7 @@
       "Bash(python3 ~/.claude/plugins/litebi/agami/scripts/setup_pgauth.py)",
       "Bash(python3 ~/.claude/plugins/litebi/agami/scripts/validate_semantic_model.py)",
       "Bash(python3 ~/.claude/plugins/litebi/agami/scripts/build_duckdb_attach.py)",
-      "Bash(python3 ~/.claude/plugins/litebi/agami/scripts/sample_render_chart.py)",
+      "Bash(python3 ~/.claude/plugins/litebi/agami/scripts/render_chart.py)",
       "Bash(open ~/.agami/charts/*.html)",
       "Bash(date -u)",
       "Bash(date +%s)",

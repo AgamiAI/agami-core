@@ -395,6 +395,47 @@ PRAGMA index_info('{index_name}');
 
 ---
 
+## Choice-field detection (low-cardinality scan)
+
+For columns that look enum-shaped (small distinct value count), capture all values + their counts as `agami.choice_field`. Persisted in the schema yaml so every future query uses the right literals (`status='shipped'` not `status='Shipped'` not `is_shipped=true`).
+
+**Candidate columns** — only scan columns matching all of:
+
+- Type is `string` or `integer` (skip floats, dates, timestamps, blobs)
+- NOT in `primary_key` and NOT in any FK's `from_columns`
+- Column name suggests enum (matches `status`, `state`, `type`, `kind`, `category`, `priority`, `tier`, `level`, `mode`, `flag`, `role`, `phase`, `stage`) OR is at most 32 chars and not obviously a free-text name (`name`, `description`, `notes`, `comment`, `body`, `content`, `email`, `address`, `url` are excluded)
+
+**Detection query** (Postgres/MySQL/Snowflake — same shape; quote per dialect):
+
+```sql
+SELECT "{column}", COUNT(*) AS cnt
+FROM "{schema}"."{table}"
+WHERE "{column}" IS NOT NULL
+GROUP BY "{column}"
+ORDER BY cnt DESC
+LIMIT 21;
+```
+
+The `LIMIT 21` is the trick: if the result has ≤ 20 rows, the column is enum-like and we capture all values. If it has 21 rows, distinct count > 20 and we skip — it's not a choice_field.
+
+**For very large tables** (`estimated_row_count > 10_000_000`), sample first to keep the scan cheap:
+
+- Postgres: `TABLESAMPLE BERNOULLI(1)` before the GROUP BY
+- Snowflake: `SAMPLE (10000 ROWS)` after `FROM`
+- MySQL: no native sampling — limit the scan to a recent slice via `LIMIT 100000` on the inner subquery, with a note that very-rare values may be missed
+- SQLite: `LIMIT 100000` similar
+
+If sampling is used, the captured choice_field is **best-effort** — the user can hand-edit if a rare value is missing.
+
+**Output mapping.** The display label defaults to the stored value (label = value). Cleaning up labels (`SHIPPED` → `Shipped`) is the user's job via hand-edit or `agami-save-correction` `field_metadata` correction. The skill never invents labels.
+
+```yaml
+# example output
+custom_extensions:
+  - vendor_name: COMMON
+    data: '{"agami": {"type": "string", "choice_field": {"pending": "pending", "shipped": "shipped", "delivered": "delivered", "cancelled": "cancelled"}}}'
+```
+
 ## Sample rows (for Phase C — auto-generated descriptions)
 
 For each table, the skill fetches up to 5 sample rows for use as evidence when auto-generating descriptions:
@@ -425,11 +466,12 @@ For each new database (or when the user says "re-introspect"):
    d. Pull row-count estimate (Postgres `pg_stat_user_tables` / MySQL `table_rows` / SQLite count if cheap).
    e. Pull indexes.
    f. Pull 5 sample rows (Phase C — auto-generated descriptions).
-4. Build the per-schema yaml entries per [`schema-reference.md`](schema-reference.md).
-5. After all tables: validate FKs via live `LEFT JOIN` orphan checks (see [`fk-validation.md`](fk-validation.md)) — drop any FK with high orphan ratio.
-6. Validate the model end-to-end (directory-mode `validate_semantic_model.py --directory`).
-7. Write `~/.agami/<profile>/index.yaml` + every `<schema>.yaml`.
-8. Hand off to the seed-examples step.
+4. **Detect `agami.choice_field`** — for each candidate column (per heuristic above), run the low-cardinality scan and capture values when distinct count ≤ 20.
+5. Build the per-schema yaml entries per [`schema-reference.md`](schema-reference.md).
+6. After all tables: validate FKs via live `LEFT JOIN` orphan checks (see [`fk-validation.md`](fk-validation.md)) — drop any FK with high orphan ratio.
+7. Validate the model end-to-end (directory-mode `validate_semantic_model.py --directory`).
+8. Write `~/.agami/<profile>/index.yaml` + every `<schema>.yaml`.
+9. Hand off to the seed-examples step.
 
 The skill executes each query via the chosen tool (native CLI / DuckDB / Python driver) and parses CSV / TSV output. No driver-specific calls.
 
