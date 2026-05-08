@@ -95,7 +95,7 @@ Use predictable alias patterns:
 | Temporal | `year`, `month_start`, `quarter_start`, `week_start` | `DATE_TRUNC('month', date) AS month_start` |
 | Day of week | `day_of_week`, `day_of_week_label` | |
 | Choice labels | `FIELDNAME_label` | `priority_label`, `status_label` |
-| Counts | Must end with `_count` | `incident_count`, `user_count` |
+| Counts | Must end with `_count` and describe what's being counted. **Never** use bare `n`, `N`, `cnt`, or `count` — they render as un-readable column headers. | `incident_count`, `user_count`, `applicant_count` (NOT `n` / `cnt` / `count`) |
 | Amounts | Must end with `_amount` | `total_revenue_amount` |
 | Percentages | Must end with `_percent` or `_percentage` | `growth_percentage` |
 

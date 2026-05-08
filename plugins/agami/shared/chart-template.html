@@ -198,10 +198,15 @@
       transition: transform 120ms ease;
     }
     details.sql[open] > summary::before { transform: rotate(90deg); }
-    .sql pre {
+    .sql-wrap {
+      position: relative;
       margin-top: 12px;
+    }
+    .sql pre {
+      margin: 0;
       background: var(--code-bg);
       padding: 14px 16px;
+      padding-right: 80px;  /* leave room for the Copy button */
       border-radius: 8px;
       overflow-x: auto;
       white-space: pre;
@@ -209,6 +214,29 @@
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
       font-size: 13px;
       line-height: 1.55;
+    }
+    .sql-copy {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      padding: 4px 10px;
+      background: var(--card);
+      color: var(--muted);
+      border: 1px solid var(--border, rgba(255,255,255,0.12));
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: color 120ms ease, border-color 120ms ease;
+    }
+    .sql-copy:hover {
+      color: var(--fg);
+      border-color: var(--accent, #4dabf7);
+    }
+    .sql-copy:active {
+      transform: translateY(1px);
     }
     footer {
       margin-top: 32px;
@@ -418,11 +446,38 @@
         sectionEl.appendChild(tableCard);
       }
 
-      // SQL
+      // SQL — collapsible <details> with a Copy button + multi-line <pre>
       if (sec.sql) {
         const det = el('details', { class: 'sql card' });
         det.appendChild(el('summary', { text: 'SQL' }));
-        det.appendChild(el('pre', { text: sec.sql }));
+
+        // Copy button — copies the raw SQL to clipboard, briefly shows "Copied"
+        const wrap = el('div', { class: 'sql-wrap' });
+        const btn = el('button', { class: 'sql-copy', text: 'Copy' });
+        btn.type = 'button';
+        btn.addEventListener('click', () => {
+          const sql = sec.sql || '';
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(sql).then(
+              () => { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); },
+              () => { btn.textContent = 'Copy failed'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); }
+            );
+          } else {
+            // Fallback for older browsers — select-text in the <pre>
+            const range = document.createRange();
+            range.selectNodeContents(pre);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            try { document.execCommand('copy'); btn.textContent = 'Copied!'; }
+            catch (e) { btn.textContent = 'Select all + ⌘C'; }
+            setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+          }
+        });
+        wrap.appendChild(btn);
+        const pre = el('pre', { text: sec.sql });
+        wrap.appendChild(pre);
+        det.appendChild(wrap);
         sectionEl.appendChild(det);
       }
 

@@ -390,14 +390,34 @@ Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
 - **NULL-safe division** via `NULLIF(denominator, 0)`.
 - **`agami.type` consistency** — if the SQL applies a numeric aggregate (`SUM`, `AVG`) to a field whose `agami.type` is `string` or `boolean`, refuse and regenerate. Type info exists for a reason.
 
-### 2d — risk assessment for large tables
+### 2d — risk assessment + time estimate for large tables
 
 For each dataset touched by the SQL, look up its `agami.performance_hints`:
 
 - `estimated_row_count > 1_000_000` AND no WHERE clause matches a `recommended_filters[].column`:
-  → **HIGH risk**. Surface a banner: "This query scans `<dataset>` (~<row_count>) without a date filter. Add a date range, or proceed anyway?" AskUserQuestion: `Add a filter` / `Proceed anyway` / `Cancel`.
+  → **HIGH risk**. Surface a banner before executing: "This query scans `<dataset>` (~<row_count>) without a date filter. Estimated time: <est>. Add a date range, or proceed anyway?" AskUserQuestion: `Add a filter` / `Proceed anyway` / `Cancel`.
 - `100k–1M` rows with no recommended filter → **MEDIUM**. Note in response footer; proceed.
 - Otherwise → **LOW**. Proceed silently.
+
+**Time estimate (announced BEFORE Phase 3 execution).** Long-running queries kill the user's confidence — they don't know if the skill is hung or actually working. Before running any non-LOW query, surface a one-liner with the rough wall-clock estimate so they can wait without anxiety:
+
+```
+Running this against ~12M rows in <dataset> — estimated 30–90s. I'll narrate when results land.
+```
+
+Estimation table (rough, calibrated to common Postgres / Snowflake shapes — adjust as needed from the latency log over time):
+
+| Largest scanned dataset | With indexed filter (`WHERE` matches `agami.performance_hints.indexes`) | Without indexed filter (full scan) |
+|---|---|---|
+| < 100k rows | < 1s | < 2s |
+| 100k–1M | 1–5s | 5–30s |
+| 1M–10M | 5–15s | 30–120s |
+| 10M–100M | 15–60s | **2–10 min** — ALWAYS warn even if filter is present |
+| > 100M | 30–120s | **> 10 min** — block as HIGH risk; offer to add filter or sample |
+
+Snowflake-specific: add 5–30s on top of any estimate for warehouse spin-up if the warehouse has been idle (the query log can detect "first query in this session" → assume cold). Federation (Phase 2b.federation) doubles or triples estimates due to network round-trips — surface "this federated query may take 30–120s" before running, regardless of estimated_row_count.
+
+If the estimate exceeds 30s, also surface: "Cancel anytime — Ctrl+C in CLI, or just send another message." The user should know they're not trapped waiting.
 
 ---
 
@@ -432,19 +452,41 @@ After 2 retries with no success, stop. Don't loop.
 
 Parse the CSV stdout. Header row = column names. Body rows = data.
 
+**Sanitize column headers before display.** SQL aliasing slips happen — bare `n`, `cnt`, single-letter columns, `?column?` (Postgres unaliased), and shouty all-uppercase Snowflake names are common. Apply this header transform **once** before any rendering surface (4d markdown, 4e HTML, chart axis labels):
+
+| Raw header | Display header | Why |
+|---|---|---|
+| `n`, `N`, `cnt`, `CNT` | `Count` | Bare counts are unreadable; "Count" is universal |
+| `?column?` (Postgres unaliased), `_col0`, `_col1` | Drop the column entirely from the visible output (parse warning to log: "unaliased column in result; SQL generator should always alias") |
+| Single uppercase word (Snowflake default — `STATUS`, `AMOUNT`) | `Status`, `Amount` (title-case the word, lowercase trailing letters) |
+| Snake_case (`order_count`, `customer_name`) | Title-case with spaces (`Order Count`, `Customer Name`) — except when ending in a unit (`_amount` → `_amount` raw is OK if unit shows in the header parens, like `Avg Outstanding (INR)`) |
+| Already title-case or sentence-case | Leave as-is |
+
+The header transform is purely cosmetic — the underlying alias stays in the SQL and the `tables_used` log. Don't rename the column in the result data; only its rendered label.
+
 Format every cell per its column's `agami.type` (and `agami.unit` if present). The same formatting applies to **every** downstream surface — chat markdown table (4d), HTML `table_rows` (4e.iii), AND chart `labels` (4e.iii). Format once here in 3c; downstream phases consume the already-formatted values.
 
 | `agami.type` | `agami.unit` | Format |
 |---|---|---|
-| `decimal` | `dollars` | `$148.95` (currency, 2 decimals, locale grouping) |
+| `decimal` / `integer` | `usd`, `dollars` | `$148.95` (always show `$`, 2 decimals, locale grouping) |
+| `decimal` / `integer` | `eur` | `€148.95` |
+| `decimal` / `integer` | `gbp` | `£148.95` |
+| `decimal` / `integer` | `jpy` | `¥148` (no decimals — JPY has no minor unit) |
+| `decimal` / `integer` | `inr` | `₹2,162,087` (Indian Rupee symbol; for amounts > 100k optionally use `2.16 Cr` / `21.6 L` if USER_MEMORY says "use Indian numbering") |
+| `decimal` / `integer` | `cad` | `CA$148.95` (or `$148.95` if locale is Canadian) |
+| `decimal` / `integer` | `aud` | `A$148.95` |
+| `decimal` / `integer` | `chf` | `CHF 148.95` (no symbol convention; show code + space) |
+| `decimal` / `integer` | other ISO 4217 code | `<UPPERCASE_CODE> <number>` — show the code as a prefix (`SEK 148.95`, `BRL 148.95`). Never strip the unit silently. |
 | `decimal` | `percent` | `12.4%` (1 decimal) |
 | `decimal` | (other / none) | `1,234.56` (commas, 2 decimals) |
-| `integer` | — | `1,234` (commas, no decimals) |
+| `integer` | (no currency unit) | `1,234` (commas, no decimals) |
 | `date` | — | **`May 6, 2026`** (`MMM D, YYYY`) — never raw ISO `2026-05-06`, never epoch numbers |
 | `timestamp` | — | **`May 6, 2026 3:14 PM`** (`MMM D, YYYY h:mm A`) — never raw ISO with `T` separator, never microsecond precision |
 | `boolean` | — | `Yes` / `No` (or `true` / `false` if the user prefers — read USER_MEMORY) |
 | `string` (with `choice_field`) | — | the choice's display label, not the stored value |
 | `string` (other) | — | as-is |
+
+**Hard rule for currency:** if the field has a currency `agami.unit`, show the symbol or code in **every** cell value — never omit it because the column header already mentions the currency. The user's screenshot showed bare `2,162,087` in an "Avg Outstanding (INR)" column; the cell should read `₹2,162,087`. Headers can drop redundant unit (the column header `Avg Outstanding` is enough when every cell is `₹...`), but cells should always carry the symbol so a screenshot or copy-paste of a single cell stays unambiguous.
 
 **Hard rule for dates: never display ISO timestamps like `2026-05-07T15:14:00.000Z`, epoch seconds, or any other machine-format string.** Cell values OR chart-axis labels — both must be human-readable. If the column shows months only (typical for time-series charts grouped by month), use `MMM YYYY` (e.g. `May 2026`); for daily granularity use `MMM D` if all data is in the current year, else `MMM D, YYYY`. The skill is responsible for inferring the right grain from the data.
 
@@ -616,15 +658,26 @@ If the user pinned a chart type via `--chart bar` (etc.), the LLM still chooses 
 
 #### 4e.vi — auto-open the file in the user's default browser
 
-Immediately after writing the HTML, run **once**:
+Immediately after writing the HTML, try to launch the browser. **Real-world testing has shown the chart often doesn't auto-open** — the host's permission cache may not include the `open` command pattern, the path may have an unexpected character, or the user is in a headless environment. Treat the open call as best-effort, not load-bearing — the path printed in 4e.vii is the contract.
+
+**Run a multi-command fallback chain** in one Bash invocation. The host typically caches the first successful pattern, so subsequent queries skip straight to it:
 
 ```bash
-open ~/.agami/charts/<ts>.html
+chart="$HOME/.agami/charts/<ts>.html"
+( command -v open    >/dev/null 2>&1 && open "$chart" ) || \
+( command -v xdg-open >/dev/null 2>&1 && xdg-open "$chart" ) || \
+( command -v start    >/dev/null 2>&1 && start "$chart" ) || \
+( command -v cmd      >/dev/null 2>&1 && cmd /c start "" "$chart" ) || \
+echo "agami: couldn't auto-open the chart — open manually: $chart"
 ```
 
-(macOS — substitute `xdg-open` on Linux, `start` on Windows.) The browser launches automatically. The user doesn't have to click anything to see the report.
+Surface the outcome explicitly in chat (don't let it disappear into the bash collapsible):
 
-Failure-tolerant: if `open` exits non-zero (e.g. headless Linux without a default browser), fall through silently — the path is still printed in chat (per 4e.vii) and the user can open it manually.
+- **Open succeeded** (exit 0, no fallback message printed) — surface in chat: `✓ Chart opened in your browser. (Path: ~/.agami/charts/<ts>.html)`
+- **Fallback printed** (the `agami: couldn't auto-open` line) — surface: `Couldn't auto-open the chart in this environment. Open it yourself: ~/.agami/charts/<ts>.html`
+- **First time the user runs a query in this host** — `open` may prompt for permission. The shipped `.claude/settings.json` allowlists `Bash(open ~/.agami/charts/*.html)` precisely so this prompt doesn't fire, but if the user's local settings override or strip that, they'll see a one-time approval modal. Tell them in chat: "First-run permission prompt — approve `open` and the chart will pop up. Future queries skip the prompt."
+
+If the user reports "the chart never opens", check (a) the path printed in chat exists on disk, (b) `command -v open` returns 0 in their host, (c) their `.claude/settings.json` includes the allowlist. The skill cannot fix mode-blocked hosts on its own; the path-in-chat fallback is the universal-truth surface.
 
 #### 4e.vii — surface in chat
 
@@ -644,6 +697,19 @@ After writing the file and triggering `open`:
 If you genuinely detect that you're running in Claude Desktop (which has a working preview pane via path clicks), you may format the path as ``Open `~/.agami/charts/<ts>.html` `` (backticks, not a link) — Desktop users get the click-to-preview experience naturally.
 
 For hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
+
+### 4e.5 — GitHub-star ask (one-time, gates Phase 4f)
+
+**This step is required between 4e and 4f.** Do not emit the 5 follow-up bullets in 4f without first running this check.
+
+```bash
+test -f ~/.agami/.optins
+```
+
+- **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
+- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. The full ask + handling logic is documented in [Phase 6 below](#phase-6-post-install-github-star-ask-interrupt-the-follow-ups-not-the-answer) — but the trigger lives here, in Phase 4e.5, because if it lives only in Phase 6 (which appears textually after Phase 4f) the LLM hits Phase 4f first and the ask never fires.
+
+The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la ~/.agami/.optins` will show whether the file exists, and `rm ~/.agami/.optins` re-arms the prompt for the next query.
 
 ### 4f — Numbered follow-up suggestions (always 5)
 
@@ -735,7 +801,9 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 ---
 
-## Phase 6: Post-install GitHub-star ask (interrupt the follow-ups, not the answer)
+## Phase 6: Post-install GitHub-star ask (full spec — triggered from Phase 4e.5)
+
+**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (between 4e and 4f) — the textual order of phases here is misleading because the ask must run *between* 4e and 4f, not after Phase 5. If you read straight through Phase 4f → 5 → 6 the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
 
 A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 
@@ -750,7 +818,7 @@ Sequence:
 
    Options:
    - `Yes — open GitHub now` — runs `open https://github.com/AgamiAI/LiteBi` (macOS), `xdg-open` (Linux), `start` (Windows) and surfaces a one-line "Thanks — opening GitHub. Star is in the top-right when you get there." (Failure-tolerant: if the open command fails, fall through with the URL printed in chat.)
-   - `Maybe later (Recommended)` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/LiteBi if you change your mind."
+   - `Maybe later` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/LiteBi if you change your mind." (No `(Recommended)` marker — we'd genuinely prefer "Yes" if the user found it useful, but no marker on any of the three options keeps the ask non-pushy.)
    - `Already starred — thank you!` — surface "🙏 thanks for the early support" and write `.optins`.
 3. **Wait for the user to answer the modal.** That's the end of this turn. Do NOT emit the 5 follow-up bullets yet.
 4. Next turn: process the decision (write `~/.agami/.optins`). Then show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.

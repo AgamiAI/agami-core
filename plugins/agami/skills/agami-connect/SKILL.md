@@ -87,7 +87,7 @@ Introspecting can take a while, especially against cloud DBs. Tell the user **be
 | `postgres` (cloud — Supabase / Neon / RDS) | 15–60 seconds | Network round-trip per query, plus FK validation join checks. |
 | `mysql` | 10–30 seconds | Similar to postgres. |
 | `redshift` | 30–120 seconds | Cloud + Redshift's metadata can be slow to return. |
-| **`snowflake`** | **60–180 seconds** | Cold warehouse spin-up + per-table SHOW commands + EXPLAIN-validation against the live warehouse. Sometimes longer for accounts with many schemas. |
+| **`snowflake`** | **2–10 minutes** | Cold warehouse spin-up (often the dominant cost), per-table SHOW commands, EXPLAIN-validation against the live warehouse, plus the FK-validation join checks. Accounts with many schemas or large warehouses can push past 10 minutes — narrate per-table progress so the user can see it's working, not stuck. |
 
 Surface a one-liner with **per-step duration estimates** so the user can tell the skill apart from a hang at any moment, not just the first:
 
@@ -216,7 +216,7 @@ Ask **once**, low-friction:
 
 Options:
 - `Yes — I'll attach it now (Other field)` — user pastes a path or drags a file into chat.
-- `Skip — no doc to share (Recommended)` — proceed to introspection.
+- `Skip — no doc to share` — proceed to introspection. (No `(Recommended)` marker — sharing a doc genuinely improves accuracy when you have one; it's a fact-of-environment question, not a default we'd push.)
 
 If the user provides a path:
 
@@ -416,7 +416,7 @@ agami-query-database treats `metrics[]` as canonical aggregations the user wants
 
 #### 1f.i — generate candidates
 
-Per schema, propose **3–7 candidate metrics** based on:
+Per schema, propose **at most 4 candidate metrics** (cap is hard — AskUserQuestion's multi-select fits about 4 options + Other on one screen; more than that triggers the "Metrics / More metrics" tab split that confuses users into thinking they need to click another tab to confirm). Pick the highest-confidence 4 from these signals:
 
 - Numeric fields named like aggregates (`amount`, `revenue`, `cost`, `quantity`, `count`) — propose a SUM metric and (if the field has multiple decimals) an AVG metric.
 - Tables that look fact-shaped (have FKs to dimension tables, time field, numeric measures) — propose `count_<table>` (`COUNT(*) FROM <table>`) as a baseline metric.
@@ -436,7 +436,9 @@ For each candidate, include:
 
 > I'd suggest adding these metrics to your model — they're reusable aggregations the skill will use whenever you ask about them by name (or synonym). Pick which ones make sense for your domain.
 
-Options: one option per candidate (pre-checked when the candidate is grounded in ORGANIZATION.md or the data-model doc; un-checked otherwise). Plus `None — skip metric suggestions for now (Recommended if you're not sure)`.
+Options: one option per candidate (pre-checked when the candidate is grounded in ORGANIZATION.md or the data-model doc; un-checked otherwise). Plus `Other (Other field)` for "describe a metric I want — e.g. 'MRR = SUM(price) where plan=subscription'". The user types a free-form metric description and the skill drafts the SQL + adds it. **No "None / skip" option** — leaving every candidate unchecked and submitting is the implicit skip.
+
+**Hard cap: 4 candidate options + Other (5 total).** Above that, the AskUserQuestion modal splits across tabs ("Metrics" / "More metrics") with a confusing "Already answered above" entry. If you've identified more than 4 high-confidence candidates, surface only the top 4 and tell the user inline: "I had 3 more metric ideas (`<name>`, `<name>`, `<name>`). Say 'add the X metric' anytime and I'll wire it via save-correction."
 
 For each metric the user picks: write into the schema yaml's `metrics[]`. Validate before write (the per-schema yaml must still pass OSI). If a metric fails validation (e.g., references a non-existent column), drop it silently and surface a one-liner: "Skipped `<name>` — couldn't validate against your model."
 
@@ -445,7 +447,7 @@ If the user picks "None", write nothing. They can add metrics later via agami-sa
 #### 1f.iii — what NOT to suggest
 
 - Don't suggest metrics that depend on choice_field literals you didn't detect (e.g., don't propose `MRR = SUM(price) WHERE plan='subscription'` if you never saw `plan='subscription'` in the choice_field detection).
-- Don't suggest more than 7 candidates — the AskUserQuestion gets cluttered. Pick the highest-confidence ones.
+- Don't suggest more than 4 candidates per schema — the AskUserQuestion splits across tabs above that. Pick the highest-confidence ones; mention the rest in chat prose for the user to add later via save-correction.
 - Don't propose metrics that span multiple schemas in the multi-schema case unless `cross_schema_relationships` already wires the join. Cross-schema metrics belong in `index.yaml` (future) — for now, scope each metric to a single schema.
 
 ---
@@ -680,14 +682,30 @@ Pick **one** example from Phase 4 that:
 2. Returns ≤ 20 rows so it displays cleanly.
 3. Is unambiguously interesting (a "top N", a "by category" breakdown, a recency filter).
 
-Tell the user what you picked and why. Show the generated SQL. Execute via the chosen tool. Render result as a markdown table.
+**Demo flow (announce → execute → render → open → ask):**
 
-Then **AskUserQuestion**:
+1. **Announce the natural-language question first**, before any SQL runs. The user should see "Running a demo: '<the NL question>'" before the bash output appears. Otherwise they see SQL execute with no context for why.
+
+   ```
+   Running a demo so you can verify the skill works end-to-end:
+
+   "<the chosen NL question, e.g. 'Top 10 customers by spend last 30 days'>"
+   ```
+
+2. **Execute via the chosen tool.** Same Phase 3 invocation as agami-query-database — psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`. Wrap in a timer so latency can surface in the closing line.
+
+3. **Render the full HTML report via `render_chart.py`** — same flow as agami-query-database Phase 4e. Don't stop at a markdown table; the demo should show the user the actual chart-and-table report they'll get for every future query, including auto-formatted dates / currency, the chart, the SQL section, and the agami logo. Without this, the user doesn't know the chart UX exists until their first real query.
+
+4. **Run `open <path>` (or `xdg-open` / `start` per OS) on the rendered HTML** so the user's browser pops up with the report. This is the moment the skill's value lands. If `open` exits non-zero, surface the path as plain text in chat so the user can open it manually — but DO NOT skip the open call entirely.
+
+5. **Then** AskUserQuestion. The user has the chart in their browser AND the markdown table in chat — both surfaces are visible when they answer.
 
 > Does this result look right?
-> - **Yes (Recommended)** — confirms the example, marks it `confirmed: true` in `<artifacts_dir>/<profile>/examples.yaml`
-> - **No** — opens the correction flow: ask the user what's wrong, take their corrected SQL, route through the agami-save-correction skill (don't say "/agami-save-correction" to the user — phrase it as "let me know what's wrong and I'll save it as a correction")
+> - **Yes** — confirms the example, marks it `confirmed: true` in `<artifacts_dir>/<profile>/examples.yaml`
+> - **No** — opens the correction flow: I'll ask what's wrong, take your corrected SQL, and save it via agami-save-correction
 > - **Skip** — moves on, doesn't change the example
+
+(No `(Recommended)` marker — the user picks based on whether the result looks right, which is a fact-of-result, not a default we'd push.)
 
 Branch:
 - **Yes** → set `confirmed: true` and `confirmed_at: <ISO>` on the example.
@@ -713,11 +731,13 @@ If `~/.agami/.config` already has an `analytics_consent` field set (true or fals
 
 Otherwise, use **AskUserQuestion** with this exact question and three options. The text matters — read it back to yourself before sending. Do not paraphrase the "what we send / never send" lists.
 
-> **You just saw agami work end-to-end. Help us improve it by sending anonymous usage stats?**
+> **Before you start asking your own questions — would you be open to sending anonymous usage stats?**
+>
+> Helps us prioritize which databases / hosts / error patterns to fix first. (Default is skip.)
 >
 > What we send:
 > - Counts of installs, queries, errors (no content)
-> - Database type (postgres/mysql/sqlite), OS, which host (Claude Code / Cowork)
+> - Database type (postgres/mysql/sqlite/snowflake/redshift), OS, which host (Claude Code / Cowork)
 > - Latency percentiles
 > - A random install ID — not tied to you
 >
@@ -726,7 +746,7 @@ Otherwise, use **AskUserQuestion** with this exact question and three options. T
 > - Your hostname, paths, credentials
 > - Anything we couldn't read out loud at a conference
 >
-> You can change your mind any time.
+> You can change your mind any time by editing `~/.agami/.config`.
 
 Options:
 - `Yes (Recommended)` — "Send anonymous usage stats. Helps us prioritize fixes."

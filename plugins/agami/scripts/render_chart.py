@@ -80,6 +80,47 @@ def _validate_section(sec: dict, idx: int) -> None:
         raise ValueError(f"section {idx}: table_rows must be a list of lists")
 
 
+def _format_sql(sql: str) -> str:
+    """Pretty-print a SQL string for display in the chart's SQL section.
+
+    Tries sqlglot first (best results — proper indentation, keyword case,
+    line breaks at clause boundaries). Falls back to a small heuristic
+    formatter if sqlglot isn't installed: insert newlines before common
+    top-level clause keywords. Either way, returns a multi-line string
+    that's readable when wrapped in <pre>.
+
+    The original SQL passes through unchanged if it's already multi-line
+    (heuristic: contains a newline) — assume the caller knew what they
+    were doing.
+    """
+    if not isinstance(sql, str) or not sql.strip():
+        return sql
+    if "\n" in sql:
+        return sql
+
+    try:
+        import sqlglot
+        # pretty=True formats with indentation; dialect=None means generic ANSI
+        return sqlglot.transpile(sql, pretty=True)[0]
+    except Exception:
+        pass
+
+    # Heuristic fallback: break before every top-level clause keyword.
+    # Not as pretty as sqlglot but still much better than one line.
+    import re
+    keywords = [
+        "SELECT", "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY",
+        "LIMIT", "OFFSET", "UNION ALL", "UNION", "INTERSECT", "EXCEPT",
+        "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "OUTER JOIN",
+        "FULL JOIN", "CROSS JOIN", "JOIN",
+        "WITH", "ON",
+    ]
+    out = sql
+    for kw in keywords:
+        out = re.sub(rf"\s+{kw}\s+", f"\n{kw} ", out, flags=re.IGNORECASE)
+    return out.strip()
+
+
 def render(
     *,
     title: str,
@@ -90,6 +131,12 @@ def render(
         raise ValueError("sections must be a non-empty list")
     for i, sec in enumerate(sections):
         _validate_section(sec, i)
+
+    # Format SQL in every section before serializing.
+    sections = [
+        {**sec, "sql": _format_sql(sec["sql"])} if isinstance(sec.get("sql"), str) else sec
+        for sec in sections
+    ]
 
     template = TEMPLATE_PATH.read_text()
     logo_dark_svg = LOGO_DARK_PATH.read_text()
