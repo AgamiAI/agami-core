@@ -1,25 +1,36 @@
 # `~/.agami/USER_MEMORY.md` — User memory format
 
-Free-form Markdown file holding user-specific preferences, policies, and domain knowledge that don't belong in the OSI semantic model. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
+Free-form Markdown file holding **cross-database user preferences and policies** that should apply no matter which profile the user connects to. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
 
-This is **separate** from the auto-memory file at `~/.claude/projects/<workspace>/memory/MEMORY.md` (Claude Code's auto-memory, which is host-managed and project-scoped). USER_MEMORY.md is **agami-managed**, lives alongside `credentials` and `<profile>.yaml`, and persists across hosts (CLI, Cowork, Desktop) the same way credentials do.
+This is **separate** from the auto-memory file at `~/.claude/projects/<workspace>/memory/MEMORY.md` (Claude Code's auto-memory, which is host-managed and project-scoped). USER_MEMORY.md is **agami-managed**, lives alongside `credentials` and the per-profile directories, and persists across hosts (CLI, Cowork, Desktop) the same way credentials do.
 
-## What goes in here
+USER_MEMORY.md is also **separate from `~/.agami/<profile>/ORGANIZATION.md`**:
 
-- **Default filters** the user always wants applied (e.g. "exclude test users where email matches `%@example.com`")
-- **Domain vocabulary** that isn't naturally in the schema or `ai_context` synonyms (e.g. "MRR" = `SUM(price) WHERE plan_type = 'subscription'`)
+| File | Scope | Examples |
+|---|---|---|
+| `~/.agami/USER_MEMORY.md` | **Cross-database** preferences (one global file) | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
+| `~/.agami/<profile>/ORGANIZATION.md` | **Per-database** domain context (one per profile) | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
+
+The skill loads both on every query. USER_MEMORY answers *how should I display / filter results, no matter which database*; ORGANIZATION.md answers *what does the data mean for this specific database*. They don't overlap.
+
+## What goes in here (USER_MEMORY)
+
+- **Default filters** the user always wants applied across every database (e.g. "exclude test users where email matches `%@example.com`")
 - **Display preferences** (currency formatting, date format, "always show top 10 not top 5")
-- **Hard avoids** (don't query the `_audit` schema; never include cancelled rows)
+- **Hard avoids that apply broadly** (don't query rows where `is_test = true`)
+
+If the preference is database-specific (e.g. "in this finance DB, always join orders to invoices"), it belongs in the OSI model or in `ORGANIZATION.md`, not here.
 
 ## What does NOT go in here
 
 - **Connection details** → `~/.agami/credentials`
-- **Schema knowledge** (table descriptions, FK relationships, column types, choice fields, metrics) → `~/.agami/<profile>.yaml` (OSI semantic model)
-- **Specific question→SQL examples** → `~/.agami/<profile>-examples.yaml` (few-shot library)
-- **Telemetry consent / install ID / tier choice** → `~/.agami/.config`
+- **Schema knowledge** (table descriptions, FK relationships, column types, choice fields, metrics) → `~/.agami/<profile>/<schema>.yaml` (OSI semantic model)
+- **Domain vocabulary specific to one database** ("MRR means…", "gold tier means…") → `~/.agami/<profile>/ORGANIZATION.md`
+- **Specific question→SQL examples** → `~/.agami/<profile>/examples.yaml` (few-shot library)
+- **Telemetry consent / install ID / connection-method choice** → `~/.agami/.config`
 - **Email opt-in state** → `~/.agami/.optins`
 
-`save-correction/SKILL.md` classifies each correction and routes the knowledge to the right file. A `user_preference` correction lands here. Other kinds land elsewhere (per the table in save-correction).
+`save-correction/SKILL.md` classifies each correction and routes the knowledge to the right file. A `user_preference` correction lands here. An `org_context` correction lands in ORGANIZATION.md. Other kinds land in the per-schema yamls (per the table in save-correction).
 
 ## Default seed (written by `init/SKILL.md` on first run)
 

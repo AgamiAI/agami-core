@@ -28,6 +28,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 from validate_semantic_model import (  # noqa: E402
     ALLOWED_AGAMI_TYPES,
     validate,
+    validate_directory,
     validate_with_warnings,
 )
 
@@ -429,3 +430,185 @@ def test_validate_with_warnings_returns_two_lists():
     errors, warnings = validate_with_warnings(minimal_valid_model())
     assert isinstance(errors, list)
     assert isinstance(warnings, list)
+
+
+# --- Directory mode (per-schema layout) ------------------------------------
+
+def _schema_yaml(profile: str, schema_name: str, datasets: list[dict]) -> dict:
+    """Build a standalone OSI doc for one schema."""
+    return {
+        "version": "0.1.1",
+        "semantic_model": [
+            {
+                "name": profile,
+                "description": f"{schema_name} schema",
+                "custom_extensions": [
+                    {
+                        "vendor_name": "COMMON",
+                        "data": (
+                            '{"agami": {"profile": "' + profile + '", '
+                            '"db_type": "postgres", '
+                            '"schema": "' + schema_name + '"}}'
+                        ),
+                    }
+                ],
+                "datasets": datasets,
+            }
+        ],
+    }
+
+
+def _basic_dataset(name: str, schema: str) -> dict:
+    return {
+        "name": name,
+        "source": f"db.{schema}.{name}",
+        "primary_key": ["id"],
+        "fields": [
+            {
+                "name": "id",
+                "expression": {
+                    "dialects": [{"dialect": "ANSI_SQL", "expression": "id"}]
+                },
+                "custom_extensions": [
+                    {
+                        "vendor_name": "COMMON",
+                        "data": '{"agami": {"type": "integer"}}',
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _write_yaml(path: Path, doc: dict) -> None:
+    with path.open("w") as f:
+        yaml.safe_dump(doc, f)
+
+
+def _build_profile_dir(tmp_path: Path) -> Path:
+    """Two-schema profile: public.users + analytics.events, plus a cross-schema rel."""
+    pdir = tmp_path / "finbud"
+    pdir.mkdir()
+
+    public = _schema_yaml(
+        "finbud",
+        "public",
+        [_basic_dataset("users", "public")],
+    )
+    analytics = _schema_yaml(
+        "finbud",
+        "analytics",
+        [_basic_dataset("events", "analytics")],
+    )
+
+    _write_yaml(pdir / "public.yaml", public)
+    _write_yaml(pdir / "analytics.yaml", analytics)
+
+    index = {
+        "version": "0.1.1",
+        "profile": "finbud",
+        "db_type": "postgres",
+        "schemas": [
+            {"name": "public", "file": "public.yaml", "table_count": 1},
+            {"name": "analytics", "file": "analytics.yaml", "table_count": 1},
+        ],
+        "cross_schema_relationships": [
+            {
+                "name": "events_to_users",
+                "from": "analytics.events",
+                "to": "public.users",
+                "from_columns": ["id"],
+                "to_columns": ["id"],
+            }
+        ],
+        "introspect_meta": {
+            "introspected_at": "2026-05-08T00:00:00Z",
+            "tier": "cli",
+            "source_db_version": "PostgreSQL 16.2",
+        },
+    }
+    _write_yaml(pdir / "index.yaml", index)
+    return pdir
+
+
+def test_directory_minimal_passes(tmp_path):
+    pdir = _build_profile_dir(tmp_path)
+    errors, _ = validate_directory(pdir)
+    assert errors == [], errors
+
+
+def test_directory_missing_index_fails(tmp_path):
+    pdir = tmp_path / "ghost"
+    pdir.mkdir()
+    errors, _ = validate_directory(pdir)
+    assert any("index.yaml" in e for e in errors), errors
+
+
+def test_directory_missing_schema_file_fails(tmp_path):
+    pdir = _build_profile_dir(tmp_path)
+    (pdir / "analytics.yaml").unlink()
+    errors, _ = validate_directory(pdir)
+    assert any("analytics.yaml" in e and "missing" in e for e in errors), errors
+
+
+def test_directory_cross_schema_endpoint_unqualified_rejected(tmp_path):
+    pdir = _build_profile_dir(tmp_path)
+    with (pdir / "index.yaml").open() as f:
+        idx = yaml.safe_load(f)
+    idx["cross_schema_relationships"][0]["from"] = "events"  # missing schema prefix
+    _write_yaml(pdir / "index.yaml", idx)
+    errors, _ = validate_directory(pdir)
+    assert any("must be qualified" in e for e in errors), errors
+
+
+def test_directory_cross_schema_endpoint_unknown_dataset_rejected(tmp_path):
+    pdir = _build_profile_dir(tmp_path)
+    with (pdir / "index.yaml").open() as f:
+        idx = yaml.safe_load(f)
+    idx["cross_schema_relationships"][0]["from"] = "analytics.ghost_table"
+    _write_yaml(pdir / "index.yaml", idx)
+    errors, _ = validate_directory(pdir)
+    assert any("ghost_table" in e for e in errors), errors
+
+
+def test_directory_schema_yaml_with_mismatched_schema_name_rejected(tmp_path):
+    pdir = _build_profile_dir(tmp_path)
+    with (pdir / "public.yaml").open() as f:
+        m = yaml.safe_load(f)
+    m["semantic_model"][0]["custom_extensions"][0]["data"] = (
+        '{"agami": {"profile": "finbud", "db_type": "postgres", "schema": "wrong"}}'
+    )
+    _write_yaml(pdir / "public.yaml", m)
+    errors, _ = validate_directory(pdir)
+    assert any("doesn't match" in e for e in errors), errors
+
+
+def test_directory_index_unknown_top_key_rejected(tmp_path):
+    pdir = _build_profile_dir(tmp_path)
+    with (pdir / "index.yaml").open() as f:
+        idx = yaml.safe_load(f)
+    idx["surprise_field"] = "nope"
+    _write_yaml(pdir / "index.yaml", idx)
+    errors, _ = validate_directory(pdir)
+    assert any("surprise_field" in e for e in errors), errors
+
+
+def test_directory_index_missing_required_key_rejected(tmp_path):
+    pdir = _build_profile_dir(tmp_path)
+    with (pdir / "index.yaml").open() as f:
+        idx = yaml.safe_load(f)
+    del idx["db_type"]
+    _write_yaml(pdir / "index.yaml", idx)
+    errors, _ = validate_directory(pdir)
+    assert any("db_type" in e for e in errors), errors
+
+
+def test_directory_schema_yaml_with_invalid_osi_rejected(tmp_path):
+    """A broken inner schema yaml surfaces with file prefix in the error."""
+    pdir = _build_profile_dir(tmp_path)
+    with (pdir / "public.yaml").open() as f:
+        m = yaml.safe_load(f)
+    del m["semantic_model"][0]["datasets"][0]["fields"][0]["expression"]
+    _write_yaml(pdir / "public.yaml", m)
+    errors, _ = validate_directory(pdir)
+    assert any("public.yaml" in e and "expression" in e for e in errors), errors

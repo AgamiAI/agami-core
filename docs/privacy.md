@@ -17,8 +17,10 @@ For the canonical, machine-checked allowlist, see [`plugins/agami/shared/telemet
 These never leave your machine, opt-in or not:
 
 - **Credentials** (`~/.agami/credentials`)
-- **Semantic model** (`~/.agami/<dbname>.yaml`)
-- **Examples library** (`~/.agami/<dbname>-examples.yaml`)
+- **Semantic model** (`~/.agami/<profile>/index.yaml` + `<profile>/<schema>.yaml`)
+- **Examples library** (`~/.agami/<profile>/examples.yaml`)
+- **Organization context** (`~/.agami/<profile>/ORGANIZATION.md`) — your description of what the database represents, domain terminology, etc.
+- **User memory** (`~/.agami/USER_MEMORY.md`) — your cross-database preferences
 - **Query results** (everything Claude shows you)
 - **Query log** (`~/.agami/query_log.jsonl`) — your personal record of every query you ran
 - **Charts** (`~/.agami/charts/<ts>.html`)
@@ -46,7 +48,7 @@ The `init` skill asks once. **Default is off.** If you opt in, every event sent 
 | `db_type` | `postgres` / `mysql` / `sqlite` | `postgres` |
 | `os` | `darwin` / `linux` / `windows` | `darwin` |
 | `host` | `claude-code-cli`, `claude-code-vscode`, `claude-code-cursor`, `claude-cowork` | `claude-code-cli` |
-| `tier` | Which execution tier ran the event: `cli` / `duckdb` / `python` | `cli` |
+| `tier` | Which connection method ran the event: `cli` (native CLI), `duckdb`, `python` (Python driver). Field name is `tier` for compatibility with the v1.0 wire format. | `cli` |
 | `error_kind` (only on errors) | One of nine categories like `auth`, `column_not_found`, `network`, `timeout` | `column_not_found` |
 | `latency_p50_ms` (optional) | Median latency, bucketed in 50ms increments | `250` |
 | `latency_p95_ms` (optional) | p95 latency, bucketed in 50ms increments | `1100` |

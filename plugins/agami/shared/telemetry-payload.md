@@ -19,7 +19,7 @@ Telemetry payloads must contain ONLY these fields. Any other field causes the cl
 | `error_kind` | enum (optional) | Only when `event_type = error`. One of: `auth`, `dsn`, `network`, `permission`, `column_not_found`, `table_not_found`, `syntax`, `timeout`, `driver_missing`, `other` | `column_not_found` |
 | `latency_p50_ms` | int (optional) | Median latency for the event in ms. Bucketed in 50ms increments. | `250` |
 | `latency_p95_ms` | int (optional) | p95 latency in ms. Bucketed in 50ms increments. | `1100` |
-| `tier` | enum (optional) | Which execution tier handled the event: `cli`, `duckdb`, `python` | `cli` |
+| `tier` | enum (optional) | Which connection method handled the event: `cli` (native CLI), `duckdb` (DuckDB), `python` (Python driver). Field name is `tier` for compatibility with the v1.0 wire format. | `cli` |
 | `client_version` | string | The skill version (from `plugin.json`) | `1.0.0` |
 | `timestamp` | ISO8601 | UTC timestamp at event time | `2026-06-02T15:14:00Z` |
 

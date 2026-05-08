@@ -1,8 +1,29 @@
 # Introspection Queries
 
-SQL the `connect` skill runs against `information_schema` to build `~/.agami/<dbname>.yaml`. Each query is **pure SQL** — no Python, no driver-specific calls. Runs identically on tier 1 (CLI), tier 2 (DuckDB), tier 3 (Python).
+SQL the `connect` skill runs against `information_schema` to build the per-schema yamls in `~/.agami/<profile>/`. Each query is **pure SQL** — no Python, no driver-specific calls. Runs identically on the native CLI, DuckDB, or the Python driver.
+
+The `connect` skill runs them in this order:
+
+1. **List schemas** — show the user a multi-select picker of which schemas to introspect (Phase B's schema picker)
+2. **List tables** — only within the selected schemas
+3. **Columns / PK / FK / row counts** — per table
+4. **Sample rows** — `SELECT * FROM <schema>.<table> LIMIT 5` (used by Phase C's description generation)
 
 ## PostgreSQL
+
+### List schemas (excluding system + user-private)
+
+```sql
+SELECT schema_name
+FROM information_schema.schemata
+WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
+  AND schema_name NOT LIKE 'pg_toast%'
+  AND schema_name NOT LIKE 'pg_temp_%'
+  AND schema_name NOT LIKE 'pg_%'
+ORDER BY schema_name;
+```
+
+Postgres treats `public` as the default schema. Pre-check it in the picker.
 
 ### List tables (excluding system schemas)
 
@@ -99,6 +120,19 @@ WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
 ---
 
 ## MySQL / MariaDB
+
+### List schemas (databases)
+
+In MySQL, "schema" and "database" are synonyms — each database is a single schema. The skill lists databases the user has access to and presents them as schemas:
+
+```sql
+SELECT schema_name
+FROM information_schema.schemata
+WHERE schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+ORDER BY schema_name;
+```
+
+Pre-check whichever database the user is currently connected to (the `database` field in their `~/.agami/credentials` profile).
 
 ### List tables
 
@@ -209,11 +243,32 @@ Redshift speaks the Postgres wire protocol, so the **Postgres queries above most
 
 Foreign keys behave the same (`information_schema.table_constraints`) but are advisory in Redshift — the engine doesn't enforce them, so an FK relationship may have orphans that wouldn't exist in a strictly-enforced Postgres. Run the live join check from [`fk-validation.md`](fk-validation.md) anyway.
 
+For listing schemas, the Postgres query works as-is.
+
 ---
 
 ## Snowflake
 
 Snowflake's metadata lives in `INFORMATION_SCHEMA` (per-database) and the account-wide `SNOWFLAKE.ACCOUNT_USAGE` views. Prefer `INFORMATION_SCHEMA` (faster, no role/grant hassle) unless you specifically need the account-wide view.
+
+### List schemas
+
+```sql
+SHOW SCHEMAS IN DATABASE "<DATABASE>";
+```
+
+Or via `INFORMATION_SCHEMA`:
+
+```sql
+SELECT SCHEMA_NAME
+FROM INFORMATION_SCHEMA.SCHEMATA
+WHERE SCHEMA_NAME NOT IN ('INFORMATION_SCHEMA')
+ORDER BY SCHEMA_NAME;
+```
+
+Snowflake account-level lookup (across databases): `SHOW SCHEMAS IN ACCOUNT;` — slower, requires higher privileges. Default to per-database listing.
+
+Pre-check `PUBLIC` if it exists (Snowflake's default schema for newly-created databases).
 
 ### List tables (excluding system schemas)
 
@@ -304,6 +359,10 @@ Skip `SNOWFLAKE`, `SNOWFLAKE_SAMPLE_DATA`, and any schema named `INFORMATION_SCH
 
 ## SQLite
 
+### List schemas
+
+SQLite has no concept of schemas in the SQL-standard sense. There's a single implicit `main` schema (or `temp` for in-memory tables). The skill **skips the schema picker** for SQLite and writes a single `main.yaml` in the profile directory.
+
 ### List tables
 
 ```sql
@@ -336,24 +395,43 @@ PRAGMA index_info('{index_name}');
 
 ---
 
+## Sample rows (for Phase C — auto-generated descriptions)
+
+For each table, the skill fetches up to 5 sample rows for use as evidence when auto-generating descriptions:
+
+```sql
+-- Generic
+SELECT * FROM "{schema}"."{table}" LIMIT 5;
+```
+
+For very large Snowflake tables, use the `SAMPLE` clause to avoid scanning a giant prefix:
+
+```sql
+SELECT * FROM "{SCHEMA}"."{TABLE}" SAMPLE (5 ROWS);
+```
+
+The sample is **never sent in telemetry** and is **never written to disk**. It lives only in the description-generation prompt's context, then is discarded.
+
 ## How the skill uses these
 
 For each new database (or when the user says "re-introspect"):
 
-1. List tables (filter system schemas).
-2. For each table:
+1. **List schemas** — show the user a multi-select picker (Phase B).
+2. List tables in the selected schemas (filter system schemas).
+3. For each table:
    a. Pull columns + types.
    b. Pull primary key.
    c. Pull foreign keys.
    d. Pull row-count estimate (Postgres `pg_stat_user_tables` / MySQL `table_rows` / SQLite count if cheap).
    e. Pull indexes.
-3. Build the table entry per [`schema-reference.md`](schema-reference.md).
-4. After all tables: validate FKs via live `LEFT JOIN` orphan checks (see [`fk-validation.md`](fk-validation.md)) — drop any FK with high orphan ratio.
-5. Validate the model end-to-end (validation rules from [`schema-reference.md`](schema-reference.md)).
-6. Write `~/.agami/<dbname>.yaml`.
-7. Hand off to the seed-examples step.
+   f. Pull 5 sample rows (Phase C — auto-generated descriptions).
+4. Build the per-schema yaml entries per [`schema-reference.md`](schema-reference.md).
+5. After all tables: validate FKs via live `LEFT JOIN` orphan checks (see [`fk-validation.md`](fk-validation.md)) — drop any FK with high orphan ratio.
+6. Validate the model end-to-end (directory-mode `validate_semantic_model.py --directory`).
+7. Write `~/.agami/<profile>/index.yaml` + every `<schema>.yaml`.
+8. Hand off to the seed-examples step.
 
-The skill executes each query via the chosen tier (CLI / DuckDB / Python) and parses CSV / TSV output. No driver-specific calls.
+The skill executes each query via the chosen tool (native CLI / DuckDB / Python driver) and parses CSV / TSV output. No driver-specific calls.
 
 ## Type mapping
 

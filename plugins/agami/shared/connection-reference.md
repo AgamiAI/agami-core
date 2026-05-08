@@ -16,10 +16,10 @@ These are non-negotiable. Skills that read this document must follow them under 
    These auth files are chmod 600 in `~/.agami/`. The visible Bash command contains NO password — psql / mysql read the password from the auth file silently. **Patterns that are FORBIDDEN**: `export PGPASSWORD='<literal>'`, `export MYSQL_PWD='<literal>'`, `psql -W <password>`, `mysql -p<password>`, or anything else where the password appears in the command, env assignment, or stdin.
 
 ## Contents
-- Execution Tiers (pick highest available)
-- Tier 1 — Native CLI tool
-- Tier 2 — DuckDB universal client
-- Tier 3 — Python driver (optional)
+- Connection methods (psql / mysql / snowsql / sqlite3 → DuckDB → Python driver)
+- Native CLI tool (`psql`, `mysql`, `snowsql`, `sqlite3`)
+- DuckDB universal client
+- Python driver via `execute_sql.py`
 - Connection Defaults
 - CLI Connection Commands
 - Python Driver Fallback
@@ -29,28 +29,32 @@ These are non-negotiable. Skills that read this document must follow them under 
 
 ---
 
-## Execution Tiers
+## Connection methods
 
-`agami` picks the highest-priority tier available for your database type. Falls through to the next tier on error. If no tier works, surfaces the list of options so you can install one.
+`agami` picks the first available connection method for your database type, falling through if it's not installed. If nothing is installed, it tells you exactly which tools are missing and the install command for each.
 
-| # | Tier | When it's the right pick | Pros | Cons |
-|---|------|--------------------------|------|------|
-| 1 | **Native CLI tool** (`psql`, `mysql`, `sqlite3`) | Most common path on a developer laptop | Fast, idiomatic, no extra layer | Requires the per-DB CLI on `PATH` |
+The order, from most-preferred to least-preferred:
+
+| # | Method | When it's the right pick | Pros | Cons |
+|---|--------|--------------------------|------|------|
+| 1 | **Native CLI tool** (`psql`, `mysql`, `snowsql`, `sqlite3`) | Most common path on a developer laptop | Fast, idiomatic, no extra layer | Requires the per-DB CLI on `PATH` |
 | 2 | **DuckDB universal client** | When you don't have / don't want the native CLI | Single binary install; handles Postgres / MySQL / SQLite / Parquet / CSV | Doesn't natively cover Snowflake, BigQuery, SQL Server, Oracle, Databricks |
-| 3 | **Python driver** (`psycopg2`, `pymysql`, …) | If you already have Python set up | Works in environments without the CLI | Adds a Python dependency |
+| 3 | **Python driver** (`psycopg2`, `pymysql`, `snowflake-connector-python`) | If you already have Python set up | Works in environments without the CLI | Adds a Python dependency |
 
-`agami` runs entirely on your machine. There is no hosted/server tier.
+`agami` runs entirely on your machine. There is no hosted server.
 
-### Tier-selection algorithm
+> **Internal note on `.config`.** The chosen method is recorded in `~/.agami/.config.tier` for compatibility with shipped installs — values are `cli` / `duckdb` / `python`. The field name stays as `tier`; user-facing prose calls these "the native CLI", "DuckDB", and "the Python driver".
 
-Tier detection runs **once**, in the agami-init skill's Phase 3. The result (chosen tier + absolute paths of every detected tool) is persisted in `~/.agami/.config.tool_paths`. Every subsequent skill invocation reads the cached paths — they do NOT re-probe.
+### How agami picks a connection method
 
-Init's tier-selection pseudocode:
+Detection runs **once**, in the agami-init skill's Phase 3. The result (chosen method + absolute paths of every detected tool) is persisted in `~/.agami/.config`. Every subsequent skill invocation reads the cached paths — they do NOT re-probe.
+
+Init's selection pseudocode:
 
 ```text
 db_type := credentials → type   (e.g., "postgres", "redshift", "snowflake")
 
-# Detect every tier in parallel and cache the absolute path of each.
+# Detect every tool in parallel and cache the absolute path of each.
 tool_paths := {
   psql:    which("psql")  || ls /opt/homebrew/Cellar/libpq/*/bin/psql /opt/homebrew/opt/libpq/bin/psql,
   mysql:   which("mysql") || ls /opt/homebrew/opt/mysql-client/bin/mysql,
@@ -65,8 +69,9 @@ tool_imports := {
   snowflake_connector_python:  python_import_ok("snowflake.connector"),
 }
 
-# Pick the highest tier with the right tool for db_type.
-# postgres / redshift share psql + psycopg2 (Redshift speaks Postgres wire protocol)
+# Pick the first available method for db_type.
+# postgres / redshift share psql + psycopg2 (Redshift speaks Postgres wire protocol).
+# (Internal config field name stays `tier`; values "cli" / "duckdb" / "python".)
 if db_type in {postgres, redshift} and tool_paths.psql:                  return tier=cli
 if db_type == "mysql"    and tool_paths.mysql:                           return tier=cli
 if db_type == "snowflake" and tool_paths.snowsql:                        return tier=cli
@@ -83,35 +88,35 @@ offer_install()  # AskUserQuestion — never install silently
 
 DuckDB's `postgres_scanner` extension can also scan Redshift over the wire (since Redshift is Postgres-protocol-compatible). DuckDB cannot scan Snowflake natively in v1.1.
 
-Other skills look up `tier` and `tool_paths.<tool>` from `~/.agami/.config` and use them directly. They do not re-run `which`. If the cached path no longer exists on disk (`! -x "$path"`), they offer to re-detect — they do NOT silently scan or fall back to localhost.
+Other skills look up the cached method (`.config.tier`) and `tool_paths.<tool>` from `~/.agami/.config` and use them directly. They do not re-run `which`. If the cached path no longer exists on disk (`! -x "$path"`), they offer to re-detect — they do NOT silently scan or fall back to localhost.
 
-### When all tiers fail
+### When no tool is available
 
-Surface a single, specific error — never a generic "connection failed":
+Surface a single, specific error that names exactly what's missing — never a generic "connection failed":
 
 ```
-No execution path found for your Postgres database:
-  ✗ psql not on PATH
-  ✗ duckdb not on PATH
-  ✗ psycopg2 not importable
+Couldn't find a tool to talk to your Postgres database:
+  ✗ psql        not on PATH
+  ✗ duckdb      not on PATH
+  ✗ psycopg2    not importable
 
-Options (listed in recommended order):
-  a) Install psql:           `brew install postgresql`       (simplest — most common)
-  b) Install DuckDB:         `brew install duckdb`           (universal client, one binary)
-  c) Install psycopg2:       `pip install psycopg2-binary`   (only if you prefer Python)
+Pick one to install (any one is enough):
+  a) psql       — `brew install postgresql`       (simplest — most common)
+  b) DuckDB     — `brew install duckdb`           (single universal binary)
+  c) psycopg2   — `pip install psycopg2-binary`   (Python driver path)
 
 Reply with a/b/c or install manually.
 ```
 
 ---
 
-## Tier 1 — Native CLI tool
+## Native CLI tool (`psql`, `mysql`, `snowsql`, `sqlite3`)
 
-The default tier. Most Postgres users already have `psql`; most MySQL users have `mysql`. See **CLI Connection Commands** below for the canonical invocation per database.
+The default and fastest path. Most Postgres users already have `psql`; most MySQL users have `mysql`; Snowflake users use `snowsql`; SQLite users use `sqlite3`. See **CLI Connection Commands** below for the canonical invocation per database.
 
 ---
 
-## Tier 2 — DuckDB universal client
+## DuckDB universal client
 
 DuckDB ships as a single binary (`brew install duckdb` / `apt install duckdb` / download from duckdb.org). It natively reads from:
 
@@ -120,15 +125,15 @@ DuckDB ships as a single binary (`brew install duckdb` / `apt install duckdb` / 
 - **SQLite** (built-in)
 - **File sources**: Parquet, CSV, JSONL, Excel, Arrow, S3
 
-It does **not** natively cover Snowflake, BigQuery, SQL Server, Oracle, or Databricks. For those, DuckDB is not a valid fallback — drop straight to the "all tiers failed" message.
+It does **not** natively cover Snowflake, BigQuery, SQL Server, Oracle, or Databricks. For those, DuckDB is not a valid fallback — drop straight to the "no tool available" message.
 
 ### Offering DuckDB to the user
 
 Only offer DuckDB when:
 1. The database type is in `{postgres, mysql, sqlite, duckdb, file}`, AND
-2. Tier 1 (native CLI) is not available.
+2. The native CLI for that database is not available.
 
-Never install silently — prompt via **AskUserQuestion** with the install command specific to the user's OS. Respect a "no" answer and fall through to the all-tiers-failed error.
+Never install silently — prompt via **AskUserQuestion** with the install command specific to the user's OS. Respect a "no" answer and fall through to the no-tool-available error.
 
 ### Connecting from DuckDB to Postgres / MySQL
 
@@ -154,9 +159,9 @@ CSV output: append `-csv` or wrap in `COPY (<query>) TO '/dev/stdout' (FORMAT CS
 
 ---
 
-## Tier 3 — Python driver
+## Python driver via `execute_sql.py`
 
-Used when neither tier 1 nor tier 2 is available, but Python with the right driver is. The agami skill ships a runtime helper for this:
+Used when neither the native CLI nor DuckDB is available, but Python with the right driver is. The agami skill ships a runtime helper for this:
 
 ```bash
 python3 plugins/agami/scripts/execute_sql.py --profile <profile> --sql-file /tmp/agami-query.sql
@@ -227,13 +232,13 @@ PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="require" \
   psql -h "$host" -p 5439 -U "$user" -d "$database" -c "$SQL" --csv
 ```
 
-`type = redshift` in the credentials profile (or a `redshift://` DSN) sets the right defaults. For psycopg2 (tier 3) the connection params are identical to postgres; agami's `execute_sql.py` routes `type=redshift` through the postgres execution path.
+`type = redshift` in the credentials profile (or a `redshift://` DSN) sets the right defaults. For the Python driver path the connection params are identical to postgres; agami's `execute_sql.py` routes `type=redshift` through the postgres execution path.
 
 ### Snowflake
 
 Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI (`snowsql`) or the `snowflake-connector-python` Python driver.
 
-#### Tier 1 — `snowsql`
+#### Native CLI — `snowsql`
 
 `scripts/setup_pgauth.py` writes a `~/.agami/.snowsql.cnf` config file with a `[connections.<profile>]` block per Snowflake profile in your credentials. The skill invokes snowsql with `--config` pointing at it:
 
@@ -250,7 +255,7 @@ The `-o output_format=csv -o header=true` flags produce parseable output. `-o fr
 
 Install snowsql: see <https://docs.snowflake.com/en/user-guide/snowsql-install-config>. macOS: download from Snowflake's website (Homebrew formula isn't official).
 
-#### Tier 3 — `snowflake-connector-python`
+#### Python driver — `snowflake-connector-python`
 
 ```bash
 pip install snowflake-connector-python
@@ -317,7 +322,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql-file /tmp/agami-query.
 
 The legacy inline `python3 -c '...'` pattern (with `export PGPASSWORD=...` / `export MYSQL_PWD=...` ahead of it) is **forbidden** — it puts the password in the visible Bash command line. Use `execute_sql.py` instead.
 
-The DuckDB scanner approach (tier 2) currently has a similar weakness for cloud-credentialed databases — DuckDB's `ATTACH 'host=... password=...'` requires the password in the SQL string. For Supabase / Neon / RDS connections, prefer tier 1 (psql with `PGPASSFILE`) or tier 3 (`execute_sql.py`) over tier 2.
+The DuckDB scanner approach currently has a similar weakness for cloud-credentialed databases — DuckDB's `ATTACH 'host=... password=...'` requires the password in the SQL string. For Supabase / Neon / RDS connections, prefer the native CLI (psql with `PGPASSFILE`) or the Python driver (`execute_sql.py`) over DuckDB.
 
 ---
 
@@ -345,7 +350,7 @@ profile="${AGAMI_PROFILE:-default}"
 
 ### `AGAMI_DATABASE_URL` override
 
-Standard DSN, parsed by tier 1/2/3 the same way:
+Standard DSN, parsed by the native CLI / DuckDB / the Python driver the same way:
 
 ```
 AGAMI_DATABASE_URL=postgres://user:password@host:5432/database
@@ -373,7 +378,7 @@ When introspecting databases, exclude system schemas:
 - **NEVER** put passwords in any visible Bash command — not in `export PGPASSWORD='...'`, not in `mysql -p<password>`, not in stdin heredocs that interpolate the password. Hosts render Bash tool calls in their UI; the password leaks into the chat. Use the auth files generated by `scripts/setup_pgauth.py`:
   - psql: `PGPASSFILE=$HOME/.agami/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
   - mysql: `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
-  - tier 3: `python3 scripts/execute_sql.py --sql-file ...` (reads creds internally; never echoes them)
+  - Python driver: `python3 scripts/execute_sql.py --sql-file ...` (reads creds internally; never echoes them)
 - Use `--csv` or `--batch` output modes (not interactive) for predictable parsing
 - **Result-set size policy** — default cap is 1000 rows with explicit "show more" prompt. User can override per-query with "top N" or "limit N" framing.
 - **NEVER** generate DDL or DML statements (`DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, etc.)

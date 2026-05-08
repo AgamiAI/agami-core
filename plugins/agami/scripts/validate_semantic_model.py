@@ -88,7 +88,7 @@ ALLOWED_AGAMI_KEYS_RELATIONSHIP: frozenset[str] = frozenset({
 })
 
 ALLOWED_AGAMI_KEYS_MODEL: frozenset[str] = frozenset({
-    "profile", "db_type", "introspect_meta",
+    "profile", "db_type", "schema", "introspect_meta",
 })
 
 ALLOWED_AGAMI_TYPES: frozenset[str] = frozenset({
@@ -501,6 +501,236 @@ def validate_with_warnings(
     return errors, warnings
 
 
+# --- Directory mode (per-schema layout) -------------------------------------
+#
+# A profile directory looks like:
+#     ~/.agami/<profile>/
+#         index.yaml
+#         <schema1>.yaml
+#         <schema2>.yaml
+#         examples.yaml
+#         ORGANIZATION.md
+#
+# Each <schema>.yaml is a standalone OSI v0.1.1 document containing only that
+# schema's datasets. index.yaml is agami-bespoke (NOT OSI) — a slim TOC plus
+# cross-schema relationships and introspect metadata.
+
+ALLOWED_INDEX_TOP_KEYS: frozenset[str] = frozenset({
+    "version", "profile", "db_type", "schemas",
+    "cross_schema_relationships", "introspect_meta",
+})
+
+ALLOWED_INDEX_SCHEMA_KEYS: frozenset[str] = frozenset({
+    "name", "file", "table_count", "description",
+})
+
+ALLOWED_CROSS_REL_KEYS: frozenset[str] = frozenset({
+    "name", "from", "to", "from_columns", "to_columns", "description",
+})
+
+
+def _index_errors(index: dict, *, ctx: str = "index.yaml") -> list[str]:
+    out: list[str] = []
+    if not isinstance(index, dict):
+        return [f"[Index] {ctx}: top-level must be an object"]
+
+    extras = set(index.keys()) - ALLOWED_INDEX_TOP_KEYS
+    if extras:
+        out.append(
+            f"[Index] {ctx}: unknown top-level key(s) {sorted(extras)}. "
+            f"Allowed: {sorted(ALLOWED_INDEX_TOP_KEYS)}."
+        )
+
+    for k in ("version", "profile", "db_type", "schemas"):
+        if k not in index:
+            out.append(f"[Index] {ctx}: missing required key '{k}'")
+
+    schemas = index.get("schemas", [])
+    if not isinstance(schemas, list) or not schemas:
+        out.append(f"[Index] {ctx}: 'schemas' must be a non-empty array")
+    else:
+        names_seen: set[str] = set()
+        for i, s in enumerate(schemas):
+            if not isinstance(s, dict):
+                out.append(f"[Index] {ctx}.schemas[{i}]: must be an object")
+                continue
+            extras_s = set(s.keys()) - ALLOWED_INDEX_SCHEMA_KEYS
+            if extras_s:
+                out.append(
+                    f"[Index] {ctx}.schemas[{i}]: unknown key(s) {sorted(extras_s)}. "
+                    f"Allowed: {sorted(ALLOWED_INDEX_SCHEMA_KEYS)}."
+                )
+            for k in ("name", "file"):
+                if k not in s:
+                    out.append(f"[Index] {ctx}.schemas[{i}]: missing '{k}'")
+            n = s.get("name")
+            if n in names_seen:
+                out.append(f"[Index] {ctx}.schemas: duplicate schema name '{n}'")
+            elif n:
+                names_seen.add(n)
+
+    rels = index.get("cross_schema_relationships", [])
+    if rels and not isinstance(rels, list):
+        out.append(f"[Index] {ctx}.cross_schema_relationships: must be an array")
+    elif isinstance(rels, list):
+        rel_names: set[str] = set()
+        for i, r in enumerate(rels):
+            if not isinstance(r, dict):
+                out.append(
+                    f"[Index] {ctx}.cross_schema_relationships[{i}]: must be an object"
+                )
+                continue
+            extras_r = set(r.keys()) - ALLOWED_CROSS_REL_KEYS
+            if extras_r:
+                out.append(
+                    f"[Index] {ctx}.cross_schema_relationships[{i}]: unknown key(s) "
+                    f"{sorted(extras_r)}. Allowed: {sorted(ALLOWED_CROSS_REL_KEYS)}."
+                )
+            for k in ("name", "from", "to", "from_columns", "to_columns"):
+                if k not in r:
+                    out.append(
+                        f"[Index] {ctx}.cross_schema_relationships[{i}]: missing '{k}'"
+                    )
+            rn = r.get("name")
+            if rn in rel_names:
+                out.append(
+                    f"[Index] {ctx}.cross_schema_relationships: duplicate name '{rn}'"
+                )
+            elif rn:
+                rel_names.add(rn)
+            fc = r.get("from_columns") or []
+            tc = r.get("to_columns") or []
+            if isinstance(fc, list) and isinstance(tc, list) and len(fc) != len(tc):
+                out.append(
+                    f"[Index] {ctx}.cross_schema_relationships[{i}]: "
+                    f"from_columns ({len(fc)}) and to_columns ({len(tc)}) differ in length"
+                )
+            for endpoint_key in ("from", "to"):
+                ep = r.get(endpoint_key)
+                if isinstance(ep, str) and "." not in ep:
+                    out.append(
+                        f"[Index] {ctx}.cross_schema_relationships[{i}].{endpoint_key}: "
+                        f"'{ep}' must be qualified as '<schema>.<dataset>'"
+                    )
+
+    meta = index.get("introspect_meta")
+    if meta is not None:
+        if not isinstance(meta, dict):
+            out.append(f"[Index] {ctx}.introspect_meta: must be an object")
+        else:
+            extras_m = set(meta.keys()) - ALLOWED_INTROSPECT_META_KEYS
+            if extras_m:
+                out.append(
+                    f"[Index] {ctx}.introspect_meta: unknown key(s) {sorted(extras_m)}. "
+                    f"Allowed: {sorted(ALLOWED_INTROSPECT_META_KEYS)}."
+                )
+
+    return out
+
+
+def validate_directory(
+    profile_dir: Path, *, schema: dict | None = None
+) -> tuple[list[str], list[str]]:
+    """
+    Validate a per-schema profile directory.
+
+    Reads <profile_dir>/index.yaml and every <schema>.yaml referenced from it.
+    Each schema yaml is validated as a standalone OSI v0.1.1 document. Then
+    cross-validates: dataset name uniqueness across schemas, cross-schema
+    relationship endpoints resolve to real datasets, and the schema-yaml
+    model-level extension's `agami.schema` matches the schema name.
+    """
+    if schema is None:
+        schema = load_osi_schema()
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not profile_dir.exists() or not profile_dir.is_dir():
+        return ([f"[Index] profile directory not found: {profile_dir}"], warnings)
+
+    index_path = profile_dir / "index.yaml"
+    if not index_path.exists():
+        return ([f"[Index] missing index.yaml at {index_path}"], warnings)
+
+    try:
+        with index_path.open() as f:
+            index = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        return ([f"[Index] {index_path.name}: invalid YAML: {e}"], warnings)
+
+    errors.extend(_index_errors(index or {}))
+
+    if errors:
+        # Don't try to load schema yamls if the index itself is broken — too
+        # noisy. The user fixes the index first, then re-runs.
+        return (errors, warnings)
+
+    # Build qualified-dataset registry across all schema yamls.
+    qualified_datasets: set[str] = set()  # "<schema>.<dataset>"
+
+    for s in index.get("schemas", []):
+        s_name = s.get("name")
+        s_file = s.get("file")
+        if not s_name or not s_file:
+            continue
+        s_path = profile_dir / s_file
+        if not s_path.exists():
+            errors.append(
+                f"[Index] schema '{s_name}': file '{s_file}' is missing from "
+                f"{profile_dir}"
+            )
+            continue
+        try:
+            with s_path.open() as f:
+                s_model = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            errors.append(f"[Schema] {s_file}: invalid YAML: {e}")
+            continue
+        if not isinstance(s_model, dict):
+            errors.append(f"[Schema] {s_file}: top-level must be an object")
+            continue
+
+        e_list, w_list = validate_with_warnings(s_model, schema=schema)
+        # Prefix each schema-yaml error with the file name for clarity.
+        errors.extend(f"[{s_file}] {e}" for e in e_list)
+        warnings.extend(f"[{s_file}] {w}" for w in w_list)
+
+        # Cross-check the schema-yaml's model-level agami.schema matches.
+        sm_list = s_model.get("semantic_model") if isinstance(s_model, dict) else None
+        if isinstance(sm_list, list) and sm_list:
+            sm = sm_list[0]
+            for ext in sm.get("custom_extensions", []) if isinstance(sm, dict) else []:
+                agami, _ = _parse_agami_payload(ext)
+                if agami and agami.get("schema") not in (None, s_name):
+                    errors.append(
+                        f"[Schema] {s_file}: agami.schema='{agami.get('schema')}' "
+                        f"doesn't match index.yaml schema name '{s_name}'"
+                    )
+
+            # Register datasets under qualified name for cross-schema rel checks.
+            for ds in sm.get("datasets", []) if isinstance(sm, dict) else []:
+                ds_name = ds.get("name")
+                if ds_name:
+                    qualified_datasets.add(f"{s_name}.{ds_name}")
+
+    # Cross-schema relationship endpoints must resolve to datasets we actually
+    # loaded. (Endpoints are required to be qualified — _index_errors caught the
+    # unqualified ones above.)
+    for i, r in enumerate(index.get("cross_schema_relationships", []) or []):
+        if not isinstance(r, dict):
+            continue
+        for endpoint_key in ("from", "to"):
+            ep = r.get(endpoint_key)
+            if isinstance(ep, str) and "." in ep and ep not in qualified_datasets:
+                errors.append(
+                    f"[Index] cross_schema_relationships[{i}].{endpoint_key} "
+                    f"'{ep}' does not match any dataset in the loaded schemas"
+                )
+
+    return (errors, warnings)
+
+
 # --- CLI --------------------------------------------------------------------
 
 def _format_errors(errors: list[str]) -> str:
@@ -515,7 +745,19 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Validate an OSI v0.1.1 semantic model with Agami extensions."
     )
-    p.add_argument("path", help="Path to the YAML semantic model file")
+    p.add_argument(
+        "path",
+        nargs="?",
+        help="Path to the YAML semantic model file (single-file mode)",
+    )
+    p.add_argument(
+        "--directory",
+        help=(
+            "Path to a per-schema profile directory containing index.yaml + "
+            "<schema>.yaml files. Validates each schema yaml individually, "
+            "then runs cross-schema checks."
+        ),
+    )
     p.add_argument(
         "--no-warnings",
         action="store_true",
@@ -523,23 +765,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
 
-    yaml_path = Path(args.path)
-    if not yaml_path.exists():
-        sys.stderr.write(f"File not found: {yaml_path}\n")
+    if args.directory and args.path:
+        sys.stderr.write("Pass either <path> or --directory, not both.\n")
         return 2
 
-    with yaml_path.open() as f:
-        try:
-            model = yaml.safe_load(f)
-        except yaml.YAMLError as e:
-            sys.stderr.write(f"Invalid YAML: {e}\n")
+    if args.directory:
+        profile_dir = Path(args.directory)
+        errors, warnings = validate_directory(profile_dir)
+        label = f"directory {profile_dir}"
+    else:
+        if not args.path:
+            sys.stderr.write("Provide either <path> or --directory.\n")
             return 2
-
-    if not isinstance(model, dict):
-        sys.stderr.write("Top-level YAML must be an object.\n")
-        return 2
-
-    errors, warnings = validate_with_warnings(model)
+        yaml_path = Path(args.path)
+        if not yaml_path.exists():
+            sys.stderr.write(f"File not found: {yaml_path}\n")
+            return 2
+        with yaml_path.open() as f:
+            try:
+                model = yaml.safe_load(f)
+            except yaml.YAMLError as e:
+                sys.stderr.write(f"Invalid YAML: {e}\n")
+                return 2
+        if not isinstance(model, dict):
+            sys.stderr.write("Top-level YAML must be an object.\n")
+            return 2
+        errors, warnings = validate_with_warnings(model)
+        label = yaml_path.name
 
     if errors:
         print(f"Validation FAILED ({len(errors)} error(s)):")
@@ -549,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
             print(_format_warnings(warnings))
         return 1
 
-    print(f"Validation PASSED: {yaml_path.name}")
+    print(f"Validation PASSED: {label}")
     if warnings and not args.no_warnings:
         print(f"\nWarnings ({len(warnings)}):")
         print(_format_warnings(warnings))

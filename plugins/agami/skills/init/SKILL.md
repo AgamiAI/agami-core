@@ -1,6 +1,6 @@
 ---
 name: init
-description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), writes a credentials.example template, detects which database execution tier is available (psql/mysql native CLI, DuckDB binary, or Python driver), and walks the user through one-time opt-in prompts for anonymous usage stats and email updates. Re-run any time to verify state, switch profiles, or change opt-in choices."
+description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), writes a credentials.example template, detects which database tool is available (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver), and walks the user through one-time opt-in prompts for anonymous usage stats and email updates. Re-run any time to verify state, switch profiles, or change opt-in choices."
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami', wants to add or switch a database connection, or asks to change their telemetry / email preferences. Auto-invoked by the connect and query-database skills if the .agami directory or credentials file is missing."
 argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
 ---
@@ -9,9 +9,9 @@ argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
 
 **Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** The only working slash command for agami is `/init` (bare). Never tell the user to type `/agami:init`, `/agami:connect`, `/connect`, `/save-correction`, or any other slash form — those don't exist in users' installations. Use natural-language phrasing for everything except `/init`.
 
-You are walking the user through the one-time setup for `agami`. The goal: by the end of this skill, the user has a working `~/.agami/credentials` file, knows which execution tier their machine supports, and has made conscious choices about telemetry and email opt-ins.
+You are walking the user through the one-time setup for `agami`. The goal: by the end of this skill, the user has a working `~/.agami/credentials` file, knows which database tool their machine will use to run queries, and has made conscious choices about telemetry and email opt-ins.
 
-This skill is idempotent — running it again with no args verifies state and surfaces any drift (missing creds, wrong file permissions, no tier available, etc.).
+This skill is idempotent — running it again with no args verifies state and surfaces any drift (missing creds, wrong file permissions, no tool available, etc.).
 
 ## Conversation style
 
@@ -76,7 +76,7 @@ stat -f '%A' ~/.agami/credentials 2>/dev/null || stat -c '%a' ~/.agami/credentia
 # 3. Is AGAMI_DATABASE_URL set?
 [ -n "$AGAMI_DATABASE_URL" ] && echo "AGAMI_DATABASE_URL is set"
 
-# 4. What tiers are available?
+# 4. Which database tools are available?
 which psql mysql sqlite3 duckdb 2>/dev/null
 python3 -c 'import psycopg2; print("psycopg2 OK")' 2>/dev/null
 python3 -c 'import pymysql; print("pymysql OK")' 2>/dev/null
@@ -307,13 +307,19 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --all
 
 (Or `--profile <name>` for one specific profile.)
 
-The generator is idempotent and safe to re-run. Auth files are chmod 600. **Without these files, the psql/mysql tier-1 invocations would have to put the password on the command line — that's forbidden per [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md). Always run setup_pgauth.py before the first tier-1 query.**
+The generator is idempotent and safe to re-run. Auth files are chmod 600. **Without these files, the psql/mysql/snowsql invocations would have to put the password on the command line — that's forbidden per [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md). Always run setup_pgauth.py before the first native-CLI query.**
 
 If the user hasn't yet saved real credentials (just the template is there), skip this step — the generator will fail on placeholder values, and we'll re-run after the user fills in their connection details.
 
 ### Seed `~/.agami/USER_MEMORY.md` if missing
 
-If `~/.agami/USER_MEMORY.md` does not exist, write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md) → "Default seed") via the Write tool, `chmod 600`. This file holds free-form user preferences (default filters, domain vocabulary, display preferences) that every other agami skill loads on each invocation. Don't overwrite an existing file — the user may have edited it.
+If `~/.agami/USER_MEMORY.md` does not exist, write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md) → "Default seed") via the Write tool, `chmod 600`. This file holds free-form **cross-database** user preferences (default filters, display preferences) that every other agami skill loads on each invocation. Don't overwrite an existing file — the user may have edited it.
+
+### `ORGANIZATION.md` is per-profile, seeded by `connect`
+
+`USER_MEMORY.md` is global (one file, applies across every database the user connects to). The **per-database** equivalent is `~/.agami/<profile>/ORGANIZATION.md` — domain context, terminology, what the data represents. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+
+`init` does NOT create `ORGANIZATION.md` here, because the profile directory `~/.agami/<profile>/` doesn't exist yet — `connect` builds it during introspection. `connect`'s Phase 1.5 prompts the user once for a one-paragraph description and writes the file alongside the per-schema yamls. Don't reach for that file from `init`.
 
 ### Permissions enforcement
 
@@ -332,11 +338,11 @@ Offer to fix it for them: "I can run `chmod 600 ~/.agami/credentials` now — OK
 
 ---
 
-## Phase 3: Tier detection
+## Phase 3: Tool detection
 
 ### Allowed probes (exhaustive list)
 
-Detect which execution tier(s) are available **only** with these commands. Anything else is forbidden — no `pgrep`, `ps`, `find /`, `ls /Applications`, `ls /Library`, network port scanning, or any other discovery technique.
+Detect which database tool(s) are available **only** with these commands. Anything else is forbidden — no `pgrep`, `ps`, `find /`, `ls /Applications`, `ls /Library`, network port scanning, or any other discovery technique.
 
 ```bash
 which psql 2>/dev/null
@@ -356,15 +362,15 @@ If `which psql` returns empty, you may try the common Homebrew location once: `l
 - Running `pgrep`, `ps`, `lsof`, or any process / port discovery.
 - Asking the user where their database is. They tell us by editing `~/.agami/credentials`.
 
-### Choose a tier and persist tool paths
+### Choose a connection method and persist tool paths
 
-Read the user's preferred profile from `~/.agami/credentials` (or `AGAMI_DATABASE_URL`) **only to determine `db_type`** — `postgres` / `mysql` / `sqlite`. Then choose a tier per [`shared/connection-reference.md`](../../shared/connection-reference.md#tier-selection-algorithm):
+Read the user's preferred profile from `~/.agami/credentials` (or `AGAMI_DATABASE_URL`) **only to determine `db_type`** — `postgres` / `mysql` / `sqlite`. Then pick the first available method per [`shared/connection-reference.md`](../../shared/connection-reference.md#how-agami-picks-a-connection-method):
 
-1. Tier 1 — native CLI (`psql` for postgres, `mysql` for mysql, `sqlite3` for sqlite)
-2. Tier 2 — DuckDB universal binary
-3. Tier 3 — Python driver via `scripts/execute_sql.py`
+1. **Native CLI** — `psql` (postgres / redshift), `mysql` (mysql), `snowsql` (snowflake), `sqlite3` (sqlite)
+2. **DuckDB** — universal binary, scans postgres / mysql / sqlite
+3. **Python driver** — `scripts/execute_sql.py` (psycopg2 / pymysql / snowflake-connector-python / stdlib sqlite3)
 
-Persist the chosen tier **and the absolute paths of every tool we found** in `~/.agami/.config`, so future skills don't re-probe:
+Persist the chosen method **and the absolute paths of every tool we found** in `~/.agami/.config`, so future skills don't re-probe. (The internal field is named `tier` for backward-compatibility with shipped installs; values are `cli` / `duckdb` / `python`.)
 
 ```json
 {
@@ -397,24 +403,24 @@ If the user later wants to add another database connection, they edit `~/.agami/
 
 Future skills that need to run SQL look up the tool path from this file and use it directly. They do NOT re-run `which` unless the cached path no longer exists on disk.
 
-### When no tier is available for `db_type`
+### When no tool is available for `db_type`
 
-If neither tier 1, tier 2, nor tier 3 is available, surface the "all tiers failed" template from [`shared/connection-reference.md`](../../shared/connection-reference.md#when-all-tiers-fail) — it lists exactly which tools are missing and the install command for each. Offer to install the simplest tier via Bash if the user accepts:
+If none of the native CLI, DuckDB, or the Python driver is available, surface the "no tool available" template from [`shared/connection-reference.md`](../../shared/connection-reference.md#when-no-tool-is-available) — it lists exactly which tools are missing and the install command for each. Offer to install the simplest one via Bash if the user accepts:
 
 ```bash
 # macOS
-brew install postgresql      # tier 1, postgres
-brew install mysql           # tier 1, mysql
-brew install duckdb          # tier 2, universal
+brew install postgresql      # native CLI for postgres / redshift
+brew install mysql           # native CLI for mysql
+brew install duckdb          # DuckDB universal client
 ```
 
 Don't install silently. Always confirm via AskUserQuestion first.
 
-### Do NOT test the chosen tier here
+### Do NOT test the chosen tool here
 
-Tier detection is path-only. A connection probe (`SELECT 1`) requires credentials. Init does NOT have credentials yet — they're written by the user after Phase 5 closes. The connection probe happens later, in `connect/SKILL.md` Phase 0, against the host in the credentials file. Never against `localhost` as a default.
+Tool detection is path-only. A connection probe (`SELECT 1`) requires credentials. Init does NOT have credentials yet — they're written by the user after Phase 5 closes. The connection probe happens later, in `connect/SKILL.md` Phase 0, against the host in the credentials file. Never against `localhost` as a default.
 
-### Persist the tier + tool paths in `~/.agami/.config`
+### Persist the chosen method + tool paths in `~/.agami/.config`
 
 Write the `.config` schema documented in Phase 3 above (`tier`, `host`, `tool_paths`, `tool_imports`, `detected_at`). **No telemetry fields here yet** — telemetry consent is asked later (after the user has seen `connect` work end-to-end), not at install time.
 
@@ -443,7 +449,7 @@ When all phases done, end with a short status + next step:
 
 > ✓ `~/.agami/` ready (chmod 700)
 > ✓ Credentials template written to `~/.agami/credentials.example`
-> ✓ Tier detected: psql (tier 1)
+> ✓ Tool detected: psql (native CLI for Postgres)
 >
 > Next: edit `~/.agami/credentials` with your DB connection, then ask me a question like "how many orders did we ship last month?". I'll introspect your schema on the first query, then ask if you'd like to share anonymous usage stats.
 

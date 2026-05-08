@@ -193,15 +193,15 @@ password = secret
 
 ### No Python required
 
-The skill drives execution through one of three tiers (highest available):
+The skill picks the first available connection method, in this order:
 
-| Tier | What you need | Install if missing |
+| Method | What you need | Install if missing |
 |---|---|---|
-| 1 — native CLI | `psql` (Postgres) / `mysql` (MySQL) / `sqlite3` (SQLite) on `PATH` | `brew install postgresql` / `brew install mysql` |
-| 2 — DuckDB universal binary | `duckdb` on `PATH` | `brew install duckdb` (or [duckdb.org](https://duckdb.org/)) |
-| 3 — Python driver (optional) | Python + `psycopg2-binary` / `pymysql` | `pip install psycopg2-binary pymysql` |
+| **Native CLI** | `psql` (Postgres / Redshift) / `mysql` (MySQL) / `snowsql` (Snowflake) / `sqlite3` (SQLite) on `PATH` | `brew install postgresql` / `brew install mysql` / [snowsql download](https://docs.snowflake.com/en/user-guide/snowsql-install-config) |
+| **DuckDB** universal binary | `duckdb` on `PATH` | `brew install duckdb` (or [duckdb.org](https://duckdb.org/)) |
+| **Python driver** (optional) | Python + `psycopg2-binary` / `pymysql` / `snowflake-connector-python` | `pip install psycopg2-binary pymysql snowflake-connector-python` |
 
-If you have **none** of those, the `init` skill tells you exactly what to install for your OS. The recommended fallback for non-developers is `brew install duckdb` — one binary, talks to everything.
+If you have **none** of those, the `init` skill tells you exactly what to install for your OS. The recommended fallback for non-developers is `brew install duckdb` — one binary, talks to Postgres, MySQL, and SQLite (Snowflake still needs `snowsql` or the Python driver).
 
 ---
 
@@ -215,7 +215,7 @@ You: @agami how many orders shipped in May?
 [agami runs Phase 0: state check]
   ✓ ~/.agami/ exists (chmod 700)
   ✓ ~/.agami/credentials present (chmod 600)
-  ✓ Tier detected: psql (tier 1)
+  ✓ Tool detected: psql (native CLI for Postgres)
 
 [agami invokes the connect skill — first time only]
   Found 4 tables across 1 schema.
@@ -351,7 +351,7 @@ The example covers the common agami invocation shapes: `psql` / `mysql` / `snows
 | `~/.agami/credentials must be chmod 600` | `chmod 600 ~/.agami/credentials` |
 | `psql: command not found` | `brew install postgresql` (or use DuckDB: `brew install duckdb`) |
 | `mysql: command not found` | `brew install mysql` (or DuckDB) |
-| `psycopg2 not importable` (you didn't ask for tier 3) | Ignore — tier 1 or 2 should cover you |
+| `psycopg2 not importable` (you don't need the Python driver) | Ignore — the native CLI or DuckDB should cover you |
 | `connection refused` on a remote DB | Check VPN / firewall, then `psql -h <host> -p <port> -U <user>` directly to confirm |
 | "I don't have a model for `<profile>`" | Tell agami "introspect my schema" or "connect to my database" — natural language; the connect skill picks it up |
 | The generated SQL keeps using a column that doesn't exist | The model is stale. Tell agami "re-introspect the schema" or "reload the schema" — the connect skill will refresh from the DB while preserving your hand-edits |
@@ -368,7 +368,7 @@ If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/
 - **Examples library YAML** (same doc) — the format for `~/.agami/<dbname>-examples.yaml` (NL→SQL few-shots).
 - **Credentials INI** ([`plugins/agami/shared/credentials-format.md`](plugins/agami/shared/credentials-format.md)) — `~/.agami/credentials`.
 - **Telemetry payload** ([`plugins/agami/shared/telemetry-payload.md`](plugins/agami/shared/telemetry-payload.md)) — what gets sent if you opt in.
-- **Connection / tier model** ([`plugins/agami/shared/connection-reference.md`](plugins/agami/shared/connection-reference.md)) — how the skill picks an execution path.
+- **Connection methods** ([`plugins/agami/shared/connection-reference.md`](plugins/agami/shared/connection-reference.md)) — how the skill picks between psql / mysql / snowsql / sqlite3 / DuckDB / the Python driver.
 
 ---
 
@@ -381,9 +381,9 @@ To run the integration tests locally:
 ```bash
 cd tests/integration
 docker compose up -d              # spins up Postgres + MySQL fixtures
-./test_postgres_e2e_cli.sh        # tier 1
+./test_postgres_e2e_cli.sh        # native CLI (psql)
 ./test_mysql_e2e_cli.sh
-./test_postgres_e2e_duckdb.sh     # tier 2 (skipped if duckdb not on PATH)
+./test_postgres_e2e_duckdb.sh     # DuckDB (skipped if duckdb not on PATH)
 docker compose down -v
 ```
 

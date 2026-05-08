@@ -24,15 +24,88 @@ The validator at [`plugins/agami/scripts/validate_semantic_model.py`](../scripts
 
 ```
 ~/.agami/
-├── credentials                      # INI, chmod 600
-├── <profile>.yaml                   # OSI semantic model — this document's spec
-├── <profile>-examples.yaml          # NL→SQL examples, agami-bespoke (not OSI)
+├── credentials                          # INI, chmod 600
+├── USER_MEMORY.md                       # global preferences (any profile)
+├── <profile>/                           # one directory per profile
+│   ├── index.yaml                       # TOC + cross-schema relationships
+│   ├── <schema1>.yaml                   # OSI semantic model for schema1
+│   ├── <schema2>.yaml                   # OSI semantic model for schema2
+│   ├── examples.yaml                    # NL→SQL examples (agami-bespoke)
+│   └── ORGANIZATION.md                  # domain context for this database
 └── ...
 ```
 
-`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One model per profile, single-user.
+`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile, single-user. Each `<schema>.yaml` is a standalone OSI v0.1.1 document for that schema's datasets — same shape as a single-file model, just narrower.
 
-The examples library (`<profile>-examples.yaml`) is a **bespoke agami format** for few-shot prompts and is documented in [`format-spec.md`](../../../docs/format-spec.md). It is intentionally not OSI — OSI doesn't model NL→SQL examples.
+The examples library (`examples.yaml`) is a **bespoke agami format** for few-shot prompts and is documented in [`format-spec.md`](../../../docs/format-spec.md). It is intentionally not OSI — OSI doesn't model NL→SQL examples.
+
+The domain context (`ORGANIZATION.md`) is documented in [`organization-context-format.md`](organization-context-format.md). Free-form Markdown, loaded into every SQL-generation prompt.
+
+### `index.yaml`
+
+The slim TOC the `query-database` skill loads first. It lists which schemas exist, where each schema's yaml lives, and any cross-schema relationships (relationships within a single schema live in that schema's yaml, not here).
+
+```yaml
+version: "0.1.1"
+profile: finbud
+db_type: postgres
+schemas:
+  - name: public
+    file: public.yaml
+    table_count: 12
+    description: Core OLTP — accounts, transactions, sessions.
+  - name: analytics
+    file: analytics.yaml
+    table_count: 47
+    description: Aggregated analytics views, refreshed nightly.
+cross_schema_relationships:
+  - name: analytics_balance_to_public_accounts
+    from: analytics.daily_balance        # qualified <schema>.<dataset>
+    to: public.accounts                  # qualified <schema>.<dataset>
+    from_columns: [account_id]
+    to_columns: [id]
+    description: Analytics balance rows reference the public accounts table.
+introspect_meta:
+  introspected_at: 2026-05-08T12:00:00Z
+  tier: cli
+  source_db_version: PostgreSQL 16.2
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `version` | yes | `"0.1.1"` |
+| `profile` | yes | Matches the credentials profile name |
+| `db_type` | yes | `postgres` / `redshift` / `mysql` / `snowflake` / `sqlite` |
+| `schemas[]` | yes | One entry per introspected schema |
+| `schemas[].name` | yes | Schema name as it appears in the database |
+| `schemas[].file` | yes | Filename of the schema yaml, relative to the profile dir |
+| `schemas[].table_count` | no | Convenience for the two-pass retrieval cost estimate |
+| `schemas[].description` | no | One-line summary of what's in the schema |
+| `cross_schema_relationships[]` | no | Relationships whose `from`/`to` span schemas. Endpoints **must** be qualified `<schema>.<dataset>` |
+| `introspect_meta` | no | Same allowlist as the per-schema yaml's model-level `agami.introspect_meta` |
+
+The validator at [`validate_semantic_model.py`](../scripts/validate_semantic_model.py) gains a `--directory <profile_dir>` mode that reads `index.yaml`, validates every referenced schema yaml, and runs cross-schema checks (cross-rel endpoints resolve to real datasets, schema yamls' `agami.schema` matches their index entry).
+
+### Per-schema yaml
+
+Each `<schema>.yaml` is a standalone OSI v0.1.1 document. The model-level `custom_extensions` carry an additional `agami.schema` field naming which schema the file represents:
+
+```yaml
+version: "0.1.1"
+
+semantic_model:
+  - name: finbud
+    description: Public schema — core OLTP tables.
+    custom_extensions:
+      - vendor_name: COMMON
+        data: '{"agami": {"profile": "finbud", "db_type": "postgres", "schema": "public"}}'
+    datasets:
+      - <only public.<table> entries>
+    relationships:
+      - <only relationships whose from + to are both in public>
+```
+
+`agami.schema` must equal the schema's `name` in `index.yaml`. Cross-schema relationships go in `index.yaml.cross_schema_relationships[]`, not in any individual schema yaml.
 
 ---
 

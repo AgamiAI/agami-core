@@ -5,11 +5,15 @@ Specs for every file `agami` reads or writes inside `~/.agami/`.
 | File | Format | Owner |
 |---|---|---|
 | `~/.agami/credentials` | INI (chmod 600) | User-edited |
-| `~/.agami/<profile>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML | Skill-written, user-editable |
-| `~/.agami/<profile>-examples.yaml` | Agami-bespoke YAML | Skill-written (seeds) + append-only via the `save-correction` skill |
-| `~/.agami/USER_MEMORY.md` | Free-form Markdown | Seeded by `init`, edited by user or appended by the `save-correction` skill |
+| `~/.agami/<profile>/index.yaml` | Agami-bespoke YAML (TOC + cross-schema relationships) | Skill-written, user-editable |
+| `~/.agami/<profile>/<schema>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML | Skill-written, user-editable |
+| `~/.agami/<profile>/examples.yaml` | Agami-bespoke YAML | Skill-written (seeds) + append-only via the `save-correction` skill |
+| `~/.agami/<profile>/ORGANIZATION.md` | Free-form Markdown — domain context for this database | Seeded by `init` / `connect`, edited by user or appended by `save-correction` |
+| `~/.agami/USER_MEMORY.md` | Free-form Markdown — global preferences | Seeded by `init`, edited by user or appended by `save-correction` |
+| `~/.agami/cross_profile_relationships.yaml` | Agami-bespoke YAML — declared JOIN paths across profiles for federation | User-edited (optional) |
 | `~/.agami/.config` | JSON (chmod 600) | Skill-managed |
 | `~/.agami/.optins` | JSON (chmod 600) | Skill-managed |
+| `~/.agami/.duckdb_init_<id>.sql` | SQL (chmod 600, ephemeral) | Skill-managed — written by `build_duckdb_attach.py` for federated queries, deleted after the query |
 | `~/.agami/.telemetry-queue.jsonl` | JSONL | Skill-managed |
 | `~/.agami/query_log.jsonl` | JSONL append-only | Skill-written, never sent |
 | `~/.agami/charts/<ts>.html` | Chart.js HTML | Skill-written |
@@ -17,7 +21,9 @@ Specs for every file `agami` reads or writes inside `~/.agami/`.
 
 `USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives alongside credentials, and persists across hosts (CLI / Cowork / Desktop) the same way credentials do.
 
-`<profile>` matches the section name in `~/.agami/credentials` (default: `default`).
+`USER_MEMORY.md` covers **user preferences that apply across every database** (default time windows, display preferences, exclude rules). The per-database **`ORGANIZATION.md`** at `~/.agami/<profile>/ORGANIZATION.md` covers **domain knowledge for that specific database** (terminology, key metrics, what the data represents). See [`plugins/agami/shared/organization-context-format.md`](../plugins/agami/shared/organization-context-format.md).
+
+`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile — replaces the v1.0 single-file `<profile>.yaml`. The `connect` skill auto-migrates v1.0 installs on first run.
 
 ---
 
@@ -268,11 +274,13 @@ Fields per line:
 | `sql` | string | The executed SQL |
 | `row_count` | integer | Rows returned (post-filter, pre-truncation) |
 | `execution_ms` | integer | Wall-clock latency |
-| `tier` | enum | `cli` / `duckdb` / `python` |
+| `tier` | enum | Connection method that ran the query: `cli` (native CLI), `duckdb`, `python` (Python driver). Field name is `tier` for backward-compatibility with v1.0 logs. |
 | `risk` | enum | `LOW` / `MEDIUM` / `HIGH` (large-table risk classifier) |
 | `error_kind` | enum or null | Set when execution failed; one of the 9 classifier kinds |
 | `feedback` | enum or null | `good` / `bad` / null (set retroactively by follow-up signals) |
 | `chart_path` | string or null | Absolute path of the HTML report from Phase 4e, or null if the query returned a 1×1 scalar that didn't get a report. Read by `query-database`'s reopen-intent flow (Phase 2a.1) |
+| `tables_used` | array of strings | Qualified `<schema>.<table>` names the SQL FROMs/JOINs. For two-pass retrieval (Phase 2b large mode), this is what Pass 1 picked; for small mode, parsed from the SQL. |
+| `retrieval_mode` | enum | `small` or `large` — which Phase 2b branch ran. Useful for tuning the 50-table threshold. |
 
 **Local-only** — never sent. Records every query. Grep / aggregate it in your own tooling if you want personal analytics.
 
