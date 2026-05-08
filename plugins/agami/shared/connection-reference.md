@@ -1,6 +1,6 @@
 # Database Connection Reference
 
-How `agami` connects to your database. Used by the `connect`, `query-database`, and `save-correction` skills.
+How `agami` connects to your database. Used by the `connect`, `query-database`, and `agami-save-correction` skills.
 
 ## HARD RULES — read first
 
@@ -383,4 +383,4 @@ When introspecting databases, exclude system schemas:
 - **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `~/.agami/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.
 - **NEVER** generate DDL or DML statements (`DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, etc.)
 - Sanitize user input before including in SQL queries
-- `~/.agami/credentials` must be `chmod 600`. The `init` skill enforces this; refuse to read otherwise.
+- `~/.agami/credentials` must be `chmod 600`. The `agami-init` skill enforces this; refuse to read otherwise.

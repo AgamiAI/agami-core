@@ -30,9 +30,9 @@ If the preference is database-specific (e.g. "in this finance DB, always join or
 - **Telemetry consent / install ID / connection-method choice** → `~/.agami/.config`
 - **Email opt-in state** → `~/.agami/.optins`
 
-`save-correction/SKILL.md` classifies each correction and routes the knowledge to the right file. A `user_preference` correction lands here. An `org_context` correction lands in ORGANIZATION.md. Other kinds land in the per-schema yamls (per the table in save-correction).
+`agami-save-correction/SKILL.md` classifies each correction and routes the knowledge to the right file. A `user_preference` correction lands here. An `org_context` correction lands in ORGANIZATION.md. Other kinds land in the per-schema yamls (per the table in save-correction).
 
-## Default seed (written by `init/SKILL.md` on first run)
+## Default seed (written by `agami-init/SKILL.md` on first run)
 
 ```markdown
 # agami user memory
@@ -87,15 +87,15 @@ Three paths:
 
 1. **User edits the file directly.** They open `~/.agami/USER_MEMORY.md` in their editor, write a bullet under a section, save. The next query picks it up.
 
-2. **The `save-correction` skill classifier identifies a `user_preference`.** During Phase 3 of save-correction, if the user's feedback reads like a general policy ("from now on, always …"; "I prefer …"; "never include …"), the classifier routes it to USER_MEMORY.md instead of the semantic model or examples library. The skill picks the right section, appends a bullet, shows the diff, gets approval before writing.
+2. **The `agami-save-correction` skill classifier identifies a `user_preference`.** During Phase 3 of save-correction, if the user's feedback reads like a general policy ("from now on, always …"; "I prefer …"; "never include …"), the classifier routes it to USER_MEMORY.md instead of the semantic model or examples library. The skill picks the right section, appends a bullet, shows the diff, gets approval before writing.
 
-3. **Explicit "remember this" in a query session.** The user says "remember that test users have @example.com emails". query-database's Phase 4d follow-up logic catches this phrasing and offers to add it to USER_MEMORY.md.
+3. **Explicit "remember this" in a query session.** The user says "remember that test users have @example.com emails". agami-query-database's Phase 4d follow-up logic catches this phrasing and offers to add it to USER_MEMORY.md.
 
 ## Validation
 
 This file is intentionally **not** schema-validated. It's free-form markdown the user owns. The agami skills read it as opaque context — they don't enforce structure beyond stripping HTML comments. If the user writes something contradictory or incoherent, the skill follows it anyway.
 
-The one rule: if the file is missing, skills behave as if it were empty. They never error out on an absent USER_MEMORY.md. The `init/SKILL.md` ensures the seed is written on first run, so this case is rare.
+The one rule: if the file is missing, skills behave as if it were empty. They never error out on an absent USER_MEMORY.md. The `agami-init/SKILL.md` ensures the seed is written on first run, so this case is rare.
 
 ## Size cap
 

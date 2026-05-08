@@ -26,12 +26,12 @@ When prompted to grant permissions, approve:
 
 ## 4. Verify
 
-In any Cowork chat, type `@agami` — autocomplete should suggest the four agami skills (`init`, `connect`, `query-database`, `save-correction`).
+In any Cowork chat, type `@agami` — autocomplete should suggest the four agami skills (`agami-init`, `agami-connect`, `agami-query-database`, `agami-save-correction`).
 
 Try:
 
 ```
-@agami init
+/agami-init
 ```
 
 ## 5. Set up credentials
@@ -41,7 +41,7 @@ Cowork runs on your machine (it's a local-first product despite the browser UI),
 If your Cowork environment runs in a sandbox or remote VM, `~/.agami/` lives in **that** environment's home directory — verify with:
 
 ```
-@agami init verify
+/agami-init verify
 ```
 
 It prints `~/.agami/` resolution and confirms credentials exist.
@@ -69,4 +69,4 @@ Your `~/.agami/` directory is not touched.
 | Marketplace not found | Double-check the spelling: `AgamiAI/LiteBi` (case-sensitive on GitHub) |
 | Permissions prompt didn't appear | Settings → Plugins → click the gear next to `agami` → Permissions → grant explicitly |
 | `psql: command not found` in the Cowork sandbox | The sandbox doesn't have a Postgres CLI; install DuckDB inside the sandbox or have your admin add `postgresql-client` |
-| `~/.agami/credentials` not found, but I just made it | The Cowork sandbox's `~` may differ from your laptop's. Run `@agami init verify` to see where the skill is looking |
+| `~/.agami/credentials` not found, but I just made it | The Cowork sandbox's `~` may differ from your laptop's. Run `/agami-init verify` to see where the skill is looking |

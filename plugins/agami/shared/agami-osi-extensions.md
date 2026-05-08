@@ -88,7 +88,7 @@ Attached to a `datasets[]` entry.
 
 ### `agami.performance_hints` (optional, emitted on introspect for tables > 100k rows)
 
-Drives the risk-assessment banner in `query-database/SKILL.md` Phase 2d. The skill consults `estimated_row_count` and `recommended_filters` to flag HIGH/MEDIUM/LOW risk on each query.
+Drives the risk-assessment banner in `agami-query-database/SKILL.md` Phase 2d. The skill consults `estimated_row_count` and `recommended_filters` to flag HIGH/MEDIUM/LOW risk on each query.
 
 ```yaml
 - name: orders
@@ -155,9 +155,9 @@ Records the result of the orphan-ratio check from [`fk-validation.md`](fk-valida
 
 ## Reading conventions for the skills
 
-- `query-database/SKILL.md` reads `agami.type` and `agami.choice_field` to inform SQL generation and chart rendering. If absent, fall back to inferring from the SQL expression.
-- `connect/SKILL.md` is the canonical writer of every extension above.
-- `save-correction/SKILL.md` may **add** new extensions (e.g., a clarified `agami.unit` after the user says "amount is in cents") but never invents an extension whose shape isn't listed here.
+- `agami-query-database/SKILL.md` reads `agami.type` and `agami.choice_field` to inform SQL generation and chart rendering. If absent, fall back to inferring from the SQL expression.
+- `agami-connect/SKILL.md` is the canonical writer of every extension above.
+- `agami-save-correction/SKILL.md` may **add** new extensions (e.g., a clarified `agami.unit` after the user says "amount is in cents") but never invents an extension whose shape isn't listed here.
 
 ---
 

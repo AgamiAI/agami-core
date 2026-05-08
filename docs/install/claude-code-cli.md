@@ -53,7 +53,7 @@ Expected output:
 
 ```
 Installed agami v1.0.0 (from litebi)
-4 skills available: init, connect, query-database, save-correction
+4 skills available: agami-init, agami-connect, agami-query-database, agami-save-correction
 ```
 
 ## 5. Verify
@@ -67,7 +67,7 @@ You should see `agami v1.0.0` in the active list.
 Try invoking it:
 
 ```
-@agami init
+/agami-init
 ```
 
 The skill should respond with the first-run state check, then walk you through credential setup.

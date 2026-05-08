@@ -1,13 +1,13 @@
 ---
-name: save-correction
+name: agami-save-correction
 description: "Saves a user correction so future queries learn from it. Always appends a (question, corrected_sql) pair to the per-database examples YAML in the .agami home directory. Additionally, classifies the correction and — when applicable — applies a surgical edit to the OSI semantic model itself (relationship fix, field metadata, or new metric). Every model edit is OSI-conformant and validated before write; the validator is the binding gate. Shows the user a model diff for approval before any model mutation."
-when_to_use: "Use when the user says 'save this as a correction', '/save-correction', 'remember this', 'use this SQL next time', or after the user manually fixes a query result and wants future similar questions to use the fix. Also use when the demo query in connect/SKILL.md gets a 'No' answer — that's a correction in disguise."
+when_to_use: "Use when the user says 'save this as a correction', '/agami-save-correction', 'remember this', 'use this SQL next time', or after the user manually fixes a query result and wants future similar questions to use the fix. Also use when the demo query in agami-connect/SKILL.md gets a 'No' answer — that's a correction in disguise."
 argument-hint: "[corrected SQL or NL feedback]"
 ---
 
 # agami save-correction
 
-**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** The only working slash command for agami is `/init` (bare). Never tell the user to type `/agami:save-correction`, `/save-correction`, `/agami:init`, or any other slash form — those don't exist. Phrase guidance as natural language ("say 'save this as a correction'", "say 'remember this'") and the relevant skill's `when_to_use` will catch it.
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** All four agami slash commands (`/agami-init`, `/agami-connect`, `/agami-query-database`, `/agami-save-correction`) work. Never write the un-prefixed forms (`/save-correction`, `/init`, etc.) or colon forms (`/agami:save-correction`) — those don't exist. For chat replies, prefer natural language ("say 'save this as a correction'", "say 'remember this'") — the agami-save-correction skill's `when_to_use` matcher routes correctly.
 
 You are recording a user correction. Goal: persist the fix so similar questions get better answers next time.
 
@@ -45,7 +45,7 @@ Determine what the user gave:
 
 ### 1d — EXPLAIN-validate the corrected SQL
 
-Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `~/.agami/.config`. Same validate-then-save contract as `connect/SKILL.md` Phase 4b:
+Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `~/.agami/.config`. Same validate-then-save contract as `agami-connect/SKILL.md` Phase 4b:
 
 - EXPLAIN succeeds → continue.
 - EXPLAIN fails → route through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Surface the one-line remediation. Do **not** save anything. Ask the user to fix the SQL and try again.
@@ -303,7 +303,7 @@ The next `query-database` invocation flushes the queue.
 ## Edge cases
 
 - **Empty examples file** — initialize it with the new entry as the only one.
-- **`examples.yaml` missing** — invoke `connect` first to seed, then append.
+- **`examples.yaml` missing** — invoke `agami-connect` first to seed, then append.
 - **User pastes SQL referencing tables not in the OSI model** — EXPLAIN-validate catches it (`table_not_found`); surface the remediation, don't save.
 - **User saves a duplicate of an existing seed** — replace the seed (`source: correction`, fresh `created_at`).
 - **Most-recent query is itself a correction** — that's fine, attach to it.

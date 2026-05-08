@@ -1,5 +1,5 @@
 ---
-name: init
+name: agami-init
 description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), writes a credentials.example template, detects which database tool is available (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver), and walks the user through one-time opt-in prompts for anonymous usage stats and email updates. Re-run any time to verify state, switch profiles, or change opt-in choices."
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami', wants to add or switch a database connection, or asks to change their telemetry / email preferences. Auto-invoked by the connect and query-database skills if the .agami directory or credentials file is missing."
 argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
@@ -7,7 +7,7 @@ argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
 
 # agami init
 
-**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** The only working slash command for agami is `/init` (bare). Never tell the user to type `/agami:init`, `/agami:connect`, `/connect`, `/save-correction`, or any other slash form — those don't exist in users' installations. Use natural-language phrasing for everything except `/init`.
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** All four agami slash commands (`/agami-init`, `/agami-connect`, `/agami-query-database`, `/agami-save-correction`) work — the `agami-` prefix avoids collision with Claude Code's built-in `/init` and other plugins. Never write the un-prefixed forms (`/init`, `/connect`, `/query-database`, `/save-correction`) or colon-namespaced forms (`/agami:init`, etc.) — those don't exist. For everything except `/agami-init`, prefer natural language ("say 'reload the schema'", "say 'save this as a correction'") — it reads better than a slash command.
 
 You are walking the user through the one-time setup for `agami`. The goal: by the end of this skill, the user has a working `~/.agami/credentials` file, knows which database tool their machine will use to run queries, and has made conscious choices about telemetry and email opt-ins.
 
@@ -418,7 +418,7 @@ Don't install silently. Always confirm via AskUserQuestion first.
 
 ### Do NOT test the chosen tool here
 
-Tool detection is path-only. A connection probe (`SELECT 1`) requires credentials. Init does NOT have credentials yet — they're written by the user after Phase 5 closes. The connection probe happens later, in `connect/SKILL.md` Phase 0, against the host in the credentials file. Never against `localhost` as a default.
+Tool detection is path-only. A connection probe (`SELECT 1`) requires credentials. Init does NOT have credentials yet — they're written by the user after Phase 5 closes. The connection probe happens later, in `agami-connect/SKILL.md` Phase 0, against the host in the credentials file. Never against `localhost` as a default.
 
 ### Persist the chosen method + tool paths in `~/.agami/.config`
 
@@ -428,7 +428,7 @@ For ISO8601 timestamp: `date -u +"%Y-%m-%dT%H:%M:%SZ"`. Detect `host` from the e
 
 After writing, `chmod 600 ~/.agami/.config`.
 
-`connect/SKILL.md` will later add `analytics_consent`, `install_id`, and `consent_ts` to this same file once the user has opted in (or out).
+`agami-connect/SKILL.md` will later add `analytics_consent`, `install_id`, and `consent_ts` to this same file once the user has opted in (or out).
 
 ---
 
@@ -436,8 +436,8 @@ After writing, `chmod 600 ~/.agami/.config`.
 
 `init` does not ask for telemetry or email opt-in. Both are asked later, when the user has felt the value of the skill:
 
-- **Telemetry consent** — asked by `connect/SKILL.md` after the demo query succeeds. Asking at `init` time is too early; the user hasn't seen anything work yet.
-- **Email updates** — asked by `query-database/SKILL.md` after the user's first real successful query.
+- **Telemetry consent** — asked by `agami-connect/SKILL.md` after the demo query succeeds. Asking at `init` time is too early; the user hasn't seen anything work yet.
+- **Email updates** — asked by `agami-query-database/SKILL.md` after the user's first real successful query.
 
 Don't do anything in this phase. Just mention in the closing message below that the user will be asked once about each (separately) after the first interaction.
 

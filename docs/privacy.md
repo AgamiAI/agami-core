@@ -38,7 +38,7 @@ That's it.
 
 ## What we send if you opt into telemetry
 
-The `init` skill asks once. **Default is off.** If you opt in, every event sent contains exactly these fields and nothing else:
+The `agami-init` skill asks once. **Default is off.** If you opt in, every event sent contains exactly these fields and nothing else:
 
 | Field | What it is | Example |
 |---|---|---|
@@ -79,7 +79,7 @@ If a future feature wants to add a field, we add it explicitly to the allowlist 
 
 ## How to opt in
 
-The `init` skill prompts you once during first-run, in plain English:
+The `agami-init` skill prompts you once during first-run, in plain English:
 
 > **Help us improve agami by sending anonymous usage stats?**
 >
@@ -179,7 +179,7 @@ We do not log IP addresses alongside `install_id`. IPs hit the rate limiter and 
 
 ## Email opt-in (separate from telemetry)
 
-After your first successful query, the `query-database` skill asks once whether you want occasional product-update emails. **Default is skip.** This is a separate question from the analytics opt-in — you can opt into one and not the other.
+After your first successful query, the `agami-query-database` skill asks once whether you want occasional product-update emails. **Default is skip.** This is a separate question from the analytics opt-in — you can opt into one and not the other.
 
 If you opt in with an email, the skill POSTs to a HubSpot form at `api.hsforms.com/submissions/v3/integration/submit/<HUB_ID>/<FORM_GUID>` with:
 

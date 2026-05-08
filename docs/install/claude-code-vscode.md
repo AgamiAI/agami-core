@@ -40,7 +40,7 @@ Expected output mirrors the CLI flow: marketplace added, plugin installed, 4 ski
 Try a skill:
 
 ```
-@agami init
+/agami-init
 ```
 
 The skill responds in the Claude pane with the first-run state check.

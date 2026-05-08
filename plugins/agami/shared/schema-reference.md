@@ -43,7 +43,7 @@ The domain context (`ORGANIZATION.md`) is documented in [`organization-context-f
 
 ### `index.yaml`
 
-The slim TOC the `query-database` skill loads first. It lists which schemas exist, where each schema's yaml lives, and any cross-schema relationships (relationships within a single schema live in that schema's yaml, not here).
+The slim TOC the `agami-query-database` skill loads first. It lists which schemas exist, where each schema's yaml lives, and any cross-schema relationships (relationships within a single schema live in that schema's yaml, not here).
 
 ```yaml
 version: "0.1.1"
@@ -403,7 +403,7 @@ Optional (warnings, not errors): SQL expression parses cleanly via `sqlglot` if 
 
 ## Worked example
 
-A small "shop" database — what `connect/SKILL.md` writes after introspecting the integration-test fixture at `tests/integration/fixtures/postgres-init.sql`.
+A small "shop" database — what `agami-connect/SKILL.md` writes after introspecting the integration-test fixture at `tests/integration/fixtures/postgres-init.sql`.
 
 ```yaml
 version: "0.1.1"
@@ -602,4 +602,4 @@ This validates clean against `osi-schema.json` and the agami extension rules.
 
 ## Migration note
 
-Versions of agami before 1.0 used a bespoke `tables` / `columns` / `entities` / `measures` schema. As of v1.0 (this release) the format is OSI-only. Existing pre-OSI models are not auto-migrated — say "reload the schema" (or "re-introspect my database") and the connect skill regenerates in the new format. The semantic content (descriptions, choice fields, hand-edits) is recovered from the source DB and the user's prior `<profile>-examples.yaml` corrections.
+Versions of agami before 1.0 used a bespoke `tables` / `columns` / `entities` / `measures` schema. As of v1.0 (this release) the format is OSI-only. Existing pre-OSI models are not auto-migrated — say "reload the schema" (or "re-introspect my database") and the agami-connect skill regenerates in the new format. The semantic content (descriptions, choice fields, hand-edits) is recovered from the source DB and the user's prior `<profile>-examples.yaml` corrections.

@@ -57,7 +57,7 @@ If the file is missing or empty, the skill treats it as no-context and proceeds.
 
 ## How `save-correction` extends it
 
-When the user says something like "gold tier means lifetime spend > $10k" or "we use 'churn' to mean a customer who hasn't placed an order in 90 days", the save-correction skill classifies that as `org_context` and appends a one-line entry under the `## Key terminology` heading (creating the heading if missing). The next query picks it up.
+When the user says something like "gold tier means lifetime spend > $10k" or "we use 'churn' to mean a customer who hasn't placed an order in 90 days", the agami-save-correction skill classifies that as `org_context` and appends a one-line entry under the `## Key terminology` heading (creating the heading if missing). The next query picks it up.
 
 The `user_preference` correction kind still routes to `USER_MEMORY.md` — those go where they always went.
 
@@ -67,6 +67,6 @@ The `user_preference` correction kind still routes to `USER_MEMORY.md` — those
 
 - **Never sent in telemetry.** The 11-field allowlist in [`telemetry-payload.md`](telemetry-payload.md) doesn't include any free-text field, period.
 - **Never read by anything other than the agami skills running locally.**
-- The `init` skill enforces `chmod 600` on creation.
+- The `agami-init` skill enforces `chmod 600` on creation.
 
 If the user shares `~/.agami/<profile>/` with a teammate (e.g. via dotfiles), the file goes with the model — that's a deliberate user action.

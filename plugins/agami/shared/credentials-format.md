@@ -1,6 +1,6 @@
 # Credentials Format — `~/.agami/credentials`
 
-`agami` reads database connection details from `~/.agami/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The `init` skill creates `~/.agami/credentials.example` for you to copy and edit.
+`agami` reads database connection details from `~/.agami/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The `agami-init` skill creates `~/.agami/credentials.example` for you to copy and edit.
 
 ## Profile names
 
@@ -196,7 +196,7 @@ The skill **refuses** to read `~/.agami/credentials` unless `chmod 600` (or stri
 Run: chmod 600 ~/.agami/credentials
 ```
 
-The `init` skill sets the right permissions automatically when it writes the file. If you create it by hand, run `chmod 600 ~/.agami/credentials` afterwards.
+The `agami-init` skill sets the right permissions automatically when it writes the file. If you create it by hand, run `chmod 600 ~/.agami/credentials` afterwards.
 
 ## Env var override: `AGAMI_DATABASE_URL`
 

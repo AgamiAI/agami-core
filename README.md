@@ -54,7 +54,7 @@ Most NL→SQL tools either send your data through a hosted backend (Snowflake-fl
 /plugin install agami@litebi
 
 # 2. Run init — creates ~/.agami/, writes a credentials template
-@agami init
+/agami-init
 
 # 3. Edit the template with your DB connection details
 $EDITOR ~/.agami/credentials.example
@@ -62,7 +62,7 @@ mv ~/.agami/credentials.example ~/.agami/credentials
 chmod 600 ~/.agami/credentials
 
 # 4. Ask a question
-@agami how many orders did we ship last month?
+how many orders did we ship last month?
 ```
 
 That's it. The skill auto-introspects on the first query, generates seed examples, runs a demo query for you to confirm, then answers your question.
@@ -131,7 +131,7 @@ Detailed walkthrough: [`docs/install/claude-cowork.md`](docs/install/claude-cowo
 
 `agami` reads database connection details from `~/.agami/credentials`. Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`.
 
-The `init` skill creates a template at `~/.agami/credentials.example`. Edit it and save as `~/.agami/credentials`:
+The `agami-init` skill creates a template at `~/.agami/credentials.example`. Edit it and save as `~/.agami/credentials`:
 
 ```ini
 [default]
@@ -201,7 +201,7 @@ The skill picks the first available connection method, in this order:
 | **DuckDB** universal binary | `duckdb` on `PATH` | `brew install duckdb` (or [duckdb.org](https://duckdb.org/)) |
 | **Python driver** (optional) | Python + `psycopg2-binary` / `pymysql` / `snowflake-connector-python` | `pip install psycopg2-binary pymysql snowflake-connector-python` |
 
-If you have **none** of those, the `init` skill tells you exactly what to install for your OS. The recommended fallback for non-developers is `brew install duckdb` — one binary, talks to Postgres, MySQL, and SQLite (Snowflake still needs `snowsql` or the Python driver).
+If you have **none** of those, the `agami-init` skill tells you exactly what to install for your OS. The recommended fallback for non-developers is `brew install duckdb` — one binary, talks to Postgres, MySQL, and SQLite (Snowflake still needs `snowsql` or the Python driver).
 
 ---
 
@@ -210,14 +210,14 @@ If you have **none** of those, the `init` skill tells you exactly what to instal
 The first time you ask a data question, the skill runs an auto-setup flow. Here's what happens:
 
 ```
-You: @agami how many orders shipped in May?
+You: how many orders shipped in May?
 
 [agami runs Phase 0: state check]
   ✓ ~/.agami/ exists (chmod 700)
   ✓ ~/.agami/credentials present (chmod 600)
   ✓ Tool detected: psql (native CLI for Postgres)
 
-[agami invokes the connect skill — first time only]
+[agami invokes the agami-connect skill — first time only]
   Found 4 tables across 1 schema.
   Introspecting columns + foreign keys...
   ✓ 4 tables, 18 columns, 3 relationships
@@ -272,7 +272,7 @@ Then it asks once for telemetry consent (Phase 4 of `init`) and once for email-u
 ### Ask a question
 
 ```
-@agami top 10 active customers by spend last 30 days
+top 10 active customers by spend last 30 days
 ```
 
 The skill loads your model + examples, generates SQL, runs it, returns a markdown table. If a touched table is large (> 1M rows) and you didn't include a date filter, it'll prompt you before running.
@@ -291,7 +291,7 @@ You: save this as a correction
  <profile>-examples.yaml]
 ```
 
-Just say "save this as a correction" / "remember this" / "use this SQL next time" — natural language. Agami's `when_to_use` matching routes the request to the save-correction skill. The next time you (or anyone using your `~/.agami/`) asks a similar question, the corrected SQL is in the prompt as a few-shot example.
+Just say "save this as a correction" / "remember this" / "use this SQL next time" — natural language. Agami's `when_to_use` matching routes the request to the agami-save-correction skill. The next time you (or anyone using your `~/.agami/`) asks a similar question, the corrected SQL is in the prompt as a few-shot example.
 
 ### Render a chart
 
@@ -321,7 +321,7 @@ Format reference: [`docs/format-spec.md`](docs/format-spec.md).
 
 ## Privacy + telemetry
 
-`agami` ships with **all telemetry off by default**. The `init` skill asks once — you can change your mind any time by editing `~/.agami/.config` or asking the skill to "turn off analytics".
+`agami` ships with **all telemetry off by default**. The `agami-init` skill asks once — you can change your mind any time by editing `~/.agami/.config` or asking the skill to "turn off analytics".
 
 Full payload allowlist + plain-English what-we-send / what-we-never-send: [`docs/privacy.md`](docs/privacy.md).
 
@@ -353,12 +353,12 @@ The example covers the common agami invocation shapes: `psql` / `mysql` / `snows
 | `mysql: command not found` | `brew install mysql` (or DuckDB) |
 | `psycopg2 not importable` (you don't need the Python driver) | Ignore — the native CLI or DuckDB should cover you |
 | `connection refused` on a remote DB | Check VPN / firewall, then `psql -h <host> -p <port> -U <user>` directly to confirm |
-| "I don't have a model for `<profile>`" | Tell agami "introspect my schema" or "connect to my database" — natural language; the connect skill picks it up |
-| The generated SQL keeps using a column that doesn't exist | The model is stale. Tell agami "re-introspect the schema" or "reload the schema" — the connect skill will refresh from the DB while preserving your hand-edits |
+| "I don't have a model for `<profile>`" | Tell agami "introspect my schema" or "connect to my database" — natural language; the agami-connect skill picks it up |
+| The generated SQL keeps using a column that doesn't exist | The model is stale. Tell agami "re-introspect the schema" or "reload the schema" — the agami-connect skill will refresh from the DB while preserving your hand-edits |
 | Query times out on a large table | Add a date filter or `LIMIT`; the skill flags HIGH-risk scans before running |
 | Want to switch profiles | `AGAMI_PROFILE=staging` then re-ask the question |
 
-If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/issues](https://github.com/AgamiAI/LiteBi/issues) with the exact error and the output of `@agami init verify`.
+If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/issues](https://github.com/AgamiAI/LiteBi/issues) with the exact error and the output of `/agami-init verify`.
 
 ---
 
@@ -395,7 +395,7 @@ pytest tests/test_telemetry_privacy.py -v
 
 When adding a feature that touches telemetry, the privacy test must still pass — the allowlist is the contract.
 
-A community Discord will land soon — once it's live the link will appear here and in [`init/SKILL.md`](plugins/agami/skills/init/SKILL.md).
+A community Discord will land soon — once it's live the link will appear here and in [`agami-init/SKILL.md`](plugins/agami/skills/agami-init/SKILL.md).
 
 ---
 

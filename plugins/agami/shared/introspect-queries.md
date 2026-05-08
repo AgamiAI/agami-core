@@ -1,8 +1,8 @@
 # Introspection Queries
 
-SQL the `connect` skill runs against `information_schema` to build the per-schema yamls in `~/.agami/<profile>/`. Each query is **pure SQL** — no Python, no driver-specific calls. Runs identically on the native CLI, DuckDB, or the Python driver.
+SQL the `agami-connect` skill runs against `information_schema` to build the per-schema yamls in `~/.agami/<profile>/`. Each query is **pure SQL** — no Python, no driver-specific calls. Runs identically on the native CLI, DuckDB, or the Python driver.
 
-The `connect` skill runs them in this order:
+The `agami-connect` skill runs them in this order:
 
 1. **List schemas** — show the user a multi-select picker of which schemas to introspect (Phase B's schema picker)
 2. **List tables** — only within the selected schemas

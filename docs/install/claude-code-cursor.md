@@ -33,7 +33,7 @@ In the Claude pane's chat input:
 
 ```
 /plugin list
-@agami init
+/agami-init
 ```
 
 ## 5. Set up credentials

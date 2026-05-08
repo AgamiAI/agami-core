@@ -1,6 +1,6 @@
 # Telemetry Payload — Privacy Allowlist
 
-`agami` ships with all telemetry **off by default**. The `init` skill asks once, in plain English, whether to enable it. The user can change their mind any time by editing `~/.agami/.config` or asking the skill to "turn off analytics".
+`agami` ships with all telemetry **off by default**. The `agami-init` skill asks once, in plain English, whether to enable it. The user can change their mind any time by editing `~/.agami/.config` or asking the skill to "turn off analytics".
 
 This document is **the authoritative source of truth** for what gets sent. Both the client (skill) and the server (Cloudflare Worker at `services/telemetry-endpoint/`) enforce this allowlist independently — defense in depth.
 
@@ -78,7 +78,7 @@ A batch is at most 100 events. Server rejects larger batches.
 
 ## How the skill builds the payload
 
-The `query-database` skill (and any other skill that emits telemetry) follows this contract:
+The `agami-query-database` skill (and any other skill that emits telemetry) follows this contract:
 
 1. Read `~/.agami/.config` — if `analytics_consent != true`, do nothing.
 2. Build the event object using only the fields in the table above. Hard-code the field list — do not iterate over a `dict` of "stuff to send".
@@ -102,7 +102,7 @@ The Cloudflare Worker at `services/telemetry-endpoint/` re-validates the payload
 
 ## Plain-English opt-in dialog
 
-The `init` skill presents this to the user, verbatim:
+The `agami-init` skill presents this to the user, verbatim:
 
 > Help us improve agami by sending **anonymous usage stats**?
 >

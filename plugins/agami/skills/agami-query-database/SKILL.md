@@ -1,5 +1,5 @@
 ---
-name: query-database
+name: agami-query-database
 description: "Answers natural-language questions about the user's database. Loads the OSI v0.1.1 semantic model and few-shot examples from the .agami home directory, generates SQL by composing OSI datasets/fields/relationships/metrics into a prompt (and reading Agami extensions for type info, choice fields, and performance hints), executes it locally via the user's chosen tool (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver `execute_sql.py`), returns results as a markdown table with optional CSV export, and renders Chart.js HTML charts on request. All execution is local — no data leaves the machine."
 when_to_use: "Use when the user asks 'how many', 'show me', 'top N', 'trend over time', 'compare', 'breakdown by', 'group by', 'average', or any other data question against their configured database. Also use for CSV export ('export this'), chart rendering ('make that a bar chart'), or to follow up on a previous result ('drill into the EU region')."
 argument-hint: "[question] [--csv] [--chart bar|line|pie|doughnut|scatter]"
@@ -28,18 +28,19 @@ For telemetry payload allowlist: [`shared/telemetry-payload.md`](../../shared/te
 
 ## Invocation conventions
 
-**Read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) before suggesting any slash command in chat.** The short version: only `/init` (bare) works as a slash command. **Never** tell the user to type `/agami:init`, `/agami:connect`, `/connect`, `/query-database`, `/save-correction`, or any colon-prefixed `/agami:<X>` form — those don't exist in users' installations.
+**Read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) before suggesting any slash command in chat.** All four agami slash commands (`/agami-init`, `/agami-connect`, `/agami-query-database`, `/agami-save-correction`) work — the `agami-` prefix avoids collision with Claude Code's built-in `/init` and other plugins. Never write the un-prefixed forms (`/init`, `/connect`, `/query-database`, `/save-correction`) or colon-namespaced forms (`/agami:init`, etc.) — those don't exist.
 
-For everything except `/init`, phrase guidance as natural language and the skill's `when_to_use` matcher routes correctly:
+For chat replies, **prefer natural language over slash commands** — it reads better and the skill's `when_to_use` matcher routes correctly:
 
 - Re-introspect the schema → "say 'reload the schema'" or "say 'reintrospect my database'"
 - Save a correction → "say 'save this as a correction'" or "say 'remember this'"
 - Ask a data question → just type the question
+- Set up agami / switch profiles → `/agami-init` (the one place the slash form is genuinely cleaner than natural language)
 
 ## Conversation style
 
 - **One question per turn unless they're truly bundled.**
-- **Use AskUserQuestion sparingly** — only when the user must pick before the skill can proceed (large-table HIGH-risk approval, the post-install email opt-in, the demo-query Yes/No/Skip in connect). **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
+- **Use AskUserQuestion sparingly** — only when the user must pick before the skill can proceed (large-table HIGH-risk approval, the post-install email opt-in, the demo-query Yes/No/Skip in agami-connect). **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
 - **Insights, not narration** — lead with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
 - **Round numbers in prose**, exact in the table.
 - **Don't echo the SQL in chat prose** — that's enforced as a hard rule in Phase 2. Don't paste the raw Bash CSV — Phase 3.
@@ -71,7 +72,7 @@ Look for the model in this priority order:
 
 1. **`~/.agami/<profile>/index.yaml`** — current layout. Read `index.yaml` first, then every `<schema>.yaml` it references (`schemas[].file`). Build a merged in-memory view from all the loaded schema yamls plus `index.yaml.cross_schema_relationships[]`.
 2. **`~/.agami/<profile>.yaml`** — v1.0 single-file layout. If this exists but the directory doesn't, surface a one-line message ("Detected v1.0 layout — migrating to per-schema directory takes ~30–90s. Say 'reload the schema' to migrate, or I'll keep using the old file for now.") and read it as before. The next reintrospect will migrate.
-3. **Neither exists** → invoke the `connect` skill.
+3. **Neither exists** → invoke the `agami-connect` skill.
 
 For directory-layout, sanity-check:
 - `index.yaml.version: "0.1.1"` (warn but proceed if different)
@@ -115,7 +116,7 @@ For each relationship, treat as a directed JOIN edge in a graph: `from` → `to`
 
 Read `~/.agami/<profile>/examples.yaml` (current layout). Fall back to `~/.agami/<profile>-examples.yaml` if only the v1.0 layout exists. Take the **most recent 50** entries (newest `created_at` first).
 
-If empty → warn the user, e.g. "I don't have any few-shot examples for this database yet — answers may be lower quality. Say 'introspect the schema' or 'connect to my database' and I'll seed the examples library." (Don't tell them to type a slash command — only `/init` is consistently surfaced as a slash command across hosts. Other skills are best invoked via natural language so the `when_to_use` matcher routes correctly.)
+If empty → warn the user, e.g. "I don't have any few-shot examples for this database yet — answers may be lower quality. Say 'introspect the schema' or 'connect to my database' and I'll seed the examples library." (Natural language reads better than a slash command in chat — `/agami-connect` works too, but only suggest the slash form when the user specifically asks "what do I type?".)
 
 ### 1d.1 — load USER_MEMORY.md
 
@@ -144,7 +145,7 @@ Look up the cached connection method from `~/.agami/.config`. Run a `SELECT 1` p
 - `network` → check VPN / DB endpoint reachability.
 - `driver_missing` → fall through to the next available method.
 
-If the cached method doesn't work, re-run tool detection per [`init/SKILL.md → Phase 3`](../init/SKILL.md#phase-3-tool-detection).
+If the cached method doesn't work, re-run tool detection per [`agami-init/SKILL.md → Phase 3`](../agami-init/SKILL.md#phase-3-tool-detection).
 
 ---
 
@@ -651,7 +652,7 @@ These are templates, not rules — adjust to the schema. If a slot doesn't fit, 
 
 **When the user is replying to follow-ups**: if the user's next message is a single digit `1`–`5` or a numbered form like `1.` / `1)` / `#1`, treat it as the n-th follow-up from the previous reply. Auto-fill the question text and re-enter Phase 2 with that question. Free-form replies are a fresh question. Genuinely ambiguous replies (`yes`, `do that`) get one short clarifier inline ("which of the 5?") — never via AskUserQuestion.
 
-**Saving a correction is NOT a follow-up bullet.** When the user expresses dissatisfaction with the answer, the skill suggests it inline as a single sentence outside the numbered list, in plain language: *"If that's not the answer you wanted, say 'save this as a correction' and I'll update the examples library."* (Don't tell them to type `/save-correction` — only `/init` is reliably surfaced as a slash command across hosts. Natural-language phrases like "save this as a correction" / "remember this" / "use this SQL next time" route to the save-correction skill via its `when_to_use` matching.) The numbered list stays focused on **what to ask next**, not how to fix what we just said.
+**Saving a correction is NOT a follow-up bullet.** When the user expresses dissatisfaction with the answer, the skill suggests it inline as a single sentence outside the numbered list, in plain language: *"If that's not the answer you wanted, say 'save this as a correction' and I'll update the examples library."* (Natural language reads better here than `/agami-save-correction` — though that slash form does work. Phrases like "save this as a correction" / "remember this" / "use this SQL next time" route to the agami-save-correction skill via its `when_to_use` matching.) The numbered list stays focused on **what to ask next**, not how to fix what we just said.
 
 ### 4g — CSV export (`--csv` or "export this")
 
@@ -761,7 +762,7 @@ End with:
 | Symptom | Action |
 |---|---|
 | `~/.agami/<profile>/index.yaml` missing AND `~/.agami/<profile>.yaml` missing | Invoke `connect` |
-| Model file fails to parse as YAML | Surface error; tell the user "say 'reload the schema' to re-introspect from your DB" (the connect skill handles it) |
+| Model file fails to parse as YAML | Surface error; tell the user "say 'reload the schema' to re-introspect from your DB" (the agami-connect skill handles it) |
 | `version` ≠ `"0.1.1"` | Warn but proceed; suggest "say 'reload the schema'" to regenerate the model in the latest format |
 | Credentials chmod wrong | Refuse, offer `chmod 600` |
 | Cached database tool broken | Re-detect, update `.config` |

@@ -11,7 +11,7 @@ Two ways to use:
     from validate_semantic_model import validate
     errors = validate(model_dict)   # list[str], empty if valid
 
-The validator is the source of truth — connect/SKILL.md and save-correction/SKILL.md
+The validator is the source of truth — agami-connect/SKILL.md and agami-save-correction/SKILL.md
 both call it before writing the model file. A model that fails validation is never
 persisted. This guarantees no OSI-breaking change ever reaches disk.
 
