@@ -27,10 +27,13 @@ Everything in here is non-secret and team-useful. The default is `~/agami-artifa
 | Path | What it is |
 |---|---|
 | `USER_MEMORY.md` | Top-level — cross-database preferences (default filters, currency, display rules). Power users committing this share their tuning with the team. |
-| `<profile>/index.yaml` | Per-profile TOC + cross-schema relationships |
-| `<profile>/<schema>.yaml` | Per-schema OSI semantic model |
+| `<profile>/index.yaml` | Per-profile TOC of schemas + cross-schema relationships + introspect metadata |
+| `<profile>/<schema>/_schema.yaml` | Per-schema slim TOC: list of tables (name + 1-line description) + within-schema relationships + multi-table metrics. NOT OSI — agami-bespoke format. |
+| `<profile>/<schema>/<table>.yaml` | Per-table OSI semantic model (one dataset per file). Field definitions, indexes, choice fields, performance hints. |
 | `<profile>/examples.yaml` | Per-profile NL→SQL few-shot library |
 | `<profile>/ORGANIZATION.md` | Per-profile domain context |
+
+**Why per-table files instead of one yaml per schema:** the two-pass retrieval in `agami-query-database` reads only `_schema.yaml` files for relevance picking (Pass 1), then lazy-loads only the picked tables' yamls (Pass 2). For a 1000-table schema, the slim `_schema.yaml` is ~100KB instead of the ~5MB the full per-schema yaml would be. Cleaner git diffs too — touching one table's metadata changes one small file, not a giant per-schema yaml.
 
 **Convention:** to share with a team, point `artifacts_dir` at a subdirectory of a git-tracked repo. Example: `~/code/myteam/data-stack/agami/` — checked in alongside dbt models, etc.
 
@@ -74,15 +77,17 @@ artifacts_dir="${artifacts_dir:-$HOME/agami-artifacts}"
 
 ## Migration
 
-If the user's install predates this layout (v1.0 single-file `~/.agami/<profile>.yaml`, or v1.1 directory `~/.agami/<profile>/`), the `agami-connect` skill auto-migrates on first run after upgrade:
+Three older layouts exist; `agami-connect` auto-detects and migrates each on first run after upgrade. See agami-connect's Phase 1.1 for the detection/migration code.
 
-1. Read or default `artifacts_dir`.
-2. `mkdir -p "$artifacts_dir/<profile>" && chmod 755 "$artifacts_dir"`.
-3. Move `~/.agami/<profile>/` → `$artifacts_dir/<profile>/` (or, for v1.0, re-introspect into the new layout per the existing `_legacy.yaml.bak` flow).
-4. Move `~/.agami/USER_MEMORY.md` → `$artifacts_dir/USER_MEMORY.md` if found.
-5. Surface a one-liner: "Migrated semantic model and USER_MEMORY.md to `<artifacts_dir>/`. You can `git init` there and commit if you want to share with your team."
+| From | To | Behavior |
+|---|---|---|
+| v1.0 single-file `~/.agami/<profile>.yaml` | v1.3 per-table | Backup the legacy file, re-introspect from DB into the new directory tree |
+| v1.1 `~/.agami/<profile>/<schema>.yaml` (under secrets dir) | v1.3 per-table | Move dir to `<artifacts_dir>`, then split each schema yaml into per-table files |
+| v1.2 `<artifacts_dir>/<profile>/<schema>.yaml` (single file per schema, no `_schema.yaml`) | v1.3 per-table | Split each `<schema>.yaml` into a `<schema>/` subdirectory with `_schema.yaml` + per-table files. Pure file-rewrite, no DB queries. |
 
-The migration is one-shot per profile — once `<artifacts_dir>/<profile>/index.yaml` exists, no further migration runs for that profile.
+USER_MEMORY.md is migrated alongside on the v1.0/v1.1 paths.
+
+The migration is one-shot per profile — once a `<schema>/_schema.yaml` exists, no further migration runs for that schema. Mixed v1.2/v1.3 profiles are supported by the validator (some schemas migrated, some not yet) so a partial-migration crash doesn't leave the user stranded.
 
 ## Why this split exists
 

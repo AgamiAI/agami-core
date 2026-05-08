@@ -104,10 +104,13 @@ Then proceed. **For reintrospect:** prepend "Re-introspecting (this takes about 
 
 ### Phase 1.1 — existing-model check + legacy-layout migration
 
-The current layout is `<artifacts_dir>/<profile>/` (a directory with `index.yaml` + per-schema yamls). Two earlier layouts exist and need migration:
+The current layout (v1.3) is `<artifacts_dir>/<profile>/index.yaml` + `<artifacts_dir>/<profile>/<schema>/_schema.yaml` + per-table yamls. Three earlier layouts exist and need migration:
 
-- **v1.0**: single file at `~/.agami/<profile>.yaml` plus a separate examples file `~/.agami/<profile>-examples.yaml`.
-- **v1.1**: per-schema directory at `<artifacts_dir>/<profile>/` (under the secrets dir, not yet split out to artifacts).
+- **v1.0** — single file at `~/.agami/<profile>.yaml` (plus `<profile>-examples.yaml`).
+- **v1.1** — per-schema directory at `~/.agami/<profile>/<schema>.yaml` (under secrets dir, not yet split to artifacts).
+- **v1.2** — per-schema directory at `<artifacts_dir>/<profile>/<schema>.yaml` (under artifacts, but each schema is one big file with all its tables).
+
+Detection (check in order — first match wins):
 
 ```bash
 artifacts_profile_dir="$artifacts_dir/$profile"
@@ -116,8 +119,22 @@ v10_legacy_file="$HOME/.agami/$profile.yaml"
 v10_legacy_examples="$HOME/.agami/$profile-examples.yaml"
 v11_user_memory="$HOME/.agami/USER_MEMORY.md"
 
-if [ -d "$artifacts_profile_dir" ] && [ -f "$artifacts_profile_dir/index.yaml" ]; then
-  layout=existing-artifacts
+is_v13_artifacts() {
+  # v1.3: artifacts dir + index.yaml + at least one <schema>/_schema.yaml
+  [ -d "$artifacts_profile_dir" ] && [ -f "$artifacts_profile_dir/index.yaml" ] && \
+    find "$artifacts_profile_dir" -mindepth 2 -name "_schema.yaml" -print -quit | grep -q .
+}
+
+is_v12_artifacts() {
+  # v1.2: artifacts dir + index.yaml + at least one top-level <schema>.yaml (no _schema.yaml subdirs)
+  [ -d "$artifacts_profile_dir" ] && [ -f "$artifacts_profile_dir/index.yaml" ] && \
+    ls "$artifacts_profile_dir"/*.yaml 2>/dev/null | grep -v -E '/(index|examples)\.yaml$' | grep -q .
+}
+
+if is_v13_artifacts; then
+  layout=existing-v13
+elif is_v12_artifacts; then
+  layout=v1.2-needs-table-split
 elif [ -d "$v11_profile_dir" ] && [ -f "$v11_profile_dir/index.yaml" ]; then
   layout=v1.1-under-agami-home
 elif [ -f "$v10_legacy_file" ]; then
@@ -129,27 +146,37 @@ fi
 
 **Branch on `layout`:**
 
-- **`existing-artifacts`** and `$ARGUMENTS` is not `reintrospect`:
+- **`existing-v13`** and `$ARGUMENTS` is not `reintrospect`:
   - "I already have a model for `<profile>` at `<artifacts_dir>/<profile>/`. What would you like to do?"
-  - AskUserQuestion: `Re-introspect from DB` / `Verify and continue (Recommended)` / `Skip to seeding examples`.
+  - AskUserQuestion: `Re-introspect from DB` / `Verify and continue` / `Skip to seeding examples`. (No `(Recommended)` — the user picks based on whether their schema changed, not a default.)
 
-- **`v1.1-under-agami-home`**: existing v1.1 install — move the per-schema dir to artifacts and continue.
-  - Tell the user: "Moving your semantic model from `<artifacts_dir>/<profile>/` to `<artifacts_dir>/<profile>/` (sharable location — `git init` there if you want to share with your team)."
+- **`v1.2-needs-table-split`** — model exists in artifacts dir but uses the single-file-per-schema layout. Migrate to per-table layout in place.
+  - Tell the user: "Splitting `<schema>.yaml` files into per-table yamls (`<schema>/<table>.yaml`). Smaller diffs in git, faster relevance retrieval at scale. No DB queries — purely a file rewrite."
+  - For each `<schema>.yaml` at the top level:
+    - Read the file, parse YAML.
+    - `mkdir -p "$artifacts_profile_dir/<schema>"`.
+    - For each `dataset` in `semantic_model[0].datasets[]`: write `<schema>/<table>.yaml` as a standalone OSI doc with one dataset (per Phase 2 shape above). Keep all the field definitions, custom_extensions, etc. as-is. Add `agami.table` to the model-level extension.
+    - Write `<schema>/_schema.yaml` with the table TOC + the original schema yaml's `relationships[]` and `metrics[]`.
+    - `rm "$artifacts_profile_dir/<schema>.yaml"`.
+  - Update `index.yaml.schemas[].file` from `<schema>.yaml` to `<schema>/_schema.yaml` for each migrated schema.
+  - Run validator in `--directory` mode to confirm. If it fails, restore from `<schema>.yaml.bak` (which the migration creates first) and surface the errors. Don't leave a half-migrated state.
+
+- **`v1.1-under-agami-home`** — move the per-schema dir to artifacts AND split into per-table.
+  - Tell the user: "Moving your model from `~/.agami/<profile>/` to `<artifacts_dir>/<profile>/` (sharable location), and splitting each schema into per-table files."
   - `mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`
   - `mv "$v11_profile_dir" "$artifacts_profile_dir"`
-  - Then `chmod 644` on each `*.yaml` and `*.md` inside (they were 600 under the secrets dir; loosen for sharing).
-  - **Also migrate `<artifacts_dir>/USER_MEMORY.md`** if it exists and `<artifacts_dir>/USER_MEMORY.md` doesn't: `mv "$v11_user_memory" "$artifacts_dir/USER_MEMORY.md" && chmod 644 "$artifacts_dir/USER_MEMORY.md"`.
-  - No reintrospection needed — the model is already current. Treat the rest of this skill as `existing-artifacts` after the move (ask the user verify-or-reintrospect).
+  - `chmod 644` on `*.yaml` and `*.md` inside.
+  - Then run the v1.2-needs-table-split path on the moved directory.
+  - Also migrate `$v11_user_memory` if `<artifacts_dir>/USER_MEMORY.md` doesn't exist: `mv "$v11_user_memory" "$artifacts_dir/USER_MEMORY.md" && chmod 644 "$artifacts_dir/USER_MEMORY.md"`.
 
-- **`v1.0-single-file`**: ancient single-file install.
-  - Tell the user: "Upgrading your model to the new per-schema layout (it's faster for large databases, supports cross-schema relationships, and lives in a sharable location). Backing up your old model and re-introspecting now (~30–90s)."
+- **`v1.0-single-file`** — ancient single-file install.
+  - Tell the user: "Upgrading your model to the new per-table layout (faster, sharable, supports cross-schema relationships). Backing up your old model and re-introspecting now (~30–90s)."
   - `mkdir -p "$artifacts_profile_dir" && chmod 755 "$artifacts_profile_dir"`
   - `mv "$v10_legacy_file" "$artifacts_profile_dir/_legacy.yaml.bak"`
-  - Also migrate `$v10_legacy_examples` if present: `mv "$v10_legacy_examples" "$artifacts_profile_dir/examples.yaml"` (format is unchanged).
-  - Also migrate `$v11_user_memory` if present (per the v1.1 path above).
-  - Force `$ARGUMENTS=reintrospect` for the rest of this skill so we re-introspect from the DB.
+  - Migrate `$v10_legacy_examples` and `$v11_user_memory` if present.
+  - Force `$ARGUMENTS=reintrospect` so we re-introspect from the DB into the new layout.
 
-- **`fresh`**:
+- **`fresh`** — first install.
   - `mkdir -p "$artifacts_profile_dir" && chmod 755 "$artifacts_profile_dir"`
   - Continue to introspection.
 
@@ -452,25 +479,22 @@ If the user picks "None", write nothing. They can add metrics later via agami-sa
 
 ---
 
-## Phase 2: Build the per-schema OSI model
+## Phase 2: Build the per-table OSI model
 
-Output is a directory: `<artifacts_dir>/<profile>/` containing `index.yaml` plus one `<schema>.yaml` per database schema. Each `<schema>.yaml` is a **standalone OSI v0.1.1 document** for that schema's datasets.
+Output is a directory tree: `<artifacts_dir>/<profile>/` contains `index.yaml`, plus one subdirectory per schema. Each schema subdirectory contains `_schema.yaml` (slim TOC + within-schema relationships) and one `<table>.yaml` per table (full OSI doc for that table). The split lets the two-pass retrieval (Pass 1) read only `_schema.yaml` files for relevance picking, then lazy-load only the picked tables' yamls in Pass 2 — much smaller prompt for 1000+-table schemas.
 
-### Per-schema yaml shape
+### Per-table yaml shape (one file per table)
+
+Each `<artifacts_dir>/<profile>/<schema>/<table>.yaml` is a **standalone OSI v0.1.1 document** with exactly one dataset:
 
 ```yaml
 version: "0.1.1"
 
 semantic_model:
   - name: <profile>
-    description: <plain-English summary of this schema's role>
-    ai_context:
-      instructions: <how the LLM should use this schema>
-      synonyms: [...]
-
     custom_extensions:
       - vendor_name: COMMON
-        data: '{"agami": {"profile": "<profile>", "db_type": "<db_type>", "schema": "<schema_name>"}}'
+        data: '{"agami": {"profile": "<profile>", "db_type": "<db_type>", "schema": "<schema_name>", "table": "<table_name>"}}'
 
     datasets:
       - name: <table_name>                                # source table name verbatim
@@ -495,24 +519,46 @@ semantic_model:
                 data: '{"agami": {"type": "<simple_type>", "original_type": "<DB native type>"}}'
         custom_extensions:
           - vendor_name: COMMON
-            data: '{"agami": {"performance_hints": {...}}}'   # only when row count > 100k
+            data: '{"agami": {"performance_hints": {"estimated_row_count": <int>, "indexes": [["col1"], ["col1","col2"]]}}}'
 
-    relationships:
-      - name: <from>_to_<to>
-        from: <from_dataset_name>                         # bare name; both endpoints must be in this schema
-        to: <to_dataset_name>
-        from_columns: [<col>, ...]
-        to_columns: [<col>, ...]
-        custom_extensions:
-          - vendor_name: COMMON
-            data: '{"agami": {"fk_validation": {...}}}'
-
-    metrics: []                                            # empty on first introspect
+    # No `relationships:` here — they live in <schema>/_schema.yaml.
+    # No `metrics:` here either — single-table metrics live in the same dataset's
+    # `custom_extensions` if measure-like; multi-table go in _schema.yaml; multi-
+    # schema go in index.yaml.
 ```
 
-`agami.schema` at the model level **must equal** the schema's `name` in `index.yaml` — the validator's `--directory` mode rejects mismatches.
+`agami.schema` and `agami.table` at the model level **must match** the file's location — the validator rejects mismatches. Each table file MUST have exactly one dataset (one file per table).
 
-### `index.yaml` shape
+### `<schema>/_schema.yaml` shape (agami-bespoke, slim TOC)
+
+```yaml
+version: "0.1.1"
+schema: <schema_name>
+description: <one-line schema role>
+tables:
+  - name: <table_name>
+    file: <table_name>.yaml
+    description: <one-line — what the table holds (used by Pass 1 retrieval)>
+    primary_key: [<col>, ...]
+    estimated_row_count: <int>           # optional, helps Pass 2 risk assessment
+relationships:                             # within-schema only
+  - name: <from>_to_<to>
+    from: <table_name>                   # bare names — both must be in this schema's tables[]
+    to: <table_name>
+    from_columns: [<col>, ...]
+    to_columns: [<col>, ...]
+    custom_extensions:
+      - vendor_name: COMMON
+        data: '{"agami": {"fk_validation": {...}}}'
+metrics:                                   # multi-table within this schema (optional)
+  - name: <metric_name>
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: SUM(orders.amount) }] }
+    description: <one-line>
+```
+
+`_schema.yaml` is **NOT OSI** — it's agami-bespoke. The validator has its own allowlist for it.
+
+### `index.yaml` shape (top-level TOC)
 
 ```yaml
 version: "0.1.1"
@@ -520,13 +566,13 @@ profile: <profile>
 db_type: <db_type>
 schemas:
   - name: <schema_name>
-    file: <schema_name>.yaml
+    file: <schema_name>/_schema.yaml      # path to the schema's TOC, NOT a single yaml
     table_count: <int>
     description: <one-line schema summary or empty>
-cross_schema_relationships:                                # only relationships that span schemas
+cross_schema_relationships:                # relationships that span schemas
   - name: <from_schema>_<from_table>_to_<to_schema>_<to_table>
-    from: <from_schema>.<from_dataset>                    # qualified
-    to: <to_schema>.<to_dataset>                          # qualified
+    from: <from_schema>.<from_dataset>    # qualified
+    to: <to_schema>.<to_dataset>          # qualified
     from_columns: [<col>, ...]
     to_columns: [<col>, ...]
     description: <optional>
@@ -536,7 +582,21 @@ introspect_meta:
   source_db_version: <version string>
 ```
 
-Within-schema relationships go in the schema's yaml. Cross-schema relationships go **only** in `index.yaml.cross_schema_relationships` — never in any individual schema yaml.
+The `file` field for each schema is `<schema>/_schema.yaml` (path with subdirectory) in v1.3, replacing the v1.2 `<schema>.yaml` (top-level single file). The validator detects layout from this path and dispatches accordingly.
+
+**Where each kind of metadata lives:**
+
+| Metadata | Lives in | Why |
+|---|---|---|
+| One table's columns / indexes / FKs / row count | `<schema>/<table>.yaml` (datasets[0]) | Per-table — load only when the table is picked |
+| Within-schema relationships | `<schema>/_schema.yaml` | Span tables in one schema |
+| Cross-schema relationships | `index.yaml.cross_schema_relationships[]` | Span schemas |
+| Single-table metrics (e.g. `SUM(orders.amount)`) | `<schema>/<table>.yaml` (model-level metrics or measures via custom_extensions) | Aggregates one table |
+| Multi-table-within-schema metrics | `<schema>/_schema.yaml.metrics[]` | Need the schema's relationships to compute |
+| Multi-schema metrics | `index.yaml.metrics[]` (future) | Need cross-schema relationships |
+| Per-database (profile-wide) settings | `index.yaml.introspect_meta` | One per profile |
+| User preferences (any DB) | `<artifacts_dir>/USER_MEMORY.md` | Cross-database |
+| Domain context (this DB) | `<artifacts_dir>/<profile>/ORGANIZATION.md` | Per-database, free-form |
 
 ### Hard rules when building
 
@@ -546,14 +606,16 @@ Within-schema relationships go in the schema's yaml. Cross-schema relationships 
 4. **`from_columns` and `to_columns` MUST have the same length.** Composite keys are arrays.
 5. **`source` must be three-part dotted notation.** `database.schema.table` — never bare table name. For sqlite use `file_basename.main.<table>`.
 6. **Don't invent `custom_extensions` keys.** Only emit the keys documented in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md). Adding a new key requires updating that doc + the validator's allowlist + a test.
-7. **Dataset name uniqueness across schemas.** The validator's `--directory` mode does NOT allow the same dataset name to appear in two different schema yamls. If you find a collision (rare — typically the same table name in `public` and `archive`), pick the most-current and skip the other; record the skip in the schema's `description` so the user can hand-edit if they want both.
-8. **Reintrospect preserves hand-edits.** When `$ARGUMENTS == reintrospect` and an existing `<artifacts_dir>/<profile>/<schema>.yaml` exists:
-   - Read the existing schema yaml first.
-   - For each existing field: keep its `description`, `ai_context`, and any `agami.choice_field` / `agami.unit` extensions. Refresh only `agami.type` / `agami.original_type` from the DB.
-   - For each existing dataset: keep its `description`, `ai_context`. Refresh `agami.performance_hints` from the DB.
-   - For each existing relationship: keep it as-is if both endpoints still exist. Drop if the underlying FK is gone.
-   - Keep all existing `metrics[]` entries — those are user-authored and we never lose them.
-   - For `index.yaml.cross_schema_relationships`: same preservation rules.
+7. **Dataset name uniqueness within a schema.** The validator merges all `<schema>/<table>.yaml` files in a schema and rejects duplicates. (Across schemas, duplicate table names ARE allowed in v1.3 because the qualified `<schema>.<table>` is the addressable name.)
+8. **Each `<table>.yaml` MUST have exactly one dataset.** The validator rejects multi-dataset table files. If you need a synthetic view that combines tables, that's a metric (model-level) or a separate yaml the user hand-creates — not something Phase 2 generates.
+9. **`agami.schema` and `agami.table` at the model level must match the file's location.** Validator-enforced. The mapping `<schema>/<table>.yaml` ↔ `agami.schema = "<schema>"` and `agami.table = "<table>"` is the only valid combination.
+10. **Reintrospect preserves hand-edits.** When `$ARGUMENTS == reintrospect` and existing `<artifacts_dir>/<profile>/<schema>/<table>.yaml` files exist:
+    - Read each existing table yaml.
+    - For each existing field: keep its `description`, `ai_context`, and any `agami.choice_field` / `agami.unit` extensions. Refresh only `agami.type` / `agami.original_type` from the DB.
+    - For each existing dataset: keep its `description`, `ai_context`. Refresh `agami.performance_hints` from the DB.
+    - For each `_schema.yaml` relationship: keep it as-is if both endpoints still exist. Drop if the underlying FK is gone.
+    - Keep all existing `metrics[]` entries (per-table or per-schema) — user-authored, never lose them.
+    - For `index.yaml.cross_schema_relationships`: same preservation rules.
 
 ---
 
@@ -561,34 +623,38 @@ Within-schema relationships go in the schema's yaml. Cross-schema relationships 
 
 This phase is the keystone. **No file is ever written to `<artifacts_dir>/<profile>/` without the directory-mode validator passing.**
 
-### 3a — stage the directory
+### 3a — stage the directory tree
 
-Stage the new layout at `/tmp/agami-staging-<profile>/` (a fresh directory), then run the validator. Never touch `<artifacts_dir>/<profile>/` until validation passes.
+Stage the full directory tree at `/tmp/agami-staging-<profile>/` (a fresh directory), then run the validator. Never touch `<artifacts_dir>/<profile>/` until validation passes.
 
 ```bash
 staging="/tmp/agami-staging-$profile"
 rm -rf "$staging" && mkdir -p "$staging"
-# Write index.yaml + every <schema>.yaml into $staging.
+# Write index.yaml at the top, then for each schema:
+#   mkdir "$staging/<schema>"
+#   write "$staging/<schema>/_schema.yaml"
+#   write "$staging/<schema>/<table>.yaml" for each table
 python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$staging"
 ```
 
 ### 3b — handle the result
 
-- **Exit 0** (PASSED): atomically promote the staging directory.
+- **Exit 0** (PASSED): atomically promote the staging directory to `<artifacts_dir>/<profile>/`.
   ```bash
-  rm -rf "$HOME/.agami/$profile.tmp_old" 2>/dev/null
-  if [ -d "$HOME/.agami/$profile" ]; then
-    # Preserve ORGANIZATION.md and examples.yaml from the existing dir if reintrospect.
-    cp -p "$HOME/.agami/$profile/ORGANIZATION.md" "$staging/" 2>/dev/null || true
-    cp -p "$HOME/.agami/$profile/examples.yaml"   "$staging/" 2>/dev/null || true
-    mv "$HOME/.agami/$profile" "$HOME/.agami/$profile.tmp_old"
+  rm -rf "$artifacts_dir/$profile.tmp_old" 2>/dev/null
+  if [ -d "$artifacts_dir/$profile" ]; then
+    # Preserve ORGANIZATION.md and examples.yaml from the existing dir on reintrospect.
+    cp -p "$artifacts_dir/$profile/ORGANIZATION.md" "$staging/" 2>/dev/null || true
+    cp -p "$artifacts_dir/$profile/examples.yaml"   "$staging/" 2>/dev/null || true
+    mv "$artifacts_dir/$profile" "$artifacts_dir/$profile.tmp_old"
   fi
-  mv "$staging" "$HOME/.agami/$profile"
-  chmod 700 "$HOME/.agami/$profile"
-  chmod 600 "$HOME/.agami/$profile/"*.yaml "$HOME/.agami/$profile/ORGANIZATION.md" 2>/dev/null
-  rm -rf "$HOME/.agami/$profile.tmp_old"
+  mv "$staging" "$artifacts_dir/$profile"
+  chmod 755 "$artifacts_dir/$profile"
+  find "$artifacts_dir/$profile" -type d -exec chmod 755 {} +
+  find "$artifacts_dir/$profile" -type f \( -name '*.yaml' -o -name '*.md' \) -exec chmod 644 {} +
+  rm -rf "$artifacts_dir/$profile.tmp_old"
   ```
-  Surface: `✓ Validator passed. Wrote <artifacts_dir>/<profile>/ (<K> schemas, <N> datasets total, <M> fields, <R> relationships).`
+  Surface: `✓ Validator passed. Wrote <artifacts_dir>/<profile>/ (<K> schemas, <N> tables, <M> fields, <R> relationships).`
 
 - **Exit 1** (FAILED): surface the validator's error list verbatim. **Do NOT promote the staging directory.** Tell the user "I built a model but it failed OSI validation. Here's what's wrong: …" and offer to attempt a fix or stop. Re-validate after every edit until clean. The staging dir remains at `/tmp/agami-staging-<profile>/` for inspection.
 

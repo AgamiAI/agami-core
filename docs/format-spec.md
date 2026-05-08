@@ -21,8 +21,9 @@ agami's state splits across two directories. See [`plugins/agami/shared/file-lay
 | File | Format | Owner |
 |---|---|---|
 | `<artifacts_dir>/USER_MEMORY.md` | Free-form Markdown — cross-database preferences | Seeded by `agami-init`, edited by user or appended by `agami-save-correction` |
-| `<artifacts_dir>/<profile>/index.yaml` | Agami-bespoke YAML (TOC + cross-schema relationships) | Skill-written, user-editable |
-| `<artifacts_dir>/<profile>/<schema>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML | Skill-written, user-editable |
+| `<artifacts_dir>/<profile>/index.yaml` | Agami-bespoke YAML (top-level TOC: schemas + cross-schema relationships + introspect_meta) | Skill-written, user-editable |
+| `<artifacts_dir>/<profile>/<schema>/_schema.yaml` | Agami-bespoke YAML (per-schema slim TOC: tables list + within-schema relationships + multi-table metrics) | Skill-written, user-editable |
+| `<artifacts_dir>/<profile>/<schema>/<table>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML — one dataset per file | Skill-written, user-editable |
 | `<artifacts_dir>/<profile>/examples.yaml` | Agami-bespoke YAML | Skill-written (seeds) + append-only via `agami-save-correction` |
 | `<artifacts_dir>/<profile>/ORGANIZATION.md` | Free-form Markdown — per-database domain context | Seeded by `agami-connect`, edited by user or appended by `agami-save-correction` |
 | `~/.agami/cross_profile_relationships.yaml` | Agami-bespoke YAML — declared JOIN paths across profiles for federation. **Lives in `~/.agami/` because it spans profiles** and isn't tied to one team's repo | User-edited (optional) |

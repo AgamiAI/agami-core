@@ -75,7 +75,7 @@ These rules apply to every phase of this skill, not just Phase 1.
 
 Read `~/.agami/credentials` (or check `AGAMI_DATABASE_URL`). If neither exists, invoke the agami-init skill and **stop this skill**. Do not continue to load the OSI model. Do not run any other Bash commands.
 
-### 1b — load the OSI model (per-schema layout)
+### 1b — load the OSI model (per-table layout, lazy)
 
 Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback).
 
@@ -83,22 +83,35 @@ Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_
 
 Look for the model in this priority order:
 
-1. **`<artifacts_dir>/<profile>/index.yaml`** — current layout (v1.2+). Read `index.yaml` first, then every `<schema>.yaml` it references (`schemas[].file`). Build a merged in-memory view from all the loaded schema yamls plus `index.yaml.cross_schema_relationships[]`.
-2. **`<artifacts_dir>/<profile>/index.yaml`** — v1.1 layout (under the secrets dir, before the artifacts split). If this exists but `<artifacts_dir>/<profile>/` doesn't, surface a one-line message ("Detected v1.1 layout — your model is under `~/.agami/`. Say 'reload the schema' to move it to the sharable artifacts dir, or I'll keep using the old location for now.") and read it as-is.
-3. **`~/.agami/<profile>.yaml`** — v1.0 single-file layout. If this exists but neither directory does, surface: "Detected v1.0 layout — migrating to per-schema directory takes ~30–90s. Say 'reload the schema' to migrate, or I'll keep using the old file for now."
-4. **None of the above** → invoke the `agami-connect` skill.
+1. **v1.3 (per-table)** — `<artifacts_dir>/<profile>/index.yaml` exists AND `index.yaml.schemas[0].file` ends with `_schema.yaml`. Load `index.yaml` + every `<schema>/_schema.yaml` (slim TOC + within-schema relationships). **Do NOT load every `<table>.yaml` upfront** — those are lazy-loaded in Phase 2b based on relevance picking. This is the win of the per-table layout: Pass 1 of two-pass retrieval reads only the schema TOCs.
+2. **v1.2 (per-schema)** — `<artifacts_dir>/<profile>/index.yaml` exists AND `index.yaml.schemas[0].file` ends with `<name>.yaml` (no subdirectory). Load every schema's full yaml. Surface: "v1.2 layout detected — `agami-connect` will split this into per-table files on the next reintrospect for faster retrieval."
+3. **v1.1 (under ~/.agami/)** — `~/.agami/<profile>/index.yaml` exists, no artifacts dir. Surface: "Detected v1.1 layout — your model is under `~/.agami/`. Say 'reload the schema' to migrate to the sharable artifacts dir." Read as-is for now.
+4. **v1.0 (single file)** — `~/.agami/<profile>.yaml` exists. Surface: "Detected v1.0 layout — migrating takes ~30–90s. Say 'reload the schema' to migrate."
+5. **None of the above** → invoke `agami-connect`.
 
-For directory-layout, sanity-check:
-- `index.yaml.version: "0.1.1"` (warn but proceed if different)
-- Each `<schema>.yaml` has `version: "0.1.1"` and `semantic_model[0]` with a `name` and `datasets`
-
-Cache the parsed merged model in working memory for the rest of the session. Build:
+For v1.3, build these views after loading `index.yaml` + every `_schema.yaml`:
 
 ```text
-schemas_by_name : { schema_name → list of dataset objects (with their schema attached) }
+table_index : { "<schema>.<table>" → { description, primary_key, file_path, schema, name, est_row_count } }
+relationships_within_schema : { schema_name → list of relationships from <schema>/_schema.yaml }
+relationships_cross_schema : list from index.yaml.cross_schema_relationships
+schemas_meta : { schema_name → schema description from _schema.yaml }
+profile_meta : { profile, db_type, introspect_meta from index.yaml }
 ```
 
-so Phase 2b can choose to render the prompt grouped by schema (helps the LLM disambiguate when datasets in different schemas share names).
+`table_index` is the **slim** index Pass 1 of Phase 2b uses for relevance picking. Each entry is ~100 bytes vs ~5KB for a full table yaml. A 1000-table schema's slim index is ~100KB; the full schema would be ~5MB.
+
+For v1.2, fall back to the existing flow: load every `<schema>.yaml` upfront, build full `datasets_by_qname` index. (Same shape as Phase 1c below, just eagerly populated.)
+
+### 1b.x — lazy-load a table yaml (called from Phase 2b)
+
+When Pass 1 picks a table, load its full yaml on demand:
+
+```bash
+table_yaml="<artifacts_dir>/<profile>/<schema>/<table>.yaml"
+```
+
+Cache loaded tables in `loaded_tables_by_qname` so subsequent queries in the same session don't re-read from disk. The cache is per-session, not persistent.
 
 ### 1c — index the model for fast access
 
@@ -269,7 +282,7 @@ Generate one SQL statement. If the model produces multiple statements separated 
 
 Two-pass uses the existing model — no embedding store, no new dependencies.
 
-**Pass 1 — relevance.** Build a *table-index* prompt that lists every `<schema>.<table>` with its 1-line description, plus the relationships graph. Skip the per-field detail.
+**Pass 1 — relevance.** Build a *table-index* prompt from the slim `table_index` view loaded in Phase 1b (each entry is one line: `<schema>.<table>` + 1-line description + primary key). **For v1.3 layouts this is essentially free — no per-table yamls have been loaded yet.** For v1.2 layouts, derive the slim view from the already-loaded full schema yamls.
 
 ```
 You are a relevance picker. Given a question, return the JSON list of every
@@ -294,7 +307,7 @@ Output: JSON array of {"schema": "<schema>", "table": "<table>"} objects.
 
 The model returns a small list (typically 1–5 tuples). Validate that every returned tuple resolves to a real loaded dataset; drop any that don't.
 
-**Pass 2 — SQL generation.** Build the small-mode prompt above, but render the schema-context section using **only the picked tables' full field definitions** plus any relationships whose endpoints are entirely within the picked set. Cross-schema relationships are included if both endpoints are picked.
+**Pass 2 — SQL generation.** **For v1.3 layouts, lazy-load each picked table's yaml** (`<artifacts_dir>/<profile>/<schema>/<table>.yaml`) via Phase 1b.x — these are small files, one per picked table. Cache in the session's `loaded_tables_by_qname` so same-session re-queries skip re-reading. Then build the small-mode prompt using **only the picked tables' full field definitions** plus any relationships whose endpoints are entirely within the picked set. Cross-schema relationships are included if both endpoints are picked.
 
 If Pass 1 picks zero tables (the model couldn't infer relevance), fall back to small mode and surface a one-liner: "I couldn't narrow down which tables to use — sending the full schema. This may be slower."
 

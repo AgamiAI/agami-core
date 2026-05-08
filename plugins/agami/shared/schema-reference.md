@@ -35,14 +35,17 @@ agami's state splits across two directories — secrets in `~/.agami/`, sharable
 <artifacts_dir>/                         # sharable — can be committed to a team repo
 ├── USER_MEMORY.md                       # cross-database preferences
 └── <profile>/
-    ├── index.yaml                       # TOC + cross-schema relationships
-    ├── <schema1>.yaml                   # OSI semantic model for schema1
-    ├── <schema2>.yaml                   # OSI semantic model for schema2
+    ├── index.yaml                       # TOC of schemas + cross-schema relationships
     ├── examples.yaml                    # NL→SQL examples (agami-bespoke)
-    └── ORGANIZATION.md                  # domain context for this database
+    ├── ORGANIZATION.md                  # domain context for this database
+    └── <schema>/                        # one directory per database schema
+        ├── _schema.yaml                 # slim table TOC + within-schema relationships
+        ├── <table_a>.yaml               # OSI doc for one table (single dataset)
+        ├── <table_b>.yaml               # OSI doc for another table
+        └── ...
 ```
 
-`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile, single-user. Each `<schema>.yaml` is a standalone OSI v0.1.1 document for that schema's datasets — same shape as a single-file model, just narrower.
+`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile. Each `<table>.yaml` is a standalone OSI v0.1.1 document containing exactly one dataset — opens cleanly in any OSI-aware tool (Snowflake / Tableau / dbt). The `_schema.yaml` files are agami-bespoke (table list + relationships); they're what Pass 1 of the two-pass NL→SQL retrieval reads.
 
 The examples library (`examples.yaml`) is a **bespoke agami format** for few-shot prompts and is documented in [`format-spec.md`](../../../docs/format-spec.md). It is intentionally not OSI — OSI doesn't model NL→SQL examples.
 

@@ -612,3 +612,218 @@ def test_directory_schema_yaml_with_invalid_osi_rejected(tmp_path):
     _write_yaml(pdir / "public.yaml", m)
     errors, _ = validate_directory(pdir)
     assert any("public.yaml" in e and "expression" in e for e in errors), errors
+
+
+# --- Directory mode v1.3 (per-table layout) --------------------------------
+
+def _per_table_yaml(profile: str, schema_name: str, table_name: str) -> dict:
+    """Build a standalone OSI doc for a single table."""
+    return {
+        "version": "0.1.1",
+        "semantic_model": [
+            {
+                "name": profile,
+                "custom_extensions": [
+                    {
+                        "vendor_name": "COMMON",
+                        "data": (
+                            '{"agami": {"profile": "' + profile + '", '
+                            '"db_type": "postgres", '
+                            '"schema": "' + schema_name + '", '
+                            '"table": "' + table_name + '"}}'
+                        ),
+                    }
+                ],
+                "datasets": [_basic_dataset(table_name, schema_name)],
+            }
+        ],
+    }
+
+
+def _build_v13_profile_dir(tmp_path: Path) -> Path:
+    """Two schemas, three tables total, one cross-schema rel — per-table layout."""
+    pdir = tmp_path / "finbud_v13"
+    pdir.mkdir()
+
+    # public/ schema directory
+    public_dir = pdir / "public"
+    public_dir.mkdir()
+    _write_yaml(public_dir / "users.yaml", _per_table_yaml("finbud", "public", "users"))
+    _write_yaml(public_dir / "orders.yaml", _per_table_yaml("finbud", "public", "orders"))
+    _write_yaml(public_dir / "_schema.yaml", {
+        "version": "0.1.1",
+        "schema": "public",
+        "description": "Core OLTP",
+        "tables": [
+            {"name": "users",  "file": "users.yaml",  "primary_key": ["id"]},
+            {"name": "orders", "file": "orders.yaml", "primary_key": ["id"]},
+        ],
+        "relationships": [
+            {
+                "name": "orders_to_users",
+                "from": "orders",
+                "to": "users",
+                "from_columns": ["id"],
+                "to_columns": ["id"],
+            }
+        ],
+    })
+
+    # analytics/ schema directory
+    analytics_dir = pdir / "analytics"
+    analytics_dir.mkdir()
+    _write_yaml(analytics_dir / "events.yaml", _per_table_yaml("finbud", "analytics", "events"))
+    _write_yaml(analytics_dir / "_schema.yaml", {
+        "version": "0.1.1",
+        "schema": "analytics",
+        "description": "Aggregated analytics",
+        "tables": [
+            {"name": "events", "file": "events.yaml", "primary_key": ["id"]},
+        ],
+    })
+
+    # index.yaml — points each schema at its _schema.yaml
+    _write_yaml(pdir / "index.yaml", {
+        "version": "0.1.1",
+        "profile": "finbud",
+        "db_type": "postgres",
+        "schemas": [
+            {"name": "public",    "file": "public/_schema.yaml",    "table_count": 2},
+            {"name": "analytics", "file": "analytics/_schema.yaml", "table_count": 1},
+        ],
+        "cross_schema_relationships": [
+            {
+                "name": "events_to_users",
+                "from": "analytics.events",
+                "to": "public.users",
+                "from_columns": ["id"],
+                "to_columns": ["id"],
+            }
+        ],
+    })
+    return pdir
+
+
+def test_directory_v13_per_table_passes(tmp_path):
+    pdir = _build_v13_profile_dir(tmp_path)
+    errors, _ = validate_directory(pdir)
+    assert errors == [], errors
+
+
+def test_directory_v13_missing_table_file_fails(tmp_path):
+    pdir = _build_v13_profile_dir(tmp_path)
+    (pdir / "public" / "orders.yaml").unlink()
+    errors, _ = validate_directory(pdir)
+    assert any("orders.yaml" in e and "missing" in e for e in errors), errors
+
+
+def test_directory_v13_table_with_wrong_schema_extension_rejected(tmp_path):
+    pdir = _build_v13_profile_dir(tmp_path)
+    with (pdir / "public" / "orders.yaml").open() as f:
+        m = yaml.safe_load(f)
+    m["semantic_model"][0]["custom_extensions"][0]["data"] = (
+        '{"agami": {"profile": "finbud", "db_type": "postgres", '
+        '"schema": "wrong", "table": "orders"}}'
+    )
+    _write_yaml(pdir / "public" / "orders.yaml", m)
+    errors, _ = validate_directory(pdir)
+    assert any("doesn't match" in e and "schema" in e.lower() for e in errors), errors
+
+
+def test_directory_v13_table_with_wrong_table_extension_rejected(tmp_path):
+    pdir = _build_v13_profile_dir(tmp_path)
+    with (pdir / "public" / "orders.yaml").open() as f:
+        m = yaml.safe_load(f)
+    m["semantic_model"][0]["custom_extensions"][0]["data"] = (
+        '{"agami": {"profile": "finbud", "db_type": "postgres", '
+        '"schema": "public", "table": "wrong_name"}}'
+    )
+    _write_yaml(pdir / "public" / "orders.yaml", m)
+    errors, _ = validate_directory(pdir)
+    assert any("doesn't match" in e and "table" in e.lower() for e in errors), errors
+
+
+def test_directory_v13_per_table_yaml_with_two_datasets_rejected(tmp_path):
+    """Each <table>.yaml should hold exactly one dataset."""
+    pdir = _build_v13_profile_dir(tmp_path)
+    with (pdir / "public" / "orders.yaml").open() as f:
+        m = yaml.safe_load(f)
+    extra = copy.deepcopy(m["semantic_model"][0]["datasets"][0])
+    extra["name"] = "smuggled_in"
+    extra["source"] = "db.public.smuggled_in"
+    m["semantic_model"][0]["datasets"].append(extra)
+    _write_yaml(pdir / "public" / "orders.yaml", m)
+    errors, _ = validate_directory(pdir)
+    assert any("expected exactly 1 dataset" in e for e in errors), errors
+
+
+def test_directory_v13_schema_yaml_with_unknown_top_key_rejected(tmp_path):
+    pdir = _build_v13_profile_dir(tmp_path)
+    with (pdir / "public" / "_schema.yaml").open() as f:
+        s = yaml.safe_load(f)
+    s["surprise"] = "nope"
+    _write_yaml(pdir / "public" / "_schema.yaml", s)
+    errors, _ = validate_directory(pdir)
+    assert any("surprise" in e for e in errors), errors
+
+
+def test_directory_v13_within_schema_relationship_dangling_rejected(tmp_path):
+    """A relationship pointing at a non-existent table fails."""
+    pdir = _build_v13_profile_dir(tmp_path)
+    with (pdir / "public" / "_schema.yaml").open() as f:
+        s = yaml.safe_load(f)
+    s["relationships"][0]["to"] = "nonexistent_table"
+    _write_yaml(pdir / "public" / "_schema.yaml", s)
+    errors, _ = validate_directory(pdir)
+    assert any("nonexistent_table" in e for e in errors), errors
+
+
+def test_directory_v13_cross_schema_relationship_passes(tmp_path):
+    """Cross-schema relationships in index.yaml resolve to merged datasets."""
+    pdir = _build_v13_profile_dir(tmp_path)
+    errors, _ = validate_directory(pdir)
+    # The cross-schema rel in _build_v13_profile_dir should pass.
+    assert errors == [], errors
+
+
+def test_directory_v13_cross_schema_relationship_unknown_dataset_rejected(tmp_path):
+    pdir = _build_v13_profile_dir(tmp_path)
+    with (pdir / "index.yaml").open() as f:
+        idx = yaml.safe_load(f)
+    idx["cross_schema_relationships"][0]["from"] = "analytics.ghost_dataset"
+    _write_yaml(pdir / "index.yaml", idx)
+    errors, _ = validate_directory(pdir)
+    assert any("ghost_dataset" in e for e in errors), errors
+
+
+def test_directory_mixed_v12_and_v13_supported(tmp_path):
+    """A profile dir can mix layouts during incremental migration."""
+    pdir = tmp_path / "mixed"
+    pdir.mkdir()
+
+    # public/ in v1.3 layout
+    public_dir = pdir / "public"
+    public_dir.mkdir()
+    _write_yaml(public_dir / "users.yaml", _per_table_yaml("mixed", "public", "users"))
+    _write_yaml(public_dir / "_schema.yaml", {
+        "version": "0.1.1",
+        "schema": "public",
+        "tables": [{"name": "users", "file": "users.yaml", "primary_key": ["id"]}],
+    })
+
+    # analytics in v1.2 layout (single file)
+    _write_yaml(pdir / "analytics.yaml", _schema_yaml(
+        "mixed", "analytics", [_basic_dataset("events", "analytics")]
+    ))
+
+    _write_yaml(pdir / "index.yaml", {
+        "version": "0.1.1",
+        "profile": "mixed",
+        "db_type": "postgres",
+        "schemas": [
+            {"name": "public",    "file": "public/_schema.yaml"},
+            {"name": "analytics", "file": "analytics.yaml"},
+        ],
+    })
+    errors, _ = validate_directory(pdir)
+    assert errors == [], errors

@@ -138,16 +138,25 @@ For every other kind, you propose a model edit and run the validator BEFORE writ
 
 ### 4a — propose the edit
 
-For OSI-model edits, the per-schema layout means the edit lands in **one specific** `<schema>.yaml` (or in `index.yaml` for cross-schema relationships). Identify the target file:
+For OSI-model edits, identify the target file based on what's being edited and which layout the user has:
+
+| Edit kind | Target file (v1.3) | Target file (v1.2) | Target file (v1.0) |
+|---|---|---|---|
+| `field_metadata`, `table_metadata`, single-table `new_metric` | `<artifacts_dir>/<profile>/<schema>/<table>.yaml` | `<artifacts_dir>/<profile>/<schema>.yaml` | `~/.agami/<profile>.yaml` |
+| Within-schema `relationship`, multi-table `new_metric` within one schema | `<artifacts_dir>/<profile>/<schema>/_schema.yaml` | `<artifacts_dir>/<profile>/<schema>.yaml` | `~/.agami/<profile>.yaml` |
+| Cross-schema `relationship` | `<artifacts_dir>/<profile>/index.yaml` (cross_schema_relationships[]) | `<artifacts_dir>/<profile>/index.yaml` (cross_schema_relationships[]) | `~/.agami/<profile>.yaml` |
+| `org_context` | `<artifacts_dir>/<profile>/ORGANIZATION.md` (no validator) | same | same |
+| `user_preference` | `<artifacts_dir>/USER_MEMORY.md` (no validator) | same | same |
+
+To resolve the schema for a dataset:
 
 1. Find the affected dataset in the merged in-memory view (built by `query-database` Phase 1c).
 2. Look up the dataset's `source: <db>.<schema>.<table>` — the middle component is the schema.
-3. The edit lands in `<artifacts_dir>/<profile>/<schema>.yaml`.
-4. **Cross-schema relationship edits** (`from` and `to` are in different schemas) land in `<artifacts_dir>/<profile>/index.yaml` under `cross_schema_relationships[]`.
+3. Use the table from `agami.table` extension (v1.3) or the dataset's `name` (which equals the table name in v1.2).
 
-For v1.0 single-file installs, the edit still lands in `~/.agami/<profile>.yaml` — the routing logic above degrades gracefully.
+Detect layout by checking if `<artifacts_dir>/<profile>/<schema>/_schema.yaml` exists — present means v1.3, absent means v1.2.
 
-Build a **proposed new schema yaml** (or new `index.yaml`) in memory by applying the edit type below.
+Build a **proposed new file** in memory by applying the edit type below.
 
 #### `relationship` edit
 
@@ -257,14 +266,19 @@ Always include the validator step in 4c regardless of which option they pick (si
 
 ### 4c — validate the proposed model BEFORE writing
 
-This phase is binding for any edit that touches `<artifacts_dir>/<profile>/<schema>.yaml` or `<artifacts_dir>/<profile>/index.yaml`. Stage the **whole target directory** at `/tmp/agami-staging-<profile>/` (copy the existing files, then overwrite the one you're editing), then run the directory-mode validator:
+This phase is binding for any edit that touches a `<table>.yaml`, `_schema.yaml`, or `index.yaml`. Stage the **whole target directory** at `/tmp/agami-staging-<profile>/` (copy all existing files, overwrite the one you're editing), then run the directory-mode validator — it walks every per-table yaml and merges per-schema before validating:
 
 ```bash
 staging="/tmp/agami-staging-$profile"
-rm -rf "$staging" && cp -r "$HOME/.agami/$profile" "$staging"
-# Overwrite the one file the edit targets (e.g., $staging/public.yaml or $staging/index.yaml)
+rm -rf "$staging" && cp -R "$artifacts_dir/$profile" "$staging"
+# Overwrite the one file the edit targets, e.g.:
+#   $staging/<schema>/<table>.yaml   for field/table edits
+#   $staging/<schema>/_schema.yaml   for within-schema relationship/metric edits
+#   $staging/index.yaml              for cross-schema relationship edits
 python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$staging"
 ```
+
+For v1.2 layouts (single file per schema, no `_schema.yaml`), the same `--directory` invocation still works — the validator detects layout per-schema and dispatches accordingly.
 
 For v1.0 single-file installs, fall back to single-file validation:
 
@@ -274,9 +288,9 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" /tmp/agami-stagi
 
 Three outcomes:
 
-- **Exit 0** (PASSED) → atomically promote the target file (or, for directory-mode, the whole directory):
-  - Directory-mode: `mv "$HOME/.agami/$profile" "$HOME/.agami/$profile.tmp_old" && mv "$staging" "$HOME/.agami/$profile" && rm -rf "$HOME/.agami/$profile.tmp_old"`. `chmod 700` on the dir, `chmod 600` on each file.
-  - Single-file mode: `mv /tmp/agami-staging-<profile>.yaml ~/.agami/<profile>.yaml && chmod 600 ~/.agami/<profile>.yaml`.
+- **Exit 0** (PASSED) → atomically promote the staging directory:
+  - Directory-mode: `mv "$artifacts_dir/$profile" "$artifacts_dir/$profile.tmp_old" && mv "$staging" "$artifacts_dir/$profile" && rm -rf "$artifacts_dir/$profile.tmp_old"`. `chmod 755` on dirs, `chmod 644` on yaml/md files.
+  - Single-file mode (v1.0): `mv /tmp/agami-staging-<profile>.yaml ~/.agami/<profile>.yaml && chmod 600 ~/.agami/<profile>.yaml`.
   - Surface `✓ Model updated and validated.`
 - **Exit 1** (FAILED) → **DO NOT PROMOTE.** Surface the validator's errors verbatim. Tell the user: "Your correction would break the OSI model — here's what's wrong: …. The example is saved either way; the model wasn't updated." Offer to retry with a fix.
 - **Exit 2** (TOOLING ERROR) → tell the user the validator is unavailable; ask them to install `pyyaml` and `jsonschema`. Don't write the model.

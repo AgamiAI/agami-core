@@ -88,7 +88,7 @@ ALLOWED_AGAMI_KEYS_RELATIONSHIP: frozenset[str] = frozenset({
 })
 
 ALLOWED_AGAMI_KEYS_MODEL: frozenset[str] = frozenset({
-    "profile", "db_type", "schema", "introspect_meta",
+    "profile", "db_type", "schema", "table", "introspect_meta",
 })
 
 ALLOWED_AGAMI_TYPES: frozenset[str] = frozenset({
@@ -501,18 +501,35 @@ def validate_with_warnings(
     return errors, warnings
 
 
-# --- Directory mode (per-schema layout) -------------------------------------
+# --- Directory mode (per-schema or per-table layout) ------------------------
 #
-# A profile directory looks like:
-#     ~/.agami/<profile>/
-#         index.yaml
-#         <schema1>.yaml
+# Two supported layouts:
+#
+# v1.2 (per-schema, single file per schema):
+#     <profile>/
+#         index.yaml                    # TOC, schemas[].file = "<name>.yaml"
+#         <schema1>.yaml                # standalone OSI doc with all schema's datasets
 #         <schema2>.yaml
 #         examples.yaml
 #         ORGANIZATION.md
 #
-# Each <schema>.yaml is a standalone OSI v0.1.1 document containing only that
-# schema's datasets. index.yaml is agami-bespoke (NOT OSI) — a slim TOC plus
+# v1.3 (per-table, one file per table):
+#     <profile>/
+#         index.yaml                    # TOC, schemas[].file = "<name>/_schema.yaml"
+#         <schema1>/
+#             _schema.yaml              # agami-bespoke: tables[] + relationships[]
+#             <table_a>.yaml            # standalone OSI doc with one dataset
+#             <table_b>.yaml
+#         <schema2>/...
+#         examples.yaml
+#         ORGANIZATION.md
+#
+# The validator detects which layout each schema uses from the `file` field
+# in index.yaml.schemas[] and dispatches accordingly. A single profile dir
+# CAN mix the two layouts (e.g., during incremental migration), but should
+# converge to v1.3 within a single agami-connect run.
+#
+# In both layouts, index.yaml is agami-bespoke (NOT OSI) — a slim TOC plus
 # cross-schema relationships and introspect metadata.
 
 ALLOWED_INDEX_TOP_KEYS: frozenset[str] = frozenset({
@@ -628,17 +645,193 @@ def _index_errors(index: dict, *, ctx: str = "index.yaml") -> list[str]:
     return out
 
 
+# --- _schema.yaml allowlist (v1.3 layout) -----------------------------------
+
+ALLOWED_SCHEMA_TOP_KEYS: frozenset[str] = frozenset({
+    "version", "schema", "description", "tables",
+    "relationships", "metrics",
+})
+
+ALLOWED_SCHEMA_TABLE_KEYS: frozenset[str] = frozenset({
+    "name", "file", "description", "primary_key", "estimated_row_count",
+})
+
+
+def _schema_yaml_errors(s_doc: dict, *, ctx: str) -> list[str]:
+    """Validate the agami-bespoke _schema.yaml (TOC + within-schema rels)."""
+    out: list[str] = []
+    if not isinstance(s_doc, dict):
+        return [f"[Schema] {ctx}: top-level must be an object"]
+
+    extras = set(s_doc.keys()) - ALLOWED_SCHEMA_TOP_KEYS
+    if extras:
+        out.append(
+            f"[Schema] {ctx}: unknown top-level key(s) {sorted(extras)}. "
+            f"Allowed: {sorted(ALLOWED_SCHEMA_TOP_KEYS)}."
+        )
+
+    for k in ("version", "schema", "tables"):
+        if k not in s_doc:
+            out.append(f"[Schema] {ctx}: missing required key '{k}'")
+
+    tables = s_doc.get("tables", [])
+    if not isinstance(tables, list) or not tables:
+        out.append(f"[Schema] {ctx}: 'tables' must be a non-empty array")
+    else:
+        names_seen: set[str] = set()
+        for i, t in enumerate(tables):
+            if not isinstance(t, dict):
+                out.append(f"[Schema] {ctx}.tables[{i}]: must be an object")
+                continue
+            extras_t = set(t.keys()) - ALLOWED_SCHEMA_TABLE_KEYS
+            if extras_t:
+                out.append(
+                    f"[Schema] {ctx}.tables[{i}]: unknown key(s) {sorted(extras_t)}. "
+                    f"Allowed: {sorted(ALLOWED_SCHEMA_TABLE_KEYS)}."
+                )
+            for k in ("name", "file"):
+                if k not in t:
+                    out.append(f"[Schema] {ctx}.tables[{i}]: missing '{k}'")
+            n = t.get("name")
+            if n in names_seen:
+                out.append(f"[Schema] {ctx}.tables: duplicate table name '{n}'")
+            elif n:
+                names_seen.add(n)
+
+    return out
+
+
+def _merge_v13_schema(
+    schema_dir: Path, schema_name: str, schema_doc_path: Path,
+    schema: dict,
+) -> tuple[dict, list[str], list[str]]:
+    """Read a v1.3 schema directory (_schema.yaml + per-table yamls) and
+    return a synthetic single-schema OSI dict suitable for `validate()`.
+
+    Returns (merged_model, errors, warnings). On error, merged_model may
+    be partial — the caller should not promote partial results to disk.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        with schema_doc_path.open() as f:
+            s_doc = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        return ({}, [f"[Schema] {schema_doc_path.name}: invalid YAML: {e}"], warnings)
+
+    errors.extend(_schema_yaml_errors(s_doc or {}, ctx=schema_doc_path.name))
+    if errors:
+        return ({}, errors, warnings)
+
+    # Read each <table>.yaml as a standalone OSI doc, validate, extract dataset.
+    merged_datasets: list[dict] = []
+    declared_schema = (s_doc or {}).get("schema")
+    if declared_schema and declared_schema != schema_name:
+        errors.append(
+            f"[Schema] {schema_doc_path.name}: 'schema' field '{declared_schema}' "
+            f"doesn't match index.yaml schema name '{schema_name}'"
+        )
+
+    for i, t in enumerate(s_doc.get("tables", [])):
+        if not isinstance(t, dict):
+            continue
+        t_file = t.get("file")
+        t_name = t.get("name")
+        if not t_file or not t_name:
+            continue
+        t_path = schema_dir / t_file
+        if not t_path.exists():
+            errors.append(
+                f"[Schema] {schema_doc_path.name}.tables[{i}]: file '{t_file}' "
+                f"is missing from {schema_dir}"
+            )
+            continue
+        try:
+            with t_path.open() as f:
+                t_model = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            errors.append(f"[Table] {t_file}: invalid YAML: {e}")
+            continue
+        if not isinstance(t_model, dict):
+            errors.append(f"[Table] {t_file}: top-level must be an object")
+            continue
+
+        e_list, w_list = validate_with_warnings(t_model, schema=schema)
+        errors.extend(f"[{t_file}] {e}" for e in e_list)
+        warnings.extend(f"[{t_file}] {w}" for w in w_list)
+
+        sm_list = t_model.get("semantic_model")
+        if not isinstance(sm_list, list) or not sm_list:
+            errors.append(f"[Table] {t_file}: missing 'semantic_model'")
+            continue
+        sm = sm_list[0]
+        if not isinstance(sm, dict):
+            continue
+
+        # Verify the table yaml's agami.schema matches and agami.table matches.
+        for ext in sm.get("custom_extensions", []):
+            agami, _ = _parse_agami_payload(ext)
+            if agami:
+                if agami.get("schema") not in (None, schema_name):
+                    errors.append(
+                        f"[Table] {t_file}: agami.schema='{agami.get('schema')}' "
+                        f"doesn't match index.yaml schema name '{schema_name}'"
+                    )
+                if agami.get("table") not in (None, t_name):
+                    errors.append(
+                        f"[Table] {t_file}: agami.table='{agami.get('table')}' "
+                        f"doesn't match _schema.yaml table name '{t_name}'"
+                    )
+
+        # Extract datasets — should be exactly 1 per file.
+        ds_list = sm.get("datasets", [])
+        if len(ds_list) != 1:
+            errors.append(
+                f"[Table] {t_file}: expected exactly 1 dataset (one file per "
+                f"table), got {len(ds_list)}"
+            )
+        merged_datasets.extend(ds_list)
+
+    # Build the synthetic merged model: borrow the first table's name + custom
+    # extensions for the model-level fields, attach the schema's relationships
+    # and metrics.
+    merged_model = {
+        "version": "0.1.1",
+        "semantic_model": [
+            {
+                "name": "merged",  # synthetic — the per-table yamls each have the real profile name
+                "datasets": merged_datasets,
+                "relationships": s_doc.get("relationships") or [],
+                "metrics": s_doc.get("metrics") or [],
+            }
+        ],
+    }
+
+    # Validate the merged model end-to-end (catches unique-name violations
+    # across tables, dangling relationships, etc.).
+    e_list, w_list = validate_with_warnings(merged_model, schema=schema)
+    errors.extend(f"[{schema_name} merged] {e}" for e in e_list)
+    warnings.extend(f"[{schema_name} merged] {w}" for w in w_list)
+
+    return (merged_model, errors, warnings)
+
+
 def validate_directory(
     profile_dir: Path, *, schema: dict | None = None
 ) -> tuple[list[str], list[str]]:
     """
-    Validate a per-schema profile directory.
+    Validate a profile directory in either v1.2 (per-schema single-file) or
+    v1.3 (per-table) layout. Layout is detected per-schema from the `file`
+    field in index.yaml.schemas[]:
 
-    Reads <profile_dir>/index.yaml and every <schema>.yaml referenced from it.
-    Each schema yaml is validated as a standalone OSI v0.1.1 document. Then
-    cross-validates: dataset name uniqueness across schemas, cross-schema
-    relationship endpoints resolve to real datasets, and the schema-yaml
-    model-level extension's `agami.schema` matches the schema name.
+      - "<name>.yaml"           → v1.2: file is a standalone OSI doc
+      - "<name>/_schema.yaml"   → v1.3: directory contains _schema.yaml + per-table yamls
+
+    Each schema yaml or per-table yaml is validated as a standalone OSI v0.1.1
+    document. Then cross-validates: dataset name uniqueness across schemas,
+    cross-schema relationship endpoints resolve to real datasets, and the
+    schema-yaml model-level extension's `agami.schema` matches the schema name.
     """
     if schema is None:
         schema = load_osi_schema()
@@ -662,11 +855,8 @@ def validate_directory(
     errors.extend(_index_errors(index or {}))
 
     if errors:
-        # Don't try to load schema yamls if the index itself is broken — too
-        # noisy. The user fixes the index first, then re-runs.
         return (errors, warnings)
 
-    # Build qualified-dataset registry across all schema yamls.
     qualified_datasets: set[str] = set()  # "<schema>.<dataset>"
 
     for s in index.get("schemas", []):
@@ -681,38 +871,56 @@ def validate_directory(
                 f"{profile_dir}"
             )
             continue
-        try:
-            with s_path.open() as f:
-                s_model = yaml.safe_load(f)
-        except yaml.YAMLError as e:
-            errors.append(f"[Schema] {s_file}: invalid YAML: {e}")
-            continue
-        if not isinstance(s_model, dict):
-            errors.append(f"[Schema] {s_file}: top-level must be an object")
-            continue
 
-        e_list, w_list = validate_with_warnings(s_model, schema=schema)
-        # Prefix each schema-yaml error with the file name for clarity.
-        errors.extend(f"[{s_file}] {e}" for e in e_list)
-        warnings.extend(f"[{s_file}] {w}" for w in w_list)
+        # Detect layout.
+        if s_file.endswith("/_schema.yaml") or s_path.name == "_schema.yaml":
+            # v1.3 — per-table layout
+            schema_dir = s_path.parent
+            merged_model, e_list, w_list = _merge_v13_schema(
+                schema_dir, s_name, s_path, schema=schema
+            )
+            errors.extend(e_list)
+            warnings.extend(w_list)
 
-        # Cross-check the schema-yaml's model-level agami.schema matches.
-        sm_list = s_model.get("semantic_model") if isinstance(s_model, dict) else None
-        if isinstance(sm_list, list) and sm_list:
-            sm = sm_list[0]
-            for ext in sm.get("custom_extensions", []) if isinstance(sm, dict) else []:
-                agami, _ = _parse_agami_payload(ext)
-                if agami and agami.get("schema") not in (None, s_name):
-                    errors.append(
-                        f"[Schema] {s_file}: agami.schema='{agami.get('schema')}' "
-                        f"doesn't match index.yaml schema name '{s_name}'"
-                    )
+            sm_list = merged_model.get("semantic_model") or []
+            for sm in sm_list:
+                if not isinstance(sm, dict):
+                    continue
+                for ds in sm.get("datasets", []):
+                    ds_name = ds.get("name")
+                    if ds_name:
+                        qualified_datasets.add(f"{s_name}.{ds_name}")
+        else:
+            # v1.2 — single-file layout
+            try:
+                with s_path.open() as f:
+                    s_model = yaml.safe_load(f)
+            except yaml.YAMLError as e:
+                errors.append(f"[Schema] {s_file}: invalid YAML: {e}")
+                continue
+            if not isinstance(s_model, dict):
+                errors.append(f"[Schema] {s_file}: top-level must be an object")
+                continue
 
-            # Register datasets under qualified name for cross-schema rel checks.
-            for ds in sm.get("datasets", []) if isinstance(sm, dict) else []:
-                ds_name = ds.get("name")
-                if ds_name:
-                    qualified_datasets.add(f"{s_name}.{ds_name}")
+            e_list, w_list = validate_with_warnings(s_model, schema=schema)
+            errors.extend(f"[{s_file}] {e}" for e in e_list)
+            warnings.extend(f"[{s_file}] {w}" for w in w_list)
+
+            sm_list = s_model.get("semantic_model") if isinstance(s_model, dict) else None
+            if isinstance(sm_list, list) and sm_list:
+                sm = sm_list[0]
+                for ext in sm.get("custom_extensions", []) if isinstance(sm, dict) else []:
+                    agami, _ = _parse_agami_payload(ext)
+                    if agami and agami.get("schema") not in (None, s_name):
+                        errors.append(
+                            f"[Schema] {s_file}: agami.schema='{agami.get('schema')}' "
+                            f"doesn't match index.yaml schema name '{s_name}'"
+                        )
+
+                for ds in sm.get("datasets", []) if isinstance(sm, dict) else []:
+                    ds_name = ds.get("name")
+                    if ds_name:
+                        qualified_datasets.add(f"{s_name}.{ds_name}")
 
     # Cross-schema relationship endpoints must resolve to datasets we actually
     # loaded. (Endpoints are required to be qualified — _index_errors caught the
