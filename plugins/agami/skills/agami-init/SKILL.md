@@ -386,21 +386,20 @@ Persist the chosen method **and the absolute paths of every tool we found** in `
 
 `artifacts_dir` is the absolute path where all sharable artifacts (semantic model, examples, ORGANIZATION.md, USER_MEMORY.md) live. **It is NOT the same as `~/.agami/`** — the agami home holds secrets and per-user state, the artifacts dir holds what teams may want to commit. See [`shared/file-layout.md`](../../shared/file-layout.md) for the full split.
 
-Ask the user where to put it via **AskUserQuestion** before writing `.config`:
+Ask the user where to put it via **AskUserQuestion** before writing `.config`. Two options only — keep it simple:
 
-> Where should agami save your semantic model, examples, and shared preferences?
+> Where should agami save your semantic model, examples, and preferences?
 >
-> These files are non-secret and team-useful — pointing this at a git repo lets your team check them in and share tuned models. Credentials and per-user state stay in `~/.agami/` either way.
-
-Options (one `(Recommended)` first):
+> These are non-secret files. Pointing this at a folder inside a git repo lets your team commit them and share. Credentials stay in `~/.agami/` either way.
 
 | label | description |
 |---|---|
-| `~/agami-artifacts/ (Recommended)` | Default — a flat directory in your home. You can `git init` there later if you want to share. |
-| `Inside an existing git repo (Other field — paste path)` | e.g. `~/code/myteam/data/agami/`. Best for teams who already have a data-stack repo. |
-| `Custom path (Other field)` | Anywhere else. |
+| `~/agami-artifacts/ (Recommended)` | Default — a folder in your home directory. You can `git init` there later, or copy the contents into your team's repo whenever you want to share. |
+| `Other (Other field)` | Paste an absolute path — e.g. `~/code/myteam/data/agami/` to put it inside an existing repo. Must be absolute and must NOT be inside `~/.agami/`. |
 
-Validate the chosen path: must be absolute, must NOT be inside `~/.agami/` (refuse with: "That's the secrets dir — pick a different location"), parent must exist or be creatable. Persist the resolved absolute path to `.config.artifacts_dir`. The directory is created lazily on first write by `agami-connect`.
+(Two options + Other = no split-screen. The `(Recommended)` here is genuine — most users should take the default and decide about sharing later, not commit to a repo path during install.)
+
+Validate the chosen path: must be absolute, must NOT be inside `~/.agami/` (refuse with: "That's the secrets directory — pick a different location"), parent must exist or be creatable. Persist the resolved absolute path to `.config.artifacts_dir`. The directory is created lazily on first write by `agami-connect`.
 
 Set `active_profile` to the name the user picked in Phase 2a (e.g. `main`, `supabase`, `production`). All other agami skills resolve the active profile in this order:
 
