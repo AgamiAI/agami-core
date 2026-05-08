@@ -432,9 +432,14 @@ Format every cell per its column's `agami.type` (and `agami.unit` if present). T
 
 If the user has stated a date-format preference in `~/.agami/USER_MEMORY.md` (e.g. "use ISO dates" or "use DD/MM/YYYY"), respect that. The defaults above apply only when USER_MEMORY is silent.
 
-If row count > 1000:
-- Truncate display to 1000.
-- Footer: "Showing 1000 of <total>. Reply 'show all' or 'export csv'."
+If row count > 30:
+- The chat preview shows the first **30** rows only — markdown tables past ~30 rows scroll forever and bury the insight.
+- The HTML report (Phase 4e) contains the full set in a paginated table.
+- For row counts > 30, **auto-write the CSV to `~/.agami/exports/<ts>.csv`** at the same time as the HTML report, without waiting for the user to ask. Surface both paths in Phase 4d's footer.
+- Footer line under the table: `Showing first 30 of <N> rows · full set in CSV: <csv-path> · HTML report: <html-path>`. Use thousands separators on `<N>` (e.g. `4,213`).
+- If `<N>` is huge (> 100k), additionally suggest tightening the filter inline: "If you want to slice by region or date, say so and I'll re-run."
+
+CSVs open natively in Excel / Numbers / Google Sheets, so "export to Excel" routes to this same CSV path — no separate `.xlsx` flow in v1.
 
 If row count == 0:
 - "No rows matched. The query was: …" (show SQL).
@@ -483,6 +488,8 @@ For multi-section: a 1–3 sentence executive summary across all sections (the s
 ### 4d — Markdown table (single-section reports only)
 
 Render the rows as a GitHub-flavored markdown table. Right-align numeric columns. Format numbers per Phase 3c (commas, currency, percentages, ISO dates). Wide tables (> 8 cols) → vertical layout, with a one-line note "wide table — see HTML for the full grid".
+
+**Cap the chat preview at 30 rows** per Phase 3c — even when the user asked for "all leads with credit rating > 700" and the result is 4,213 rows, the chat shows the first 30 and points them at the CSV + HTML report. The full set lives in the artifacts on disk. The footer line ("Showing first 30 of 4,213 rows · full set in CSV: …") is the contract that tells the user where to find everything.
 
 **Multi-section reports skip the table in chat.** The chat already has the insight; the per-section tables live in the HTML report. Multi-section chat output is: approach + fetching + summary + a short bulleted list of section titles + HTML path + 5 follow-ups. No tables in chat.
 
@@ -648,7 +655,12 @@ These are templates, not rules — adjust to the schema. If a slot doesn't fit, 
 
 ### 4g — CSV export (`--csv` or "export this")
 
-Even with the HTML report, the user might still want flat CSVs. If they pass `--csv` or say "export this":
+Two ways the CSV gets written:
+
+1. **Auto-export for large results** (row count > 30, per Phase 3c). The CSV is written alongside the HTML report without the user asking, and the path is surfaced in Phase 4d's footer.
+2. **Explicit `--csv` / "export this" / "export to Excel"** for any result, including small ones. The user explicitly wants a flat file.
+
+Either way:
 
 - Single-section report → one CSV at `~/.agami/exports/<ts>.csv`.
 - Multi-section report → one CSV per section at `~/.agami/exports/<ts>-<section-slug>.csv`. Surface all paths.
@@ -659,7 +671,9 @@ mkdir -p ~/.agami/exports
 # write header + rows per section, RFC 4180 escaping
 ```
 
-Surface the path(s) inline — they don't replace 4f, they appear before it.
+CSVs open natively in Excel / Numbers / Google Sheets — when the user asks for "Excel", the CSV path is the answer. If they specifically want a `.xlsx` (formulas, multiple sheets, formatting), tell them to open the CSV in Excel and Save As — v1 doesn't ship a native `.xlsx` writer.
+
+Surface the path(s) inline. For the auto-export case, the path is already in the Phase 4d footer; the explicit-export case adds a separate confirmation line before Phase 4f.
 
 ---
 

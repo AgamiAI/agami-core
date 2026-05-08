@@ -380,7 +380,7 @@ When introspecting databases, exclude system schemas:
   - mysql: `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
   - Python driver: `python3 scripts/execute_sql.py --sql-file ...` (reads creds internally; never echoes them)
 - Use `--csv` or `--batch` output modes (not interactive) for predictable parsing
-- **Result-set size policy** — default cap is 1000 rows with explicit "show more" prompt. User can override per-query with "top N" or "limit N" framing.
+- **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `~/.agami/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.
 - **NEVER** generate DDL or DML statements (`DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, etc.)
 - Sanitize user input before including in SQL queries
 - `~/.agami/credentials` must be `chmod 600`. The `init` skill enforces this; refuse to read otherwise.
