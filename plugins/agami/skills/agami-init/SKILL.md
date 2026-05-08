@@ -24,31 +24,9 @@ This skill is idempotent — running it again with no args verifies state and su
 
 ## Phase −1: Plan-mode check (before anything else)
 
-agami's setup needs to make edits — write `~/.agami/credentials.example`, run `mkdir`, materialize `.pgpass`, etc. None of that works in Claude Code's **Plan mode**, which restricts the assistant to read-only tools.
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). If plan mode is active and the user picks `Stay in plan mode`, agami-init has a defined fallback: **emit a written plan only** (no file writes, no Bash). Other skills don't have this fallback and refuse to proceed.
 
-Detect plan mode via two signals:
-
-1. **System-reminder context.** When plan mode is active, the host injects a `<system-reminder>` saying so into the conversation. If the latest such reminder is in scope and indicates plan mode is active, treat that as confirmed.
-2. **Optional probe.** If the system context is ambiguous, attempt one no-op Bash: `echo agami-plan-probe`. If it succeeds, edits will succeed. If it fails because of plan mode, the failure is the signal.
-
-If plan mode is active, **stop the skill and ask the user to switch** via AskUserQuestion. Do not proceed to Phase 0 yet.
-
-> agami's setup needs to write files in `~/.agami/` and run a few commands. **Plan mode is active**, which blocks edits. Switch modes?
-
-Options (mark exactly one Recommended, place it first):
-
-| label | description |
-|---|---|
-| `Default mode (Recommended)` | Switch to default mode — agami will ask for permission per command (you can approve once and the host caches the allow). |
-| `Auto-accept edits` | Switch to auto-accept-edits mode — agami runs without per-command prompts. Use if you trust the skill. |
-| `Stay in plan mode` | Don't run setup. I'll show you the plan only, no actual changes. |
-
-After the user picks, surface a one-liner reminder of the keystroke (`Shift+Tab` cycles modes in Claude Code) so they know how to flip. Then:
-
-- **`Default mode` or `Auto-accept edits`** → wait for the user to actually press Shift+Tab. Don't try to flip the mode programmatically — the skill can't. Ask them to confirm "I've switched, continue" before proceeding.
-- **`Stay in plan mode`** → continue, but emit only a written plan (no file writes, no Bash). Tell the user: "I'll describe what I would do; re-invoke me out of plan mode when you're ready to actually run it."
-
-If the user is NOT in plan mode (signal #1 absent and the probe succeeds), skip this phase silently and go to Phase 0.
+If plan mode is not active, skip this phase silently and go to Phase 0.
 
 ---
 
@@ -311,15 +289,19 @@ The generator is idempotent and safe to re-run. Auth files are chmod 600. **With
 
 If the user hasn't yet saved real credentials (just the template is there), skip this step — the generator will fail on placeholder values, and we'll re-run after the user fills in their connection details.
 
-### Seed `~/.agami/USER_MEMORY.md` if missing
+### Seed `<artifacts_dir>/USER_MEMORY.md` if missing
 
-If `~/.agami/USER_MEMORY.md` does not exist, write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md) → "Default seed") via the Write tool, `chmod 600`. This file holds free-form **cross-database** user preferences (default filters, display preferences) that every other agami skill loads on each invocation. Don't overwrite an existing file — the user may have edited it.
+After `artifacts_dir` is resolved (above), check for `<artifacts_dir>/USER_MEMORY.md`. If it does not exist, create the directory if needed (`mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md) → "Default seed") via the Write tool, `chmod 644` (sharable; not secret).
 
-### `ORGANIZATION.md` is per-profile, seeded by `connect`
+USER_MEMORY.md holds free-form **cross-database** user preferences (default filters, display rules) that every other agami skill loads on each invocation. Don't overwrite an existing file — the user may have edited it (or pulled a team-shared copy from git).
 
-`USER_MEMORY.md` is global (one file, applies across every database the user connects to). The **per-database** equivalent is `~/.agami/<profile>/ORGANIZATION.md` — domain context, terminology, what the data represents. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+**Migration:** if `~/.agami/USER_MEMORY.md` exists from a v1.1 install, move it: `mv "$HOME/.agami/USER_MEMORY.md" "$artifacts_dir/USER_MEMORY.md"`. Surface a one-line note: "Moved your USER_MEMORY.md to `<artifacts_dir>/USER_MEMORY.md`. It's sharable — `git init` and commit if you want."
 
-`init` does NOT create `ORGANIZATION.md` here, because the profile directory `~/.agami/<profile>/` doesn't exist yet — `connect` builds it during introspection. `connect`'s Phase 1.5 prompts the user once for a one-paragraph description and writes the file alongside the per-schema yamls. Don't reach for that file from `init`.
+### `ORGANIZATION.md` is per-profile, seeded by `agami-connect`
+
+`USER_MEMORY.md` is global (one file at the top of `<artifacts_dir>/`, applies across every database the user connects to). The **per-database** equivalent is `<artifacts_dir>/<profile>/ORGANIZATION.md` — domain context, terminology, what the data represents. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+
+`agami-init` does NOT create `ORGANIZATION.md` here, because the profile directory `<artifacts_dir>/<profile>/` doesn't exist yet — `agami-connect` builds it during introspection. `agami-connect`'s Phase 1.4 prompts the user once for a one-paragraph description and writes the file alongside the per-schema yamls. Don't reach for that file from `agami-init`.
 
 ### Permissions enforcement
 
@@ -378,6 +360,7 @@ Persist the chosen method **and the absolute paths of every tool we found** in `
   "tier": "cli",
   "host": "claude-code-cli",
   "active_profile": "main",
+  "artifacts_dir": "/Users/me/agami-artifacts",
   "tool_paths": {
     "psql": "/opt/homebrew/Cellar/libpq/18.3/bin/psql",
     "mysql": null,
@@ -392,6 +375,24 @@ Persist the chosen method **and the absolute paths of every tool we found** in `
   "detected_at": "2026-05-07T17:30:00Z"
 }
 ```
+
+`artifacts_dir` is the absolute path where all sharable artifacts (semantic model, examples, ORGANIZATION.md, USER_MEMORY.md) live. **It is NOT the same as `~/.agami/`** — the agami home holds secrets and per-user state, the artifacts dir holds what teams may want to commit. See [`shared/file-layout.md`](../../shared/file-layout.md) for the full split.
+
+Ask the user where to put it via **AskUserQuestion** before writing `.config`:
+
+> Where should agami save your semantic model, examples, and shared preferences?
+>
+> These files are non-secret and team-useful — pointing this at a git repo lets your team check them in and share tuned models. Credentials and per-user state stay in `~/.agami/` either way.
+
+Options (one `(Recommended)` first):
+
+| label | description |
+|---|---|
+| `~/agami-artifacts/ (Recommended)` | Default — a flat directory in your home. You can `git init` there later if you want to share. |
+| `Inside an existing git repo (Other field — paste path)` | e.g. `~/code/myteam/data/agami/`. Best for teams who already have a data-stack repo. |
+| `Custom path (Other field)` | Anywhere else. |
+
+Validate the chosen path: must be absolute, must NOT be inside `~/.agami/` (refuse with: "That's the secrets dir — pick a different location"), parent must exist or be creatable. Persist the resolved absolute path to `.config.artifacts_dir`. The directory is created lazily on first write by `agami-connect`.
 
 Set `active_profile` to the name the user picked in Phase 2a (e.g. `main`, `supabase`, `production`). All other agami skills resolve the active profile in this order:
 

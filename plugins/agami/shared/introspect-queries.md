@@ -1,6 +1,6 @@
 # Introspection Queries
 
-SQL the `agami-connect` skill runs against `information_schema` to build the per-schema yamls in `~/.agami/<profile>/`. Each query is **pure SQL** — no Python, no driver-specific calls. Runs identically on the native CLI, DuckDB, or the Python driver.
+SQL the `agami-connect` skill runs against `information_schema` to build the per-schema yamls in `<artifacts_dir>/<profile>/`. Each query is **pure SQL** — no Python, no driver-specific calls. Runs identically on the native CLI, DuckDB, or the Python driver.
 
 The `agami-connect` skill runs them in this order:
 
@@ -470,7 +470,7 @@ For each new database (or when the user says "re-introspect"):
 5. Build the per-schema yaml entries per [`schema-reference.md`](schema-reference.md).
 6. After all tables: validate FKs via live `LEFT JOIN` orphan checks (see [`fk-validation.md`](fk-validation.md)) — drop any FK with high orphan ratio.
 7. Validate the model end-to-end (directory-mode `validate_semantic_model.py --directory`).
-8. Write `~/.agami/<profile>/index.yaml` + every `<schema>.yaml`.
+8. Write `<artifacts_dir>/<profile>/index.yaml` + every `<schema>.yaml`.
 9. Hand off to the seed-examples step.
 
 The skill executes each query via the chosen tool (native CLI / DuckDB / Python driver) and parses CSV / TSV output. No driver-specific calls.

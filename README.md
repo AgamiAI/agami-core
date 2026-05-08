@@ -39,8 +39,9 @@ Ask plain-English questions of your **Postgres** or **MySQL** database. Your cre
 Most NL→SQL tools either send your data through a hosted backend (Snowflake-flavored ChatBI, Hex, etc.) or require a heavy local install (a database proxy, a fine-tuned model, a Python package). `agami` does neither.
 
 - **Local execution.** The skill reads your `~/.agami/credentials` file, runs SQL through your existing `psql` / `mysql` / `duckdb` binary, parses the rows, and shows you the answer. No data path through any server we operate.
-- **Zero infra.** Just a Claude Code skill plugin and a tiny YAML file at `~/.agami/<dbname>.yaml`. If you have `psql`, you have everything you need.
-- **Corrections persist.** When you say "no, the join should be on `customer_id`", we append your corrected SQL to `~/.agami/<dbname>-examples.yaml`. Every future query loads the entire examples library into the prompt — Claude weighs them and picks what's relevant. No embeddings, no fine-tune, no second tool to manage.
+- **Zero infra.** Just a Claude Code skill plugin and a few YAML files under `~/agami-artifacts/<dbname>/`. If you have `psql`, you have everything you need.
+- **Sharable.** Your tuned semantic model, examples, ORGANIZATION.md, and USER_MEMORY.md preferences live in `~/agami-artifacts/` (configurable per profile). `git init` and check in to share with your team. Credentials stay in `~/.agami/` — separate, never committed.
+- **Corrections persist.** When you say "no, the join should be on `customer_id`", we append your corrected SQL to `~/agami-artifacts/<dbname>/examples.yaml`. Every future query loads the entire examples library into the prompt — Claude weighs them and picks what's relevant. No embeddings, no fine-tune, no second tool to manage.
 
 `agami` is open source under the MIT license. The code that runs on your machine is the code in this repo. Read it.
 
@@ -331,18 +332,13 @@ There are 11 fields. None of them contain query text, schema content, result dat
 
 ---
 
-## Reduce permission prompts (optional)
+## Reduce permission prompts (built in)
 
-Claude Code prompts for permission the first time it runs a Bash command pattern. If you're tired of clicking "allow" for the same agami commands every session, copy the recommended allowlist into `~/.claude/settings.local.json`:
+Claude Code prompts for permission the first time it runs a Bash command pattern. agami ships its allowlist as part of the plugin's `.claude/settings.json` — when you install agami via the marketplace, the host picks up these defaults automatically. No copy-paste step needed.
 
-```bash
-# One-time setup — copies the agami-friendly allowlist to your user-scope settings
-cp <plugin-install-path>/.claude/settings.local.example.json ~/.claude/settings.local.json
-```
+The shipped allowlist covers the common agami invocation shapes: `psql` / `mysql` / `snowsql` with auth files, the bundled scripts (`execute_sql.py` / `setup_pgauth.py` / `validate_semantic_model.py` / `render_chart.py` / `build_duckdb_attach.py`), `mkdir`/`chmod` on `~/.agami/` and `~/agami-artifacts/`, `open` on chart files, and the GitHub-star ask URL. It does NOT auto-allow arbitrary `psql` / `mysql` invocations against your DB — only the wrapper scripts that read credentials safely.
 
-Or merge selectively into your existing `~/.claude/settings.local.json`. The file is gitignored — your allowlist stays local.
-
-The example covers the common agami invocation shapes: `psql` / `mysql` / `snowsql` with auth files, `execute_sql.py` / `setup_pgauth.py` / `validate_semantic_model.py` script calls, `mkdir`/`chmod` on `~/.agami/`, and `open` on chart files. It does NOT auto-allow arbitrary `psql` / `mysql` invocations against your DB — only the wrapper scripts that read credentials safely.
+To override per-user (e.g., to add commands you trust beyond agami), put them in `~/.claude/settings.local.json` — Claude Code merges that on top of the shipped allowlist. That file is gitignored; your additions stay private.
 
 ## Troubleshooting
 

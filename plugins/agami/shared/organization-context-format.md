@@ -2,7 +2,7 @@
 
 Free-form Markdown describing **what this database is about**: the company / product, what the data represents, who the users are, what the domain vocabulary means. The skill loads it into every SQL-generation prompt as steering context, ahead of `USER_MEMORY.md`.
 
-Lives at `~/.agami/<profile>/ORGANIZATION.md`. One file per profile — context is database-specific (a fintech database has different vocabulary than an ITSM database).
+Lives at `<artifacts_dir>/<profile>/ORGANIZATION.md`. One file per profile — context is database-specific (a fintech database has different vocabulary than an ITSM database).
 
 Local-only. Never sent in telemetry. The skill reads it on each query, but neither the file nor any extracted snippet leaves the machine.
 
@@ -10,8 +10,8 @@ Local-only. Never sent in telemetry. The skill reads it on each query, but neith
 
 | File | Lives where | Scope | Examples |
 |---|---|---|---|
-| `~/.agami/USER_MEMORY.md` | Profile-agnostic (one global file) | **User preferences** that apply across every database | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
-| `~/.agami/<profile>/ORGANIZATION.md` | Per-profile (one per database) | **Domain knowledge** about this specific database | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
+| `<artifacts_dir>/USER_MEMORY.md` | Profile-agnostic (one global file) | **User preferences** that apply across every database | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
+| `<artifacts_dir>/<profile>/ORGANIZATION.md` | Per-profile (one per database) | **Domain knowledge** about this specific database | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
 
 The skill loads both on every query. `ORGANIZATION.md` answers *what does this data mean*, `USER_MEMORY.md` answers *how should I display / filter results*. They don't overlap.
 
@@ -49,7 +49,7 @@ The user is expected to replace the parenthetical guidance with real prose. The 
 
 ## When the skill loads it
 
-- **`query-database`** — Phase 1d.2 reads `~/.agami/<profile>/ORGANIZATION.md`, strips HTML comments, injects under `## Organization context` in the SQL-generation prompt (ahead of `## User memory (preferences and policies)` from `USER_MEMORY.md`).
+- **`query-database`** — Phase 1d.2 reads `<artifacts_dir>/<profile>/ORGANIZATION.md`, strips HTML comments, injects under `## Organization context` in the SQL-generation prompt (ahead of `## User memory (preferences and policies)` from `USER_MEMORY.md`).
 - **`connect`** — Phase C (description generation) loads ORGANIZATION.md as a domain prior so the auto-generated table / column descriptions reflect the user's terminology.
 - **`save-correction`** — `org_context` correction kind appends to ORGANIZATION.md.
 
@@ -69,4 +69,4 @@ The `user_preference` correction kind still routes to `USER_MEMORY.md` — those
 - **Never read by anything other than the agami skills running locally.**
 - The `agami-init` skill enforces `chmod 600` on creation.
 
-If the user shares `~/.agami/<profile>/` with a teammate (e.g. via dotfiles), the file goes with the model — that's a deliberate user action.
+If the user shares `<artifacts_dir>/<profile>/` with a teammate (e.g. via dotfiles), the file goes with the model — that's a deliberate user action.

@@ -17,9 +17,9 @@ For the canonical, machine-checked allowlist, see [`plugins/agami/shared/telemet
 These never leave your machine, opt-in or not:
 
 - **Credentials** (`~/.agami/credentials`)
-- **Semantic model** (`~/.agami/<profile>/index.yaml` + `<profile>/<schema>.yaml`)
-- **Examples library** (`~/.agami/<profile>/examples.yaml`)
-- **Organization context** (`~/.agami/<profile>/ORGANIZATION.md`) — your description of what the database represents, domain terminology, etc.
+- **Semantic model** (`<artifacts_dir>/<profile>/index.yaml` + `<schema>.yaml` files; default `<artifacts_dir>` is `~/agami-artifacts/`)
+- **Examples library** (`<artifacts_dir>/<profile>/examples.yaml`)
+- **Organization context** (`<artifacts_dir>/<profile>/ORGANIZATION.md`) — your description of what the database represents, domain terminology, etc.
 - **User memory** (`~/.agami/USER_MEMORY.md`) — your cross-database preferences
 - **Query results** (everything Claude shows you)
 - **Query log** (`~/.agami/query_log.jsonl`) — your personal record of every query you ran

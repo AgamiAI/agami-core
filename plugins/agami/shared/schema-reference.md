@@ -22,17 +22,24 @@ The validator at [`plugins/agami/scripts/validate_semantic_model.py`](../scripts
 
 ## File layout
 
+agami's state splits across two directories — secrets in `~/.agami/`, sharable artifacts in `<artifacts_dir>/` (default `~/agami-artifacts/`, configurable per [`file-layout.md`](file-layout.md)).
+
 ```
-~/.agami/
+~/.agami/                                # secrets — NEVER commit
 ├── credentials                          # INI, chmod 600
-├── USER_MEMORY.md                       # global preferences (any profile)
-├── <profile>/                           # one directory per profile
-│   ├── index.yaml                       # TOC + cross-schema relationships
-│   ├── <schema1>.yaml                   # OSI semantic model for schema1
-│   ├── <schema2>.yaml                   # OSI semantic model for schema2
-│   ├── examples.yaml                    # NL→SQL examples (agami-bespoke)
-│   └── ORGANIZATION.md                  # domain context for this database
+├── .pgpass / .mysql.cnf / .snowsql.cnf
+├── .config                              # JSON, chmod 600 (incl. artifacts_dir)
+├── .optins, query_log.jsonl, charts/, exports/
 └── ...
+
+<artifacts_dir>/                         # sharable — can be committed to a team repo
+├── USER_MEMORY.md                       # cross-database preferences
+└── <profile>/
+    ├── index.yaml                       # TOC + cross-schema relationships
+    ├── <schema1>.yaml                   # OSI semantic model for schema1
+    ├── <schema2>.yaml                   # OSI semantic model for schema2
+    ├── examples.yaml                    # NL→SQL examples (agami-bespoke)
+    └── ORGANIZATION.md                  # domain context for this database
 ```
 
 `<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile, single-user. Each `<schema>.yaml` is a standalone OSI v0.1.1 document for that schema's datasets — same shape as a single-file model, just narrower.

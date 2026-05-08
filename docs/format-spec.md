@@ -1,29 +1,45 @@
 # Format specs
 
-Specs for every file `agami` reads or writes inside `~/.agami/`.
+agami's state splits across two directories. See [`plugins/agami/shared/file-layout.md`](../plugins/agami/shared/file-layout.md) for the full design rationale; this page is the per-file format reference.
+
+## `~/.agami/` — secrets + per-user state — **NEVER commit**
 
 | File | Format | Owner |
 |---|---|---|
 | `~/.agami/credentials` | INI (chmod 600) | User-edited |
-| `~/.agami/<profile>/index.yaml` | Agami-bespoke YAML (TOC + cross-schema relationships) | Skill-written, user-editable |
-| `~/.agami/<profile>/<schema>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML | Skill-written, user-editable |
-| `~/.agami/<profile>/examples.yaml` | Agami-bespoke YAML | Skill-written (seeds) + append-only via the `agami-save-correction` skill |
-| `~/.agami/<profile>/ORGANIZATION.md` | Free-form Markdown — domain context for this database | Seeded by `init` / `connect`, edited by user or appended by `save-correction` |
-| `~/.agami/USER_MEMORY.md` | Free-form Markdown — global preferences | Seeded by `init`, edited by user or appended by `save-correction` |
-| `~/.agami/cross_profile_relationships.yaml` | Agami-bespoke YAML — declared JOIN paths across profiles for federation | User-edited (optional) |
-| `~/.agami/.config` | JSON (chmod 600) | Skill-managed |
+| `~/.agami/.pgpass`, `.mysql.cnf`, `.snowsql.cnf` | Provider-native auth files (chmod 600) | Skill-written by `setup_pgauth.py` |
+| `~/.agami/.config` | JSON (chmod 600) — telemetry consent, install_id, active_profile, **artifacts_dir**, tool_paths | Skill-managed |
 | `~/.agami/.optins` | JSON (chmod 600) | Skill-managed |
-| `~/.agami/.duckdb_init_<id>.sql` | SQL (chmod 600, ephemeral) | Skill-managed — written by `build_duckdb_attach.py` for federated queries, deleted after the query |
+| `~/.agami/.duckdb_init_<id>.sql` | SQL (chmod 600, ephemeral) | `build_duckdb_attach.py`, deleted after the query |
 | `~/.agami/.telemetry-queue.jsonl` | JSONL | Skill-managed |
-| `~/.agami/query_log.jsonl` | JSONL append-only | Skill-written, never sent |
+| `~/.agami/query_log.jsonl` | JSONL append-only | Skill-written, never sent, personal record |
 | `~/.agami/charts/<ts>.html` | Chart.js HTML | Skill-written |
 | `~/.agami/exports/<ts>.csv` | RFC 4180 CSV | Skill-written |
 
-`USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives alongside credentials, and persists across hosts (CLI / Cowork / Desktop) the same way credentials do.
+## `<artifacts_dir>/` — sharable, can be committed (default `~/agami-artifacts/`)
 
-`USER_MEMORY.md` covers **user preferences that apply across every database** (default time windows, display preferences, exclude rules). The per-database **`ORGANIZATION.md`** at `~/.agami/<profile>/ORGANIZATION.md` covers **domain knowledge for that specific database** (terminology, key metrics, what the data represents). See [`plugins/agami/shared/organization-context-format.md`](../plugins/agami/shared/organization-context-format.md).
+| File | Format | Owner |
+|---|---|---|
+| `<artifacts_dir>/USER_MEMORY.md` | Free-form Markdown — cross-database preferences | Seeded by `agami-init`, edited by user or appended by `agami-save-correction` |
+| `<artifacts_dir>/<profile>/index.yaml` | Agami-bespoke YAML (TOC + cross-schema relationships) | Skill-written, user-editable |
+| `<artifacts_dir>/<profile>/<schema>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML | Skill-written, user-editable |
+| `<artifacts_dir>/<profile>/examples.yaml` | Agami-bespoke YAML | Skill-written (seeds) + append-only via `agami-save-correction` |
+| `<artifacts_dir>/<profile>/ORGANIZATION.md` | Free-form Markdown — per-database domain context | Seeded by `agami-connect`, edited by user or appended by `agami-save-correction` |
+| `~/.agami/cross_profile_relationships.yaml` | Agami-bespoke YAML — declared JOIN paths across profiles for federation. **Lives in `~/.agami/` because it spans profiles** and isn't tied to one team's repo | User-edited (optional) |
 
-`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile — replaces the v1.0 single-file `<profile>.yaml`. The `agami-connect` skill auto-migrates v1.0 installs on first run.
+`USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives in the artifacts dir, and persists across hosts (CLI / Cowork / Desktop) the same way the rest of `<artifacts_dir>/` does.
+
+`USER_MEMORY.md` covers **user preferences that apply across every database** (default time windows, display preferences, exclude rules). The per-database **`ORGANIZATION.md`** at `<artifacts_dir>/<profile>/ORGANIZATION.md` covers **domain knowledge for that specific database** (terminology, key metrics, what the data represents). See [`plugins/agami/shared/organization-context-format.md`](../plugins/agami/shared/organization-context-format.md).
+
+`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile under `<artifacts_dir>/`. The `agami-connect` skill auto-migrates v1.0 (single-file) and v1.1 (under `~/.agami/`) installs on first run after upgrade.
+
+## Why the split
+
+Three concrete wins (full design in [`shared/file-layout.md`](../plugins/agami/shared/file-layout.md)):
+
+1. **Zero credential-leak risk on commit.** `~/.agami/` is gitignored by default; `<artifacts_dir>/` is the only place anything goes when teams share.
+2. **Team workflows just work.** `cd ~/code/myteam/data && git add agami/` commits everyone's tuned semantic model, examples, ORGANIZATION.md, and USER_MEMORY.md preferences.
+3. **Power users override per-environment.** Set `AGAMI_ARTIFACTS_DIR=/path/to/staging-models` for an experimental session.
 
 ---
 

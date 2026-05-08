@@ -47,6 +47,17 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 
 ---
 
+## Phase −1: Plan-mode check
+
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-query-database needs Bash (SQL execution) and Write (chart HTML) — both are blocked in plan mode. If the user picks `Stay in plan mode`:
+
+- **Reopen-last-chart intent** (Phase 2a.1 below) — re-displaying an existing HTML chart only needs `Read` plus `open <path>`. Run that flow if matched.
+- **Anything else** — refuse: "I can't run SQL in plan mode. Switch to Default or Auto-accept and re-invoke."
+
+If plan mode is not active, skip this phase silently and go to Phase 1.
+
+---
+
 ## Phase 1: Setup (once per session)
 
 ### HARD RULES — connection rules
@@ -68,11 +79,14 @@ Read `~/.agami/credentials` (or check `AGAMI_DATABASE_URL`). If neither exists, 
 
 Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback).
 
+Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`.
+
 Look for the model in this priority order:
 
-1. **`~/.agami/<profile>/index.yaml`** — current layout. Read `index.yaml` first, then every `<schema>.yaml` it references (`schemas[].file`). Build a merged in-memory view from all the loaded schema yamls plus `index.yaml.cross_schema_relationships[]`.
-2. **`~/.agami/<profile>.yaml`** — v1.0 single-file layout. If this exists but the directory doesn't, surface a one-line message ("Detected v1.0 layout — migrating to per-schema directory takes ~30–90s. Say 'reload the schema' to migrate, or I'll keep using the old file for now.") and read it as before. The next reintrospect will migrate.
-3. **Neither exists** → invoke the `agami-connect` skill.
+1. **`<artifacts_dir>/<profile>/index.yaml`** — current layout (v1.2+). Read `index.yaml` first, then every `<schema>.yaml` it references (`schemas[].file`). Build a merged in-memory view from all the loaded schema yamls plus `index.yaml.cross_schema_relationships[]`.
+2. **`<artifacts_dir>/<profile>/index.yaml`** — v1.1 layout (under the secrets dir, before the artifacts split). If this exists but `<artifacts_dir>/<profile>/` doesn't, surface a one-line message ("Detected v1.1 layout — your model is under `~/.agami/`. Say 'reload the schema' to move it to the sharable artifacts dir, or I'll keep using the old location for now.") and read it as-is.
+3. **`~/.agami/<profile>.yaml`** — v1.0 single-file layout. If this exists but neither directory does, surface: "Detected v1.0 layout — migrating to per-schema directory takes ~30–90s. Say 'reload the schema' to migrate, or I'll keep using the old file for now."
+4. **None of the above** → invoke the `agami-connect` skill.
 
 For directory-layout, sanity-check:
 - `index.yaml.version: "0.1.1"` (warn but proceed if different)
@@ -114,19 +128,19 @@ For each relationship, treat as a directed JOIN edge in a graph: `from` → `to`
 
 ### 1d — load the examples library
 
-Read `~/.agami/<profile>/examples.yaml` (current layout). Fall back to `~/.agami/<profile>-examples.yaml` if only the v1.0 layout exists. Take the **most recent 50** entries (newest `created_at` first).
+Read `<artifacts_dir>/<profile>/examples.yaml` (current layout). Fall back to `~/.agami/<profile>-examples.yaml` if only the v1.0 layout exists. Take the **most recent 50** entries (newest `created_at` first).
 
 If empty → warn the user, e.g. "I don't have any few-shot examples for this database yet — answers may be lower quality. Say 'introspect the schema' or 'connect to my database' and I'll seed the examples library." (Natural language reads better than a slash command in chat — `/agami-connect` works too, but only suggest the slash form when the user specifically asks "what do I type?".)
 
 ### 1d.1 — load USER_MEMORY.md
 
-Read `~/.agami/USER_MEMORY.md` (if present). Strip HTML comments (`<!--...-->`), then keep the rest. If the file is missing, treat it as empty — never error. See [`shared/user-memory-format.md`](../../shared/user-memory-format.md) for what's in it.
+Read `<artifacts_dir>/USER_MEMORY.md` (if present). Strip HTML comments (`<!--...-->`), then keep the rest. If the file is missing, treat it as empty — never error. See [`shared/user-memory-format.md`](../../shared/user-memory-format.md) for what's in it.
 
 This file holds free-form **user preferences across every database** (default filters, display preferences). Inject it into the SQL-generation prompt in Phase 2b under a labeled `## User memory (preferences and policies)` section — the LLM uses it as steering context.
 
 ### 1d.2 — load ORGANIZATION.md
 
-Read `~/.agami/<profile>/ORGANIZATION.md` (if present). Strip HTML comments. If missing or empty, treat as empty — never error. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+Read `<artifacts_dir>/<profile>/ORGANIZATION.md` (if present). Strip HTML comments. If missing or empty, treat as empty — never error. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
 
 This file holds **domain context for this specific database** (terminology, key metrics, what the data represents). Inject into the SQL-generation prompt in Phase 2b under `## Organization context`, **before** the `## User memory` section — domain knowledge precedes display preferences in the LLM's reading order.
 
@@ -208,7 +222,7 @@ The prompt assembly branches on **two axes**: profile count and dataset count.
 
 Federation mode is described in **2b.federation** further below. The single-profile branches (small mode and large mode) are described first.
 
-Users can override the threshold by writing `always use full-schema mode` (or similar) in `~/.agami/USER_MEMORY.md`. Default to large mode for `> 50` datasets.
+Users can override the threshold by writing `always use full-schema mode` (or similar) in `<artifacts_dir>/USER_MEMORY.md`. Default to large mode for `> 50` datasets.
 
 #### Small mode (≤ 50 datasets)
 
@@ -239,9 +253,9 @@ Build the prompt in this order:
    ```
    The schema-qualified prefix on dataset names disambiguates same-named datasets across schemas. Within a single-schema setup, the prefix is still emitted but harmless.
 
-3. **Organization context** — content of `~/.agami/<profile>/ORGANIZATION.md` from Step 1d.2, under a heading `## Organization context`. Skip if empty after stripping comments. The LLM treats this as binding domain context — apply terminology, respect business-rule definitions.
+3. **Organization context** — content of `<artifacts_dir>/<profile>/ORGANIZATION.md` from Step 1d.2, under a heading `## Organization context`. Skip if empty after stripping comments. The LLM treats this as binding domain context — apply terminology, respect business-rule definitions.
 
-4. **User memory** — content of `~/.agami/USER_MEMORY.md` from Step 1d.1, under a heading `## User memory (preferences and policies)`. Skip if empty. Cross-database preferences (default filters, display rules).
+4. **User memory** — content of `<artifacts_dir>/USER_MEMORY.md` from Step 1d.1, under a heading `## User memory (preferences and policies)`. Skip if empty. Cross-database preferences (default filters, display rules).
 
 5. **Few-shot examples** — the up-to-50 `(question, sql)` pairs from the examples library.
 
@@ -434,7 +448,7 @@ Format every cell per its column's `agami.type` (and `agami.unit` if present). T
 
 **Hard rule for dates: never display ISO timestamps like `2026-05-07T15:14:00.000Z`, epoch seconds, or any other machine-format string.** Cell values OR chart-axis labels — both must be human-readable. If the column shows months only (typical for time-series charts grouped by month), use `MMM YYYY` (e.g. `May 2026`); for daily granularity use `MMM D` if all data is in the current year, else `MMM D, YYYY`. The skill is responsible for inferring the right grain from the data.
 
-If the user has stated a date-format preference in `~/.agami/USER_MEMORY.md` (e.g. "use ISO dates" or "use DD/MM/YYYY"), respect that. The defaults above apply only when USER_MEMORY is silent.
+If the user has stated a date-format preference in `<artifacts_dir>/USER_MEMORY.md` (e.g. "use ISO dates" or "use DD/MM/YYYY"), respect that. The defaults above apply only when USER_MEMORY is silent.
 
 If row count > 30:
 - The chat preview shows the first **30** rows only — markdown tables past ~30 rows scroll forever and bury the insight.
@@ -783,7 +797,7 @@ End with:
 
 | Symptom | Action |
 |---|---|
-| `~/.agami/<profile>/index.yaml` missing AND `~/.agami/<profile>.yaml` missing | Invoke `connect` |
+| `<artifacts_dir>/<profile>/index.yaml` missing AND `~/.agami/<profile>.yaml` missing | Invoke `connect` |
 | Model file fails to parse as YAML | Surface error; tell the user "say 'reload the schema' to re-introspect from your DB" (the agami-connect skill handles it) |
 | `version` ≠ `"0.1.1"` | Warn but proceed; suggest "say 'reload the schema'" to regenerate the model in the latest format |
 | Credentials chmod wrong | Refuse, offer `chmod 600` |

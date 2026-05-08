@@ -1,15 +1,15 @@
-# `~/.agami/USER_MEMORY.md` — User memory format
+# `<artifacts_dir>/USER_MEMORY.md` — User memory format
 
 Free-form Markdown file holding **cross-database user preferences and policies** that should apply no matter which profile the user connects to. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
 
 This is **separate** from the auto-memory file at `~/.claude/projects/<workspace>/memory/MEMORY.md` (Claude Code's auto-memory, which is host-managed and project-scoped). USER_MEMORY.md is **agami-managed**, lives alongside `credentials` and the per-profile directories, and persists across hosts (CLI, Cowork, Desktop) the same way credentials do.
 
-USER_MEMORY.md is also **separate from `~/.agami/<profile>/ORGANIZATION.md`**:
+USER_MEMORY.md is also **separate from `<artifacts_dir>/<profile>/ORGANIZATION.md`**:
 
 | File | Scope | Examples |
 |---|---|---|
-| `~/.agami/USER_MEMORY.md` | **Cross-database** preferences (one global file) | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
-| `~/.agami/<profile>/ORGANIZATION.md` | **Per-database** domain context (one per profile) | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
+| `<artifacts_dir>/USER_MEMORY.md` | **Cross-database** preferences (one global file) | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
+| `<artifacts_dir>/<profile>/ORGANIZATION.md` | **Per-database** domain context (one per profile) | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
 
 The skill loads both on every query. USER_MEMORY answers *how should I display / filter results, no matter which database*; ORGANIZATION.md answers *what does the data mean for this specific database*. They don't overlap.
 
@@ -24,9 +24,9 @@ If the preference is database-specific (e.g. "in this finance DB, always join or
 ## What does NOT go in here
 
 - **Connection details** → `~/.agami/credentials`
-- **Schema knowledge** (table descriptions, FK relationships, column types, choice fields, metrics) → `~/.agami/<profile>/<schema>.yaml` (OSI semantic model)
-- **Domain vocabulary specific to one database** ("MRR means…", "gold tier means…") → `~/.agami/<profile>/ORGANIZATION.md`
-- **Specific question→SQL examples** → `~/.agami/<profile>/examples.yaml` (few-shot library)
+- **Schema knowledge** (table descriptions, FK relationships, column types, choice fields, metrics) → `<artifacts_dir>/<profile>/<schema>.yaml` (OSI semantic model)
+- **Domain vocabulary specific to one database** ("MRR means…", "gold tier means…") → `<artifacts_dir>/<profile>/ORGANIZATION.md`
+- **Specific question→SQL examples** → `<artifacts_dir>/<profile>/examples.yaml` (few-shot library)
 - **Telemetry consent / install ID / connection-method choice** → `~/.agami/.config`
 - **Email opt-in state** → `~/.agami/.optins`
 
@@ -75,7 +75,7 @@ The HTML-comment hints (`<!-- -->`) document each section; the user replaces the
 
 On every invocation, the skill:
 
-1. Reads `~/.agami/USER_MEMORY.md` (entire file — it's intentionally small, target ≤ 4 KB).
+1. Reads `<artifacts_dir>/USER_MEMORY.md` (entire file — it's intentionally small, target ≤ 4 KB).
 2. Strips HTML comments (`<!-- ... -->`) from the loaded content. Comments are scaffolding for the user, not for the LLM.
 3. Includes the stripped text in the SQL-generation prompt as a labeled section: `## User memory (preferences and policies)\n<file content>`.
 
@@ -85,7 +85,7 @@ The LLM uses this as additional steering context: it should respect the policies
 
 Three paths:
 
-1. **User edits the file directly.** They open `~/.agami/USER_MEMORY.md` in their editor, write a bullet under a section, save. The next query picks it up.
+1. **User edits the file directly.** They open `<artifacts_dir>/USER_MEMORY.md` in their editor, write a bullet under a section, save. The next query picks it up.
 
 2. **The `agami-save-correction` skill classifier identifies a `user_preference`.** During Phase 3 of save-correction, if the user's feedback reads like a general policy ("from now on, always …"; "I prefer …"; "never include …"), the classifier routes it to USER_MEMORY.md instead of the semantic model or examples library. The skill picks the right section, appends a bullet, shows the diff, gets approval before writing.
 

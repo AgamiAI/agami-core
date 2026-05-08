@@ -9,7 +9,7 @@ argument-hint: "[reintrospect | profile NAME]"
 
 **Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** All four agami slash commands (`/agami-init`, `/agami-connect`, `/agami-query-database`, `/agami-save-correction`) work. Never write the un-prefixed forms (`/init`, `/connect`, etc.) or colon forms (`/agami:connect`) — those don't exist. For chat replies, prefer natural language ("say 'reload the schema'", "say 'introspect my database'") — the agami-connect skill's `when_to_use` matcher routes correctly without an explicit slash command.
 
-You are setting up the agami semantic model for the user's database. Goal: by the end, there is a **per-schema OSI v0.1.1 model** at `~/.agami/<profile>/` (`index.yaml` + one `<schema>.yaml` per database schema), a seeded examples library at `~/.agami/<profile>/examples.yaml`, an `ORGANIZATION.md` template the user can edit, and the user has seen one demo query execute end-to-end.
+You are setting up the agami semantic model for the user's database. Goal: by the end, there is a **per-schema OSI v0.1.1 model** at `<artifacts_dir>/<profile>/` (`index.yaml` + one `<schema>.yaml` per database schema), a seeded examples library at `<artifacts_dir>/<profile>/examples.yaml`, an `ORGANIZATION.md` template the user can edit, and the user has seen one demo query execute end-to-end.
 
 This skill orchestrates four phases:
 
@@ -32,6 +32,14 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
 - **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Mark exactly one option `(Recommended)` first.
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
+
+---
+
+## Phase −1: Plan-mode check
+
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-connect needs Bash (introspection queries) and Write (per-schema yaml files) — both are blocked in plan mode. If the user picks `Stay in plan mode`, refuse to proceed: "I can't introspect in plan mode — switch to Default or Auto-accept and re-invoke. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`."
+
+If plan mode is not active, skip this phase silently and go to Phase 0.
 
 ---
 
@@ -61,7 +69,8 @@ If you find yourself reaching for any command that doesn't fit the rules above, 
 
    Never substitute a value that's missing — surface a clear "your credentials file is missing field X for profile Y; please add it" message and stop.
 5. Look up the cached connection method and tool paths from `~/.agami/.config`. If absent, run tool detection per the agami-init skill's Phase 3.
-6. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch. **Hand-edits the user made (descriptions, ai_context, choice_fields, metrics) MUST be preserved** — re-introspection only updates what the DB unambiguously tells us (table list, columns, types, PK, FK).
+6. **Resolve `<artifacts_dir>`** per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All semantic-model files (`index.yaml`, `<schema>.yaml`, `examples.yaml`, `ORGANIZATION.md`) for this skill go inside `<artifacts_dir>/<profile>/`. The directory is created lazily — if it doesn't exist yet, `mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`.
+7. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch. **Hand-edits the user made (descriptions, ai_context, choice_fields, metrics) MUST be preserved** — re-introspection only updates what the DB unambiguously tells us (table list, columns, types, PK, FK).
 
 ---
 
@@ -95,16 +104,24 @@ Then proceed. **For reintrospect:** prepend "Re-introspecting (this takes about 
 
 ### Phase 1.1 — existing-model check + legacy-layout migration
 
-The current layout is `~/.agami/<profile>/` (a directory with `index.yaml` + per-schema yamls). v1.0 installs used a single file at `~/.agami/<profile>.yaml` — auto-migrate those.
+The current layout is `<artifacts_dir>/<profile>/` (a directory with `index.yaml` + per-schema yamls). Two earlier layouts exist and need migration:
+
+- **v1.0**: single file at `~/.agami/<profile>.yaml` plus a separate examples file `~/.agami/<profile>-examples.yaml`.
+- **v1.1**: per-schema directory at `<artifacts_dir>/<profile>/` (under the secrets dir, not yet split out to artifacts).
 
 ```bash
-profile_dir="$HOME/.agami/$profile"
-legacy_file="$HOME/.agami/$profile.yaml"
+artifacts_profile_dir="$artifacts_dir/$profile"
+v11_profile_dir="$HOME/.agami/$profile"
+v10_legacy_file="$HOME/.agami/$profile.yaml"
+v10_legacy_examples="$HOME/.agami/$profile-examples.yaml"
+v11_user_memory="$HOME/.agami/USER_MEMORY.md"
 
-if [ -d "$profile_dir" ] && [ -f "$profile_dir/index.yaml" ]; then
-  layout=existing-directory
-elif [ -f "$legacy_file" ]; then
-  layout=legacy-single-file
+if [ -d "$artifacts_profile_dir" ] && [ -f "$artifacts_profile_dir/index.yaml" ]; then
+  layout=existing-artifacts
+elif [ -d "$v11_profile_dir" ] && [ -f "$v11_profile_dir/index.yaml" ]; then
+  layout=v1.1-under-agami-home
+elif [ -f "$v10_legacy_file" ]; then
+  layout=v1.0-single-file
 else
   layout=fresh
 fi
@@ -112,20 +129,31 @@ fi
 
 **Branch on `layout`:**
 
-- **`existing-directory`** and `$ARGUMENTS` is not `reintrospect`:
-  - "I already have a model for `<profile>` at `~/.agami/<profile>/`. What would you like to do?"
+- **`existing-artifacts`** and `$ARGUMENTS` is not `reintrospect`:
+  - "I already have a model for `<profile>` at `<artifacts_dir>/<profile>/`. What would you like to do?"
   - AskUserQuestion: `Re-introspect from DB` / `Verify and continue (Recommended)` / `Skip to seeding examples`.
 
-- **`legacy-single-file`**:
-  - Tell the user: "Upgrading your model to the new per-schema layout (it's faster for large databases and lets you give per-schema descriptions). Backing up your old model and re-introspecting now (~30–90s)."
-  - `mkdir -p "$profile_dir" && chmod 700 "$profile_dir"`
-  - `mv "$legacy_file" "$profile_dir/_legacy.yaml.bak"`
-  - Also migrate `~/.agami/<profile>-examples.yaml` if present: `mv "$HOME/.agami/<profile>-examples.yaml" "$profile_dir/examples.yaml"` (no rewrite needed; format is unchanged).
+- **`v1.1-under-agami-home`**: existing v1.1 install — move the per-schema dir to artifacts and continue.
+  - Tell the user: "Moving your semantic model from `<artifacts_dir>/<profile>/` to `<artifacts_dir>/<profile>/` (sharable location — `git init` there if you want to share with your team)."
+  - `mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`
+  - `mv "$v11_profile_dir" "$artifacts_profile_dir"`
+  - Then `chmod 644` on each `*.yaml` and `*.md` inside (they were 600 under the secrets dir; loosen for sharing).
+  - **Also migrate `<artifacts_dir>/USER_MEMORY.md`** if it exists and `<artifacts_dir>/USER_MEMORY.md` doesn't: `mv "$v11_user_memory" "$artifacts_dir/USER_MEMORY.md" && chmod 644 "$artifacts_dir/USER_MEMORY.md"`.
+  - No reintrospection needed — the model is already current. Treat the rest of this skill as `existing-artifacts` after the move (ask the user verify-or-reintrospect).
+
+- **`v1.0-single-file`**: ancient single-file install.
+  - Tell the user: "Upgrading your model to the new per-schema layout (it's faster for large databases, supports cross-schema relationships, and lives in a sharable location). Backing up your old model and re-introspecting now (~30–90s)."
+  - `mkdir -p "$artifacts_profile_dir" && chmod 755 "$artifacts_profile_dir"`
+  - `mv "$v10_legacy_file" "$artifacts_profile_dir/_legacy.yaml.bak"`
+  - Also migrate `$v10_legacy_examples` if present: `mv "$v10_legacy_examples" "$artifacts_profile_dir/examples.yaml"` (format is unchanged).
+  - Also migrate `$v11_user_memory` if present (per the v1.1 path above).
   - Force `$ARGUMENTS=reintrospect` for the rest of this skill so we re-introspect from the DB.
 
 - **`fresh`**:
-  - `mkdir -p "$profile_dir" && chmod 700 "$profile_dir"`
+  - `mkdir -p "$artifacts_profile_dir" && chmod 755 "$artifacts_profile_dir"`
   - Continue to introspection.
+
+In every migration case, surface a one-liner pointing at the new location: "Your semantic model lives at `<artifacts_dir>/<profile>/` now. Credentials and per-user state stay in `~/.agami/`. See [`shared/file-layout.md`](../../shared/file-layout.md) for the split."
 
 Otherwise, continue to schema selection.
 
@@ -160,7 +188,7 @@ Run introspection. For every step, use the SQL from [`shared/introspect-queries.
 
 After the schema picker (1.3) but before the heavy per-table work, prompt the user once for domain context. Domain context boosts NL→SQL accuracy a lot — a 30-second ask that often pays for itself.
 
-If `~/.agami/<profile>/ORGANIZATION.md` exists AND has been edited beyond the default template (any line longer than the template's parenthetical guidance), skip this phase.
+If `<artifacts_dir>/<profile>/ORGANIZATION.md` exists AND has been edited beyond the default template (any line longer than the template's parenthetical guidance), skip this phase.
 
 Otherwise, **AskUserQuestion**:
 
@@ -169,7 +197,7 @@ Otherwise, **AskUserQuestion**:
 > Examples of useful context: what the company / product is, what "MRR" or "active user" means in your terms, what kinds of users / customers you have.
 
 Options:
-- `Yes — I'll type it now (Other field)` — capture the user's free-form paragraph and write it to `~/.agami/<profile>/ORGANIZATION.md` under a `# About this database` heading. Add the rest of the default template (terminology / who's in this data / what we don't track) as commented prompts the user can fill in later.
+- `Yes — I'll type it now (Other field)` — capture the user's free-form paragraph and write it to `<artifacts_dir>/<profile>/ORGANIZATION.md` under a `# About this database` heading. Add the rest of the default template (terminology / who's in this data / what we don't track) as commented prompts the user can fill in later.
 - `Skip — I'll edit ORGANIZATION.md later (Recommended)` — write only the default template (untouched) so the user knows where the file lives.
 
 In both cases, write to `chmod 600`. Format and content rules: see [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
@@ -313,7 +341,7 @@ The sample is **never written to disk and never sent in telemetry.** It lives in
 Process schemas one at a time. For each schema, build a prompt with:
 
 - The user-provided data-model document from Phase 1.5 (`$DATA_MODEL_DOC_TEXT`, or multimodal image block if it's a diagram), if present — placed **first** so it acts as the dominant domain prior. Header: `## User-provided data-model document`.
-- The user's `~/.agami/<profile>/ORGANIZATION.md` (if non-empty) — domain context for the database. Header: `## Organization context`.
+- The user's `<artifacts_dir>/<profile>/ORGANIZATION.md` (if non-empty) — domain context for the database. Header: `## Organization context`.
 - The schema's tables, columns (with types), FKs, choice-field hints
 - The 5 sample rows per table
 
@@ -346,7 +374,7 @@ If a schema fails validation, the staging file stays at `/tmp/agami-staging-<pro
 - Don't invent column meanings for opaque names (`v_1`, `tmp_col`, `x`). Leave empty.
 - Don't invent business semantics not supported by sample rows (e.g., don't claim a `status` column is "active vs cancelled" if the samples only show `pending`).
 - Don't translate column names ("`amt`" → "amount") — keep descriptions about what the column *means*, not what it's *named*.
-- The user can hand-edit any `~/.agami/<profile>/<schema>.yaml` and the changes will survive future re-introspections (Phase 2 hard rule #8 — preserve descriptions, ai_context, choice_fields, metrics).
+- The user can hand-edit any `<artifacts_dir>/<profile>/<schema>.yaml` and the changes will survive future re-introspections (Phase 2 hard rule #8 — preserve descriptions, ai_context, choice_fields, metrics).
 
 ### 1e — detect units (`agami.unit`) + currency ask
 
@@ -424,7 +452,7 @@ If the user picks "None", write nothing. They can add metrics later via agami-sa
 
 ## Phase 2: Build the per-schema OSI model
 
-Output is a directory: `~/.agami/<profile>/` containing `index.yaml` plus one `<schema>.yaml` per database schema. Each `<schema>.yaml` is a **standalone OSI v0.1.1 document** for that schema's datasets.
+Output is a directory: `<artifacts_dir>/<profile>/` containing `index.yaml` plus one `<schema>.yaml` per database schema. Each `<schema>.yaml` is a **standalone OSI v0.1.1 document** for that schema's datasets.
 
 ### Per-schema yaml shape
 
@@ -517,7 +545,7 @@ Within-schema relationships go in the schema's yaml. Cross-schema relationships 
 5. **`source` must be three-part dotted notation.** `database.schema.table` — never bare table name. For sqlite use `file_basename.main.<table>`.
 6. **Don't invent `custom_extensions` keys.** Only emit the keys documented in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md). Adding a new key requires updating that doc + the validator's allowlist + a test.
 7. **Dataset name uniqueness across schemas.** The validator's `--directory` mode does NOT allow the same dataset name to appear in two different schema yamls. If you find a collision (rare — typically the same table name in `public` and `archive`), pick the most-current and skip the other; record the skip in the schema's `description` so the user can hand-edit if they want both.
-8. **Reintrospect preserves hand-edits.** When `$ARGUMENTS == reintrospect` and an existing `~/.agami/<profile>/<schema>.yaml` exists:
+8. **Reintrospect preserves hand-edits.** When `$ARGUMENTS == reintrospect` and an existing `<artifacts_dir>/<profile>/<schema>.yaml` exists:
    - Read the existing schema yaml first.
    - For each existing field: keep its `description`, `ai_context`, and any `agami.choice_field` / `agami.unit` extensions. Refresh only `agami.type` / `agami.original_type` from the DB.
    - For each existing dataset: keep its `description`, `ai_context`. Refresh `agami.performance_hints` from the DB.
@@ -529,11 +557,11 @@ Within-schema relationships go in the schema's yaml. Cross-schema relationships 
 
 ## Phase 3: Validate, then write
 
-This phase is the keystone. **No file is ever written to `~/.agami/<profile>/` without the directory-mode validator passing.**
+This phase is the keystone. **No file is ever written to `<artifacts_dir>/<profile>/` without the directory-mode validator passing.**
 
 ### 3a — stage the directory
 
-Stage the new layout at `/tmp/agami-staging-<profile>/` (a fresh directory), then run the validator. Never touch `~/.agami/<profile>/` until validation passes.
+Stage the new layout at `/tmp/agami-staging-<profile>/` (a fresh directory), then run the validator. Never touch `<artifacts_dir>/<profile>/` until validation passes.
 
 ```bash
 staging="/tmp/agami-staging-$profile"
@@ -558,7 +586,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$st
   chmod 600 "$HOME/.agami/$profile/"*.yaml "$HOME/.agami/$profile/ORGANIZATION.md" 2>/dev/null
   rm -rf "$HOME/.agami/$profile.tmp_old"
   ```
-  Surface: `✓ Validator passed. Wrote ~/.agami/<profile>/ (<K> schemas, <N> datasets total, <M> fields, <R> relationships).`
+  Surface: `✓ Validator passed. Wrote <artifacts_dir>/<profile>/ (<K> schemas, <N> datasets total, <M> fields, <R> relationships).`
 
 - **Exit 1** (FAILED): surface the validator's error list verbatim. **Do NOT promote the staging directory.** Tell the user "I built a model but it failed OSI validation. Here's what's wrong: …" and offer to attempt a fix or stop. Re-validate after every edit until clean. The staging dir remains at `/tmp/agami-staging-<profile>/` for inspection.
 
@@ -566,7 +594,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$st
 
 ### 3c — never bypass
 
-If the validator can't be run for any reason (missing Python, missing dependencies, missing schema file), **DO NOT PROMOTE THE STAGING DIRECTORY**. Tell the user the validator is unavailable and offer to install the dependencies. The files in `~/.agami/<profile>/` are the source of truth for every future query — a broken model breaks every query that follows.
+If the validator can't be run for any reason (missing Python, missing dependencies, missing schema file), **DO NOT PROMOTE THE STAGING DIRECTORY**. Tell the user the validator is unavailable and offer to install the dependencies. The files in `<artifacts_dir>/<profile>/` are the source of truth for every future query — a broken model breaks every query that follows.
 
 ---
 
@@ -596,7 +624,7 @@ Skip patterns that don't fit the user's schema (e.g., no time field → no "last
 
 ### 4a — generate
 
-First, **load `~/.agami/USER_MEMORY.md`** (strip HTML comments) and **`~/.agami/<profile>/ORGANIZATION.md`** (same — strip HTML comments). USER_MEMORY holds cross-database preferences; ORGANIZATION.md holds domain context for *this* database. Both improve seed-example quality.
+First, **load `<artifacts_dir>/USER_MEMORY.md`** (strip HTML comments) and **`<artifacts_dir>/<profile>/ORGANIZATION.md`** (same — strip HTML comments). USER_MEMORY holds cross-database preferences; ORGANIZATION.md holds domain context for *this* database. Both improve seed-example quality.
 
 For each example:
 - Build `(question, sql)` using the model from Phase 3.
@@ -612,12 +640,12 @@ Before adding to the YAML, run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` fo
 2. Make ONE auto-fix attempt (typically a column-name typo or missing alias).
 3. If still failing, move that example to `~/.agami/.rejected/` (with the error) and continue. Don't block.
 
-### 4c — write `~/.agami/<profile>/examples.yaml`
+### 4c — write `<artifacts_dir>/<profile>/examples.yaml`
 
 This file is **NOT OSI** — it's an agami-bespoke few-shot library. Format:
 
 ```yaml
-# ~/.agami/<profile>/examples.yaml
+# <artifacts_dir>/<profile>/examples.yaml
 # NL → SQL few-shot examples loaded by the agami-query-database skill.
 # Corrections appended by /agami-save-correction.
 
@@ -639,7 +667,7 @@ examples:
 
 `source` is `seed` here, `correction` for entries added by `/agami-save-correction`. The query-database skill loads at most 50 most-recent.
 
-Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Saved to ~/.agami/<profile>/examples.yaml.`
+Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Saved to <artifacts_dir>/<profile>/examples.yaml.`
 
 ---
 
@@ -657,7 +685,7 @@ Tell the user what you picked and why. Show the generated SQL. Execute via the c
 Then **AskUserQuestion**:
 
 > Does this result look right?
-> - **Yes (Recommended)** — confirms the example, marks it `confirmed: true` in `~/.agami/<profile>/examples.yaml`
+> - **Yes (Recommended)** — confirms the example, marks it `confirmed: true` in `<artifacts_dir>/<profile>/examples.yaml`
 > - **No** — opens the correction flow: ask the user what's wrong, take their corrected SQL, route through the agami-save-correction skill (don't say "/agami-save-correction" to the user — phrase it as "let me know what's wrong and I'll save it as a correction")
 > - **Skip** — moves on, doesn't change the example
 
@@ -777,8 +805,8 @@ Pick suggestions that show off the schema's distinctive shape. If the model has 
 Format exactly:
 
 ```
-✓ ~/.agami/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
-✓ ~/.agami/<profile>/examples.yaml — <N> NL→SQL examples
+✓ <artifacts_dir>/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
+✓ <artifacts_dir>/<profile>/examples.yaml — <N> NL→SQL examples
 ✓ Demo query verified
 ✓ Telemetry: <enabled | disabled — your call>
 
@@ -804,7 +832,7 @@ Then end the turn. The user picking a number routes the chosen question into `qu
 | Credentials chmod wrong | Refuse, offer to `chmod 600` |
 | Cached connection tool no longer works | Re-detect, update `~/.agami/.config` |
 | Introspection SQL fails | Route through `db_error_classifier.md`, surface the one-line remediation |
-| **Validator fails** | **Refuse to promote `/tmp/agami-staging-<profile>/` to `~/.agami/<profile>/`. Show errors verbatim. Loop on edits + re-validate.** |
+| **Validator fails** | **Refuse to promote `/tmp/agami-staging-<profile>/` to `<artifacts_dir>/<profile>/`. Show errors verbatim. Loop on edits + re-validate.** |
 | EXPLAIN fails for a seed example | Auto-fix once → if still bad, move to `~/.agami/.rejected/`. Don't block the connect flow. |
 | Reintrospect would lose hand-edits | Phase 2 hard rule #8 — preserve descriptions, ai_context, choice_fields, metrics. |
-| Legacy single-file install detected | Auto-migrate: backup to `~/.agami/<profile>/_legacy.yaml.bak`, re-introspect into the new directory layout. |
+| Legacy single-file install detected | Auto-migrate: backup to `<artifacts_dir>/<profile>/_legacy.yaml.bak`, re-introspect into the new directory layout. |

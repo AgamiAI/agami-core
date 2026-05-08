@@ -13,8 +13,8 @@ You are recording a user correction. Goal: persist the fix so similar questions 
 
 This skill does two things, in this order:
 
-1. **Always**: append the `(question, corrected_sql)` pair to `~/.agami/<profile>-examples.yaml` (few-shot library).
-2. **When applicable**: surgically update `~/.agami/<profile>.yaml` (the OSI semantic model) with the knowledge implied by the correction. The model edit is **always** OSI-conformant and **always** validated before write. If the user's correction would break OSI, refuse the model update (the example still gets saved).
+1. **Always**: append the `(question, corrected_sql)` pair to `<artifacts_dir>/<profile>/examples.yaml` (few-shot library).
+2. **When applicable**: surgically update one of the OSI semantic model files at `<artifacts_dir>/<profile>/` (e.g. `<schema>.yaml` for a relationship/field/metric edit, or `index.yaml` for a cross-schema relationship) with the knowledge implied by the correction. The model edit is **always** OSI-conformant and **always** validated before write. If the user's correction would break OSI, refuse the model update (the example still gets saved).
 
 For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
 For Agami's `custom_extensions`: [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
@@ -24,11 +24,23 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 ---
 
+## Phase −1: Plan-mode check
+
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-save-correction needs Write (examples + model edits) and Bash (EXPLAIN-validation) — both are blocked in plan mode. If the user picks `Stay in plan mode`, refuse to proceed: "I can't save corrections in plan mode — switch to Default or Auto-accept and re-invoke. The correction won't persist otherwise."
+
+If plan mode is not active, skip this phase silently and go to Phase 1.
+
+---
+
 ## Phase 1: Identify the correction
 
-### 1a — resolve the active profile
+### 1a — resolve the active profile and artifacts_dir
 
-Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback). All `~/.agami/<profile>.yaml` and `~/.agami/<profile>-examples.yaml` paths in this skill use the resolved name.
+Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback).
+
+Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / OSI / ORGANIZATION.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
+
+For v1.0 / v1.1 fallback paths (`~/.agami/<profile>.yaml`, `~/.agami/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
 
 ### 1b — find the most recent query
 
@@ -58,7 +70,7 @@ Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
 
 ## Phase 2: Always append to the examples library
 
-Read `~/.agami/<profile>/examples.yaml` via Read (fall back to `~/.agami/<profile>-examples.yaml` for v1.0 layouts). Append a new entry to `examples:` via Edit:
+Read `<artifacts_dir>/<profile>/examples.yaml` via Read (fall back to `~/.agami/<profile>-examples.yaml` for v1.0 layouts). Append a new entry to `examples:` via Edit:
 
 ```yaml
 - question: <the original NL question from query_log.jsonl>
@@ -74,7 +86,7 @@ If a previous example has the same `question`: replace its `sql` and bump `creat
 
 This phase is **non-conditional** — every correction always lands in the examples library, even if Phase 4 (model update) declines or fails.
 
-Surface: `✓ Correction appended to ~/.agami/<profile>/examples.yaml.`
+Surface: `✓ Correction appended to <artifacts_dir>/<profile>/examples.yaml.`
 
 ---
 
@@ -130,8 +142,8 @@ For OSI-model edits, the per-schema layout means the edit lands in **one specifi
 
 1. Find the affected dataset in the merged in-memory view (built by `query-database` Phase 1c).
 2. Look up the dataset's `source: <db>.<schema>.<table>` — the middle component is the schema.
-3. The edit lands in `~/.agami/<profile>/<schema>.yaml`.
-4. **Cross-schema relationship edits** (`from` and `to` are in different schemas) land in `~/.agami/<profile>/index.yaml` under `cross_schema_relationships[]`.
+3. The edit lands in `<artifacts_dir>/<profile>/<schema>.yaml`.
+4. **Cross-schema relationship edits** (`from` and `to` are in different schemas) land in `<artifacts_dir>/<profile>/index.yaml` under `cross_schema_relationships[]`.
 
 For v1.0 single-file installs, the edit still lands in `~/.agami/<profile>.yaml` — the routing logic above degrades gracefully.
 
@@ -146,7 +158,7 @@ If the user's corrected SQL implies a JOIN that:
 
 If the user dropped a JOIN that was previously there, do **not** delete the relationship from the model — corrections delete only when the user explicitly says "remove the relationship".
 
-For **cross-schema relationships** (the JOIN spans datasets in different schemas), edit `~/.agami/<profile>/index.yaml.cross_schema_relationships[]` instead of any individual schema yaml. Endpoints must be qualified `<schema>.<dataset>` per [`shared/schema-reference.md`](../../shared/schema-reference.md).
+For **cross-schema relationships** (the JOIN spans datasets in different schemas), edit `<artifacts_dir>/<profile>/index.yaml.cross_schema_relationships[]` instead of any individual schema yaml. Endpoints must be qualified `<schema>.<dataset>` per [`shared/schema-reference.md`](../../shared/schema-reference.md).
 
 #### `table_metadata` edit
 
@@ -186,9 +198,9 @@ Add a new entry to top-level `metrics[]`:
 
 #### `user_preference` edit
 
-A `user_preference` correction does NOT touch the OSI semantic model. It lands in `~/.agami/USER_MEMORY.md` (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)) — the **global** preferences file that applies across every database. Steps:
+A `user_preference` correction does NOT touch the OSI semantic model. It lands in `<artifacts_dir>/USER_MEMORY.md` (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)) — the **global** preferences file that applies across every database. Steps:
 
-1. **Read** `~/.agami/USER_MEMORY.md` (it exists — `init` seeds it).
+1. **Read** `<artifacts_dir>/USER_MEMORY.md` (it exists — `init` seeds it).
 2. **Pick the right section** (`Default filters`, `Naming and synonyms`, `Display preferences`, or `Avoid`) based on the policy's nature. Add a new section if none of the four fits — keep this rare.
 3. **Append the new bullet** under that section, in plain English (the user's wording, lightly cleaned). Don't paraphrase aggressively — preserve their voice.
 4. **Show the user the diff** (per Phase 4b below) before writing.
@@ -198,11 +210,11 @@ The user's bullet should be self-contained — anyone reading USER_MEMORY.md sho
 
 #### `org_context` edit
 
-An `org_context` correction lands in `~/.agami/<profile>/ORGANIZATION.md` — the **per-database** domain context file (per [`shared/organization-context-format.md`](../../shared/organization-context-format.md)). It does NOT touch the OSI semantic model.
+An `org_context` correction lands in `<artifacts_dir>/<profile>/ORGANIZATION.md` — the **per-database** domain context file (per [`shared/organization-context-format.md`](../../shared/organization-context-format.md)). It does NOT touch the OSI semantic model.
 
 Steps:
 
-1. **Read** `~/.agami/<profile>/ORGANIZATION.md` (create with the default template if missing — `init`/`connect` normally seed it, but this is a safe fallback).
+1. **Read** `<artifacts_dir>/<profile>/ORGANIZATION.md` (create with the default template if missing — `init`/`connect` normally seed it, but this is a safe fallback).
 2. **Pick the right section.** Most domain-context entries land under `## Key terminology` as `- "<term>" = <definition>` bullets. If the user is describing what the data represents at a higher level, append a paragraph under `# About this database` instead. If they're describing *what's not in this database*, append under `## What we DON'T track here`. Add a new section only if none of the existing ones fit.
 3. **Append the new bullet (or paragraph)** in plain English, preserving the user's wording.
 4. **Show the user the diff** (Phase 4b) before writing.
@@ -226,7 +238,7 @@ Apply each individual edit as above. Show the user the combined diff in 4b befor
 
 Build a unified diff (or a compact "before / after" summary) of the proposed change against the existing target file. Name the file in the prompt so the user knows what they're approving. Show via AskUserQuestion:
 
-> I want to update `~/.agami/<profile>/public.yaml`:
+> I want to update `<artifacts_dir>/<profile>/public.yaml`:
 >
 > ```
 > [Relationship] orders_to_customers
@@ -245,7 +257,7 @@ Always include the validator step in 4c regardless of which option they pick (si
 
 ### 4c — validate the proposed model BEFORE writing
 
-This phase is binding for any edit that touches `~/.agami/<profile>/<schema>.yaml` or `~/.agami/<profile>/index.yaml`. Stage the **whole target directory** at `/tmp/agami-staging-<profile>/` (copy the existing files, then overwrite the one you're editing), then run the directory-mode validator:
+This phase is binding for any edit that touches `<artifacts_dir>/<profile>/<schema>.yaml` or `<artifacts_dir>/<profile>/index.yaml`. Stage the **whole target directory** at `/tmp/agami-staging-<profile>/` (copy the existing files, then overwrite the one you're editing), then run the directory-mode validator:
 
 ```bash
 staging="/tmp/agami-staging-$profile"
@@ -269,15 +281,15 @@ Three outcomes:
 - **Exit 1** (FAILED) → **DO NOT PROMOTE.** Surface the validator's errors verbatim. Tell the user: "Your correction would break the OSI model — here's what's wrong: …. The example is saved either way; the model wasn't updated." Offer to retry with a fix.
 - **Exit 2** (TOOLING ERROR) → tell the user the validator is unavailable; ask them to install `pyyaml` and `jsonschema`. Don't write the model.
 
-There is no override path. If validation fails, the user's `~/.agami/<profile>/` is unchanged. The example library still got the correction (Phase 2 already happened).
+There is no override path. If validation fails, the user's `<artifacts_dir>/<profile>/` is unchanged. The example library still got the correction (Phase 2 already happened).
 
 For `org_context` / `user_preference` corrections (which only touch ORGANIZATION.md / USER_MEMORY.md): no validator step. Write the file directly with `chmod 600`.
 
 ### 4d — confirmation
 
 ```
-✓ Correction appended to ~/.agami/<profile>/examples.yaml
-✓ Model updated in ~/.agami/<profile>/public.yaml:
+✓ Correction appended to <artifacts_dir>/<profile>/examples.yaml
+✓ Model updated in <artifacts_dir>/<profile>/public.yaml:
     - relationship orders_to_customers from_columns: [user_id] → [customer_id]
 ✓ Validator passed.
 
@@ -307,7 +319,7 @@ The next `query-database` invocation flushes the queue.
 - **User pastes SQL referencing tables not in the OSI model** — EXPLAIN-validate catches it (`table_not_found`); surface the remediation, don't save.
 - **User saves a duplicate of an existing seed** — replace the seed (`source: correction`, fresh `created_at`).
 - **Most-recent query is itself a correction** — that's fine, attach to it.
-- **Validator fails on a model edit but the user really wants it saved** — they can hand-edit `~/.agami/<profile>/<schema>.yaml` directly and the next `query-database` will (try to) read it. The validator runs again from `connect verify` if they want to confirm. There is no "skip validation" path from this skill.
+- **Validator fails on a model edit but the user really wants it saved** — they can hand-edit `<artifacts_dir>/<profile>/<schema>.yaml` directly and the next `query-database` will (try to) read it. The validator runs again from `connect verify` if they want to confirm. There is no "skip validation" path from this skill.
 - **User says "actually undo my last correction"** — they hand-edit the YAML / Markdown files; this skill doesn't track an undo log in v1.
 - **Edit affects datasets in two different schemas** — split into two separate edits, one per target file. The validator runs once per write (or once for the merged directory).
 
@@ -316,6 +328,6 @@ The next `query-database` invocation flushes the queue.
 ## Hard rules
 
 1. **Phase 2 (examples append) always runs.** Even if the user later changes their mind on the model edit, the example is already saved.
-2. **Phase 4 model writes are gated by the validator.** Exit-0 from `validate_semantic_model.py --directory` (or single-file mode for legacy installs) is the only way to write inside `~/.agami/<profile>/`. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
+2. **Phase 4 model writes are gated by the validator.** Exit-0 from `validate_semantic_model.py --directory` (or single-file mode for legacy installs) is the only way to write inside `<artifacts_dir>/<profile>/`. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
 3. **Edits stay OSI-conformant.** Don't invent fields. Don't add `custom_extensions` keys not listed in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md). When you can't express a correction within the OSI shape + documented Agami extensions, fall back to `sql_fix` (example only) and tell the user "I can save this as a few-shot example but it doesn't fit a model edit; want me to extend the spec?"
 4. **Show the diff before mutating the model.** The user always gets to see and approve the proposed change.
