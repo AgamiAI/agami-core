@@ -368,28 +368,30 @@ If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/
 
 ---
 
+## Uninstalling
+
+Removing the plugin via the Claude Code marketplace UI marks it disabled, but the on-disk cache (and your data + settings) survive in case you reinstall later. To fully clean up:
+
+```bash
+# 1. Optional: archive your tuned semantic model first (in case you come back)
+tar czf ~/agami-backup-$(date +%Y%m%d).tar.gz ~/agami-artifacts ~/.agami
+
+# 2. Remove the plugin's on-disk cache (Claude Code doesn't auto-purge this)
+rm -rf ~/.claude/plugins/cache/litebi
+rm -rf ~/.claude/plugins/cache/agami-skills   # only if you also installed our pre-LiteBi marketplace
+
+# 3. Remove your data (only if you're sure you don't want it back)
+rm -rf ~/agami-artifacts                      # semantic model, examples, ORGANIZATION.md, USER_MEMORY.md
+rm -rf ~/.agami                               # credentials, query log, charts, exports
+
+# 4. Restart Claude Code (full quit, not just close window)
+```
+
+If the slash commands `/agami-init`, `/agami-connect`, etc. still appear after step 4, you have another LiteBi version cached at a different path. `find ~/.claude -type d -name "litebi*"` will show every copy.
+
 ## Contributing
 
-Issues + PRs welcome at [github.com/AgamiAI/LiteBi](https://github.com/AgamiAI/LiteBi).
-
-To run the integration tests locally:
-
-```bash
-cd tests/integration
-docker compose up -d              # spins up Postgres + MySQL fixtures
-./test_postgres_e2e_cli.sh        # native CLI (psql)
-./test_mysql_e2e_cli.sh
-./test_postgres_e2e_duckdb.sh     # DuckDB (skipped if duckdb not on PATH)
-docker compose down -v
-```
-
-Privacy invariant tests (no DB required):
-
-```bash
-pytest tests/test_telemetry_privacy.py -v
-```
-
-When adding a feature that touches telemetry, the privacy test must still pass — the allowlist is the contract.
+Issues + PRs welcome at [github.com/AgamiAI/LiteBi](https://github.com/AgamiAI/LiteBi). See [CONTRIBUTING.md](CONTRIBUTING.md) for the test commands and the **version-bump discipline** — every user-visible change needs a version bump in `.claude-plugin/marketplace.json` (twice) and `plugins/agami/.claude-plugin/plugin.json`, otherwise existing installs stay on the cached old version forever.
 
 A community Discord will land soon — once it's live the link will appear here and in [`agami-init/SKILL.md`](plugins/agami/skills/agami-init/SKILL.md).
 
