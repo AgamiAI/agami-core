@@ -41,7 +41,7 @@ Plan mode CAN proceed for read-only flows. Each SKILL declares what's possible:
 
 ### `agami-init`
 
-Stay-in-plan-mode → **emit a written plan only** (no file writes, no Bash). Tell the user: "I'll describe what I would do. Re-invoke me out of plan mode when you're ready to actually run it." This is the one skill where plan mode produces useful output.
+Stay-in-plan-mode → **refuse to proceed**, like the other skills. Earlier versions of this doc had agami-init emit a written plan as a fallback; that turned out to be noise — users in plan mode are almost always there by accident, and what they actually want is to switch and proceed, not read a description of what would have happened. Surface: "I can't run setup in plan mode. Press Shift+Tab to switch to Default or Auto-accept, then send any message to continue."
 
 ### `agami-connect`
 

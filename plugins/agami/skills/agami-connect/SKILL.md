@@ -86,21 +86,25 @@ Introspecting can take a while, especially against cloud DBs. Tell the user **be
 | `postgres` (local) | 5–15 seconds | Local network, fast `information_schema` queries. |
 | `postgres` (cloud — Supabase / Neon / RDS) | 15–60 seconds | Network round-trip per query, plus FK validation join checks. |
 | `mysql` | 10–30 seconds | Similar to postgres. |
-| `redshift` | 30–120 seconds | Cloud + Redshift's metadata can be slow to return. |
-| **`snowflake`** | **2–10 minutes** | Cold warehouse spin-up (often the dominant cost), per-table SHOW commands, EXPLAIN-validation against the live warehouse, plus the FK-validation join checks. Accounts with many schemas or large warehouses can push past 10 minutes — narrate per-table progress so the user can see it's working, not stuck. |
+| `redshift` | 1–5 minutes | Cloud + Redshift's metadata can be slow to return; FK validation joins amplify the cost. |
+| **`snowflake`** | **5–15 minutes (longer with many tables / large data)** | Cold warehouse spin-up (often the dominant cost), per-table SHOW commands, EXPLAIN-validation against the live warehouse, FK-validation join checks, choice-field cardinality scans, and per-table sample-row queries for description generation. Real-world tested against a 100-table credit-bureau Snowflake account: ~12 minutes. Accounts with hundreds of tables or huge warehouses can push past 30 minutes. **Always set the user's expectation honestly** — narrate per-table progress so they can see it's working, not stuck. |
 
-Surface a one-liner with **per-step duration estimates** so the user can tell the skill apart from a hang at any moment, not just the first:
+Surface a one-liner with **per-step duration estimates** so the user can tell the skill apart from a hang at any moment, not just the first. **Don't lowball — err on the high side.** A user told "5 min" who waits 4 minutes thinks "almost there"; one told "1 min" who waits 4 minutes thinks "stuck or broken." Honest estimates buy patience.
 
 > Setting up your `<profile>` connection — for `<db_type>` this typically runs:
 > - Listing schemas (~5s)
-> - Discovering tables (~<10–30>s depending on schema size)
-> - Generating descriptions (~30–60s for ~50 tables)
+> - Discovering tables (~<10–60>s depending on schema size)
+> - Generating descriptions (~30–60s per ~50 tables — scales linearly)
+> - Choice-field detection (~5–10s per ~50 tables)
+> - FK validation joins (~<5–60>s depending on table sizes)
 > - Seeding examples (~20s)
 > - Demo query (~5s)
 >
-> Total: **<low>–<high> seconds**. I'll narrate as I go.
+> **Total: <high-end estimate>.** I'll narrate progress so you can see it's working.
 
-Then proceed. **For reintrospect:** prepend "Re-introspecting (this takes about as long as initial setup)." so the user knows the estimate still applies.
+For Snowflake specifically, write the total as a range like "5–15 minutes (longer if your warehouse needs to spin up cold)" — never lowball it as "60–180 seconds" the way earlier versions of this skill did. Real users on real warehouses regularly take 10+ minutes, and the under-promise-over-deliver framing keeps them patient.
+
+**For reintrospect:** prepend "Re-introspecting (this takes about as long as initial setup)." so the user knows the estimate still applies.
 
 ### Phase 1.1 — existing-model check + legacy-layout migration
 
@@ -346,6 +350,48 @@ Display labels default to the stored value (`label = value`). Don't invent prett
 ```
 
 If a candidate column has > 20 distinct values, skip silently. Don't narrate misses.
+
+### 1c.7 — propose `agami.performance_hints.recommended_filters` (the targeted-warning unlock)
+
+Phase 2d in agami-query-database treats any query against an `estimated_row_count > 1_000_000` table as **HIGH risk** unless the WHERE clause matches a column listed in `recommended_filters`. Without that field populated, every query against every big table blocks with a "this is heavy, want to add a filter?" prompt — even queries that already have a perfectly good filter. That's blunt.
+
+For each table with `estimated_row_count > 1_000_000`, propose a list of recommended filter columns. Heuristic candidates, in priority order:
+
+1. **Primary key columns.** Equality on PK is always cheap.
+2. **Indexed columns.** Already captured in Phase 1b's `agami.performance_hints.indexes` — every leading column of every index is a recommended filter (single-col equality OR range on a covered prefix). For composite indexes `(a, b, c)`, only `a` is index-eligible without `a` first.
+3. **Time / date dimensions.** Any column with `agami.type` in `{date, timestamp}` AND a name suggesting recency (`created_at`, `updated_at`, `_at` suffix, `_date` suffix, `event_time`, `as_of`) — date-range filters are universally useful.
+4. **Identity / FK columns.** Columns named like `*_id` (especially the customer/user/account/applicant kind) — common per-entity-narrowing filters.
+5. **Choice-field columns from Phase 1c.5.** A `WHERE status='active'` is selective enough to count as a recommended filter for tables where `status` is a choice_field with ≤ 5 values.
+
+Persist as `{column, kind, reason}` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md):
+
+```yaml
+custom_extensions:
+  - vendor_name: COMMON
+    data: '{"agami": {"performance_hints": {"estimated_row_count": 134000000, "indexes": [["created_at"], ["payment_status"]], "recommended_filters": [{"column": "id", "kind": "equality", "reason": "primary key"}, {"column": "applicant_id", "kind": "equality", "reason": "FK to applicant — the natural per-entity narrowing"}, {"column": "report_date", "kind": "range", "reason": "indexed time dimension"}]}}}'
+```
+
+`kind` is machine-read by Phase 2d's risk classifier:
+- `equality` — `WHERE col = ?` is the expected shape (PK, FK, choice_field).
+- `range` — `WHERE col BETWEEN ? AND ?` or `WHERE col >= ?` is the expected shape (time/date columns).
+
+`reason` is short free-form prose for humans hand-editing the schema yaml later — keep it under one line.
+
+The Phase 2d risk classifier checks both `column` AND `kind` against the user's WHERE clause: an equality filter matches an `equality` entry, a range filter matches a `range`. A column queried by both `=` and `BETWEEN` is allowed — list it twice (one entry per kind).
+
+**Why this matters for finbud-shaped schemas:** without recommended_filters, every query against a 134M-row credit-bureau table blocks the user with a HIGH-risk warning. With recommended_filters listing `applicant_id`, `pan`, and `report_date`, queries that filter on any of those are LOW risk and run silently. Queries that DON'T filter on any of those still warn — that's the targeted behavior.
+
+**Cap at ~6 filters per table.** More than that and the list stops being a recommendation and becomes "everything's a filter" — the user should hand-edit if they need to add more.
+
+Don't narrate per-table — just emit a single line per schema:
+
+```
+[recommended_filters] public — proposed filter columns on 8 of 47 tables (>1M rows). Validator will surface them in the schema yaml.
+```
+
+For tables with `estimated_row_count <= 1_000_000`, skip — no need to propose recommended_filters when the whole table fits in a few seconds of scan.
+
+**Note on Snowflake clustering keys:** Snowflake has clustering keys (organize micro-partitions for cheaper range scans), which sound like indexes but behave differently — equality on a clustered column is no faster than on any other column once partitions are pruned. We deliberately do NOT capture clustering keys as a separate field; the validator's `agami.performance_hints` allowlist excludes `clustering_keys`. If clustering matters for a specific column, it shows up naturally as a `recommended_filters` entry with `kind: range`. Don't add a `clustering_keys` field — it would mislead the SQL generator into treating clustered columns like indexed ones.
 
 ### 1d — auto-generate descriptions (per-schema batched, evidence-grounded)
 

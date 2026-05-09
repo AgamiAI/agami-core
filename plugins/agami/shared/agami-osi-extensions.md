@@ -95,12 +95,12 @@ Drives the risk-assessment banner in `agami-query-database/SKILL.md` Phase 2d. T
   source: shop.public.orders
   custom_extensions:
     - vendor_name: COMMON
-      data: '{"agami": {"performance_hints": {"estimated_row_count": 50000000, "recommended_filters": [{"column": "placed_at", "reason": "partition key"}, {"column": "customer_id", "reason": "indexed FK"}], "selective_filters": ["is_active = true"], "indexes": [["placed_at"], ["customer_id", "status"]]}}}'
+      data: '{"agami": {"performance_hints": {"estimated_row_count": 50000000, "recommended_filters": [{"column": "placed_at", "kind": "range", "reason": "partition key"}, {"column": "customer_id", "kind": "equality", "reason": "indexed FK"}], "selective_filters": ["is_active = true"], "indexes": [["placed_at"], ["customer_id", "status"]]}}}'
 ```
 
 Sub-fields:
 - `estimated_row_count` (integer, optional)
-- `recommended_filters` (array of `{column, reason}`)
+- `recommended_filters` (array of `{column, kind, reason}`). `kind` is one of `"equality"` (PK / FK / choice_field — `WHERE col = ?`) or `"range"` (time / date columns — `WHERE col BETWEEN ? AND ?`). `reason` is a free-form short prose explanation. Phase 2d's risk classifier checks the user's WHERE clause against `column` + `kind` to downgrade HIGH risk → LOW risk for queries that already include a recommended filter. Without this field, queries against `>1M` row tables stay HIGH risk regardless of how well-filtered they are.
 - `selective_filters` (array of free-form WHERE-clause snippets the LLM should consider)
 - `indexes` (array of column-list arrays; first column is the leading column)
 

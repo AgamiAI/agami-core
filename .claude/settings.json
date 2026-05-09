@@ -1,7 +1,4 @@
 {
-  "enabledPlugins": {
-    "agami@litebi": true
-  },
   "permissions": {
     "allow": [
       "Bash(mkdir -p ~/.agami)",
@@ -44,5 +41,6 @@
       "Write(/Users/*/agami-artifacts/**)",
       "Edit(/Users/*/agami-artifacts/**)"
     ]
-  }
+  },
+  "enabledPlugins": {}
 }

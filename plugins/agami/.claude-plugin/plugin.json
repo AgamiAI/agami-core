@@ -1,7 +1,7 @@
 {
   "name": "agami",
   "description": "Ask plain-English questions of your Postgres or MySQL database. Local-first: your credentials, schema, and query results never leave your machine. Save corrections that improve future answers, and render rich Chart.js charts.",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": {
     "name": "Agami AI",
     "email": "skills@agami.ai",

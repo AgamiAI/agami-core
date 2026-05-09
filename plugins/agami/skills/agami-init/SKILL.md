@@ -24,7 +24,7 @@ This skill is idempotent — running it again with no args verifies state and su
 
 ## Phase −1: Plan-mode check (before anything else)
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). If plan mode is active and the user picks `Stay in plan mode`, agami-init has a defined fallback: **emit a written plan only** (no file writes, no Bash). Other skills don't have this fallback and refuse to proceed.
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). If plan mode is active and the user picks `Stay in plan mode`, **refuse to proceed**: "I can't run setup in plan mode. Press Shift+Tab to switch to Default or Auto-accept, then send any message to continue." Don't emit a written plan as a fallback — that turned out to be noise; users in plan mode want to switch and proceed, not read a description.
 
 If plan mode is not active, skip this phase silently and go to Phase 0.
 
@@ -384,22 +384,31 @@ Persist the chosen method **and the absolute paths of every tool we found** in `
 }
 ```
 
-`artifacts_dir` is the absolute path where all sharable artifacts (semantic model, examples, ORGANIZATION.md, USER_MEMORY.md) live. **It is NOT the same as `~/.agami/`** — the agami home holds secrets and per-user state, the artifacts dir holds what teams may want to commit. See [`shared/file-layout.md`](../../shared/file-layout.md) for the full split.
+`artifacts_dir` is the absolute path of the **parent directory that holds ALL profiles** (not just the current one). Each profile gets its own subdirectory: `<artifacts_dir>/<profile_name>/`. Don't include the profile name in `artifacts_dir` — that's the most common mistake (e.g., setting `artifacts_dir: ~/Documents/finbud-agami` then later adding a `turning-pages` profile that lands at `~/Documents/finbud-agami/turning-pages/`, which reads weird because the parent directory is named after a different profile).
 
-Ask the user where to put it via **AskUserQuestion** before writing `.config`. Two options only — keep it simple:
+The agami home (`~/.agami/`) holds secrets and per-user state; the artifacts dir holds what teams may want to commit. See [`shared/file-layout.md`](../../shared/file-layout.md) for the full split.
+
+Ask the user where to put it via **AskUserQuestion** before writing `.config`. Two options:
 
 > Where should agami save your semantic model, examples, and preferences?
 >
-> These are non-secret files. Pointing this at a folder inside a git repo lets your team commit them and share. Credentials stay in `~/.agami/` either way.
+> This is the **parent directory** for ALL your database profiles — each profile lands in a subdirectory (`<artifacts_dir>/finbud/`, `<artifacts_dir>/turning-pages/`, etc.). Pick a profile-neutral path. These are non-secret files; pointing at a folder inside a git repo lets your team commit them and share. Credentials stay in `~/.agami/` either way.
 
 | label | description |
 |---|---|
-| `~/agami-artifacts/ (Recommended)` | Default — a folder in your home directory. You can `git init` there later, or copy the contents into your team's repo whenever you want to share. |
-| `Other (Other field)` | Paste an absolute path — e.g. `~/code/myteam/data/agami/` to put it inside an existing repo. Must be absolute and must NOT be inside `~/.agami/`. |
+| `~/agami-artifacts/ (Recommended)` | Default — a profile-neutral folder in your home. Each profile lives in its own subdir (`~/agami-artifacts/<profile>/`). You can `git init` there later, or copy contents into your team's repo whenever you want to share. |
+| `Other (Other field)` | Paste an absolute path — e.g. `~/code/myteam/data/agami/` to put all profiles inside an existing repo. Must be absolute, must NOT be inside `~/.agami/`, and **should not include a profile name** (that's the parent for all profiles). |
 
-(Two options + Other = no split-screen. The `(Recommended)` here is genuine — most users should take the default and decide about sharing later, not commit to a repo path during install.)
+(Two options + Other = no split-screen.)
 
-Validate the chosen path: must be absolute, must NOT be inside `~/.agami/` (refuse with: "That's the secrets directory — pick a different location"), parent must exist or be creatable. Persist the resolved absolute path to `.config.artifacts_dir`. The directory is created lazily on first write by `agami-connect`.
+Validate the chosen path:
+
+- Must be absolute.
+- Must NOT be inside `~/.agami/` (refuse with: "That's the secrets directory — pick a different location").
+- **If the basename of the chosen path matches the active_profile** (e.g., user set `~/Documents/finbud-agami/` for the `finbud` profile), warn but accept: "Heads up: `<basename>` looks profile-specific. When you add another profile, it'll land at `<path>/<other_profile>/`, which may read confusingly. You can edit `~/.agami/.config.artifacts_dir` later if you'd rather keep this profile-neutral. Continue?"
+- Parent of the chosen path must exist or be creatable.
+
+Persist the resolved absolute path to `.config.artifacts_dir`. The directory is created lazily on first write by `agami-connect`.
 
 Set `active_profile` to the name the user picked in Phase 2a (e.g. `main`, `supabase`, `production`). All other agami skills resolve the active profile in this order:
 
