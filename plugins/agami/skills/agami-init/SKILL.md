@@ -388,18 +388,20 @@ Persist the chosen method **and the absolute paths of every tool we found** in `
 
 The agami home (`~/.agami/`) holds secrets and per-user state; the artifacts dir holds what teams may want to commit. See [`shared/file-layout.md`](../../shared/file-layout.md) for the full split.
 
-Ask the user where to put it via **AskUserQuestion** before writing `.config`. Two options:
+Ask the user where to put it via **AskUserQuestion** before writing `.config`. Two options — **never label one of them "Other"**, since AskUserQuestion auto-adds an "Other" with a free-text input. Naming a labeled option "Other" produces a duplicate row and confused users.
 
 > Where should agami save your semantic model, examples, and preferences?
 >
 > This is the **parent directory** for ALL your database profiles — each profile lands in a subdirectory (`<artifacts_dir>/finbud/`, `<artifacts_dir>/turning-pages/`, etc.). Pick a profile-neutral path. These are non-secret files; pointing at a folder inside a git repo lets your team commit them and share. Credentials stay in `~/.agami/` either way.
+>
+> Need a custom location (e.g. inside a team repo at `~/code/myteam/data/agami/` for git-sharing)? Pick **Other** and paste an absolute path.
 
 | label | description |
 |---|---|
 | `~/agami-artifacts/ (Recommended)` | Default — a profile-neutral folder in your home. Each profile lives in its own subdir (`~/agami-artifacts/<profile>/`). You can `git init` there later, or copy contents into your team's repo whenever you want to share. |
-| `Other (Other field)` | Paste an absolute path — e.g. `~/code/myteam/data/agami/` to put all profiles inside an existing repo. Must be absolute, must NOT be inside `~/.agami/`, and **should not include a profile name** (that's the parent for all profiles). |
+| `~/Documents/agami/` | Alternative if you keep code and project files under `~/Documents/`. Each profile lives at `~/Documents/agami/<profile>/`. Same `git init` / sharing options apply. |
 
-(Two options + Other = no split-screen.)
+The auto-provided **Other** option captures any other absolute path the user wants to paste — including inside an existing team repo. Don't list it explicitly; AskUserQuestion's runtime adds it automatically.
 
 Validate the chosen path:
 
