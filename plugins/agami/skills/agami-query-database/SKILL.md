@@ -670,12 +670,17 @@ Build the receipt as a single JSON object. Schema (see [`shared/chart-template.h
 
 How to populate each field:
 
-- **`model_version`** — read `index.yaml`'s `introspect_meta.model_version` (the 12-char hash written by agami-connect Phase 3d). If absent (legacy v1.2 model), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."*
-- **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the count returned by the EXPLAIN or post-execution counter (skip if uncertain). `freshness` comes from `agami.introspect_meta.introspected_at` — pass it as a hint of how stale the snapshot is, plus the upstream load cadence if known (often unknowable from the model alone — pass `null` if so).
+- **`model_version`** — derive from the **newest directory** under `<artifacts_dir>/<profile>/.snapshots/`. The directory name itself IS the version (a 12-char content hash). Lookup:
+  ```bash
+  model_version=$(ls -t "$artifacts_dir/$profile/.snapshots/" 2>/dev/null | head -n1)
+  ```
+  If `.snapshots/` doesn't exist or is empty (legacy v1.2 model that pre-dates trust-layer), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."* **Do not look for `model_version` inside `index.yaml`** — it's not stored there; the snapshot directory is the source of truth.
+- **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the count returned by the EXPLAIN or post-execution counter (skip if uncertain).
+  **`freshness`** — pass the **raw ISO timestamp** from `agami.introspect_meta.introspected_at` (e.g., `"2026-05-10T11:57:13Z"`). The chart template prettifies it to `"introspected May 10, 2026, 11:57 AM"` automatically. Don't prefix with "introspected" yourself or you'll double-prefix. If the upstream load cadence is known (e.g., daily ETL at 2am UTC), pass a pre-formatted string instead — e.g., `"2026-05-10T02:00:00Z (daily 2am UTC ETL)"` — and the template passes it through unchanged. Pass `null` when freshness is unknowable.
 - **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the loaded OSI model (Phase 1c's `relationships_by_endpoints` index). Read `confidence`, `review_state`, `origin` from its `agami` extension. For composite or multi-hop joins, list each edge.
 - **`metrics`** — every OSI metric whose `expression` matches a fragment in the SQL. Pull `definition_prose` and the `signed_off_*` fields from the metric's `agami` extension.
 - **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING.
-- **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning: `"Used 1 unreviewed join (orders → customers, conf 0.62). Review now?"`. If the receipt has zero warnings, pass `[]` and the banner suppresses.
+- **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning naming the entry and its confidence. Examples: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`, `"Used metric `revenue` which has not been signed off."`. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-review to walk these items, or say 'open the review dashboard'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely — no need for an action line if everything is approved.
 
 Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
 

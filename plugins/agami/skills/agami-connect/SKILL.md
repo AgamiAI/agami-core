@@ -813,7 +813,7 @@ If the validator can't be run for any reason (missing Python, missing dependenci
 
 ### 3d — snapshot for reproducibility
 
-After promotion succeeds, freeze the model under `.snapshots/<model_version>/`. Every query log entry pins this version so old answers reproduce against the model that produced them.
+After promotion succeeds, freeze the model under `.snapshots/<model_version>/`. The `model_version` is a 12-char content hash; the **directory name itself is the canonical version pin** — we don't stamp it into `index.yaml` (the OSI extension allowlist doesn't include it, and there's no need: the snapshot dir name is the source of truth, the receipt reads it at query time).
 
 ```bash
 # Compute model_version: SHA-256 of every yaml file's content, sorted by relative path.
@@ -828,8 +828,7 @@ model_version=$(
     | sha256sum | cut -d' ' -f1 | head -c 12
 )
 
-# Write the version into index.yaml under introspect_meta.model_version.
-# Then snapshot the directory under .snapshots/<model_version>/ (immutable copy).
+# Snapshot the directory under .snapshots/<model_version>/ (immutable copy).
 mkdir -p "$artifacts_dir/$profile/.snapshots/$model_version"
 rsync -a --exclude '.snapshots' --exclude '.git' \
   "$artifacts_dir/$profile/" "$artifacts_dir/$profile/.snapshots/$model_version/"
@@ -838,15 +837,7 @@ chmod -R a-w "$artifacts_dir/$profile/.snapshots/$model_version"
 
 Surface: `✓ Snapshot saved at .snapshots/<model_version>/ — query receipts pin this version.`
 
-Stamp the model version into `index.yaml`'s `introspect_meta` block (so Phase 1.1 can read it on subsequent runs and build the receipt's "model version pin"):
-
-```yaml
-introspect_meta:
-  introspected_at: <ISO>
-  tier: <cli|duckdb|python>
-  source_db_version: <version string>
-  model_version: <12-char hash>     # NEW — written by Phase 3d after promotion
-```
+**Do NOT add `model_version` as a field inside `index.yaml.introspect_meta`** — that's not in the OSI agami-extension allowlist (see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md) → `agami.introspect_meta`), and adding it would fail validation. The receipt builder in agami-query-database reads the version directly from the `.snapshots/` directory listing — see Phase 4e.iii.5 of agami-query-database for the lookup pattern.
 
 ### 3e — code-as-artifact: git init + commit
 

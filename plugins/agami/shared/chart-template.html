@@ -681,11 +681,62 @@
             li.appendChild(document.createTextNode(' — ' + Number(t.rows).toLocaleString() + ' rows'));
           }
           if (t.freshness) {
-            li.appendChild(document.createTextNode(' · data as of ' + t.freshness));
+            // The skill may pass either a raw ISO timestamp (we prettify and
+            // prefix with "introspected") or a pre-formatted human string
+            // (we pass through unchanged). Avoid the awkward
+            // "data as of introspected <ISO>" double-prefix the old template
+            // produced.
+            const f = String(t.freshness).trim();
+            let label;
+            if (ISO_TIME_RE.test(f) || ISO_DATE_RE.test(f)) {
+              label = ' · introspected ' + maybePrettifyDate(f);
+            } else {
+              label = ' · ' + f;
+            }
+            li.appendChild(document.createTextNode(label));
           }
           ul.appendChild(li);
         });
         rb.appendChild(ul);
+      }
+
+      // Build a readable approval phrase like:
+      //   "auto-approved (FK declared in DB)"
+      //   "approved by jane@example.com (cfo), Mar 15"
+      //   "unreviewed (confidence 0.62)"
+      function approvalPhrase(entry) {
+        const state = (entry.review_state || 'unreviewed').toLowerCase();
+        if (state === 'approved') {
+          // System-approved (auto) vs human-approved.
+          if (entry.signed_off_by === 'agami_introspect_v1' || entry.signed_off_role === 'system') {
+            const reasons = {
+              fk:                    'FK declared in DB',
+              column_comment:        'DBA-authored column comment',
+              introspect_heuristic:  'unique-index + name match',
+            };
+            const why = reasons[entry.origin] || 'introspect signal';
+            return 'auto-approved (' + why + ')';
+          }
+          let txt = 'approved';
+          if (entry.signed_off_by) {
+            txt += ' by ' + entry.signed_off_by;
+            if (entry.signed_off_role && entry.signed_off_role !== 'system') {
+              txt += ' (' + entry.signed_off_role + ')';
+            }
+          }
+          if (entry.signed_off_at) {
+            const d = new Date(entry.signed_off_at);
+            if (!isNaN(d.getTime())) {
+              txt += ', ' + d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+            }
+          }
+          return txt;
+        }
+        if (state === 'rejected') return 'rejected';
+        if (state === 'stale')    return 'stale (schema drift — needs reconciliation)';
+        // unreviewed
+        const c = (typeof entry.confidence === 'number') ? entry.confidence.toFixed(2) : '?';
+        return 'unreviewed (confidence ' + c + ')';
       }
 
       // Relationships used
@@ -695,12 +746,8 @@
         receipt.relationships.forEach(r => {
           const li = el('li');
           li.appendChild(el('code', { text: r.from_to || r.name || '<unknown>' }));
-          if (typeof r.confidence === 'number') {
-            li.appendChild(document.createTextNode(' · conf ' + r.confidence.toFixed(2)));
-          }
-          if (r.origin) {
-            li.appendChild(document.createTextNode(' · origin: ' + r.origin));
-          }
+          li.appendChild(document.createTextNode(' — '));
+          li.appendChild(document.createTextNode(approvalPhrase(r)));
           li.appendChild(document.createTextNode(' '));
           li.appendChild(badge(r.review_state));
           ul.appendChild(li);
@@ -718,12 +765,8 @@
           if (m.definition_prose) {
             li.appendChild(document.createTextNode(' — ' + m.definition_prose));
           }
-          if (m.signed_off_by) {
-            const att = ' · sign-off: ' + m.signed_off_by +
-              (m.signed_off_role ? ' (' + m.signed_off_role + ')' : '') +
-              (m.signed_off_at ? ' on ' + m.signed_off_at.slice(0, 10) : '');
-            li.appendChild(el('span', { class: 'receipt-meta', text: att }));
-          }
+          li.appendChild(el('br'));
+          li.appendChild(el('span', { class: 'receipt-meta', text: approvalPhrase(m) }));
           ul.appendChild(li);
         });
         rb.appendChild(ul);

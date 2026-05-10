@@ -144,44 +144,44 @@ Write `~/.agami/credentials.example` using the **Write tool**. Pick the body **b
 # Switch profiles with AGAMI_PROFILE=<name>.
 ```
 
-**If `$DB_TYPE = postgres`**, append:
+**If `$DB_TYPE = postgres`**, append. **Lead with the URL form** — that's what Supabase / Neon / RDS / Heroku / Railway hand you. The per-field form is the alternative for self-hosted Postgres where the user knows the parts:
 
 ```ini
-# Postgres profile — fill in below. localhost is fine for a local DB.
+# Postgres profile.
+# Fastest path: paste your connection URL (Supabase, Neon, RDS all give you one).
 [$PROFILE_NAME]
-type     = postgres
-host     = your-host.example.com
-port     = 5432
-database = your-database-name
-user     = your-username
-password = your-password
-# Uncomment the next line for cloud DBs (Supabase / Neon / RDS):
-# sslmode = require
+type = postgres
+url  = postgresql://user:password@host:5432/database
+# (Accepts postgresql://, postgres://, postgresql+asyncpg://, postgresql+psycopg2://)
+# (Query params like ?sslmode=require are honored automatically.)
 
-# OR — comment out the per-field block above and paste a DSN URL instead:
-# Accepts postgresql://, postgres://, postgresql+asyncpg://, postgresql+psycopg2://
-# Query params like ?sslmode=require are honored automatically.
-# url = postgresql://user:pass@host:5432/db
+# --- OR, instead of `url`, fill in the fields below (typical for self-hosted) ---
+# host     = your-host.example.com
+# port     = 5432
+# database = your-database-name
+# user     = your-username
+# password = your-password
+# sslmode  = require        # uncomment for cloud DBs
 ```
 
-**If `$DB_TYPE = redshift`**, append (same shape as postgres but with Redshift defaults):
+**If `$DB_TYPE = redshift`**, append:
 
 ```ini
 # Redshift profile.
-# Provisioned cluster host:    your-cluster.<region>.redshift.amazonaws.com
-# Redshift Serverless host:    <wg>.<acct>.<region>.redshift-serverless.amazonaws.com
-# Default port is 5439. SSL is required.
+# Provisioned cluster: your-cluster.<region>.redshift.amazonaws.com
+# Redshift Serverless: <wg>.<acct>.<region>.redshift-serverless.amazonaws.com
+# Default port 5439. SSL required.
 [$PROFILE_NAME]
-type     = redshift
-host     = your-cluster.example.region.redshift.amazonaws.com
-port     = 5439
-database = your-database
-user     = your-username
-password = your-password
-sslmode  = require
+type = redshift
+url  = redshift://user:password@your-cluster.us-west-2.redshift.amazonaws.com:5439/db
 
-# OR — use a DSN URL (port 5439 + sslmode=require auto-applied):
-# url = redshift://user:pass@your-cluster.us-west-2.redshift.amazonaws.com:5439/db
+# --- OR, fill in fields ---
+# host     = your-cluster.example.region.redshift.amazonaws.com
+# port     = 5439
+# database = your-database
+# user     = your-username
+# password = your-password
+# sslmode  = require
 ```
 
 **If `$DB_TYPE = snowflake`**, append:
@@ -214,18 +214,19 @@ role      = ANALYST_ROLE
 **If `$DB_TYPE = mysql`**, append:
 
 ```ini
-# MySQL profile. localhost is fine for a local DB.
+# MySQL profile.
+# Fastest path: paste your connection URL (PlanetScale, Aiven, RDS all give you one).
 [$PROFILE_NAME]
-type     = mysql
-host     = your-host.example.com
-port     = 3306
-database = your-database-name
-user     = your-username
-password = your-password
+type = mysql
+url  = mysql://user:password@host:3306/database
+# (mysql+pymysql:// also works; the +driver suffix is stripped.)
 
-# OR — use a DSN URL:
-# url = mysql://user:pass@host:3306/db
-# url = mysql+pymysql://user:pass@host:3306/db
+# --- OR, fill in fields (typical for self-hosted / localhost) ---
+# host     = your-host.example.com
+# port     = 3306
+# database = your-database-name
+# user     = your-username
+# password = your-password
 ```
 
 **If `$DB_TYPE = sqlite`**, append:
@@ -250,31 +251,15 @@ url = paste-your-connection-string-here
 # Query params like ?sslmode=require are honored.
 ```
 
-**Always** finish the file with a small "additional profiles" section so the user can see how to add more later (commented examples; one block, doesn't need to be type-specific):
+**Always** finish the file with a tight "additional profiles" hint — one commented block, not three:
 
 ```ini
 
-# --- Additional profile examples (uncomment, edit, and add) ---
-
+# Add more profiles by appending another [section]. Switch with AGAMI_PROFILE=<name>.
+# Example:
 # [staging]
-# type     = postgres
-# host     = staging-db.example.com
-# port     = 5432
-# database = mydb
-# user     = readonly
-# password = ...
-
-# [analytics]
-# type     = mysql
-# host     = 127.0.0.1
-# port     = 3306
-# database = analytics
-# user     = analyst
-# password = ...
-
-# [local]
-# type = sqlite
-# path = /Users/me/data/local.db
+# type = postgres
+# url  = postgresql://readonly:pass@staging-db.example.com:5432/mydb
 ```
 
 Then say something like:
@@ -458,19 +443,19 @@ After writing, `chmod 600 ~/.agami/.config`.
 - **Telemetry consent** — asked by `agami-connect/SKILL.md` after the demo query succeeds. Asking at install time is too early; the user hasn't seen anything work yet.
 - **GitHub star** — asked by `agami-query-database/SKILL.md` after the user's first real successful query. No email collection, no list — just a one-click ask.
 
-Don't do anything in this phase. Just mention in the closing message below that the user will be asked once about each (separately) after the first interaction.
+Don't do anything in this phase. **Don't mention the deferred asks in the closing message either** — previewing them at install time is noise the user can't act on, and telegraphing "I'll ask you for X later" reads as nagging. The asks fire when the user has actually felt the value; that's the right moment to surface them, not earlier.
 
 ---
 
 ## Phase 5: Hand-off
 
-When all phases done, end with a short status + next step:
+When all phases done, end with a short status + next step. **No telegraphed opt-ins**:
 
 > ✓ `~/.agami/` ready (chmod 700)
 > ✓ Credentials template written to `~/.agami/credentials.example`
 > ✓ Tool detected: psql (native CLI for Postgres)
 >
-> Next: edit `~/.agami/credentials` with your DB connection, then ask me a question like "how many orders did we ship last month?". I'll introspect your schema on the first query, then ask if you'd like to share anonymous usage stats.
+> Next: edit `~/.agami/credentials` with your DB connection, then ask me a question like "how many orders did we ship last month?".
 
 If the user already has credentials and just ran `init` to verify, skip the "edit credentials" line and prompt them to ask a question directly.
 
