@@ -1036,46 +1036,124 @@ Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Sa
 
 ---
 
-## Phase 5: Run a demo query
+## Phase 5: Validate every seed example (the trust onboarding)
 
-Pick one of the seed examples and run it end-to-end. The user gets to verify the skill works against their actual data before they start asking real questions. Show the result, ask Yes / No / Skip on the example. **Do NOT use the phrase "engagement moment" anywhere the user can see — it's internal phasing and looks marketing-speak in a chat.**
+Earlier versions of this skill picked ONE seed example as a demo. Replaced — three independent sets of early-adopter feedback (Sourav + Intuit + Asana) said the same thing: "let me validate the queries you've inferred, not just see one of them work." Validating all 10–15 seeds in a single guided pass is what turns LLM-generated guesses into golden truths the query skill can trust.
 
-Pick **one** example from Phase 4 that:
-1. Spans ≥ 2 datasets via a relationship (uses a JOIN).
-2. Returns ≤ 20 rows so it displays cleanly.
-3. Is unambiguously interesting (a "top N", a "by category" breakdown, a recency filter).
+**Output of this phase:** an HTML dashboard at `~/.agami/examples-validation/<ts>.html` listing every seed example with its question, SQL, and a 5-row result preview, plus a chat back-channel for the user to validate / reject / edit each one.
 
-**Demo flow (announce → execute → render → open → ask):**
+### 5a — Run every seed example
 
-1. **Announce the natural-language question first**, before any SQL runs. The user should see "Running a demo: '<the NL question>'" before the bash output appears. Otherwise they see SQL execute with no context for why.
+Read `<artifacts_dir>/<profile>/examples.yaml`. For each example:
 
+1. Execute the SQL via the same tool used by agami-query-database (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`). **Add a `LIMIT 5` (or dialect-specific equivalent) wrapped via a CTE for the row preview** — but ALSO capture the full `row_count`. Pseudo:
+   ```sql
+   -- For the count:
+   SELECT COUNT(*) FROM (<original_sql>) sub;
+   -- For the preview:
+   SELECT * FROM (<original_sql>) sub LIMIT 5;
    ```
-   Running a demo so you can verify the skill works end-to-end:
+   (For SQLite/Postgres/Redshift/MySQL this works. For Snowflake, use the same pattern with `LIMIT 5`.)
+2. Capture: `row_count`, `row_headers` (column names from the result), `row_preview` (up to 5 rows as arrays of stringified values).
+3. If the SQL fails: capture the one-line error from the db_error_classifier; set `error: <message>`. Do NOT block — broken examples become `state: error` cards in the dashboard, the user can fix them via `edit N`.
 
-   "<the chosen NL question, e.g. 'Top 10 customers by spend last 30 days'>"
-   ```
+Run all examples sequentially (parallel execution risks overloading small DBs and is hard to attribute errors). Surface a one-line progress note: `Running 12 seed examples…`. Total time scales with example count × per-query latency — typically 30–60s for 12 examples on a small DB.
 
-2. **Execute via the chosen tool.** Same Phase 3 invocation as agami-query-database — psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`. Wrap in a timer so latency can surface in the closing line.
+### 5b — Build the items JSON for the dashboard
 
-3. **Render the full HTML report via `render_chart.py`** — same flow as agami-query-database Phase 4e. Don't stop at a markdown table; the demo should show the user the actual chart-and-table report they'll get for every future query, including auto-formatted dates / currency, the chart, the SQL section, and the agami logo. Without this, the user doesn't know the chart UX exists until their first real query.
+For each example, build:
 
-4. **Run `open <path>` (or `xdg-open` / `start` per OS) on the rendered HTML** so the user's browser pops up with the report. This is the moment the skill's value lands. If `open` exits non-zero, surface the path as plain text in chat so the user can open it manually — but DO NOT skip the open call entirely.
+```json
+{
+  "n": <1-indexed display number>,
+  "question": "<NL question>",
+  "sql": "<SQL string, multi-line OK>",
+  "state": "<state from examples.yaml: unreviewed | validated | rejected>",
+  "row_count": <int>,
+  "row_headers": ["col1", "col2", ...],
+  "row_preview": [["v1", "v2", ...], ...],
+  "validated_by": "<email or null>",
+  "validated_at": "<ISO or null>",
+  "error": "<error message or null>"
+}
+```
 
-5. **Then** AskUserQuestion. The user has the chart in their browser AND the markdown table in chat — both surfaces are visible when they answer.
+Write the array to `/tmp/agami-examples-items-<ts>.json`. The exact schema is documented in [`shared/examples-validation-template.html`](../../shared/examples-validation-template.html) → `ITEMS_JSON`.
 
-> Does this result look right?
-> - **Yes** — confirms the example, marks it `confirmed: true` in `<artifacts_dir>/<profile>/examples.yaml`
-> - **No** — opens the correction flow: I'll ask what's wrong, take your corrected SQL, and save it via agami-save-correction
-> - **Skip** — moves on, doesn't change the example
+### 5c — Render the dashboard
 
-(No `(Recommended)` marker — the user picks based on whether the result looks right, which is a fact-of-result, not a default we'd push.)
+```bash
+ts=$(date +%Y%m%d-%H%M%S)
+mkdir -p ~/.agami/examples-validation
+python3 "$AGAMI_PLUGIN_ROOT/scripts/render_examples_validation.py" \
+  --title "Seed examples · $profile" \
+  --profile "$profile" \
+  --items-file "/tmp/agami-examples-items-$ts.json" \
+  --out "$HOME/.agami/examples-validation/$ts.html"
+rm -f "/tmp/agami-examples-items-$ts.json"
+```
 
-Branch:
-- **Yes** → set `confirmed: true` and `confirmed_at: <ISO>` on the example.
-- **No** → invoke the agami-save-correction skill with the user's feedback (which may also update the OSI model — see agami-save-correction/SKILL.md). When telling the user about it, prefer "let me know what's wrong and I'll save it as a correction" over a slash form — natural language reads better mid-conversation. (`/agami-save-correction` does work if the user prefers it.)
-- **Skip** → leave example as-is.
+Surface in chat (single block):
 
-Surface: `✓ Demo run complete.`
+```
+Validating <N> seed examples — dashboard rendered:
+  ~/.agami/examples-validation/<ts>.html
+
+Reply with:
+  validate N           (or `validate 1, 3, 5`)
+  validate all         (bulk — skips errored examples)
+  reject N
+  edit N
+  done
+```
+
+Auto-open with the same multi-command fallback chain as agami-query-database Phase 4e.vi (`open` → `xdg-open` → `start` → fall through with the path printed). End the turn here.
+
+### 5d — Chat back-channel grammar
+
+The user replies with one or more commands (comma-separated allowed). Parse:
+
+- **`validate N`** (or `validate N, M, …`) — for each item, set `state: validated`, `validated_by: <user email or "<unknown>">`, `validated_at: <UTC ISO>` in the example's entry in `<artifacts_dir>/<profile>/examples.yaml`.
+- **`validate all`** — bulk-set every non-errored example to `validated`. Skip errored ones; surface the count: *"Validated 9 examples; 3 had errors and stay unreviewed (use `edit N` to fix)."*
+- **`reject N`** — set `state: rejected`. Don't delete the example from the YAML (preserves audit trail).
+- **`edit N`** — open the example's `sql` for editing. Read the YAML, surface the SQL block in chat as a fenced code block, accept the user's edits inline, write back, re-execute, update the dashboard JSON's row preview, and ask again.
+- **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed.` and continue to Phase 5.5.
+
+For each successful edit, the user is also offered: *"Promote this to a golden test in `tests.yaml`? (yes / no / skip)"*. If yes → append a new test entry to `<artifacts_dir>/<profile>/tests.yaml` with the same question + an `equals` assertion against the actual returned value(s). This is the bridge to the Quality-Loop launch's `agami test`.
+
+### 5e — Re-render after each batch of edits
+
+After applying a batch of validate / reject / edit commands, re-render the dashboard with updated state per item. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
+
+Surface a one-line ack:
+```
+✓ Applied: validated 3 (#1, #3, #5), rejected 1 (#7). Re-rendered.
+```
+
+Then end the turn. Wait for the user.
+
+If the queue is fully reviewed (no `unreviewed` items remain) OR the user types `done`, surface:
+```
+✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed (errors).
+```
+…and continue to Phase 5.5 (the trust-layer summary).
+
+### 5f — examples.yaml schema additions
+
+Each example entry now supports trust-layer-style state:
+
+```yaml
+examples:
+  - question: How many orders are there?
+    sql: SELECT COUNT(*) AS order_count FROM orders
+    source: seed
+    created_at: 2026-05-06T12:00:00Z
+    state: validated                          # NEW: unreviewed | validated | rejected
+    validated_by: ashwin@agami.ai             # NEW (when state=validated)
+    validated_at: 2026-05-10T14:30:00Z        # NEW (when state=validated)
+```
+
+Existing examples without these fields are treated as `state: unreviewed`. Backward-compatible — agami-query-database loads everything regardless of state, with `validated` examples weighted slightly higher in the few-shot mix (future enhancement; for v1, equal weighting).
 
 ---
 

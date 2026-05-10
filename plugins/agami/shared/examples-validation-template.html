@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<!--
+  agami examples-validation dashboard — used by agami-connect Phase 5 via
+  render_examples_validation.py.
+
+  Different from the review dashboard (review-dashboard-template.html) because
+  the cards display question + SQL + actual result rows, not source-signal
+  audit blocks. The skill walks the user through every seed example, asking
+  them to validate each one (mark as a known-good prompt) or reject/edit it.
+
+  Validated examples become candidates for golden tests (tests.yaml) so a
+  future schema change that breaks them surfaces as a red CI run.
+
+  Per-render placeholders:
+    {{REPORT_TITLE}}             — "Seed examples · <profile>"
+    {{GENERATED_AT}}             — ISO8601 UTC timestamp
+    {{ITEMS_JSON}}                — JSON array of example-item objects
+    {{PROFILE}}                   — the active profile name
+    {{TOTAL_ROW_COUNT}}           — sum of rows across all examples (for the header summary)
+    {{AGAMI_LOGO_DARK_TEXT}}      — full SVG content of agami-logo-dark.svg
+    {{AGAMI_LOGO_LIGHT_TEXT}}     — full SVG content of agami-logo-light.svg
+
+  ITEMS_JSON schema — array of objects, one per seed example:
+    {
+      "n":             integer (1-indexed display number)
+      "question":      "string — the NL question"
+      "sql":           "string — the executed SQL (multi-line OK)"
+      "state":         "unreviewed" | "validated" | "rejected"
+      "row_count":     integer (number of rows the SQL returned)
+      "row_preview":   [["col1", "col2", ...], ...] — first 5 rows as arrays of strings
+      "row_headers":   ["col1", "col2", ...] — column names
+      "validated_by":  string (email) or null
+      "validated_at":  ISO8601 string or null
+      "error":         string or null — if EXPLAIN or execution failed, the error
+    }
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} — agami</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-elev: #fafafa;
+      --fg: #1a1a1a;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --row-zebra: rgba(0, 0, 0, 0.025);
+      --code-bg: rgba(0, 0, 0, 0.04);
+      --ok: #166534;
+      --bad: #991b1b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --bg-elev: #131c2f;
+        --fg: #f1f5f9;
+        --muted: #94a3b8;
+        --border: #1e293b;
+        --accent: #60a5fa;
+        --row-zebra: rgba(255, 255, 255, 0.03);
+        --code-bg: rgba(255, 255, 255, 0.04);
+        --ok: #86efac;
+        --bad: #fca5a5;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; }
+    header.dashboard-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 16px;
+    }
+    .logo a { display: inline-block; line-height: 0; text-decoration: none; }
+    .logo svg { display: block; height: 28px; width: auto; }
+    .logo-light-mode { display: inline-block; }
+    .logo-dark-mode { display: none; }
+    @media (prefers-color-scheme: dark) {
+      .logo-light-mode { display: none; }
+      .logo-dark-mode { display: inline-block; }
+    }
+    h1.dashboard-title {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0;
+      flex: 1;
+      text-align: right;
+    }
+    .meta { font-size: 12px; color: var(--muted); margin-bottom: 24px; }
+    .intro {
+      font-size: 14px;
+      color: var(--fg);
+      margin-bottom: 24px;
+      padding: 14px 18px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .intro code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+
+    .example-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 22px;
+      background: var(--bg-elev);
+      margin-bottom: 16px;
+    }
+    .example-header {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .example-num {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      min-width: 2.4em;
+    }
+    .example-question {
+      font-size: 15px;
+      font-weight: 600;
+      flex: 1;
+      min-width: 200px;
+    }
+    .row-pill {
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 999px;
+      margin-left: 6px;
+    }
+    .badge.unreviewed { background: #fef3c7; color: #92400e; }
+    .badge.validated  { background: #dcfce7; color: #166534; }
+    .badge.rejected   { background: #fee2e2; color: #991b1b; }
+    .badge.error      { background: #fee2e2; color: #991b1b; }
+    @media (prefers-color-scheme: dark) {
+      .badge.unreviewed { background: #422006; color: #fbbf24; }
+      .badge.validated  { background: #052e16; color: #86efac; }
+      .badge.rejected   { background: #450a0a; color: #fca5a5; }
+      .badge.error      { background: #450a0a; color: #fca5a5; }
+    }
+
+    .label-line {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin: 12px 0 4px;
+    }
+
+    pre.sql {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: var(--code-bg);
+      padding: 10px 12px;
+      border-radius: 6px;
+      margin: 0 0 4px;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    .result-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin: 0 0 4px;
+    }
+    .result-table th, .result-table td {
+      padding: 6px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .result-table th {
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .result-table tbody tr:nth-child(even) td { background: var(--row-zebra); }
+
+    .error-box {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: rgba(239, 68, 68, 0.08);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--bad);
+      margin: 4px 0;
+    }
+
+    .signoff {
+      font-size: 11px;
+      color: var(--muted);
+      margin: 8px 0 4px;
+    }
+    .reply-hint {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--code-bg);
+      padding: 6px 10px;
+      border-radius: 6px;
+      margin-top: 10px;
+      display: inline-block;
+    }
+
+    footer {
+      margin-top: 36px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="dashboard-header">
+      <span class="logo">
+        <a href="https://agami.ai" target="_blank" rel="noopener">
+          <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+          <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+        </a>
+      </span>
+      <h1 class="dashboard-title">{{REPORT_TITLE}}</h1>
+    </header>
+    <p class="meta">Generated <span id="generated-at"></span> · profile <code id="profile"></code></p>
+
+    <div class="intro">
+      <strong>Validate the seed examples below.</strong> Each card is a question
+      that <code>agami-query-database</code> already knows how to answer — but
+      seed examples are LLM-generated guesses that haven't been seen by you
+      yet. <strong>Validating them turns them into golden truths</strong> the
+      query skill will trust as few-shot anchors, and they become candidates
+      for <code>tests.yaml</code> so future schema changes that break them
+      surface as a red CI run.
+      <br/><br/>
+      Reply in chat with <code>validate N</code>, <code>reject N</code>,
+      <code>edit N</code>, or <code>done</code>. Bulk-validate with
+      <code>validate all</code>.
+    </div>
+
+    <div id="items"></div>
+
+    <footer>
+      Each example was executed against your live database during introspection.
+      The result column shows the first 5 rows. <code>row_count</code> is the
+      total your query returned.
+    </footer>
+  </div>
+
+  <script>
+    const items = {{ITEMS_JSON}};
+    const generatedAt = "{{GENERATED_AT}}";
+    const profile = "{{PROFILE}}";
+
+    function el(tag, attrs = {}, ...children) {
+      const e = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (k === 'class') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else e.setAttribute(k, v);
+      }
+      for (const c of children) {
+        if (c == null) continue;
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      }
+      return e;
+    }
+
+    document.getElementById('generated-at').textContent = generatedAt;
+    document.getElementById('profile').textContent = profile;
+
+    const itemsEl = document.getElementById('items');
+    items.forEach(item => {
+      const card = el('div', { class: 'example-item' });
+
+      const header = el('div', { class: 'example-header' });
+      header.appendChild(el('span', { class: 'example-num', text: '#' + item.n }));
+      header.appendChild(el('span', { class: 'example-question', text: item.question || '<no question>' }));
+
+      const stateBadge = item.error ? 'error' : (item.state || 'unreviewed');
+      header.appendChild(el('span', { class: 'badge ' + stateBadge, text: stateBadge }));
+
+      if (typeof item.row_count === 'number') {
+        header.appendChild(el('span', { class: 'row-pill',
+          text: '· ' + item.row_count.toLocaleString() + ' row' + (item.row_count === 1 ? '' : 's') }));
+      }
+      card.appendChild(header);
+
+      // SQL block
+      card.appendChild(el('div', { class: 'label-line', text: 'SQL' }));
+      card.appendChild(el('pre', { class: 'sql', text: item.sql || '' }));
+
+      // Result block — table preview, OR error
+      if (item.error) {
+        card.appendChild(el('div', { class: 'label-line', text: 'Error' }));
+        card.appendChild(el('div', { class: 'error-box', text: item.error }));
+      } else if (Array.isArray(item.row_preview) && item.row_preview.length) {
+        card.appendChild(el('div', { class: 'label-line',
+          text: 'Result preview (first ' + item.row_preview.length + ' of ' + (item.row_count || item.row_preview.length) + ')' }));
+        const table = el('table', { class: 'result-table' });
+        if (Array.isArray(item.row_headers) && item.row_headers.length) {
+          const thead = el('thead');
+          const tr = el('tr');
+          item.row_headers.forEach(h => tr.appendChild(el('th', { text: h })));
+          thead.appendChild(tr);
+          table.appendChild(thead);
+        }
+        const tbody = el('tbody');
+        item.row_preview.forEach(row => {
+          const tr = el('tr');
+          row.forEach(cell => tr.appendChild(el('td', { text: String(cell == null ? '' : cell) })));
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        card.appendChild(table);
+      } else {
+        card.appendChild(el('div', { class: 'label-line', text: 'Result' }));
+        card.appendChild(el('div', { class: 'signoff', text: 'No rows returned.' }));
+      }
+
+      // Sign-off block (only for validated items)
+      if (item.state === 'validated' && item.validated_by) {
+        const date = item.validated_at ? new Date(item.validated_at) : null;
+        const dateStr = (date && !isNaN(date.getTime()))
+          ? date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+          : '';
+        card.appendChild(el('div', { class: 'signoff',
+          text: 'Validated by ' + item.validated_by + (dateStr ? ' on ' + dateStr : '') }));
+      }
+
+      // Reply hint per state
+      let hint;
+      if (item.state === 'validated') {
+        hint = 'Reply: edit ' + item.n + '  or  reject ' + item.n + ' (to un-validate)';
+      } else if (item.state === 'rejected') {
+        hint = 'Reply: validate ' + item.n + '  or  edit ' + item.n;
+      } else {
+        hint = 'Reply: validate ' + item.n + '  |  reject ' + item.n + '  |  edit ' + item.n;
+      }
+      card.appendChild(el('div', { class: 'reply-hint', text: hint }));
+
+      itemsEl.appendChild(card);
+    });
+
+    if (items.length === 0) {
+      itemsEl.appendChild(el('div', { class: 'example-item',
+        text: 'No seed examples found. agami-connect normally writes 10–15 to <artifacts_dir>/<profile>/examples.yaml — check the introspect log if this is unexpected.' }));
+    }
+  </script>
+</body>
+</html>
