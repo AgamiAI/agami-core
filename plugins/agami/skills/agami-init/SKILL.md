@@ -1,17 +1,17 @@
 ---
 name: agami-init
-description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), writes a credentials.example template, and detects which database tool is available (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver). Re-run any time to verify state, switch profiles, or change telemetry preference."
-when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami', wants to add or switch a database connection, or asks to change their telemetry / email preferences. Auto-invoked by the connect and query-database skills if the .agami directory or credentials file is missing."
-argument-hint: "[verify | reconfigure-analytics | switch-profile NAME]"
+description: "Verify agami setup, switch profiles, change preferences (telemetry / artifacts dir), and detect which database tool the machine will use (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver). The primary onboarding entry is /agami-connect — that skill now collects credentials inline. agami-init is the post-setup verification + profile-switching surface; first-run users should not need to invoke this directly."
+when_to_use: "Use when the user says 'verify my agami setup', 'switch profile', 'change my telemetry preference', 'change my artifacts dir', or '/agami-init verify'. Also auto-invoked from agami-connect for the tool-detection step (Phase 3 below) on first run. Do NOT run this skill as the entry point for first-time setup — point the user at /agami-connect instead, or just have them ask a data question (which auto-invokes connect)."
+argument-hint: "[verify | switch-profile NAME | reconfigure-analytics | setup (legacy)]"
 ---
 
 # agami init
 
-**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** All four agami slash commands (`/agami-init`, `/agami-connect`, `/agami-query-database`, `/agami-save-correction`) work — the `agami-` prefix avoids collision with Claude Code's built-in `/init` and other plugins. Never write the un-prefixed forms (`/init`, `/connect`, `/query-database`, `/save-correction`) or colon-namespaced forms (`/agami:init`, etc.) — those don't exist. For everything except `/agami-init`, prefer natural language ("say 'reload the schema'", "say 'save this as a correction'") — it reads better than a slash command.
+**Role change (May 2026):** This skill is no longer the primary onboarding entry. `/agami-connect` now collects credentials inline via its Phase 0a — the user pastes a connection URL once and goes straight to introspect. `agami-init` is the **verify / switch / reconfigure** surface for users who already have a working setup. If a first-time user invokes `/agami-init`, redirect them to `/agami-connect` rather than walking them through the legacy template-editing flow (it's still here under "Phase 2 (legacy)" for users who explicitly want manual credential editing, but the default path no longer touches it).
 
-You are walking the user through the one-time setup for `agami`. The goal: by the end of this skill, the user has a working `~/.agami/credentials` file, knows which database tool their machine will use to run queries, and has made conscious choices about telemetry and email opt-ins.
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** All four agami slash commands work; for chat replies prefer natural language over slash commands.
 
-This skill is idempotent — running it again with no args verifies state and surfaces any drift (missing creds, wrong file permissions, no tool available, etc.).
+This skill is idempotent — running it with no args runs `verify` and surfaces any drift (missing creds, wrong file permissions, no tool available, etc.) without modifying anything.
 
 ## Conversation style
 
@@ -32,10 +32,11 @@ If plan mode is not active, skip this phase silently and go to Phase 0.
 
 ## Phase 0: Decide what to do based on `$ARGUMENTS`
 
-- **No arguments**: Run the full first-run flow (Phases 1–5).
+- **No arguments**: Run **`verify`** (Phase 1 only — state check, no mutations). The full first-run flow is now `/agami-connect` (which collects credentials inline). If you find this skill has nothing to verify because credentials don't exist yet, point the user at `/agami-connect` and stop.
 - **`verify`**: Run Phase 1 (state check) only. Print what's working and what's missing. Exit.
+- **`switch-profile <name>`**: Set `active_profile` in `~/.agami/.config` to `<name>`. If `~/.agami/credentials` has no `[<name>]` section, surface: *"Profile `<name>` doesn't exist yet. Run `AGAMI_PROFILE=<name> /agami-connect` to set it up."* Don't write a stub section.
 - **`reconfigure-analytics`**: Skip to Phase 4. Re-prompt the opt-in.
-- **`switch-profile <name>`**: Skip to Phase 2 with the profile name pre-set. Help the user add a new `[<name>]` section to `~/.agami/credentials`.
+- **`setup`** (legacy / explicit): Run the full Phases 2–5 flow — manual credential template, multi-question DB picker, etc. **Do not run this by default.** It's preserved for users who want to edit credentials by hand instead of pasting a URL through `/agami-connect`. New users should never see this.
 
 ---
 
@@ -69,7 +70,9 @@ If `verify` mode: print a one-line status per item (✓/✗) and exit.
 
 ---
 
-## Phase 2: Create `~/.agami/` and write credentials template
+## Phase 2 (legacy `setup` mode only): Create `~/.agami/` and write credentials template
+
+**Skip this phase unless `$ARGUMENTS == setup`.** The default and recommended path is `/agami-connect`'s Phase 0a (inline credentials collection from a single URL paste). This phase is preserved only for users who explicitly want to edit credentials manually.
 
 If `~/.agami/` does not exist:
 
@@ -449,15 +452,28 @@ Don't do anything in this phase. **Don't mention the deferred asks in the closin
 
 ## Phase 5: Hand-off
 
-When all phases done, end with a short status + next step. **No telegraphed opt-ins**:
+End with a short status + next step. **No telegraphed opt-ins**.
+
+For **`verify`** mode (the default — most invocations):
+
+> ✓ `~/.agami/` exists (chmod 700)
+> ✓ Credentials present for profile `main` (chmod 600)
+> ✓ Tool detected: psql (native CLI for Postgres)
+> ✓ Active profile: main
+>
+> All set. Ask me a data question or run `/agami-connect reintrospect` to refresh the schema.
+
+If something is missing in `verify`, surface what's missing and the one command that fixes it. Examples:
+- *"No credentials yet. Run `/agami-connect` and paste your DB connection URL — it'll write `~/.agami/credentials` and continue straight to introspect."*
+- *"Credentials exist but `psql` isn't on PATH — install with `brew install postgresql` or `apt install postgresql-client`, then re-run."*
+
+For **`setup`** mode (legacy / manual):
 
 > ✓ `~/.agami/` ready (chmod 700)
 > ✓ Credentials template written to `~/.agami/credentials.example`
 > ✓ Tool detected: psql (native CLI for Postgres)
 >
-> Next: edit `~/.agami/credentials` with your DB connection, then ask me a question like "how many orders did we ship last month?".
-
-If the user already has credentials and just ran `init` to verify, skip the "edit credentials" line and prompt them to ask a question directly.
+> Next: edit `~/.agami/credentials.example`, save as `~/.agami/credentials`, run `chmod 600`, then ask me a question. (Or skip the manual edit and run `/agami-connect` instead — it collects the URL inline.)
 
 ---
 
