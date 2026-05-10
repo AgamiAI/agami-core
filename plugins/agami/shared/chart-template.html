@@ -16,8 +16,23 @@
     {{REPORT_SUMMARY}}   — 1-3 sentence executive summary across all sections
     {{GENERATED_AT}}     — ISO8601 UTC timestamp
     {{SECTIONS_JSON}}    — JSON array of section objects (see schema below)
+    {{RECEIPT_JSON}}     — Trust receipt object (or `null` to skip the receipt
+                           panel entirely — see RECEIPT_JSON schema below).
     {{AGAMI_LOGO_DARK_TEXT}}   — full SVG content of shared/agami-logo-dark.svg  (light bg)
     {{AGAMI_LOGO_LIGHT_TEXT}}  — full SVG content of shared/agami-logo-light.svg (dark bg)
+
+  RECEIPT_JSON schema — single object (not array):
+    {
+      "model_version":   "string — short content hash from agami.config / index.yaml",
+      "tables_used":     [{"qname":"public.orders", "rows":5000, "freshness":"2026-05-09T23:00:00Z (nightly batch)"}, ...],
+      "relationships":   [{"name":"orders_to_customers","from_to":"orders → customers",
+                           "confidence":0.62,"review_state":"unreviewed","origin":"introspect_heuristic"}, ...],
+      "metrics":         [{"name":"revenue","definition_prose":"...","signed_off_by":"jane@x.com",
+                           "signed_off_role":"cfo","signed_off_at":"2026-03-15T10:00:00Z"}, ...],
+      "named_filters":   [{"name":"active_customer","expression":"...","definition_prose":"..."}, ...],
+      "warnings":        ["⚠ Used 1 unreviewed join (orders → customers, conf 0.62). Review now?", ...]
+    }
+  Pass `null` for {{RECEIPT_JSON}} on legacy callers that don't yet build a receipt.
 
   SECTIONS_JSON schema — array of these objects, one per section:
     {
@@ -197,6 +212,97 @@
       width: 1em;
       transition: transform 120ms ease;
     }
+
+    /* --- Trust receipt + warning banner ------------------------------- */
+    .trust-warning-banner {
+      margin: 16px 0 24px;
+      padding: 12px 16px;
+      background: #fef3c7;          /* amber-100 */
+      color: #78350f;               /* amber-900 */
+      border: 1px solid #f59e0b;    /* amber-500 */
+      border-radius: 8px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .trust-warning-banner ul { margin: 4px 0 0; padding-left: 20px; }
+    @media (prefers-color-scheme: dark) {
+      .trust-warning-banner {
+        background: #422006;
+        color: #fbbf24;
+        border-color: #b45309;
+      }
+    }
+    details.trust-receipt { margin: 24px 0 16px; }
+    details.trust-receipt > summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      list-style: none;
+      user-select: none;
+      padding: 4px 0;
+    }
+    details.trust-receipt > summary::-webkit-details-marker { display: none; }
+    details.trust-receipt > summary::before {
+      content: "▸";
+      display: inline-block;
+      width: 1em;
+      transition: transform 120ms ease;
+    }
+    details.trust-receipt[open] > summary::before { transform: rotate(90deg); }
+    .receipt-body { padding-top: 12px; font-size: 13px; }
+    .receipt-body h4 {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 16px 0 6px;
+    }
+    .receipt-body h4:first-child { margin-top: 0; }
+    .receipt-body ul { margin: 0; padding-left: 20px; }
+    .receipt-body li { margin: 4px 0; line-height: 1.5; }
+    .receipt-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .conf-badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 999px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .conf-badge.approved {
+      background: #dcfce7;          /* green-100 */
+      color: #166534;               /* green-800 */
+    }
+    .conf-badge.unreviewed {
+      background: #fef3c7;          /* amber-100 */
+      color: #92400e;               /* amber-800 */
+    }
+    .conf-badge.rejected {
+      background: #fee2e2;          /* red-100 */
+      color: #991b1b;               /* red-800 */
+    }
+    .conf-badge.stale {
+      background: #e5e7eb;          /* gray-200 */
+      color: #374151;               /* gray-700 */
+    }
+    @media (prefers-color-scheme: dark) {
+      .conf-badge.approved   { background: #052e16; color: #86efac; }
+      .conf-badge.unreviewed { background: #422006; color: #fbbf24; }
+      .conf-badge.rejected   { background: #450a0a; color: #fca5a5; }
+      .conf-badge.stale      { background: #1f2937; color: #9ca3af; }
+    }
     details.sql[open] > summary::before { transform: rotate(90deg); }
     .sql-wrap {
       position: relative;
@@ -286,6 +392,10 @@
     const reportSummary = {{REPORT_SUMMARY_JSON}};
     const generatedAt = "{{GENERATED_AT}}";
     const sections = {{SECTIONS_JSON}};
+    // Trust receipt — single object, or null. Legacy callers pass null; the
+    // trust-layer launch (May 18) wires the receipt up via render_chart.py's
+    // --receipt-file flag.
+    const receipt = {{RECEIPT_JSON}};
 
     // ---- Helpers ----
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899'];
@@ -380,6 +490,25 @@
         tocList.appendChild(li);
       });
       document.getElementById('toc').hidden = false;
+    }
+
+    // ---- Trust warning banner (top of report, only if there are warnings) ----
+    if (receipt && Array.isArray(receipt.warnings) && receipt.warnings.length > 0) {
+      const wrap = document.querySelector('.wrap');
+      const banner = el('div', { class: 'trust-warning-banner' });
+      const intro = el('strong', { text: 'Trust note' });
+      banner.appendChild(intro);
+      banner.appendChild(document.createTextNode(' — '));
+      if (receipt.warnings.length === 1) {
+        banner.appendChild(document.createTextNode(receipt.warnings[0]));
+      } else {
+        const ul = el('ul');
+        receipt.warnings.forEach(w => ul.appendChild(el('li', { text: w })));
+        banner.appendChild(ul);
+      }
+      // Insert before the report body
+      const body0 = document.getElementById('report-body');
+      wrap.insertBefore(banner, body0);
     }
 
     // ---- Sections ----
@@ -529,6 +658,106 @@
         },
       });
     });
+
+    // ---- Trust receipt panel (bottom of report, collapsed by default) ----
+    if (receipt) {
+      const det = el('details', { class: 'trust-receipt' });
+      det.appendChild(el('summary', { text: 'Trust receipt — provenance for this answer' }));
+      const rb = el('div', { class: 'receipt-body' });
+
+      function badge(state) {
+        const cls = (state || 'unreviewed').toLowerCase();
+        return el('span', { class: 'conf-badge ' + cls, text: state || 'unreviewed' });
+      }
+
+      // Tables touched
+      if (Array.isArray(receipt.tables_used) && receipt.tables_used.length) {
+        rb.appendChild(el('h4', { text: 'Tables touched' }));
+        const ul = el('ul');
+        receipt.tables_used.forEach(t => {
+          const li = el('li');
+          li.appendChild(el('code', { text: t.qname || '<unknown>' }));
+          if (t.rows !== undefined && t.rows !== null) {
+            li.appendChild(document.createTextNode(' — ' + Number(t.rows).toLocaleString() + ' rows'));
+          }
+          if (t.freshness) {
+            li.appendChild(document.createTextNode(' · data as of ' + t.freshness));
+          }
+          ul.appendChild(li);
+        });
+        rb.appendChild(ul);
+      }
+
+      // Relationships used
+      if (Array.isArray(receipt.relationships) && receipt.relationships.length) {
+        rb.appendChild(el('h4', { text: 'Relationships used' }));
+        const ul = el('ul');
+        receipt.relationships.forEach(r => {
+          const li = el('li');
+          li.appendChild(el('code', { text: r.from_to || r.name || '<unknown>' }));
+          if (typeof r.confidence === 'number') {
+            li.appendChild(document.createTextNode(' · conf ' + r.confidence.toFixed(2)));
+          }
+          if (r.origin) {
+            li.appendChild(document.createTextNode(' · origin: ' + r.origin));
+          }
+          li.appendChild(document.createTextNode(' '));
+          li.appendChild(badge(r.review_state));
+          ul.appendChild(li);
+        });
+        rb.appendChild(ul);
+      }
+
+      // Metrics used
+      if (Array.isArray(receipt.metrics) && receipt.metrics.length) {
+        rb.appendChild(el('h4', { text: 'Metric definitions invoked' }));
+        const ul = el('ul');
+        receipt.metrics.forEach(m => {
+          const li = el('li');
+          li.appendChild(el('strong', { text: m.name || '<unnamed>' }));
+          if (m.definition_prose) {
+            li.appendChild(document.createTextNode(' — ' + m.definition_prose));
+          }
+          if (m.signed_off_by) {
+            const att = ' · sign-off: ' + m.signed_off_by +
+              (m.signed_off_role ? ' (' + m.signed_off_role + ')' : '') +
+              (m.signed_off_at ? ' on ' + m.signed_off_at.slice(0, 10) : '');
+            li.appendChild(el('span', { class: 'receipt-meta', text: att }));
+          }
+          ul.appendChild(li);
+        });
+        rb.appendChild(ul);
+      }
+
+      // Named filters used
+      if (Array.isArray(receipt.named_filters) && receipt.named_filters.length) {
+        rb.appendChild(el('h4', { text: 'Named filters applied' }));
+        const ul = el('ul');
+        receipt.named_filters.forEach(nf => {
+          const li = el('li');
+          li.appendChild(el('strong', { text: nf.name || '<unnamed>' }));
+          if (nf.definition_prose) {
+            li.appendChild(document.createTextNode(' — ' + nf.definition_prose));
+          }
+          if (nf.expression) {
+            li.appendChild(el('br'));
+            li.appendChild(el('code', { text: nf.expression }));
+          }
+          ul.appendChild(li);
+        });
+        rb.appendChild(ul);
+      }
+
+      // Model version pin
+      if (receipt.model_version) {
+        const meta = el('div', { class: 'receipt-meta',
+          text: 'Model version: ' + receipt.model_version + ' — old answers reproduce against this snapshot.' });
+        rb.appendChild(meta);
+      }
+
+      det.appendChild(rb);
+      document.querySelector('.wrap').appendChild(det);
+    }
   </script>
 </body>
 </html>

@@ -75,21 +75,45 @@ except ImportError:
 #   2. extending the allowlist below
 #   3. adding a test in tests/test_semantic_model_validator.py
 
+# Trust-layer keys — universal across field / dataset / relationship / metric
+# / named_filter entries. Documented under the "Trust-layer extensions" section
+# of agami-osi-extensions.md. Model-level extensions deliberately do NOT
+# include these (the model itself isn't reviewable; only its members are).
+TRUST_LAYER_KEYS: frozenset[str] = frozenset({
+    "confidence", "signal_breakdown", "review_state",
+    "signed_off_by", "signed_off_at", "signed_off_role", "origin",
+})
+
 ALLOWED_AGAMI_KEYS_FIELD: frozenset[str] = frozenset({
     "type", "choice_field", "unit", "original_type",
-})
+}) | TRUST_LAYER_KEYS
 
 ALLOWED_AGAMI_KEYS_DATASET: frozenset[str] = frozenset({
     "performance_hints",
-})
+}) | TRUST_LAYER_KEYS
 
 ALLOWED_AGAMI_KEYS_RELATIONSHIP: frozenset[str] = frozenset({
     "fk_validation",
-})
+}) | TRUST_LAYER_KEYS
+
+# Metric-level extensions are new — OSI Metric supports custom_extensions but
+# the validator did not previously walk them. The definitional layer
+# (definition_prose / assumptions / excludes) lives here, alongside the
+# universal trust-layer keys.
+ALLOWED_AGAMI_KEYS_METRIC: frozenset[str] = frozenset({
+    "definition_prose", "assumptions", "excludes",
+}) | TRUST_LAYER_KEYS
 
 ALLOWED_AGAMI_KEYS_MODEL: frozenset[str] = frozenset({
-    "profile", "db_type", "schema", "table", "introspect_meta",
+    "profile", "db_type", "schema", "table", "introspect_meta", "named_filters",
 })
+
+# Named-filter object keys (lives inside the model-level agami.named_filters
+# array). Carries trust-layer fields because each named_filter is independently
+# reviewed under Rule 1.
+ALLOWED_NAMED_FILTER_KEYS: frozenset[str] = frozenset({
+    "name", "expression", "definition_prose", "synonyms",
+}) | TRUST_LAYER_KEYS
 
 ALLOWED_AGAMI_TYPES: frozenset[str] = frozenset({
     "string", "integer", "decimal", "timestamp", "date", "boolean",
@@ -105,6 +129,19 @@ ALLOWED_FK_VALIDATION_KEYS: frozenset[str] = frozenset({
 
 ALLOWED_INTROSPECT_META_KEYS: frozenset[str] = frozenset({
     "introspected_at", "tier", "source_db_version",
+})
+
+# Trust-layer enums (see agami-osi-extensions.md → Hard rules #7).
+ALLOWED_REVIEW_STATES: frozenset[str] = frozenset({
+    "unreviewed", "approved", "rejected", "stale",
+})
+
+ALLOWED_ORIGINS: frozenset[str] = frozenset({
+    "fk", "introspect_heuristic", "column_comment", "llm_suggested", "human_authored",
+})
+
+ALLOWED_SIGNOFF_ROLES: frozenset[str] = frozenset({
+    "cfo", "cto", "data_lead", "engineer", "analyst", "other", "system",
 })
 
 
@@ -252,6 +289,99 @@ def _check_extension_keys(
     return out
 
 
+def _check_trust_layer(agami: dict, ctx: str, *, is_rule_1: bool) -> list[str]:
+    """Validate the universal trust-layer fields (confidence, review_state,
+    origin, signed_off_*). Enforces Hard Rules #7 / #8 / #9 / #10 from
+    agami-osi-extensions.md.
+
+    `is_rule_1=True` means this entry is a metric or a named_filter — high
+    blast radius — and a `signed_off_role` is required when approved. Rule 1
+    callers should additionally check `definition_prose` themselves.
+    """
+    out: list[str] = []
+
+    # confidence: number in [0, 1]
+    if "confidence" in agami:
+        c = agami["confidence"]
+        if isinstance(c, bool) or not isinstance(c, (int, float)):
+            out.append(f"[Trust] {ctx}: confidence must be a number")
+        elif not (0.0 <= float(c) <= 1.0):
+            out.append(f"[Trust] {ctx}: confidence {c} outside [0, 1]")
+
+    # signal_breakdown: free-form dict
+    if "signal_breakdown" in agami:
+        sb_dict = agami["signal_breakdown"]
+        if not isinstance(sb_dict, dict):
+            out.append(f"[Trust] {ctx}: signal_breakdown must be an object")
+
+    # review_state enum
+    rs = agami.get("review_state")
+    if rs is not None and rs not in ALLOWED_REVIEW_STATES:
+        out.append(
+            f"[Trust] {ctx}: review_state '{rs}' invalid. "
+            f"Must be one of {sorted(ALLOWED_REVIEW_STATES)}."
+        )
+
+    # origin enum
+    origin = agami.get("origin")
+    if origin is not None and origin not in ALLOWED_ORIGINS:
+        out.append(
+            f"[Trust] {ctx}: origin '{origin}' invalid. "
+            f"Must be one of {sorted(ALLOWED_ORIGINS)}."
+        )
+
+    # signed_off_role enum
+    role = agami.get("signed_off_role")
+    if role is not None and role not in ALLOWED_SIGNOFF_ROLES:
+        out.append(
+            f"[Trust] {ctx}: signed_off_role '{role}' invalid. "
+            f"Must be one of {sorted(ALLOWED_SIGNOFF_ROLES)}."
+        )
+
+    # signed_off_by, signed_off_at types
+    sb = agami.get("signed_off_by")
+    if sb is not None and not isinstance(sb, str):
+        out.append(f"[Trust] {ctx}: signed_off_by must be a string or null")
+    sa = agami.get("signed_off_at")
+    if sa is not None and not isinstance(sa, str):
+        out.append(f"[Trust] {ctx}: signed_off_at must be an ISO-8601 string or null")
+
+    # Hard Rule #8 / #9 — sign-off completeness when approved.
+    if rs == "approved":
+        if not isinstance(sb, str) or not sb:
+            out.append(
+                f"[Trust] {ctx}: review_state=approved requires non-null signed_off_by"
+            )
+        if not isinstance(sa, str) or not sa:
+            out.append(
+                f"[Trust] {ctx}: review_state=approved requires non-null signed_off_at"
+            )
+        if is_rule_1 and role is None:
+            out.append(
+                f"[Trust] {ctx}: Rule 1 (metric / named_filter) approved requires "
+                f"non-null signed_off_role"
+            )
+
+    # Hard Rule #10 — sign-off coherence: unreviewed/rejected entries must not
+    # carry sign-off attribution. (Stale entries preserve their previous sign-off,
+    # so they are exempt.)
+    if rs in ("unreviewed", "rejected"):
+        if sb is not None:
+            out.append(
+                f"[Trust] {ctx}: review_state={rs} requires signed_off_by=null"
+            )
+        if sa is not None:
+            out.append(
+                f"[Trust] {ctx}: review_state={rs} requires signed_off_at=null"
+            )
+        if role is not None:
+            out.append(
+                f"[Trust] {ctx}: review_state={rs} requires signed_off_role=null"
+            )
+
+    return out
+
+
 def _check_field_extensions(field_agami: dict, context: str) -> list[str]:
     out = _check_extension_keys(field_agami, ALLOWED_AGAMI_KEYS_FIELD, context)
 
@@ -286,6 +416,7 @@ def _check_field_extensions(field_agami: dict, context: str) -> list[str]:
     if "original_type" in field_agami and not isinstance(field_agami["original_type"], str):
         out.append(f"[Extension] {context}: original_type must be a string")
 
+    out.extend(_check_trust_layer(field_agami, context, is_rule_1=False))
     return out
 
 
@@ -313,6 +444,8 @@ def _check_dataset_extensions(ds_agami: dict, context: str) -> list[str]:
                         f"[Extension] {context}.performance_hints.{arr_key} "
                         f"must be an array"
                     )
+
+    out.extend(_check_trust_layer(ds_agami, context, is_rule_1=False))
     return out
 
 
@@ -329,6 +462,70 @@ def _check_relationship_extensions(rel_agami: dict, context: str) -> list[str]:
                     f"[Extension] {context}.fk_validation: unknown key(s) "
                     f"{sorted(extras)}. Allowed: {sorted(ALLOWED_FK_VALIDATION_KEYS)}."
                 )
+
+    out.extend(_check_trust_layer(rel_agami, context, is_rule_1=False))
+    return out
+
+
+def _check_metric_extensions(metric_agami: dict, context: str) -> list[str]:
+    out = _check_extension_keys(metric_agami, ALLOWED_AGAMI_KEYS_METRIC, context)
+
+    if "definition_prose" in metric_agami and not isinstance(metric_agami["definition_prose"], str):
+        out.append(f"[Extension] {context}: definition_prose must be a string")
+    if "assumptions" in metric_agami and not isinstance(metric_agami["assumptions"], list):
+        out.append(f"[Extension] {context}: assumptions must be an array")
+    if "excludes" in metric_agami and not isinstance(metric_agami["excludes"], list):
+        out.append(f"[Extension] {context}: excludes must be an array")
+
+    out.extend(_check_trust_layer(metric_agami, context, is_rule_1=True))
+
+    # Rule 1 + Hard Rule #8 — approved metric requires non-empty definition_prose.
+    if metric_agami.get("review_state") == "approved":
+        dp = metric_agami.get("definition_prose")
+        if not isinstance(dp, str) or not dp.strip():
+            out.append(
+                f"[Trust] {context}: Rule 1 (metric) approved requires "
+                f"non-empty definition_prose"
+            )
+
+    return out
+
+
+def _check_named_filter(nf: dict, ctx: str) -> list[str]:
+    """Validate a single named_filter object inside agami.named_filters[]."""
+    out: list[str] = []
+    if not isinstance(nf, dict):
+        return [f"[Extension] {ctx}: must be an object"]
+
+    extras = set(nf.keys()) - ALLOWED_NAMED_FILTER_KEYS
+    if extras:
+        out.append(
+            f"[Extension] {ctx}: unknown key(s) {sorted(extras)}. "
+            f"Allowed: {sorted(ALLOWED_NAMED_FILTER_KEYS)}."
+        )
+
+    for required in ("name", "expression"):
+        v = nf.get(required)
+        if not isinstance(v, str) or not v.strip():
+            out.append(
+                f"[Extension] {ctx}: missing required key '{required}' (non-empty string)"
+            )
+
+    if "definition_prose" in nf and not isinstance(nf["definition_prose"], str):
+        out.append(f"[Extension] {ctx}: definition_prose must be a string")
+    if "synonyms" in nf and not isinstance(nf["synonyms"], list):
+        out.append(f"[Extension] {ctx}: synonyms must be an array")
+
+    out.extend(_check_trust_layer(nf, ctx, is_rule_1=True))
+
+    if nf.get("review_state") == "approved":
+        dp = nf.get("definition_prose")
+        if not isinstance(dp, str) or not dp.strip():
+            out.append(
+                f"[Trust] {ctx}: Rule 1 (named_filter) approved requires "
+                f"non-empty definition_prose"
+            )
+
     return out
 
 
@@ -345,6 +542,26 @@ def _check_model_extensions(sm_agami: dict, context: str) -> list[str]:
                     f"[Extension] {context}.introspect_meta: unknown key(s) "
                     f"{sorted(extras)}. Allowed: {sorted(ALLOWED_INTROSPECT_META_KEYS)}."
                 )
+
+    if "named_filters" in sm_agami:
+        nfs = sm_agami["named_filters"]
+        if not isinstance(nfs, list):
+            out.append(f"[Extension] {context}: named_filters must be an array")
+        else:
+            seen_names: set[str] = set()
+            for i, nf in enumerate(nfs):
+                nf_ctx = f"{context}.named_filters[{i}]"
+                out.extend(_check_named_filter(nf, nf_ctx))
+                if isinstance(nf, dict):
+                    n = nf.get("name")
+                    if isinstance(n, str):
+                        if n in seen_names:
+                            out.append(
+                                f"[Extension] {context}.named_filters: "
+                                f"duplicate name '{n}'"
+                            )
+                        seen_names.add(n)
+
     return out
 
 
@@ -405,6 +622,19 @@ def _walk_extensions(model: dict) -> list[str]:
                     continue
                 if agami is not None:
                     out.extend(_check_relationship_extensions(agami, ctx))
+
+        # Metric level — new in the trust-layer launch. OSI defines
+        # metric.custom_extensions but this validator did not previously walk it.
+        for metric in sm.get("metrics", []):
+            m_name = metric.get("name", "<unnamed>")
+            for i, ext in enumerate(metric.get("custom_extensions", [])):
+                agami, err = _parse_agami_payload(ext)
+                ctx = f"metrics['{m_name}'].custom_extensions[{i}].agami"
+                if err:
+                    out.append(f"[Extension] {ctx}: {err}")
+                    continue
+                if agami is not None:
+                    out.extend(_check_metric_extensions(agami, ctx))
 
     return out
 

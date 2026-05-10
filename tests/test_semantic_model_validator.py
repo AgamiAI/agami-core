@@ -827,3 +827,410 @@ def test_directory_mixed_v12_and_v13_supported(tmp_path):
     })
     errors, _ = validate_directory(pdir)
     assert errors == [], errors
+
+
+# --- Class 4: Trust-layer extensions ---------------------------------------
+#
+# Mirrors plugins/agami/shared/agami-osi-extensions.md → Trust-layer extensions.
+# The trust spine introduces:
+#   - Universal keys on field / dataset / relationship / metric / named_filter:
+#     confidence, signal_breakdown, review_state, origin, signed_off_*
+#   - Metric-level definitional keys: definition_prose, assumptions, excludes
+#   - Model-level named_filters array (with its own per-filter Rule 1)
+# And the validator enforces Hard Rules #7 / #8 / #9 / #10.
+
+
+def _agami_ext(payload: dict) -> dict:
+    """Helper: build a custom_extensions entry from an agami payload dict."""
+    import json
+    return {"vendor_name": "COMMON", "data": json.dumps({"agami": payload})}
+
+
+def _approved(by: str = "ashwin@agami.ai", role: str | None = None,
+              at: str = "2026-05-10T14:23:11Z") -> dict:
+    """Helper: build a Rule 2 approved trust block (no role required)."""
+    out = {"review_state": "approved", "signed_off_by": by, "signed_off_at": at}
+    if role is not None:
+        out["signed_off_role"] = role
+    return out
+
+
+def _approved_rule1(by: str = "jane.smith@example.com", role: str = "cfo",
+                    at: str = "2026-03-15T10:00:00Z") -> dict:
+    """Helper: full Rule 1 sign-off block."""
+    return {
+        "review_state": "approved",
+        "signed_off_by": by,
+        "signed_off_at": at,
+        "signed_off_role": role,
+    }
+
+
+def test_relationship_with_trust_layer_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "confidence": 0.62,
+        "review_state": "unreviewed",
+        "origin": "introspect_heuristic",
+        "signed_off_by": None,
+        "signed_off_at": None,
+        "signed_off_role": None,
+        "signal_breakdown": {
+            "fk_declared": False,
+            "unique_index_match": True,
+            "column_type_match": True,
+            "column_name_similarity": 1.0,
+        },
+    })]
+    assert validate(m) == []
+
+
+def test_relationship_approved_with_full_signoff_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "confidence": 1.0,
+        "origin": "fk",
+        **_approved(by="agami_introspect_v1", role="system"),
+    })]
+    assert validate(m) == []
+
+
+def test_field_with_trust_layer_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["fields"][0]["custom_extensions"] = [_agami_ext({
+        "type": "integer",
+        "confidence": 0.95,
+        "origin": "fk",
+        **_approved(by="agami_introspect_v1", role="system"),
+    })]
+    assert validate(m) == []
+
+
+def test_dataset_with_trust_layer_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["datasets"][0]["custom_extensions"] = [_agami_ext({
+        "performance_hints": {"estimated_row_count": 1000},
+        "confidence": 0.9,
+        "review_state": "unreviewed",
+        "signed_off_by": None,
+        "signed_off_at": None,
+    })]
+    assert validate(m) == []
+
+
+# --- Confidence number range ------------------------------------------------
+
+def test_confidence_above_1_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "confidence": 1.5,
+        "review_state": "unreviewed",
+    })]
+    errors = validate(m)
+    assert any("confidence 1.5 outside [0, 1]" in e for e in errors), errors
+
+
+def test_confidence_below_0_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "confidence": -0.1,
+        "review_state": "unreviewed",
+    })]
+    errors = validate(m)
+    assert any("outside [0, 1]" in e for e in errors), errors
+
+
+def test_confidence_non_number_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "confidence": "high",
+        "review_state": "unreviewed",
+    })]
+    errors = validate(m)
+    assert any("confidence must be a number" in e for e in errors), errors
+
+
+def test_confidence_boolean_rejected():
+    """A bare True looks numeric in Python (1.0) — explicitly reject it."""
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "confidence": True,
+        "review_state": "unreviewed",
+    })]
+    errors = validate(m)
+    assert any("confidence must be a number" in e for e in errors), errors
+
+
+# --- Enum violations --------------------------------------------------------
+
+def test_invalid_review_state_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "review_state": "in_review",
+    })]
+    errors = validate(m)
+    assert any("review_state 'in_review' invalid" in e for e in errors), errors
+
+
+def test_invalid_origin_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "origin": "magic",
+        "review_state": "unreviewed",
+    })]
+    errors = validate(m)
+    assert any("origin 'magic' invalid" in e for e in errors), errors
+
+
+def test_invalid_signoff_role_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [{
+        "name": "revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(orders.id)"}]},
+        "custom_extensions": [_agami_ext({
+            "definition_prose": "Some prose.",
+            "review_state": "approved",
+            "signed_off_by": "x@y.com",
+            "signed_off_at": "2026-05-10T00:00:00Z",
+            "signed_off_role": "ceo",  # not in enum
+        })],
+    }]
+    errors = validate(m)
+    assert any("signed_off_role 'ceo' invalid" in e for e in errors), errors
+
+
+# --- Hard Rule #9 (Rule 2): approved entry needs by + at -------------------
+
+def test_rule2_approved_relationship_missing_signoff_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "review_state": "approved",
+        # missing signed_off_by, signed_off_at
+    })]
+    errors = validate(m)
+    assert any("requires non-null signed_off_by" in e for e in errors), errors
+    assert any("requires non-null signed_off_at" in e for e in errors), errors
+
+
+def test_rule2_approved_relationship_role_optional():
+    """Non-Rule-1 entries don't require signed_off_role."""
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        **_approved(role=None),  # by + at, no role
+    })]
+    assert validate(m) == []
+
+
+# --- Hard Rule #8 (Rule 1): metrics + named_filters -------------------------
+
+def test_rule1_approved_metric_missing_role_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [{
+        "name": "revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(orders.id)"}]},
+        "custom_extensions": [_agami_ext({
+            "definition_prose": "Net revenue.",
+            "review_state": "approved",
+            "signed_off_by": "jane@example.com",
+            "signed_off_at": "2026-03-15T10:00:00Z",
+            # missing signed_off_role — Rule 1 violation
+        })],
+    }]
+    errors = validate(m)
+    assert any("Rule 1" in e and "signed_off_role" in e for e in errors), errors
+
+
+def test_rule1_approved_metric_missing_definition_prose_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [{
+        "name": "revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(orders.id)"}]},
+        "custom_extensions": [_agami_ext({
+            **_approved_rule1(),
+            # no definition_prose
+        })],
+    }]
+    errors = validate(m)
+    assert any("definition_prose" in e and "Rule 1" in e for e in errors), errors
+
+
+def test_rule1_approved_metric_with_full_signoff_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [{
+        "name": "revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(orders.id)"}]},
+        "custom_extensions": [_agami_ext({
+            "definition_prose": "Net revenue, gross of refunds.",
+            "assumptions": ["FX is invoice-date USD"],
+            "excludes": ["trial revenue"],
+            "confidence": 1.0,
+            "origin": "human_authored",
+            **_approved_rule1(),
+        })],
+    }]
+    assert validate(m) == []
+
+
+# --- Hard Rule #10: sign-off coherence (unreviewed/rejected → null) --------
+
+def test_unreviewed_with_signoff_by_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "review_state": "unreviewed",
+        "signed_off_by": "leftover@example.com",  # should be null
+    })]
+    errors = validate(m)
+    assert any("review_state=unreviewed requires signed_off_by=null" in e for e in errors), errors
+
+
+def test_rejected_with_signoff_role_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "review_state": "rejected",
+        "signed_off_role": "engineer",  # should be null
+    })]
+    errors = validate(m)
+    assert any("review_state=rejected requires signed_off_role=null" in e for e in errors), errors
+
+
+def test_stale_preserves_signoff():
+    """Stale entries keep their previous sign-off (audit trail)."""
+    m = minimal_valid_model()
+    m["semantic_model"][0]["relationships"][0]["custom_extensions"] = [_agami_ext({
+        "review_state": "stale",
+        "signed_off_by": "previous.approver@example.com",
+        "signed_off_at": "2026-04-01T00:00:00Z",
+        "signed_off_role": "engineer",
+    })]
+    assert validate(m) == []
+
+
+# --- Metric-level extensions -----------------------------------------------
+
+def test_metric_with_definition_keys_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [{
+        "name": "revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(orders.id)"}]},
+        "custom_extensions": [_agami_ext({
+            "definition_prose": "Some prose.",
+            "assumptions": ["a1", "a2"],
+            "excludes": ["e1"],
+            "review_state": "unreviewed",
+        })],
+    }]
+    assert validate(m) == []
+
+
+def test_metric_unknown_extension_key_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [{
+        "name": "revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(orders.id)"}]},
+        "custom_extensions": [_agami_ext({
+            "definition_prose": "x",
+            "review_state": "unreviewed",
+            "made_up_key": "bad",
+        })],
+    }]
+    errors = validate(m)
+    assert any("unknown agami key" in e and "made_up_key" in e for e in errors), errors
+
+
+def test_metric_assumptions_must_be_array():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["metrics"] = [{
+        "name": "revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(orders.id)"}]},
+        "custom_extensions": [_agami_ext({
+            "assumptions": "single string is wrong",
+            "review_state": "unreviewed",
+        })],
+    }]
+    errors = validate(m)
+    assert any("assumptions must be an array" in e for e in errors), errors
+
+
+# --- Named filters (model-level extension) ---------------------------------
+
+def test_named_filters_valid_passes():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["custom_extensions"] = [_agami_ext({
+        "profile": "default",
+        "named_filters": [
+            {
+                "name": "active_customer",
+                "expression": "customers.is_active = true",
+                "definition_prose": "Currently active.",
+                "synonyms": ["active customers"],
+                "confidence": 1.0,
+                "origin": "human_authored",
+                **_approved_rule1(role="data_lead"),
+            }
+        ],
+    })]
+    assert validate(m) == []
+
+
+def test_named_filter_missing_expression_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["custom_extensions"] = [_agami_ext({
+        "named_filters": [
+            {"name": "no_expr", "review_state": "unreviewed"}
+        ],
+    })]
+    errors = validate(m)
+    assert any("missing required key 'expression'" in e for e in errors), errors
+
+
+def test_named_filter_duplicate_names_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["custom_extensions"] = [_agami_ext({
+        "named_filters": [
+            {"name": "active", "expression": "x = 1", "review_state": "unreviewed"},
+            {"name": "active", "expression": "y = 2", "review_state": "unreviewed"},
+        ],
+    })]
+    errors = validate(m)
+    assert any("duplicate name 'active'" in e for e in errors), errors
+
+
+def test_named_filter_rule1_approved_without_role_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["custom_extensions"] = [_agami_ext({
+        "named_filters": [{
+            "name": "active",
+            "expression": "x = 1",
+            "definition_prose": "Some prose.",
+            "review_state": "approved",
+            "signed_off_by": "x@y.com",
+            "signed_off_at": "2026-05-10T00:00:00Z",
+            # missing signed_off_role — Rule 1
+        }],
+    })]
+    errors = validate(m)
+    assert any("Rule 1" in e and "signed_off_role" in e for e in errors), errors
+
+
+def test_named_filter_unknown_key_rejected():
+    m = minimal_valid_model()
+    m["semantic_model"][0]["custom_extensions"] = [_agami_ext({
+        "named_filters": [{
+            "name": "active", "expression": "x = 1",
+            "review_state": "unreviewed",
+            "made_up": "bad",
+        }],
+    })]
+    errors = validate(m)
+    assert any("named_filters[0]" in e and "made_up" in e for e in errors), errors
+
+
+def test_model_level_trust_keys_rejected():
+    """Trust-layer keys on the model itself are not allowed (model isn't reviewable)."""
+    m = minimal_valid_model()
+    m["semantic_model"][0]["custom_extensions"] = [_agami_ext({
+        "profile": "default",
+        "confidence": 0.9,  # trust keys not allowed at model level
+    })]
+    errors = validate(m)
+    assert any("unknown agami key" in e and "confidence" in e for e in errors), errors

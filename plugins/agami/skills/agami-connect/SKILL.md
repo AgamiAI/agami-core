@@ -662,6 +662,107 @@ The `file` field for each schema is `<schema>/_schema.yaml` (path with subdirect
     - For each `_schema.yaml` relationship: keep it as-is if both endpoints still exist. Drop if the underlying FK is gone.
     - Keep all existing `metrics[]` entries (per-table or per-schema) — user-authored, never lose them.
     - For `index.yaml.cross_schema_relationships`: same preservation rules.
+    - **Trust-layer fields preserved.** For every entry whose `agami.review_state` is `approved` or `rejected` in the existing yaml, keep the full trust block (`confidence`, `signal_breakdown`, `review_state`, `origin`, `signed_off_*`) verbatim — human review is never lost on reintrospect. New entries (those that didn't exist before) get fresh trust blocks per Phase 2c. Entries whose underlying schema element changed (column type, FK target, etc.) get their `agami.review_state` flipped to `stale` (drift signal), preserving prior `signed_off_*` for audit.
+11. **Trust-layer fields on every entry.** Every dataset, field, and relationship MUST carry the universal trust-layer keys (`confidence`, `signal_breakdown`, `review_state`, `origin`, `signed_off_by`, `signed_off_at`, `signed_off_role`) inside its `custom_extensions[].vendor_name=COMMON` agami payload. The validator rejects any entry without them. See Phase 2c below for how to compute the values.
+
+---
+
+## Phase 2c: Confidence and auto-approve (the trust spine)
+
+Before promoting any yaml from staging, every dataset / field / relationship gets a **trust block** populated. The trust spine has two pieces:
+
+1. **Compute a confidence number** in `[0, 1]` from the signals the introspect step already collected.
+2. **Apply auto-approve rules** — entries with strong-enough provenance flip `review_state` straight to `approved` with `signed_off_by: agami_introspect_v1`. Everything else stays `unreviewed`.
+
+This is what makes the trust marketing claim defensible: every join is either FK-derived (auto-approved) or human-approved later via the review dashboard. Nothing slips through silently.
+
+### 2c.1 — compute confidence per entity
+
+Use [`plugins/agami/scripts/compute_confidence.py`](../../scripts/compute_confidence.py) — one pure function per entity type:
+
+- `confidence_for_join(...)` — for each relationship in `_schema.yaml` and every cross-schema relationship in `index.yaml`
+- `confidence_for_field_description(...)` — for every field with a non-empty `description` (hand-edits, DBA column comments, or LLM-generated descriptions)
+- `confidence_for_metric(...)` — for any future-proposed metrics (Phase 2 currently doesn't auto-propose metrics; metrics that exist were hand-authored and stay `human_authored` / `approved` if they were already approved)
+- `confidence_for_named_filter(...)` — same — named filters aren't auto-proposed in v1
+
+The signal inputs come from data the introspect step already collects:
+
+| Signal | Where it comes from |
+|---|---|
+| `fk_declared` | `information_schema.table_constraints` rows where `constraint_type = 'FOREIGN KEY'` |
+| `pk_overlap` | both endpoints listed as PK in `information_schema.table_constraints` |
+| `unique_index_match` | the target column has a unique index (`pg_indexes` for postgres, `SHOW INDEXES` for mysql) |
+| `column_type_match` | `data_type` matches between source and target columns |
+| `column_name_similarity` | Jaccard similarity over the columns' name tokens |
+| `plural_pattern_match` | `<table>.<col>` matches `<plural-of-target-table>.<col>` (heuristic) |
+| `dba_column_comment` | `pg_description` / `INFORMATION_SCHEMA.COLUMNS.COMMENT` is non-empty |
+| `business_term_match` | column name appears in the introspect dictionary (`status`, `email`, `country`, `name`, etc.) |
+| `enum_like_distribution` | sampled distinct values are ≤ 50 short strings (already used today for `choice_field`) |
+
+If a signal isn't observable for a given DB type (e.g., SQLite has no FK metadata when foreign_keys pragma is off; MySQL has no column comments unless the DBA wrote them), pass `False` for that signal — `compute_confidence.py` clamps appropriately.
+
+Invocation pattern (pseudocode — Claude composes the actual YAML):
+
+```python
+# For a relationship between orders.customer_id → customers.id:
+score, signal_breakdown = confidence_for_join(
+    fk_declared=True,
+    pk_overlap=False,
+    unique_index_match=True,
+    column_type_match=True,
+    column_name_similarity=0.92,
+    plural_pattern_match=True,
+)
+# score ≈ 0.95 (typical FK-declared join with corroborating signals)
+```
+
+### 2c.2 — auto-approve rules (the queue-shrinkers)
+
+These produce `review_state: approved` upfront, with `signed_off_by: agami_introspect_v1`, `signed_off_role: system`, `signed_off_at: <UTC ISO8601 of introspect run>`. Do NOT use auto-approve for `metrics` or `named_filters` — those are Rule 1 and require human sign-off. Joins / field descriptions / dataset metadata can auto-approve when:
+
+- **FK declared** in DB metadata → relationship auto-approved (`origin: fk`)
+- **DBA-authored column comment** present → field description auto-approved (`origin: column_comment`)
+- **`agami.type` derived from SQL column type** → field auto-approved (`origin: introspect_heuristic`, but the type itself is mechanical so it's safe)
+- **Single-column unique index + plural-of-table-name pattern + column type match** → join auto-approved (`origin: introspect_heuristic`, supplementary auto-approve case)
+
+Anything else that doesn't auto-approve gets `review_state: unreviewed`, `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null`.
+
+### 2c.3 — origin enum (which path produced this entry)
+
+Pick exactly one:
+
+- `fk` — derived from FK metadata in the source DB
+- `introspect_heuristic` — derived from name-similarity / unique-index-match / etc.
+- `column_comment` — derived from a DBA-authored column comment
+- `llm_suggested` — proposed by an LLM during introspect (e.g., generated description) with no stronger signal
+- `human_authored` — written by a human (e.g., preserved from a prior reintrospect, or hand-edited)
+
+### 2c.4 — example: a relationship with the trust block filled in
+
+```yaml
+- name: orders_to_customers
+  from: orders
+  to: customers
+  from_columns: [customer_id]
+  to_columns: [id]
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"fk_validation": {"validated_at": "2026-05-10T14:23:11Z", "orphan_count": 0, "total_rows": 4213, "orphan_ratio": 0.0}, "confidence": 1.0, "signal_breakdown": {"fk_declared": true, "pk_overlap": true, "unique_index_match": true, "column_type_match": true, "column_name_similarity": 0.95, "plural_pattern_match": true, "llm_inferred": false}, "review_state": "approved", "origin": "fk", "signed_off_by": "agami_introspect_v1", "signed_off_at": "2026-05-10T14:23:11Z", "signed_off_role": "system"}}'
+```
+
+### 2c.5 — example: a field description below threshold (review queue)
+
+```yaml
+- name: status
+  expression:
+    dialects:
+      - dialect: ANSI_SQL
+        expression: status
+  description: "Customer lifecycle status (active / churned / trial / inactive)"
+  custom_extensions:
+    - vendor_name: COMMON
+      data: '{"agami": {"type": "string", "choice_field": {"active": "Active", "churned": "Churned", "trial": "Trial", "inactive": "Inactive"}, "confidence": 0.55, "signal_breakdown": {"dba_column_comment": false, "business_term_match": true, "enum_like_distribution": true, "llm_inferred": true}, "review_state": "unreviewed", "origin": "llm_suggested", "signed_off_by": null, "signed_off_at": null, "signed_off_role": null}}'
+```
 
 ---
 
@@ -709,6 +810,69 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$st
 ### 3c — never bypass
 
 If the validator can't be run for any reason (missing Python, missing dependencies, missing schema file), **DO NOT PROMOTE THE STAGING DIRECTORY**. Tell the user the validator is unavailable and offer to install the dependencies. The files in `<artifacts_dir>/<profile>/` are the source of truth for every future query — a broken model breaks every query that follows.
+
+### 3d — snapshot for reproducibility
+
+After promotion succeeds, freeze the model under `.snapshots/<model_version>/`. Every query log entry pins this version so old answers reproduce against the model that produced them.
+
+```bash
+# Compute model_version: SHA-256 of every yaml file's content, sorted by relative path.
+# This is a content hash — identical introspects produce identical hashes (idempotent
+# snapshots), and any change to any yaml produces a new hash.
+model_version=$(
+  cd "$artifacts_dir/$profile"
+  find . -type f \( -name '*.yaml' -o -name '*.md' \) \
+    ! -path './.snapshots/*' ! -path './.git/*' \
+    | LC_ALL=C sort \
+    | xargs sha256sum \
+    | sha256sum | cut -d' ' -f1 | head -c 12
+)
+
+# Write the version into index.yaml under introspect_meta.model_version.
+# Then snapshot the directory under .snapshots/<model_version>/ (immutable copy).
+mkdir -p "$artifacts_dir/$profile/.snapshots/$model_version"
+rsync -a --exclude '.snapshots' --exclude '.git' \
+  "$artifacts_dir/$profile/" "$artifacts_dir/$profile/.snapshots/$model_version/"
+chmod -R a-w "$artifacts_dir/$profile/.snapshots/$model_version"
+```
+
+Surface: `✓ Snapshot saved at .snapshots/<model_version>/ — query receipts pin this version.`
+
+Stamp the model version into `index.yaml`'s `introspect_meta` block (so Phase 1.1 can read it on subsequent runs and build the receipt's "model version pin"):
+
+```yaml
+introspect_meta:
+  introspected_at: <ISO>
+  tier: <cli|duckdb|python>
+  source_db_version: <version string>
+  model_version: <12-char hash>     # NEW — written by Phase 3d after promotion
+```
+
+### 3e — code-as-artifact: git init + commit
+
+The model is files. Diffable, PR-able, git-blame-able is the trust property — *the dashboard is a view; YAML is canonical*. On first introspect, init a git repo at `<artifacts_dir>/<profile>/` so every change a curator makes via the dashboard creates a traceable diff.
+
+```bash
+profile_dir="$artifacts_dir/$profile"
+if [ ! -d "$profile_dir/.git" ]; then
+  ( cd "$profile_dir" && git init -q -b main ) || true
+  cat > "$profile_dir/.gitignore" <<'EOF'
+# Internal — don't commit ephemeral state
+.snapshots/
+EOF
+fi
+
+# Stage and commit (best-effort — never block the introspect on git failure).
+( cd "$profile_dir" && git add -A && git -c user.name="agami" \
+  -c user.email="agami_introspect_v1@local" \
+  commit -q -m "introspect: $profile @ $model_version" --allow-empty ) || true
+```
+
+`.snapshots/` is gitignored — snapshots are local-only audit history, not source-controllable content. The user can `cd <artifacts_dir>/<profile> && git log` to see every model change over time.
+
+If the user already committed the directory to a wider repo (e.g., they `git init`'d their whole `~/agami-artifacts/` for cross-profile tracking), skip the per-profile init and just commit there. Detect via `git rev-parse --show-toplevel` from `$profile_dir`.
+
+Surface: `✓ Committed to <profile_dir>/.git as <short-sha>.` (Or: `✓ Committed to existing repo at <toplevel>.`)
 
 ---
 
@@ -825,6 +989,49 @@ Branch:
 - **Skip** → leave example as-is.
 
 Surface: `✓ Demo run complete.`
+
+---
+
+## Phase 5.5: Post-introspect summary (the trust-layer landing)
+
+This is the first surface a curator sees. It tells them what auto-approved cleanly and what needs their attention — bounded, scannable, never a 350-item wall.
+
+Scan the freshly-written model under `<artifacts_dir>/<profile>/` and count entries by `agami.review_state` and entity type. Produce the summary block exactly:
+
+```
+agami-connect just ran. Here's what we found:
+
+  ✓  <N>  datasets, <M> fields                            (auto-approved)
+  ✓  <K>  FK relationships                                 (auto-approved)
+  ✓  <J>  field descriptions from DBA column comments      (auto-approved)
+  ⚠  <R1> inferred relationships from column-name matches  (review)
+  ⚠  <R2> field descriptions below confidence 0.7          (review)
+  ⚠  <R3> metric proposals (sign-off required — Rule 1)
+  ⚠  <R4> named-filter proposals (sign-off required — Rule 1)
+
+  <R1+R2+R3+R4> items need your attention at threshold 0.7.
+```
+
+Counting rules (read the YAMLs after promotion, not the staging dir):
+
+- `auto-approved datasets/fields` — `agami.review_state == "approved"` AND `agami.signed_off_by == "agami_introspect_v1"`. Count datasets and fields separately and combine in the first row.
+- `FK relationships` — `agami.review_state == "approved"` AND `agami.origin == "fk"` (across `_schema.yaml` and `index.yaml.cross_schema_relationships`).
+- `field descriptions from DBA column comments` — fields with `agami.review_state == "approved"` AND `agami.origin == "column_comment"`.
+- `inferred relationships ... (review)` — relationships with `agami.review_state == "unreviewed"` AND `agami.origin == "introspect_heuristic"`.
+- `field descriptions below confidence 0.7 (review)` — fields with `agami.review_state == "unreviewed"` AND `agami.confidence < 0.7`.
+- `metric proposals` and `named-filter proposals` — count `metrics[]` entries in any yaml + `named_filters[]` entries in `index.yaml`'s model-level extension where `agami.review_state == "unreviewed"`.
+
+If a category's count is `0`, omit that line entirely — don't show "0 metric proposals". A small DB might collapse the summary to two or three lines, which is fine.
+
+Then offer the review dashboard via AskUserQuestion (single question, three options):
+
+| Option | What happens |
+|---|---|
+| `Open the review dashboard` | Invoke the `agami-review` skill (built in §4 of the plan; ships with the dashboard launch). The user lands on the queue and walks the items. |
+| `Skip — I'll review later` (default) | Acknowledge: "OK — `<R1+R2+R3+R4>` items remain unreviewed. Run `/agami-review` (or say 'open the review dashboard') anytime." Continue to Phase 6. |
+| `Adjust the threshold` | Ask for a number (`0.0` – `1.0`). Re-render the summary using that threshold. Persist to `<artifacts_dir>/<profile>/agami.config.yaml` under `review.threshold`. |
+
+If `agami-review` doesn't exist yet (the dashboard skill ships in a follow-up of the same launch), surface the summary block but skip the AskUserQuestion — instead surface a one-liner: *"Review dashboard not yet shipping in this build — the unreviewed items will surface in answer receipts as warnings until you can review them."*
 
 ---
 

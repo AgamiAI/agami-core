@@ -31,6 +31,10 @@ node_modules/
 tests/integration/.tmp/
 tests/integration/*.log
 
+# Built fixtures — sources are checked in (sqlite-shop-init.sql); the binary
+# .db is built locally by the smoke-test harness.
+tests/integration/fixtures/*.db
+
 # Dotenv (only for local dev, never committed)
 .env
 .env.local

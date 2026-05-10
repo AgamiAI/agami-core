@@ -121,16 +121,32 @@ def _format_sql(sql: str) -> str:
     return out.strip()
 
 
+def _validate_receipt(receipt: dict) -> None:
+    """Light validation of the trust-receipt shape. The fields are documented
+    in chart-template.html → RECEIPT_JSON schema. Receipts are optional —
+    callers that don't have one pass None / omit --receipt-file."""
+    if not isinstance(receipt, dict):
+        raise ValueError("receipt must be a JSON object")
+    for arr_key in ("tables_used", "relationships", "metrics", "named_filters", "warnings"):
+        if arr_key in receipt and not isinstance(receipt[arr_key], list):
+            raise ValueError(f"receipt.{arr_key} must be a list")
+    if "model_version" in receipt and not isinstance(receipt["model_version"], (str, type(None))):
+        raise ValueError("receipt.model_version must be a string or null")
+
+
 def render(
     *,
     title: str,
     summary: str,
     sections: list,
+    receipt: dict | None = None,
 ) -> str:
     if not isinstance(sections, list) or not sections:
         raise ValueError("sections must be a non-empty list")
     for i, sec in enumerate(sections):
         _validate_section(sec, i)
+    if receipt is not None:
+        _validate_receipt(receipt)
 
     # Format SQL in every section before serializing.
     sections = [
@@ -149,6 +165,8 @@ def render(
         .replace("{{REPORT_SUMMARY_JSON}}", json.dumps(summary or ""))
         .replace("{{GENERATED_AT}}", datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
         .replace("{{SECTIONS_JSON}}", json.dumps(sections))
+        # `null` for receipt-less reports — the template's JS checks `if (receipt)` and skips.
+        .replace("{{RECEIPT_JSON}}", json.dumps(receipt))
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark_svg)
         .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", logo_light_svg)
     )
@@ -164,6 +182,13 @@ def main() -> int:
     src.add_argument("--section", action="append", help="JSON object for a single section. Repeat for multiple.")
     src.add_argument("--sections-file", help="Path to a JSON file containing a list of section objects.")
 
+    p.add_argument(
+        "--receipt-file",
+        help="Path to a JSON file with the trust receipt object (model_version, "
+             "tables_used, relationships, metrics, named_filters, warnings). "
+             "Optional — when omitted, the report renders without a receipt panel.",
+    )
+
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
@@ -176,10 +201,19 @@ def main() -> int:
     else:
         sections = [json.loads(s) for s in args.section]
 
+    receipt = None
+    if args.receipt_file:
+        with open(os.path.expanduser(args.receipt_file)) as f:
+            receipt = json.load(f)
+        if not isinstance(receipt, dict):
+            sys.stderr.write(f"--receipt-file must contain a JSON object, got {type(receipt).__name__}\n")
+            return 1
+
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(title=args.title, summary=args.summary, sections=sections))
-    print(f"Wrote {out_path} ({len(sections)} section{'s' if len(sections) != 1 else ''})")
+    out_path.write_text(render(title=args.title, summary=args.summary, sections=sections, receipt=receipt))
+    print(f"Wrote {out_path} ({len(sections)} section{'s' if len(sections) != 1 else ''}"
+          f"{', with trust receipt' if receipt else ''})")
     return 0
 
 

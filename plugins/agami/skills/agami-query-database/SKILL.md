@@ -641,6 +641,44 @@ When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). Th
 
 The whole report's `SECTIONS_JSON` is a JSON array of these objects.
 
+#### 4e.iii.5 — build the trust receipt
+
+Every answer ships with a **trust receipt** that documents provenance: tables touched, relationships used, metric definitions invoked, named filters applied, source-data freshness, and the model version pin. This is the single most important UX element for a data engineer — it lets them defend any number to a CxO with one click.
+
+Build the receipt as a single JSON object. Schema (see [`shared/chart-template.html` → `RECEIPT_JSON`](../../shared/chart-template.html) for the canonical version):
+
+```json
+{
+  "model_version": "<short hash from index.yaml.introspect_meta.model_version>",
+  "tables_used": [
+    {"qname": "public.orders", "rows": <integer or null>, "freshness": "<ISO8601 + cadence note, or null>"}
+  ],
+  "relationships": [
+    {"name": "<rel name>", "from_to": "<from> → <to>",
+     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "fk|..."}
+  ],
+  "metrics": [
+    {"name": "<metric>", "definition_prose": "<plain English>",
+     "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
+  ],
+  "named_filters": [
+    {"name": "<filter>", "expression": "<predicate>", "definition_prose": "<plain English>"}
+  ],
+  "warnings": ["<one-liner per unreviewed entry that the answer used>"]
+}
+```
+
+How to populate each field:
+
+- **`model_version`** — read `index.yaml`'s `introspect_meta.model_version` (the 12-char hash written by agami-connect Phase 3d). If absent (legacy v1.2 model), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."*
+- **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the count returned by the EXPLAIN or post-execution counter (skip if uncertain). `freshness` comes from `agami.introspect_meta.introspected_at` — pass it as a hint of how stale the snapshot is, plus the upstream load cadence if known (often unknowable from the model alone — pass `null` if so).
+- **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the loaded OSI model (Phase 1c's `relationships_by_endpoints` index). Read `confidence`, `review_state`, `origin` from its `agami` extension. For composite or multi-hop joins, list each edge.
+- **`metrics`** — every OSI metric whose `expression` matches a fragment in the SQL. Pull `definition_prose` and the `signed_off_*` fields from the metric's `agami` extension.
+- **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING.
+- **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning: `"Used 1 unreviewed join (orders → customers, conf 0.62). Review now?"`. If the receipt has zero warnings, pass `[]` and the banner suppresses.
+
+Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
+
 #### 4e.iv — render via `render_chart.py` (do NOT inline-substitute through the Write tool)
 
 The HTML report is produced by a Python helper that reads the template + SVG logos once and substitutes placeholders. **Do not Read the template + Write the rendered HTML through the LLM** — that path costs ~30KB of token I/O per query and is the dominant slowness in chart rendering.
@@ -649,7 +687,9 @@ Instead:
 
 1. Build the sections JSON file at `/tmp/agami-sections-<ts>.json`. The shape is the JSON array built in 4e.iii — a list of section objects (`title`, `insights`, `chart_type`, `labels`, `datasets`, `table_headers`, `table_rows`, `sql`).
 
-2. Run the renderer:
+2. Build the receipt JSON file at `/tmp/agami-receipt-<ts>.json` per Phase 4e.iii.5.
+
+3. Run the renderer:
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)
@@ -658,14 +698,15 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/render_chart.py" \
   --title "$USER_QUESTION" \
   --summary "$EXECUTIVE_SUMMARY" \
   --sections-file "/tmp/agami-sections-$ts.json" \
+  --receipt-file "/tmp/agami-receipt-$ts.json" \
   --out "$HOME/.agami/charts/$ts.html"
 ```
 
-The helper reads `shared/chart-template.html` + the two logo SVGs once, validates each section, runs `template.replace(...)` for each placeholder, and writes the file. Stdlib only — no extra deps.
+The helper reads `shared/chart-template.html` + the two logo SVGs once, validates each section + receipt, runs `template.replace(...)` for each placeholder, and writes the file. Stdlib only — no extra deps.
 
-3. Delete the temp sections file: `rm -f /tmp/agami-sections-<ts>.json`.
+4. Delete the temp files: `rm -f /tmp/agami-sections-<ts>.json /tmp/agami-receipt-<ts>.json`.
 
-`--summary` is the executive summary used for multi-section reports; for single-section reports pass an empty string and the section's own insight covers it. `--title` is the user's original question.
+`--summary` is the executive summary used for multi-section reports; for single-section reports pass an empty string and the section's own insight covers it. `--title` is the user's original question. `--receipt-file` is **optional** for backward compatibility — if you can't build a receipt (legacy model, missing trust fields), omit the flag and the report renders without the receipt panel.
 
 If the user pinned a chart type via `--chart bar` (etc.), the LLM still chooses per section — the flag from 2a is hint, not override. Multi-section reports often need different chart types per section.
 

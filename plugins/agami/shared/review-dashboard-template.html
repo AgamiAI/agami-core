@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<!--
+  agami review dashboard — used by the agami-review skill via render_review.py.
+
+  The skill substitutes the {{...}} placeholders below and writes the result
+  to ~/.agami/review/<ts>.html. Self-contained: opens from file:// in any
+  browser, no server, no relative-path dependencies.
+
+  Per-render placeholders (always substitute):
+    {{REPORT_TITLE}}             — "Review queue · <profile> · threshold <X>"
+    {{GENERATED_AT}}             — ISO8601 UTC timestamp
+    {{ITEMS_JSON}}                — JSON array of review-item objects (schema below)
+    {{SUMMARY_JSON}}              — JSON object with the per-category counts
+                                    (auto-approved + needs-review)
+    {{THRESHOLD}}                 — Float string, e.g. "0.7"
+    {{MODEL_VERSION}}             — Short hash from index.yaml
+    {{AGAMI_LOGO_DARK_TEXT}}      — full SVG content of agami-logo-dark.svg
+    {{AGAMI_LOGO_LIGHT_TEXT}}     — full SVG content of agami-logo-light.svg
+
+  ITEMS_JSON schema — array of objects, one per item needing review:
+    {
+      "n":             integer (1-indexed display number — used in chat back-channel)
+      "entity_type":   "join" | "metric" | "field_description" | "named_filter"
+      "rule_1":        boolean (Rule 1 = sign-off required: metric / named_filter)
+      "id":            "qualified.identifier — e.g. relationships.orders_to_customers"
+      "yaml_path":     "public/orders.yaml" (relative to <artifacts_dir>/<profile>/)
+      "title":         "header line — e.g. 'public.orders → public.customers'"
+      "subtitle":      "optional one-line context — e.g. 'metric: revenue' or null"
+      "confidence":    float in [0,1]
+      "review_state":  "unreviewed" | "stale"
+      "origin":        "fk" | "introspect_heuristic" | "column_comment" | "llm_suggested" | "human_authored"
+      "signals":       [{"ok": true|false, "text": "Both columns named `customer_id`"}, ...]
+      "inferred":      "string — the inferred SQL fragment / definition / mapping"
+      "extra_lines":   [{"label": "Definition", "text": "..."}, ...] — optional structured details
+      "reply_hint":    "string — example chat command, e.g. 'approve 3' or 'approve 1 by you@x.com role=cfo'"
+    }
+
+  SUMMARY_JSON schema:
+    {
+      "auto_approved": {
+        "datasets":                            int,
+        "fields":                              int,
+        "fk_relationships":                    int,
+        "field_descriptions_from_comments":    int
+      },
+      "needs_review": {
+        "inferred_relationships":              int,
+        "low_confidence_field_descriptions":   int,
+        "metric_proposals":                    int,
+        "named_filter_proposals":              int,
+        "stale":                               int
+      }
+    }
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} — agami</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-elev: #fafafa;
+      --fg: #1a1a1a;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --row-zebra: rgba(0, 0, 0, 0.025);
+      --code-bg: rgba(0, 0, 0, 0.04);
+      --ok: #166534;
+      --bad: #991b1b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --bg-elev: #131c2f;
+        --fg: #f1f5f9;
+        --muted: #94a3b8;
+        --border: #1e293b;
+        --accent: #60a5fa;
+        --row-zebra: rgba(255, 255, 255, 0.03);
+        --code-bg: rgba(255, 255, 255, 0.04);
+        --ok: #86efac;
+        --bad: #fca5a5;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; }
+    header.dashboard-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 16px;
+    }
+    .logo a { display: inline-block; line-height: 0; text-decoration: none; }
+    .logo svg { display: block; height: 28px; width: auto; }
+    .logo-light-mode { display: inline-block; }
+    .logo-dark-mode { display: none; }
+    @media (prefers-color-scheme: dark) {
+      .logo-light-mode { display: none; }
+      .logo-dark-mode { display: inline-block; }
+    }
+    h1.dashboard-title {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0;
+      flex: 1;
+      text-align: right;
+    }
+    .meta { font-size: 12px; color: var(--muted); margin-bottom: 24px; }
+
+    .summary-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 22px;
+      background: var(--bg-elev);
+      margin-bottom: 28px;
+    }
+    .summary-card h2 {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 10px;
+    }
+    .summary-card ul { list-style: none; padding: 0; margin: 0; }
+    .summary-card li {
+      font-size: 14px;
+      padding: 3px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .summary-card .checkmark { color: var(--ok); font-weight: 700; }
+    .summary-card .warnmark { color: #d97706; font-weight: 700; }
+    .summary-card .count { font-variant-numeric: tabular-nums; min-width: 3em; text-align: right; }
+    .summary-total {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .review-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 22px;
+      background: var(--bg-elev);
+      margin-bottom: 16px;
+    }
+    .review-item-header {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .review-item-num {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      min-width: 2.4em;
+    }
+    .review-item-title {
+      font-size: 16px;
+      font-weight: 600;
+      flex: 1;
+      min-width: 200px;
+    }
+    .review-item-title code {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 14px;
+      background: var(--code-bg);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .review-item-subtitle {
+      font-size: 13px;
+      color: var(--muted);
+      margin: -8px 0 12px 2.4em;
+    }
+    .conf-pill {
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 999px;
+      margin-left: 6px;
+    }
+    .badge.unreviewed { background: #fef3c7; color: #92400e; }
+    .badge.stale      { background: #e5e7eb; color: #374151; }
+    .badge.rule1      { background: #dbeafe; color: #1e40af; }
+    @media (prefers-color-scheme: dark) {
+      .badge.unreviewed { background: #422006; color: #fbbf24; }
+      .badge.stale      { background: #1f2937; color: #9ca3af; }
+      .badge.rule1      { background: #1e3a8a; color: #93c5fd; }
+    }
+
+    .why { font-size: 12px; color: var(--muted);
+      margin: 0 0 6px; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600; }
+    .signals { list-style: none; padding: 0; margin: 0 0 14px; }
+    .signals li {
+      font-size: 14px;
+      padding: 2px 0;
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+    }
+    .signals .mark { font-weight: 700; min-width: 1.2em; }
+    .signals .ok { color: var(--ok); }
+    .signals .no { color: var(--bad); }
+
+    .inferred {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      background: var(--code-bg);
+      padding: 8px 12px;
+      border-radius: 6px;
+      margin: 6px 0 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .extra { margin: 8px 0 12px; font-size: 14px; }
+    .extra-line { margin: 3px 0; }
+    .extra-line .label {
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+      margin-right: 8px;
+    }
+
+    .reply-hint {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--code-bg);
+      padding: 6px 10px;
+      border-radius: 6px;
+      margin-top: 12px;
+      display: inline-block;
+    }
+    .yaml-path {
+      font-size: 11px;
+      color: var(--muted);
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      margin-top: 8px;
+    }
+
+    footer {
+      margin-top: 36px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="dashboard-header">
+      <span class="logo">
+        <a href="https://agami.ai" target="_blank" rel="noopener">
+          <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+          <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+        </a>
+      </span>
+      <h1 class="dashboard-title">{{REPORT_TITLE}}</h1>
+    </header>
+    <p class="meta">Generated <span id="generated-at"></span> · model version <code id="model-version"></code> · threshold <code id="threshold"></code></p>
+
+    <div class="summary-card" id="summary"></div>
+    <div id="items"></div>
+
+    <footer>
+      Reply in chat to act on these items:
+      <code>approve N</code>,
+      <code>reject N</code>,
+      <code>edit N</code>,
+      <code>approve all below 0.95</code>,
+      <code>threshold 0.5</code>,
+      <code>done</code>.
+      Rule 1 items (metrics, named filters) require a role:
+      <code>approve N by you@example.com role=cfo</code>.
+    </footer>
+  </div>
+
+  <script>
+    const items = {{ITEMS_JSON}};
+    const summary = {{SUMMARY_JSON}};
+    const threshold = "{{THRESHOLD}}";
+    const generatedAt = "{{GENERATED_AT}}";
+    const modelVersion = "{{MODEL_VERSION}}";
+
+    function el(tag, attrs = {}, ...children) {
+      const e = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (k === 'class') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else e.setAttribute(k, v);
+      }
+      for (const c of children) {
+        if (c == null) continue;
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      }
+      return e;
+    }
+
+    document.getElementById('generated-at').textContent = generatedAt;
+    document.getElementById('model-version').textContent = modelVersion || '(none)';
+    document.getElementById('threshold').textContent = threshold;
+
+    // ---- Summary card ----
+    const sumEl = document.getElementById('summary');
+    sumEl.appendChild(el('h2', { text: 'Summary at threshold ' + threshold }));
+    const sumList = el('ul');
+
+    const aa = (summary && summary.auto_approved) || {};
+    const nr = (summary && summary.needs_review) || {};
+
+    function row(symbol, klass, text, count) {
+      const li = el('li');
+      li.appendChild(el('span', { class: klass, text: symbol }));
+      li.appendChild(el('span', { text: text }));
+      const sp = el('span', { class: 'count', text: String(count) });
+      li.style.flex = '1';
+      const right = el('span', { class: 'count', text: String(count) });
+      // Layout: spacer + count
+      const spacer = el('span', { text: '' });
+      spacer.style.flex = '1';
+      li.appendChild(spacer);
+      li.appendChild(right);
+      return li;
+    }
+
+    let totalAuto = 0;
+    if ((aa.datasets || 0) + (aa.fields || 0) > 0) {
+      const c = (aa.datasets || 0) + (aa.fields || 0);
+      sumList.appendChild(row('✓', 'checkmark', `${aa.datasets || 0} datasets, ${aa.fields || 0} fields (auto-approved)`, c));
+      totalAuto += c;
+    }
+    if (aa.fk_relationships) {
+      sumList.appendChild(row('✓', 'checkmark', `${aa.fk_relationships} FK relationships (auto-approved)`, aa.fk_relationships));
+      totalAuto += aa.fk_relationships;
+    }
+    if (aa.field_descriptions_from_comments) {
+      sumList.appendChild(row('✓', 'checkmark',
+        `${aa.field_descriptions_from_comments} field descriptions from DBA column comments (auto-approved)`,
+        aa.field_descriptions_from_comments));
+      totalAuto += aa.field_descriptions_from_comments;
+    }
+
+    let totalReview = 0;
+    if (nr.inferred_relationships) {
+      sumList.appendChild(row('⚠', 'warnmark',
+        `${nr.inferred_relationships} inferred relationships from column-name matches (review)`,
+        nr.inferred_relationships));
+      totalReview += nr.inferred_relationships;
+    }
+    if (nr.low_confidence_field_descriptions) {
+      sumList.appendChild(row('⚠', 'warnmark',
+        `${nr.low_confidence_field_descriptions} field descriptions below confidence ${threshold} (review)`,
+        nr.low_confidence_field_descriptions));
+      totalReview += nr.low_confidence_field_descriptions;
+    }
+    if (nr.metric_proposals) {
+      sumList.appendChild(row('⚠', 'warnmark',
+        `${nr.metric_proposals} metric proposals (sign-off required — Rule 1)`,
+        nr.metric_proposals));
+      totalReview += nr.metric_proposals;
+    }
+    if (nr.named_filter_proposals) {
+      sumList.appendChild(row('⚠', 'warnmark',
+        `${nr.named_filter_proposals} named-filter proposals (sign-off required — Rule 1)`,
+        nr.named_filter_proposals));
+      totalReview += nr.named_filter_proposals;
+    }
+    if (nr.stale) {
+      sumList.appendChild(row('⚠', 'warnmark',
+        `${nr.stale} stale entries (schema drift — needs reconciliation)`,
+        nr.stale));
+      totalReview += nr.stale;
+    }
+
+    sumEl.appendChild(sumList);
+    const totalLine = el('div', { class: 'summary-total',
+      text: `${totalReview} item${totalReview === 1 ? '' : 's'} need your attention at threshold ${threshold}.` });
+    sumEl.appendChild(totalLine);
+
+    // ---- Item cards ----
+    const itemsEl = document.getElementById('items');
+
+    function renderSignals(signals) {
+      const ul = el('ul', { class: 'signals' });
+      (signals || []).forEach(s => {
+        const li = el('li');
+        const mark = s.ok ? '✓' : '✗';
+        const cls = s.ok ? 'mark ok' : 'mark no';
+        li.appendChild(el('span', { class: cls, text: mark }));
+        li.appendChild(el('span', { text: s.text || '' }));
+        ul.appendChild(li);
+      });
+      return ul;
+    }
+
+    items.forEach(item => {
+      const card = el('div', { class: 'review-item' });
+
+      const header = el('div', { class: 'review-item-header' });
+      header.appendChild(el('span', { class: 'review-item-num', text: '#' + item.n }));
+      const title = el('span', { class: 'review-item-title' });
+      title.appendChild(el('code', { text: item.title || '' }));
+      header.appendChild(title);
+      header.appendChild(el('span', { class: 'conf-pill',
+        text: 'conf ' + (typeof item.confidence === 'number' ? item.confidence.toFixed(2) : '?') }));
+      header.appendChild(el('span', { class: 'badge ' + (item.review_state || 'unreviewed'),
+        text: item.review_state || 'unreviewed' }));
+      if (item.rule_1) {
+        header.appendChild(el('span', { class: 'badge rule1', text: 'Rule 1' }));
+      }
+      card.appendChild(header);
+
+      if (item.subtitle) {
+        card.appendChild(el('div', { class: 'review-item-subtitle', text: item.subtitle }));
+      }
+
+      if (item.signals && item.signals.length) {
+        card.appendChild(el('div', { class: 'why', text: 'Why' }));
+        card.appendChild(renderSignals(item.signals));
+      }
+
+      if (item.inferred) {
+        card.appendChild(el('div', { class: 'why', text: 'Inferred' }));
+        card.appendChild(el('div', { class: 'inferred', text: item.inferred }));
+      }
+
+      if (Array.isArray(item.extra_lines) && item.extra_lines.length) {
+        const ex = el('div', { class: 'extra' });
+        item.extra_lines.forEach(line => {
+          const div = el('div', { class: 'extra-line' });
+          div.appendChild(el('span', { class: 'label', text: line.label || '' }));
+          div.appendChild(document.createTextNode(line.text || ''));
+          ex.appendChild(div);
+        });
+        card.appendChild(ex);
+      }
+
+      if (item.yaml_path) {
+        card.appendChild(el('div', { class: 'yaml-path', text: 'YAML: ' + item.yaml_path }));
+      }
+      if (item.reply_hint) {
+        card.appendChild(el('div', { class: 'reply-hint', text: 'Reply: ' + item.reply_hint }));
+      }
+
+      itemsEl.appendChild(card);
+    });
+
+    if (items.length === 0) {
+      itemsEl.appendChild(el('div', { class: 'review-item',
+        text: 'No items need review at threshold ' + threshold + '. Lower the threshold (e.g., "threshold 0.5") to inspect borderline entries, or you’re done — proceed to chat.' }));
+    }
+  </script>
+</body>
+</html>
