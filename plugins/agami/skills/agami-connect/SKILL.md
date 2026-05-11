@@ -33,6 +33,31 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 - **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. **Use `(Recommended)` only when there's a genuine recommendation.** For fact-of-environment questions ("which database type?", "which schemas should I introspect?"), don't mark any option Recommended — the user picks what they have.
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 
+## Progress tracking — set up a todo list at the very start
+
+This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to call `TodoWrite` with the skill's major phases as todos**, so the user can see what's coming and watch progress in real time. This was validated as a strong UX signal — users reported it makes the wait feel intentional rather than opaque.
+
+The exact todo list to seed (one task per major phase, in this order):
+
+```
+1. Preflight: credentials check + tool detection
+2. Introspect database schema (list tables, columns, PK, FK)
+3. Build OSI semantic model (with trust-layer confidence per entry)
+4. Validate + write model; snapshot under .snapshots/<hash>/; git init
+5. Generate seed NL→SQL examples (EXPLAIN-validated)
+6. Validate every seed example (user reviews via dashboard)
+7. Post-introspect trust summary + dashboard offer
+8. Telemetry opt-in + follow-up suggestions
+```
+
+Use `content` for the imperative form and `activeForm` for the present-continuous form, e.g. `content: "Introspect database schema"` / `activeForm: "Introspecting database schema"`.
+
+**Mark each todo `in_progress` when its phase starts and `completed` immediately when the phase ends.** Exactly one `in_progress` at a time. Never batch completions.
+
+**Skip the seeding if the todo list already contains these items** (e.g., the skill is resuming a mid-run state because the user re-invoked after Phase 0 bailed to agami-init for credentials). Detect by inspecting the current todo list: if it already has todos matching this skill's phases (by content), don't re-create — just continue marking progress on the existing list.
+
+When `$ARGUMENTS == reintrospect`, the same todos apply — re-introspection runs through the same phases.
+
 ---
 
 ## Phase −1: Plan-mode check
