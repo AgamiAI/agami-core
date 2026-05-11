@@ -55,9 +55,9 @@ Then end the turn. No plan, no modal, no follow-up.
 
 ### `agami-connect`
 
-Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Introspection requires Bash (`psql -c`, etc.) and writes (the per-schema yaml files + the credentials file from Phase 0a). Surface ONLY this:
+Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Introspection requires Bash (`psql -c`, etc.) and writes (the per-schema yaml files). Credential setup is handled by `agami-init` (a separate skill) — agami-connect itself doesn't write credentials. Surface ONLY this:
 
-> I can't introspect in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke me. The credentials write, schema picker, description generation, and demo query all need write access to `~/.agami/` and `<artifacts_dir>/<profile>/`.
+> I can't introspect in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke me. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`.
 
 Then end the turn. No plan file describing what would happen — that's noise the user didn't ask for.
 
