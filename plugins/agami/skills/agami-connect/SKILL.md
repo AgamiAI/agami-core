@@ -1053,7 +1053,10 @@ Auto-open with the same multi-command fallback chain as agami-query-database Pha
 
 The user replies with one or more commands. Commands can come from the dashboard's "Generate feedback for Claude" button (newline-separated block) or be typed directly. Same grammar either way.
 
-- **`validate N`** (or `validate N, M, …` / `validate N, M by you@example.com`) — for each item, set `state: validated`, `validated_by: <email from the command, or the reviewer's stored email in localStorage as passed from the page, or "<unknown>" if neither>`, `validated_at: <UTC ISO>` in the example's entry in `<artifacts_dir>/<profile>/examples.yaml`.
+- **`validate N`** (or `validate N, M, …` / `validate N, M by you@example.com`) — for each item, set `state: validated`, `validated_at: <UTC ISO>`, and `validated_by` sourced in this order (stop at the first hit):
+  1. **The chat command** itself if it includes `by <email>` — use it.
+  2. **`~/.agami/.config`'s `reviewer_email`** if present.
+  3. **Otherwise, ask the user once**: *"What's your email? I'll save it to `~/.agami/.config.reviewer_email` so future validations and Rule 1 approvals don't re-ask."* Validate the email shape, persist to `.config` (merge — don't overwrite `tier`, `host`, etc.). See the same persistence block in [`agami-review/SKILL.md → Phase 3a`](../agami-review/SKILL.md#3a--validate-the-command). Never infer from `git config`, environment, or credentials — that path produces silent inconsistency.
 - **`validate all`** — bulk-set every non-errored example to `validated`. Skip errored ones; surface the count: *"Validated 9 examples; 3 had errors and stay unreviewed (use `edit N` to fix)."*
 - **`reject N`** — set `state: rejected`. Don't delete the example from the YAML (preserves audit trail).
 - **`edit N`** — interactive form: surface the example's current SQL in chat, accept the user's edit conversationally, write back, re-execute, update the dashboard.

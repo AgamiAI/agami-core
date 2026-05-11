@@ -209,7 +209,34 @@ done
 
 Per command:
 
-- **approve N** — N must be a valid item number in the current queue. If the item is Rule 1 (metric / named_filter), `by` and `role` are required; surface a refusal: *"Item #N is a metric and requires sign-off. Reply: `approve N by <email> role=<role>`."*
+- **approve N** — N must be a valid item number in the current queue. **For Rule 1 items (metric / named_filter), the sign-off email + role are required.** Source them in this order, **stop at the first hit**:
+  1. **The chat command** itself: `approve N by <email> role=<role>` — use these verbatim.
+  2. **`~/.agami/.config`'s `reviewer_email` and `reviewer_role`** fields, if present.
+  3. **Otherwise, ask the user exactly once per install**: surface a single inline prompt asking for both at once (do NOT infer from `git config`, environment, or credentials — that path produces silent inconsistency). Use this exact prompt:
+     > To sign off the Rule 1 items in this batch, I need your email and role. Reply like: `ashwin@agami.ai / data_lead`
+     >
+     > Valid roles: `cfo`, `cto`, `data_lead`, `engineer`, `analyst`, `other`.
+     >
+     > I'll save these to `~/.agami/.config` so I don't ask again.
+
+  Parse the user's response: split on `/`, trim each half. Validate the email against `\S+@\S+\.\S+` and the role against the enum above. If either fails, re-prompt with the same format.
+
+  **Persist on success** — merge into `~/.agami/.config` (preserve any existing fields like `tier`, `host`, `tool_paths`):
+  ```bash
+  python3 - <<PY
+  import json, pathlib
+  p = pathlib.Path.home() / ".agami" / ".config"
+  cfg = json.loads(p.read_text()) if p.exists() else {"schema_version": 1}
+  cfg["reviewer_email"] = "<email>"
+  cfg["reviewer_role"]  = "<role>"
+  p.write_text(json.dumps(cfg, indent=2))
+  PY
+  chmod 600 ~/.agami/.config
+  ```
+
+  If the user later passes a different email/role in an explicit `by`/`role=` clause, use those for that command only — don't overwrite the stored defaults unless they say "remember this" or edit `.config` directly.
+
+  Refusal text only fires when sources 1, 2, and the asked response all fail: *"Item #N is a metric and requires sign-off and I couldn't get an email + role. Reply: `approve N by <email> role=<role>` or update `~/.agami/.config`."*
 - **reject N** — same numbering check.
 - **unreject N** — N must be an item with `review_state: rejected`. If not, surface: *"Item #N isn't currently rejected — no-op."*
 - **edit N** — open YAML for review (see Phase 4d).
