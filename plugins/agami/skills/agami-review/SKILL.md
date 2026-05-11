@@ -346,15 +346,22 @@ Best-effort — never block on git failure. The YAML files + curation log are th
 
 ## Phase 5: Re-render or close
 
-After a batch of edits applies cleanly, re-render the dashboard (Phase 2) with the updated counts. The numbering shifts (some items are now approved/rejected and dropped from the queue) — recompute from scratch.
+After a batch of edits applies cleanly, **always re-render the dashboard** with a **new timestamped filename** at `~/.agami/review/<new-ts>.html` (don't overwrite the old one — the user may still have it open and you need them to notice the refresh). Recompute Phase 1 from scratch (re-walk the YAMLs, re-classify into tabs, re-count the summary). The numbering shifts as approved/rejected items leave the For Review tab — that's expected.
 
-Surface a one-line ack before the re-render:
+**Surface BOTH the ack AND the new file path in one chat block** so the user can't miss it:
 
 ```
-✓ Applied: approved 2 (#1, #3), rejected 1 (#7). 38 items remain. Re-rendering.
+✓ Applied: approved 2 (#1, #3), rejected 1 (#7). 38 items remain.
+
+Re-rendered: ~/.agami/review/<new-ts>.html
+(Open the new file — the previous one is stale.)
 ```
 
-Then end the turn. The user replies with the next batch of commands.
+The `<new-ts>` is a fresh `date +%Y%m%d-%H%M%S` timestamp. Surfacing it inline (not just internally) is mandatory: the alternative — writing to a new path without telling the user — is what produced the "page summary says 237 but chat says 187" confusion in real testing. The user's expectation is "if you say the dashboard re-rendered, give me the URL to open."
+
+Best-effort auto-open on every re-render so the new file pops into their browser without an explicit click. Use the same multi-command fallback chain as agami-query-database Phase 4e.vi (`open` → `xdg-open` → `start`).
+
+Then end the turn. The user replies with the next batch of commands against the NEW dashboard's numbering.
 
 If the queue is empty after edits, surface:
 
