@@ -722,7 +722,7 @@
     // ---- Trust receipt panel (bottom of report, collapsed by default) ----
     if (receipt) {
       const det = el('details', { class: 'trust-receipt' });
-      det.appendChild(el('summary', { text: 'Trust receipt — provenance for this answer' }));
+      det.appendChild(el('summary', { text: 'Provenance for this answer' }));
       const rb = el('div', { class: 'receipt-body' });
 
       function badge(state) {
@@ -739,6 +739,13 @@
           li.appendChild(el('code', { text: t.qname || '<unknown>' }));
           if (t.rows !== undefined && t.rows !== null) {
             li.appendChild(document.createTextNode(' — ' + Number(t.rows).toLocaleString() + ' rows'));
+          } else {
+            // Skill couldn't determine the row count for this table (e.g.,
+            // it appeared in a subquery / join shape where a clean COUNT
+            // wasn't available). Render the fallback so the reader doesn't
+            // wonder "did agami forget about this table?"
+            const span = el('span', { class: 'receipt-meta', text: ' — rows unknown' });
+            li.appendChild(span);
           }
           if (t.freshness) {
             // The skill may pass either a raw ISO timestamp (we prettify and

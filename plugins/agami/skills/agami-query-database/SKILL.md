@@ -658,14 +658,19 @@ Build the receipt as a single JSON object. Schema (see [`shared/chart-template.h
   ],
   "relationships": [
     {"name": "<rel name>", "from_to": "<from> → <to>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "fk|..."}
+     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "fk|...",
+     "signed_off_by": "<email or 'agami_introspect_v1'>", "signed_off_role": "<enum>",
+     "signed_off_at": "<ISO>"}
   ],
   "metrics": [
     {"name": "<metric>", "definition_prose": "<plain English>",
+     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum>",
      "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
   ],
   "named_filters": [
-    {"name": "<filter>", "expression": "<predicate>", "definition_prose": "<plain English>"}
+    {"name": "<filter>", "expression": "<predicate>", "definition_prose": "<plain English>",
+     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum>",
+     "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
   ],
   "warnings": ["<one-liner per unreviewed entry that the answer used>"]
 }
@@ -680,9 +685,9 @@ How to populate each field:
   If `.snapshots/` doesn't exist or is empty (legacy v1.2 model that pre-dates trust-layer), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."* **Do not look for `model_version` inside `index.yaml`** — it's not stored there; the snapshot directory is the source of truth.
 - **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the count returned by the EXPLAIN or post-execution counter (skip if uncertain).
   **`freshness`** — pass the **raw ISO timestamp** from `agami.introspect_meta.introspected_at` (e.g., `"2026-05-10T11:57:13Z"`). The chart template prettifies it to `"introspected May 10, 2026, 11:57 AM"` automatically. Don't prefix with "introspected" yourself or you'll double-prefix. If the upstream load cadence is known (e.g., daily ETL at 2am UTC), pass a pre-formatted string instead — e.g., `"2026-05-10T02:00:00Z (daily 2am UTC ETL)"` — and the template passes it through unchanged. Pass `null` when freshness is unknowable.
-- **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the loaded OSI model (Phase 1c's `relationships_by_endpoints` index). Read `confidence`, `review_state`, `origin` from its `agami` extension. For composite or multi-hop joins, list each edge.
-- **`metrics`** — every OSI metric whose `expression` matches a fragment in the SQL. Pull `definition_prose` and the `signed_off_*` fields from the metric's `agami` extension.
-- **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING.
+- **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the loaded OSI model (Phase 1c's `relationships_by_endpoints` index). **Pull EVERY trust field** from its `agami` extension: `confidence` (number), `review_state` (enum), `origin` (enum), `signed_off_by`, `signed_off_role`, `signed_off_at`. Don't skip any — the template's `approvalPhrase` reads all of them to render "auto-approved (FK declared)" vs "approved by jane@x.com (cfo), Mar 15" vs "unreviewed (confidence 0.62)". Missing fields → ugly "unreviewed (confidence ?)" rendering. For composite or multi-hop joins, list each edge.
+- **`metrics`** — every OSI metric whose `expression` matches a fragment in the SQL. **Pull EVERY trust field** from the metric's `agami` extension: `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships — partial population produces a meaningless receipt. If a metric is genuinely unreviewed in the YAML, that's fine: the receipt will show "unreviewed (confidence 0.85)" which is honest and actionable. If you populate only `definition_prose` + sign-off and skip `review_state` + `confidence`, the template falls back to "unreviewed (?)" and the user wonders if their approval was lost.
+- **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING. **Pull EVERY trust field** from the filter's entry: `expression`, `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships and metrics.
 - **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning naming the entry and its confidence. Examples: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`, `"Used metric `revenue` which has not been signed off."`. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-review to walk these items, or say 'open the review dashboard'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely — no need for an action line if everything is approved.
 
 Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
