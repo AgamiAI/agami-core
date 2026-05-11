@@ -169,7 +169,20 @@ Order in Phase 2b prompt:
 
 ### 1e — verify the configured database tool
 
-Look up the cached connection method from `~/.agami/.config`. Run a `SELECT 1` probe via that tool. Route any error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Common cases:
+Look up the cached connection method from `~/.agami/.config`. Run a `SELECT 1` probe via that tool. **Use the EXACT invocation pattern below for the tier — don't guess flags.** `execute_sql.py` does NOT accept positional SQL, a `--format` flag, or any flag not listed below; guessing produces "unrecognized arguments" errors that waste turns.
+
+| tier | SELECT 1 invocation |
+|---|---|
+| `cli` (postgres) | `PGPASSFILE="$HOME/.agami/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
+| `cli` (mysql) | `mysql --defaults-file="$HOME/.agami/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
+| `cli` (snowflake) | `snowsql --config "$HOME/.agami/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
+| `cli` (sqlite) | `sqlite3 -csv "<path>" 'SELECT 1'` |
+| `duckdb` (any) | `duckdb -init "$init_file" -c 'SELECT 1' --csv` (see `build_duckdb_attach.py` for `$init_file`) |
+| `python` (all DBs) | `AGAMI_PROFILE="<profile>" python3 "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` |
+
+The Python tier's CLI is **`--sql <string>`** or **`--sql-file <path>`** — those are the only two ways to pass SQL. Optional flag: `--profile <profile>` (overrides `AGAMI_PROFILE` env). **Output is RFC-4180 CSV on stdout**, always — no `--format` flag exists. If you need JSON, post-process the CSV.
+
+Route any error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Common cases:
 
 - `auth` / `dsn` → credentials may have rotated; point at `~/.agami/credentials`.
 - `network` → check VPN / DB endpoint reachability.

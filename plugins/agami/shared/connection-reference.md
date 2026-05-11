@@ -29,6 +29,34 @@ These are non-negotiable. Skills that read this document must follow them under 
 
 ---
 
+## Quick connection probes — `SELECT 1` per tier
+
+Reference this table whenever a skill needs to verify a connection works. Don't guess flags — `execute_sql.py` has a tight CLI and made-up flags like `--format json` produce wasted-turn errors that look bad in chat.
+
+| tier | EXACT invocation |
+|---|---|
+| `cli` postgres | `PGPASSFILE="$HOME/.agami/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
+| `cli` mysql | `mysql --defaults-file="$HOME/.agami/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
+| `cli` snowflake | `snowsql --config "$HOME/.agami/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
+| `cli` sqlite | `sqlite3 -csv "<path>" 'SELECT 1'` |
+| `duckdb` | `duckdb -init "$init_file" -c 'SELECT 1' --csv` |
+| `python` | `AGAMI_PROFILE="<profile>" python3 "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` |
+
+**`execute_sql.py` CLI surface** — exhaustive, read before invoking:
+
+```
+python3 execute_sql.py [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE)
+```
+
+- **Output is RFC-4180 CSV on stdout, always.** No `--format` flag exists; don't pass one.
+- **Either** `--sql 'SELECT 1'` (string) **or** `--sql-file /tmp/q.sql` (path). Positional SQL is rejected.
+- `--profile` overrides `AGAMI_PROFILE`. If neither is set, defaults to `active_profile` from `~/.agami/.config`.
+- Exit codes: `0` (success), `2` (config/usage), `3` (connect error), `4` (execution error), `5` (driver missing).
+
+For Snowflake-specific liveness checks where `SELECT CURRENT_VERSION()` reads better than `SELECT 1`, just substitute the SQL — same flag shape. **Never** add flags not listed above.
+
+---
+
 ## Connection methods
 
 `agami` picks the first available connection method for your database type, falling through if it's not installed. If nothing is installed, it tells you exactly which tools are missing and the install command for each.
