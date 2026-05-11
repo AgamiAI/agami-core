@@ -980,19 +980,36 @@
     document.getElementById('modal-close').addEventListener('click', () => {
       document.getElementById('modal').hidden = true;
     });
+    function resetQueueAfterCopy() {
+      // Copy succeeded — the user has shipped this batch to Claude.
+      // Clear the queue so the next round of clicks isn't piled on top of
+      // commands that have already been sent. Close the modal too — the
+      // user has what they need.
+      Object.keys(pendingActions).forEach(k => delete pendingActions[k]);
+      renderItems();
+      updateFooter();
+      // Brief delay before closing so the "Copied! Batch cleared." feedback
+      // is visible.
+      setTimeout(() => { document.getElementById('modal').hidden = true; }, 700);
+    }
     document.getElementById('modal-copy').addEventListener('click', () => {
       const ta = document.getElementById('modal-text');
       ta.select();
       const btn = document.getElementById('modal-copy');
+      const done = (didCopy) => {
+        if (didCopy) {
+          btn.textContent = 'Copied! Batch cleared.';
+          resetQueueAfterCopy();
+        } else {
+          btn.textContent = 'Copy failed — select all + ⌘C';
+        }
+        setTimeout(() => btn.textContent = 'Copy to clipboard', 2000);
+      };
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(ta.value).then(
-          () => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy to clipboard', 1500); },
-          () => { btn.textContent = 'Copy failed — select all + ⌘C'; }
-        );
+        navigator.clipboard.writeText(ta.value).then(() => done(true), () => done(false));
       } else {
-        try { document.execCommand('copy'); btn.textContent = 'Copied!'; }
-        catch (e) { btn.textContent = 'Select all + ⌘C'; }
-        setTimeout(() => btn.textContent = 'Copy to clipboard', 1500);
+        try { document.execCommand('copy'); done(true); }
+        catch (e) { done(false); }
       }
     });
 
