@@ -269,7 +269,11 @@ For **approve** (Rule 2 item):
 
 For **approve** (Rule 1 item — metric / named_filter):
 - Same as above, but `signed_off_role` is REQUIRED. If missing in the command, surface a refusal as in Phase 3a.
-- Verify `definition_prose` is non-empty in the entry. If empty, surface: *"Item #N is a metric/named_filter; `definition_prose` is empty. Use `edit N` first to add the definition, then approve."*
+- **CHECK `definition_prose` BEFORE attempting any YAML write.** Read the entry's current `agami.definition_prose`. If it's missing, empty, or whitespace-only, **refuse the approve upfront** with this exact message — don't write to the YAML, don't let the validator catch it after the fact (validator rollback is a worse UX than upfront refusal):
+
+  > Item #N is a `<metric | named_filter>` and Rule 1 requires a non-empty `definition_prose` before it can be approved. Reply `edit N` and I'll walk you through adding the definition, then re-issue the approve.
+
+  This check happens for every Rule 1 item in the batch *before* the first Edit tool call. If multiple Rule 1 items in the batch fail this check, list all of them in one message: *"Items #3, #7, #12 are metrics with empty `definition_prose`. Reply `edit 3`, `edit 7`, `edit 12` to fill them in (one per turn or batch them in the dashboard), then approve. Other items in this batch will proceed."* Then continue applying the non-blocked items.
 
 For **reject**:
 - `review_state: rejected`. Per Hard Rule #10, set `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null` (rejected entries don't carry sign-off attribution; the rejecter is recorded in the curation log instead).

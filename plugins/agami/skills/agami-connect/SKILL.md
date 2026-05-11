@@ -544,7 +544,15 @@ Options: one option per candidate (pre-checked when the candidate is grounded in
 
 **Hard cap: 4 candidate options + Other (5 total).** Above that, the AskUserQuestion modal splits across tabs ("Metrics" / "More metrics") with a confusing "Already answered above" entry. If you've identified more than 4 high-confidence candidates, surface only the top 4 and tell the user inline: "I had 3 more metric ideas (`<name>`, `<name>`, `<name>`). Say 'add the X metric' anytime and I'll wire it via save-correction."
 
-For each metric the user picks: write into the schema yaml's `metrics[]`. Validate before write (the per-schema yaml must still pass OSI). If a metric fails validation (e.g., references a non-existent column), drop it silently and surface a one-liner: "Skipped `<name>` — couldn't validate against your model."
+For each metric the user picks: write into the schema yaml's `metrics[]`. **Always include a draft `agami.definition_prose`** — without it the metric can never be approved later (Rule 1 of the trust layer requires non-empty prose for approval). Source the draft in this order:
+
+1. Use the **column comment** of the metric's source column if present (DBA-authored — strongest signal).
+2. Else use the **ORGANIZATION.md** definition if the metric's name matches a defined business term.
+3. Else generate a one-sentence LLM draft from the metric name + expression + a sample of values (e.g., `"Sum of orders.amount_usd across all rows — total revenue in USD."`).
+
+The user will edit this prose later via `agami-review` if it's wrong; the point is to ship something non-empty so the validator + the approval flow have a starting state.
+
+Validate before write (the per-schema yaml must still pass OSI). If a metric fails validation (e.g., references a non-existent column), drop it silently and surface a one-liner: "Skipped `<name>` — couldn't validate against your model."
 
 If the user picks "None", write nothing. They can add metrics later via agami-save-correction (`new_metric` correction kind).
 
