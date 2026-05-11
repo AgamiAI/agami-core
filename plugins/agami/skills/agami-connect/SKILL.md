@@ -183,7 +183,14 @@ fi
 
 - **`existing-v13`** and `$ARGUMENTS` is not `reintrospect`:
   - "I already have a model for `<profile>` at `<artifacts_dir>/<profile>/`. What would you like to do?"
-  - AskUserQuestion: `Re-introspect from DB` / `Verify and continue` / `Skip to seeding examples`. (No `(Recommended)` — the user picks based on whether their schema changed, not a default.)
+  - AskUserQuestion options (no `(Recommended)` — user picks based on intent):
+    | label | description |
+    |---|---|
+    | `Re-introspect from DB` | Drop everything not hand-edited and pull fresh from the database. Preserves descriptions, ai_context, choice_fields, metrics, and human-approved trust-layer sign-offs. |
+    | `Verify and continue` | Validate the existing model (no DB queries), then continue to seed-examples / dashboard offer. |
+    | `Skip to seeding examples` | Skip introspection and validation. Regenerate examples.yaml and run the validation dashboard. |
+    | `Set up a different database (new profile)` | Add a separate profile for another DB (e.g., staging, analytics). Leaves `<profile>` untouched and starts the full first-run flow for the new profile name. |
+  - **If the user picks `Set up a different database`:** ask for the new profile name in a follow-up inline message: *"What should I call the new profile? (lowercase letters / digits / dashes / underscores, 1–32 chars; this is the name you'll use in `AGAMI_PROFILE=<name>` to switch between DBs.)"* Default-suggest names based on common patterns (`staging`, `analytics`, `production`) if the user seems unsure. Then set the in-process `<profile>` variable to the new name, invoke `agami-init` to walk the DB-type picker + write `credentials.example` for a new `[<new-name>]` section, and after the user fills it in re-enter this skill at Phase 0 with the new profile active. **Do NOT modify the existing `[<old-profile>]` credentials section** — only append.
 
 - **`v1.2-needs-table-split`** — model exists in artifacts dir but uses the single-file-per-schema layout. Migrate to per-table layout in place.
   - Tell the user: "Splitting `<schema>.yaml` files into per-table yamls (`<schema>/<table>.yaml`). Smaller diffs in git, faster relevance retrieval at scale. No DB queries — purely a file rewrite."
