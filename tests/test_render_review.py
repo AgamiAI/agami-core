@@ -147,11 +147,30 @@ def test_render_empty_queue_still_renders():
 
 # --- validation guards ----------------------------------------------------
 
-def test_render_rejects_invalid_review_state():
-    """approved/rejected entries don't belong in the review dashboard."""
+def test_render_accepts_all_four_review_states():
+    """The 4-tab dashboard accepts every review_state — `approved` and
+    `rejected` entries now appear in their own tabs (Approved Automatically /
+    Manually Approved / Rejected) rather than being filtered out."""
+    for state in ("unreviewed", "approved", "rejected", "stale"):
+        item = _items_join_card()
+        item["review_state"] = state
+        # No exception — the renderer accepts all four.
+        render(title="x", threshold=0.7, model_version="v", items=[item], summary=None)
+
+
+def test_render_rejects_unknown_review_state():
+    """A made-up state value is still rejected — only the documented enum is valid."""
     item = _items_join_card()
-    item["review_state"] = "approved"
+    item["review_state"] = "in_progress"  # not in enum
     with pytest.raises(ValueError, match="review_state"):
+        render(title="x", threshold=0.7, model_version="v", items=[item], summary=None)
+
+
+def test_render_rejects_unknown_tab():
+    """The new `tab` field is validated against {review, auto, manual, rejected}."""
+    item = _items_join_card()
+    item["tab"] = "elsewhere"
+    with pytest.raises(ValueError, match="tab"):
         render(title="x", threshold=0.7, model_version="v", items=[item], summary=None)
 
 

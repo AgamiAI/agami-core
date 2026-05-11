@@ -41,11 +41,13 @@ Resolve the active threshold:
 
 ---
 
-## Phase 1: Build the review queue
+## Phase 1: Walk every entity and classify into tabs
+
+The dashboard now has **four tabs**: For Review · Approved Automatically · Manually Approved · Rejected. So this phase loads EVERY entity (not just review-needing) and tags each with a `tab` field. The template filters by tab.
 
 Load every yaml under `<artifacts_dir>/<profile>/` — `index.yaml`, every `<schema>/_schema.yaml`, every `<schema>/<table>.yaml`. Walk the structures.
 
-For each entity (dataset, field, relationship, metric, named_filter), parse its `agami` extension payload (one entry per `custom_extensions[]` whose `vendor_name=COMMON` and JSON has an `agami` top-level key — see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md)). Determine if the entity needs review:
+For each entity (dataset, field, relationship, metric, named_filter), parse its `agami` extension payload (one entry per `custom_extensions[]` whose `vendor_name=COMMON` and JSON has an `agami` top-level key — see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md)). Then classify:
 
 ```
 needs_review(entry) =
@@ -54,16 +56,24 @@ needs_review(entry) =
   (review_state == unreviewed AND confidence < threshold)                      # Rule 2
   OR
   (review_state == stale)                                                      # drift
+
+tab(entry) =
+  "rejected"  if review_state == "rejected"
+  "review"    if needs_review(entry)
+  "auto"      if review_state == "approved" AND (signed_off_by == "agami_introspect_v1"
+                                                  OR signed_off_role == "system")
+  "manual"    otherwise (review_state == "approved" with a human signer)
 ```
 
-Sort the queue:
-1. Rule 1 entries first (metrics, then named_filters), since they block at runtime.
-2. Then Rule 2 entries, sorted by ascending confidence (lowest first — those need the most review).
-3. Then stale entries.
+Set `item.tab` on each item. The template:
+- **For Review** tab: shows action buttons (Approve / Reject / Edit / Skip), groups by entity type, sorts by ascending confidence within each group.
+- **Approved Automatically** tab: read-only, shows the approval phrase (e.g., "auto-approved (FK declared in DB)").
+- **Manually Approved** tab: read-only, shows "approved by jane@example.com (cfo), Mar 15".
+- **Rejected** tab: shows a single "Move to For Review" button per card, which generates `unreject N`.
 
-Cap at 50 items per dashboard render — paginate if more (page navigation is not implemented in v1; if more than 50, surface "Showing first 50 of N — approve some and re-render to see the next batch.").
+Cap the "For Review" tab at 50 items per dashboard render (the other tabs can list everything — they're inspection-only). If more than 50 review items: include the top-50 only and surface in chat: "Showing first 50 of N — approve some and re-render to see the next batch."
 
-Number items 1, 2, 3… globally. The numbering corresponds to chat commands.
+Number items 1, 2, 3… **globally across all tabs**, in a stable order — Rule 1 first (metrics, then named_filters), then Rule 2 by ascending confidence, then approved entries grouped by entity type, then rejected. The numbering corresponds to chat commands, so it must stay stable across re-renders.
 
 ### 1a — count the auto-approved entries (for the summary card)
 
@@ -140,11 +150,17 @@ Surface in chat (single block, no padding):
 Review queue rendered — <N> items at threshold <X>.
 ~/.agami/review/<ts>.html
 
-Reply with:
+The dashboard has 4 tabs (For Review · Approved Automatically · Manually
+Approved · Rejected) and click-to-approve buttons on each card. Click
+the actions you want, hit "Generate feedback for Claude" at the bottom,
+then paste the result back here.
+
+You can also type commands directly:
   approve N         (or `approve 1, 3, 7`)
   approve all below 0.95
   reject N
   edit N
+  unreject N
   threshold 0.5
   done
 ```
@@ -157,11 +173,12 @@ End the turn here. Wait for the user.
 
 ## Phase 3: Chat back-channel grammar
 
-The user replies with one or more commands on a single line. Parse them.
+The user replies with one or more commands. Commands can come from the dashboard's "Generate feedback for Claude" button (newline-separated block) or be typed directly. Same grammar either way.
 
 ```
 approve <num-list> [by <email>] [role=<role>]
 reject  <num-list>
+unreject <num-list>
 edit    <num>
 approve all below <number>
 threshold <number>
@@ -174,8 +191,17 @@ Where:
 - `<role>` ∈ `{cfo, cto, data_lead, engineer, analyst, other}` (no `system` — that's auto-only)
 - `<number>` = float in `[0, 1]`
 
-Multiple commands on one line are allowed, comma-separated:
-- `approve 1 by you@x.com role=cfo, reject 4, threshold 0.5`
+Multiple commands on one line are allowed, comma-separated. Newline-separated blocks (as the dashboard generates) are also fine:
+
+```
+approve 1, 3, 7 by you@x.com role=cfo
+approve 2, 4
+reject 5
+unreject 12
+done
+```
+
+**`unreject N`** flips a rejected entry back to `unreviewed` — clears `signed_off_by` / `signed_off_at` / `signed_off_role`. The item appears on the For Review tab on the next re-render. Used when the curator wants a second look at something they previously rejected.
 
 ### 3a — validate the command
 
@@ -183,6 +209,7 @@ Per command:
 
 - **approve N** — N must be a valid item number in the current queue. If the item is Rule 1 (metric / named_filter), `by` and `role` are required; surface a refusal: *"Item #N is a metric and requires sign-off. Reply: `approve N by <email> role=<role>`."*
 - **reject N** — same numbering check.
+- **unreject N** — N must be an item with `review_state: rejected`. If not, surface: *"Item #N isn't currently rejected — no-op."*
 - **edit N** — open YAML for review (see Phase 4d).
 - **approve all below X** — bulk-approve every Rule 2 item where `confidence < X` AND it's not Rule 1. Skip Rule 1 items. Surface what would be skipped: *"Skipping 8 Rule 1 items (metrics + named filters) — those need explicit sign-off."*
 - **threshold X** — change the threshold for this render. Persist to `agami.config.yaml`. Re-render.
@@ -217,6 +244,9 @@ For **approve** (Rule 1 item — metric / named_filter):
 
 For **reject**:
 - `review_state: rejected`. Per Hard Rule #10, set `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null` (rejected entries don't carry sign-off attribution; the rejecter is recorded in the curation log instead).
+
+For **unreject**:
+- `review_state: unreviewed`. Set `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null`. The entry's `confidence` and `signal_breakdown` are preserved — only the review state flips. Item reappears on the For Review tab on the next re-render. Append a `unreject` event to `curation_log.jsonl` with the curator's identity so the audit trail captures it.
 
 For **edit**:
 - Read the current entity.

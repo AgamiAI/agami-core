@@ -43,7 +43,11 @@ LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
 
 
 VALID_ENTITY_TYPES = {"join", "metric", "field_description", "named_filter"}
-VALID_REVIEW_STATES = {"unreviewed", "stale"}  # only review-needing states appear in the dashboard
+# All four review states are now valid — the dashboard's tabs surface each
+# group separately (For Review / Approved Automatically / Manually Approved /
+# Rejected). The SKILL classifies each entity into a tab via `item.tab`.
+VALID_REVIEW_STATES = {"unreviewed", "approved", "rejected", "stale"}
+VALID_TABS = {"review", "auto", "manual", "rejected"}
 
 
 def _validate_item(item: dict, idx: int) -> None:
@@ -61,8 +65,12 @@ def _validate_item(item: dict, idx: int) -> None:
         )
     if "review_state" in item and item["review_state"] not in VALID_REVIEW_STATES:
         raise ValueError(
-            f"item {idx}: review_state must be one of {sorted(VALID_REVIEW_STATES)} "
-            f"(approved/rejected entries don't belong in the review dashboard)"
+            f"item {idx}: review_state must be one of {sorted(VALID_REVIEW_STATES)}, "
+            f"got {item['review_state']!r}"
+        )
+    if "tab" in item and item["tab"] not in VALID_TABS:
+        raise ValueError(
+            f"item {idx}: tab must be one of {sorted(VALID_TABS)}, got {item['tab']!r}"
         )
     c = item.get("confidence")
     if c is not None and (not isinstance(c, (int, float)) or isinstance(c, bool)):

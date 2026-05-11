@@ -3,35 +3,32 @@
   agami examples-validation dashboard — used by agami-connect Phase 5 via
   render_examples_validation.py.
 
-  Different from the review dashboard (review-dashboard-template.html) because
-  the cards display question + SQL + actual result rows, not source-signal
-  audit blocks. The skill walks the user through every seed example, asking
-  them to validate each one (mark as a known-good prompt) or reject/edit it.
-
-  Validated examples become candidates for golden tests (tests.yaml) so a
-  future schema change that breaks them surfaces as a red CI run.
+  Interactive controls: per-card Validate / Reject / Edit / Skip buttons,
+  inline SQL textarea for Edit, reviewer email persisted to localStorage,
+  sticky "Generate feedback for Claude" footer with a paste-ready command
+  block. Three tabs: For Validation / Validated / Rejected.
 
   Per-render placeholders:
     {{REPORT_TITLE}}             — "Seed examples · <profile>"
     {{GENERATED_AT}}             — ISO8601 UTC timestamp
     {{ITEMS_JSON}}                — JSON array of example-item objects
     {{PROFILE}}                   — the active profile name
-    {{TOTAL_ROW_COUNT}}           — sum of rows across all examples (for the header summary)
+    {{TOTAL_ROW_COUNT}}           — (legacy placeholder, unused in the new layout)
     {{AGAMI_LOGO_DARK_TEXT}}      — full SVG content of agami-logo-dark.svg
     {{AGAMI_LOGO_LIGHT_TEXT}}     — full SVG content of agami-logo-light.svg
 
   ITEMS_JSON schema — array of objects, one per seed example:
     {
-      "n":             integer (1-indexed display number)
+      "n":             integer (1-indexed display number — used in chat back-channel)
       "question":      "string — the NL question"
       "sql":           "string — the executed SQL (multi-line OK)"
       "state":         "unreviewed" | "validated" | "rejected"
-      "row_count":     integer (number of rows the SQL returned)
+      "row_count":     integer (total rows the SQL returned)
       "row_preview":   [["col1", "col2", ...], ...] — first 5 rows as arrays of strings
       "row_headers":   ["col1", "col2", ...] — column names
       "validated_by":  string (email) or null
       "validated_at":  ISO8601 string or null
-      "error":         string or null — if EXPLAIN or execution failed, the error
+      "error":         string or null — if EXPLAIN or execution failed
     }
 -->
 <html lang="en">
@@ -41,47 +38,35 @@
   <title>{{REPORT_TITLE}} — agami</title>
   <style>
     :root {
-      --bg: #ffffff;
-      --bg-elev: #fafafa;
-      --fg: #1a1a1a;
-      --muted: #6b7280;
-      --border: #e5e7eb;
-      --accent: #2563eb;
-      --row-zebra: rgba(0, 0, 0, 0.025);
-      --code-bg: rgba(0, 0, 0, 0.04);
-      --ok: #166534;
-      --bad: #991b1b;
+      --bg: #ffffff; --bg-elev: #fafafa;
+      --fg: #1a1a1a; --muted: #6b7280;
+      --border: #e5e7eb; --accent: #2563eb; --accent-hover: #1d4ed8;
+      --row-zebra: rgba(0, 0, 0, 0.025); --code-bg: rgba(0, 0, 0, 0.04);
+      --ok-bg: #dcfce7; --ok-fg: #166534; --ok-border: #86efac;
+      --bad-bg: #fee2e2; --bad-fg: #991b1b; --bad-border: #fca5a5;
+      --warn-bg: #fef3c7; --warn-fg: #92400e;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0f172a;
-        --bg-elev: #131c2f;
-        --fg: #f1f5f9;
-        --muted: #94a3b8;
-        --border: #1e293b;
-        --accent: #60a5fa;
-        --row-zebra: rgba(255, 255, 255, 0.03);
-        --code-bg: rgba(255, 255, 255, 0.04);
-        --ok: #86efac;
-        --bad: #fca5a5;
+        --bg: #0f172a; --bg-elev: #131c2f; --fg: #f1f5f9; --muted: #94a3b8;
+        --border: #1e293b; --accent: #60a5fa; --accent-hover: #93c5fd;
+        --row-zebra: rgba(255, 255, 255, 0.03); --code-bg: rgba(255, 255, 255, 0.04);
+        --ok-bg: #052e16; --ok-fg: #86efac; --ok-border: #14532d;
+        --bad-bg: #450a0a; --bad-fg: #fca5a5; --bad-border: #7f1d1d;
+        --warn-bg: #422006; --warn-fg: #fbbf24;
       }
     }
     * { box-sizing: border-box; }
     body {
-      margin: 0;
-      padding: 32px;
+      margin: 0; padding: 32px 32px 110px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--fg);
-      line-height: 1.5;
+      background: var(--bg); color: var(--fg); line-height: 1.5;
     }
     .wrap { max-width: 920px; margin: 0 auto; }
+
     header.dashboard-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 24px;
-      margin-bottom: 16px;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 24px; margin-bottom: 16px;
     }
     .logo a { display: inline-block; line-height: 0; text-decoration: none; }
     .logo svg { display: block; height: 28px; width: auto; }
@@ -92,115 +77,133 @@
       .logo-dark-mode { display: inline-block; }
     }
     h1.dashboard-title {
-      font-size: 22px;
-      font-weight: 600;
-      margin: 0;
-      flex: 1;
-      text-align: right;
+      font-size: 22px; font-weight: 600; margin: 0; flex: 1; text-align: right;
     }
     .meta { font-size: 12px; color: var(--muted); margin-bottom: 24px; }
+    .meta code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+
+    /* Reviewer form */
+    .reviewer-form {
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 14px 18px; background: var(--bg-elev);
+      margin-bottom: 18px;
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    }
+    .reviewer-form label {
+      font-size: 12px; color: var(--muted);
+      letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600;
+    }
+    .reviewer-form input {
+      font: inherit; font-size: 14px;
+      padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg); color: var(--fg); min-width: 260px;
+    }
+    .reviewer-form .status { font-size: 12px; color: var(--muted); margin-left: auto; }
+    .reviewer-form .status.saved { color: var(--ok-fg); }
+
     .intro {
-      font-size: 14px;
-      color: var(--fg);
-      margin-bottom: 24px;
-      padding: 14px 18px;
-      background: var(--bg-elev);
-      border: 1px solid var(--border);
-      border-radius: 10px;
+      font-size: 14px; color: var(--fg);
+      margin-bottom: 18px; padding: 14px 18px;
+      background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
     }
     .intro code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
 
+    /* Tabs */
+    .tab-bar {
+      display: flex; gap: 4px; flex-wrap: wrap;
+      margin: 12px 0 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-bar button {
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 10px 16px; border: none; cursor: pointer;
+      background: transparent; color: var(--muted);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+    .tab-bar button:hover { color: var(--fg); }
+    .tab-bar button.active {
+      color: var(--accent); border-bottom-color: var(--accent);
+    }
+    .tab-bar .tab-count {
+      font-size: 11px; color: var(--muted); margin-left: 6px;
+      background: var(--code-bg); padding: 1px 6px; border-radius: 999px;
+    }
+    .tab-bar button.active .tab-count { color: var(--accent); }
+
+    /* Cards */
     .example-item {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 18px 22px;
-      background: var(--bg-elev);
-      margin-bottom: 16px;
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px 20px; background: var(--bg-elev);
+      margin-bottom: 14px;
+      transition: background 120ms ease, border-color 120ms ease;
     }
-    .example-header {
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-      margin-bottom: 10px;
-      flex-wrap: wrap;
+    .example-item.pending-validate {
+      background: var(--ok-bg); border-color: var(--ok-border);
     }
-    .example-num {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-      min-width: 2.4em;
+    .example-item.pending-reject {
+      background: var(--bad-bg); border-color: var(--bad-border);
     }
-    .example-question {
-      font-size: 15px;
-      font-weight: 600;
-      flex: 1;
-      min-width: 200px;
-    }
-    .row-pill {
-      font-size: 12px;
-      color: var(--muted);
-      font-variant-numeric: tabular-nums;
-    }
-    .badge {
-      display: inline-block;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      padding: 2px 7px;
-      border-radius: 999px;
-      margin-left: 6px;
-    }
-    .badge.unreviewed { background: #fef3c7; color: #92400e; }
-    .badge.validated  { background: #dcfce7; color: #166534; }
-    .badge.rejected   { background: #fee2e2; color: #991b1b; }
-    .badge.error      { background: #fee2e2; color: #991b1b; }
-    @media (prefers-color-scheme: dark) {
-      .badge.unreviewed { background: #422006; color: #fbbf24; }
-      .badge.validated  { background: #052e16; color: #86efac; }
-      .badge.rejected   { background: #450a0a; color: #fca5a5; }
-      .badge.error      { background: #450a0a; color: #fca5a5; }
+    .example-item.pending-edit {
+      background: var(--warn-bg); border-color: #fbbf24;
     }
 
+    .example-header {
+      display: flex; align-items: baseline; gap: 10px;
+      margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .example-num {
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      letter-spacing: 0.04em; min-width: 2.4em;
+    }
+    .example-question {
+      font-size: 15px; font-weight: 600; flex: 1; min-width: 200px;
+    }
+    .badge {
+      display: inline-block; font-size: 10px; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      padding: 2px 7px; border-radius: 999px;
+    }
+    .badge.unreviewed { background: var(--warn-bg); color: var(--warn-fg); }
+    .badge.validated  { background: var(--ok-bg);   color: var(--ok-fg); }
+    .badge.rejected   { background: var(--bad-bg);  color: var(--bad-fg); }
+    .badge.error      { background: var(--bad-bg);  color: var(--bad-fg); }
+
     .label-line {
-      font-size: 11px;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      font-weight: 600;
-      margin: 12px 0 4px;
+      font-size: 11px; color: var(--muted);
+      letter-spacing: 0.04em; text-transform: uppercase;
+      font-weight: 600; margin: 12px 0 4px;
     }
 
     pre.sql {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 12px;
-      background: var(--code-bg);
-      padding: 10px 12px;
-      border-radius: 6px;
-      margin: 0 0 4px;
-      overflow-x: auto;
-      white-space: pre;
+      font-size: 12px; background: var(--code-bg);
+      padding: 10px 12px; border-radius: 6px;
+      margin: 0; overflow-x: auto; white-space: pre;
     }
+
+    .sql-editor {
+      width: 100%; min-height: 120px;
+      font: inherit;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      padding: 10px 12px; border: 1px solid #fbbf24; border-radius: 6px;
+      background: var(--bg); color: var(--fg);
+      resize: vertical;
+    }
+    .sql-editor:focus { outline: 2px solid var(--accent); }
+
     .result-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-      margin: 0 0 4px;
+      width: 100%; border-collapse: collapse; font-size: 13px; margin: 0;
     }
     .result-table th, .result-table td {
-      padding: 6px 10px;
-      text-align: left;
+      padding: 6px 10px; text-align: left;
       border-bottom: 1px solid var(--border);
-      white-space: nowrap;
-      font-variant-numeric: tabular-nums;
+      white-space: nowrap; font-variant-numeric: tabular-nums;
     }
     .result-table th {
-      font-size: 10px;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: var(--muted);
-      font-weight: 600;
+      font-size: 10px; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--muted); font-weight: 600;
     }
     .result-table tbody tr:nth-child(even) td { background: var(--row-zebra); }
 
@@ -209,36 +212,92 @@
       font-size: 12px;
       background: rgba(239, 68, 68, 0.08);
       border: 1px solid rgba(239, 68, 68, 0.4);
-      border-radius: 6px;
-      padding: 10px 12px;
-      color: var(--bad);
+      border-radius: 6px; padding: 10px 12px; color: var(--bad-fg);
       margin: 4px 0;
     }
+    .signoff { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
 
-    .signoff {
-      font-size: 11px;
-      color: var(--muted);
-      margin: 8px 0 4px;
-    }
-    .reply-hint {
-      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 12px;
-      color: var(--muted);
-      background: var(--code-bg);
-      padding: 6px 10px;
-      border-radius: 6px;
-      margin-top: 10px;
-      display: inline-block;
-    }
-
-    footer {
-      margin-top: 36px;
-      padding-top: 16px;
+    /* Per-card actions */
+    .card-actions {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      margin-top: 14px; padding-top: 12px;
       border-top: 1px solid var(--border);
-      font-size: 12px;
-      color: var(--muted);
     }
-    footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+    .card-actions button {
+      font: inherit; font-size: 13px; font-weight: 500;
+      padding: 6px 14px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+    }
+    .card-actions button:hover { border-color: var(--accent); color: var(--accent); }
+    .card-actions button.btn-validate.active {
+      background: var(--ok-fg); color: white; border-color: var(--ok-fg);
+    }
+    .card-actions button.btn-reject.active {
+      background: var(--bad-fg); color: white; border-color: var(--bad-fg);
+    }
+    .card-actions button.btn-edit.active {
+      background: #d97706; color: white; border-color: #d97706;
+    }
+    .card-actions .pending-note {
+      font-size: 12px; color: var(--muted); margin-left: auto; align-self: center;
+    }
+
+    /* Sticky footer */
+    .sticky-footer {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: var(--bg-elev); border-top: 1px solid var(--border);
+      padding: 14px 32px; z-index: 100;
+      box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.05);
+    }
+    .sticky-footer-inner {
+      max-width: 920px; margin: 0 auto;
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    }
+    .pending-summary { font-size: 14px; color: var(--fg); flex: 1; }
+    .pending-summary .count { font-weight: 600; }
+    .sticky-footer button {
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 8px 16px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+    }
+    .sticky-footer button.primary {
+      background: var(--accent); color: white; border-color: var(--accent);
+    }
+    .sticky-footer button.primary:hover { background: var(--accent-hover); }
+    .sticky-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex; align-items: center; justify-content: center;
+      padding: 32px;
+    }
+    .modal-backdrop[hidden] { display: none; }
+    .modal-card {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 12px; padding: 24px;
+      max-width: 720px; width: 100%; max-height: 80vh;
+      display: flex; flex-direction: column;
+    }
+    .modal-card h2 { margin: 0 0 12px; font-size: 18px; }
+    .modal-card p { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+    .modal-card textarea {
+      flex: 1; font: inherit;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px; padding: 12px;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-elev); color: var(--fg);
+      min-height: 240px; resize: vertical;
+    }
+    .modal-actions { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
+
+    footer.page-footer {
+      margin-top: 36px; padding-top: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 12px; color: var(--muted);
+    }
+    footer.page-footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -254,27 +313,51 @@
     </header>
     <p class="meta">Generated <span id="generated-at"></span> · profile <code id="profile"></code></p>
 
-    <div class="intro">
-      <strong>Validate the seed examples below.</strong> Each card is a question
-      that <code>agami-query-database</code> already knows how to answer — but
-      seed examples are LLM-generated guesses that haven't been seen by you
-      yet. <strong>Validating them turns them into golden truths</strong> the
-      query skill will trust as few-shot anchors, and they become candidates
-      for <code>tests.yaml</code> so future schema changes that break them
-      surface as a red CI run.
-      <br/><br/>
-      Reply in chat with <code>validate N</code>, <code>reject N</code>,
-      <code>edit N</code>, or <code>done</code>. Bulk-validate with
-      <code>validate all</code>.
+    <!-- Reviewer identity (used for validated_by). Persisted to localStorage. -->
+    <div class="reviewer-form" id="reviewer-form">
+      <label for="rv-email">Your email</label>
+      <input type="email" id="rv-email" placeholder="you@example.com" />
+      <span class="status" id="reviewer-status">(saved to this browser; we'll attribute validations to it)</span>
     </div>
 
+    <div class="intro">
+      Click <strong>Validate</strong> on each seed example you'd like agami to
+      trust as a few-shot anchor. <strong>Reject</strong> kills it. <strong>Edit</strong>
+      opens an inline SQL editor — paste a corrected query and we'll re-run it on
+      the next round. When done, hit <strong>Generate feedback for Claude</strong>
+      below and paste the result back into chat.
+    </div>
+
+    <div class="tab-bar" id="tab-bar"></div>
     <div id="items"></div>
 
-    <footer>
+    <footer class="page-footer">
       Each example was executed against your live database during introspection.
-      The "Returned N rows" line above each result table is the total your
-      query returned; the table shows the first 5 of those rows.
+      The "Returned N rows" line above each result table is the total your query
+      returned; the table shows the first 5 of those rows.
     </footer>
+  </div>
+
+  <!-- Sticky footer: pending count + generate button -->
+  <div class="sticky-footer">
+    <div class="sticky-footer-inner">
+      <span class="pending-summary" id="pending-summary">No actions queued yet — click buttons on the cards above to start.</span>
+      <button id="btn-reset" type="button">Reset all</button>
+      <button id="btn-generate" class="primary" type="button" disabled>Generate feedback for Claude</button>
+    </div>
+  </div>
+
+  <!-- Modal: generated feedback block -->
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Paste this into your Claude Code chat</h2>
+      <p>Claude will parse these commands, apply each one to <code>examples.yaml</code> (re-executing edited SQL against your live DB), and re-render the dashboard.</p>
+      <textarea id="modal-text" readonly></textarea>
+      <div class="modal-actions">
+        <button id="modal-copy" type="button" class="primary">Copy to clipboard</button>
+        <button id="modal-close" type="button">Close</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -282,11 +365,18 @@
     const generatedAt = "{{GENERATED_AT}}";
     const profile = "{{PROFILE}}";
 
+    // pendingActions[n] = { action: "validate" | "reject" | "edit", sql?: string }
+    const pendingActions = {};
+    let activeTab = "review";
+
     function el(tag, attrs = {}, ...children) {
       const e = document.createElement(tag);
       for (const [k, v] of Object.entries(attrs)) {
         if (k === 'class') e.className = v;
         else if (k === 'text') e.textContent = v;
+        else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+        else if (v === false || v === null || v === undefined) {}
+        else if (v === true) e.setAttribute(k, '');
         else e.setAttribute(k, v);
       }
       for (const c of children) {
@@ -296,8 +386,6 @@
       return e;
     }
 
-    // Render an ISO timestamp as a human-readable string in the user's locale.
-    // Falls through to the raw string if parsing fails.
     function prettifyTimestamp(iso) {
       if (typeof iso !== 'string' || !iso) return iso || '';
       const d = new Date(iso);
@@ -312,55 +400,138 @@
     document.getElementById('generated-at').textContent = prettifyTimestamp(generatedAt);
     document.getElementById('profile').textContent = profile;
 
-    const itemsEl = document.getElementById('items');
-    items.forEach(item => {
-      const card = el('div', { class: 'example-item' });
+    // Reviewer form + localStorage
+    const emailInput = document.getElementById('rv-email');
+    const reviewerStatus = document.getElementById('reviewer-status');
 
+    function loadReviewer() {
+      try { emailInput.value = localStorage.getItem('agami.reviewer.email') || ''; }
+      catch (e) {}
+    }
+    function saveReviewer() {
+      try {
+        localStorage.setItem('agami.reviewer.email', emailInput.value.trim());
+        reviewerStatus.textContent = '✓ Saved';
+        reviewerStatus.classList.add('saved');
+        setTimeout(() => {
+          reviewerStatus.classList.remove('saved');
+          reviewerStatus.textContent = '(saved to this browser; we\'ll attribute validations to it)';
+        }, 2000);
+      } catch (e) {
+        reviewerStatus.textContent = '⚠ Browser blocked localStorage';
+      }
+    }
+    emailInput.addEventListener('change', saveReviewer);
+    loadReviewer();
+    function reviewerEmail() { return emailInput.value.trim(); }
+
+    // ---- Tabs ----
+    function itemTab(item) {
+      const s = item.state || 'unreviewed';
+      if (s === 'validated') return 'validated';
+      if (s === 'rejected')  return 'rejected';
+      return 'review';   // unreviewed (or error) → For Validation
+    }
+    const TABS = [
+      { id: 'review',    label: 'For Validation' },
+      { id: 'validated', label: 'Validated' },
+      { id: 'rejected',  label: 'Rejected' },
+    ];
+    function tabCounts() {
+      const c = { review: 0, validated: 0, rejected: 0 };
+      items.forEach(it => { c[itemTab(it)]++; });
+      return c;
+    }
+    function renderTabs() {
+      const counts = tabCounts();
+      const bar = document.getElementById('tab-bar');
+      bar.innerHTML = '';
+      TABS.forEach(t => {
+        const btn = el('button', {
+          class: t.id === activeTab ? 'active' : '',
+          type: 'button',
+          onclick: () => { activeTab = t.id; renderTabs(); renderItems(); },
+        });
+        btn.appendChild(document.createTextNode(t.label));
+        btn.appendChild(el('span', { class: 'tab-count', text: String(counts[t.id] || 0) }));
+        bar.appendChild(btn);
+      });
+    }
+
+    function renderResultTable(item) {
+      const rc = (typeof item.row_count === 'number') ? item.row_count : (item.row_preview ? item.row_preview.length : 0);
+      const previewN = item.row_preview ? item.row_preview.length : 0;
+      const rowsLabel = rc.toLocaleString() + ' row' + (rc === 1 ? '' : 's');
+      const showingClause = (rc > previewN) ? ' · showing first ' + previewN : '';
+
+      const out = document.createDocumentFragment();
+      out.appendChild(el('div', { class: 'label-line', text: 'Returned ' + rowsLabel + showingClause }));
+
+      if (previewN === 0) {
+        out.appendChild(el('div', { class: 'signoff', text: 'No rows returned.' }));
+        return out;
+      }
+      const table = el('table', { class: 'result-table' });
+      if (Array.isArray(item.row_headers) && item.row_headers.length) {
+        const thead = el('thead');
+        const tr = el('tr');
+        item.row_headers.forEach(h => tr.appendChild(el('th', { text: h })));
+        thead.appendChild(tr);
+        table.appendChild(thead);
+      }
+      const tbody = el('tbody');
+      item.row_preview.forEach(row => {
+        const tr = el('tr');
+        row.forEach(cell => tr.appendChild(el('td', { text: String(cell == null ? '' : cell) })));
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      out.appendChild(table);
+      return out;
+    }
+
+    function renderCard(item) {
+      const card = el('div', { class: 'example-item', 'data-n': item.n });
+      const pending = pendingActions[item.n];
+      if (pending) card.classList.add('pending-' + pending.action);
+
+      // Header
       const header = el('div', { class: 'example-header' });
       header.appendChild(el('span', { class: 'example-num', text: '#' + item.n }));
       header.appendChild(el('span', { class: 'example-question', text: item.question || '<no question>' }));
-
       const stateBadge = item.error ? 'error' : (item.state || 'unreviewed');
       header.appendChild(el('span', { class: 'badge ' + stateBadge, text: stateBadge }));
       card.appendChild(header);
 
-      // SQL block
+      // SQL — either the static SQL block, or (if pending edit) an editable textarea
       card.appendChild(el('div', { class: 'label-line', text: 'SQL' }));
-      card.appendChild(el('pre', { class: 'sql', text: item.sql || '' }));
+      if (pending && pending.action === 'edit') {
+        const ta = el('textarea', {
+          class: 'sql-editor',
+          rows: Math.min(20, Math.max(4, (item.sql || '').split('\n').length + 1)),
+          oninput: (ev) => {
+            pendingActions[item.n].sql = ev.target.value;
+            updateFooter();
+          },
+        });
+        ta.value = pending.sql != null ? pending.sql : (item.sql || '');
+        // Stash initial value into state so we have something to ship on copy.
+        if (pending.sql == null) pendingActions[item.n].sql = ta.value;
+        card.appendChild(ta);
+      } else {
+        card.appendChild(el('pre', { class: 'sql', text: item.sql || '' }));
+      }
 
-      // Result block — table preview, OR error
+      // Result preview OR error
       if (item.error) {
         card.appendChild(el('div', { class: 'label-line', text: 'Error' }));
         card.appendChild(el('div', { class: 'error-box', text: item.error }));
-      } else if (Array.isArray(item.row_preview) && item.row_preview.length) {
-        const rc = (typeof item.row_count === 'number') ? item.row_count : item.row_preview.length;
-        const previewN = item.row_preview.length;
-        const rowsLabel = rc.toLocaleString() + ' row' + (rc === 1 ? '' : 's');
-        const showingClause = (rc > previewN) ? ' · showing first ' + previewN : '';
-        card.appendChild(el('div', { class: 'label-line',
-          text: 'Returned ' + rowsLabel + showingClause }));
-        const table = el('table', { class: 'result-table' });
-        if (Array.isArray(item.row_headers) && item.row_headers.length) {
-          const thead = el('thead');
-          const tr = el('tr');
-          item.row_headers.forEach(h => tr.appendChild(el('th', { text: h })));
-          thead.appendChild(tr);
-          table.appendChild(thead);
-        }
-        const tbody = el('tbody');
-        item.row_preview.forEach(row => {
-          const tr = el('tr');
-          row.forEach(cell => tr.appendChild(el('td', { text: String(cell == null ? '' : cell) })));
-          tbody.appendChild(tr);
-        });
-        table.appendChild(tbody);
-        card.appendChild(table);
       } else {
-        card.appendChild(el('div', { class: 'label-line', text: 'Result' }));
-        card.appendChild(el('div', { class: 'signoff', text: 'No rows returned.' }));
+        const frag = renderResultTable(item);
+        card.appendChild(frag);
       }
 
-      // Sign-off block (only for validated items)
+      // Sign-off info (validated tab)
       if (item.state === 'validated' && item.validated_by) {
         const date = item.validated_at ? new Date(item.validated_at) : null;
         const dateStr = (date && !isNaN(date.getTime()))
@@ -370,24 +541,158 @@
           text: 'Validated by ' + item.validated_by + (dateStr ? ' on ' + dateStr : '') }));
       }
 
-      // Reply hint per state
-      let hint;
-      if (item.state === 'validated') {
-        hint = 'Reply: edit ' + item.n + '  or  reject ' + item.n + ' (to un-validate)';
-      } else if (item.state === 'rejected') {
-        hint = 'Reply: validate ' + item.n + '  or  edit ' + item.n;
-      } else {
-        hint = 'Reply: validate ' + item.n + '  |  reject ' + item.n + '  |  edit ' + item.n;
+      // Actions
+      const actions = el('div', { class: 'card-actions' });
+      const isReview = activeTab === 'review';
+      if (isReview) {
+        const validateBtn = el('button', {
+          class: 'btn-validate' + (pending && pending.action === 'validate' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'validate'),
+        }, 'Validate');
+        const rejectBtn = el('button', {
+          class: 'btn-reject' + (pending && pending.action === 'reject' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'reject'),
+        }, 'Reject');
+        const editBtn = el('button', {
+          class: 'btn-edit' + (pending && pending.action === 'edit' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'edit'),
+        }, pending && pending.action === 'edit' ? 'Cancel edit' : 'Edit');
+        const skipBtn = el('button', {
+          type: 'button',
+          onclick: () => clearAction(item),
+        }, 'Skip');
+        actions.appendChild(validateBtn);
+        actions.appendChild(rejectBtn);
+        actions.appendChild(editBtn);
+        actions.appendChild(skipBtn);
+        if (pending) {
+          const notes = {
+            validate: '✓ queued: validate',
+            reject:   '✗ queued: reject',
+            edit:     '✎ queued: edit (new SQL will be sent inline)',
+          };
+          actions.appendChild(el('span', { class: 'pending-note', text: notes[pending.action] || '' }));
+        }
       }
-      card.appendChild(el('div', { class: 'reply-hint', text: hint }));
+      // Validated / Rejected tabs: no action buttons in v1 (inspection only)
+      if (actions.children.length) card.appendChild(actions);
 
-      itemsEl.appendChild(card);
+      return card;
+    }
+
+    function renderItems() {
+      const root = document.getElementById('items');
+      root.innerHTML = '';
+      const subset = items.filter(it => itemTab(it) === activeTab);
+      if (subset.length === 0) {
+        root.appendChild(el('div', { class: 'example-item', text: 'Nothing in this tab.' }));
+        return;
+      }
+      subset.forEach(it => root.appendChild(renderCard(it)));
+    }
+
+    function toggleAction(item, action) {
+      const cur = pendingActions[item.n];
+      if (cur && cur.action === action) {
+        delete pendingActions[item.n];
+      } else {
+        pendingActions[item.n] = { action };
+        if (action === 'edit') pendingActions[item.n].sql = item.sql || '';
+      }
+      renderItems();
+      updateFooter();
+    }
+    function clearAction(item) {
+      delete pendingActions[item.n];
+      renderItems();
+      updateFooter();
+    }
+
+    function actionCounts() {
+      const c = { validate: 0, reject: 0, edit: 0 };
+      Object.values(pendingActions).forEach(a => { c[a.action] = (c[a.action] || 0) + 1; });
+      return c;
+    }
+    function updateFooter() {
+      const c = actionCounts();
+      const total = c.validate + c.reject + c.edit;
+      const sum = document.getElementById('pending-summary');
+      const btn = document.getElementById('btn-generate');
+      if (total === 0) {
+        sum.textContent = 'No actions queued yet — click buttons on the cards above to start.';
+        btn.disabled = true;
+      } else {
+        const parts = [];
+        if (c.validate) parts.push(`${c.validate} validate`);
+        if (c.reject)   parts.push(`${c.reject} reject`);
+        if (c.edit)     parts.push(`${c.edit} edit`);
+        sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
+        btn.disabled = false;
+      }
+    }
+
+    function generateFeedback() {
+      const email = reviewerEmail();
+      const validates = [], rejects = [], editsByN = {};
+      Object.entries(pendingActions).forEach(([n, p]) => {
+        if (p.action === 'validate') validates.push(Number(n));
+        else if (p.action === 'reject') rejects.push(Number(n));
+        else if (p.action === 'edit') editsByN[n] = p.sql || '';
+      });
+      validates.sort((a, b) => a - b);
+      rejects.sort((a, b) => a - b);
+
+      const lines = [];
+      if (validates.length) {
+        const byClause = email ? ` by ${email}` : '';
+        lines.push(`validate ${validates.join(', ')}${byClause}`);
+      }
+      if (rejects.length) {
+        lines.push(`reject ${rejects.join(', ')}`);
+      }
+      // Each edit gets its own multi-line block.
+      Object.keys(editsByN).sort((a, b) => Number(a) - Number(b)).forEach(n => {
+        lines.push(`edit ${n} sql>>>`);
+        lines.push(editsByN[n]);
+        lines.push(`<<<`);
+      });
+      if (lines.length) lines.push('done');
+
+      document.getElementById('modal-text').value = lines.join('\n') + '\n';
+      document.getElementById('modal').hidden = false;
+    }
+
+    document.getElementById('btn-generate').addEventListener('click', generateFeedback);
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      Object.keys(pendingActions).forEach(k => delete pendingActions[k]);
+      renderItems();
+      updateFooter();
+    });
+    document.getElementById('modal-close').addEventListener('click', () => {
+      document.getElementById('modal').hidden = true;
+    });
+    document.getElementById('modal-copy').addEventListener('click', () => {
+      const ta = document.getElementById('modal-text');
+      ta.select();
+      const btn = document.getElementById('modal-copy');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(ta.value).then(
+          () => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy to clipboard', 1500); },
+          () => { btn.textContent = 'Copy failed — select all + ⌘C'; }
+        );
+      } else {
+        try { document.execCommand('copy'); btn.textContent = 'Copied!'; }
+        catch (e) { btn.textContent = 'Select all + ⌘C'; }
+        setTimeout(() => btn.textContent = 'Copy to clipboard', 1500);
+      }
     });
 
-    if (items.length === 0) {
-      itemsEl.appendChild(el('div', { class: 'example-item',
-        text: 'No seed examples found. agami-connect normally writes 10–15 to <artifacts_dir>/<profile>/examples.yaml — check the introspect log if this is unexpected.' }));
-    }
+    renderTabs();
+    renderItems();
+    updateFooter();
   </script>
 </body>
 </html>

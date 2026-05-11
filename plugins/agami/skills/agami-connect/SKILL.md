@@ -1034,11 +1034,16 @@ Surface in chat (single block):
 Validating <N> seed examples — dashboard rendered:
   ~/.agami/examples-validation/<ts>.html
 
-Reply with:
+The dashboard has 3 tabs (For Validation · Validated · Rejected) and
+click-to-act buttons on each card. Click Validate / Reject / Edit on
+the items you want, then hit "Generate feedback for Claude" at the
+bottom and paste the result back here.
+
+You can also type commands directly:
   validate N           (or `validate 1, 3, 5`)
   validate all         (bulk — skips errored examples)
   reject N
-  edit N
+  edit N               (I'll prompt for the new SQL in chat)
   done
 ```
 
@@ -1046,12 +1051,22 @@ Auto-open with the same multi-command fallback chain as agami-query-database Pha
 
 ### 5d — Chat back-channel grammar
 
-The user replies with one or more commands (comma-separated allowed). Parse:
+The user replies with one or more commands. Commands can come from the dashboard's "Generate feedback for Claude" button (newline-separated block) or be typed directly. Same grammar either way.
 
-- **`validate N`** (or `validate N, M, …`) — for each item, set `state: validated`, `validated_by: <user email or "<unknown>">`, `validated_at: <UTC ISO>` in the example's entry in `<artifacts_dir>/<profile>/examples.yaml`.
+- **`validate N`** (or `validate N, M, …` / `validate N, M by you@example.com`) — for each item, set `state: validated`, `validated_by: <email from the command, or the reviewer's stored email in localStorage as passed from the page, or "<unknown>" if neither>`, `validated_at: <UTC ISO>` in the example's entry in `<artifacts_dir>/<profile>/examples.yaml`.
 - **`validate all`** — bulk-set every non-errored example to `validated`. Skip errored ones; surface the count: *"Validated 9 examples; 3 had errors and stay unreviewed (use `edit N` to fix)."*
 - **`reject N`** — set `state: rejected`. Don't delete the example from the YAML (preserves audit trail).
-- **`edit N`** — open the example's `sql` for editing. Read the YAML, surface the SQL block in chat as a fenced code block, accept the user's edits inline, write back, re-execute, update the dashboard JSON's row preview, and ask again.
+- **`edit N`** — interactive form: surface the example's current SQL in chat, accept the user's edit conversationally, write back, re-execute, update the dashboard.
+- **`edit N sql>>>` ... `<<<`** — inline form (dashboard generates this when the user clicks Edit + retypes the SQL in the textarea on the page). Multi-line block:
+  ```
+  edit 8 sql>>>
+  SELECT customer_id, SUM(amount) AS total
+  FROM orders
+  WHERE status = 'shipped'
+  GROUP BY customer_id
+  <<<
+  ```
+  Parser: see a line matching `edit N sql>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line after it until `<<<`; that's the new SQL. Write it back to the example's `sql` field, re-EXPLAIN-validate via the chosen tool, re-execute, refresh the dashboard's row preview. **Apply the same SQL-safety checks as Phase 4b** (refuse DDL/DML, refuse system tables) — broken edits leave the example as `state: error` and the dashboard surfaces the error in the next render.
 - **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed.` and continue to Phase 5.5.
 
 For each successful edit, the user is also offered: *"Promote this to a golden test in `tests.yaml`? (yes / no / skip)"*. If yes → append a new test entry to `<artifacts_dir>/<profile>/tests.yaml` with the same question + an `equals` assertion against the actual returned value(s). This is the bridge to the Quality-Loop launch's `agami test`.

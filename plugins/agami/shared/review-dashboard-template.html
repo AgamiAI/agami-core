@@ -9,15 +9,14 @@
   Per-render placeholders (always substitute):
     {{REPORT_TITLE}}             — "Review queue · <profile> · threshold <X>"
     {{GENERATED_AT}}             — ISO8601 UTC timestamp
-    {{ITEMS_JSON}}                — JSON array of review-item objects (schema below)
+    {{ITEMS_JSON}}                — JSON array of item objects (schema below)
     {{SUMMARY_JSON}}              — JSON object with the per-category counts
-                                    (auto-approved + needs-review)
     {{THRESHOLD}}                 — Float string, e.g. "0.7"
-    {{MODEL_VERSION}}             — Short hash from index.yaml
+    {{MODEL_VERSION}}             — Short hash from .snapshots/ dir name
     {{AGAMI_LOGO_DARK_TEXT}}      — full SVG content of agami-logo-dark.svg
     {{AGAMI_LOGO_LIGHT_TEXT}}     — full SVG content of agami-logo-light.svg
 
-  ITEMS_JSON schema — array of objects, one per item needing review:
+  ITEMS_JSON schema — array of objects, one per entity in the model:
     {
       "n":             integer (1-indexed display number — used in chat back-channel)
       "entity_type":   "join" | "metric" | "field_description" | "named_filter"
@@ -27,29 +26,20 @@
       "title":         "header line — e.g. 'public.orders → public.customers'"
       "subtitle":      "optional one-line context — e.g. 'metric: revenue' or null"
       "confidence":    float in [0,1]
-      "review_state":  "unreviewed" | "stale"
+      "review_state":  "unreviewed" | "approved" | "rejected" | "stale"
       "origin":        "fk" | "introspect_heuristic" | "column_comment" | "llm_suggested" | "human_authored"
+      "signed_off_by": "<email or 'agami_introspect_v1'>" | null
+      "signed_off_at": ISO8601 | null
+      "signed_off_role": "cfo" | "cto" | "data_lead" | "engineer" | "analyst" | "other" | "system" | null
       "signals":       [{"ok": true|false, "text": "Both columns named `customer_id`"}, ...]
       "inferred":      "string — the inferred SQL fragment / definition / mapping"
-      "extra_lines":   [{"label": "Definition", "text": "..."}, ...] — optional structured details
-      "reply_hint":    "string — example chat command, e.g. 'approve 3' or 'approve 1 by you@x.com role=cfo'"
+      "extra_lines":   [{"label": "Definition", "text": "..."}, ...]
+      "tab":           "review" | "auto" | "manual" | "rejected"  (SKILL pre-classifies)
     }
 
-  SUMMARY_JSON schema:
+  SUMMARY_JSON schema (unchanged from prior versions):
     {
-      "auto_approved": {
-        "datasets":                            int,
-        "fields":                              int,
-        "fk_relationships":                    int,
-        "field_descriptions_from_comments":    int
-      },
-      "needs_review": {
-        "inferred_relationships":              int,
-        "low_confidence_field_descriptions":   int,
-        "metric_proposals":                    int,
-        "named_filter_proposals":              int,
-        "stale":                               int
-      }
+      "auto_approved": { ... }, "needs_review": { ... }
     }
 -->
 <html lang="en">
@@ -65,10 +55,17 @@
       --muted: #6b7280;
       --border: #e5e7eb;
       --accent: #2563eb;
+      --accent-hover: #1d4ed8;
       --row-zebra: rgba(0, 0, 0, 0.025);
       --code-bg: rgba(0, 0, 0, 0.04);
-      --ok: #166534;
-      --bad: #991b1b;
+      --ok-bg: #dcfce7;
+      --ok-fg: #166534;
+      --ok-border: #86efac;
+      --bad-bg: #fee2e2;
+      --bad-fg: #991b1b;
+      --bad-border: #fca5a5;
+      --warn-bg: #fef3c7;
+      --warn-fg: #92400e;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -78,22 +75,30 @@
         --muted: #94a3b8;
         --border: #1e293b;
         --accent: #60a5fa;
+        --accent-hover: #93c5fd;
         --row-zebra: rgba(255, 255, 255, 0.03);
         --code-bg: rgba(255, 255, 255, 0.04);
-        --ok: #86efac;
-        --bad: #fca5a5;
+        --ok-bg: #052e16;
+        --ok-fg: #86efac;
+        --ok-border: #14532d;
+        --bad-bg: #450a0a;
+        --bad-fg: #fca5a5;
+        --bad-border: #7f1d1d;
+        --warn-bg: #422006;
+        --warn-fg: #fbbf24;
       }
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 32px;
+      padding: 32px 32px 110px;   /* extra bottom for sticky footer */
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg);
       color: var(--fg);
       line-height: 1.5;
     }
-    .wrap { max-width: 920px; margin: 0 auto; }
+    .wrap { max-width: 980px; margin: 0 auto; }
+
     header.dashboard-header {
       display: flex;
       align-items: center;
@@ -110,172 +115,288 @@
       .logo-dark-mode { display: inline-block; }
     }
     h1.dashboard-title {
-      font-size: 22px;
-      font-weight: 600;
-      margin: 0;
-      flex: 1;
-      text-align: right;
+      font-size: 22px; font-weight: 600;
+      margin: 0; flex: 1; text-align: right;
     }
     .meta { font-size: 12px; color: var(--muted); margin-bottom: 24px; }
+    .meta code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
 
+    /* Reviewer form */
+    .reviewer-form {
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 14px 18px; background: var(--bg-elev);
+      margin-bottom: 18px;
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    }
+    .reviewer-form label {
+      font-size: 12px; color: var(--muted);
+      letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600;
+    }
+    .reviewer-form input, .reviewer-form select {
+      font: inherit; font-size: 14px;
+      padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg); color: var(--fg); min-width: 200px;
+    }
+    .reviewer-form .status { font-size: 12px; color: var(--muted); margin-left: auto; }
+    .reviewer-form .status.saved { color: var(--ok-fg); }
+
+    /* Summary card */
     .summary-card {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 18px 22px;
-      background: var(--bg-elev);
-      margin-bottom: 28px;
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px 22px; background: var(--bg-elev);
+      margin-bottom: 24px;
     }
     .summary-card h2 {
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin: 0 0 10px;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
     }
     .summary-card ul { list-style: none; padding: 0; margin: 0; }
     .summary-card li {
-      font-size: 14px;
-      padding: 3px 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
+      font-size: 14px; padding: 3px 0;
+      display: flex; align-items: center; gap: 10px;
     }
-    .summary-card .checkmark { color: var(--ok); font-weight: 700; }
+    .summary-card .checkmark { color: var(--ok-fg); font-weight: 700; }
     .summary-card .warnmark { color: #d97706; font-weight: 700; }
-    .summary-card .count { font-variant-numeric: tabular-nums; min-width: 3em; text-align: right; }
-    .summary-total {
-      margin-top: 14px;
-      padding-top: 12px;
-      border-top: 1px solid var(--border);
-      font-size: 14px;
-      font-weight: 600;
+    @media (prefers-color-scheme: dark) {
+      .summary-card .warnmark { color: #fbbf24; }
+    }
+    .summary-card .count { font-variant-numeric: tabular-nums; min-width: 3em; text-align: right; margin-left: auto; }
+
+    /* Tabs */
+    .tab-bar {
+      display: flex; gap: 4px; flex-wrap: wrap;
+      margin: 24px 0 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-bar button {
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 10px 16px; border: none; cursor: pointer;
+      background: transparent; color: var(--muted);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+    .tab-bar button:hover { color: var(--fg); }
+    .tab-bar button.active {
+      color: var(--accent); border-bottom-color: var(--accent);
+    }
+    .tab-bar .tab-count {
+      font-size: 11px; color: var(--muted); margin-left: 6px;
+      background: var(--code-bg); padding: 1px 6px; border-radius: 999px;
+    }
+    .tab-bar button.active .tab-count { color: var(--accent); }
+
+    /* Entity-type group sections */
+    .group-section { margin: 20px 0; }
+    .group-header {
+      font-size: 13px; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase; color: var(--muted);
+      padding: 6px 0; cursor: pointer;
+      display: flex; align-items: center; gap: 8px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .group-header::before {
+      content: "▼"; font-size: 9px; transition: transform 120ms ease;
+    }
+    .group-header.collapsed::before { transform: rotate(-90deg); }
+    .group-header .group-count {
+      font-size: 11px; color: var(--muted);
+      background: var(--code-bg); padding: 1px 6px; border-radius: 999px;
+    }
+    .group-bulk {
+      margin-left: auto; font-size: 11px; font-weight: 500;
+      color: var(--accent); text-transform: none;
+      background: none; border: none; cursor: pointer;
+    }
+    .group-bulk:hover { color: var(--accent-hover); text-decoration: underline; }
+    .group-cards.collapsed { display: none; }
+
+    /* Item cards */
+    .review-item {
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px 20px; background: var(--bg-elev);
+      margin-bottom: 12px;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .review-item.pending-approve {
+      background: var(--ok-bg); border-color: var(--ok-border);
+    }
+    .review-item.pending-reject, .review-item.pending-unreject {
+      background: var(--bad-bg); border-color: var(--bad-border);
+    }
+    .review-item.pending-edit {
+      background: var(--warn-bg); border-color: #fbbf24;
     }
 
-    .review-item {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 18px 22px;
-      background: var(--bg-elev);
-      margin-bottom: 16px;
-    }
     .review-item-header {
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-      margin-bottom: 12px;
-      flex-wrap: wrap;
+      display: flex; align-items: baseline; gap: 10px;
+      margin-bottom: 10px; flex-wrap: wrap;
     }
     .review-item-num {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-      min-width: 2.4em;
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      letter-spacing: 0.04em; min-width: 2.4em;
     }
     .review-item-title {
-      font-size: 16px;
-      font-weight: 600;
-      flex: 1;
-      min-width: 200px;
+      font-size: 16px; font-weight: 600;
+      flex: 1; min-width: 200px;
     }
     .review-item-title code {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 14px;
-      background: var(--code-bg);
-      padding: 1px 5px;
-      border-radius: 4px;
+      font-size: 14px; background: var(--code-bg);
+      padding: 1px 5px; border-radius: 4px;
     }
     .review-item-subtitle {
-      font-size: 13px;
-      color: var(--muted);
-      margin: -8px 0 12px 2.4em;
+      font-size: 13px; color: var(--muted);
+      margin: -6px 0 10px 2.4em;
     }
     .conf-pill {
-      font-size: 12px;
-      color: var(--muted);
-      font-variant-numeric: tabular-nums;
+      font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
     }
     .badge {
-      display: inline-block;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      padding: 2px 7px;
-      border-radius: 999px;
-      margin-left: 6px;
+      display: inline-block; font-size: 10px; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      padding: 2px 7px; border-radius: 999px;
     }
-    .badge.unreviewed { background: #fef3c7; color: #92400e; }
-    .badge.stale      { background: #e5e7eb; color: #374151; }
-    .badge.rule1      { background: #dbeafe; color: #1e40af; }
+    .badge.unreviewed { background: var(--warn-bg); color: var(--warn-fg); }
+    .badge.approved   { background: var(--ok-bg);   color: var(--ok-fg); }
+    .badge.rejected   { background: var(--bad-bg);  color: var(--bad-fg); }
+    .badge.stale      { background: #e5e7eb;        color: #374151; }
+    .badge.rule1      { background: #dbeafe;        color: #1e40af; }
     @media (prefers-color-scheme: dark) {
-      .badge.unreviewed { background: #422006; color: #fbbf24; }
-      .badge.stale      { background: #1f2937; color: #9ca3af; }
-      .badge.rule1      { background: #1e3a8a; color: #93c5fd; }
+      .badge.stale  { background: #1f2937; color: #9ca3af; }
+      .badge.rule1  { background: #1e3a8a; color: #93c5fd; }
     }
 
-    .why { font-size: 12px; color: var(--muted);
-      margin: 0 0 6px; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600; }
-    .signals { list-style: none; padding: 0; margin: 0 0 14px; }
+    .why {
+      font-size: 11px; color: var(--muted);
+      margin: 0 0 6px; letter-spacing: 0.04em;
+      text-transform: uppercase; font-weight: 600;
+    }
+    .signals { list-style: none; padding: 0; margin: 0 0 12px; }
     .signals li {
-      font-size: 14px;
-      padding: 2px 0;
-      display: flex;
-      gap: 10px;
-      align-items: baseline;
+      font-size: 14px; padding: 2px 0;
+      display: flex; gap: 10px; align-items: baseline;
     }
     .signals .mark { font-weight: 700; min-width: 1.2em; }
-    .signals .ok { color: var(--ok); }
-    .signals .no { color: var(--bad); }
+    .signals .ok { color: var(--ok-fg); }
+    .signals .no { color: var(--bad-fg); }
 
     .inferred {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 13px;
-      background: var(--code-bg);
-      padding: 8px 12px;
-      border-radius: 6px;
-      margin: 6px 0 12px;
-      white-space: pre-wrap;
-      word-break: break-word;
+      font-size: 13px; background: var(--code-bg);
+      padding: 8px 12px; border-radius: 6px;
+      margin: 4px 0 12px; white-space: pre-wrap; word-break: break-word;
     }
-
-    .extra { margin: 8px 0 12px; font-size: 14px; }
+    .extra { margin: 6px 0 12px; font-size: 14px; }
     .extra-line { margin: 3px 0; }
     .extra-line .label {
-      font-size: 11px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--muted);
-      font-weight: 600;
-      margin-right: 8px;
+      font-size: 11px; letter-spacing: 0.04em;
+      text-transform: uppercase; color: var(--muted);
+      font-weight: 600; margin-right: 8px;
     }
 
-    .reply-hint {
-      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 12px;
-      color: var(--muted);
-      background: var(--code-bg);
-      padding: 6px 10px;
-      border-radius: 6px;
-      margin-top: 12px;
-      display: inline-block;
+    .approval-info {
+      font-size: 12px; color: var(--muted);
+      margin: 8px 0 0;
     }
     .yaml-path {
-      font-size: 11px;
-      color: var(--muted);
+      font-size: 11px; color: var(--muted);
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      margin-top: 6px;
+    }
+
+    /* Per-card actions */
+    .card-actions {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      margin-top: 14px; padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .card-actions button {
+      font: inherit; font-size: 13px; font-weight: 500;
+      padding: 6px 14px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--bg);
+      color: var(--fg);
+    }
+    .card-actions button:hover {
+      border-color: var(--accent); color: var(--accent);
+    }
+    .card-actions button.btn-approve.active {
+      background: var(--ok-fg); color: white; border-color: var(--ok-fg);
+    }
+    .card-actions button.btn-reject.active,
+    .card-actions button.btn-unreject.active {
+      background: var(--bad-fg); color: white; border-color: var(--bad-fg);
+    }
+    .card-actions button.btn-edit.active {
+      background: #d97706; color: white; border-color: #d97706;
+    }
+    .card-actions .pending-note {
+      font-size: 12px; color: var(--muted); margin-left: auto;
+      align-self: center;
+    }
+
+    /* Sticky footer */
+    .sticky-footer {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: var(--bg-elev); border-top: 1px solid var(--border);
+      padding: 14px 32px; z-index: 100;
+      box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.05);
+    }
+    .sticky-footer-inner {
+      max-width: 980px; margin: 0 auto;
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    }
+    .pending-summary { font-size: 14px; color: var(--fg); flex: 1; }
+    .pending-summary .count { font-weight: 600; }
+    .sticky-footer button {
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 8px 16px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+    }
+    .sticky-footer button.primary {
+      background: var(--accent); color: white; border-color: var(--accent);
+    }
+    .sticky-footer button.primary:hover { background: var(--accent-hover); }
+    .sticky-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex; align-items: center; justify-content: center;
+      padding: 32px;
+    }
+    .modal-backdrop[hidden] { display: none; }
+    .modal-card {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 12px; padding: 24px;
+      max-width: 720px; width: 100%; max-height: 80vh;
+      display: flex; flex-direction: column;
+    }
+    .modal-card h2 { margin: 0 0 12px; font-size: 18px; }
+    .modal-card p { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+    .modal-card textarea {
+      flex: 1; font: inherit;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px; padding: 12px;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-elev); color: var(--fg);
+      min-height: 200px; resize: vertical;
+    }
+    .modal-actions {
+      display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end;
+    }
+    .inline-error {
+      font-size: 12px; color: var(--bad-fg);
       margin-top: 8px;
     }
 
-    footer {
-      margin-top: 36px;
-      padding-top: 16px;
+    footer.page-footer {
+      margin-top: 36px; padding-top: 16px;
       border-top: 1px solid var(--border);
-      font-size: 12px;
-      color: var(--muted);
+      font-size: 12px; color: var(--muted);
     }
-    footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+    footer.page-footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -289,36 +410,87 @@
       </span>
       <h1 class="dashboard-title">{{REPORT_TITLE}}</h1>
     </header>
-    <p class="meta">Generated <span id="generated-at"></span> · model version <code id="model-version"></code> · threshold <code id="threshold"></code></p>
+    <p class="meta">
+      Generated <span id="generated-at"></span>
+      · model version <code id="model-version"></code>
+      · threshold <code id="threshold"></code>
+    </p>
+
+    <!-- Reviewer identity (used for Rule 1 sign-offs). Persisted to localStorage. -->
+    <div class="reviewer-form" id="reviewer-form">
+      <label for="rv-email">Your email</label>
+      <input type="email" id="rv-email" placeholder="you@example.com" />
+      <label for="rv-role">Role</label>
+      <select id="rv-role">
+        <option value="">— pick one —</option>
+        <option value="cfo">cfo</option>
+        <option value="cto">cto</option>
+        <option value="data_lead">data_lead</option>
+        <option value="engineer">engineer</option>
+        <option value="analyst">analyst</option>
+        <option value="other">other</option>
+      </select>
+      <span class="status" id="reviewer-status">(saved to this browser; we'll use it for metrics + named-filter sign-offs)</span>
+    </div>
 
     <div class="summary-card" id="summary"></div>
+
+    <div class="tab-bar" id="tab-bar"></div>
     <div id="items"></div>
 
-    <footer>
-      Reply in chat to act on these items:
-      <code>approve N</code>,
-      <code>reject N</code>,
-      <code>edit N</code>,
-      <code>approve all below 0.95</code>,
-      <code>threshold 0.5</code>,
-      <code>done</code>.
-      Rule 1 items (metrics, named filters) require a role:
-      <code>approve N by you@example.com role=cfo</code>.
+    <footer class="page-footer">
+      Tip: click <strong>Approve / Reject / Edit</strong> on each card you want to act on,
+      then hit <strong>Generate feedback for Claude</strong> at the bottom. Copy the resulting
+      text, paste it back into your Claude Code chat. Each action is queued locally until you generate.
     </footer>
   </div>
 
+  <!-- Sticky footer: pending count + generate button -->
+  <div class="sticky-footer">
+    <div class="sticky-footer-inner">
+      <span class="pending-summary" id="pending-summary">No actions queued yet — click buttons on the cards above to start.</span>
+      <button id="btn-reset" type="button">Reset all</button>
+      <button id="btn-generate" class="primary" type="button" disabled>Generate feedback for Claude</button>
+    </div>
+  </div>
+
+  <!-- Modal: generated feedback block -->
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Paste this into your Claude Code chat</h2>
+      <p>Claude will parse these commands, apply each one to the YAML files (gated by the validator), and re-render the dashboard.</p>
+      <textarea id="modal-text" readonly></textarea>
+      <div id="modal-error" class="inline-error" hidden></div>
+      <div class="modal-actions">
+        <button id="modal-copy" type="button" class="primary">Copy to clipboard</button>
+        <button id="modal-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
+    // ---- Skill-substituted placeholders ----
     const items = {{ITEMS_JSON}};
     const summary = {{SUMMARY_JSON}};
     const threshold = "{{THRESHOLD}}";
     const generatedAt = "{{GENERATED_AT}}";
     const modelVersion = "{{MODEL_VERSION}}";
 
+    // ---- Local state ----
+    // pendingActions[n] = "approve" | "reject" | "edit" | "unreject" | null
+    const pendingActions = {};
+    let activeTab = "review";
+
+    // ---- Helpers ----
     function el(tag, attrs = {}, ...children) {
       const e = document.createElement(tag);
       for (const [k, v] of Object.entries(attrs)) {
         if (k === 'class') e.className = v;
         else if (k === 'text') e.textContent = v;
+        else if (k === 'html') e.innerHTML = v;
+        else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+        else if (v === false || v === null || v === undefined) { /* skip */ }
+        else if (v === true) e.setAttribute(k, '');
         else e.setAttribute(k, v);
       }
       for (const c of children) {
@@ -328,8 +500,6 @@
       return e;
     }
 
-    // Render an ISO timestamp as a human-readable string in the user's locale.
-    // Falls through to the raw string if parsing fails.
     function prettifyTimestamp(iso) {
       if (typeof iso !== 'string' || !iso) return iso || '';
       const d = new Date(iso);
@@ -345,85 +515,187 @@
     document.getElementById('model-version').textContent = modelVersion || '(none)';
     document.getElementById('threshold').textContent = threshold;
 
+    // ---- Reviewer form + localStorage ----
+    const emailInput = document.getElementById('rv-email');
+    const roleSelect = document.getElementById('rv-role');
+    const reviewerStatus = document.getElementById('reviewer-status');
+
+    function loadReviewer() {
+      try {
+        emailInput.value = localStorage.getItem('agami.reviewer.email') || '';
+        roleSelect.value = localStorage.getItem('agami.reviewer.role') || '';
+      } catch (e) { /* localStorage may be blocked in some hosts */ }
+    }
+    function saveReviewer() {
+      try {
+        localStorage.setItem('agami.reviewer.email', emailInput.value.trim());
+        localStorage.setItem('agami.reviewer.role', roleSelect.value);
+        reviewerStatus.textContent = '✓ Saved';
+        reviewerStatus.classList.add('saved');
+        setTimeout(() => {
+          reviewerStatus.classList.remove('saved');
+          reviewerStatus.textContent = '(saved to this browser; we\'ll use it for metrics + named-filter sign-offs)';
+        }, 2000);
+      } catch (e) {
+        reviewerStatus.textContent = '⚠ Browser blocked localStorage; type your email each time';
+      }
+    }
+    emailInput.addEventListener('change', saveReviewer);
+    roleSelect.addEventListener('change', saveReviewer);
+    loadReviewer();
+
+    function reviewerEmail() { return emailInput.value.trim(); }
+    function reviewerRole()  { return roleSelect.value; }
+
     // ---- Summary card ----
     const sumEl = document.getElementById('summary');
     sumEl.appendChild(el('h2', { text: 'Summary at threshold ' + threshold }));
     const sumList = el('ul');
-
     const aa = (summary && summary.auto_approved) || {};
     const nr = (summary && summary.needs_review) || {};
 
-    function row(symbol, klass, text, count) {
+    function sumRow(symbol, klass, text, count) {
       const li = el('li');
       li.appendChild(el('span', { class: klass, text: symbol }));
       li.appendChild(el('span', { text: text }));
-      const sp = el('span', { class: 'count', text: String(count) });
-      li.style.flex = '1';
-      const right = el('span', { class: 'count', text: String(count) });
-      // Layout: spacer + count
-      const spacer = el('span', { text: '' });
-      spacer.style.flex = '1';
-      li.appendChild(spacer);
-      li.appendChild(right);
+      li.appendChild(el('span', { class: 'count', text: String(count) }));
       return li;
     }
-
-    let totalAuto = 0;
+    let totalReview = 0;
     if ((aa.datasets || 0) + (aa.fields || 0) > 0) {
       const c = (aa.datasets || 0) + (aa.fields || 0);
-      sumList.appendChild(row('✓', 'checkmark', `${aa.datasets || 0} datasets, ${aa.fields || 0} fields (auto-approved)`, c));
-      totalAuto += c;
+      sumList.appendChild(sumRow('✓', 'checkmark',
+        `${aa.datasets || 0} datasets, ${aa.fields || 0} fields (auto-approved)`, c));
     }
     if (aa.fk_relationships) {
-      sumList.appendChild(row('✓', 'checkmark', `${aa.fk_relationships} FK relationships (auto-approved)`, aa.fk_relationships));
-      totalAuto += aa.fk_relationships;
+      sumList.appendChild(sumRow('✓', 'checkmark',
+        `${aa.fk_relationships} FK relationships (auto-approved)`, aa.fk_relationships));
     }
     if (aa.field_descriptions_from_comments) {
-      sumList.appendChild(row('✓', 'checkmark',
-        `${aa.field_descriptions_from_comments} field descriptions from DBA column comments (auto-approved)`,
+      sumList.appendChild(sumRow('✓', 'checkmark',
+        `${aa.field_descriptions_from_comments} field descriptions from DBA column comments`,
         aa.field_descriptions_from_comments));
-      totalAuto += aa.field_descriptions_from_comments;
     }
-
-    let totalReview = 0;
     if (nr.inferred_relationships) {
-      sumList.appendChild(row('⚠', 'warnmark',
-        `${nr.inferred_relationships} inferred relationships from column-name matches (review)`,
+      sumList.appendChild(sumRow('⚠', 'warnmark',
+        `${nr.inferred_relationships} inferred relationships from column-name matches`,
         nr.inferred_relationships));
       totalReview += nr.inferred_relationships;
     }
     if (nr.low_confidence_field_descriptions) {
-      sumList.appendChild(row('⚠', 'warnmark',
-        `${nr.low_confidence_field_descriptions} field descriptions below confidence ${threshold} (review)`,
+      sumList.appendChild(sumRow('⚠', 'warnmark',
+        `${nr.low_confidence_field_descriptions} field descriptions below confidence ${threshold}`,
         nr.low_confidence_field_descriptions));
       totalReview += nr.low_confidence_field_descriptions;
     }
     if (nr.metric_proposals) {
-      sumList.appendChild(row('⚠', 'warnmark',
+      sumList.appendChild(sumRow('⚠', 'warnmark',
         `${nr.metric_proposals} metric proposals (sign-off required — Rule 1)`,
         nr.metric_proposals));
       totalReview += nr.metric_proposals;
     }
     if (nr.named_filter_proposals) {
-      sumList.appendChild(row('⚠', 'warnmark',
+      sumList.appendChild(sumRow('⚠', 'warnmark',
         `${nr.named_filter_proposals} named-filter proposals (sign-off required — Rule 1)`,
         nr.named_filter_proposals));
       totalReview += nr.named_filter_proposals;
     }
     if (nr.stale) {
-      sumList.appendChild(row('⚠', 'warnmark',
-        `${nr.stale} stale entries (schema drift — needs reconciliation)`,
-        nr.stale));
+      sumList.appendChild(sumRow('⚠', 'warnmark',
+        `${nr.stale} stale entries (schema drift)`, nr.stale));
       totalReview += nr.stale;
     }
-
     sumEl.appendChild(sumList);
-    const totalLine = el('div', { class: 'summary-total',
-      text: `${totalReview} item${totalReview === 1 ? '' : 's'} need your attention at threshold ${threshold}.` });
-    sumEl.appendChild(totalLine);
 
-    // ---- Item cards ----
-    const itemsEl = document.getElementById('items');
+    // ---- Tab bar ----
+    const TABS = [
+      { id: 'review', label: 'For Review' },
+      { id: 'auto',   label: 'Approved Automatically' },
+      { id: 'manual', label: 'Manually Approved' },
+      { id: 'rejected', label: 'Rejected' },
+    ];
+
+    function tabCounts() {
+      const c = { review: 0, auto: 0, manual: 0, rejected: 0 };
+      items.forEach(it => { c[it.tab] = (c[it.tab] || 0) + 1; });
+      return c;
+    }
+
+    function renderTabs() {
+      const counts = tabCounts();
+      const bar = document.getElementById('tab-bar');
+      bar.innerHTML = '';
+      TABS.forEach(t => {
+        const btn = el('button', {
+          class: t.id === activeTab ? 'active' : '',
+          type: 'button',
+          'data-tab': t.id,
+          onclick: () => { activeTab = t.id; renderTabs(); renderItems(); },
+        });
+        btn.appendChild(document.createTextNode(t.label));
+        btn.appendChild(el('span', { class: 'tab-count', text: String(counts[t.id] || 0) }));
+        bar.appendChild(btn);
+      });
+    }
+
+    // ---- Entity-type group ordering inside a tab ----
+    // Sort entity types: Rule 1 first (metric, named_filter), then field_description, join, dataset.
+    const TYPE_ORDER = ['metric', 'named_filter', 'join', 'field_description'];
+    const TYPE_LABEL = {
+      metric:             'Metrics',
+      named_filter:       'Named Filters',
+      join:               'Joins',
+      field_description:  'Field Descriptions',
+    };
+
+    function itemsForTab(tab) {
+      return items.filter(it => it.tab === tab);
+    }
+    function groupItemsByType(list) {
+      const out = {};
+      TYPE_ORDER.forEach(t => { out[t] = []; });
+      list.forEach(it => {
+        const t = it.entity_type;
+        (out[t] = out[t] || []).push(it);
+      });
+      // Sort each group by ascending confidence (worst first for review).
+      Object.values(out).forEach(arr => {
+        arr.sort((a, b) => (a.confidence ?? 0) - (b.confidence ?? 0));
+      });
+      return out;
+    }
+
+    // ---- Approval-phrase formatter (read-only tabs need this) ----
+    function approvalPhrase(item) {
+      const state = (item.review_state || 'unreviewed').toLowerCase();
+      if (state === 'approved') {
+        if (item.signed_off_by === 'agami_introspect_v1' || item.signed_off_role === 'system') {
+          const reasons = {
+            fk:                    'FK declared in DB',
+            column_comment:        'DBA-authored column comment',
+            introspect_heuristic:  'unique-index + name match',
+          };
+          return 'auto-approved (' + (reasons[item.origin] || 'introspect signal') + ')';
+        }
+        let txt = 'approved';
+        if (item.signed_off_by) {
+          txt += ' by ' + item.signed_off_by;
+          if (item.signed_off_role && item.signed_off_role !== 'system') {
+            txt += ' (' + item.signed_off_role + ')';
+          }
+        }
+        if (item.signed_off_at) {
+          const d = new Date(item.signed_off_at);
+          if (!isNaN(d.getTime())) {
+            txt += ', ' + d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+          }
+        }
+        return txt;
+      }
+      if (state === 'rejected') return 'rejected';
+      if (state === 'stale')    return 'stale (schema drift — needs reconciliation)';
+      return 'unreviewed';
+    }
 
     function renderSignals(signals) {
       const ul = el('ul', { class: 'signals' });
@@ -438,16 +710,21 @@
       return ul;
     }
 
-    items.forEach(item => {
-      const card = el('div', { class: 'review-item' });
+    function renderCard(item) {
+      const card = el('div', { class: 'review-item', 'data-n': item.n });
+      const pending = pendingActions[item.n];
+      if (pending) card.classList.add('pending-' + pending);
 
+      // Header
       const header = el('div', { class: 'review-item-header' });
       header.appendChild(el('span', { class: 'review-item-num', text: '#' + item.n }));
       const title = el('span', { class: 'review-item-title' });
       title.appendChild(el('code', { text: item.title || '' }));
       header.appendChild(title);
-      header.appendChild(el('span', { class: 'conf-pill',
-        text: 'conf ' + (typeof item.confidence === 'number' ? item.confidence.toFixed(2) : '?') }));
+      if (typeof item.confidence === 'number') {
+        header.appendChild(el('span', { class: 'conf-pill',
+          text: 'conf ' + item.confidence.toFixed(2) }));
+      }
       header.appendChild(el('span', { class: 'badge ' + (item.review_state || 'unreviewed'),
         text: item.review_state || 'unreviewed' }));
       if (item.rule_1) {
@@ -459,16 +736,19 @@
         card.appendChild(el('div', { class: 'review-item-subtitle', text: item.subtitle }));
       }
 
-      if (item.signals && item.signals.length) {
+      // Why (source signals) — show on review tab, hide on the others to reduce clutter
+      if (activeTab === 'review' && item.signals && item.signals.length) {
         card.appendChild(el('div', { class: 'why', text: 'Why' }));
         card.appendChild(renderSignals(item.signals));
       }
 
+      // Inferred
       if (item.inferred) {
         card.appendChild(el('div', { class: 'why', text: 'Inferred' }));
         card.appendChild(el('div', { class: 'inferred', text: item.inferred }));
       }
 
+      // Extra lines (metrics: Definition + Assumptions)
       if (Array.isArray(item.extra_lines) && item.extra_lines.length) {
         const ex = el('div', { class: 'extra' });
         item.extra_lines.forEach(line => {
@@ -480,20 +760,237 @@
         card.appendChild(ex);
       }
 
+      // Approval / rejection info (auto & manual tabs)
+      if (activeTab === 'auto' || activeTab === 'manual' || activeTab === 'rejected') {
+        card.appendChild(el('div', { class: 'approval-info', text: approvalPhrase(item) }));
+      }
+
+      // YAML path (small, last)
       if (item.yaml_path) {
         card.appendChild(el('div', { class: 'yaml-path', text: 'YAML: ' + item.yaml_path }));
       }
-      if (item.reply_hint) {
-        card.appendChild(el('div', { class: 'reply-hint', text: 'Reply: ' + item.reply_hint }));
+
+      // Actions
+      const actions = el('div', { class: 'card-actions' });
+      if (activeTab === 'review') {
+        // Approve / Reject / Edit / Skip
+        const approveBtn = el('button', {
+          class: 'btn-approve' + (pending === 'approve' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'approve'),
+        }, 'Approve');
+        const rejectBtn = el('button', {
+          class: 'btn-reject' + (pending === 'reject' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'reject'),
+        }, 'Reject');
+        const editBtn = el('button', {
+          class: 'btn-edit' + (pending === 'edit' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'edit'),
+        }, 'Edit');
+        const skipBtn = el('button', {
+          type: 'button',
+          onclick: () => clearAction(item),
+        }, 'Skip');
+        actions.appendChild(approveBtn);
+        actions.appendChild(rejectBtn);
+        actions.appendChild(editBtn);
+        actions.appendChild(skipBtn);
+      } else if (activeTab === 'rejected') {
+        const unrejectBtn = el('button', {
+          class: 'btn-unreject' + (pending === 'unreject' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'unreject'),
+        }, 'Move to For Review');
+        const skipBtn = el('button', {
+          type: 'button',
+          onclick: () => clearAction(item),
+        }, 'Skip');
+        actions.appendChild(unrejectBtn);
+        actions.appendChild(skipBtn);
+      }
+      // auto / manual tabs: no action buttons — inspection only
+
+      if (pending) {
+        const noteText = {
+          approve: '✓ queued: approve',
+          reject:  '✗ queued: reject',
+          edit:    '✎ queued: edit (you\'ll be prompted in chat for the new content)',
+          unreject:'↺ queued: move back to review',
+        }[pending];
+        actions.appendChild(el('span', { class: 'pending-note', text: noteText }));
       }
 
-      itemsEl.appendChild(card);
+      if (actions.children.length) card.appendChild(actions);
+      return card;
+    }
+
+    function renderItems() {
+      const root = document.getElementById('items');
+      root.innerHTML = '';
+      const subset = itemsForTab(activeTab);
+      if (subset.length === 0) {
+        const empty = el('div', { class: 'review-item',
+          text: 'Nothing in this tab.' });
+        root.appendChild(empty);
+        return;
+      }
+      const grouped = groupItemsByType(subset);
+      TYPE_ORDER.forEach(t => {
+        const list = grouped[t] || [];
+        if (!list.length) return;
+        const section = el('div', { class: 'group-section' });
+        const header = el('div', { class: 'group-header', onclick: (ev) => {
+          ev.currentTarget.classList.toggle('collapsed');
+          ev.currentTarget.nextElementSibling.classList.toggle('collapsed');
+        } });
+        header.appendChild(document.createTextNode(TYPE_LABEL[t] || t));
+        header.appendChild(el('span', { class: 'group-count', text: String(list.length) }));
+        // Bulk-approve link only meaningful on the review tab and not for Rule 1 types
+        // (Rule 1 needs sign-off per item).
+        if (activeTab === 'review' && t !== 'metric' && t !== 'named_filter') {
+          const bulkBtn = el('button', {
+            class: 'group-bulk', type: 'button',
+            onclick: (ev) => { ev.stopPropagation(); bulkApproveGroup(list); },
+          }, 'Approve all in this group');
+          header.appendChild(bulkBtn);
+        }
+        section.appendChild(header);
+        const cards = el('div', { class: 'group-cards' });
+        list.forEach(it => cards.appendChild(renderCard(it)));
+        section.appendChild(cards);
+        root.appendChild(section);
+      });
+    }
+
+    function toggleAction(item, action) {
+      if (pendingActions[item.n] === action) {
+        delete pendingActions[item.n];
+      } else {
+        pendingActions[item.n] = action;
+      }
+      renderItems();
+      renderTabs();   // counts don't change yet (state only flips on paste-back), but keep consistent
+      updateFooter();
+    }
+    function clearAction(item) {
+      delete pendingActions[item.n];
+      renderItems();
+      updateFooter();
+    }
+    function bulkApproveGroup(list) {
+      list.forEach(it => { if (!pendingActions[it.n]) pendingActions[it.n] = 'approve'; });
+      renderItems();
+      updateFooter();
+    }
+
+    // ---- Sticky footer + generate ----
+    function actionCounts() {
+      const c = { approve: 0, reject: 0, edit: 0, unreject: 0 };
+      Object.values(pendingActions).forEach(a => { c[a] = (c[a] || 0) + 1; });
+      return c;
+    }
+    function updateFooter() {
+      const c = actionCounts();
+      const total = c.approve + c.reject + c.edit + c.unreject;
+      const sum = document.getElementById('pending-summary');
+      const btn = document.getElementById('btn-generate');
+      if (total === 0) {
+        sum.textContent = 'No actions queued yet — click buttons on the cards above to start.';
+        btn.disabled = true;
+      } else {
+        const parts = [];
+        if (c.approve) parts.push(`${c.approve} approve`);
+        if (c.reject) parts.push(`${c.reject} reject`);
+        if (c.edit) parts.push(`${c.edit} edit`);
+        if (c.unreject) parts.push(`${c.unreject} unreject`);
+        sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
+        btn.disabled = false;
+      }
+    }
+
+    function generateFeedback() {
+      const email = reviewerEmail();
+      const role  = reviewerRole();
+      const linesByAction = { approve: [], reject: [], edit: [], unreject: [] };
+      const rule1NoSignoff = [];
+
+      Object.entries(pendingActions).forEach(([n, action]) => {
+        const item = items.find(it => String(it.n) === String(n));
+        if (!item) return;
+        if (action === 'approve' && item.rule_1 && (!email || !role)) {
+          rule1NoSignoff.push(item.n);
+          return;
+        }
+        linesByAction[action].push(item.n);
+      });
+
+      if (rule1NoSignoff.length) {
+        const err = document.getElementById('modal-error');
+        err.textContent = `Items #${rule1NoSignoff.join(', #')} are Rule 1 (metric / named_filter) and need an email + role at the top of this page before they can be approved.`;
+        err.hidden = false;
+      } else {
+        document.getElementById('modal-error').hidden = true;
+      }
+
+      const blocks = [];
+      // approve — separate into Rule-1 (with by/role) and Rule-2 (without)
+      const rule1Approves = linesByAction.approve.filter(n => {
+        const it = items.find(x => x.n === n); return it && it.rule_1;
+      });
+      const rule2Approves = linesByAction.approve.filter(n => {
+        const it = items.find(x => x.n === n); return it && !it.rule_1;
+      });
+      if (rule1Approves.length) {
+        blocks.push(`approve ${rule1Approves.join(', ')} by ${email} role=${role}`);
+      }
+      if (rule2Approves.length) {
+        blocks.push(`approve ${rule2Approves.join(', ')}`);
+      }
+      if (linesByAction.reject.length) {
+        blocks.push(`reject ${linesByAction.reject.join(', ')}`);
+      }
+      if (linesByAction.unreject.length) {
+        blocks.push(`unreject ${linesByAction.unreject.join(', ')}`);
+      }
+      // Edits each get their own line — Claude will prompt you per item.
+      linesByAction.edit.forEach(n => blocks.push(`edit ${n}`));
+
+      const txt = blocks.join('\n') + (blocks.length ? '\ndone\n' : '');
+      document.getElementById('modal-text').value = txt;
+      document.getElementById('modal').hidden = false;
+    }
+
+    document.getElementById('btn-generate').addEventListener('click', generateFeedback);
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      Object.keys(pendingActions).forEach(k => delete pendingActions[k]);
+      renderItems();
+      updateFooter();
+    });
+    document.getElementById('modal-close').addEventListener('click', () => {
+      document.getElementById('modal').hidden = true;
+    });
+    document.getElementById('modal-copy').addEventListener('click', () => {
+      const ta = document.getElementById('modal-text');
+      ta.select();
+      const btn = document.getElementById('modal-copy');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(ta.value).then(
+          () => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy to clipboard', 1500); },
+          () => { btn.textContent = 'Copy failed — select all + ⌘C'; }
+        );
+      } else {
+        try { document.execCommand('copy'); btn.textContent = 'Copied!'; }
+        catch (e) { btn.textContent = 'Select all + ⌘C'; }
+        setTimeout(() => btn.textContent = 'Copy to clipboard', 1500);
+      }
     });
 
-    if (items.length === 0) {
-      itemsEl.appendChild(el('div', { class: 'review-item',
-        text: 'No items need review at threshold ' + threshold + '. Lower the threshold (e.g., "threshold 0.5") to inspect borderline entries, or you’re done — proceed to chat.' }));
-    }
+    // ---- Initial render ----
+    renderTabs();
+    renderItems();
+    updateFooter();
   </script>
 </body>
 </html>
