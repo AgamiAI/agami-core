@@ -446,6 +446,7 @@
         return d.toLocaleString(undefined, {
           year: 'numeric', month: 'short', day: 'numeric',
           hour: 'numeric', minute: '2-digit',
+          timeZoneName: 'short',
         });
       } catch (e) {
         return d.toString();

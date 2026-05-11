@@ -328,7 +328,20 @@
       return e;
     }
 
-    document.getElementById('generated-at').textContent = generatedAt;
+    // Render an ISO timestamp as a human-readable string in the user's locale.
+    // Falls through to the raw string if parsing fails.
+    function prettifyTimestamp(iso) {
+      if (typeof iso !== 'string' || !iso) return iso || '';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+        timeZoneName: 'short',
+      });
+    }
+
+    document.getElementById('generated-at').textContent = prettifyTimestamp(generatedAt);
     document.getElementById('model-version').textContent = modelVersion || '(none)';
     document.getElementById('threshold').textContent = threshold;
 

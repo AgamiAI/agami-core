@@ -272,8 +272,8 @@
 
     <footer>
       Each example was executed against your live database during introspection.
-      The result column shows the first 5 rows. <code>row_count</code> is the
-      total your query returned.
+      The "Returned N rows" line above each result table is the total your
+      query returned; the table shows the first 5 of those rows.
     </footer>
   </div>
 
@@ -296,7 +296,20 @@
       return e;
     }
 
-    document.getElementById('generated-at').textContent = generatedAt;
+    // Render an ISO timestamp as a human-readable string in the user's locale.
+    // Falls through to the raw string if parsing fails.
+    function prettifyTimestamp(iso) {
+      if (typeof iso !== 'string' || !iso) return iso || '';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+        timeZoneName: 'short',
+      });
+    }
+
+    document.getElementById('generated-at').textContent = prettifyTimestamp(generatedAt);
     document.getElementById('profile').textContent = profile;
 
     const itemsEl = document.getElementById('items');
@@ -309,11 +322,6 @@
 
       const stateBadge = item.error ? 'error' : (item.state || 'unreviewed');
       header.appendChild(el('span', { class: 'badge ' + stateBadge, text: stateBadge }));
-
-      if (typeof item.row_count === 'number') {
-        header.appendChild(el('span', { class: 'row-pill',
-          text: '· ' + item.row_count.toLocaleString() + ' row' + (item.row_count === 1 ? '' : 's') }));
-      }
       card.appendChild(header);
 
       // SQL block
@@ -325,8 +333,12 @@
         card.appendChild(el('div', { class: 'label-line', text: 'Error' }));
         card.appendChild(el('div', { class: 'error-box', text: item.error }));
       } else if (Array.isArray(item.row_preview) && item.row_preview.length) {
+        const rc = (typeof item.row_count === 'number') ? item.row_count : item.row_preview.length;
+        const previewN = item.row_preview.length;
+        const rowsLabel = rc.toLocaleString() + ' row' + (rc === 1 ? '' : 's');
+        const showingClause = (rc > previewN) ? ' · showing first ' + previewN : '';
         card.appendChild(el('div', { class: 'label-line',
-          text: 'Result preview (first ' + item.row_preview.length + ' of ' + (item.row_count || item.row_preview.length) + ')' }));
+          text: 'Returned ' + rowsLabel + showingClause }));
         const table = el('table', { class: 'result-table' });
         if (Array.isArray(item.row_headers) && item.row_headers.length) {
           const thead = el('thead');
