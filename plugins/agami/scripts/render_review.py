@@ -42,11 +42,14 @@ LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
 LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
 
 
-VALID_ENTITY_TYPES = {"join", "metric", "field_description", "named_filter"}
+VALID_ENTITY_TYPES = {"join", "metric", "field_description", "named_filter", "dataset"}
 # All four review states are now valid — the dashboard's tabs surface each
 # group separately (For Review / Approved Automatically / Manually Approved /
 # Rejected). The SKILL classifies each entity into a tab via `item.tab`.
-VALID_REVIEW_STATES = {"unreviewed", "approved", "rejected", "stale"}
+# `not_applicable` is filtered out by the SKILL before this renderer is
+# called (empty-description fields aren't surfaced); allowed here as a safety
+# net so a stray entry doesn't blow up the render.
+VALID_REVIEW_STATES = {"unreviewed", "approved", "rejected", "stale", "not_applicable"}
 VALID_TABS = {"review", "auto", "manual", "rejected"}
 
 

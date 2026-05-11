@@ -555,7 +555,7 @@
           validate: '→ will validate',
           reject:   '→ will reject',
           edit:     pending.editSaved ? '→ will edit (SQL saved)' : '→ editing — click Save edit',
-          note:     '+ note pending',
+          note:     pending.noteSaved ? '+ note saved' : '+ note — click Save note',
         }[pending.action];
         if (pendingLabel) {
           header.appendChild(el('span', {
@@ -586,11 +586,26 @@
               pendingActions[item.n].sql = ev.target.value;
               updateFooter();
             },
+            // ⌘/Ctrl+Enter commits the edit without needing to click Save.
+            onkeydown: (ev) => {
+              if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+                ev.preventDefault();
+                pendingActions[item.n].sql = ev.target.value;
+                pendingActions[item.n].editSaved = true;
+                renderItems();
+                updateFooter();
+              }
+            },
           });
           ta.value = pending.sql != null ? pending.sql : (item.sql || '');
           // Stash initial value into state so we have something to ship on copy.
           if (pending.sql == null) pendingActions[item.n].sql = ta.value;
           card.appendChild(ta);
+          card.appendChild(el('div', {
+            class: 'label-line',
+            style: 'color: var(--muted); font-size: 12px; margin-top: 4px;',
+            text: '⌘/Ctrl+Enter saves (or click Save edit below).',
+          }));
         }
       } else {
         card.appendChild(el('pre', { class: 'sql', text: item.sql || '' }));
@@ -600,18 +615,42 @@
       // comment (formatting / context / anything that isn't a SQL rewrite).
       if (pending && pending.action === 'note') {
         card.appendChild(el('div', { class: 'label-line', text: 'Note' }));
-        const noteTa = el('textarea', {
-          class: 'sql-editor',  // reuse styling
-          rows: 4,
-          placeholder: "Anything that isn't a SQL change — e.g. 'format counts with commas', 'active means last-purchase < 90 days', 'this is for the finance team — refunds in'.",
-          oninput: (ev) => {
-            pendingActions[item.n].note = ev.target.value;
-            updateFooter();
-          },
-        });
-        noteTa.value = pending.note != null ? pending.note : '';
-        if (pending.note == null) pendingActions[item.n].note = '';
-        card.appendChild(noteTa);
+        if (pending.noteSaved) {
+          // Same UX shape as Save edit: collapse to static view with a green
+          // banner once committed. The user can click Add note again to
+          // reopen and keep iterating.
+          card.appendChild(el('div', { class: 'label-line',
+            style: 'color: var(--ok-fg);',
+            text: '✓ Note saved (will ship on Generate)' }));
+          card.appendChild(el('pre', { class: 'sql', text: pending.note || '' }));
+        } else {
+          const noteTa = el('textarea', {
+            class: 'sql-editor',
+            rows: 4,
+            placeholder: "Anything that isn't a SQL change — e.g. 'format counts with commas', 'active means last-purchase < 90 days', 'this is for the finance team — refunds in'.",
+            oninput: (ev) => {
+              pendingActions[item.n].note = ev.target.value;
+              updateFooter();
+            },
+            onkeydown: (ev) => {
+              if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+                ev.preventDefault();
+                pendingActions[item.n].note = ev.target.value;
+                pendingActions[item.n].noteSaved = true;
+                renderItems();
+                updateFooter();
+              }
+            },
+          });
+          noteTa.value = pending.note != null ? pending.note : '';
+          if (pending.note == null) pendingActions[item.n].note = '';
+          card.appendChild(noteTa);
+          card.appendChild(el('div', {
+            class: 'label-line',
+            style: 'color: var(--muted); font-size: 12px; margin-top: 4px;',
+            text: '⌘/Ctrl+Enter saves (or click Save note below).',
+          }));
+        }
       }
 
       // Result preview OR error
@@ -682,8 +721,6 @@
             type: 'button',
             title: 'Commit the SQL you typed. The textarea will collapse to a static view; click Reopen edit to keep iterating.',
             onclick: () => {
-              // Re-read current textarea value (oninput should already have
-              // captured it, but be defensive).
               const ta = card.querySelector('.sql-editor');
               if (ta) pendingActions[item.n].sql = ta.value;
               pendingActions[item.n].editSaved = true;
@@ -702,11 +739,29 @@
           onclick: () => toggleAction(item, 'note'),
         }, pending && pending.action === 'note' ? 'Cancel note' : 'Add note');
 
+        // Save-note button: same shape as Save edit, for the note flow.
+        let saveNoteBtn = null;
+        if (pending && pending.action === 'note' && !pending.noteSaved) {
+          saveNoteBtn = el('button', {
+            class: 'btn-validate',
+            type: 'button',
+            title: 'Commit the note you typed. The textarea will collapse to a static view; click Add note again to reopen.',
+            onclick: () => {
+              const ta = card.querySelector('.sql-editor');
+              if (ta) pendingActions[item.n].note = ta.value;
+              pendingActions[item.n].noteSaved = true;
+              renderItems();
+              updateFooter();
+            },
+          }, 'Save note');
+        }
+
         actions.appendChild(validateBtn);
         actions.appendChild(rejectBtn);
         actions.appendChild(editBtn);
         if (saveEditBtn) actions.appendChild(saveEditBtn);
         actions.appendChild(noteBtn);
+        if (saveNoteBtn) actions.appendChild(saveNoteBtn);
 
         // No Skip button — clicking the same action toggles it off, and the
         // "Reset all" button in the sticky footer clears everything. Skip was

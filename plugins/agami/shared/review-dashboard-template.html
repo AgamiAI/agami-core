@@ -299,6 +299,44 @@
       font-size: 12px; color: var(--muted);
       margin: 8px 0 0;
     }
+
+    .edit-form {
+      margin: 8px 0 0; padding: 12px;
+      background: var(--code-bg); border-radius: 6px;
+      border: 1px dashed var(--accent);
+    }
+    .edit-form label {
+      display: block; font-size: 11px; letter-spacing: 0.04em;
+      text-transform: uppercase; color: var(--muted);
+      font-weight: 600; margin-bottom: 6px;
+    }
+    .edit-form textarea {
+      width: 100%; min-height: 60px; box-sizing: border-box;
+      font: inherit; font-size: 13px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 8px; resize: vertical;
+    }
+    .edit-form textarea:focus {
+      outline: 2px solid var(--accent); outline-offset: -2px;
+      border-color: var(--accent);
+    }
+    .edit-form-actions {
+      display: flex; gap: 8px; margin-top: 8px; align-items: center;
+    }
+    .edit-form-actions .btn-save-edit {
+      font-size: 13px; padding: 5px 12px; border-radius: 5px;
+      cursor: pointer; background: var(--accent); color: white;
+      border: 1px solid var(--accent); font-weight: 500;
+    }
+    .edit-form-actions .btn-save-edit:hover { opacity: 0.9; }
+    .edit-form-actions .btn-save-edit.saved {
+      background: var(--ok-fg); border-color: var(--ok-fg);
+    }
+    .edit-form-actions .edit-hint {
+      font-size: 12px; color: var(--muted);
+    }
     .yaml-path {
       font-size: 11px; color: var(--muted);
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -333,6 +371,14 @@
     .card-actions .pending-note {
       font-size: 12px; color: var(--muted); margin-left: auto;
       align-self: center;
+    }
+    .card-actions .btn-clear {
+      padding: 2px 8px; font-size: 14px; line-height: 1;
+      color: var(--muted); border-color: var(--border);
+      align-self: center;
+    }
+    .card-actions .btn-clear:hover {
+      color: var(--bad-fg); border-color: var(--bad-fg);
     }
 
     /* Sticky footer */
@@ -479,7 +525,21 @@
     // ---- Local state ----
     // pendingActions[n] = "approve" | "reject" | "edit" | "unreject" | null
     const pendingActions = {};
+    // editedValues[n] = { text: <user-typed new value>, saved: <bool> }
+    // Used when the user clicks Edit and types a new description / definition
+    // inline. generateFeedback() emits `edit N with>>>...<<<` blocks for these.
+    const editedValues = {};
     let activeTab = "review";
+
+    // Track per-group collapse state across re-renders, keyed by `<tab>:<type>`.
+    // Without this, clicking Approve on any card calls renderItems() which
+    // recomputes the auto-collapse default — wiping the user's manual choice.
+    const collapsedGroups = new Set();
+    function groupKey(tab, type) { return tab + ':' + type; }
+    // Has the user made any manual toggle for this group? If yes, the manual
+    // choice wins over the size-based default. We track this so a user who
+    // opens a 100-item group once doesn't see it re-collapse every render.
+    const userTouchedGroups = new Set();
 
     // ---- Helpers ----
     function el(tag, attrs = {}, ...children) {
@@ -670,12 +730,27 @@
       const state = (item.review_state || 'unreviewed').toLowerCase();
       if (state === 'approved') {
         if (item.signed_off_by === 'agami_introspect_v1' || item.signed_off_role === 'system') {
-          const reasons = {
-            fk:                    'FK declared in DB',
-            column_comment:        'DBA-authored column comment',
-            introspect_heuristic:  'unique-index + name match',
-          };
-          return 'auto-approved (' + (reasons[item.origin] || 'introspect signal') + ')';
+          // Reason text is entity-aware: `introspect_heuristic` means different
+          // things on a join (unique-index + name match) vs a field description
+          // (column-name match) vs a dataset.
+          const entity = item.entity_type || '';
+          let reason;
+          if (item.origin === 'fk') {
+            reason = 'FK declared in DB';
+          } else if (item.origin === 'column_comment') {
+            reason = 'DBA-authored column comment';
+          } else if (item.origin === 'introspect_heuristic' && entity === 'join') {
+            reason = 'unique-index + name-match heuristic';
+          } else if (item.origin === 'introspect_heuristic' && entity === 'field_description') {
+            reason = 'column-name match';
+          } else if (item.origin === 'introspect_heuristic' && entity === 'dataset') {
+            reason = 'table introspect';
+          } else if (item.origin === 'introspect_heuristic') {
+            reason = 'introspect heuristic';
+          } else {
+            reason = item.origin || 'introspect signal';
+          }
+          return 'auto-approved (' + reason + ')';
         }
         let txt = 'approved';
         if (item.signed_off_by) {
@@ -708,6 +783,76 @@
         ul.appendChild(li);
       });
       return ul;
+    }
+
+    // What an inline Edit form targets, per entity_type:
+    //   field_description / dataset → the `description` text (item.inferred)
+    //   metric / named_filter       → the `definition_prose` text (extra_lines)
+    //   join                         → no inline editable field; user uses chat
+    function editableTarget(item) {
+      const t = item.entity_type || '';
+      if (t === 'metric' || t === 'named_filter') {
+        const line = (item.extra_lines || []).find(l => (l.label || '').toLowerCase() === 'definition');
+        return { kind: 'definition_prose', label: 'Definition prose', current: (line && line.text) || '' };
+      }
+      if (t === 'field_description' || t === 'dataset') {
+        return { kind: 'description', label: 'Description', current: item.inferred || '' };
+      }
+      return { kind: null, label: '', current: '' };
+    }
+
+    function renderEditForm(item) {
+      const tgt = editableTarget(item);
+      const wrap = el('div', { class: 'edit-form' });
+      if (!tgt.kind) {
+        wrap.appendChild(el('label', { text: 'Edit (this entity type needs a chat-side edit)' }));
+        wrap.appendChild(el('div', {
+          class: 'edit-hint',
+          text: 'Click "Generate feedback for Claude" and paste back; Claude will prompt you for the new content in chat.',
+        }));
+        return wrap;
+      }
+      wrap.appendChild(el('label', { text: tgt.label }));
+      const cur = editedValues[item.n];
+      const ta = el('textarea', { rows: '4' });
+      ta.value = cur ? cur.text : tgt.current;
+      const row = el('div', { class: 'edit-form-actions' });
+      const saved = !!(cur && cur.saved);
+      const saveBtn = el('button', {
+        type: 'button',
+        class: 'btn-save-edit' + (saved ? ' saved' : ''),
+      }, saved ? '✓ Saved' : 'Save edit');
+      const hint = el('span', { class: 'edit-hint',
+        text: saved ? 'Edit captured — click Generate feedback when done.'
+                    : 'Press ⌘/Ctrl+Enter or click Save edit.' });
+      function commit() {
+        editedValues[item.n] = { text: ta.value, saved: true };
+        saveBtn.textContent = '✓ Saved';
+        saveBtn.classList.add('saved');
+        hint.textContent = 'Edit captured — click Generate feedback when done.';
+        updateFooter();
+      }
+      saveBtn.addEventListener('click', commit);
+      ta.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          commit();
+        }
+      });
+      ta.addEventListener('input', () => {
+        // Once the user types, mark as unsaved again so they know to re-save.
+        if (editedValues[item.n] && editedValues[item.n].saved) {
+          editedValues[item.n].saved = false;
+          saveBtn.textContent = 'Save edit';
+          saveBtn.classList.remove('saved');
+          hint.textContent = 'Press ⌘/Ctrl+Enter or click Save edit.';
+        }
+      });
+      row.appendChild(saveBtn);
+      row.appendChild(hint);
+      wrap.appendChild(ta);
+      wrap.appendChild(row);
+      return wrap;
     }
 
     function renderCard(item) {
@@ -770,10 +915,14 @@
         card.appendChild(el('div', { class: 'yaml-path', text: 'YAML: ' + item.yaml_path }));
       }
 
+      // Inline edit form (only when Edit is queued)
+      if (pending === 'edit') {
+        card.appendChild(renderEditForm(item));
+      }
+
       // Actions
       const actions = el('div', { class: 'card-actions' });
       if (activeTab === 'review') {
-        // Approve / Reject / Edit / Skip
         const approveBtn = el('button', {
           class: 'btn-approve' + (pending === 'approve' ? ' active' : ''),
           type: 'button',
@@ -789,37 +938,48 @@
           type: 'button',
           onclick: () => toggleAction(item, 'edit'),
         }, 'Edit');
-        const skipBtn = el('button', {
-          type: 'button',
-          onclick: () => clearAction(item),
-        }, 'Skip');
         actions.appendChild(approveBtn);
         actions.appendChild(rejectBtn);
         actions.appendChild(editBtn);
-        actions.appendChild(skipBtn);
+      } else if (activeTab === 'auto' || activeTab === 'manual') {
+        // Approved already, but the user can still edit (e.g., correct a
+        // description) or reject (excludes it from the runtime model).
+        const editBtn = el('button', {
+          class: 'btn-edit' + (pending === 'edit' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'edit'),
+        }, 'Edit');
+        const rejectBtn = el('button', {
+          class: 'btn-reject' + (pending === 'reject' ? ' active' : ''),
+          type: 'button',
+          onclick: () => toggleAction(item, 'reject'),
+        }, 'Reject');
+        actions.appendChild(editBtn);
+        actions.appendChild(rejectBtn);
       } else if (activeTab === 'rejected') {
         const unrejectBtn = el('button', {
           class: 'btn-unreject' + (pending === 'unreject' ? ' active' : ''),
           type: 'button',
           onclick: () => toggleAction(item, 'unreject'),
         }, 'Move to For Review');
-        const skipBtn = el('button', {
-          type: 'button',
-          onclick: () => clearAction(item),
-        }, 'Skip');
         actions.appendChild(unrejectBtn);
-        actions.appendChild(skipBtn);
       }
-      // auto / manual tabs: no action buttons — inspection only
 
       if (pending) {
         const noteText = {
           approve: '✓ queued: approve',
           reject:  '✗ queued: reject',
-          edit:    '✎ queued: edit (you\'ll be prompted in chat for the new content)',
+          edit:    '✎ queued: edit (Claude will prompt you in chat for the new content after you click Generate feedback)',
           unreject:'↺ queued: move back to review',
         }[pending];
-        actions.appendChild(el('span', { class: 'pending-note', text: noteText }));
+        const noteEl = el('span', { class: 'pending-note', text: noteText });
+        const clearBtn = el('button', {
+          class: 'btn-clear', type: 'button',
+          title: 'Clear this queued action',
+          onclick: () => clearAction(item),
+        }, '×');
+        actions.appendChild(noteEl);
+        actions.appendChild(clearBtn);
       }
 
       if (actions.children.length) card.appendChild(actions);
@@ -845,20 +1005,30 @@
       TYPE_ORDER.forEach(t => {
         const list = grouped[t] || [];
         if (!list.length) return;
-        const startCollapsed = list.length > AUTO_COLLAPSE_THRESHOLD;
+        const key = groupKey(activeTab, t);
+        // First render: auto-collapse if the group is large. After that the
+        // user's manual choice takes over.
+        if (!userTouchedGroups.has(key) && list.length > AUTO_COLLAPSE_THRESHOLD) {
+          collapsedGroups.add(key);
+        }
+        const isCollapsed = collapsedGroups.has(key);
         const section = el('div', { class: 'group-section' });
         const header = el('div', {
-          class: 'group-header' + (startCollapsed ? ' collapsed' : ''),
+          class: 'group-header' + (isCollapsed ? ' collapsed' : ''),
           onclick: (ev) => {
+            userTouchedGroups.add(key);
+            if (collapsedGroups.has(key)) collapsedGroups.delete(key);
+            else collapsedGroups.add(key);
             ev.currentTarget.classList.toggle('collapsed');
             ev.currentTarget.nextElementSibling.classList.toggle('collapsed');
           },
         });
         header.appendChild(document.createTextNode(TYPE_LABEL[t] || t));
         header.appendChild(el('span', { class: 'group-count', text: String(list.length) }));
-        // Bulk-approve link only meaningful on the review tab and not for Rule 1 types
-        // (Rule 1 needs sign-off per item).
-        if (activeTab === 'review' && t !== 'metric' && t !== 'named_filter') {
+        // Bulk-approve link only meaningful on the review tab. Allowed for
+        // metrics + named_filters too — generateFeedback() checks email + role
+        // at submit time, so we don't need to gate the queue here.
+        if (activeTab === 'review') {
           const bulkBtn = el('button', {
             class: 'group-bulk', type: 'button',
             onclick: (ev) => { ev.stopPropagation(); bulkApproveGroup(list); },
@@ -866,7 +1036,7 @@
           header.appendChild(bulkBtn);
         }
         section.appendChild(header);
-        const cards = el('div', { class: 'group-cards' + (startCollapsed ? ' collapsed' : '') });
+        const cards = el('div', { class: 'group-cards' + (isCollapsed ? ' collapsed' : '') });
         list.forEach(it => cards.appendChild(renderCard(it)));
         section.appendChild(cards);
         root.appendChild(section);
@@ -889,6 +1059,23 @@
       updateFooter();
     }
     function bulkApproveGroup(list) {
+      // If the group contains Rule 1 items (metrics / named_filters), the user
+      // needs an email + role recorded before any sign-off can land. Surface
+      // the requirement once at the moment they queue the batch, rather than
+      // letting them queue 50 items and discovering it at Generate time.
+      const rule1Count = list.filter(it => it.rule_1).length;
+      const email = reviewerEmail();
+      const role = reviewerRole();
+      if (rule1Count > 0 && (!email || !role)) {
+        const target = document.getElementById('reviewer-status');
+        if (target) {
+          target.textContent = `⚠ ${rule1Count} item${rule1Count === 1 ? '' : 's'} in this group `
+            + `need sign-off — enter your email + role above before approving.`;
+          target.style.color = 'var(--bad-fg)';
+        }
+        // Still queue them so the user can adjust afterwards; the Generate step
+        // will list any that still lack credentials.
+      }
       list.forEach(it => { if (!pendingActions[it.n]) pendingActions[it.n] = 'approve'; });
       renderItems();
       updateFooter();
@@ -963,8 +1150,20 @@
       if (linesByAction.unreject.length) {
         blocks.push(`unreject ${linesByAction.unreject.join(', ')}`);
       }
-      // Edits each get their own line — Claude will prompt you per item.
-      linesByAction.edit.forEach(n => blocks.push(`edit ${n}`));
+      // Edits: if the user filled in the inline form (editedValues[n].saved),
+      // emit `edit N with>>>\n<text>\n<<<`; otherwise emit a bare `edit N` and
+      // Claude will prompt them in chat.
+      linesByAction.edit.forEach(n => {
+        const ev = editedValues[n];
+        if (ev && ev.saved && (ev.text || '').trim() !== '') {
+          const item = items.find(it => it.n === n);
+          const tgt = item ? editableTarget(item) : { kind: null };
+          const kind = tgt.kind || 'value';
+          blocks.push(`edit ${n} ${kind}>>>\n${ev.text}\n<<<`);
+        } else {
+          blocks.push(`edit ${n}`);
+        }
+      });
 
       const txt = blocks.join('\n') + (blocks.length ? '\ndone\n' : '');
       document.getElementById('modal-text').value = txt;

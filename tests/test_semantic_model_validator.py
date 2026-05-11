@@ -1234,3 +1234,85 @@ def test_model_level_trust_keys_rejected():
     })]
     errors = validate(m)
     assert any("unknown agami key" in e and "confidence" in e for e in errors), errors
+
+
+# --- not_applicable / no_description (fields with empty descriptions) -------
+
+def test_field_with_no_description_marked_not_applicable_passes():
+    """Empty-description field stamped with not_applicable + no_description is
+    the canonical shape. The introspect step uses this for fields where neither
+    a DBA comment nor an LLM-proposed description was available."""
+    m = minimal_valid_model()
+    f = m["semantic_model"][0]["datasets"][0]["fields"][0]
+    f["description"] = ""
+    f["custom_extensions"] = [_agami_ext({
+        "type": "string",
+        "confidence": None,
+        "review_state": "not_applicable",
+        "origin": "no_description",
+        "signed_off_by": None,
+        "signed_off_at": None,
+        "signed_off_role": None,
+    })]
+    assert validate(m) == []
+
+
+def test_not_applicable_with_real_description_rejected():
+    """not_applicable on a field with actual description content is incoherent
+    — that's reviewable content, not a skip case. Validator must catch."""
+    m = minimal_valid_model()
+    f = m["semantic_model"][0]["datasets"][0]["fields"][0]
+    f["description"] = "Customer status (active / churned / trial)"
+    f["custom_extensions"] = [_agami_ext({
+        "type": "string",
+        "confidence": None,
+        "review_state": "not_applicable",
+        "origin": "no_description",
+        "signed_off_by": None,
+        "signed_off_at": None,
+        "signed_off_role": None,
+    })]
+    errors = validate(m)
+    assert any("not_applicable" in e and "description" in e for e in errors), errors
+
+
+def test_not_applicable_without_no_description_origin_rejected():
+    """not_applicable must pair with origin=no_description. Any other origin
+    is misuse of the escape hatch (the prior bug: introspect writing
+    review_state=approved + origin=introspect_heuristic on empty-description
+    fields would now have been routed to not_applicable but with a wrong
+    origin like llm_suggested — catch that)."""
+    m = minimal_valid_model()
+    f = m["semantic_model"][0]["datasets"][0]["fields"][0]
+    f["description"] = ""
+    f["custom_extensions"] = [_agami_ext({
+        "type": "string",
+        "confidence": None,
+        "review_state": "not_applicable",
+        "origin": "llm_suggested",  # wrong — must be no_description
+        "signed_off_by": None,
+        "signed_off_at": None,
+        "signed_off_role": None,
+    })]
+    errors = validate(m)
+    assert any(
+        "not_applicable" in e and "no_description" in e
+        for e in errors
+    ), errors
+
+
+def test_confidence_null_allowed_for_not_applicable():
+    """For not_applicable fields, confidence is null (there's nothing to score)."""
+    m = minimal_valid_model()
+    f = m["semantic_model"][0]["datasets"][0]["fields"][0]
+    f["description"] = ""
+    f["custom_extensions"] = [_agami_ext({
+        "type": "string",
+        "confidence": None,
+        "review_state": "not_applicable",
+        "origin": "no_description",
+        "signed_off_by": None,
+        "signed_off_at": None,
+        "signed_off_role": None,
+    })]
+    assert validate(m) == []

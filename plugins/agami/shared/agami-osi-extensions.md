@@ -52,6 +52,7 @@ Enum: one of:
 - `approved` — a human (or, for auto-approve cases, the introspect process) has signed off
 - `rejected` — explicitly excluded; runtime model loader skips it
 - `stale` — was approved but a schema-drift event has invalidated it; runtime refuses dependent queries until reconciled
+- `not_applicable` — there is nothing to review on this entry. Reserved for fields whose `description` is empty: the agami extension still records type / name / signal_breakdown, but the review dashboard skips the card because no description was proposed. Allowed only when paired with `origin: no_description`.
 
 ### `agami.origin` (always emitted on introspect)
 
@@ -61,6 +62,7 @@ Enum: one of:
 - `column_comment` — derived from a DBA-authored column comment
 - `llm_suggested` — proposed by an LLM during introspect with no stronger signal
 - `human_authored` — written by a human in the YAML directly (or via the dashboard)
+- `no_description` — the introspect step had nothing to propose for this field's `description` (DB returned no column comment, LLM was not used). Pairs with `review_state: not_applicable`.
 
 ### `agami.signed_off_by` (required when `review_state: approved`)
 
@@ -309,7 +311,7 @@ The agami validator (`plugins/agami/scripts/validate_semantic_model.py`) refuses
 4. A relationship's `from` / `to` doesn't match an existing dataset's `name`.
 5. A relationship's `from_columns` / `to_columns` arrays differ in length (OSI also checks this; we surface it as a separate error for clarity).
 6. Two datasets share a `name`, or two fields within one dataset share a `name`, or two metrics share a `name`, or two relationships share a `name`. Two `named_filters` share a `name` within one model.
-7. **Trust-layer enum violations.** `agami.review_state` outside `{unreviewed, approved, rejected, stale}`; `agami.origin` outside `{fk, introspect_heuristic, column_comment, llm_suggested, human_authored}`; `agami.signed_off_role` outside `{cfo, cto, data_lead, engineer, analyst, other, system}`; `agami.confidence` outside `[0, 1]`.
+7. **Trust-layer enum violations.** `agami.review_state` outside `{unreviewed, approved, rejected, stale, not_applicable}`; `agami.origin` outside `{fk, introspect_heuristic, column_comment, llm_suggested, human_authored, no_description}`; `agami.signed_off_role` outside `{cfo, cto, data_lead, engineer, analyst, other, system}`; `agami.confidence` outside `[0, 1]`. `review_state: not_applicable` requires `origin: no_description` and an empty `description`.
 8. **Rule 1 — high-blast-radius sign-off.** A `metric` or a model-level `named_filter` with `agami.review_state: approved` MUST have non-null `agami.signed_off_by`, `agami.signed_off_at`, AND `agami.signed_off_role`. A metric with `review_state: approved` MUST also have non-empty `agami.definition_prose`. Reject the YAML write otherwise.
 9. **Rule 2 — sign-off completeness.** Any other entry (field / dataset / relationship) with `agami.review_state: approved` MUST have non-null `agami.signed_off_by` and `agami.signed_off_at`. Reject the YAML write otherwise.
 10. **Sign-off coherence.** When `agami.review_state` is `unreviewed` or `rejected`, `agami.signed_off_by`, `agami.signed_off_at`, and `agami.signed_off_role` MUST all be `null` (preserves audit-log clarity — only approved entries carry sign-off attribution).

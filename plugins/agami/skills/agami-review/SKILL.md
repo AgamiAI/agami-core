@@ -47,7 +47,15 @@ The dashboard now has **four tabs**: For Review · Approved Automatically · Man
 
 Load every yaml under `<artifacts_dir>/<profile>/` — `index.yaml`, every `<schema>/_schema.yaml`, every `<schema>/<table>.yaml`. Walk the structures.
 
-For each entity (dataset, field, relationship, metric, named_filter), parse its `agami` extension payload (one entry per `custom_extensions[]` whose `vendor_name=COMMON` and JSON has an `agami` top-level key — see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md)). Then classify:
+For each entity (dataset, field, relationship, metric, named_filter), parse its `agami` extension payload (one entry per `custom_extensions[]` whose `vendor_name=COMMON` and JSON has an `agami` top-level key — see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md)).
+
+**Skip fields with empty descriptions entirely.** A field whose `description` is empty (`""` or whitespace) has nothing for the curator to look at — do not include it in any tab. This rule applies regardless of `review_state` and `origin`:
+- New introspects produce `review_state: not_applicable` + `origin: no_description` on these fields (the canonical shape).
+- Legacy YAMLs (introspected before this rule existed) may have these fields stamped with `review_state: approved` + `origin: introspect_heuristic`. Still skip them — the empty `description` is the trigger, not the trust block.
+
+The field stays in the YAML (with its name and `agami.type`); the dashboard just doesn't surface a card. If a curator wants to add a description for such a field, they edit the YAML directly (or, in a future build, via an "Add description" action on the table-level card — not in scope here).
+
+For the remaining entries, classify:
 
 ```
 needs_review(entry) =
@@ -195,10 +203,20 @@ approve <num-list> [by <email>] [role=<role>]
 reject  <num-list>
 unreject <num-list>
 edit    <num>
+edit    <num> <kind>>>>\n<new text>\n<<<
 approve all below <number>
 threshold <number>
 done
 ```
+
+`edit N <kind>>>>\n...\n<<<` is the **inline-edit form** the dashboard generates when the user fills in the per-card Edit textarea. `<kind>` ∈ `{description, definition_prose}`:
+
+- `description` — write the new prose to the entry's `description` field (or to `dataset.description` for a dataset entry).
+- `definition_prose` — write the new prose to the entry's `agami.definition_prose` field. Used for metrics and named filters. After the write, set `agami.review_state` to whatever the user batched it with (or, if no approve was queued for this item, leave it as-is — the edit alone does not re-trigger sign-off).
+
+Parser: see a line matching `edit N <kind>>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line between as the new value. Apply via the same Edit-tool flow as Phase 4c/4d, then re-run the validator. If validator fails, revert and surface the error.
+
+The bare `edit N` form (no `>>>...<<<` block) is the **chat-side form** — Claude reads the current entry, surfaces it as a fenced code block, accepts the new content conversationally, and writes back. Use this for entity types without an inline form (joins, dataset trust blocks).
 
 Where:
 - `<num-list>` = `1` | `1, 3, 5` | `1-5` (range)

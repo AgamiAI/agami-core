@@ -132,12 +132,16 @@ ALLOWED_INTROSPECT_META_KEYS: frozenset[str] = frozenset({
 })
 
 # Trust-layer enums (see agami-osi-extensions.md → Hard rules #7).
+# `not_applicable` is the explicit "skip the review card" state for fields whose
+# `description` is empty — there's nothing for the curator to look at. Allowed
+# only when paired with `origin: no_description` and `description == ""`.
 ALLOWED_REVIEW_STATES: frozenset[str] = frozenset({
-    "unreviewed", "approved", "rejected", "stale",
+    "unreviewed", "approved", "rejected", "stale", "not_applicable",
 })
 
 ALLOWED_ORIGINS: frozenset[str] = frozenset({
-    "fk", "introspect_heuristic", "column_comment", "llm_suggested", "human_authored",
+    "fk", "introspect_heuristic", "column_comment", "llm_suggested",
+    "human_authored", "no_description",
 })
 
 ALLOWED_SIGNOFF_ROLES: frozenset[str] = frozenset({
@@ -300,11 +304,14 @@ def _check_trust_layer(agami: dict, ctx: str, *, is_rule_1: bool) -> list[str]:
     """
     out: list[str] = []
 
-    # confidence: number in [0, 1]
+    # confidence: number in [0, 1], or null when review_state=not_applicable
+    # (there's no signal to score for fields with empty descriptions).
     if "confidence" in agami:
         c = agami["confidence"]
-        if isinstance(c, bool) or not isinstance(c, (int, float)):
-            out.append(f"[Trust] {ctx}: confidence must be a number")
+        if c is None:
+            pass  # null is allowed; see not_applicable case
+        elif isinstance(c, bool) or not isinstance(c, (int, float)):
+            out.append(f"[Trust] {ctx}: confidence must be a number or null")
         elif not (0.0 <= float(c) <= 1.0):
             out.append(f"[Trust] {ctx}: confidence {c} outside [0, 1]")
 
@@ -362,10 +369,10 @@ def _check_trust_layer(agami: dict, ctx: str, *, is_rule_1: bool) -> list[str]:
                 f"non-null signed_off_role"
             )
 
-    # Hard Rule #10 — sign-off coherence: unreviewed/rejected entries must not
-    # carry sign-off attribution. (Stale entries preserve their previous sign-off,
-    # so they are exempt.)
-    if rs in ("unreviewed", "rejected"):
+    # Hard Rule #10 — sign-off coherence: unreviewed/rejected/not_applicable
+    # entries must not carry sign-off attribution. (Stale entries preserve their
+    # previous sign-off, so they are exempt.)
+    if rs in ("unreviewed", "rejected", "not_applicable"):
         if sb is not None:
             out.append(
                 f"[Trust] {ctx}: review_state={rs} requires signed_off_by=null"
@@ -379,11 +386,39 @@ def _check_trust_layer(agami: dict, ctx: str, *, is_rule_1: bool) -> list[str]:
                 f"[Trust] {ctx}: review_state={rs} requires signed_off_role=null"
             )
 
+    # not_applicable is allowed only on entries with origin=no_description.
+    # This prevents misuse as a generic "skip review" escape hatch.
+    if rs == "not_applicable" and origin != "no_description":
+        out.append(
+            f"[Trust] {ctx}: review_state=not_applicable requires "
+            f"origin=no_description (got origin={origin!r}). This state is "
+            f"reserved for fields whose `description` is empty."
+        )
+
     return out
 
 
-def _check_field_extensions(field_agami: dict, context: str) -> list[str]:
+def _check_field_extensions(
+    field_agami: dict,
+    context: str,
+    *,
+    field_description: str | None = None,
+) -> list[str]:
     out = _check_extension_keys(field_agami, ALLOWED_AGAMI_KEYS_FIELD, context)
+
+    # Coherence check: review_state=not_applicable + origin=no_description is
+    # only valid when the field's actual `description` is empty. Otherwise the
+    # entry has reviewable content that should not be skipped.
+    rs = field_agami.get("review_state")
+    origin = field_agami.get("origin")
+    desc_str = (field_description or "").strip()
+    if (rs == "not_applicable" or origin == "no_description") and desc_str:
+        out.append(
+            f"[Trust] {context}: review_state=not_applicable / "
+            f"origin=no_description requires the field's `description` to be "
+            f"empty (got: {desc_str!r}). Use review_state=unreviewed for fields "
+            f"that have a description awaiting review."
+        )
 
     if "type" in field_agami:
         t = field_agami["type"]
@@ -602,6 +637,7 @@ def _walk_extensions(model: dict) -> list[str]:
             # Field level
             for field in ds.get("fields", []):
                 f_name = field.get("name", "<unnamed>")
+                f_desc = field.get("description", "")
                 for i, ext in enumerate(field.get("custom_extensions", [])):
                     agami, err = _parse_agami_payload(ext)
                     ctx = f"datasets['{ds_name}'].fields['{f_name}'].custom_extensions[{i}].agami"
@@ -609,7 +645,9 @@ def _walk_extensions(model: dict) -> list[str]:
                         out.append(f"[Extension] {ctx}: {err}")
                         continue
                     if agami is not None:
-                        out.extend(_check_field_extensions(agami, ctx))
+                        out.extend(_check_field_extensions(
+                            agami, ctx, field_description=f_desc,
+                        ))
 
         # Relationship level
         for rel in sm.get("relationships", []):
