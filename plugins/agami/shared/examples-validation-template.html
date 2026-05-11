@@ -168,6 +168,16 @@
     .badge.validated  { background: var(--ok-bg);   color: var(--ok-fg); }
     .badge.rejected   { background: var(--bad-bg);  color: var(--bad-fg); }
     .badge.error      { background: var(--bad-bg);  color: var(--bad-fg); }
+    /* "Pending" badge — shown next to the YAML-state badge to communicate
+       what WILL happen when the user generates + pastes the feedback block.
+       Yellow/amber so it reads as "in-flight, not yet applied." */
+    .badge.pending {
+      background: #fbbf24; color: #78350f;
+      font-weight: 600;
+    }
+    @media (prefers-color-scheme: dark) {
+      .badge.pending { background: #b45309; color: #fef3c7; }
+    }
 
     .label-line {
       font-size: 11px; color: var(--muted);
@@ -321,11 +331,13 @@
     </div>
 
     <div class="intro">
-      Click <strong>Validate</strong> on each seed example you'd like agami to
-      trust as a few-shot anchor. <strong>Reject</strong> kills it. <strong>Edit</strong>
-      opens an inline SQL editor — paste a corrected query and we'll re-run it on
-      the next round. When done, hit <strong>Generate feedback for Claude</strong>
-      below and paste the result back into chat.
+      <strong>How this works.</strong> Your clicks are queued in the browser, not applied immediately. When you hit <strong>Generate feedback for Claude</strong> at the bottom, the page packages everything into a single chat command. Paste it back, Claude writes the changes to <code>examples.yaml</code>, and the dashboard re-renders. Items only move to other tabs after that round-trip.
+      <br/><br/>
+      <strong>Validate</strong> — this example is correct; trust it as a few-shot anchor. Writes <code>state: validated</code>.<br/>
+      <strong>Reject</strong> — this example is wrong; don't use it. Writes <code>state: rejected</code> (stays in YAML for audit but excluded from runtime).<br/>
+      <strong>Edit</strong> — rewrite the SQL inline; the new query re-runs against your DB on the next round.<br/>
+      <strong>Add note</strong> — leave a comment (formatting hint, context, business rule) without changing the SQL. Goes to <code>USER_MEMORY.md</code> or the example's notes depending on what you wrote.<br/>
+      <strong>Skip</strong> — clears a queued action on a card you've already clicked. Use it when you change your mind before pasting.
     </div>
 
     <div class="tab-bar" id="tab-bar"></div>
@@ -507,6 +519,25 @@
       header.appendChild(el('span', { class: 'example-question', text: item.question || '<no question>' }));
       const stateBadge = item.error ? 'error' : (item.state || 'unreviewed');
       header.appendChild(el('span', { class: 'badge ' + stateBadge, text: stateBadge }));
+
+      // Pending-action badge — shown when the user has queued an action on
+      // this card. Makes it obvious that something is in-flight even though
+      // the YAML state hasn't changed yet.
+      if (pending) {
+        const pendingLabel = {
+          validate: '→ will validate',
+          reject:   '→ will reject',
+          edit:     pending.editSaved ? '→ will edit (SQL saved)' : '→ editing — click Save edit',
+          note:     '+ note pending',
+        }[pending.action];
+        if (pendingLabel) {
+          header.appendChild(el('span', {
+            class: 'badge pending',
+            title: 'Queued in your browser. Hit Generate feedback for Claude to apply.',
+            text: pendingLabel,
+          }));
+        }
+      }
       card.appendChild(header);
 
       // SQL — either the static SQL block, or (if pending edit) an editable textarea
@@ -582,11 +613,13 @@
         const validateBtn = el('button', {
           class: 'btn-validate' + (pending && pending.action === 'validate' ? ' active' : ''),
           type: 'button',
+          title: 'Mark this example as a trusted few-shot anchor (state: validated).',
           onclick: () => toggleAction(item, 'validate'),
         }, 'Validate');
         const rejectBtn = el('button', {
           class: 'btn-reject' + (pending && pending.action === 'reject' ? ' active' : ''),
           type: 'button',
+          title: "Mark this example as wrong — don't use it as a few-shot (state: rejected). Stays in YAML for audit.",
           onclick: () => toggleAction(item, 'reject'),
         }, 'Reject');
 
@@ -600,6 +633,7 @@
         const editBtn = el('button', {
           class: 'btn-edit' + (pending && pending.action === 'edit' ? ' active' : ''),
           type: 'button',
+          title: 'Rewrite the SQL inline. The new query will re-run on the next round-trip.',
           onclick: () => {
             if (pending && pending.action === 'edit' && pending.editSaved) {
               // Reopen: flip back to in-progress
@@ -619,6 +653,7 @@
           saveEditBtn = el('button', {
             class: 'btn-validate',  // green styling for "save" = commit
             type: 'button',
+            title: 'Commit the SQL you typed. The textarea will collapse to a static view; click Reopen edit to keep iterating.',
             onclick: () => {
               // Re-read current textarea value (oninput should already have
               // captured it, but be defensive).
@@ -636,31 +671,25 @@
         const noteBtn = el('button', {
           class: (pending && pending.action === 'note') ? 'btn-validate active' : '',
           type: 'button',
+          title: "Add a comment without changing the SQL — formatting hints, business rules, anything Claude should remember.",
           onclick: () => toggleAction(item, 'note'),
         }, pending && pending.action === 'note' ? 'Cancel note' : 'Add note');
-
-        const skipBtn = el('button', {
-          type: 'button',
-          onclick: () => clearAction(item),
-        }, 'Skip');
 
         actions.appendChild(validateBtn);
         actions.appendChild(rejectBtn);
         actions.appendChild(editBtn);
         if (saveEditBtn) actions.appendChild(saveEditBtn);
         actions.appendChild(noteBtn);
-        actions.appendChild(skipBtn);
 
+        // Skip button — only meaningful when there's a queued action to clear.
+        // Showing it when there's nothing to skip is confusing.
         if (pending) {
-          const notes = {
-            validate: '✓ queued: validate',
-            reject:   '✗ queued: reject',
-            edit:     pending.editSaved
-                        ? '✎ queued: edit saved (new SQL will ship on Generate)'
-                        : '✎ editing — click Save edit when done',
-            note:     '💬 queued: note (formatting / context comment)',
-          };
-          actions.appendChild(el('span', { class: 'pending-note', text: notes[pending.action] || '' }));
+          const skipBtn = el('button', {
+            type: 'button',
+            title: 'Clear your queued action on this card. Leaves the example unreviewed.',
+            onclick: () => clearAction(item),
+          }, 'Skip (clear queued action)');
+          actions.appendChild(skipBtn);
         }
       }
       // Validated / Rejected tabs: no action buttons in v1 (inspection only)
