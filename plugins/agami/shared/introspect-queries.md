@@ -357,6 +357,109 @@ Skip `SNOWFLAKE`, `SNOWFLAKE_SAMPLE_DATA`, and any schema named `INFORMATION_SCH
 
 ---
 
+## BigQuery
+
+BigQuery exposes `INFORMATION_SCHEMA` per-dataset (and a project-wide `INFORMATION_SCHEMA.SCHEMATA` at the project level). All `INFORMATION_SCHEMA` queries are **free** (no bytes scanned) — they're the cheap, safe introspection surface.
+
+In every query below, substitute `<project>` and `<dataset>` from the credentials (or from the skill's per-dataset iteration). Use backtick identifier quoting on multi-part names: ``` `<project>.<dataset>.INFORMATION_SCHEMA.TABLES` ```.
+
+### List schemas (datasets)
+
+```sql
+SELECT schema_name AS dataset_name
+FROM `<project>.INFORMATION_SCHEMA.SCHEMATA`
+ORDER BY schema_name;
+```
+
+### List tables in a dataset
+
+```sql
+SELECT table_name, table_type
+FROM `<project>.<dataset>.INFORMATION_SCHEMA.TABLES`
+WHERE table_type IN ('BASE TABLE', 'VIEW', 'MATERIALIZED VIEW')
+ORDER BY table_name;
+```
+
+### Columns for a table
+
+```sql
+SELECT column_name, data_type, is_nullable, is_partitioning_column, clustering_ordinal_position
+FROM `<project>.<dataset>.INFORMATION_SCHEMA.COLUMNS`
+WHERE table_name = '<table>'
+ORDER BY ordinal_position;
+```
+
+`is_partitioning_column` and `clustering_ordinal_position` are BigQuery-specific signals that drive partition-pruning hints. Use them when populating `agami.performance_hints.recommended_filters`: a column that's `is_partitioning_column = TRUE` is a strong `range` recommended filter.
+
+### Primary keys
+
+BigQuery supports **declarative** PRIMARY KEY constraints (introduced 2023). They're not enforced at write time but they ARE stored in `TABLE_CONSTRAINTS`.
+
+```sql
+SELECT tc.table_name, kcu.column_name, kcu.ordinal_position
+FROM `<project>.<dataset>.INFORMATION_SCHEMA.TABLE_CONSTRAINTS` tc
+JOIN `<project>.<dataset>.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` kcu
+  USING (constraint_name, table_name)
+WHERE tc.constraint_type = 'PRIMARY KEY'
+ORDER BY tc.table_name, kcu.ordinal_position;
+```
+
+If your project doesn't declare PKs (older BigQuery datasets often don't), this returns empty. That's fine — agami treats clustering keys and partitioning columns as informal PK signals.
+
+### Foreign keys
+
+Same caveat — declarative since 2023, not enforced. Use as a join hint:
+
+```sql
+SELECT
+  kcu.table_name        AS from_table,
+  kcu.column_name       AS from_column,
+  ccu.table_name        AS to_table,
+  ccu.column_name       AS to_column
+FROM `<project>.<dataset>.INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS` rc
+JOIN `<project>.<dataset>.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` kcu
+  ON rc.constraint_name = kcu.constraint_name
+JOIN `<project>.<dataset>.INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE` ccu
+  ON rc.unique_constraint_name = ccu.constraint_name
+ORDER BY kcu.table_name, kcu.column_name;
+```
+
+Since BigQuery FKs are advisory-only, agami's FK-validation pass (orphan-ratio check) is doubly valuable — it tells you whether the declared FK is actually consistent in the data.
+
+### Row-count estimates (no full scan)
+
+`__TABLES__` is the legacy per-dataset metadata view; use it for fast row-count estimates without scanning:
+
+```sql
+SELECT table_id AS table_name, row_count
+FROM `<project>.<dataset>.__TABLES__`
+ORDER BY table_id;
+```
+
+Alternative (newer): `INFORMATION_SCHEMA.PARTITIONS` aggregated. Both are free.
+
+### Indexes / clustering keys
+
+BigQuery doesn't have B-tree indexes. The equivalent signals are **partitioning** (one column, time- or integer-based) and **clustering** (up to 4 columns). They drive query pruning the same way indexes do in Postgres.
+
+```sql
+SELECT
+  table_name,
+  ddl
+FROM `<project>.<dataset>.INFORMATION_SCHEMA.TABLES`
+WHERE table_name = '<table>';
+```
+
+The `ddl` column contains the full `CREATE TABLE` statement including `PARTITION BY ...` and `CLUSTER BY ...` clauses — parse those for `agami.performance_hints`.
+
+### BigQuery-only quirks
+
+- **Cost awareness during introspect.** `INFORMATION_SCHEMA` queries are free. Sample-row queries (Phase C below) ARE billed. Always use `TABLESAMPLE SYSTEM (n PERCENT)` or `LIMIT` aggressively on tables over ~1B rows.
+- **Dataset locations.** A dataset has a region (`US`, `EU`, etc.). Cross-region queries fail. agami's BigQuery client sets `location` from the credentials profile; if your project has datasets in multiple regions, use a separate profile per region.
+- **Nested types.** `STRUCT` and `ARRAY` columns appear in `INFORMATION_SCHEMA.COLUMNS` with their full type expansion (`STRUCT<a INT64, b STRING>`). agami treats these as `agami.type = "string"` and surfaces them as-is in chart cells; full nested-type handling is deferred.
+
+---
+
 ## SQLite
 
 ### List schemas

@@ -95,6 +95,7 @@ If you find yourself reaching for any command that doesn't fit the rules above, 
 3. **Resolve the connection fields** from the credentials file's `[<profile>]` section (or parse from `AGAMI_DATABASE_URL`):
    - **postgres / redshift / mysql:** either `url = ...` (DSN form, recommended for cloud DBs) or per-field `host`, `port`, `database`, `user`, `password` (+ optional `sslmode`).
    - **snowflake:** either DSN `url = snowflake://...` or per-field `account`, `user`, `password` (or `authenticator`), plus optional `warehouse`, `database`, `schema`, `role`. **No `host`/`port` for Snowflake** — the connector uses the account identifier directly.
+   - **bigquery:** either DSN `url = bigquery://<project>[/<dataset>]?service_account=/path/to/key.json&location=US` or per-field `project` (required), `service_account_path` (recommended; falls back to Application Default Credentials if omitted), and optional `dataset`, `location`. **No `host`/`port`** — BigQuery is HTTPS-only via the Google Cloud REST API.
    - **sqlite:** `path` (absolute).
 
    Never substitute a value that's missing — surface a clear "your credentials file is missing field X for profile Y; please add it" message and stop.

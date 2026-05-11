@@ -96,19 +96,20 @@ Use **AskUserQuestion** with this exact shape:
 | `PostgreSQL` | Postgres + everything Postgres-compatible: Supabase, Neon, RDS, Aurora, Cloud SQL, Timescale, and **Amazon Redshift** (Postgres wire protocol — same psql tool, port 5439, SSL required by default). |
 | `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
 | `Snowflake` | Snowflake. Uses `snowsql` CLI or `snowflake-connector-python`. Account identifier instead of host. |
-| `SQLite` | A local `.db` / `.sqlite` file. |
-| `Other (Other field)` | Anything else, or paste a DSN string. Accepts `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `sqlite:///abs/path` and the `+driver` SQLAlchemy variants. |
+| `BigQuery` | Google BigQuery. Uses `google-cloud-bigquery`. Auth via a service-account JSON key file (`service_account_path`) or Application Default Credentials. |
+| `Other (Other field)` | Anything else, or paste a DSN / file path. Accepts `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `bigquery://project[/dataset]`, `sqlite:///abs/path`, or a plain `.db` / `.sqlite` file path for **SQLite** (the niche dev case — Other handles it cleanly without taking a top-level slot). |
 
-Bind the chosen type to `$DB_TYPE` (one of `postgres` | `mysql` | `snowflake` | `sqlite` | `dsn` | `other`).
+Bind the chosen type to `$DB_TYPE` (one of `postgres` | `mysql` | `snowflake` | `bigquery` | `sqlite` | `dsn` | `other`).
 
 **Routing the chosen option:**
 
 - `PostgreSQL` → `$DB_TYPE = postgres`, but if the user later enters port `5439` or a hostname matching `*.redshift.*.amazonaws.com`, transparently re-bind to `redshift` (different sslmode default, different port). The `psql` tool works either way.
-- `MySQL`, `Snowflake`, `SQLite` → straight pass-through.
+- `MySQL`, `Snowflake`, `BigQuery` → straight pass-through.
 - `Other` → parse the user's free-form input:
-  - If it parses as a DSN (starts with `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `sqlite://`, etc.) → treat as `dsn`, write `url = ...` in credentials, derive `db_type` from the scheme.
-  - If it's a plain word like `bigquery`, `clickhouse`, `databricks`, `oracle`, `mssql` → tell the user that database isn't supported in v1.1 and point at the v1.2 roadmap. Don't write credentials for an unsupported type.
-  - If it's a free-form description ("I have an internal tool", "MongoDB") → similar — surface "I don't have first-class support for that yet; only Postgres/MySQL/Snowflake/Redshift/SQLite for v1.1." Don't write.
+  - If it parses as a DSN (starts with `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `bigquery://`, `bq://`, `sqlite://`, etc.) → treat as `dsn`, write `url = ...` in credentials, derive `db_type` from the scheme.
+  - If it ends in `.db` / `.sqlite` / `.sqlite3` or is an absolute path → SQLite.
+  - If it's a plain word like `clickhouse`, `databricks`, `oracle`, `mssql` → tell the user that database isn't supported yet and offer to open a tracking issue. Don't write credentials for an unsupported type.
+  - If it's a free-form description ("I have an internal tool", "MongoDB") → similar — surface "I don't have first-class support for that yet; supported: Postgres / Redshift / MySQL / Snowflake / BigQuery / SQLite." Don't write.
 
 ### 2b — Pick a profile name
 
@@ -232,6 +233,34 @@ url  = mysql://user:password@host:3306/database
 # password = your-password
 ```
 
+**If `$DB_TYPE = bigquery`**, append:
+
+```ini
+# Google BigQuery profile.
+# Auth: service-account JSON key (recommended) or Application Default Credentials.
+# To create a key: GCP Console → IAM & Admin → Service Accounts → pick or create
+# a service account with BigQuery Job User + BigQuery Data Viewer roles → Keys
+# → Add Key → JSON. Download and put it somewhere agami can read (chmod 600).
+[$PROFILE_NAME]
+type = bigquery
+project = your-gcp-project-id
+service_account_path = /absolute/path/to/your-sa-key.json
+# Optional: a default dataset so SQL can use bare `table_name` instead of
+# `project.dataset.table_name`. Leave commented to require fully-qualified refs.
+# dataset = your_default_dataset
+# Optional: the BigQuery location (US / EU / asia-northeast1 / etc.).
+# location = US
+
+# Skip `service_account_path` entirely to use Application Default Credentials
+# (set up via `gcloud auth application-default login`). Less common for
+# production but fine for a developer laptop.
+
+# OR — use a DSN URL:
+# url = bigquery://your-gcp-project-id/your_default_dataset?service_account=/path/to/key.json&location=US
+```
+
+**Important for BigQuery**: `chmod 600 /path/to/your-sa-key.json` after downloading. The JSON contains a private key. agami's `execute_sql.py` surfaces a warning if it's world-readable.
+
 **If `$DB_TYPE = sqlite`**, append:
 
 ```ini
@@ -249,6 +278,7 @@ url = paste-your-connection-string-here
 #   postgresql://user:pass@host:5432/db
 #   postgresql+asyncpg://postgres.<ref>:<pw>@aws-1-<region>.pooler.supabase.com:5432/postgres
 #   mysql://user:pass@host:3306/db
+#   bigquery://your-gcp-project/your_dataset?service_account=/abs/path/key.json
 #   sqlite:///absolute/path.db
 # +driver suffixes (asyncpg, psycopg2, pymysql) are stripped.
 # Query params like ?sslmode=require are honored.

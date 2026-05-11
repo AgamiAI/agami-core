@@ -201,6 +201,55 @@ def test_sqlite_absolute_path():
     assert out["path"] == "/Users/me/data/local.db"
 
 
+# --- BigQuery --------------------------------------------------------------
+
+def test_bigquery_project_only():
+    out = _parse_dsn("bigquery://my-gcp-project")
+    assert out["type"] == "bigquery"
+    assert out["project"] == "my-gcp-project"
+    assert "dataset" not in out
+
+
+def test_bigquery_project_and_dataset():
+    out = _parse_dsn("bigquery://my-gcp-project/analytics")
+    assert out["type"] == "bigquery"
+    assert out["project"] == "my-gcp-project"
+    assert out["dataset"] == "analytics"
+
+
+def test_bigquery_service_account_via_query():
+    out = _parse_dsn(
+        "bigquery://my-project/sales?service_account=/abs/path/key.json&location=US"
+    )
+    assert out["type"] == "bigquery"
+    assert out["project"] == "my-project"
+    assert out["dataset"] == "sales"
+    assert out["service_account_path"] == "/abs/path/key.json"
+    assert out["location"] == "US"
+
+
+def test_bigquery_credentials_path_synonym():
+    """`credentials_path` is the SQLAlchemy-bigquery name; accepted as a
+    synonym for service_account."""
+    out = _parse_dsn("bigquery://p?credentials_path=/k.json")
+    assert out["service_account_path"] == "/k.json"
+
+
+def test_bigquery_bq_scheme_alias():
+    """`bq://` is the shorter form some tools use; treat as alias."""
+    out = _parse_dsn("bq://my-project/my_dataset")
+    assert out["type"] == "bigquery"
+    assert out["project"] == "my-project"
+    assert out["dataset"] == "my_dataset"
+
+
+def test_bigquery_no_credentials_means_adc():
+    """A URL with no service_account is valid — execute_sql.py falls back to
+    Application Default Credentials at runtime."""
+    out = _parse_dsn("bigquery://my-project")
+    assert "service_account_path" not in out
+
+
 # --- Rejection -------------------------------------------------------------
 
 def test_unsupported_scheme_exits():

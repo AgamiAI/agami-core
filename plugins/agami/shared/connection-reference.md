@@ -38,6 +38,7 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 | `cli` postgres | `PGPASSFILE="$HOME/.agami/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
 | `cli` mysql | `mysql --defaults-file="$HOME/.agami/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
 | `cli` snowflake | `snowsql --config "$HOME/.agami/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
+| `python` bigquery | `AGAMI_PROFILE="<profile>" python3 "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` (BigQuery is Python-only — there's no native CLI tier today) |
 | `cli` sqlite | `sqlite3 -csv "<path>" 'SELECT 1'` |
 | `duckdb` | `duckdb -init "$init_file" -c 'SELECT 1' --csv` |
 | `python` | `AGAMI_PROFILE="<profile>" python3 "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` |
@@ -66,7 +67,7 @@ The order, from most-preferred to least-preferred:
 | # | Method | When it's the right pick | Pros | Cons |
 |---|--------|--------------------------|------|------|
 | 1 | **Native CLI tool** (`psql`, `mysql`, `snowsql`, `sqlite3`) | Most common path on a developer laptop | Fast, idiomatic, no extra layer | Requires the per-DB CLI on `PATH` |
-| 2 | **DuckDB universal client** | When you don't have / don't want the native CLI | Single binary install; handles Postgres / MySQL / SQLite / Parquet / CSV | Doesn't natively cover Snowflake, BigQuery, SQL Server, Oracle, Databricks |
+| 2 | **DuckDB universal client** | When you don't have / don't want the native CLI | Single binary install; handles Postgres / MySQL / SQLite / Parquet / CSV | Doesn't natively cover Snowflake, BigQuery (use the Python tier for those), SQL Server, Oracle, Databricks |
 | 3 | **Python driver** (`psycopg2`, `pymysql`, `snowflake-connector-python`) | If you already have Python set up | Works in environments without the CLI | Adds a Python dependency |
 
 `agami` runs entirely on your machine. There is no hosted server.
@@ -214,7 +215,7 @@ The "Python Driver Fallback" section further down shows the inline `python3 -c '
 | SQLite | N/A (file) | `sqlite3` | built-in `sqlite3` | n/a |
 | DuckDB | N/A (file) | `duckdb` | built-in or `pip install duckdb` | n/a |
 
-v1.1 supports Postgres + Redshift + MySQL + Snowflake + SQLite end-to-end. SQLite also works via DuckDB. Other databases (BigQuery, SQL Server, Oracle, Databricks, ClickHouse) are deferred — track the v1.2+ roadmap.
+Supported end-to-end: Postgres + Redshift + MySQL + Snowflake + SQLite + **BigQuery**. SQLite also works via DuckDB. Other databases (SQL Server, Oracle, Databricks, ClickHouse) are deferred.
 
 ---
 
@@ -302,6 +303,49 @@ Snowflake's `account` field is **not** a hostname. Examples:
 - `myorg-myaccount` — newer org-account format (recommended by Snowflake)
 
 The connector / snowsql appends `.snowflakecomputing.com` automatically. Use whatever your Snowflake admin gave you.
+
+### BigQuery
+
+BigQuery has no host:port and no native CLI tier in agami today. It uses Google's REST API via the `google-cloud-bigquery` Python library, authenticated by a service-account JSON key (recommended) or Application Default Credentials.
+
+#### Python driver — `google-cloud-bigquery`
+
+```bash
+pip install google-cloud-bigquery
+
+# Run a query — execute_sql.py loads the service-account JSON itself and
+# never puts credentials on the Bash command line.
+python3 "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --profile "$PROFILE" --sql-file /tmp/agami-q.sql
+```
+
+`execute_sql.py` handles BigQuery natively when `type=bigquery`. Connection params (read from the credentials profile):
+
+- `project` — required. The GCP project ID (e.g., `my-prod-project-12345`).
+- `service_account_path` — recommended. Absolute path to the JSON key file. `chmod 600` it.
+- `dataset` — optional. Sets the default dataset so SQL can use bare `table_name`.
+- `location` — optional. BigQuery dataset location (`US`, `EU`, `asia-northeast1`, etc.).
+
+If `service_account_path` is omitted, the BigQuery client falls back to Application Default Credentials (`gcloud auth application-default login`).
+
+#### DSN form
+
+```
+bigquery://<project>[/<dataset>]?service_account=/abs/path/to/key.json&location=US
+```
+
+The `bq://` scheme also works. Query parameters `credentials_path` and `service_account` are equivalent.
+
+#### Cost note
+
+BigQuery bills per byte scanned (~$5 / TB). `INFORMATION_SCHEMA` queries are free, so introspection is cheap. Sample-row queries (for description generation, choice-field detection) ARE billed — the SKILL applies `LIMIT 100` aggressively and uses `TABLESAMPLE SYSTEM (1 PERCENT)` on tables > 1B rows. Runtime queries from `agami-query-database` are billed at whatever they scan; the receipt's `tables_used` row counts give the user visibility.
+
+#### Required IAM roles
+
+The service account needs:
+- **`roles/bigquery.dataViewer`** on every dataset to be queried
+- **`roles/bigquery.jobUser`** on the project (to submit jobs)
+
+These are sufficient for SELECT-only workloads, which is all agami issues.
 
 ### MySQL / MariaDB
 

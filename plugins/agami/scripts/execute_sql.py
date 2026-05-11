@@ -20,8 +20,10 @@ AGAMI_DATABASE_URL). Never substitutes localhost. Never asks for
 credentials. Hard exits with a clear message if credentials are missing.
 
 Drivers (install only what you need):
-    pip install psycopg2-binary    # Postgres
-    pip install pymysql            # MySQL
+    pip install psycopg2-binary             # Postgres / Redshift
+    pip install pymysql                     # MySQL
+    pip install snowflake-connector-python  # Snowflake
+    pip install google-cloud-bigquery       # BigQuery
     # SQLite uses the stdlib `sqlite3` module — no install needed.
 
 Exit codes:
@@ -144,6 +146,7 @@ _POSTGRES_SCHEMES = {"postgres", "postgresql"}
 _MYSQL_SCHEMES = {"mysql", "mariadb"}
 _REDSHIFT_SCHEMES = {"redshift"}        # speaks Postgres wire protocol; port 5439, SSL required
 _SNOWFLAKE_SCHEMES = {"snowflake"}      # native CLI (snowsql) + snowflake-connector-python
+_BIGQUERY_SCHEMES = {"bigquery", "bq"}  # google-cloud-bigquery — auth via service-account JSON or ADC
 
 
 def _parse_dsn(dsn: str) -> dict[str, str]:
@@ -186,6 +189,30 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
     elif base_scheme in _SNOWFLAKE_SCHEMES:
         db_type = "snowflake"
         default_port = 443  # Snowflake is HTTPS-only; port not used by snowsql/connector
+    elif base_scheme in _BIGQUERY_SCHEMES:
+        # BigQuery URLs follow the SQLAlchemy-bigquery convention:
+        #   bigquery://<project>             — default dataset comes from creds
+        #   bigquery://<project>/<dataset>   — set the default dataset
+        # Query params may carry: service_account, location.
+        # No host:port — BigQuery is HTTPS-only via the Google Cloud REST API.
+        project = u.hostname or ""
+        path_parts = (u.path or "").lstrip("/").split("/") if u.path else []
+        out = {
+            "type": "bigquery",
+            "project": project,
+        }
+        if path_parts and path_parts[0]:
+            out["dataset"] = path_parts[0]
+        if u.query:
+            for k, v in urllib.parse.parse_qsl(u.query):
+                key = k.lower()
+                # `service_account` and `credentials_path` both map to the
+                # file path of the JSON service-account key.
+                if key in ("credentials_path", "service_account"):
+                    out["service_account_path"] = v
+                else:
+                    out[key] = v
+        return out
     elif base_scheme == "sqlite":
         # sqlite:///absolute/path or sqlite:relative/path
         path = dsn[len("sqlite://"):]
@@ -357,6 +384,94 @@ def _execute_snowflake(creds: dict[str, str], sql: str) -> int:
     return 0
 
 
+def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
+    """Tier-3 path for BigQuery using google-cloud-bigquery.
+
+    Required: `project`. One of: `service_account_path` (path to a JSON key
+    file), OR no auth at all (falls back to Application Default Credentials —
+    `gcloud auth application-default login`). Optional: `dataset` (sets the
+    default dataset so unqualified table refs resolve), `location` (e.g. `US`,
+    `EU`, `asia-northeast1`).
+    """
+    try:
+        from google.cloud import bigquery  # type: ignore
+        from google.oauth2 import service_account  # type: ignore
+    except ImportError:
+        return _err(
+            "google-cloud-bigquery not installed. "
+            "Run: pip install google-cloud-bigquery",
+            code=3,
+        )
+
+    _require(creds, "project")
+    project = creds["project"]
+    sa_path = creds.get("service_account_path")
+    location = creds.get("location") or None
+
+    client_kwargs: dict[str, Any] = {"project": project}
+    if location:
+        client_kwargs["location"] = location
+
+    if sa_path:
+        sa_path_expanded = os.path.expanduser(sa_path)
+        if not os.path.exists(sa_path_expanded):
+            return _err(
+                f"service_account_path '{sa_path}' doesn't exist. "
+                f"Point at the JSON key file you downloaded from GCP.",
+                code=2,
+            )
+        # Defensive chmod check — service-account JSON contains a private key.
+        try:
+            mode = stat.S_IMODE(os.stat(sa_path_expanded).st_mode)
+            if mode not in ALLOWED_PERMS:
+                sys.stderr.write(
+                    f"Warning: service_account_path '{sa_path}' has permissions "
+                    f"{oct(mode)} — should be 0600. The file contains a private key.\n"
+                )
+        except Exception:
+            pass
+        try:
+            creds_obj = service_account.Credentials.from_service_account_file(
+                sa_path_expanded
+            )
+            client_kwargs["credentials"] = creds_obj
+        except Exception as e:
+            return _err(f"BigQuery credentials load failed: {e}", code=2)
+
+    try:
+        client = bigquery.Client(**client_kwargs)
+    except Exception as e:
+        return _err(f"BigQuery client init failed: {e}", code=4)
+
+    # If `dataset` was set, prefix unqualified table references via the
+    # default_dataset job config so the SQL can omit `<project>.<dataset>.`
+    job_config_kwargs: dict[str, Any] = {}
+    if creds.get("dataset"):
+        try:
+            job_config_kwargs["default_dataset"] = f"{project}.{creds['dataset']}"
+        except Exception:
+            pass
+
+    try:
+        if job_config_kwargs:
+            job_config = bigquery.QueryJobConfig(**job_config_kwargs)
+            job = client.query(sql, job_config=job_config)
+        else:
+            job = client.query(sql)
+        results = job.result()  # waits for completion; raises on error
+    except Exception as e:
+        return _err(f"BigQuery execution error: {e}", code=5)
+
+    # Stream rows to stdout as CSV. results.schema gives column metadata.
+    writer = csv.writer(sys.stdout)
+    if results.schema:
+        writer.writerow([f.name for f in results.schema])
+        for row in results:
+            writer.writerow([row[i] for i in range(len(results.schema))])
+
+    return 0
+
+
 def _execute_sqlite(creds: dict[str, str], sql: str) -> int:
     import sqlite3  # always available in stdlib
     _require(creds, "path")
@@ -423,9 +538,11 @@ def main() -> int:
         return _execute_sqlite(creds, sql)
     if db_type == "snowflake":
         return _execute_snowflake(creds, sql)
+    if db_type == "bigquery":
+        return _execute_bigquery(creds, sql)
     return _err(
         f"Unsupported db type {db_type!r}. "
-        f"Supported: postgres, redshift, mysql, sqlite, snowflake."
+        f"Supported: postgres, redshift, mysql, sqlite, snowflake, bigquery."
     )
 
 
