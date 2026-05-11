@@ -31,13 +31,13 @@ Options (place exactly one `(Recommended)` first):
 
 | label | description |
 |---|---|
-| `Default mode (Recommended)` | Switch to default mode — agami will ask for permission per command. The host caches "always allow" choices. |
-| `Auto-accept edits` | Switch to auto-accept-edits mode — agami runs without per-command prompts. Use if you trust the skill. |
+| `Auto mode (Recommended)` | Switch to Auto mode — agami will ask for permission per command. The host caches "always allow" choices. (Some Claude Code builds label this "Default mode".) |
+| `Edit Automatically` | Switch to Edit Automatically mode — agami runs without per-command prompts. Use if you trust the skill. (Some Claude Code builds label this "Auto-accept edits".) |
 | `Stay in plan mode` | Don't run. Behavior depends on which skill — see "Stay-in-plan-mode behavior" below. |
 
-After the user picks `Default mode` or `Auto-accept edits`:
+After the user picks `Auto mode` or `Edit Automatically`:
 
-1. Surface a one-line reminder of the keystroke: `Press Shift+Tab to cycle modes — keep tapping until you see "Default mode" (or "Auto-accept edits") in the bottom bar.`
+1. Surface a one-line reminder of the keystroke: `Press Shift+Tab to cycle modes — keep tapping until you see "Auto" (or "Edit Automatically") in the bottom bar.`
 2. **Do NOT try to flip the mode programmatically.** Claude Code doesn't expose a mode-toggle tool. Only the user can press Shift+Tab.
 3. Wait for the user to confirm "I've switched, continue" (or just send the next message). On the next turn, re-run the detection (step 1 above). If plan mode is now off, proceed to Phase 0 of the skill. If it's still on, ask once more — they may have missed the keystroke.
 
@@ -49,7 +49,7 @@ Plan mode CAN proceed for read-only flows. Each SKILL declares what's possible:
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Earlier versions of this doc had agami-init emit a written plan as a fallback; that turned out to be noise — users in plan mode are almost always there by accident, and what they actually want is to switch and proceed, not read a description of what would have happened. Surface ONLY this:
 
-> I can't run setup in plan mode. Press Shift+Tab to switch to Default or Auto-accept, then send any message to continue.
+> I can't run setup in plan mode. Press Shift+Tab to switch to **Auto** or **Edit Automatically** mode, then send any message to continue.
 
 Then end the turn. No plan, no modal, no follow-up.
 
@@ -57,7 +57,7 @@ Then end the turn. No plan, no modal, no follow-up.
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Introspection requires Bash (`psql -c`, etc.) and writes (the per-schema yaml files). Credential setup is handled by `agami-init` (a separate skill) — agami-connect itself doesn't write credentials. Surface ONLY this:
 
-> I can't introspect in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke me. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`.
+> I can't introspect in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`.
 
 Then end the turn. No plan file describing what would happen — that's noise the user didn't ask for.
 
@@ -65,25 +65,25 @@ Then end the turn. No plan file describing what would happen — that's noise th
 
 Stay-in-plan-mode → **refuse, with one exception. Do not write a plan file. Do not call ExitPlanMode.** SQL execution requires Bash; chart rendering requires Write. Both are blocked. The exception is the **reopen-last-chart intent** (Phase 2a.1) — re-displaying an existing HTML report only needs the `Read` tool plus an `open <path>` command (which most hosts allow even in plan mode for files under `$HOME`). If the user's intent is reopen-last-chart, run that flow and stop. For anything else, surface ONLY this:
 
-> I can't run SQL in plan mode. Switch to Default or Auto-accept (Shift+Tab) and re-invoke.
+> I can't run SQL in plan mode. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke.
 
 ### `agami-save-correction`
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Saving requires Write (examples + model edits) and Bash (EXPLAIN-validation). Surface ONLY this:
 
-> I can't save corrections in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke. The correction won't persist otherwise.
+> I can't save corrections in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. The correction won't persist otherwise.
 
 ### `agami-review`
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Approving / rejecting items writes back to YAML files. Surface ONLY this:
 
-> I can't apply review edits in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke. (You can still inspect the dashboard HTML if it was rendered in a prior session — open `~/.agami/review/<ts>.html` directly.)
+> I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect the dashboard HTML if it was rendered in a prior session — open `~/.agami/review/<ts>.html` directly.)
 
 ### `agami-reconcile`
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Per-row queries require Bash; chart receipts require Write. Surface ONLY this:
 
-> I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to Default or Auto-accept (Shift+Tab) and re-invoke me with the CSV path.
+> I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the CSV path.
 
 ## When the system context is silent
 

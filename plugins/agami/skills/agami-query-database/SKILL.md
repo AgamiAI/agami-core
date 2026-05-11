@@ -56,7 +56,7 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 - **Reopen-last-chart intent** (Phase 2a.1 below) — re-displaying an existing HTML chart only needs `Read` plus `open <path>`. Run that flow if matched.
 - **Anything else** — refuse and end the turn. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text (verbatim):
 
-  > I can't run SQL in plan mode. Switch to Default or Auto-accept (Shift+Tab) and re-invoke me.
+  > I can't run SQL in plan mode. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me.
 
 If plan mode is not active, skip this phase silently and go to Phase 1.
 

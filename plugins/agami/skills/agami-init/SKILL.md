@@ -28,7 +28,7 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 
 Refusal text (verbatim):
 
-> I can't run setup in plan mode. Press Shift+Tab to switch to Default or Auto-accept, then send any message to continue.
+> I can't run setup in plan mode. Press Shift+Tab to switch to **Auto** or **Edit Automatically** mode, then send any message to continue.
 
 If plan mode is not active, skip this phase silently and go to Phase 0.
 

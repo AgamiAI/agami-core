@@ -30,7 +30,7 @@ Trust-layer spec lives in [`shared/agami-osi-extensions.md`](../../shared/agami-
 ## Phase 0: Preflight
 
 Run the same plan-mode + credentials checks as `agami-query-database`:
-- Plan-mode: this skill needs Read + Bash + Write. **If plan mode is active: refuse and end the turn. DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't apply review edits in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/review/<ts>.html`.)"*
+- Plan-mode: this skill needs Read + Bash + Write. **If plan mode is active: refuse and end the turn. DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/review/<ts>.html`.)"*
 - Resolve `<profile>` and `<artifacts_dir>` per the standard chain (`AGAMI_PROFILE` env → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` env → `~/.agami/.config.artifacts_dir` → `~/agami-artifacts`).
 - If `<artifacts_dir>/<profile>/index.yaml` doesn't exist, invoke `agami-connect` and stop.
 - Probe the validator is runnable: `python3 -c 'import yaml, jsonschema'`. If not, surface the install hint and stop — we won't write YAML edits without the validator gate.

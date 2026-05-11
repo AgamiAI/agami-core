@@ -30,7 +30,7 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 
 **If plan mode is active and the user picks `Stay in plan mode` (or this skill is invoked under an active plan-mode context):** refuse and end the turn. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text (verbatim):
 
-> I can't save corrections in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke. The correction won't persist otherwise.
+> I can't save corrections in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. The correction won't persist otherwise.
 
 If plan mode is not active, skip this phase silently and go to Phase 1.
 

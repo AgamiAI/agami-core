@@ -43,7 +43,7 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 
 Refusal text (verbatim — don't elaborate):
 
-> I can't introspect in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke me. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`.
+> I can't introspect in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`.
 
 If plan mode is not active, skip this phase silently and go to Phase 0.
 
