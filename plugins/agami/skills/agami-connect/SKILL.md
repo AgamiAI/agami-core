@@ -916,27 +916,40 @@ Surface: `✓ Committed to <profile_dir>/.git as <short-sha>.` (Or: `✓ Committ
 
 ## Phase 4: Seed prompt examples
 
-Generate **10–15** NL→SQL examples covering this distribution. The bias is intentionally toward multi-table joins — that's where NL→SQL gets hard, and seed examples covering 3- and 4-table joins lift answer quality on real questions far more than another COUNT(*) example.
+Generate **10–12** NL→SQL examples. The bar is **analytical shape**, not "did it join two tables." A `SELECT col1, col2, col3 FROM a JOIN b ORDER BY x LIMIT 10` is a list, not an analysis — it doesn't answer a business question and it doesn't exercise the model's hard parts (aggregation grain, fan-out joins, time windows, segmentation). Every seed example must do real analytical work.
 
-| # | Pattern | Min tables | Example shape |
-|---|---------|---|---------------|
-| 1 | Count rows | 1 | "How many orders are there?" |
-| 2 | Filter + count | 1 | "How many orders are still pending?" |
-| 3 | GROUP BY | 1 | "Orders by status" |
-| 4 | Date range | 1 | "Orders placed last month" |
-| 5 | Top N (single table) | 1 | "Top 5 statuses by order count" |
-| 6 | JOIN (2 tables) | 2 | "Total spend per customer" |
-| 7 | JOIN (3 tables) | 3 | "Top 10 products by revenue" |
-| 8 | **JOIN (3 tables) + filter** | **3** | **"Top 10 customers by spend on shipped orders this quarter"** |
-| 9 | **JOIN (4 tables)** | **4** | **"Revenue per category per region last 90 days"** (orders → order_items → products → categories) |
-| 10 | **JOIN (4 tables) + GROUP BY two dimensions** | **4** | **"Order count by customer-segment and product-category last quarter"** |
-| 11 | Boolean filter | 1 | "Active customers only" |
-| 12 | Aggregate | 1 | "Average order size" |
-| 13 | Combined (filter + JOIN + GROUP BY + ORDER BY) | 2-3 | "Top 5 active customers by spend last 30 days" |
+**Every seed example must satisfy at least ONE of these "shape" requirements:**
 
-**Hard rule: at least 3 examples must touch ≥ 3 tables, and at least 1 must touch ≥ 4 tables** — when the user's schema supports it (i.e., the relationships graph is deep enough). If the schema only has 2 tables connected by FKs, skip patterns 7-10 and document why in the staging log: "schema only has 2 connected tables; skipped multi-join examples".
+- **S1 — Aggregation with a measure**: `SUM`, `COUNT(DISTINCT ...)`, `AVG`, or a derived ratio over a numeric column. Not just `COUNT(*)`.
+- **S2 — Segmentation**: `GROUP BY` on a meaningful dimension (segment / category / status / cohort / region), returning a row per group.
+- **S3 — Time comparison**: this period vs. last period (WoW, MoM, YoY) using window functions, CTEs, or self-joins on a date.
+- **S4 — Filtered top-N with context**: top-N ordered by a measure, but with at least one non-trivial filter (active-only, paying-only, last-90-days) AND extra columns that explain *why* each top-N row qualifies.
+- **S5 — Cohort / retention**: bucket entities by their first-event date and measure their behavior in subsequent periods.
 
-Skip patterns that don't fit the user's schema (e.g., no time field → no "last month" example; no boolean column → no #11). The 3- and 4-table patterns require enough relationships in the graph to traverse — use the relationships from Phase 1c when picking which tables to join.
+A "list rows" example (`SELECT a, b, c FROM t1 JOIN t2 ORDER BY x LIMIT N`) **does not qualify** as a seed. If the schema is genuinely too narrow for shape S1–S5 (e.g., one fact table, no time dimension), say so in the staging log and emit fewer examples — quality over count.
+
+**Suggested distribution** (the LLM has discretion to mix, but the count constraints are binding):
+
+| # | Shape | Min tables | Example |
+|---|---|---|---|
+| 1 | S1: aggregation | 1–2 | "Average loan amount per applicant by employment type" |
+| 2 | S2: segment counts | 1–2 | "Applicants by score band (650–700, 700–750, 750+)" |
+| 3 | S2: revenue per segment | 2–3 | "Total revenue per customer segment" |
+| 4 | S4: filtered top-N | 2–3 | "Top 10 customers by lifetime spend who placed an order in the last 90 days" |
+| 5 | S3: time comparison | 2–3 | "Monthly active customer count for the last 6 months" |
+| 6 | S1 + S2: two-dimension breakdown | 3+ | "Revenue per product category per region last quarter" |
+| 7 | S4 + S2: top-N within group | 3+ | "Top 3 products by units sold within each category last 30 days" |
+| 8 | S3: MoM growth | 2–3 | "Month-over-month % change in new sign-ups for the last 6 months" |
+| 9 | S5: cohort retention | 3+ | "% of customers who placed a second order within 30 days of their first, by sign-up month" |
+| 10 | Composite (S1+S2+S3+S4) | 3+ | "Top 5 product categories by revenue this quarter vs. last quarter, % change" |
+
+**Hard count constraints** (binding when the schema supports them):
+- **≥ 6 examples must be multi-table** (≥ 2 tables joined). Not just "join exists" — the join must be load-bearing for the answer (you can't drop a joined table without losing a column the user asked for).
+- **≥ 3 examples must touch ≥ 3 tables.**
+- **≥ 1 example must use a time-comparison shape (S3) or cohort shape (S5)** — these are the analytical patterns most likely to expose grain bugs, and seeding one teaches the query skill the right CTE shape.
+- **≥ 1 example must include a derived ratio or percentage** (e.g., `revenue / row_count`, `100.0 * COUNT(active) / COUNT(*)`).
+
+**Schema-fit fallbacks**: if the schema lacks a dimension required by a pattern (no time column → skip S3/S5; only 2 connected tables → skip the ≥3-table requirement), document the skip in the staging log: `skipped pattern N: schema has no time column on any fact table`. Do not invent dimensions to satisfy the rules — emit fewer examples with a logged justification.
 
 ### 4a — generate
 
