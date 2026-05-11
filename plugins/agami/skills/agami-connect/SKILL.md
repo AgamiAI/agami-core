@@ -37,7 +37,13 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 ## Phase −1: Plan-mode check
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-connect needs Bash (introspection queries) and Write (per-schema yaml files) — both are blocked in plan mode. If the user picks `Stay in plan mode`, refuse to proceed: "I can't introspect in plan mode — switch to Default or Auto-accept and re-invoke. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`."
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-connect needs Bash (introspection queries) and Write (credentials in Phase 0a + per-schema yaml files) — both are blocked in plan mode.
+
+**If plan mode is active and the user picks `Stay in plan mode` (or this skill is invoked under an active plan-mode context with no prompt available):** refuse with the one-liner below and **end the turn**. **DO NOT write a plan file describing what would happen. DO NOT call `ExitPlanMode`.** Generating "a brief plan of what introspect would do" is noise the user did not ask for — they invoked this skill to do its job, not to read a description of its job. The user switches modes via Shift+Tab and re-invokes.
+
+Refusal text (verbatim — don't elaborate):
+
+> I can't introspect in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke me. The credentials write, schema picker, description generation, and demo query all need write access to `~/.agami/` and `<artifacts_dir>/<profile>/`.
 
 If plan mode is not active, skip this phase silently and go to Phase 0.
 

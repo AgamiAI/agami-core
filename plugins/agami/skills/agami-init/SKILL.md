@@ -24,7 +24,11 @@ This skill is idempotent — running it with no args runs `verify` and surfaces 
 
 ## Phase −1: Plan-mode check (before anything else)
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). If plan mode is active and the user picks `Stay in plan mode`, **refuse to proceed**: "I can't run setup in plan mode. Press Shift+Tab to switch to Default or Auto-accept, then send any message to continue." Don't emit a written plan as a fallback — that turned out to be noise; users in plan mode want to switch and proceed, not read a description.
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). If plan mode is active and the user picks `Stay in plan mode` (or this skill is invoked under an active plan-mode context with no prompt available), **refuse to proceed** and end the turn. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Users in plan mode want to switch and proceed — not read a description of what would have happened.
+
+Refusal text (verbatim):
+
+> I can't run setup in plan mode. Press Shift+Tab to switch to Default or Auto-accept, then send any message to continue.
 
 If plan mode is not active, skip this phase silently and go to Phase 0.
 

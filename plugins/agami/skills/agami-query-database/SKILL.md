@@ -49,10 +49,14 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 
 ## Phase −1: Plan-mode check
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-query-database needs Bash (SQL execution) and Write (chart HTML) — both are blocked in plan mode. If the user picks `Stay in plan mode`:
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-query-database needs Bash (SQL execution) and Write (chart HTML) — both are blocked in plan mode.
+
+**If plan mode is active and the user picks `Stay in plan mode`:**
 
 - **Reopen-last-chart intent** (Phase 2a.1 below) — re-displaying an existing HTML chart only needs `Read` plus `open <path>`. Run that flow if matched.
-- **Anything else** — refuse: "I can't run SQL in plan mode. Switch to Default or Auto-accept and re-invoke."
+- **Anything else** — refuse and end the turn. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text (verbatim):
+
+  > I can't run SQL in plan mode. Switch to Default or Auto-accept (Shift+Tab) and re-invoke me.
 
 If plan mode is not active, skip this phase silently and go to Phase 1.
 

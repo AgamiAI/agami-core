@@ -31,7 +31,7 @@ Spec for the deterministic helpers: [`scripts/reconcile.py`](../../scripts/recon
 
 Same checks as agami-query-database / agami-connect:
 
-1. **Plan-mode check** per [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash + Read + Write — refuse if locked in plan mode.
+1. **Plan-mode check** per [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash + Read + Write — refuse if locked in plan mode. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to Default or Auto-accept (Shift+Tab) and re-invoke me with the CSV path."*
 2. **Credentials present** — read `~/.agami/credentials` for the active profile. If missing, invoke `/agami-connect` to set up first; this skill needs a working DB connection.
 3. **OSI model present** — `<artifacts_dir>/<profile>/index.yaml` must exist. If not, invoke `/agami-connect`. This skill needs an introspected model to generate questions against.
 4. **Argument** — `$ARGUMENTS` should be a path to a CSV file. If not provided, ask once: *"Paste the path to a CSV with two columns: `label,value`. (Or paste the CSV inline as a code block and I'll extract it.)"* Accept inline-pasted CSV — write it to `/tmp/agami-reconcile-<ts>.csv` and proceed.

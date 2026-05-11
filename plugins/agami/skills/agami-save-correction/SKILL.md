@@ -26,7 +26,11 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 ## Phase −1: Plan-mode check
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-save-correction needs Write (examples + model edits) and Bash (EXPLAIN-validation) — both are blocked in plan mode. If the user picks `Stay in plan mode`, refuse to proceed: "I can't save corrections in plan mode — switch to Default or Auto-accept and re-invoke. The correction won't persist otherwise."
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-save-correction needs Write (examples + model edits) and Bash (EXPLAIN-validation) — both are blocked in plan mode.
+
+**If plan mode is active and the user picks `Stay in plan mode` (or this skill is invoked under an active plan-mode context):** refuse and end the turn. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text (verbatim):
+
+> I can't save corrections in plan mode — switch to Default or Auto-accept (Shift+Tab) and re-invoke. The correction won't persist otherwise.
 
 If plan mode is not active, skip this phase silently and go to Phase 1.
 
