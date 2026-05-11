@@ -1078,6 +1078,8 @@ You can also type commands directly:
 
 Auto-open with the same multi-command fallback chain as agami-query-database Phase 4e.vi (`open` → `xdg-open` → `start` → fall through with the path printed). End the turn here.
 
+**HARD STOP rule (read this twice):** Do NOT surface Phase 5.5 (post-introspect summary) or offer the model-review dashboard in the same turn as 5c. The examples-validation flow and the model-review flow are sequential, not concurrent — a user who is mid-validation on examples should not see "open the review dashboard" anywhere on screen. Phase 5.5 may only run after the gate in 5e fires.
+
 ### 5d — Chat back-channel grammar
 
 The user replies with one or more commands. Commands can come from the dashboard's "Generate feedback for Claude" button (newline-separated block) or be typed directly. Same grammar either way.
@@ -1159,11 +1161,17 @@ Open: ~/.agami/examples-validation/<new-ts>.html
 
 Then end the turn. Wait for the user.
 
-If the queue is fully reviewed (no `unreviewed` items remain) OR the user types `done`, surface:
+**HARD STOP — gate for advancing to Phase 5.5:** Phase 5.5 (post-introspect summary) and the model-review dashboard offer may only fire when **both** of the following are true:
+1. The user has explicitly typed `done`, OR every example in `examples.yaml` has `state ∈ {validated, rejected, error}` (no `unreviewed` examples remain).
+2. The current turn's batch of commands has been processed and the re-render is complete.
+
+If condition (1) is false — i.e., there are still `unreviewed` examples in the YAML after applying this batch — **end the turn after the re-render.** Do not surface Phase 5.5, do not offer the model-review dashboard, do not say "set up." The user is still mid-validation. They will return with another batch.
+
+When the gate fires, surface:
 ```
 ✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed (errors).
 ```
-…and continue to Phase 5.5 (the trust-layer summary).
+…and continue to Phase 5.5 (the trust-layer summary) **in a new turn after the user replies** to any subsequent prompt — or, if you have remaining context budget, surface the Phase 5.5 summary as the next message in the same turn. Either way, the model-review dashboard is offered *only* via Phase 5.5's AskUserQuestion, never embedded earlier.
 
 ### 5f — examples.yaml schema additions
 
