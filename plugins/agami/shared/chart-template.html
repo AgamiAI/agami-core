@@ -196,6 +196,24 @@
       margin-top: 8px;
       text-align: right;
     }
+    .paginator {
+      display: flex; align-items: center; gap: 12px;
+      margin-top: 12px; font-size: 13px; flex-wrap: wrap;
+    }
+    .paginator button {
+      font: inherit; font-size: 12px;
+      padding: 4px 12px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg-elev); color: var(--fg);
+      cursor: pointer;
+    }
+    .paginator button:hover:not(:disabled) {
+      border-color: var(--accent); color: var(--accent);
+    }
+    .paginator button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .paginator .page-info { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .paginator .page-summary {
+      color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums;
+    }
     details.sql > summary {
       cursor: pointer;
       font-size: 12px;
@@ -415,6 +433,7 @@
         if (k === 'class') e.className = v;
         else if (k === 'text') e.textContent = v;
         else if (k === 'html') e.innerHTML = v;
+        else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
         else if (v !== undefined && v !== null) e.setAttribute(k, v);
       }
       children.flat().forEach(c => {
@@ -537,7 +556,7 @@
         sectionEl.appendChild(chartCard);
       }
 
-      // Table card
+      // Table card — paginated at 20 rows per page when the result has more.
       if (sec.table_headers && sec.table_headers.length > 0 && sec.table_rows) {
         const tableCard = el('div', { class: 'card' });
         const wrap = el('div', { class: 'table-wrap' });
@@ -551,28 +570,68 @@
           trHead.appendChild(th);
         });
         thead.appendChild(trHead);
+
         const tbody = el('tbody');
-        const visibleRows = sec.table_rows.slice(0, 200);
-        visibleRows.forEach(row => {
-          const tr = el('tr');
-          row.forEach((cell, c) => {
-            const display = cell == null ? '' : String(maybePrettifyDate(cell));
-            const td = el('td', { text: display });
-            if (numericCols[c]) td.classList.add('numeric');
-            tr.appendChild(td);
-          });
-          tbody.appendChild(tr);
-        });
         table.appendChild(thead);
         table.appendChild(tbody);
         wrap.appendChild(table);
         tableCard.appendChild(wrap);
-        if (sec.table_rows.length > visibleRows.length) {
-          tableCard.appendChild(el('p', {
-            class: 'table-truncated',
-            text: 'Showing first ' + visibleRows.length + ' of ' + sec.table_rows.length + ' rows.'
-          }));
+
+        const PAGE_SIZE = 20;
+        const totalRows = sec.table_rows.length;
+        const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+        let currentPage = 0;
+        let pageInfoEl = null;
+        let prevBtn = null;
+        let nextBtn = null;
+        let pageSummaryEl = null;
+
+        function renderPage(pageIdx) {
+          currentPage = pageIdx;
+          tbody.innerHTML = '';
+          const start = pageIdx * PAGE_SIZE;
+          const end = Math.min(start + PAGE_SIZE, totalRows);
+          for (let r = start; r < end; r++) {
+            const row = sec.table_rows[r];
+            const tr = el('tr');
+            row.forEach((cell, c) => {
+              const display = cell == null ? '' : String(maybePrettifyDate(cell));
+              const td = el('td', { text: display });
+              if (numericCols[c]) td.classList.add('numeric');
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+          }
+          if (pageInfoEl) {
+            pageInfoEl.textContent = 'Page ' + (pageIdx + 1) + ' of ' + totalPages;
+            prevBtn.disabled = pageIdx === 0;
+            nextBtn.disabled = pageIdx >= totalPages - 1;
+            pageSummaryEl.textContent =
+              'Showing rows ' + (start + 1).toLocaleString() + '–' +
+              end.toLocaleString() + ' of ' + totalRows.toLocaleString();
+          }
         }
+
+        if (totalRows > PAGE_SIZE) {
+          const paginator = el('div', { class: 'paginator' });
+          prevBtn = el('button', {
+            class: 'btn-prev', type: 'button',
+            onclick: () => { if (currentPage > 0) renderPage(currentPage - 1); },
+          }, '‹ Prev');
+          pageInfoEl = el('span', { class: 'page-info' });
+          nextBtn = el('button', {
+            class: 'btn-next', type: 'button',
+            onclick: () => { if (currentPage < totalPages - 1) renderPage(currentPage + 1); },
+          }, 'Next ›');
+          pageSummaryEl = el('span', { class: 'page-summary' });
+          paginator.appendChild(prevBtn);
+          paginator.appendChild(pageInfoEl);
+          paginator.appendChild(nextBtn);
+          paginator.appendChild(pageSummaryEl);
+          tableCard.appendChild(paginator);
+        }
+
+        renderPage(0);
         sectionEl.appendChild(tableCard);
       }
 
