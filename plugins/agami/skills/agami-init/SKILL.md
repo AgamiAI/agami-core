@@ -1,8 +1,8 @@
 ---
 name: agami-init
-description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), asks one short question to determine the database type, writes a credentials.example template the user fills in, and detects which database tool is available (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver). Re-run with `verify` to check state, `switch-profile NAME` to change active profile, or `reconfigure-analytics` to re-prompt the telemetry opt-in."
-when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami', wants to add or switch a database connection, or asks to change their telemetry preference. Auto-invoked by agami-connect when ~/.agami/credentials is missing — that's the standard onboarding path."
-argument-hint: "[verify | switch-profile NAME | reconfigure-analytics]"
+description: "First-run setup for agami. Creates the .agami directory in the user's home (chmod 700), asks one short question to determine the database type, writes a credentials.example template the user fills in, and detects which database tool is available (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver). Re-run with `verify` to check state or `switch-profile NAME` to change active profile."
+when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami', or wants to add or switch a database connection. Auto-invoked by agami-connect when ~/.agami/credentials is missing — that's the standard onboarding path."
+argument-hint: "[verify | switch-profile NAME]"
 ---
 
 # agami init
@@ -16,9 +16,9 @@ This skill is idempotent — running it again with no args walks the full first-
 ## Conversation style
 
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
-- **Use AskUserQuestion for every choice** — never bullet-list options inline. **Use `(Recommended)` only when there's a genuine recommendation** (e.g. "skip telemetry" is a privacy default we'd suggest). Don't mark it for fact-of-environment questions like "what database do you have?" — the user picks what they have, and labeling one option Recommended is misleading.
+- **Use AskUserQuestion for every choice** — never bullet-list options inline. **Use `(Recommended)` only when there's a genuine recommendation.** Don't mark it for fact-of-environment questions like "what database do you have?" — the user picks what they have, and labeling one option Recommended is misleading.
 - **Keep prompts short** — 2-4 lines per question max.
-- **Plain English over jargon** — for telemetry / privacy, sound like a human.
+- **Plain English over jargon.**
 
 ---
 
@@ -39,7 +39,6 @@ If plan mode is not active, skip this phase silently and go to Phase 0.
 - **No arguments**: Run the full first-run flow (Phases 1–5). The DB-type picker in Phase 2a is the entry point; the user fills in the credentials.example template after this skill writes it, then re-invokes `/agami-connect` (or just asks a data question — which auto-invokes connect).
 - **`verify`**: Run Phase 1 (state check) only. Print what's working and what's missing. Exit.
 - **`switch-profile <name>`**: Skip to Phase 2 with the profile name pre-set. Help the user add a new `[<name>]` section to `~/.agami/credentials`.
-- **`reconfigure-analytics`**: Skip to Phase 4. Re-prompt the opt-in.
 
 ---
 
@@ -430,30 +429,29 @@ Tool detection is path-only. A connection probe (`SELECT 1`) requires credential
 
 ### Persist the chosen method + tool paths in `~/.agami/.config`
 
-Write the `.config` schema documented in Phase 3 above (`tier`, `host`, `tool_paths`, `tool_imports`, `detected_at`). **No telemetry fields here yet** — telemetry consent is asked later (after the user has seen `connect` work end-to-end), not at install time.
+Write the `.config` schema documented in Phase 3 above (`tier`, `host`, `tool_paths`, `tool_imports`, `detected_at`).
 
 For ISO8601 timestamp: `date -u +"%Y-%m-%dT%H:%M:%SZ"`. Detect `host` from the environment — Claude Code CLI sets `CLAUDE_CODE_HOST=cli` (or similar; fall back to `unknown` if you can't tell).
 
 After writing, `chmod 600 ~/.agami/.config`.
 
-`agami-connect/SKILL.md` will later add `analytics_consent`, `install_id`, and `consent_ts` to this same file once the user has opted in (or out).
+(Telemetry consent fields — `analytics_consent`, `install_id`, `consent_ts` — were previously added to `.config` by agami-connect after the demo query. Telemetry is disabled in the current 0.x line, so those fields are no longer written. The server-side telemetry endpoint and the privacy spec remain in the repo for future re-enable.)
 
 ---
 
-## Phase 4: Deferred opt-ins (no prompts here)
+## Phase 4: Deferred GitHub-star ask (no prompts here)
 
-`agami-init` does not ask for telemetry or any other opt-in. Both are asked later, when the user has felt the value of the skill:
+`agami-init` does not ask for the GitHub star or anything else. It's asked later, after the user has felt the value of the skill:
 
-- **Telemetry consent** — asked by `agami-connect/SKILL.md` after the demo query succeeds. Asking at install time is too early; the user hasn't seen anything work yet.
 - **GitHub star** — asked by `agami-query-database/SKILL.md` after the user's first real successful query. No email collection, no list — just a one-click ask.
 
-Don't do anything in this phase. **Don't mention the deferred asks in the closing message either** — previewing them at install time is noise the user can't act on, and telegraphing "I'll ask you for X later" reads as nagging. The asks fire when the user has actually felt the value; that's the right moment to surface them, not earlier.
+Don't do anything in this phase. **Don't mention the deferred ask in the closing message either** — previewing it at install time is noise the user can't act on, and telegraphing "I'll ask you for X later" reads as nagging. It fires when the user has actually felt the value; that's the right moment to surface it, not earlier.
 
 ---
 
 ## Phase 5: Hand-off
 
-End with a short status + next step. **No telegraphed opt-ins** (don't preview the GitHub-star ask or the telemetry consent — those fire later, when the user has felt the value).
+End with a short status + next step. **No telegraphed opt-ins** (don't preview the GitHub-star ask — it fires later, when the user has felt the value).
 
 For **first-run** (default — Phases 2–4 just ran):
 

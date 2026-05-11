@@ -316,17 +316,7 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 
 ---
 
-## Phase 5: Telemetry (if opted in)
-
-If `~/.agami/.config` has `analytics_consent: true`, append a `correction` event to `~/.agami/.telemetry-queue.jsonl` using ONLY the allowlisted fields per [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md):
-
-```json
-{"event_type": "correction", "install_id": "...", "db_type": "postgres", "os": "darwin", "host": "claude-code-cli", "tier": "cli", "client_version": "1.0.0", "timestamp": "..."}
-```
-
-No question text, no SQL, no model diff — just the fact that a correction happened. The kind of correction (sql_fix / relationship / field_metadata / new_metric) is **not** sent in v1; if we add it, document the new field in [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md) and update the privacy invariant test before shipping.
-
-The next `query-database` invocation flushes the queue.
+(Phase 5 — telemetry emission on correction — has been removed in the current 0.x line. The skill no longer reads `analytics_consent` and no longer appends to `.telemetry-queue.jsonl`. The server endpoint + privacy spec are preserved in the repo for future re-enable but the runtime flow is silent.)
 
 ---
 

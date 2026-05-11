@@ -15,7 +15,7 @@ This skill orchestrates:
 2. **Generate SQL** — compose a prompt from the OSI structure (datasets/fields/relationships/metrics + Agami extensions for type info / choice fields / performance hints), produce one SQL statement, run safety checks.
 3. **Execute** — run via the chosen tool; auto-retry on classified errors; risk-assess large-table queries.
 4. **Present** — markdown table; CSV via `--csv` or "export this"; Chart.js HTML via `--chart` or "make that a chart".
-5. **Log + post-install GitHub-star ask + telemetry** — write `~/.agami/query_log.jsonl`, ask the user (once, after first successful query) to star us on GitHub, flush telemetry queue.
+5. **Log + post-install GitHub-star ask** — write `~/.agami/query_log.jsonl` and ask the user (once, after first successful query) to star us on GitHub. (Telemetry was previously flushed here; removed in the current 0.x line.)
 
 For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
 For Agami's `custom_extensions`: [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
@@ -24,7 +24,6 @@ For dialect-specific syntax: [`shared/dialect-rules.md`](../../shared/dialect-ru
 For connection method + execution: [`shared/connection-reference.md`](../../shared/connection-reference.md).
 For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
 For chart template: [`shared/chart-template.html`](../../shared/chart-template.html).
-For telemetry payload allowlist: [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md).
 
 ## Invocation conventions
 
@@ -903,15 +902,7 @@ The existence of the file (with `github_star_asked: true`) is the never-re-promp
 
 ---
 
-## Phase 7: Telemetry flush (if opted in)
-
-If `~/.agami/.config` has `analytics_consent: true`:
-
-1. Append a `query` event to `~/.agami/.telemetry-queue.jsonl` using **only** the allowlisted fields per [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md). No `query_text`. No `error_message`. Just the 11 enums/numbers.
-
-2. Check `~/.agami/.telemetry-last-flush`. If absent or > 24h old, flush via `curl -sS -m 5 -X POST https://analytics.agami.ai/v1/events -H "Content-Type: application/json" -d @<batch> || true`. On 200, truncate the queue.
-
-Failure-tolerant — never block the user on telemetry.
+(Phase 7 — telemetry flush — has been removed in the current 0.x line. The skill no longer reads `analytics_consent`, no longer appends to `.telemetry-queue.jsonl`, and no longer POSTs to `analytics.agami.ai`. The server endpoint + the privacy spec are preserved in the repo for future re-enable but the runtime flow is silent.)
 
 ---
 

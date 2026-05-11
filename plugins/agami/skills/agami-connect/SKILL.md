@@ -47,7 +47,7 @@ The exact todo list to seed (one task per major phase, in this order):
 5. Generate seed NL→SQL examples (EXPLAIN-validated)
 6. Validate every seed example (user reviews via dashboard)
 7. Post-introspect trust summary + dashboard offer
-8. Telemetry opt-in + follow-up suggestions
+8. Follow-up suggestions
 ```
 
 Use `content` for the imperative form and `activeForm` for the present-continuous form, e.g. `content: "Introspect database schema"` / `activeForm: "Introspecting database schema"`.
@@ -1135,109 +1135,11 @@ If `agami-review` doesn't exist yet (the dashboard skill ships in a follow-up of
 
 ---
 
-## Phase 6: Telemetry opt-in, THEN follow-up suggestions (correct order matters)
+## Phase 6: Post-setup follow-up suggestions
 
-This is the first moment the user sees the skill produce real value. Ask for analytics consent here — not at install time. **And — important — the telemetry consent has to fully resolve BEFORE the user sees any "what to ask next" follow-up suggestions.** If they see follow-ups and *then* the consent modal pops up, they lose context for the follow-ups. The flow:
+(Telemetry consent was previously asked here. It has been removed in the current 0.x line — there is no opt-in, no install event, no `~/.agami/.config.analytics_consent` field written, no `.telemetry-queue.jsonl` appended. The server-side telemetry endpoint and the privacy spec are preserved in the repo for future re-enable, but the runtime flow is silent. Don't surface anything about telemetry here.)
 
-1. **Phase 5 demo finishes.** User answered Yes / No / Skip on the demo example.
-2. Surface a one-line closing for the demo: `✓ Demo run complete.`
-3. **Phase 6 (this phase): ask telemetry consent NOW.** AskUserQuestion modal. End the turn here. Do not yet emit follow-up suggestions about what to query next — the user is in a "decide about telemetry" mode.
-4. **Next turn:** the user answered consent. Process it (write `~/.agami/.config`, send install event if opted in). Then **Phase 7 below** surfaces follow-up suggestions ("Now that you're set up, here are five things you could ask…"). These are the *first* five suggestions the user sees post-setup.
-
-If `~/.agami/.config` already has an `analytics_consent` field set (true or false), **skip Phase 6 entirely** (only ask once) and go straight to Phase 7's follow-up suggestions.
-
-If `~/.agami/.config` already has an `analytics_consent` field set (true or false), **skip this phase entirely**. Only ask once.
-
-Otherwise, use **AskUserQuestion** with this exact question and three options. The text matters — read it back to yourself before sending. Do not paraphrase the "what we send / never send" lists.
-
-> **Before you start asking your own questions — would you be open to sending anonymous usage stats?**
->
-> Helps us prioritize which databases / hosts / error patterns to fix first. (Default is skip.)
->
-> What we send:
-> - Counts of installs, queries, errors (no content)
-> - Database type (postgres/mysql/sqlite/snowflake/redshift), OS, which host (Claude Code / Cowork)
-> - Latency percentiles
-> - A random install ID — not tied to you
->
-> What we never send:
-> - Your queries, your schema, your data
-> - Your hostname, paths, credentials
-> - Anything we couldn't read out loud at a conference
->
-> You can change your mind any time by editing `~/.agami/.config`.
-
-Options:
-- `Yes (Recommended)` — "Send anonymous usage stats. Helps us prioritize fixes."
-- `No` — "Don't send anything. Skill works the same."
-- `Read more` — "Open `docs/privacy.md` and the full payload allowlist."
-
-If `Read more`: open [`docs/privacy.md`](../../../../docs/privacy.md) and [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md), then re-prompt with just `Yes (Recommended)` / `No`.
-
-### 6a — persist the choice into the existing `~/.agami/.config`
-
-`agami-init/SKILL.md` already wrote a base `.config` with the chosen connection method (the internal `tier` field) and `host`. Update it in place — don't overwrite the existing fields.
-
-```bash
-install_id=""
-if [ "$CONSENT" = "true" ]; then
-  install_id=$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
-fi
-ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-# Merge new fields into the existing .config (preserve the connection method + host)
-python3 - <<PY
-import json, pathlib
-p = pathlib.Path.home() / ".agami" / ".config"
-cfg = json.loads(p.read_text()) if p.exists() else {"schema_version": 1}
-cfg["analytics_consent"] = $CONSENT_BOOL
-cfg["install_id"] = "$install_id" if "$install_id" else None
-cfg["consent_ts"] = "$ts"
-p.write_text(json.dumps(cfg, indent=2))
-PY
-chmod 600 ~/.agami/.config
-```
-
-(Substitute `$CONSENT_BOOL` with literal `true` or `false` based on the user's choice.)
-
-### 6b — send the install event (only if consent is true)
-
-```bash
-if [ "$CONSENT" = "true" ]; then
-  curl -sS -m 5 -X POST https://analytics.agami.ai/v1/events \
-    -H "Content-Type: application/json" \
-    -d "$(cat <<JSON
-{
-  "schema_version": 1,
-  "events": [{
-    "event_type": "install",
-    "install_id": "$install_id",
-    "db_type": "$db_type",
-    "os": "$(uname -s | tr '[:upper:]' '[:lower:]')",
-    "host": "$host",
-    "tier": "$tier",
-    "client_version": "1.0.0",
-    "timestamp": "$ts"
-  }]
-}
-JSON
-)" || true
-fi
-```
-
-Build the payload **only** from the allowlist in [`shared/telemetry-payload.md`](../../shared/telemetry-payload.md). If you find yourself reaching for any other field, stop — there's nothing else to send.
-
-Failure-tolerant: `|| true` so a network blip doesn't break the connect flow.
-
-### 6c — queue the connect event (only if consent is true)
-
-After the install event sends, append a `connect` event to `~/.agami/.telemetry-queue.jsonl` using only the allowlisted fields. Don't flush yet — that happens daily from `query-database`.
-
----
-
-## Phase 7: Post-setup follow-up suggestions (only after telemetry decision is recorded)
-
-Show **five** numbered suggestions for things the user can ask now, drawn from the schema we just introspected. This phase fires only after Phase 6's consent has been answered (or skipped because `analytics_consent` was already set). Format follows the same shape as `query-database`'s Phase 4f — five numbered bullets, plain markdown, no AskUserQuestion modal.
+Show **five** numbered suggestions for things the user can ask now, drawn from the schema we just introspected. Format follows the same shape as `query-database`'s Phase 4f — five numbered bullets, plain markdown, no AskUserQuestion modal.
 
 Pick suggestions that show off the schema's distinctive shape. If the model has tables like `orders` and `customers`, suggest things grounded in those. If it's a content/CRM schema, pick something domain-relevant. Keep each under 80 characters.
 

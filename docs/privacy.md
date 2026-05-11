@@ -2,6 +2,8 @@
 
 The short version: **your data never leaves your machine.** `agami` is a Claude Code skill that runs locally — credentials, schema, query results, and corrections all live in `~/.agami/` on your laptop. We do not host, proxy, or process any of them.
 
+> **Telemetry disabled (0.x line).** The plugin no longer asks for analytics consent and no longer sends anything to `analytics.agami.ai`. The server endpoint, the payload allowlist spec, and the privacy-invariant test suite are preserved in the repo (as hardened infrastructure for a future re-enable), but the runtime flow is silent. The "What we send if you opt into telemetry" section below describes what *would* be sent if telemetry were re-enabled in a future version — it does not describe current behavior.
+
 This page documents:
 - What we send if you opt into anonymous usage stats (and what we never send)
 - How to opt in and out
