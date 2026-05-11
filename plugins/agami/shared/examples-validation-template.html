@@ -331,13 +331,13 @@
     </div>
 
     <div class="intro">
-      <strong>How this works.</strong> Your clicks are queued in the browser, not applied immediately. When you hit <strong>Generate feedback for Claude</strong> at the bottom, the page packages everything into a single chat command. Paste it back, Claude writes the changes to <code>examples.yaml</code>, and the dashboard re-renders. Items only move to other tabs after that round-trip.
+      <strong>How this works.</strong> Your clicks are queued in the browser, not applied immediately. When you hit <strong>Generate feedback for Claude</strong> at the bottom, the page packages everything into a single chat command. Paste it back, Claude writes the changes to <code>examples.yaml</code>, and the dashboard re-renders. Items only move to other tabs after that round-trip. To undo a click on a card, click the same action again (toggles off) or use <strong>Reset all</strong> in the bottom bar.
       <br/><br/>
       <strong>Validate</strong> — this example is correct; trust it as a few-shot anchor. Writes <code>state: validated</code>.<br/>
       <strong>Reject</strong> — this example is wrong; don't use it. Writes <code>state: rejected</code> (stays in YAML for audit but excluded from runtime).<br/>
       <strong>Edit</strong> — rewrite the SQL inline; the new query re-runs against your DB on the next round.<br/>
       <strong>Add note</strong> — leave a comment (formatting hint, context, business rule) without changing the SQL. Goes to <code>USER_MEMORY.md</code> or the example's notes depending on what you wrote.<br/>
-      <strong>Skip</strong> — clears a queued action on a card you've already clicked. Use it when you change your mind before pasting.
+      <strong>+ Add example</strong> (bottom bar) — write a new question + SQL pair from scratch. It gets appended to <code>examples.yaml</code> with <code>source: manual</code>.
     </div>
 
     <div class="tab-bar" id="tab-bar"></div>
@@ -354,8 +354,27 @@
   <div class="sticky-footer">
     <div class="sticky-footer-inner">
       <span class="pending-summary" id="pending-summary">No actions queued yet — click buttons on the cards above to start.</span>
+      <button id="btn-add-example" type="button" title="Write a new question + SQL pair and append it to examples.yaml.">+ Add example</button>
       <button id="btn-reset" type="button">Reset all</button>
       <button id="btn-generate" class="primary" type="button" disabled>Generate feedback for Claude</button>
+    </div>
+  </div>
+
+  <!-- Modal: add a new example (question + SQL) -->
+  <div class="modal-backdrop" id="add-modal" hidden>
+    <div class="modal-card">
+      <h2>Add a new example</h2>
+      <p>This pair will be appended to <code>examples.yaml</code> with <code>source: manual</code>. Claude EXPLAIN-validates the SQL before writing; broken SQL is rejected with the error inline.</p>
+      <label for="add-question" style="font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); font-weight: 600;">Question</label>
+      <input type="text" id="add-question" placeholder="e.g. How many invoices are still unpaid?"
+        style="font: inherit; font-size: 14px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev); color: var(--fg); margin-top: 6px;" />
+      <label for="add-sql" style="font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-top: 14px; display: block;">SQL</label>
+      <textarea id="add-sql" rows="8" placeholder="SELECT ..."
+        style="font: inherit; font-family: ui-monospace, monospace; font-size: 13px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev); color: var(--fg); margin-top: 6px; resize: vertical;"></textarea>
+      <div class="modal-actions">
+        <button id="add-modal-save" type="button" class="primary">Queue example</button>
+        <button id="add-modal-cancel" type="button">Cancel</button>
+      </div>
     </div>
   </div>
 
@@ -385,6 +404,14 @@
     //                 not a SQL change. Goes to USER_MEMORY.md or examples.yaml notes
     //                 depending on how Claude classifies it.
     const pendingActions = {};
+
+    // newExamples — user-authored (question, sql) pairs that aren't in
+    // examples.yaml yet. They render at the top of the For Validation tab
+    // with a "NEW" badge until the user generates feedback and Claude appends
+    // them to examples.yaml on the next round-trip.
+    const newExamples = [];   // [{ tempId, question, sql }]
+    let nextTempId = 1;
+
     let activeTab = "review";
 
     function el(tag, attrs = {}, ...children) {
@@ -681,16 +708,9 @@
         if (saveEditBtn) actions.appendChild(saveEditBtn);
         actions.appendChild(noteBtn);
 
-        // Skip button — only meaningful when there's a queued action to clear.
-        // Showing it when there's nothing to skip is confusing.
-        if (pending) {
-          const skipBtn = el('button', {
-            type: 'button',
-            title: 'Clear your queued action on this card. Leaves the example unreviewed.',
-            onclick: () => clearAction(item),
-          }, 'Skip (clear queued action)');
-          actions.appendChild(skipBtn);
-        }
+        // No Skip button — clicking the same action toggles it off, and the
+        // "Reset all" button in the sticky footer clears everything. Skip was
+        // a third path to the same outcome, just more confusing.
       }
       // Validated / Rejected tabs: no action buttons in v1 (inspection only)
       if (actions.children.length) card.appendChild(actions);
@@ -698,16 +718,112 @@
       return card;
     }
 
+    function renderNewExampleCard(ex) {
+      // Card for a user-authored example not yet in examples.yaml.
+      const card = el('div', { class: 'example-item pending-validate' });
+      const header = el('div', { class: 'example-header' });
+      header.appendChild(el('span', { class: 'example-num', text: 'NEW' }));
+      header.appendChild(el('span', { class: 'example-question', text: ex.question || '<no question>' }));
+      header.appendChild(el('span', {
+        class: 'badge pending',
+        title: 'New example queued in your browser. Hit Generate feedback to ship it to Claude.',
+        text: '→ will be added',
+      }));
+      card.appendChild(header);
+
+      card.appendChild(el('div', { class: 'label-line', text: 'SQL' }));
+      card.appendChild(el('pre', { class: 'sql', text: ex.sql || '' }));
+
+      const actions = el('div', { class: 'card-actions' });
+      const editBtn = el('button', {
+        type: 'button',
+        title: 'Edit the question or SQL before sending.',
+        onclick: () => openAddModal(ex.tempId),
+      }, 'Edit');
+      const removeBtn = el('button', {
+        type: 'button',
+        title: 'Remove this queued example from the page (does not affect examples.yaml).',
+        onclick: () => {
+          const idx = newExamples.findIndex(e => e.tempId === ex.tempId);
+          if (idx >= 0) newExamples.splice(idx, 1);
+          renderItems();
+          updateFooter();
+        },
+      }, 'Remove');
+      actions.appendChild(editBtn);
+      actions.appendChild(removeBtn);
+      card.appendChild(actions);
+      return card;
+    }
+
     function renderItems() {
       const root = document.getElementById('items');
       root.innerHTML = '';
+
+      // New examples render at the top of the For Validation tab only.
+      if (activeTab === 'review' && newExamples.length > 0) {
+        const heading = el('div', { class: 'label-line',
+          style: 'margin-top: 0; font-size: 13px; color: var(--ok-fg);',
+          text: 'New examples (' + newExamples.length + ') — queued, not yet in examples.yaml' });
+        root.appendChild(heading);
+        newExamples.forEach(ex => root.appendChild(renderNewExampleCard(ex)));
+      }
+
       const subset = items.filter(it => itemTab(it) === activeTab);
-      if (subset.length === 0) {
+      if (subset.length === 0 && (activeTab !== 'review' || newExamples.length === 0)) {
         root.appendChild(el('div', { class: 'example-item', text: 'Nothing in this tab.' }));
         return;
       }
       subset.forEach(it => root.appendChild(renderCard(it)));
     }
+
+    // ---- Add-example modal ----
+    let editingNewExampleId = null;   // tempId being edited, or null for "create"
+
+    function openAddModal(tempId) {
+      const modal = document.getElementById('add-modal');
+      const qInput = document.getElementById('add-question');
+      const sqlInput = document.getElementById('add-sql');
+      editingNewExampleId = tempId || null;
+      if (tempId) {
+        const ex = newExamples.find(e => e.tempId === tempId);
+        qInput.value = ex ? ex.question : '';
+        sqlInput.value = ex ? ex.sql : '';
+      } else {
+        qInput.value = '';
+        sqlInput.value = '';
+      }
+      modal.hidden = false;
+      qInput.focus();
+    }
+
+    document.getElementById('btn-add-example').addEventListener('click', () => openAddModal(null));
+    document.getElementById('add-modal-cancel').addEventListener('click', () => {
+      document.getElementById('add-modal').hidden = true;
+      editingNewExampleId = null;
+    });
+    document.getElementById('add-modal-save').addEventListener('click', () => {
+      const q = document.getElementById('add-question').value.trim();
+      const sql = document.getElementById('add-sql').value.trim();
+      if (!q || !sql) {
+        // Inline feedback would be nicer but for v1 a one-liner suffices.
+        alert('Both Question and SQL are required.');
+        return;
+      }
+      if (editingNewExampleId) {
+        const ex = newExamples.find(e => e.tempId === editingNewExampleId);
+        if (ex) { ex.question = q; ex.sql = sql; }
+      } else {
+        newExamples.push({ tempId: nextTempId++, question: q, sql });
+      }
+      editingNewExampleId = null;
+      document.getElementById('add-modal').hidden = true;
+      // Switch to For Validation so the user sees the new card.
+      activeTab = 'review';
+      renderTabs();
+      renderItems();
+      updateFooter();
+    });
 
     function toggleAction(item, action) {
       const cur = pendingActions[item.n];
@@ -733,7 +849,8 @@
     }
     function updateFooter() {
       const c = actionCounts();
-      const total = c.validate + c.reject + c.edit + c.note;
+      const newCount = newExamples.length;
+      const total = c.validate + c.reject + c.edit + c.note + newCount;
       const sum = document.getElementById('pending-summary');
       const btn = document.getElementById('btn-generate');
       if (total === 0) {
@@ -745,6 +862,7 @@
         if (c.reject)   parts.push(`${c.reject} reject`);
         if (c.edit)     parts.push(`${c.edit} edit`);
         if (c.note)     parts.push(`${c.note} note`);
+        if (newCount)   parts.push(`${newCount} new example${newCount === 1 ? '' : 's'}`);
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
         btn.disabled = false;
       }
@@ -783,6 +901,16 @@
         lines.push(notesByN[n]);
         lines.push(`<<<`);
       });
+      // New (user-authored) examples — each gets a question + SQL block.
+      newExamples.forEach(ex => {
+        const q = (ex.question || '').replace(/\r?\n/g, ' ').trim();
+        const sql = (ex.sql || '').trim();
+        if (!q || !sql) return;
+        lines.push(`add example: ${q}`);
+        lines.push(`sql>>>`);
+        lines.push(sql);
+        lines.push(`<<<`);
+      });
       if (lines.length) lines.push('done');
 
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
@@ -792,6 +920,7 @@
     document.getElementById('btn-generate').addEventListener('click', generateFeedback);
     document.getElementById('btn-reset').addEventListener('click', () => {
       Object.keys(pendingActions).forEach(k => delete pendingActions[k]);
+      newExamples.splice(0, newExamples.length);
       renderItems();
       updateFooter();
     });
@@ -800,6 +929,7 @@
     });
     function resetQueueAfterCopy() {
       Object.keys(pendingActions).forEach(k => delete pendingActions[k]);
+      newExamples.splice(0, newExamples.length);
       renderItems();
       updateFooter();
       setTimeout(() => { document.getElementById('modal').hidden = true; }, 700);

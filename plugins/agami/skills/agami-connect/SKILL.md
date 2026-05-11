@@ -1102,7 +1102,31 @@ The user replies with one or more commands. Commands can come from the dashboard
   If the note's classification is ambiguous, default to `USER_MEMORY.md` (the broadest scope) and surface a one-liner: *"Saved to USER_MEMORY.md (applies across every database). Reply 'move that to ORGANIZATION.md' if it's specific to this DB."*
 
   Notes do NOT mutate the example's `state` — they're additive context. The user can `validate N` and `note N` in the same batch.
-- **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed.` and continue to Phase 5.5.
+- **`add example: <question>` followed by a `sql>>>` ... `<<<` block** — a new user-authored example to append to `examples.yaml`. The dashboard generates this when the user clicks "+ Add example" in the sticky footer. Multi-line block:
+  ```
+  add example: How many invoices are still unpaid?
+  sql>>>
+  SELECT COUNT(*) AS unpaid_count
+  FROM invoices
+  WHERE status != 'paid'
+  <<<
+  ```
+  Parser: see a line starting with `add example:` — capture the rest of the line as the **question**. The next non-empty line MUST be `sql>>>`; everything after it until `<<<` on its own line is the **SQL**.
+
+  Validation: EXPLAIN-validate the SQL against the live DB before writing (same safety checks as Phase 4b — refuse DDL/DML, refuse system tables). If EXPLAIN fails, surface the one-line error and **don't write the example**. The user can resubmit a fixed version in the next batch.
+
+  On success: append a new entry to `<artifacts_dir>/<profile>/examples.yaml`:
+  ```yaml
+  - question: <question text verbatim>
+    sql: |-
+      <SQL with original indentation>
+    source: manual          # NEW source value — distinguishes from seed/correction
+    created_at: <UTC ISO>
+    created_by: <reviewer_email from ~/.agami/.config, or "<unknown>">
+    state: unreviewed        # The user can validate it on the next render
+  ```
+  Multiple `add example:` blocks in one batch are fine — process each independently. The next dashboard re-render shows the new examples with their assigned `n` (continues the existing numbering — appended at the end).
+- **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed, <A> added.` and continue to Phase 5.5.
 
 For each successful edit, the user is also offered: *"Promote this to a golden test in `tests.yaml`? (yes / no / skip)"*. If yes → append a new test entry to `<artifacts_dir>/<profile>/tests.yaml` with the same question + an `equals` assertion against the actual returned value(s). This is the bridge to the Quality-Loop launch's `agami test`.
 
