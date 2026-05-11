@@ -837,14 +837,23 @@
         return;
       }
       const grouped = groupItemsByType(subset);
+      // Auto-collapse threshold: groups larger than this start collapsed so
+      // the smaller, higher-priority groups (Metrics, Named Filters) lead.
+      // The user clicks the header to expand a large group.
+      const AUTO_COLLAPSE_THRESHOLD = 30;
+
       TYPE_ORDER.forEach(t => {
         const list = grouped[t] || [];
         if (!list.length) return;
+        const startCollapsed = list.length > AUTO_COLLAPSE_THRESHOLD;
         const section = el('div', { class: 'group-section' });
-        const header = el('div', { class: 'group-header', onclick: (ev) => {
-          ev.currentTarget.classList.toggle('collapsed');
-          ev.currentTarget.nextElementSibling.classList.toggle('collapsed');
-        } });
+        const header = el('div', {
+          class: 'group-header' + (startCollapsed ? ' collapsed' : ''),
+          onclick: (ev) => {
+            ev.currentTarget.classList.toggle('collapsed');
+            ev.currentTarget.nextElementSibling.classList.toggle('collapsed');
+          },
+        });
         header.appendChild(document.createTextNode(TYPE_LABEL[t] || t));
         header.appendChild(el('span', { class: 'group-count', text: String(list.length) }));
         // Bulk-approve link only meaningful on the review tab and not for Rule 1 types
@@ -857,7 +866,7 @@
           header.appendChild(bulkBtn);
         }
         section.appendChild(header);
-        const cards = el('div', { class: 'group-cards' });
+        const cards = el('div', { class: 'group-cards' + (startCollapsed ? ' collapsed' : '') });
         list.forEach(it => cards.appendChild(renderCard(it)));
         section.appendChild(cards);
         root.appendChild(section);

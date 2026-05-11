@@ -71,7 +71,9 @@ Set `item.tab` on each item. The template:
 - **Manually Approved** tab: read-only, shows "approved by jane@example.com (cfo), Mar 15".
 - **Rejected** tab: shows a single "Move to For Review" button per card, which generates `unreject N`.
 
-Cap the "For Review" tab at 50 items per dashboard render (the other tabs can list everything — they're inspection-only). If more than 50 review items: include the top-50 only and surface in chat: "Showing first 50 of N — approve some and re-render to see the next batch."
+**No per-tab item cap.** Earlier versions of this SKILL capped the For Review tab at 50 items because the old flat layout became a wall past that. The new dashboard groups by entity type with collapsible sections — 237 items split across 4 groups (Metrics / Named Filters / Joins / Field Descriptions) is navigable. The user expands the group they want to work on; the others stay collapsed.
+
+(If a user reports the page is sluggish on a model with, say, 5000+ unreviewed field descriptions, *then* introduce a per-group cap with "Show more" pagination. Don't optimize speculatively.)
 
 Number items 1, 2, 3… **globally across all tabs**, in a stable order — Rule 1 first (metrics, then named_filters), then Rule 2 by ascending confidence, then approved entries grouped by entity type, then rejected. The numbering corresponds to chat commands, so it must stay stable across re-renders.
 
