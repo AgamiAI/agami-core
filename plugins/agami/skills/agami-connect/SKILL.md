@@ -1084,11 +1084,16 @@ For each successful edit, the user is also offered: *"Promote this to a golden t
 
 ### 5e — Re-render after each batch of edits
 
-After applying a batch of validate / reject / edit commands, re-render the dashboard with updated state per item. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
+After applying a batch of validate / reject / edit commands, **always re-render the dashboard to a NEW timestamped file** at `~/.agami/examples-validation/<new-ts>.html`. Don't overwrite the previous file — the user may have the old tab open and you need them to notice the fresh state. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
 
-Surface a one-line ack:
+**Auto-open the new file on every re-render** (same multi-command fallback chain as Phase 5c — `open` → `xdg-open` → `start` → `cmd /c start` → echo the path). The user gets a new browser tab with the fresh state; the previous tab is now stale and can be closed.
+
+**Surface the new file path in the chat ack** so the user can't miss the refresh:
 ```
 ✓ Applied: validated 3 (#1, #3, #5), rejected 1 (#7). Re-rendered.
+
+Open: ~/.agami/examples-validation/<new-ts>.html
+(Previous tab is stale and can be closed.)
 ```
 
 Then end the turn. Wait for the user.

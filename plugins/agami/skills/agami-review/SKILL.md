@@ -167,7 +167,20 @@ You can also type commands directly:
   done
 ```
 
-**Don't auto-open the file** in this skill — let the user open it themselves. The dashboard re-renders every time the user replies; opening repeatedly creates browser-tab sprawl. The first render of a session can include `open ~/.agami/review/<ts>.html` (best-effort, same fallback chain as agami-query-database Phase 4e.vi). Subsequent re-renders surface only the path.
+**Auto-open the file on EVERY render**, not just the first. Earlier versions of this SKILL tried "first render only" to avoid browser-tab sprawl, but in practice that produced worse UX — users kept looking at the old stale tab. Every re-render targets a NEW timestamped file (Phase 5), so opening every time gets the user the fresh state without ambiguity. Tab sprawl is the lesser cost; tell the user once in the closing chat that the previous tab can be closed if they want.
+
+Use the same multi-command fallback chain as agami-query-database Phase 4e.vi:
+
+```bash
+out="$HOME/.agami/review/<ts>.html"
+( command -v open    >/dev/null 2>&1 && open "$out" ) || \
+( command -v xdg-open >/dev/null 2>&1 && xdg-open "$out" ) || \
+( command -v start    >/dev/null 2>&1 && start "$out" ) || \
+( command -v cmd      >/dev/null 2>&1 && cmd /c start "" "$out" ) || \
+echo "agami: couldn't auto-open the dashboard — open manually: $out"
+```
+
+Treat as best-effort — never block on the open call. If it fails, the printed path is the contract.
 
 End the turn here. Wait for the user.
 
@@ -359,7 +372,7 @@ Re-rendered: ~/.agami/review/<new-ts>.html
 
 The `<new-ts>` is a fresh `date +%Y%m%d-%H%M%S` timestamp. Surfacing it inline (not just internally) is mandatory: the alternative — writing to a new path without telling the user — is what produced the "page summary says 237 but chat says 187" confusion in real testing. The user's expectation is "if you say the dashboard re-rendered, give me the URL to open."
 
-Best-effort auto-open on every re-render so the new file pops into their browser without an explicit click. Use the same multi-command fallback chain as agami-query-database Phase 4e.vi (`open` → `xdg-open` → `start`).
+Best-effort auto-open on every re-render — same multi-command fallback chain as Phase 2 above (`open` → `xdg-open` → `start` → `cmd /c start` → echo the path). The new file gets a new tab in the user's browser; the previous tab now points at stale content and can be closed.
 
 Then end the turn. The user replies with the next batch of commands against the NEW dashboard's numbering.
 
