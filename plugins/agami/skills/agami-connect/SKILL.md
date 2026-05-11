@@ -1076,7 +1076,7 @@ The user replies with one or more commands. Commands can come from the dashboard
 - **`validate all`** — bulk-set every non-errored example to `validated`. Skip errored ones; surface the count: *"Validated 9 examples; 3 had errors and stay unreviewed (use `edit N` to fix)."*
 - **`reject N`** — set `state: rejected`. Don't delete the example from the YAML (preserves audit trail).
 - **`edit N`** — interactive form: surface the example's current SQL in chat, accept the user's edit conversationally, write back, re-execute, update the dashboard.
-- **`edit N sql>>>` ... `<<<`** — inline form (dashboard generates this when the user clicks Edit + retypes the SQL in the textarea on the page). Multi-line block:
+- **`edit N sql>>>` ... `<<<`** — inline form (dashboard generates this when the user clicks Edit + Save edit in the textarea on the page). Multi-line block:
   ```
   edit 8 sql>>>
   SELECT customer_id, SUM(amount) AS total
@@ -1086,6 +1086,22 @@ The user replies with one or more commands. Commands can come from the dashboard
   <<<
   ```
   Parser: see a line matching `edit N sql>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line after it until `<<<`; that's the new SQL. Write it back to the example's `sql` field, re-EXPLAIN-validate via the chosen tool, re-execute, refresh the dashboard's row preview. **Apply the same SQL-safety checks as Phase 4b** (refuse DDL/DML, refuse system tables) — broken edits leave the example as `state: error` and the dashboard surfaces the error in the next render.
+- **`note N >>>` ... `<<<`** — separate from edit. For comments / formatting hints / context that isn't a SQL rewrite. Multi-line block:
+  ```
+  note 4 >>>
+  Format counts with commas — applies to every result, not just this example.
+  <<<
+  ```
+  Parser: same pattern as edit (token `note N >>>`, closing `<<<` on its own line, body in between).
+
+  **Where to write the note** — classify by the note's content:
+    - **Cross-cutting preference** (mentions formatting, defaults, "always", "every", "from now on") → append to `<artifacts_dir>/USER_MEMORY.md` under a `## Preferences` section. This is the cross-database file applied to every query.
+    - **Per-example commentary** (specific to this example only — e.g., "this counts active users only, excluding trials") → append to the example's entry in `examples.yaml` as a new `notes:` array. Append rather than overwrite if a `notes` array already exists.
+    - **Per-database / domain context** (mentions a metric definition, a business term, a table-meaning clarification specific to this DB) → append to `<artifacts_dir>/<profile>/ORGANIZATION.md` under a `## Notes from review` section.
+
+  If the note's classification is ambiguous, default to `USER_MEMORY.md` (the broadest scope) and surface a one-liner: *"Saved to USER_MEMORY.md (applies across every database). Reply 'move that to ORGANIZATION.md' if it's specific to this DB."*
+
+  Notes do NOT mutate the example's `state` — they're additive context. The user can `validate N` and `note N` in the same batch.
 - **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed.` and continue to Phase 5.5.
 
 For each successful edit, the user is also offered: *"Promote this to a golden test in `tests.yaml`? (yes / no / skip)"*. If yes → append a new test entry to `<artifacts_dir>/<profile>/tests.yaml` with the same question + an `equals` assertion against the actual returned value(s). This is the bridge to the Quality-Loop launch's `agami test`.
@@ -1178,19 +1194,59 @@ If `agami-review` doesn't exist yet (the dashboard skill ships in a follow-up of
 
 (Telemetry consent was previously asked here. It has been removed in the current 0.x line — there is no opt-in, no install event, no `~/.agami/.config.analytics_consent` field written, no `.telemetry-queue.jsonl` appended. The server-side telemetry endpoint and the privacy spec are preserved in the repo for future re-enable, but the runtime flow is silent. Don't surface anything about telemetry here.)
 
-Show **five** numbered suggestions for things the user can ask now, drawn from the schema we just introspected. Format follows the same shape as `query-database`'s Phase 4f — five numbered bullets, plain markdown, no AskUserQuestion modal.
+### 6a — gate on Rule 1 review status
 
-Pick suggestions that show off the schema's distinctive shape. If the model has tables like `orders` and `customers`, suggest things grounded in those. If it's a content/CRM schema, pick something domain-relevant. Keep each under 80 characters.
+**Before declaring `<profile> is set up`, check whether the trust-layer dashboard has any Rule 1 items unreviewed** (metrics with `review_state != approved`, named_filters with `review_state != approved`). Rule 1 items block at runtime — agami-query-database refuses to answer a question that depends on an unreviewed metric, per the strict-gate rule in §3.4 of `agami-osi-extensions.md`. Declaring "set up" while metrics are still unreviewed is misleading.
 
-Format exactly:
+Count:
+```python
+rule1_unreviewed = (
+  count(metrics where review_state != "approved") +
+  count(named_filters where review_state != "approved")
+)
+```
+
+If `rule1_unreviewed > 0`, **skip the "Now that you're set up" framing** and surface the **in-progress** variant in 6b. Otherwise, fall through to the **fully-set-up** variant in 6c.
+
+### 6b — in-progress framing (Rule 1 items still unreviewed)
 
 ```
 ✓ <artifacts_dir>/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
 ✓ <artifacts_dir>/<profile>/examples.yaml — <N> NL→SQL examples
-✓ Demo query verified
-✓ Telemetry: <enabled | disabled — your call>
+✓ Snapshot pinned at .snapshots/<hash>/
 
-Now that you're set up, here are five things you could ask:
+⚠ Setup is partial — <rule1_unreviewed> Rule 1 items still need sign-off:
+   - <M> metric proposal<s> (run /agami-review to walk them)
+   - <K> named-filter proposal<s>
+
+Until those are reviewed, agami-query-database will refuse questions that
+depend on them (the trust-layer strict gate). Run `/agami-review` (or say
+"open the review dashboard") to finish.
+
+Here are five things you could already ask that don't depend on Rule 1 items:
+
+1. <a count question — "How many orders are in the database?">
+2. <a top-N from a single FK-approved table>
+3. <a time-bucketed count>
+4. <a status / category breakdown>
+5. <a recency filter>
+
+Pick deliberately — anything that touches `revenue`, `MRR`, `active_customer`,
+or similar unreviewed metrics will refuse. Reply with a number, or run
+`/agami-review` first.
+```
+
+Then end the turn.
+
+### 6c — fully-set-up framing (no Rule 1 items pending)
+
+```
+✓ <artifacts_dir>/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
+✓ <artifacts_dir>/<profile>/examples.yaml — <N> NL→SQL examples
+✓ Snapshot pinned at .snapshots/<hash>/
+✓ All metrics + named filters signed off
+
+Now that <profile> is set up, here are five things you could ask:
 
 1. <a count question grounded in a real table — "How many orders shipped last month?">
 2. <a top-N grouped question — "Top 10 customers by total spend">
@@ -1202,6 +1258,8 @@ Reply with a number, or ask anything else.
 ```
 
 Then end the turn. The user picking a number routes the chosen question into `query-database` for a real answer.
+
+Pick suggestions that show off the schema's distinctive shape. If the model has tables like `orders` and `customers`, suggest things grounded in those. If it's a content/CRM schema, pick something domain-relevant. Keep each under 80 characters.
 
 ---
 

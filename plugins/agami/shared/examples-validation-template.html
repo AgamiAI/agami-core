@@ -365,7 +365,13 @@
     const generatedAt = "{{GENERATED_AT}}";
     const profile = "{{PROFILE}}";
 
-    // pendingActions[n] = { action: "validate" | "reject" | "edit", sql?: string }
+    // pendingActions[n] = { action: "validate" | "reject" | "edit" | "note",
+    //                        sql?: string, note?: string, editSaved?: boolean }
+    // - action=edit + editSaved=false : user is mid-typing the SQL textarea
+    // - action=edit + editSaved=true  : user has clicked "Save edit"; SQL is queued
+    // - action=note : user is adding a comment (formatting / context / anything else),
+    //                 not a SQL change. Goes to USER_MEMORY.md or examples.yaml notes
+    //                 depending on how Claude classifies it.
     const pendingActions = {};
     let activeTab = "review";
 
@@ -506,20 +512,48 @@
       // SQL — either the static SQL block, or (if pending edit) an editable textarea
       card.appendChild(el('div', { class: 'label-line', text: 'SQL' }));
       if (pending && pending.action === 'edit') {
-        const ta = el('textarea', {
-          class: 'sql-editor',
-          rows: Math.min(20, Math.max(4, (item.sql || '').split('\n').length + 1)),
+        if (pending.editSaved) {
+          // Edit has been "Save"d — show the new SQL as a static block with a
+          // saved-banner. The user can re-open by clicking Edit again.
+          const savedBanner = el('div', { class: 'label-line',
+            style: 'color: var(--ok-fg);',
+            text: '✓ Edit saved (new SQL will ship on Generate)' });
+          card.appendChild(savedBanner);
+          card.appendChild(el('pre', { class: 'sql', text: pending.sql || '' }));
+        } else {
+          const ta = el('textarea', {
+            class: 'sql-editor',
+            rows: Math.min(20, Math.max(4, (item.sql || '').split('\n').length + 1)),
+            oninput: (ev) => {
+              pendingActions[item.n].sql = ev.target.value;
+              updateFooter();
+            },
+          });
+          ta.value = pending.sql != null ? pending.sql : (item.sql || '');
+          // Stash initial value into state so we have something to ship on copy.
+          if (pending.sql == null) pendingActions[item.n].sql = ta.value;
+          card.appendChild(ta);
+        }
+      } else {
+        card.appendChild(el('pre', { class: 'sql', text: item.sql || '' }));
+      }
+
+      // Note textarea — separate from SQL edit. Shown when user is adding a
+      // comment (formatting / context / anything that isn't a SQL rewrite).
+      if (pending && pending.action === 'note') {
+        card.appendChild(el('div', { class: 'label-line', text: 'Note' }));
+        const noteTa = el('textarea', {
+          class: 'sql-editor',  // reuse styling
+          rows: 4,
+          placeholder: "Anything that isn't a SQL change — e.g. 'format counts with commas', 'active means last-purchase < 90 days', 'this is for the finance team — refunds in'.",
           oninput: (ev) => {
-            pendingActions[item.n].sql = ev.target.value;
+            pendingActions[item.n].note = ev.target.value;
             updateFooter();
           },
         });
-        ta.value = pending.sql != null ? pending.sql : (item.sql || '');
-        // Stash initial value into state so we have something to ship on copy.
-        if (pending.sql == null) pendingActions[item.n].sql = ta.value;
-        card.appendChild(ta);
-      } else {
-        card.appendChild(el('pre', { class: 'sql', text: item.sql || '' }));
+        noteTa.value = pending.note != null ? pending.note : '';
+        if (pending.note == null) pendingActions[item.n].note = '';
+        card.appendChild(noteTa);
       }
 
       // Result preview OR error
@@ -555,24 +589,76 @@
           type: 'button',
           onclick: () => toggleAction(item, 'reject'),
         }, 'Reject');
+
+        // Edit button: toggles into edit mode, or out of it. If we're currently
+        // mid-edit (editSaved=false), the label is "Cancel edit". If we've
+        // saved, the label is "Reopen edit" (lets the user further refine).
+        let editLabel = 'Edit';
+        if (pending && pending.action === 'edit') {
+          editLabel = pending.editSaved ? 'Reopen edit' : 'Cancel edit';
+        }
         const editBtn = el('button', {
           class: 'btn-edit' + (pending && pending.action === 'edit' ? ' active' : ''),
           type: 'button',
-          onclick: () => toggleAction(item, 'edit'),
-        }, pending && pending.action === 'edit' ? 'Cancel edit' : 'Edit');
+          onclick: () => {
+            if (pending && pending.action === 'edit' && pending.editSaved) {
+              // Reopen: flip back to in-progress
+              pendingActions[item.n].editSaved = false;
+              renderItems();
+              updateFooter();
+            } else {
+              toggleAction(item, 'edit');
+            }
+          },
+        }, editLabel);
+
+        // Save-edit button: only shown while in edit mode AND not yet saved.
+        // Clicking commits the textarea value as the queued edit.
+        let saveEditBtn = null;
+        if (pending && pending.action === 'edit' && !pending.editSaved) {
+          saveEditBtn = el('button', {
+            class: 'btn-validate',  // green styling for "save" = commit
+            type: 'button',
+            onclick: () => {
+              // Re-read current textarea value (oninput should already have
+              // captured it, but be defensive).
+              const ta = card.querySelector('.sql-editor');
+              if (ta) pendingActions[item.n].sql = ta.value;
+              pendingActions[item.n].editSaved = true;
+              renderItems();
+              updateFooter();
+            },
+          }, 'Save edit');
+        }
+
+        // Note button: separate from edit. For comments/formatting hints that
+        // aren't a SQL rewrite. Toggles the note textarea on the card.
+        const noteBtn = el('button', {
+          class: (pending && pending.action === 'note') ? 'btn-validate active' : '',
+          type: 'button',
+          onclick: () => toggleAction(item, 'note'),
+        }, pending && pending.action === 'note' ? 'Cancel note' : 'Add note');
+
         const skipBtn = el('button', {
           type: 'button',
           onclick: () => clearAction(item),
         }, 'Skip');
+
         actions.appendChild(validateBtn);
         actions.appendChild(rejectBtn);
         actions.appendChild(editBtn);
+        if (saveEditBtn) actions.appendChild(saveEditBtn);
+        actions.appendChild(noteBtn);
         actions.appendChild(skipBtn);
+
         if (pending) {
           const notes = {
             validate: '✓ queued: validate',
             reject:   '✗ queued: reject',
-            edit:     '✎ queued: edit (new SQL will be sent inline)',
+            edit:     pending.editSaved
+                        ? '✎ queued: edit saved (new SQL will ship on Generate)'
+                        : '✎ editing — click Save edit when done',
+            note:     '💬 queued: note (formatting / context comment)',
           };
           actions.appendChild(el('span', { class: 'pending-note', text: notes[pending.action] || '' }));
         }
@@ -612,13 +698,13 @@
     }
 
     function actionCounts() {
-      const c = { validate: 0, reject: 0, edit: 0 };
+      const c = { validate: 0, reject: 0, edit: 0, note: 0 };
       Object.values(pendingActions).forEach(a => { c[a.action] = (c[a.action] || 0) + 1; });
       return c;
     }
     function updateFooter() {
       const c = actionCounts();
-      const total = c.validate + c.reject + c.edit;
+      const total = c.validate + c.reject + c.edit + c.note;
       const sum = document.getElementById('pending-summary');
       const btn = document.getElementById('btn-generate');
       if (total === 0) {
@@ -629,6 +715,7 @@
         if (c.validate) parts.push(`${c.validate} validate`);
         if (c.reject)   parts.push(`${c.reject} reject`);
         if (c.edit)     parts.push(`${c.edit} edit`);
+        if (c.note)     parts.push(`${c.note} note`);
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
         btn.disabled = false;
       }
@@ -636,11 +723,12 @@
 
     function generateFeedback() {
       const email = reviewerEmail();
-      const validates = [], rejects = [], editsByN = {};
+      const validates = [], rejects = [], editsByN = {}, notesByN = {};
       Object.entries(pendingActions).forEach(([n, p]) => {
         if (p.action === 'validate') validates.push(Number(n));
         else if (p.action === 'reject') rejects.push(Number(n));
-        else if (p.action === 'edit') editsByN[n] = p.sql || '';
+        else if (p.action === 'edit')   editsByN[n] = p.sql || '';
+        else if (p.action === 'note')   notesByN[n] = (p.note || '').trim();
       });
       validates.sort((a, b) => a - b);
       rejects.sort((a, b) => a - b);
@@ -657,6 +745,13 @@
       Object.keys(editsByN).sort((a, b) => Number(a) - Number(b)).forEach(n => {
         lines.push(`edit ${n} sql>>>`);
         lines.push(editsByN[n]);
+        lines.push(`<<<`);
+      });
+      // Each note gets its own multi-line block. Empty notes are skipped.
+      Object.keys(notesByN).sort((a, b) => Number(a) - Number(b)).forEach(n => {
+        if (!notesByN[n]) return;
+        lines.push(`note ${n} >>>`);
+        lines.push(notesByN[n]);
         lines.push(`<<<`);
       });
       if (lines.length) lines.push('done');
