@@ -38,3 +38,6 @@ tests/integration/fixtures/*.db
 # Dotenv (only for local dev, never committed)
 .env
 .env.local
+
+# Host-side plugin markers (created by Claude Code when a symlinked plugin is detected)
+.orphaned_at
