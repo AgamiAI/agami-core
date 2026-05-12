@@ -16,6 +16,7 @@ This skill orchestrates four phases:
 1. **Introspect** — pull tables / columns / PK / FK from `information_schema` via the chosen database tool (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`). Ask once for a domain-context paragraph (Phase 1.4) and once for a data-model document upload (Phase 1.5). **Both AskUserQuestion calls are MANDATORY** — the user picks Skip or proceeds, but the SKILL always asks.
 2. **Build the OSI model** — assemble the YAML strictly to the OSI v0.1.1 spec, with Agami metadata (column types, choice fields, performance hints) packed under `custom_extensions[].vendor_name: COMMON` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
 3. **Validate, then write** — run the validator at `plugins/agami/scripts/validate_semantic_model.py`. If it fails, **DO NOT WRITE THE FILE.** Surface the errors and stop.
+3.5. **Rule 1 sign-off (BEFORE seed generation)** — gate the user on metrics + named filters that need approval. Seed SQL exercises these definitions, so signing them off first means the seeds inherit approved truth. Rule 2 polish (low-confidence joins / field descriptions) does NOT block here — that surfaces later in Phase 5.5's optional panel.
 4. **Seed examples + validate-via-dashboard** — generate 10–12 analytical-shape NL→SQL pairs, EXPLAIN-validate each against the live DB, then render the examples-validation dashboard. **The dashboard is MANDATORY — never skip rendering it, never auto-validate the examples on the user's behalf.** Phase 5 ends when the user types `done` or all examples are in `{validated, rejected, error}` state.
 
 For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
@@ -44,10 +45,11 @@ The exact todo list to seed (one task per major phase, in this order):
 2. Introspect database schema (list tables, columns, PK, FK)
 3. Build OSI semantic model (with trust-layer confidence per entry)
 4. Validate + write model; snapshot under .snapshots/<hash>/; git init
-5. Generate seed NL→SQL examples (EXPLAIN-validated)
-6. Validate every seed example (user reviews via dashboard)
-7. Post-introspect trust summary + dashboard offer
-8. Follow-up suggestions
+5. Rule 1 sign-off — metrics + named filters reviewed BEFORE example gen
+6. Generate seed NL→SQL examples (EXPLAIN-validated)
+7. Validate every seed example (user reviews via dashboard)
+8. Post-introspect trust summary + Rule 2 polish dashboard
+9. Follow-up suggestions
 ```
 
 Use `content` for the imperative form and `activeForm` for the present-continuous form, e.g. `content: "Introspect database schema"` / `activeForm: "Introspecting database schema"`.
@@ -1302,6 +1304,75 @@ Surface: `✓ Committed to <profile_dir>/.git as <short-sha>.` (Or: `✓ Committ
 
 ---
 
+## Phase 3.5: Rule 1 sign-off (BEFORE example generation)
+
+**Hybrid review order — added 2026-05-12.** Rule 1 entries (metrics + named filters) drive seed-example correctness, so they must be signed off before Phase 4 generates SQL that uses them. If Phase 4 fires against unreviewed metrics, the seed SQL exercises the *old* (or LLM-guessed) definition; the user signs off in Phase 6, and the seeds are now wrong relative to the approved truth.
+
+Rule 2 entries (low-confidence joins, field descriptions) do NOT block here. They surface in the Optional panel of Phase 5.5's review dashboard, where they self-approve as the user queries. The hybrid keeps Rule 1 strict + upfront; Rule 2 lazy + after-the-fact.
+
+### 3.5a — count Rule 1 candidates
+
+Walk the freshly-written model under `<artifacts_dir>/<profile>/` and count:
+- Metrics with `agami.review_state != approved`
+- Named filters with `agami.review_state != approved`
+- Stale items (any entity with `review_state: stale`)
+
+If the total is **0** (small DB, no metrics yet, no drift) → skip this whole phase. Continue to Phase 4.
+
+### 3.5b — surface the gate
+
+Tell the user upfront that this is required-now-or-Phase-4-will-fire-against-unreviewed-definitions:
+
+```
+Before generating seed examples, I need your sign-off on the Rule 1
+entries — these drive what the seeds mean. <R1+stale> items need
+your eyes:
+  - <M> metric proposals (sign-off required)
+  - <K> named-filter proposals (sign-off required)
+  - <S> stale entries from prior drift (need re-approval)
+
+The other <R2> low-confidence entries (joins / field descriptions)
+can wait — they surface as warnings on answers later and approve
+themselves as you query.
+```
+
+### 3.5c — render the Rule 1 dashboard via /agami-review (gated)
+
+Invoke `/agami-review` with a `--rule-1-only` filter so the dashboard renders ONLY the Rule 1 + stale items — the user shouldn't be shown the long tail at this stage. The agami-review SKILL's Phase 1 partitioning already classifies items; pass an env hint `AGAMI_REVIEW_SCOPE=rule_1_only` so the SKILL hides everything else from the For Review tab.
+
+**End the turn after the dashboard renders.** Wait for the user to come back with their approval batch.
+
+### 3.5d — gate the return-to-Phase-4
+
+When the user comes back with their approval batch and `/agami-review` has finished applying it, check:
+
+```
+remaining_rule1 = (
+  count(metrics where review_state != approved) +
+  count(named_filters where review_state != approved) +
+  count(any entity where review_state == stale)
+)
+```
+
+If `remaining_rule1 == 0` → continue to Phase 4. The seeds can now safely reference approved definitions.
+
+If `remaining_rule1 > 0` (user only partially approved, or rejected some, or `done`-d early) → ask:
+
+> You still have <N> Rule 1 items unreviewed. I can proceed to seed generation, but the seeds will exercise the unreviewed definitions and may need re-running after you sign them off. Continue, or wait until you've finished sign-off?
+
+| Option | What happens |
+|---|---|
+| `Continue (Recommended)` | Generate seeds against current state. The receipt panel on each answer will warn about unreviewed Rule 1 entries that were used. |
+| `Pause — I'll finish review first` | End the skill here; user re-invokes `/agami-connect` to resume after sign-off. |
+
+If the user picks Continue, proceed to Phase 4. If they pick Pause, surface "Resume by running `/agami-connect`" and end the turn.
+
+### 3.5e — re-introspect handling
+
+On `$ARGUMENTS == reintrospect`: if Phase 3.5a counts 0 (all metrics + named filters are still approved from a prior run, no new ones), skip silently. Otherwise the gate applies — re-introspection can introduce new Rule 1 candidates that need sign-off.
+
+---
+
 ## Phase 4: Seed prompt examples
 
 **SURFACE A PROGRESS WARNING FIRST.** Before kicking off generation, tell the user what's about to happen and how long it'll take — this phase is the second-longest in the skill (after introspect itself), and silence here is the most common "is it stuck?" moment in real-world testing.
@@ -1614,7 +1685,11 @@ Existing examples without these fields are treated as `state: unreviewed`. Backw
 
 ## Phase 5.5: Post-introspect summary (the trust-layer landing)
 
-This is the first surface a curator sees. It tells them what auto-approved cleanly and what needs their attention — bounded, scannable, never a 350-item wall.
+This is the curator's checkout screen. Rule 1 sign-off already happened in Phase 3.5 (or was skipped because there was nothing to sign off), so by the time we land here the must-do work for the *current* introspect run is done. Everything surfaced here is **optional polish** — Rule 2 entries (low-confidence joins, field descriptions) that surface as warnings on answers but don't block.
+
+**If Phase 3.5 ran**: lead with "Rule 1 sign-off complete · X items approved earlier this session" so the user remembers what they already did.
+
+**If Phase 3.5 was skipped** (no Rule 1 candidates): no opening — this is purely the Rule 2 polish summary.
 
 Scan the freshly-written model under `<artifacts_dir>/<profile>/` and count entries by `agami.review_state` and entity type. The summary leads with the **must-do-to-ship** count (Rule 1 + drift) so the user sees a small number first, with the optional polish count broken out separately. Produce the summary block:
 

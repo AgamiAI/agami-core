@@ -45,6 +45,8 @@ Resolve the active threshold:
 
 The dashboard now has **four tabs**: For Review · Approved Automatically · Manually Approved · Rejected. So this phase loads EVERY entity (not just review-needing) and tags each with a `tab` field. The template filters by tab.
 
+**Scope filter — `AGAMI_REVIEW_SCOPE=rule_1_only`** (added 2026-05-12 for the hybrid review order in `/agami-connect` Phase 3.5). When this env var is set, the dashboard shows ONLY Rule 1 + stale items (metrics, named filters, drift) in the For Review tab. Everything else (low-confidence joins / field descriptions — Rule 2) is excluded from the items array entirely. The Auto / Manual / Rejected tabs are unaffected — read-only inspection is always allowed. This scope is used during the post-introspect upfront review gate, where surfacing the long tail would defeat the "fast time to value" goal. Without the env var (the default), the dashboard shows everything as before.
+
 Load every yaml under `<artifacts_dir>/<profile>/` — `index.yaml`, every `<schema>/_schema.yaml`, every `<schema>/<table>.yaml`. Walk the structures.
 
 For each entity (dataset, field, relationship, metric, named_filter), parse its `agami` extension payload (one entry per `custom_extensions[]` whose `vendor_name=COMMON` and JSON has an `agami` top-level key — see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md)).
