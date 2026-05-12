@@ -96,41 +96,129 @@ Surface: `✓ Correction appended to <artifacts_dir>/<profile>/examples.yaml.`
 
 ## Phase 3: Classify the correction
 
-Compare the original SQL (from `query_log.jsonl`) to the corrected SQL. Identify what the user was teaching us. Use this taxonomy:
+Compare the original SQL (from `query_log.jsonl`) to the corrected SQL. Identify what the user was teaching us, then route the correction to the right destination. **Mis-routing is the most common failure** — early-adopter feedback included three real cases where corrections landed in the wrong file:
 
-| Kind | Detection signal | Examples |
+| Category | What the user did (wrong) | What should have happened |
 |---|---|---|
-| `sql_fix` | Pure syntax / typo / missing alias / wrong literal — no domain knowledge implied | "missed the GROUP BY"; "you wrote `customer_idx` instead of `customer_id`"; "needs a `LIMIT 5`" |
-| `relationship` | The JOIN `ON` clause changed to use different columns, OR a JOIN was added between two datasets where none existed | "join should be on customer_id, not user_id"; "products → categories via category_id" |
-| `field_metadata` | Description / unit / type-implication of one field changed — but no SQL structure change beyond the literal value or a CAST | "amount is in cents, divide by 100"; "is_active means 1, not true"; "description for status should say…" |
-| `table_metadata` | Description or `ai_context` of one **dataset** (table) changed — the user is teaching us what the table represents, not a single column. Trigger phrases: "the orders table also includes…", "this table is what we use for…", "<table> is really for…" | "the `orders` table includes both completed AND cancelled orders — never assume it's only completed"; "`metrics_daily` is materialized from `events` — use `metrics_daily` for date ranges > 7 days" |
-| `new_metric` | The corrected SQL defines a reusable aggregation that didn't exist in the model — typically the user is teaching us a business metric | "MRR = SUM(price) WHERE plan_type='subscription'"; "active customers means is_active AND last_login > 30 days ago" |
-| `user_preference` | A general policy that should apply to **every** future query, **across every database** — not specific to this question or this database. Trigger phrases: "from now on", "always", "never", "by default", "I prefer", "stop showing me…" | "always exclude test users where email matches @example.com"; "default time window is last 30 days unless I say otherwise"; "I prefer line charts for time-series" |
-| `org_context` | Domain knowledge specific to **this database**: vocabulary, business definitions, what the data represents. Trigger phrases that reference business terms not derivable from the schema, or definitions like "<term> means…", "we use <term> to mean…", "in our world <term> is…" | "gold-tier customers means lifetime spend > $10k"; "MRR is what we call recurring revenue — only counts subscription plans"; "we DON'T track refunds in this database, those live in Stripe" |
-| `mixed` | More than one of the above | "wrong join AND amount needs /100" |
+| Per-example commentary ("CRIF total can be negative on #12") | Captured in `examples.yaml` `notes[]` | Field description on `LOAN_DETAILS.TOTAL_DISBURSED_ALL` (`field_metadata`) |
+| Gender normalization (Male / MALE / T / Unknown → "Male") | `ORGANIZATION.md` | `agami.choice_field` on `PII.GENDER` (`field_metadata`) |
+| "Format counts with commas in outputs" | Captured in a markdown file as prose | `user_preference` in `USER_MEMORY.md` AND `TO_CHAR(…)` / aliases IN the seed example's SQL |
 
-### How to classify
+The decision tree below corrects these failures. **Walk it top to bottom — first match wins.** Don't fall back to `org_context` as a default; it's the catch-all that produces the wrong outcome in practice.
 
-Look at the **diff** between the original SQL and the corrected SQL:
+### Decision tree (top to bottom — first match wins)
+
+```
+Is the correction about a single column's MEANING, UNIT, ENCODING, or VALUE NORMALIZATION?
+   (e.g., "amount is in cents", "1 means active not true", "TOTAL_DISBURSED can be
+    negative for refunds", "Male/MALE/T all map to 'Male'", "STATUS='1' means active")
+   → field_metadata
+       → if it's specifically about value → canonical-display mapping, write to
+         agami.choice_field on that field.
+       → if it's about how the column is interpreted (unit, sign convention,
+         encoding), update agami.unit + the field description prose.
+
+Else: is the correction about a JOIN — which columns connect two tables?
+   (e.g., "join on customer_id, not user_id"; "products → categories via category_id")
+   → relationship
+
+Else: is the correction about what a WHOLE TABLE represents, not one column?
+   (e.g., "`orders` includes cancelled rows too", "`metrics_daily` is materialized
+    from `events`, use it for date ranges > 7 days")
+   → table_metadata
+
+Else: does the corrected SQL define a REUSABLE AGGREGATION that didn't exist?
+   (e.g., "MRR = SUM(price) WHERE plan_type='subscription'", "active customers
+    means is_active AND last_login > 30 days ago")
+   → new_metric
+       → if also touches the predicate side (active customers), consider whether
+         the predicate alone deserves a named_filter — same Rule 1 sign-off.
+
+Else: is the correction a DISPLAY / FORMATTING / DEFAULT-FILTER preference that
+   should apply to every database?
+   (e.g., "always exclude @example.com test users", "default time window is
+    last 30 days", "format counts with commas", "always show currency with $")
+   → user_preference (writes to USER_MEMORY.md)
+       → if it's about how SQL renders results (TO_CHAR, ROUND, ::text, AS aliases),
+         ALSO update the relevant seed example's SQL so future answers actually
+         apply the formatting — prose in USER_MEMORY.md tells the LLM what the
+         user wants; the example demonstrates how to achieve it.
+
+Else: is the correction about a BUSINESS TERM specific to this database's domain?
+   (e.g., "gold tier means lifetime spend > $10k" — used as a category in many
+    queries; "MRR" — the abstract concept; "we don't track refunds, those live
+    in Stripe" — what the data fundamentally doesn't include)
+   → org_context (writes to ORGANIZATION.md)
+       → org_context is for ABSTRACT business concepts that aren't tied to one
+         specific column. A correction tied to a specific column belongs in
+         field_metadata, NOT here. Re-check the first rule of the tree before
+         landing here.
+
+Else: pure SQL syntax / typo with no domain knowledge implied
+   (e.g., "missed the GROUP BY", "`customer_idx` is a typo of `customer_id`")
+   → sql_fix
+```
+
+### Anti-patterns the LLM keeps producing (do NOT do these)
+
+1. **Per-column rule → ORGANIZATION.md.** "`PII.GENDER` values normalize to Male" is NOT domain context — it's a column-value mapping. Route to `field_metadata` (`choice_field`).
+2. **Per-column rule → examples.yaml notes.** This skill never writes to `examples.yaml.notes[]` (that path lives in agami-connect Phase 5d). If you find yourself wanting to write "the CRIF total can be negative" as a note on example #12, route it to `field_metadata` on the actual column instead — the lesson applies to every future query, not just to one example.
+3. **Display preference → ORGANIZATION.md.** "Format counts with commas" is not a domain concept — it's a display preference. Route to `user_preference` (USER_MEMORY.md).
+4. **Display preference → prose without changing SQL.** If the correction is "always format like X," ALSO modify the seed example's SQL to demonstrate the formatting (so future answers actually apply it, not just describe it).
+
+### Diff-based hints (look at SQL changes for classification clues)
+
 - JOIN condition changed → likely `relationship`.
+- Math applied to one column (`/100`, `* 100.0`, `CAST(...)`) → likely `field_metadata` (with a `unit` correction).
+- `CASE WHEN col = 'X' THEN 'Y' ELSE 'Z' END` for a column's display value → likely `field_metadata` with `choice_field` update.
 - New WHERE clause referencing a specific business term (e.g., `plan_type='subscription'`) AND new aggregation → likely `new_metric`.
-- Math applied to one column (`/100`, `* 100.0`, `CAST(...)`) where the column wasn't aliased before → likely `field_metadata` (with a `unit` correction).
+- `TO_CHAR(...)`, `ROUND(...)`, `AS my_alias` purely on the output side → likely `user_preference` (display) — ALSO update the seed example's SQL.
 - Only structural / cosmetic SQL changes → `sql_fix`.
 
-When ambiguous, **AskUserQuestion**:
+### When ambiguous, AskUserQuestion (use the rubric above as your option set)
 
 > What kind of correction is this?
 > - **A SQL fix** — the answer was wrong but the model is fine
+> - **A column meaning change** — e.g., amount is in cents, status means something specific, Male/MALE/T all map to "Male"
 > - **A join correction** — relationships in the model need updating
-> - **A column meaning change** — e.g., amount is in cents, status means something specific
 > - **A table meaning change** — the description / context for a whole table
 > - **A new business metric** — let's add this as a reusable metric
-> - **Domain context for this database** — e.g., "gold tier means lifetime spend > $10k" (saves to ORGANIZATION.md)
-> - **A general preference** — applies across every database, not just this one (saves to USER_MEMORY.md)
+> - **A display preference** — applies across every database (formatting, default filters, ...)
+> - **Domain context for this database** — abstract business concepts not tied to one column (e.g., "gold tier means lifetime spend > $10k")
 
 The user's answer determines Phase 4 routing.
 
-**Distinguishing `org_context` vs `user_preference`:** ask "would this guidance apply if I connected to a different database?" If yes → `user_preference`. If no (it's specific to this domain) → `org_context`.
+**Distinguishing `org_context` vs `user_preference` vs `field_metadata`:**
+- If the rule is tied to a specific column → `field_metadata`. **Always check this first.**
+- Else ask: "would this guidance apply if I connected to a different database?" If yes → `user_preference`. If no (it's specific to this domain) → `org_context`.
+
+### Phase 3.5 — surface classification + destination BEFORE Phase 4 writes anything
+
+After classifying, **always** surface the decision to the user in chat as a one-line summary with explicit reasoning, then proceed with the edit. The contract:
+
+```
+Classification: <kind>
+  → routing to: <destination file + the specific field/section that'll change>
+  → reasoning: <one sentence explaining which rule of the decision tree matched>
+```
+
+Concrete examples (taken from real corrections):
+
+```
+Classification: field_metadata
+  → routing to: BUREAU_DATA/LOAN_DETAILS.yaml → fields["TOTAL_DISBURSED_ALL"].description
+  → reasoning: rule says "correction about a single column's meaning/encoding/sign convention" — you're teaching that this column can be negative because refunds carry a negative sign.
+
+Classification: field_metadata
+  → routing to: BUREAU_DATA/PII.yaml → fields["GENDER"].agami.choice_field
+  → reasoning: rule says "value normalization mapping (Male/MALE/T → 'Male') belongs in choice_field" — not ORGANIZATION.md.
+
+Classification: user_preference + seed-example update
+  → routing to: USER_MEMORY.md (the prose preference) AND examples.yaml example #N (TO_CHAR in SQL)
+  → reasoning: "always format counts with commas" is a display preference (cross-DB), and the seed example needs the formatting baked into its SQL so future answers actually apply it.
+```
+
+The user can override before any file is written. If they say "no, that belongs in X instead," re-route to X and re-surface the new classification before proceeding.
 
 ---
 
