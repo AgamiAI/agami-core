@@ -82,7 +82,7 @@ Auto-approve rules collapse the queue to what actually needs human eyes:
 - **Structural / well-known column-name pattern match** — `id`, `*_id`, `created_at`, `*_at`, `email`, `phone`, `city`, `status`, `*_count`, `is_*`/`has_*` flags, PK/FK columns, etc. — auto-approved with `signal_breakdown.structural_pattern_match` set to the pattern name. Full list at [`plugins/agami/shared/column-name-dictionary.md`](plugins/agami/shared/column-name-dictionary.md).
 - **Empty `description` on a field** → marked `not_applicable` (no_description); the dashboard skips the card.
 
-Everything else stays `unreviewed` and surfaces in the review dashboard. On a real Snowflake schema (FinBud, 12 tables, 345 fields), these rules collapse what would have been a 237-card review queue down to ~14 visible Rule 1 cards.
+Everything else stays `unreviewed` and surfaces in the review dashboard. On a real Snowflake schema (12 tables, 345 fields, typical OLTP-to-warehouse shape), these rules collapse what would have been a 237-card review queue down to ~14 visible Rule 1 cards.
 
 ### Rule 1 vs Rule 2 — and the hybrid review order
 
@@ -386,7 +386,7 @@ $ /agami-connect
 
 [Phase 3: validate + write]
   ✓ Validator passed (universal trust block + OSI v0.1.1 schema)
-  ✓ Wrote per-table YAMLs under ~/agami-artifacts/finbud/BUREAU_DATA/
+  ✓ Wrote per-table YAMLs under ~/agami-artifacts/main/ANALYTICS/
   ✓ Snapshot pinned at .snapshots/45f0fefa2403/
   ✓ git init + initial commit
 
@@ -396,9 +396,9 @@ $ /agami-connect
   approved truth instead of LLM guesses.
 
   Opening Rule 1 review dashboard…
-  ~/.agami/review/finbud/20260511-204100.html
+  ~/.agami/review/main/20260511-204100.html
 
-You (in dashboard): click Approve on 6 metrics by ashwin@agami.ai role=data_lead,
+You (in dashboard): click Approve on 6 metrics by you@example.com role=data_lead,
                     Edit 1 (definition_prose tweak), Reject 1.
                     Generate feedback → paste back.
 
@@ -407,14 +407,14 @@ You (in dashboard): click Approve on 6 metrics by ashwin@agami.ai role=data_lead
 [Phase 4: seed examples]
   Generating 10–12 NL→SQL seed examples and EXPLAIN-validating each
   against the live database. Expect 1–3 minutes…
-  [1/11] Top 5 applicants by score — EXPLAIN ✓
+  [1/11] Top 5 customers by lifetime spend — EXPLAIN ✓
   ...
   ✓ Generated 11 seed examples (≥6 multi-table, ≥1 time-comparison shape)
 
 [Phase 5: examples validation]
-  Rendered dashboard: ~/.agami/examples-validation/finbud/20260511-204500.html
+  Rendered dashboard: ~/.agami/examples-validation/main/20260511-204500.html
 
-You (in chat): validate 1, 3, 4, 5, 7 by ashwin@agami.ai
+You (in chat): validate 1, 3, 4, 5, 7 by you@example.com
                edit 8 sql>>>
                SELECT ...
                <<<
@@ -436,7 +436,7 @@ You (in chat): validate 1, 3, 4, 5, 7 by ashwin@agami.ai
 
 You: skip
 
-You: how many applicants do we have with a score above 750?
+You: how many customers placed an order in the last 30 days?
 ```
 
 The receipt panel on the answer shows the SQL that ran, the relationships used (with their confidence + review state), and the model version (`.snapshots/45f0fefa2403/`). If a query touched an unreviewed entry, the receipt has a warning banner pointing back at `/agami-review`.
@@ -508,7 +508,7 @@ agami's save-correction classifier routes to one of five destinations based on w
 | Abstract business concept tied to this DB ("gold tier means lifetime spend > $10k") | `ORGANIZATION.md` |
 | Reusable aggregation that didn't exist before ("MRR = SUM(price) WHERE plan_type='subscription'") | New `metric` in the semantic model (sign-off required — Rule 1) |
 
-The classifier surfaces its decision before writing, so you can override if it picks wrong. The next answer that uses the correction surfaces its attribution in the receipt: *"this answer was influenced by a correction from ashwin@agami.ai on 2026-05-11: 'use lifetime spend not 30-day window.'"*
+The classifier surfaces its decision before writing, so you can override if it picks wrong. The next answer that uses the correction surfaces its attribution in the receipt: *"this answer was influenced by a correction from you@example.com on 2026-05-11: 'use lifetime spend not 30-day window.'"*
 
 ### Render a chart
 
@@ -599,19 +599,17 @@ Or in chat: *"switch to the staging profile"*. Per-profile artifacts live under 
 
 ## Privacy
 
-`agami` runs entirely locally. There is **no telemetry** in the 0.x line — no install events, no usage pings, no anonymous metrics. The runtime is silent.
+`agami` runs entirely locally.
 
 What lives on your machine:
 - `~/.agami/credentials` (chmod 600) — DB connection details. Never read by anything outside the skill scripts in this repo.
 - `~/.agami/.config` — your reviewer email + role (for trust-layer sign-offs) and optional `artifacts_dir` override.
 - `~/agami-artifacts/<profile>/` — the OSI semantic model (per-table YAML), examples, ORGANIZATION.md, snapshots, curation log, `corrections.jsonl`, `.git/` history.
-- `~/.agami/charts/<ts>.html` — rendered charts.
-- `~/.agami/exports/<ts>.csv` — CSV exports.
-- `~/.agami/review/<ts>.html` and `~/.agami/examples-validation/<ts>.html` — review-flow dashboards.
+- `~/.agami/charts/<profile>/<ts>.html` — rendered charts (per profile).
+- `~/.agami/exports/<profile>/<ts>.csv` — CSV exports (per profile).
+- `~/.agami/review/<profile>/<ts>.html`, `~/.agami/examples-validation/<profile>/<ts>.html`, `~/.agami/model/<profile>/<ts>.html` — dashboards (per profile).
 
 The skill never reads files outside those paths (except your DB tool's auth config — `~/.pg_service.conf`, `~/.snowsql/config`, etc. — which it sets up on first connect with your permission).
-
-The telemetry endpoint code under `services/telemetry-endpoint/` and the spec at `plugins/agami/shared/telemetry-payload.md` are preserved in the repo for a future re-enable that would require explicit opt-in, but they are not invoked by any skill in this build.
 
 ---
 
@@ -647,7 +645,7 @@ If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/
 
 ## Format reference
 
-- **Semantic model — OSI v0.1.1 base spec** ([Open Semantic Interchange](https://opensemanticinterchange.org/)) — the universal `version`, `semantic_model`, `datasets`, `fields`, `relationships`, `metrics`, `custom_extensions` shape.
+- **Semantic model — OSI v0.1.1 base spec** (Open Semantic Interchange) — the universal `version`, `semantic_model`, `datasets`, `fields`, `relationships`, `metrics`, `custom_extensions` shape. See [`plugins/agami/shared/osi-schema.json`](plugins/agami/shared/osi-schema.json) for the bundled JSON Schema, and [`plugins/agami/shared/schema-reference.md`](plugins/agami/shared/schema-reference.md) for the prose spec.
 - **agami trust-layer extensions** ([`plugins/agami/shared/agami-osi-extensions.md`](plugins/agami/shared/agami-osi-extensions.md)) — the `agami` keys carried in `custom_extensions[].vendor_name=COMMON` (confidence, signal_breakdown, review_state, origin, signed_off_by/at/role, definition_prose, assumptions, excludes, named_filters, etc.).
 - **File layout** ([`plugins/agami/shared/file-layout.md`](plugins/agami/shared/file-layout.md)) — what lives where under `~/agami-artifacts/<profile>/` and how the snapshot directory works.
 - **Examples library YAML** — `<artifacts_dir>/<profile>/examples.yaml`, the NL→SQL few-shot library. Entries carry `source: seed|correction|manual`, `state: unreviewed|validated|rejected`, `validated_by`, `validated_at`.
