@@ -30,7 +30,7 @@ Trust-layer spec lives in [`shared/agami-osi-extensions.md`](../../shared/agami-
 ## Phase 0: Preflight
 
 Run the same plan-mode + credentials checks as `agami-query-database`:
-- Plan-mode: this skill needs Read + Bash + Write. **If plan mode is active: refuse and end the turn. DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/review/<ts>.html`.)"*
+- Plan-mode: this skill needs Read + Bash + Write. **If plan mode is active: refuse and end the turn. DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/review/<profile>/<ts>.html`.)"*
 - Resolve `<profile>` and `<artifacts_dir>` per the standard chain (`AGAMI_PROFILE` env → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` env → `~/.agami/.config.artifacts_dir` → `~/agami-artifacts`).
 - If `<artifacts_dir>/<profile>/index.yaml` doesn't exist, invoke `agami-connect` and stop.
 - Probe the validator is runnable: `python3 -c 'import yaml, jsonschema'`. If not, surface the install hint and stop — we won't write YAML edits without the validator gate.
@@ -143,14 +143,17 @@ Build `/tmp/agami-review-items-<ts>.json` and `/tmp/agami-review-summary-<ts>.js
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)
-mkdir -p ~/.agami/review
+# Per-profile subdir so multi-profile users can tell renders apart and
+# clean up per-profile (dev/reset-yamls.sh --clean-renders scopes to the
+# named profile).
+mkdir -p ~/.agami/review/"$profile"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_review.py" \
   --title "Review queue · $profile · threshold $threshold" \
   --threshold "$threshold" \
   --model-version "$model_version" \
   --items-file "/tmp/agami-review-items-$ts.json" \
   --summary-file "/tmp/agami-review-summary-$ts.json" \
-  --out "$HOME/.agami/review/$ts.html"
+  --out "$HOME/.agami/review/$profile/$ts.html"
 
 rm -f "/tmp/agami-review-items-$ts.json" "/tmp/agami-review-summary-$ts.json"
 ```
@@ -159,7 +162,7 @@ Surface in chat (single block, no padding):
 
 ```
 Review queue rendered — <N> items at threshold <X>.
-~/.agami/review/<ts>.html
+~/.agami/review/<profile>/<ts>.html
 
 The dashboard has 4 tabs (For Review · Approved Automatically · Manually
 Approved · Rejected) and click-to-approve buttons on each card. Click
@@ -181,7 +184,7 @@ You can also type commands directly:
 Use the same multi-command fallback chain as agami-query-database Phase 4e.vi:
 
 ```bash
-out="$HOME/.agami/review/<ts>.html"
+out="$HOME/.agami/review/$profile/<ts>.html"
 ( command -v open    >/dev/null 2>&1 && open "$out" ) || \
 ( command -v xdg-open >/dev/null 2>&1 && xdg-open "$out" ) || \
 ( command -v start    >/dev/null 2>&1 && start "$out" ) || \
@@ -378,14 +381,14 @@ Best-effort — never block on git failure. The YAML files + curation log are th
 
 ## Phase 5: Re-render or close
 
-After a batch of edits applies cleanly, **always re-render the dashboard** with a **new timestamped filename** at `~/.agami/review/<new-ts>.html` (don't overwrite the old one — the user may still have it open and you need them to notice the refresh). Recompute Phase 1 from scratch (re-walk the YAMLs, re-classify into tabs, re-count the summary). The numbering shifts as approved/rejected items leave the For Review tab — that's expected.
+After a batch of edits applies cleanly, **always re-render the dashboard** with a **new timestamped filename** at `~/.agami/review/<profile>/<new-ts>.html` (don't overwrite the old one — the user may still have it open and you need them to notice the refresh). Recompute Phase 1 from scratch (re-walk the YAMLs, re-classify into tabs, re-count the summary). The numbering shifts as approved/rejected items leave the For Review tab — that's expected.
 
 **Surface BOTH the ack AND the new file path in one chat block** so the user can't miss it:
 
 ```
 ✓ Applied: approved 2 (#1, #3), rejected 1 (#7). 38 items remain.
 
-Re-rendered: ~/.agami/review/<new-ts>.html
+Re-rendered: ~/.agami/review/<profile>/<new-ts>.html
 (Open the new file — the previous one is stale.)
 ```
 

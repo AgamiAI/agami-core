@@ -113,7 +113,7 @@ Per row:
   "delta_pct":    <signed fraction or null>,
   "match":        true | false,
   "status":       "match" | "mismatch" | "error",
-  "report_path":  "~/.agami/charts/<ts>.html",  // the full chart report for this query
+  "report_path":  "~/.agami/charts/<profile>/<ts>.html",  // the full chart report for this query
   "error":        "<message if status=error, else null>"
 }
 ```
@@ -139,8 +139,8 @@ Render the mismatches as a markdown table BEFORE the matches:
 
 | Label | Expected | Got | Δ | Drill-down |
 |---|---:|---:|---:|---|
-| Q3 2025 Revenue          | $4,200,000 | $3,890,000 | -7.4% | ~/.agami/charts/...html |
-| Active customers (Apr)   | 12,450     | 11,920     | -4.3% | ~/.agami/charts/...html |
+| Q3 2025 Revenue          | $4,200,000 | $3,890,000 | -7.4% | ~/.agami/charts/&lt;profile&gt;/...html |
+| Active customers (Apr)   | 12,450     | 11,920     | -4.3% | ~/.agami/charts/&lt;profile&gt;/...html |
 ```
 
 Cell formatting:

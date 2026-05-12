@@ -77,7 +77,7 @@ Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Approving / rejecting items writes back to YAML files. Surface ONLY this:
 
-> I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect the dashboard HTML if it was rendered in a prior session — open `~/.agami/review/<ts>.html` directly.)
+> I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect the dashboard HTML if it was rendered in a prior session — open `~/.agami/review/<profile>/<ts>.html` directly.)
 
 ### `agami-reconcile`
 

@@ -11,7 +11,7 @@ You are running the model-explorer surface. Goal: let the user see every dataset
 
 This skill orchestrates:
 
-1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `~/.agami/model/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**.
+1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `~/.agami/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**.
 2. **Open + wait** — auto-open the file, end the turn, wait for the user to come back with exclude / include commands from the dashboard's "Generate feedback for Claude" button.
 3. **Apply** — for each batch of commands, invoke `apply_model_exclusions.py` with a JSON actions file. The script edits the YAMLs, runs the validator, reverts via `git checkout` on failure, appends to `curation_log.jsonl` on success, and commits to the profile's git repo.
 4. **Re-render** — render to a new timestamped file and re-open. Wait for the next batch.
@@ -30,7 +30,7 @@ Trust-spine semantics: "exclude" flips `agami.review_state` to `rejected`. The r
 
 Same shape as `agami-review`:
 
-- **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered model-explorer artifact at `~/.agami/model/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
+- **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered model-explorer artifact at `~/.agami/model/<profile>/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
 - **If `<artifacts_dir>/<profile>/index.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
 - **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
@@ -45,8 +45,9 @@ Resolve the curator's identity for `curation_log.jsonl` + git commits:
 
 ```bash
 ts=$(date -u +%Y%m%d-%H%M%S)
-mkdir -p ~/.agami/model
-out="$HOME/.agami/model/$ts.html"
+# Per-profile subdir so multi-profile users can tell renders apart.
+mkdir -p ~/.agami/model/"$profile"
+out="$HOME/.agami/model/$profile/$ts.html"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
@@ -59,7 +60,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
 
 ```
 Model explorer rendered — <N> schemas · <M> tables · <K> fields.
-~/.agami/model/<ts>.html
+~/.agami/model/<profile>/<ts>.html
 
 The dashboard has live search, filter chips (All / Active / Excluded /
 Unreviewed / Queued), and per-table + per-column Exclude / Include
@@ -160,7 +161,7 @@ Every successful apply produces a new explorer file at a new timestamp. The cont
 
 ```bash
 new_ts=$(date -u +%Y%m%d-%H%M%S)
-new_out="$HOME/.agami/model/$new_ts.html"
+new_out="$HOME/.agami/model/$profile/$new_ts.html"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
   --profile "$profile" --artifacts-dir "$artifacts_dir" --out "$new_out"
 ```
@@ -169,7 +170,7 @@ Auto-open the new path. Surface the new file path in the chat ack:
 
 ```
 ✓ Applied: 2 tables excluded, 2 columns excluded. Re-rendered.
-~/.agami/model/<new-ts>.html
+~/.agami/model/<profile>/<new-ts>.html
 (Previous tab is stale and can be closed.)
 ```
 
@@ -228,7 +229,7 @@ This is the same mechanism `/agami-review`'s Reject button uses on individual en
 ```
 You: open the model explorer
 
-[skill renders ~/.agami/model/20260512-101500.html and opens it]
+[skill renders ~/.agami/model/finbud/20260512-101500.html and opens it]
 
 You (in dashboard): search "pan" → toggle Exclude on every PAN/AADHAAR
                     field → click Generate feedback → paste back in chat:
@@ -241,7 +242,7 @@ done
 [skill applies, validator passes, commits, re-renders]
 
 agami: ✓ Applied: 3 columns excluded. Re-rendered.
-       ~/.agami/model/20260512-101830.html
+       ~/.agami/model/finbud/20260512-101830.html
 ```
 
 ### Removing staging tables

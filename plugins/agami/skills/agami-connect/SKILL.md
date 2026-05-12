@@ -1083,7 +1083,7 @@ Do NOT combine with Phase 4's "✓ Generated <N> examples" surface (that's a sep
 
 Earlier versions of this skill picked ONE seed example as a demo. Replaced — three independent sets of early-adopter feedback (Sourav + Intuit + Asana) said the same thing: "let me validate the queries you've inferred, not just see one of them work." Validating all 10–12 seeds in a single guided pass is what turns LLM-generated guesses into golden truths the query skill can trust.
 
-**Output of this phase:** an HTML dashboard at `~/.agami/examples-validation/<ts>.html` listing every seed example with its question, SQL, and a 5-row result preview, plus a chat back-channel for the user to validate / reject / edit each one.
+**Output of this phase:** an HTML dashboard at `~/.agami/examples-validation/<profile>/<ts>.html` listing every seed example with its question, SQL, and a 5-row result preview, plus a chat back-channel for the user to validate / reject / edit each one.
 
 ### 5a — Run every seed example
 
@@ -1127,12 +1127,13 @@ Write the array to `/tmp/agami-examples-items-<ts>.json`. The exact schema is do
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)
-mkdir -p ~/.agami/examples-validation
+# Per-profile subdir so multi-profile users can tell renders apart.
+mkdir -p ~/.agami/examples-validation/"$profile"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_examples_validation.py" \
   --title "Seed examples · $profile" \
   --profile "$profile" \
   --items-file "/tmp/agami-examples-items-$ts.json" \
-  --out "$HOME/.agami/examples-validation/$ts.html"
+  --out "$HOME/.agami/examples-validation/$profile/$ts.html"
 rm -f "/tmp/agami-examples-items-$ts.json"
 ```
 
@@ -1140,7 +1141,7 @@ Surface in chat (single block):
 
 ```
 Validating <N> seed examples — dashboard rendered:
-  ~/.agami/examples-validation/<ts>.html
+  ~/.agami/examples-validation/<profile>/<ts>.html
 
 The dashboard has 3 tabs (For Validation · Validated · Rejected) and
 click-to-act buttons on each card. Click Validate / Reject / Edit on
@@ -1226,7 +1227,7 @@ For each successful edit, the user is also offered: *"Promote this to a golden t
 
 ### 5e — Re-render after each batch of edits
 
-After applying a batch of validate / reject / edit commands, **always re-render the dashboard to a NEW timestamped file** at `~/.agami/examples-validation/<new-ts>.html`. Don't overwrite the previous file — the user may have the old tab open and you need them to notice the fresh state. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
+After applying a batch of validate / reject / edit commands, **always re-render the dashboard to a NEW timestamped file** at `~/.agami/examples-validation/<profile>/<new-ts>.html`. Don't overwrite the previous file — the user may have the old tab open and you need them to notice the fresh state. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
 
 **Auto-open the new file on every re-render** (same multi-command fallback chain as Phase 5c — `open` → `xdg-open` → `start` → `cmd /c start` → echo the path). The user gets a new browser tab with the fresh state; the previous tab is now stale and can be closed.
 
@@ -1234,7 +1235,7 @@ After applying a batch of validate / reject / edit commands, **always re-render 
 ```
 ✓ Applied: validated 3 (#1, #3, #5), rejected 1 (#7). Re-rendered.
 
-Open: ~/.agami/examples-validation/<new-ts>.html
+Open: ~/.agami/examples-validation/<profile>/<new-ts>.html
 (Previous tab is stale and can be closed.)
 ```
 

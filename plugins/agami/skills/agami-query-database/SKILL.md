@@ -240,11 +240,11 @@ If the user's intent is to re-display the most recent chart:
 2. Look at the `chart_path` field. Possible cases:
    - **`chart_path` set AND the file exists on disk** → run `open <path>` (macOS), `xdg-open <path>` (Linux), or `start <path>` (Windows). Surface a one-liner in chat:
      ```
-     Reopened: ~/.agami/charts/20260507-150912.html
+     Reopened: ~/.agami/charts/<profile>/20260507-150912.html
      ```
      Done. Skip every other phase. Don't re-execute SQL. Don't re-render. Don't add 5 follow-ups (this is a UI action, not a fresh answer).
    - **`chart_path` is null** (last query was a 1×1 scalar that didn't render a chart) → surface: "The last answer didn't render a chart (it was a single number). Ask me a new question and I'll generate a fresh report."
-   - **`chart_path` set but the file is missing** (user deleted `~/.agami/charts/`) → surface: "The chart file is gone — `<path>` no longer exists. Ask me the question again and I'll regenerate it."
+   - **`chart_path` set but the file is missing** (user deleted `~/.agami/charts/<profile>/`) → surface: "The chart file is gone — `<path>` no longer exists. Ask me the question again and I'll regenerate it."
    - **Query log empty or missing** → surface: "I don't have any prior queries to reopen. Ask me a question first."
 
 This phase neither logs anything new to `query_log.jsonl` nor sends telemetry — re-opening an existing artifact isn't a query event.
@@ -535,7 +535,7 @@ If the user has stated a date-format preference in `<artifacts_dir>/USER_MEMORY.
 If row count > 30:
 - The chat preview shows the first **30** rows only — markdown tables past ~30 rows scroll forever and bury the insight.
 - The HTML report (Phase 4e) contains the full set in a paginated table.
-- For row counts > 30, **auto-write the CSV to `~/.agami/exports/<ts>.csv`** at the same time as the HTML report, without waiting for the user to ask. Surface both paths in Phase 4d's footer.
+- For row counts > 30, **auto-write the CSV to `~/.agami/exports/<profile>/<ts>.csv`** at the same time as the HTML report, without waiting for the user to ask. Surface both paths in Phase 4d's footer.
 - Footer line under the table: `Showing first 30 of <N> rows · full set in CSV: <csv-path> · HTML report: <html-path>`. Use thousands separators on `<N>` (e.g. `4,213`).
 - If `<N>` is huge (> 100k), additionally suggest tightening the filter inline: "If you want to slice by region or date, say so and I'll re-run."
 
@@ -595,7 +595,7 @@ Render the rows as a GitHub-flavored markdown table. Right-align numeric columns
 
 ### 4e — Build ONE coherent HTML report (one file, N sections)
 
-The output is **one self-contained HTML file** at `~/.agami/charts/<ts>.html`, no matter how broad the question is. Broad questions decompose into multiple sub-questions; each sub-question becomes a **section** inside the same file. Each section has its own chart + table + insight + SQL. **Never write multiple HTML files for one user question. Never open multiple browser tabs.**
+The output is **one self-contained HTML file** at `~/.agami/charts/<profile>/<ts>.html`, no matter how broad the question is. Broad questions decompose into multiple sub-questions; each sub-question becomes a **section** inside the same file. Each section has its own chart + table + insight + SQL. **Never write multiple HTML files for one user question. Never open multiple browser tabs.**
 
 Skip the report only when the result is a single 1×1 scalar (e.g., `SELECT COUNT(*) FROM orders` returning `42`) — for those, the chat answer is enough.
 
@@ -730,13 +730,15 @@ Instead:
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)
-mkdir -p ~/.agami/charts
+# Per-profile subdir so multi-profile users can tell charts apart and
+# clean per-profile via dev/reset-yamls.sh --clean-renders.
+mkdir -p ~/.agami/charts/"$profile"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_chart.py" \
   --title "$USER_QUESTION" \
   --summary "$EXECUTIVE_SUMMARY" \
   --sections-file "/tmp/agami-sections-$ts.json" \
   --receipt-file "/tmp/agami-receipt-$ts.json" \
-  --out "$HOME/.agami/charts/$ts.html"
+  --out "$HOME/.agami/charts/$profile/$ts.html"
 ```
 
 The helper reads `shared/chart-template.html` + the two logo SVGs once, validates each section + receipt, runs `template.replace(...)` for each placeholder, and writes the file. Stdlib only — no extra deps.
@@ -754,7 +756,7 @@ Immediately after writing the HTML, try to launch the browser. **Real-world test
 **Run a multi-command fallback chain** in one Bash invocation. The host typically caches the first successful pattern, so subsequent queries skip straight to it:
 
 ```bash
-chart="$HOME/.agami/charts/<ts>.html"
+chart="$HOME/.agami/charts/$profile/<ts>.html"
 ( command -v open    >/dev/null 2>&1 && open "$chart" ) || \
 ( command -v xdg-open >/dev/null 2>&1 && xdg-open "$chart" ) || \
 ( command -v start    >/dev/null 2>&1 && start "$chart" ) || \
@@ -764,9 +766,9 @@ echo "agami: couldn't auto-open the chart — open manually: $chart"
 
 Surface the outcome explicitly in chat (don't let it disappear into the bash collapsible):
 
-- **Open succeeded** (exit 0, no fallback message printed) — surface in chat: `✓ Chart opened in your browser. (Path: ~/.agami/charts/<ts>.html)`
-- **Fallback printed** (the `agami: couldn't auto-open` line) — surface: `Couldn't auto-open the chart in this environment. Open it yourself: ~/.agami/charts/<ts>.html`
-- **First time the user runs a query in this host** — `open` may prompt for permission. The shipped `.claude/settings.json` allowlists `Bash(open ~/.agami/charts/*.html)` precisely so this prompt doesn't fire, but if the user's local settings override or strip that, they'll see a one-time approval modal. Tell them in chat: "First-run permission prompt — approve `open` and the chart will pop up. Future queries skip the prompt."
+- **Open succeeded** (exit 0, no fallback message printed) — surface in chat: `✓ Chart opened in your browser. (Path: ~/.agami/charts/<profile>/<ts>.html)`
+- **Fallback printed** (the `agami: couldn't auto-open` line) — surface: `Couldn't auto-open the chart in this environment. Open it yourself: ~/.agami/charts/<profile>/<ts>.html`
+- **First time the user runs a query in this host** — `open` may prompt for permission. The shipped `.claude/settings.json` allowlists `Bash(open ~/.agami/charts/**/*.html)` precisely so this prompt doesn't fire, but if the user's local settings override or strip that, they'll see a one-time approval modal. Tell them in chat: "First-run permission prompt — approve `open` and the chart will pop up. Future queries skip the prompt."
 
 If the user reports "the chart never opens", check (a) the path printed in chat exists on disk, (b) `command -v open` returns 0 in their host, (c) their `.claude/settings.json` includes the allowlist. The skill cannot fix mode-blocked hosts on its own; the path-in-chat fallback is the universal-truth surface.
 
@@ -776,16 +778,16 @@ After writing the file and triggering `open`:
 
 - For a **single-section** report: surface the section's insight + the markdown table (Phases 4c + 4d). End with the chart's path as **plain text** (NOT a markdown link):
   ```
-  Chart: ~/.agami/charts/20260507-150912.html
+  Chart: ~/.agami/charts/<profile>/20260507-150912.html
   ```
 - For a **multi-section** report: surface the executive summary + a tight bulleted list of section titles. **Don't** repeat each section's table in the chat. End with:
   ```
-  Report (N sections): ~/.agami/charts/20260507-150912.html
+  Report (N sections): ~/.agami/charts/<profile>/20260507-150912.html
   ```
 
 **Do NOT format the path as `[Open chart](file://...)` or any other clickable markdown link.** Some hosts (notably VS Code's Claude Code chat sandbox) only route workspace-relative paths through their click handler; `file://` URLs and absolute paths outside the workspace die silently. A fake-clickable link is worse UX than a plain path the user knows they can `open` from their terminal.
 
-If you genuinely detect that you're running in Claude Desktop (which has a working preview pane via path clicks), you may format the path as ``Open `~/.agami/charts/<ts>.html` `` (backticks, not a link) — Desktop users get the click-to-preview experience naturally.
+If you genuinely detect that you're running in Claude Desktop (which has a working preview pane via path clicks), you may format the path as ``Open `~/.agami/charts/<profile>/<ts>.html` `` (backticks, not a link) — Desktop users get the click-to-preview experience naturally.
 
 For hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
 
@@ -844,13 +846,14 @@ Two ways the CSV gets written:
 
 Either way:
 
-- Single-section report → one CSV at `~/.agami/exports/<ts>.csv`.
-- Multi-section report → one CSV per section at `~/.agami/exports/<ts>-<section-slug>.csv`. Surface all paths.
+- Single-section report → one CSV at `~/.agami/exports/<profile>/<ts>.csv`.
+- Multi-section report → one CSV per section at `~/.agami/exports/<profile>/<ts>-<section-slug>.csv`. Surface all paths.
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)
-mkdir -p ~/.agami/exports
-# write header + rows per section, RFC 4180 escaping
+mkdir -p ~/.agami/exports/"$profile"
+# write header + rows per section, RFC 4180 escaping; output path is
+# $HOME/.agami/exports/$profile/$ts.csv (or with section-slug suffix).
 ```
 
 CSVs open natively in Excel / Numbers / Google Sheets — when the user asks for "Excel", the CSV path is the answer. If they specifically want a `.xlsx` (formulas, multiple sheets, formatting), tell them to open the CSV in Excel and Save As — v1 doesn't ship a native `.xlsx` writer.
@@ -874,7 +877,7 @@ Append one line to `~/.agami/query_log.jsonl`:
   "risk": "LOW",
   "error_kind": null,
   "feedback": null,
-  "chart_path": "/Users/me/.agami/charts/20260507-141500.html",
+  "chart_path": "/Users/me/.agami/charts/finbud/20260507-141500.html",
   "tables_used": ["public.orders", "public.customers"],
   "retrieval_mode": "small"
 }

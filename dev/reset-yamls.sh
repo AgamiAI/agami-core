@@ -24,12 +24,13 @@
 #   ~/.agami/charts/                          rendered query charts
 #
 # Usage:
-#   dev/reset-yamls.sh                                   # default profile, soft reset
-#   dev/reset-yamls.sh finbud                            # specific profile, soft reset
-#   dev/reset-yamls.sh finbud --hard                     # also drop ORGANIZATION.md + .git/ + logs
-#   dev/reset-yamls.sh finbud --clean-renders            # also drop ~/.agami/{charts,review,...}
-#   dev/reset-yamls.sh finbud --hard --clean-renders     # combine the two
-#   dev/reset-yamls.sh finbud --dry-run                  # show what would be deleted, do nothing
+#   dev/reset-yamls.sh                                       # default profile, soft reset
+#   dev/reset-yamls.sh finbud                                # specific profile, soft reset
+#   dev/reset-yamls.sh finbud --hard                         # also drop ORGANIZATION.md + .git/ + logs
+#   dev/reset-yamls.sh finbud --clean-renders                # also drop ~/.agami/<kind>/finbud/* (this profile only)
+#   dev/reset-yamls.sh finbud --clean-renders-all            # wipe legacy flat-layout files + every profile
+#   dev/reset-yamls.sh finbud --hard --clean-renders         # full per-profile wipe
+#   dev/reset-yamls.sh finbud --dry-run                      # show what would be deleted, do nothing
 #
 # Env:
 #   AGAMI_ARTIFACTS_DIR (default: $HOME/agami-artifacts)
@@ -40,12 +41,14 @@ PROFILE=""
 HARD=0
 DRY_RUN=0
 CLEAN_RENDERS=0
+CLEAN_RENDERS_ALL=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --hard)           HARD=1; shift ;;
-    --dry-run)        DRY_RUN=1; shift ;;
-    --clean-renders)  CLEAN_RENDERS=1; shift ;;
+    --hard)               HARD=1; shift ;;
+    --dry-run)            DRY_RUN=1; shift ;;
+    --clean-renders)      CLEAN_RENDERS=1; shift ;;
+    --clean-renders-all)  CLEAN_RENDERS=1; CLEAN_RENDERS_ALL=1; shift ;;
     -h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -85,7 +88,11 @@ action() {
 
 echo "Resetting YAMLs in $PROFILE_DIR (profile: $PROFILE)"
 echo "  mode: $([[ $HARD -eq 1 ]] && echo 'hard (drops ORGANIZATION.md, .git/, logs)' || echo 'soft (keeps ORGANIZATION.md, .git/, logs)')"
-[[ $CLEAN_RENDERS -eq 1 ]] && echo "  also cleaning ~/.agami/{charts,review,examples-validation,model,exports}/"
+if [[ $CLEAN_RENDERS_ALL -eq 1 ]]; then
+  echo "  also cleaning ~/.agami/{charts,review,examples-validation,model,exports}/ (ALL profiles + legacy)"
+elif [[ $CLEAN_RENDERS -eq 1 ]]; then
+  echo "  also cleaning ~/.agami/{charts,review,examples-validation,model,exports}/$PROFILE/ (this profile only)"
+fi
 [[ $DRY_RUN -eq 1 ]] && echo "  dry-run: nothing will actually be deleted"
 echo ""
 
@@ -128,16 +135,33 @@ fi
 # 5. Optional: nuke accumulated render outputs under ~/.agami/. These pile up
 #    over time (each dashboard re-render writes a new timestamp). They are
 #    regenerable from source, so safe to delete.
+#
+#    --clean-renders        wipes only this profile's renders:
+#                             ~/.agami/<kind>/<profile>/*
+#    --clean-renders-all    additionally wipes legacy flat-layout files
+#                           at ~/.agami/<kind>/*.{html,csv} (predate the
+#                           per-profile subdir change) AND every other
+#                           profile's renders.
 if [[ $CLEAN_RENDERS -eq 1 ]]; then
   for render_dir in charts review examples-validation model exports; do
-    target="$HOME/.agami/$render_dir"
-    [[ -d "$target" ]] || continue
-    # Delete the contents but keep the directory so subsequent renders don't
-    # have to mkdir again.
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      action "rm -f '$f'"
-    done < <(find "$target" -mindepth 1 -maxdepth 1 2>/dev/null)
+    base="$HOME/.agami/$render_dir"
+    [[ -d "$base" ]] || continue
+
+    if [[ $CLEAN_RENDERS_ALL -eq 1 ]]; then
+      # Full wipe: every file and every per-profile subdir under <kind>/.
+      while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        action "rm -rf '$f'"
+      done < <(find "$base" -mindepth 1 -maxdepth 1 2>/dev/null)
+    else
+      # Profile-scoped wipe: only files inside <kind>/<profile>/.
+      target="$base/$PROFILE"
+      [[ -d "$target" ]] || continue
+      while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        action "rm -f '$f'"
+      done < <(find "$target" -mindepth 1 -maxdepth 1 2>/dev/null)
+    fi
   done
 fi
 
