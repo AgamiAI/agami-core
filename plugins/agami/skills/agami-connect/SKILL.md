@@ -13,10 +13,10 @@ You are setting up the agami semantic model for the user's database. Goal: by th
 
 This skill orchestrates four phases:
 
-1. **Introspect** — pull tables / columns / PK / FK from `information_schema` via the chosen database tool (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`).
+1. **Introspect** — pull tables / columns / PK / FK from `information_schema` via the chosen database tool (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`). Ask once for a domain-context paragraph (Phase 1.4) and once for a data-model document upload (Phase 1.5). **Both AskUserQuestion calls are MANDATORY** — the user picks Skip or proceeds, but the SKILL always asks.
 2. **Build the OSI model** — assemble the YAML strictly to the OSI v0.1.1 spec, with Agami metadata (column types, choice fields, performance hints) packed under `custom_extensions[].vendor_name: COMMON` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
 3. **Validate, then write** — run the validator at `plugins/agami/scripts/validate_semantic_model.py`. If it fails, **DO NOT WRITE THE FILE.** Surface the errors and stop.
-4. **Seed examples + run demo query** — generate few-shot pairs, EXPLAIN-validate each, then pick one to run as a demo and ask the user Yes / No / Skip.
+4. **Seed examples + validate-via-dashboard** — generate 10–12 analytical-shape NL→SQL pairs, EXPLAIN-validate each against the live DB, then render the examples-validation dashboard. **The dashboard is MANDATORY — never skip rendering it, never auto-validate the examples on the user's behalf.** Phase 5 ends when the user types `done` or all examples are in `{validated, rejected, error}` state.
 
 For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
 For the bundled JSON schema: [`shared/osi-schema.json`](../../shared/osi-schema.json).
@@ -272,11 +272,19 @@ Options:
 
 In both cases, write to `chmod 600`. Format and content rules: see [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
 
-### Phase 1.5 — optional: data-model document upload
+### Phase 1.5 — data-model document upload
+
+**MANDATORY — ALWAYS ASK.** This phase must run on every `/agami-connect` invocation, every time. The user's reply (yes / skip) is theirs to decide, but the SKILL never decides on their behalf. Past failure mode: when the SKILL header said "optional" the LLM sometimes silently skipped this phase for users it judged "didn't need it," and those users never got the chance to upload a doc that would have materially improved description quality. **The fact that this phase is short and the user usually picks Skip is not a reason to skip the ask** — making the ask is the contract.
+
+Do NOT skip if:
+- Phase 1.4 returned "Skip" (org context skipped) — these are independent decisions, the user might have a doc but no time to write a paragraph.
+- The user already mentioned domain context in chat — they still might have a formal doc.
+- The schema has DBA-authored column comments (`information_schema.columns.column_comment` is non-empty) — comments are field-level; a doc is table-level and process-level.
+- Re-introspect (the user's previous answer for this profile is not stored).
 
 Many users have an existing artifact describing their schema — an ERD, a data dictionary, a "what each table means" Confluence page. Feeding it to the description generator is a big lift on accuracy with zero extra introspect work.
 
-Ask **once**, low-friction:
+Ask **once per `/agami-connect` invocation**, low-friction:
 
 **AskUserQuestion**:
 
@@ -1026,7 +1034,19 @@ Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Sa
 
 ## Phase 5: Validate every seed example (the trust onboarding)
 
-Earlier versions of this skill picked ONE seed example as a demo. Replaced — three independent sets of early-adopter feedback (Sourav + Intuit + Asana) said the same thing: "let me validate the queries you've inferred, not just see one of them work." Validating all 10–15 seeds in a single guided pass is what turns LLM-generated guesses into golden truths the query skill can trust.
+**MANDATORY — NEVER SKIP. NEVER COMBINE WITH PHASE 4 OR PHASE 5.5.**
+
+This phase MUST run on every `/agami-connect` invocation that generated examples in Phase 4. The dashboard at 5c MUST render and the turn MUST end after it. Past failure mode: the LLM running this skill saw that Phase 4b had already EXPLAIN-validated each example and concluded "the examples are good — skip to Phase 5.5 / Phase 6." That is wrong: EXPLAIN-validation means the SQL parses against the schema, not that the SQL answers the question the user would actually ask. The user has to *see* the question + SQL + result rows and confirm before any of this is "validated" in the trust-spine sense.
+
+Do NOT skip if:
+- All Phase 4 EXPLAIN checks passed (that's the floor for this phase to run, not a reason to skip it).
+- The example count is small (3 examples still get a dashboard).
+- The user said something casual like "looks good" or "great" earlier in the turn — they haven't seen the SQL yet, so they can't have meant the examples.
+- The skill is rate-limited / nearing context budget — fewer Phase 6 suggestions is acceptable; skipping Phase 5 is not.
+
+Do NOT combine with Phase 4's "✓ Generated <N> examples" surface (that's a separate turn boundary) or with Phase 5.5's post-introspect summary (the HARD STOP rule in 5e enforces this on the back end; this MANDATORY rule enforces it at entry).
+
+Earlier versions of this skill picked ONE seed example as a demo. Replaced — three independent sets of early-adopter feedback (Sourav + Intuit + Asana) said the same thing: "let me validate the queries you've inferred, not just see one of them work." Validating all 10–12 seeds in a single guided pass is what turns LLM-generated guesses into golden truths the query skill can trust.
 
 **Output of this phase:** an HTML dashboard at `~/.agami/examples-validation/<ts>.html` listing every seed example with its question, SQL, and a 5-row result preview, plus a chat back-channel for the user to validate / reject / edit each one.
 
