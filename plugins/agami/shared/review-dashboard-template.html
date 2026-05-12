@@ -211,6 +211,46 @@
     .group-bulk:hover { color: var(--accent-hover); text-decoration: underline; }
     .group-cards.collapsed { display: none; }
 
+    /* Priority hints + secondary section (Pillar D) */
+    .priority-hint {
+      padding: 14px 18px; border-radius: 10px;
+      margin-bottom: 16px; font-size: 14px;
+      border-left: 4px solid var(--accent);
+      background: var(--bg-elev);
+    }
+    .priority-hint-must { border-left-color: var(--accent); }
+    .priority-hint-good {
+      border-left-color: var(--ok-fg);
+      color: var(--ok-fg);
+    }
+    .priority-hint strong { font-weight: 600; }
+
+    .secondary-wrap {
+      margin: 28px 0 0;
+      border-top: 1px dashed var(--border);
+      padding-top: 20px;
+    }
+    .secondary-header {
+      cursor: pointer; user-select: none;
+      padding: 12px 16px; border-radius: 8px;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+      transition: background 120ms ease;
+    }
+    .secondary-header:hover { background: var(--row-zebra); }
+    .secondary-header::before {
+      content: "▼"; font-size: 10px; color: var(--muted);
+      transition: transform 120ms ease; flex: 0 0 auto;
+    }
+    .secondary-header.collapsed::before { transform: rotate(-90deg); }
+    .secondary-header-text {
+      font-size: 13px; color: var(--muted);
+      line-height: 1.5;
+    }
+    .secondary-header-text strong { color: var(--fg); }
+    .secondary-body { margin-top: 14px; }
+    .secondary-body.collapsed { display: none; }
+
     /* Item cards */
     .review-item {
       border: 1px solid var(--border); border-radius: 12px;
@@ -701,6 +741,11 @@
     // ---- Entity-type group ordering inside a tab ----
     // Sort entity types: Rule 1 first (metric, named_filter), then field_description, join, dataset.
     const TYPE_ORDER = ['metric', 'named_filter', 'join', 'field_description'];
+    // Primary (must-do-to-ship) vs Secondary (polish over time). Pillar D split.
+    // The runtime *blocks* on Rule 1 (metric / named_filter) and on drift
+    // (stale entries); everything else is "Optional" — surfaces as a warning
+    // on the answers that use it, but doesn't block.
+    const PRIMARY_TYPES = new Set(['metric', 'named_filter']);
     const TYPE_LABEL = {
       metric:             'Metrics',
       named_filter:       'Named Filters',
@@ -710,6 +755,16 @@
 
     function itemsForTab(tab) {
       return items.filter(it => it.tab === tab);
+    }
+    function isPrimary(item) {
+      // Rule 1 items always primary. Stale (drift) items also primary — runtime
+      // refuses queries depending on them, so they block to ship.
+      return !!item.rule_1 || (item.review_state === 'stale');
+    }
+    function partitionByPriority(list) {
+      const primary = [], secondary = [];
+      list.forEach(it => (isPrimary(it) ? primary : secondary).push(it));
+      return { primary, secondary };
     }
     function groupItemsByType(list) {
       const out = {};
@@ -986,29 +1041,21 @@
       return card;
     }
 
-    function renderItems() {
-      const root = document.getElementById('items');
-      root.innerHTML = '';
-      const subset = itemsForTab(activeTab);
-      if (subset.length === 0) {
-        const empty = el('div', { class: 'review-item',
-          text: 'Nothing in this tab.' });
-        root.appendChild(empty);
-        return;
-      }
-      const grouped = groupItemsByType(subset);
+    // Render the per-type group sections for a given list of items into a
+    // parent element. `keyPrefix` is the prefix used in the collapsedGroups
+    // Set so primary/secondary sections track their open/closed state
+    // independently across re-renders.
+    function renderGroupSections(parent, list, keyPrefix) {
+      const grouped = groupItemsByType(list);
       // Auto-collapse threshold: groups larger than this start collapsed so
-      // the smaller, higher-priority groups (Metrics, Named Filters) lead.
-      // The user clicks the header to expand a large group.
+      // the smaller, higher-priority groups lead.
       const AUTO_COLLAPSE_THRESHOLD = 30;
 
       TYPE_ORDER.forEach(t => {
-        const list = grouped[t] || [];
-        if (!list.length) return;
-        const key = groupKey(activeTab, t);
-        // First render: auto-collapse if the group is large. After that the
-        // user's manual choice takes over.
-        if (!userTouchedGroups.has(key) && list.length > AUTO_COLLAPSE_THRESHOLD) {
+        const items = grouped[t] || [];
+        if (!items.length) return;
+        const key = keyPrefix + ':' + t;
+        if (!userTouchedGroups.has(key) && items.length > AUTO_COLLAPSE_THRESHOLD) {
           collapsedGroups.add(key);
         }
         const isCollapsed = collapsedGroups.has(key);
@@ -1024,23 +1071,92 @@
           },
         });
         header.appendChild(document.createTextNode(TYPE_LABEL[t] || t));
-        header.appendChild(el('span', { class: 'group-count', text: String(list.length) }));
-        // Bulk-approve link only meaningful on the review tab. Allowed for
-        // metrics + named_filters too — generateFeedback() checks email + role
-        // at submit time, so we don't need to gate the queue here.
+        header.appendChild(el('span', { class: 'group-count', text: String(items.length) }));
         if (activeTab === 'review') {
           const bulkBtn = el('button', {
             class: 'group-bulk', type: 'button',
-            onclick: (ev) => { ev.stopPropagation(); bulkApproveGroup(list); },
+            onclick: (ev) => { ev.stopPropagation(); bulkApproveGroup(items); },
           }, 'Approve all in this group');
           header.appendChild(bulkBtn);
         }
         section.appendChild(header);
         const cards = el('div', { class: 'group-cards' + (isCollapsed ? ' collapsed' : '') });
-        list.forEach(it => cards.appendChild(renderCard(it)));
+        items.forEach(it => cards.appendChild(renderCard(it)));
         section.appendChild(cards);
-        root.appendChild(section);
+        parent.appendChild(section);
       });
+    }
+
+    function renderItems() {
+      const root = document.getElementById('items');
+      root.innerHTML = '';
+      const subset = itemsForTab(activeTab);
+      if (subset.length === 0) {
+        const empty = el('div', { class: 'review-item',
+          text: 'Nothing in this tab.' });
+        root.appendChild(empty);
+        return;
+      }
+
+      if (activeTab !== 'review') {
+        // Other tabs: single flat section, no primary/secondary split.
+        renderGroupSections(root, subset, activeTab);
+        return;
+      }
+
+      // Pillar D — For Review tab is partitioned into primary (must-do-to-ship)
+      // and secondary (polish over time). Primary always visible; secondary
+      // wrapped in a collapsible "Optional" panel.
+      const { primary, secondary } = partitionByPriority(subset);
+
+      if (primary.length === 0 && secondary.length > 0) {
+        // Edge case: nothing critical, but low-confidence items exist. Skip
+        // the empty primary header but still show a hint at the top.
+        const hint = el('div', { class: 'priority-hint priority-hint-good',
+          text: '✓ No must-do items. The optional polish queue is below if you want a look.' });
+        root.appendChild(hint);
+      } else if (primary.length > 0) {
+        const primaryHint = el('div', { class: 'priority-hint priority-hint-must' });
+        primaryHint.innerHTML =
+          '<strong>' + primary.length + ' ' +
+          (primary.length === 1 ? 'item needs' : 'items need') +
+          ' your sign-off to start querying.</strong>'
+          + ' These block at runtime — the query skill refuses answers that depend on them.';
+        root.appendChild(primaryHint);
+        renderGroupSections(root, primary, 'review_primary');
+      }
+
+      if (secondary.length > 0) {
+        const wrap = el('div', { class: 'secondary-wrap' });
+        const key = 'review_secondary:wrap';
+        // Default: collapsed. User toggle persists across re-renders.
+        if (!userTouchedGroups.has(key)) {
+          collapsedGroups.add(key);
+        }
+        const isCollapsed = collapsedGroups.has(key);
+        const header = el('div', {
+          class: 'secondary-header' + (isCollapsed ? ' collapsed' : ''),
+          onclick: (ev) => {
+            userTouchedGroups.add(key);
+            if (collapsedGroups.has(key)) collapsedGroups.delete(key);
+            else collapsedGroups.add(key);
+            ev.currentTarget.classList.toggle('collapsed');
+            ev.currentTarget.nextElementSibling.classList.toggle('collapsed');
+          },
+        });
+        const headerText = el('div', { class: 'secondary-header-text' });
+        headerText.innerHTML =
+          '<strong>Optional — ' + secondary.length + ' low-confidence ' +
+          (secondary.length === 1 ? 'entry' : 'entries') + '.</strong>'
+          + ' These surface as warnings on the answers that use them. '
+          + 'The system can self-approve them as you query — open if you want to bulk-approve now.';
+        header.appendChild(headerText);
+        wrap.appendChild(header);
+        const body = el('div', { class: 'secondary-body' + (isCollapsed ? ' collapsed' : '') });
+        renderGroupSections(body, secondary, 'review_secondary');
+        wrap.appendChild(body);
+        root.appendChild(wrap);
+      }
     }
 
     function toggleAction(item, action) {

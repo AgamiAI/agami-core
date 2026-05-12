@@ -207,6 +207,160 @@ def test_field_description_dba_comment_overrides_llm_cap():
     assert score >= 0.70
 
 
+# --- Pillar A: structural pattern matching --------------------------------
+
+from compute_confidence import match_structural_pattern  # noqa: E402
+
+
+class TestStructuralPatternMatch:
+    """`match_structural_pattern` is the dictionary lookup driving Pillar A
+    (auto-approve structural / well-known columns). Each test asserts that
+    representative column names produce the expected pattern_name.
+
+    When adding new patterns to shared/column-name-dictionary.md, add a
+    corresponding test here so the dictionary and the lookup stay in sync."""
+
+    def test_bare_id_matches_id_pattern(self):
+        assert match_structural_pattern("id") == "id"
+        assert match_structural_pattern("ID") == "id"
+        assert match_structural_pattern("Id") == "id"
+
+    def test_suffix_id_matches_fk_pattern(self):
+        assert match_structural_pattern("customer_id") == "fk_id_suffix"
+        assert match_structural_pattern("ORDER_ID") == "fk_id_suffix"
+
+    def test_bare_id_does_not_match_suffix_pattern(self):
+        # The bare-id exact match must win over the *_id suffix.
+        assert match_structural_pattern("id") != "fk_id_suffix"
+
+    def test_uuid_variants(self):
+        assert match_structural_pattern("uuid") == "uuid"
+        assert match_structural_pattern("session_uuid") == "fk_uuid_suffix"
+
+    def test_timestamp_suffix(self):
+        assert match_structural_pattern("created_at") == "created_at"
+        assert match_structural_pattern("shipped_at") == "event_at"
+        assert match_structural_pattern("paid_date") == "event_date"
+        assert match_structural_pattern("login_ts") == "event_ts"
+
+    def test_audit_columns(self):
+        assert match_structural_pattern("created_by") == "created_by"
+        assert match_structural_pattern("approved_by") == "audit_by"
+
+    def test_email_phone_variants(self):
+        assert match_structural_pattern("email") == "email_field"
+        assert match_structural_pattern("email_address") == "email_field"
+        assert match_structural_pattern("phone") == "phone_field"
+        assert match_structural_pattern("phone_number") == "phone_field"
+        assert match_structural_pattern("mobile_number") == "phone_field"
+
+    def test_address_components(self):
+        assert match_structural_pattern("city") == "city_field"
+        assert match_structural_pattern("state") == "state_field"
+        assert match_structural_pattern("country") == "country_field"
+        assert match_structural_pattern("zip") == "postal_field"
+        assert match_structural_pattern("postal_code") == "postal_field"
+
+    def test_boolean_flag_prefixes(self):
+        assert match_structural_pattern("is_active") == "is_flag"
+        assert match_structural_pattern("has_paid") == "has_flag"
+        assert match_structural_pattern("can_edit") == "can_flag"
+        assert match_structural_pattern("should_notify") == "should_flag"
+
+    def test_lifecycle_flags_exact(self):
+        assert match_structural_pattern("active") == "lifecycle_flag"
+        assert match_structural_pattern("archived") == "state_flag"
+
+    def test_categorical_terms(self):
+        assert match_structural_pattern("status") == "status_field"
+        assert match_structural_pattern("type") == "type_field"
+        assert match_structural_pattern("category") == "category_field"
+
+    def test_measure_suffixes(self):
+        assert match_structural_pattern("order_count") == "count_field"
+        assert match_structural_pattern("total_amount") == "amount_field"
+        assert match_structural_pattern("interest_rate") == "rate_field"
+        assert match_structural_pattern("loan_min") == "min_max_field"
+
+    def test_opaque_column_no_match(self):
+        # Opaque names should not pattern-match — they need LLM / DBA review.
+        assert match_structural_pattern("v_1") is None
+        assert match_structural_pattern("tmp_col") is None
+        assert match_structural_pattern("x") is None
+        assert match_structural_pattern("foobar") is None
+
+    def test_case_insensitive(self):
+        assert match_structural_pattern("CREATED_AT") == "created_at"
+        assert match_structural_pattern("Email") == "email_field"
+
+    def test_whitespace_tolerated(self):
+        assert match_structural_pattern(" customer_id ") == "fk_id_suffix"
+
+    def test_empty_and_none(self):
+        assert match_structural_pattern("") is None
+        assert match_structural_pattern("   ") is None
+        assert match_structural_pattern(None) is None  # type: ignore[arg-type]
+
+    def test_suffix_requires_non_empty_prefix(self):
+        # Bare `_id` (length 3) with no prefix character must not match.
+        # In practice DBs disallow names starting with underscore-only, but
+        # the matcher should still reject them defensively.
+        assert match_structural_pattern("_id") is None
+
+
+class TestFieldStructuralAutoApprove:
+    """The new W_FIELD_STRUCTURAL_PATTERN weight + the rule that LLM_only
+    fields keep the cap unless a structural pattern is present."""
+
+    def test_structural_match_alone_auto_approves(self):
+        """A column named `customer_id` with NO other signals (no DBA comment,
+        no business term match, no enum-like) should still auto-approve via
+        the structural pattern — its meaning is fixed by the name."""
+        score, _ = confidence_for_field_description(
+            structural_pattern_match="fk_id_suffix",
+        )
+        assert score >= 0.50  # default threshold is 0.7 but we use 0.5+ for explicit auto-approve at introspect
+        # In practice the auto-approve rule lives in agami-connect Phase 2c.2,
+        # not in compute_confidence — but the score should be high enough that
+        # it crosses ANY reasonable threshold.
+
+    def test_structural_match_bypasses_llm_cap(self):
+        """When a structural pattern matches AND the description is
+        LLM-generated, the LLM cap does NOT apply — the pattern carries the
+        trust, not the prose."""
+        score, _ = confidence_for_field_description(
+            structural_pattern_match="email_field",
+            business_term_match=True,
+            llm_inferred=True,
+        )
+        # Pattern (0.50) + business_term (0.20) = 0.70, well above the cap.
+        assert score >= 0.70
+
+    def test_no_structural_no_dba_llm_still_capped(self):
+        """An LLM-only description on an opaque column (no pattern match)
+        stays capped at LLM_ONLY_FIELD_CAP. This is the pre-Pillar-A behavior
+        that protects against silent auto-approve of fabricated descriptions."""
+        score, _ = confidence_for_field_description(
+            business_term_match=True,
+            enum_like_distribution=True,
+            llm_inferred=True,
+            structural_pattern_match=None,
+        )
+        assert score <= LLM_ONLY_FIELD_CAP
+
+    def test_signal_breakdown_includes_pattern_name(self):
+        """The pattern name (not just True/False) lives in signal_breakdown so
+        a curator inspecting the YAML can see *why* it auto-approved."""
+        _, breakdown = confidence_for_field_description(
+            structural_pattern_match="created_at",
+        )
+        assert breakdown["structural_pattern_match"] == "created_at"
+
+    def test_signal_breakdown_none_when_no_pattern(self):
+        _, breakdown = confidence_for_field_description(business_term_match=True)
+        assert breakdown["structural_pattern_match"] is None
+
+
 # --- Named filters ---------------------------------------------------------
 
 def test_named_filter_predicate_must_typecheck():

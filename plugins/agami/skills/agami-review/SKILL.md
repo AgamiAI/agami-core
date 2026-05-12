@@ -112,6 +112,7 @@ For each item, build the item object per [`shared/review-dashboard-template.html
   - For named filters: the predicate
 - **`extra_lines`** — for metrics, include `Definition` (from `agami.definition_prose`) and `Assumptions` (from `agami.assumptions`). For field descriptions, include `Choices` (formatted from `agami.choice_field`).
 - **`reply_hint`** — for Rule 1 items: `approve N by you@example.com role=cfo`. For Rule 2 items: `approve N`.
+- **`rule_1`** — boolean. `true` if `entity_type ∈ {metric, named_filter}`. **The dashboard uses this to split the For Review tab into a primary "must-do-to-ship" section (Rule 1 + drift/stale) and a secondary "Optional" collapsed section (everything else).** Pillar D, added 2026-05-12. Don't forget to set this — missing `rule_1: true` on a metric pushes it into the optional collapsed section and the user might miss the sign-off.
 
 Signal-text translation table (used to render the ✓/✗ list):
 

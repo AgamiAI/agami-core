@@ -203,3 +203,34 @@ def test_items_numbering_is_caller_responsibility():
     item["n"] = 99
     html = render(title="x", threshold=0.7, model_version="v", items=[item], summary=None)
     assert '"n": 99' in html
+
+
+# --- Pillar D: primary/secondary partition in the For Review tab ----------
+
+def test_template_carries_priority_partition_helpers():
+    """The renderer always ships the template prelude; the partition logic
+    lives in the template (client-side JS) so any rendered file has the
+    helpers compiled in. Smoke-check the classes / function names are present
+    in the output."""
+    html = render(
+        title="x", threshold=0.7, model_version="abc", items=[],
+        summary={"auto_approved": {}, "needs_review": {}},
+    )
+    assert "partitionByPriority" in html, "primary/secondary partition helper missing"
+    assert "priority-hint" in html, "priority-hint CSS class missing"
+    assert "secondary-wrap" in html, "secondary-wrap CSS class missing"
+    assert "PRIMARY_TYPES" in html, "PRIMARY_TYPES const missing"
+
+
+def test_template_summary_messaging_pillar_d():
+    """The Pillar D copy on the For Review tab tells users that low-confidence
+    items can wait and self-approve as they query."""
+    html = render(
+        title="x", threshold=0.7, model_version="abc", items=[],
+        summary={},
+    )
+    # The "Optional —" framing for the secondary section.
+    assert "Optional" in html
+    # The "self-approve as you query" promise.
+    assert "self-approve" in html or "self approve" in html
+

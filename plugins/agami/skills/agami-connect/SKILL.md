@@ -467,7 +467,29 @@ Process schemas one at a time. For each schema, build a prompt with:
 
 Ask the model to emit, for each table:
 - A 1-line `description` summarizing what the table holds
-- For each column, a 1-line `description` — but **skip if blindingly obvious from the column name** (e.g., `id`, `created_at`). Leave such columns' description empty.
+- For each column, a 1-line `description` **only if you can say something the column name doesn't already say**. **Empty is the default, not the exception.** Every empty `description` field skips the review queue entirely (the trust spine marks it `not_applicable`), so the user has fewer cards to walk. Examples the LLM must follow:
+
+  | Column | Bad (rejected) | Good (kept) | Empty (preferred) |
+  |---|---|---|---|
+  | `id` | "Primary key" | (always leave empty — structural) | `""` |
+  | `customer_id` | "The customer ID" | "FK to customers.id; 1:N with orders" | `""` if no extra context to add |
+  | `created_at` | "When the row was created" | (always leave empty — structural) | `""` |
+  | `status` | "A status code" | "lifecycle: pending → shipped → cancelled" (only if you know the enum) | `""` if no enum is known |
+  | `revenue_usd` | "Revenue in USD" | "Net revenue, USD at invoice date, excludes refunds" (only if sample data or domain doc supports it) | `""` if you can't tell whether refunds are in |
+  | `email` | "Email address" | (always leave empty — structural) | `""` |
+  | `v_1`, `tmp_col`, `x` | "A value" | (leave empty — opaque) | `""` |
+  | `pl_outstanding` | "PL outstanding" | "Total outstanding balance on personal loans, INR" (if samples show INR-shaped amounts) | `""` if you can't tell what `pl` stands for |
+
+  **Disqualifying patterns — always output `""` for these:**
+  - The description would essentially restate the column name (`status` → "A status").
+  - The description is generic boilerplate ("An identifier", "A flag", "A value", "A code").
+  - The description merely translates an abbreviation ("amt" → "amount") without adding meaning.
+  - The column name is opaque (`v_1`, `x`, `tmp_col`) and the sample rows / domain doc give no clue.
+  - The column matches a structural / universal pattern that Pillar A auto-approves (`id`, `*_id`, `created_at`, `*_at`, `email`, `phone`, `name`, `status`, `*_count`, `*_amount`, etc. — see [`shared/column-name-dictionary.md`](../../shared/column-name-dictionary.md)). The introspect step's auto-approve rule writes the canonical description for these *if* you leave them empty; if you write a description, you're competing with the dictionary and your text needs to add real value or it'll be rejected as boilerplate.
+
+  **What counts as "real value":** the description tells the user something they couldn't have learned by looking at the column name + type. Business rules (excludes / includes / currency conventions), unit assumptions, lifecycle enums, FK target tables, sample-grounded specifics. If you can't articulate one of those, leave empty.
+
+  Empty is encouraged. Cards in the review queue are a cost. A short, honest empty is better than padded prose.
 
 #### 1d.iii — width bounding for large schemas
 
@@ -779,6 +801,19 @@ These produce `review_state: approved` upfront, with `signed_off_by: agami_intro
 - **Relationship — Single-column unique index + plural-of-table-name pattern + column type match** → `review_state: approved`, `origin: introspect_heuristic`. (Supplementary case for DBs that don't surface FK metadata, e.g. some Snowflake schemas.)
 - **Field description — DBA-authored column comment present** (description text comes from `pg_description` / `INFORMATION_SCHEMA.COLUMNS.COMMENT`) → `review_state: approved`, `origin: column_comment`.
 - **Dataset (table-level) description — DBA-authored table comment present** → `review_state: approved`, `origin: column_comment`.
+- **Field — structural / well-known column-name pattern match** (Pillar A, added 2026-05-12) → `review_state: approved`, `origin: introspect_heuristic`, with `signal_breakdown.structural_pattern_match` set to the pattern name. See full pattern list at [`shared/column-name-dictionary.md`](../../shared/column-name-dictionary.md). Categories:
+  - Identity: `id`, `uuid`, `guid`, `*_id`, `*_uuid`, `*_guid`, `id_*`
+  - Timestamps: `created_at`, `updated_at`, `deleted_at`, `*_at`, `*_date`, `*_time`, `*_timestamp`, `*_ts`, `dob` / `date_of_birth`
+  - Audit: `created_by`, `updated_by`, `deleted_by`, `*_by`, `version`, `revision`, `etag`
+  - Boolean flags: `is_*`, `has_*`, `can_*`, `should_*`, lifecycle (`enabled` / `disabled` / `active` / `archived` / ...)
+  - Contact / location: `name`, `email`, `phone`, `address`, `city`, `state`, `country`, `zip`, `lat`, `lng`, `url`, ...
+  - Text / metadata: `description`, `title`, `notes`, `slug`, `tag`, `metadata`, ...
+  - Categorical: `status`, `type`, `category`, `priority`
+  - Measure / currency: `*_count`, `*_amount`, `*_total`, `*_avg`, `*_min`/`max`, `*_rate`, `currency`, `locale`, `timezone`
+  - **PK columns**: any field the introspect step identified as a primary key — auto-approve with `structural_pattern_match: "primary_key"`.
+  - **FK columns**: any field whose relationship was auto-approved via the FK or unique-index rule above — auto-approve with `structural_pattern_match: "foreign_key"`.
+  - Use `compute_confidence.match_structural_pattern(column_name)` to look up the pattern name; the function lives in [`scripts/compute_confidence.py`](../../scripts/compute_confidence.py) and is the source of truth for the pattern list.
+  - **Canonical-description fallback**: when a field matches a pattern AND the LLM left `description: ""`, the introspect step writes the canonical description from the dictionary (e.g., `customer_id` → "FK to the named table's id column.") instead of leaving the field with an empty description. The trust block still records `origin: introspect_heuristic` (not `human_authored`) since it's mechanically derived.
 
 **Do NOT auto-approve a field just because the introspect step ran on it.** Specifically:
 
@@ -1240,7 +1275,7 @@ Existing examples without these fields are treated as `state: unreviewed`. Backw
 
 This is the first surface a curator sees. It tells them what auto-approved cleanly and what needs their attention — bounded, scannable, never a 350-item wall.
 
-Scan the freshly-written model under `<artifacts_dir>/<profile>/` and count entries by `agami.review_state` and entity type. Produce the summary block exactly:
+Scan the freshly-written model under `<artifacts_dir>/<profile>/` and count entries by `agami.review_state` and entity type. The summary leads with the **must-do-to-ship** count (Rule 1 + drift) so the user sees a small number first, with the optional polish count broken out separately. Produce the summary block:
 
 ```
 agami-connect just ran. Here's what we found:
@@ -1248,24 +1283,32 @@ agami-connect just ran. Here's what we found:
   ✓  <N>  datasets, <M> fields                            (auto-approved)
   ✓  <K>  FK relationships                                 (auto-approved)
   ✓  <J>  field descriptions from DBA column comments      (auto-approved)
+  ✓  <S>  field descriptions from column-name patterns     (auto-approved)
   ⚠  <R1> inferred relationships from column-name matches  (review)
   ⚠  <R2> field descriptions below confidence 0.7          (review)
   ⚠  <R3> metric proposals (sign-off required — Rule 1)
   ⚠  <R4> named-filter proposals (sign-off required — Rule 1)
 
-  <R1+R2+R3+R4> items need your attention at threshold 0.7.
+  <R3+R4+stale> items need your sign-off to start querying.
+  <R1+R2> low-confidence entries can wait — they surface as warnings on the
+  answers that use them, and the system can self-approve them as you query.
 ```
+
+The closing two lines are **mandatory** — they tell the user "you can ship now; the long tail is optional." Without them the user reads the total as the must-do count and gets stuck.
 
 Counting rules (read the YAMLs after promotion, not the staging dir):
 
 - `auto-approved datasets/fields` — `agami.review_state == "approved"` AND `agami.signed_off_by == "agami_introspect_v1"`. Count datasets and fields separately and combine in the first row.
 - `FK relationships` — `agami.review_state == "approved"` AND `agami.origin == "fk"` (across `_schema.yaml` and `index.yaml.cross_schema_relationships`).
 - `field descriptions from DBA column comments` — fields with `agami.review_state == "approved"` AND `agami.origin == "column_comment"`.
+- **`field descriptions from column-name patterns`** (Pillar A) — fields with `agami.review_state == "approved"` AND `agami.origin == "introspect_heuristic"` AND `agami.signal_breakdown.structural_pattern_match` is non-null. If `<S>` is `0`, omit the line.
 - `inferred relationships ... (review)` — relationships with `agami.review_state == "unreviewed"` AND `agami.origin == "introspect_heuristic"`.
 - `field descriptions below confidence 0.7 (review)` — fields with `agami.review_state == "unreviewed"` AND `agami.confidence < 0.7`.
 - `metric proposals` and `named-filter proposals` — count `metrics[]` entries in any yaml + `named_filters[]` entries in `index.yaml`'s model-level extension where `agami.review_state == "unreviewed"`.
 
 If a category's count is `0`, omit that line entirely — don't show "0 metric proposals". A small DB might collapse the summary to two or three lines, which is fine.
+
+**For the must-do / optional split at the bottom**: count only `metric proposals` + `named-filter proposals` + `stale` items as must-do. Count `inferred relationships` + `low-confidence field descriptions` as optional. Even if both numbers are non-zero, surface them on separate lines as shown above — the order communicates priority.
 
 Then offer two surfaces via AskUserQuestion. The trust-layer review queue and the model explorer are sibling activities — review is "approve / reject what the introspect inferred"; the explorer is "browse + remove tables and columns I don't want the runtime to use at all." Both are linked to the same `review_state` field; the curator picks whichever shape they want first.
 
