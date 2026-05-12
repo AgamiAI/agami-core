@@ -347,6 +347,7 @@ The `agami-init` skill tells you exactly what to install for your OS if nothing 
 | `/agami-connect` | Introspects the live DB, builds the per-schema OSI v0.1.1 semantic model at `~/agami-artifacts/<profile>/`, computes confidence on every entity, auto-approves the high-signal ones, generates 10–12 analytical-shape seed examples (each EXPLAIN-validated), and opens the examples-validation dashboard. Runs `git init` and snapshots the model under `.snapshots/<hash>/`. |
 | `/agami-query-database` | Answers a NL question. Picks examples + relationships, generates SQL, runs it, formats the result, and surfaces a SQL receipt panel (provenance + model-version pin). Refuses if any required Rule 1 entry is unreviewed. (You usually don't need to type this — natural language routes here.) |
 | `/agami-review` | Opens the trust review dashboard: For Review / Approved Automatically / Manually Approved / Rejected tabs, grouped by entity type. Click-to-act buttons + inline edit textareas. Generates a chat-back-channel command block when you click "Generate feedback for Claude." |
+| `/agami-model` | Opens the model explorer — a static HTML browser of every schema / table / field with live search, filter chips, and per-table + per-column **Exclude / Include** buttons. Excluded entries are filtered out of the runtime model (joins, prompts, aggregates) but stay in the YAML for audit; the curator can include them back any time. |
 | `/agami-save-correction` | Records a corrected `(question, SQL)` pair to `<artifacts_dir>/<profile>/examples.yaml`, with author + date + classification. The next answer that uses it surfaces the correction's attribution in the receipt. |
 | `/agami-reconcile` | Reconciliation harness: point it at a legacy dashboard's CSV (label → number rows) and it generates each NL question, runs it through agami, and shows a side-by-side diff with tolerances. Use to validate the model against numbers you already trust. |
 
@@ -449,6 +450,22 @@ You: open the review dashboard
 ```
 
 Walk the cards. Each shows the inferred SQL + signal breakdown + an inline editable textarea. Click Approve / Reject / Edit on the cards you want, then hit "Generate feedback for Claude" at the bottom and paste back. agami applies each edit, runs the validator, commits to `<artifacts_dir>/<profile>/.git/`, and re-renders to a new timestamped HTML file.
+
+### Browse the model + exclude tables / columns
+
+```
+You: open the model explorer
+# or: /agami-model
+# or: "remove the staging tables and PII columns from the model"
+```
+
+Renders a self-contained HTML browser of every schema → table → field. Live search across names + types + descriptions, filter chips (All / Active / Excluded / Unreviewed / Queued for change), per-table + per-column Exclude / Include buttons. Useful when:
+
+- You want PII columns hidden from agami without changing access at the DB level.
+- A re-introspect pulled in staging / archive tables you don't want considered.
+- You want to scan field names across the whole schema (e.g. "where do we have `created_at` columns?").
+
+Excluded entries flip `agami.review_state` to `rejected`. The runtime model loader filters them out everywhere — they never appear in prompts, never get joined to, never get aggregated. The YAML still has them, so you can re-include later. The HTML is static and rendered by Python; **no LLM tokens are spent on the YAML walk**.
 
 ### Save a correction (with attribution)
 

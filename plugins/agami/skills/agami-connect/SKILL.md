@@ -1247,15 +1247,16 @@ Counting rules (read the YAMLs after promotion, not the staging dir):
 
 If a category's count is `0`, omit that line entirely — don't show "0 metric proposals". A small DB might collapse the summary to two or three lines, which is fine.
 
-Then offer the review dashboard via AskUserQuestion (single question, three options):
+Then offer two surfaces via AskUserQuestion. The trust-layer review queue and the model explorer are sibling activities — review is "approve / reject what the introspect inferred"; the explorer is "browse + remove tables and columns I don't want the runtime to use at all." Both are linked to the same `review_state` field; the curator picks whichever shape they want first.
 
 | Option | What happens |
 |---|---|
-| `Open the review dashboard` | Invoke the `agami-review` skill (built in §4 of the plan; ships with the dashboard launch). The user lands on the queue and walks the items. |
-| `Skip — I'll review later` (default) | Acknowledge: "OK — `<R1+R2+R3+R4>` items remain unreviewed. Run `/agami-review` (or say 'open the review dashboard') anytime." Continue to Phase 6. |
+| `Open the review dashboard` | Invoke the `agami-review` skill. The user lands on the queue and walks the items needing sign-off / approval. |
+| `Open the model explorer` | Invoke the `agami-model` skill. The user lands on the full schema tree (search + filter), can exclude entire tables or specific columns they don't want agami to use, and re-render after each batch. |
+| `Skip — I'll review later` (default) | Acknowledge: "OK — `<R1+R2+R3+R4>` items remain unreviewed. Run `/agami-review` to walk them, or `/agami-model` to browse + exclude tables/columns. Either skill works any time." Continue to Phase 6. |
 | `Adjust the threshold` | Ask for a number (`0.0` – `1.0`). Re-render the summary using that threshold. Persist to `<artifacts_dir>/<profile>/agami.config.yaml` under `review.threshold`. |
 
-If `agami-review` doesn't exist yet (the dashboard skill ships in a follow-up of the same launch), surface the summary block but skip the AskUserQuestion — instead surface a one-liner: *"Review dashboard not yet shipping in this build — the unreviewed items will surface in answer receipts as warnings until you can review them."*
+If a sibling skill (`agami-review` or `agami-model`) doesn't exist yet (mid-rollout build), surface the summary block but skip that option from the AskUserQuestion. Don't error.
 
 ---
 
@@ -1290,7 +1291,8 @@ If `rule1_unreviewed > 0`, **skip the "Now that you're set up" framing** and sur
 
 Until those are reviewed, agami-query-database will refuse questions that
 depend on them (the trust-layer strict gate). Run `/agami-review` (or say
-"open the review dashboard") to finish.
+"open the review dashboard") to finish. Or run `/agami-model` to browse
+the full model and exclude tables/columns you don't want agami to use.
 
 Here are five things you could already ask that don't depend on Rule 1 items:
 
@@ -1314,6 +1316,9 @@ Then end the turn.
 ✓ <artifacts_dir>/<profile>/examples.yaml — <N> NL→SQL examples
 ✓ Snapshot pinned at .snapshots/<hash>/
 ✓ All metrics + named filters signed off
+
+(Want to remove tables or columns you don't want agami to use? Run
+ `/agami-model` for the browse + exclude flow.)
 
 Now that <profile> is set up, here are five things you could ask:
 

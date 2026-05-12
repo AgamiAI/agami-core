@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<!--
+  agami model explorer — used by the agami-model skill via render_model_explorer.py.
+
+  The renderer substitutes the {{...}} placeholders below and writes the
+  result to ~/.agami/model/<ts>.html. Self-contained: opens from file:// in
+  any browser, no server, no relative-path dependencies.
+
+  Per-render placeholders (always substitute):
+    {{REPORT_TITLE}}          — "Model explorer · <profile>"
+    {{GENERATED_AT}}          — ISO8601 UTC timestamp
+    {{PROFILE}}               — profile name
+    {{MANIFEST_JSON}}         — JSON object with schemas/tables/fields (schema below)
+    {{AGAMI_LOGO_DARK_TEXT}}  — full SVG content of agami-logo-dark.svg
+    {{AGAMI_LOGO_LIGHT_TEXT}} — full SVG content of agami-logo-light.svg
+
+  MANIFEST_JSON shape:
+    {
+      "profile": "finbud",
+      "totals":  { "schemas": 1, "tables": 14, "fields": 312 },
+      "schemas": [
+        {
+          "name": "BUREAU_DATA",
+          "tables": [
+            {
+              "name":          "NOHIT_DATA",
+              "qname":         "BUREAU_DATA.NOHIT_DATA",
+              "description":   "Applicant leads where bureau returned no hit",
+              "row_count":     6807724,
+              "review_state":  "approved" | "rejected" | "unreviewed" | "stale",
+              "excluded":      false,                   // review_state == rejected
+              "yaml_path":     "BUREAU_DATA/NOHIT_DATA.yaml",
+              "synonyms":      ["nohit", "unmatched_leads"],
+              "fields": [
+                {
+                  "name":         "MOBILE",
+                  "qname":        "BUREAU_DATA.NOHIT_DATA.MOBILE",
+                  "type":         "string",
+                  "description":  "Mobile number",
+                  "review_state": "approved" | "rejected" | "unreviewed" | "not_applicable",
+                  "excluded":     false,
+                  "confidence":   0.55
+                }, ...
+              ]
+            }
+          ]
+        }
+      ]
+    }
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} — agami</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-elev: #fafafa;
+      --fg: #1a1a1a;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --row-zebra: rgba(0, 0, 0, 0.025);
+      --code-bg: rgba(0, 0, 0, 0.04);
+      --ok-bg: #dcfce7;
+      --ok-fg: #166534;
+      --ok-border: #86efac;
+      --bad-bg: #fee2e2;
+      --bad-fg: #991b1b;
+      --bad-border: #fca5a5;
+      --warn-bg: #fef3c7;
+      --warn-fg: #92400e;
+      --hi-bg: #fef08a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --bg-elev: #131c2f;
+        --fg: #f1f5f9;
+        --muted: #94a3b8;
+        --border: #1e293b;
+        --accent: #60a5fa;
+        --accent-hover: #93c5fd;
+        --row-zebra: rgba(255, 255, 255, 0.03);
+        --code-bg: rgba(255, 255, 255, 0.04);
+        --ok-bg: #052e16;
+        --ok-fg: #86efac;
+        --ok-border: #14532d;
+        --bad-bg: #450a0a;
+        --bad-fg: #fca5a5;
+        --bad-border: #7f1d1d;
+        --warn-bg: #422006;
+        --warn-fg: #fbbf24;
+        --hi-bg: #78350f;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 32px 110px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+
+    header.dashboard-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 24px; margin-bottom: 12px;
+    }
+    .logo a { display: inline-block; line-height: 0; text-decoration: none; }
+    .logo svg { display: block; height: 26px; width: auto; }
+    .logo-light-mode { display: inline-block; }
+    .logo-dark-mode { display: none; }
+    @media (prefers-color-scheme: dark) {
+      .logo-light-mode { display: none; }
+      .logo-dark-mode { display: inline-block; }
+    }
+    h1.dashboard-title {
+      font-size: 20px; font-weight: 600;
+      margin: 0; flex: 1; text-align: right;
+    }
+    .meta { font-size: 12px; color: var(--muted); margin-bottom: 18px; }
+    .meta code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+
+    /* Sticky search + counts row */
+    .toolbar {
+      position: sticky; top: 0; z-index: 50;
+      background: var(--bg); padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 20px;
+    }
+    .search-row {
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    }
+    .search-input {
+      flex: 1; min-width: 260px;
+      font: inherit; font-size: 15px;
+      padding: 10px 14px;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-elev); color: var(--fg);
+    }
+    .search-input:focus {
+      outline: 2px solid var(--accent); outline-offset: -2px;
+      border-color: var(--accent);
+    }
+    .search-counts {
+      font-size: 13px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .filter-chips {
+      display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    }
+    .filter-chips button {
+      font: inherit; font-size: 12px; font-weight: 500;
+      padding: 5px 12px; border-radius: 999px;
+      cursor: pointer; background: var(--bg-elev);
+      color: var(--muted); border: 1px solid var(--border);
+    }
+    .filter-chips button:hover { color: var(--fg); }
+    .filter-chips button.active {
+      color: var(--accent); border-color: var(--accent);
+      background: var(--bg);
+    }
+
+    /* Schema sections */
+    .schema-section { margin: 24px 0; }
+    .schema-header {
+      font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--muted);
+      padding: 8px 0; border-bottom: 1px solid var(--border);
+      margin-bottom: 14px;
+      display: flex; gap: 10px; align-items: center;
+    }
+    .schema-header .schema-count {
+      font-size: 11px; color: var(--muted);
+      background: var(--code-bg); padding: 1px 7px; border-radius: 999px;
+    }
+
+    /* Table card */
+    .table-card {
+      border: 1px solid var(--border); border-radius: 12px;
+      background: var(--bg-elev);
+      margin-bottom: 14px;
+      overflow: hidden;
+      transition: opacity 120ms ease, border-color 120ms ease;
+    }
+    .table-card.excluded {
+      opacity: 0.55;
+      border-color: var(--bad-border);
+    }
+    .table-card.queued-exclude {
+      border-color: var(--bad-border);
+      background: var(--bad-bg);
+    }
+    .table-card.queued-include {
+      border-color: var(--ok-border);
+      background: var(--ok-bg);
+    }
+    .table-header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px 18px; cursor: pointer;
+      user-select: none;
+    }
+    .table-header:hover { background: var(--row-zebra); }
+    .table-toggle {
+      font-size: 10px; color: var(--muted);
+      transition: transform 120ms ease;
+    }
+    .table-toggle.collapsed { transform: rotate(-90deg); }
+    .table-name {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 15px; font-weight: 600;
+    }
+    .table-name .schema-prefix { color: var(--muted); font-weight: 400; }
+    .table-rows {
+      font-size: 12px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .table-state-badge {
+      font-size: 10px; padding: 2px 8px; border-radius: 999px;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      font-weight: 600;
+    }
+    .badge-excluded {
+      background: var(--bad-bg); color: var(--bad-fg);
+      border: 1px solid var(--bad-border);
+    }
+    .badge-rejected {
+      background: var(--bad-bg); color: var(--bad-fg);
+      border: 1px solid var(--bad-border);
+    }
+    .badge-unreviewed {
+      background: var(--warn-bg); color: var(--warn-fg);
+      border: 1px solid var(--warn-fg);
+    }
+    .badge-stale {
+      background: var(--warn-bg); color: var(--warn-fg);
+      border: 1px solid var(--warn-fg);
+    }
+    .table-actions {
+      margin-left: auto; display: flex; gap: 8px; align-items: center;
+    }
+    .table-actions button {
+      font: inherit; font-size: 12px; font-weight: 500;
+      padding: 6px 12px; border-radius: 6px;
+      cursor: pointer; background: var(--bg);
+      color: var(--fg); border: 1px solid var(--border);
+    }
+    .table-actions button:hover {
+      border-color: var(--accent); color: var(--accent);
+    }
+    .table-actions button.action-exclude.queued {
+      background: var(--bad-fg); color: white; border-color: var(--bad-fg);
+    }
+    .table-actions button.action-include.queued {
+      background: var(--ok-fg); color: white; border-color: var(--ok-fg);
+    }
+
+    .table-body {
+      border-top: 1px solid var(--border);
+      padding: 0;
+    }
+    .table-body.collapsed { display: none; }
+    .table-description {
+      font-size: 13px; color: var(--muted);
+      padding: 12px 18px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .table-description.empty {
+      font-style: italic; color: var(--muted); opacity: 0.6;
+    }
+
+    /* Field rows */
+    .field-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) 90px minmax(0, 2.2fr) auto;
+      gap: 14px;
+      padding: 9px 18px;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      transition: background 120ms ease;
+    }
+    .field-row:last-child { border-bottom: none; }
+    .field-row:hover { background: var(--row-zebra); }
+    .field-row.excluded { opacity: 0.5; }
+    .field-row.queued-exclude { background: var(--bad-bg); }
+    .field-row.queued-include { background: var(--ok-bg); }
+    .field-row.hidden { display: none; }
+    .field-name {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px; font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .field-type {
+      font-size: 11px; color: var(--muted);
+      background: var(--code-bg); padding: 2px 8px; border-radius: 4px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      text-align: center;
+      width: 100%; max-width: 90px;
+    }
+    .field-desc {
+      font-size: 13px; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .field-desc.empty {
+      font-style: italic; opacity: 0.45;
+    }
+    .field-actions { display: flex; gap: 6px; }
+    .field-actions button {
+      font: inherit; font-size: 11px;
+      padding: 4px 10px; border-radius: 5px;
+      cursor: pointer; background: var(--bg);
+      color: var(--muted); border: 1px solid var(--border);
+    }
+    .field-actions button:hover {
+      color: var(--accent); border-color: var(--accent);
+    }
+    .field-actions button.queued-exclude {
+      background: var(--bad-fg); color: white; border-color: var(--bad-fg);
+    }
+    .field-actions button.queued-include {
+      background: var(--ok-fg); color: white; border-color: var(--ok-fg);
+    }
+
+    /* Search highlights */
+    .hl { background: var(--hi-bg); padding: 0 2px; border-radius: 2px; }
+    .table-card.hidden { display: none; }
+    .schema-section.hidden { display: none; }
+
+    /* Empty state */
+    .empty-state {
+      padding: 40px 20px; text-align: center;
+      color: var(--muted); font-size: 14px;
+    }
+
+    /* Sticky footer */
+    .sticky-footer {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: var(--bg-elev); border-top: 1px solid var(--border);
+      padding: 14px 32px; z-index: 100;
+      box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.05);
+      display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    }
+    .sticky-footer .pending-summary {
+      font-size: 13px; color: var(--fg);
+    }
+    .sticky-footer .pending-summary .count {
+      font-weight: 600; color: var(--accent);
+      font-variant-numeric: tabular-nums;
+    }
+    .sticky-footer .actions { margin-left: auto; display: flex; gap: 8px; }
+    .sticky-footer button {
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 8px 16px; border-radius: 6px;
+      cursor: pointer; background: var(--bg);
+      color: var(--fg); border: 1px solid var(--border);
+    }
+    .sticky-footer button.primary {
+      background: var(--accent); color: white; border-color: var(--accent);
+    }
+    .sticky-footer button.primary:disabled {
+      opacity: 0.5; cursor: not-allowed;
+    }
+    .sticky-footer button.primary:not(:disabled):hover {
+      background: var(--accent-hover); border-color: var(--accent-hover);
+    }
+
+    /* Generate-feedback modal */
+    .modal {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 200; padding: 20px;
+    }
+    .modal[hidden] { display: none; }
+    .modal-card {
+      background: var(--bg); border-radius: 12px;
+      padding: 24px; max-width: 720px; width: 100%;
+      max-height: 80vh; overflow: auto;
+      border: 1px solid var(--border);
+    }
+    .modal-card h2 { margin: 0 0 8px; font-size: 18px; }
+    .modal-card .modal-hint {
+      font-size: 13px; color: var(--muted); margin: 0 0 14px;
+    }
+    .modal-card textarea {
+      width: 100%; min-height: 200px; box-sizing: border-box;
+      font: inherit; font-size: 13px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      background: var(--code-bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 12px; resize: vertical;
+    }
+    .modal-card .modal-actions {
+      display: flex; gap: 8px; margin-top: 12px; align-items: center;
+    }
+    .modal-card .modal-actions button {
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 8px 14px; border-radius: 6px;
+      cursor: pointer; background: var(--bg);
+      color: var(--fg); border: 1px solid var(--border);
+    }
+    .modal-card .modal-actions button.primary {
+      background: var(--accent); color: white; border-color: var(--accent);
+    }
+    .modal-card .modal-actions .modal-status {
+      margin-left: auto; font-size: 12px; color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="dashboard-header">
+      <div class="logo">
+        <a href="https://agami.ai" target="_blank" rel="noopener">
+          <span class="logo-light-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+          <span class="logo-dark-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+        </a>
+      </div>
+      <h1 class="dashboard-title">{{REPORT_TITLE}}</h1>
+    </header>
+    <div class="meta">
+      Generated <span id="generated-at">{{GENERATED_AT}}</span> · profile <code>{{PROFILE}}</code> ·
+      <span id="totals-meta"></span>
+    </div>
+
+    <div class="toolbar">
+      <div class="search-row">
+        <input class="search-input" id="search" type="search"
+          placeholder="Search tables, fields, descriptions…" autocomplete="off" />
+        <span class="search-counts" id="search-counts"></span>
+      </div>
+      <div class="filter-chips" style="margin-top: 10px;">
+        <button type="button" data-filter="all" class="active">All</button>
+        <button type="button" data-filter="active">Active (not excluded)</button>
+        <button type="button" data-filter="excluded">Excluded</button>
+        <button type="button" data-filter="unreviewed">Unreviewed</button>
+        <button type="button" data-filter="queued">Queued for change</button>
+      </div>
+    </div>
+
+    <div id="schemas"></div>
+  </div>
+
+  <div class="sticky-footer">
+    <div class="pending-summary" id="pending-summary">
+      No actions queued yet — click Exclude / Include on a table or field to start.
+    </div>
+    <div class="actions">
+      <button type="button" id="btn-reset">Reset all</button>
+      <button type="button" id="btn-generate" class="primary" disabled>
+        Generate feedback for Claude
+      </button>
+    </div>
+  </div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Send to Claude</h2>
+      <p class="modal-hint">
+        Copy this block and paste it back into Claude — agami will apply each
+        change to the YAML files, run the validator, commit to
+        <code>&lt;artifacts_dir&gt;/&lt;profile&gt;/.git/</code>, and re-render.
+      </p>
+      <textarea id="modal-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" id="modal-copy" class="primary">Copy to clipboard</button>
+        <button type="button" id="modal-close">Close</button>
+        <span class="modal-status" id="modal-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const manifest = {{MANIFEST_JSON}};
+
+    // ---- Local state ----
+    // pending[qname] = "exclude" | "include" | undefined
+    //   qname is "<schema>.<table>" for tables, "<schema>.<table>.<field>" for fields
+    const pending = {};
+    let activeFilter = 'all';
+    let searchQ = '';
+
+    // ---- Helpers ----
+    function el(tag, attrs = {}, ...children) {
+      const e = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v === false || v === null || v === undefined) continue;
+        if (k === 'text') e.textContent = String(v);
+        else if (k === 'html') e.innerHTML = v;
+        else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+        else e.setAttribute(k, v);
+      }
+      for (const c of children) {
+        if (c === null || c === undefined) continue;
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      }
+      return e;
+    }
+    function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    function highlight(text, q) {
+      if (!q || !text) return document.createTextNode(text || '');
+      const re = new RegExp(escapeRegex(q), 'gi');
+      const parts = [];
+      let last = 0;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) parts.push(document.createTextNode(text.slice(last, m.index)));
+        parts.push(el('span', { class: 'hl', text: m[0] }));
+        last = re.lastIndex;
+        if (m.index === re.lastIndex) re.lastIndex++;  // zero-width safety
+      }
+      if (last < text.length) parts.push(document.createTextNode(text.slice(last)));
+      const span = document.createElement('span');
+      parts.forEach(p => span.appendChild(p));
+      return span;
+    }
+    function fmtCount(n) {
+      if (n == null) return '';
+      if (n < 1000) return String(n);
+      if (n < 1e6) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+      return (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + 'M';
+    }
+
+    // ---- Determine effective excluded state (current + pending) ----
+    function effectivelyExcluded(qname, currentlyExcluded) {
+      const p = pending[qname];
+      if (p === 'exclude') return true;
+      if (p === 'include') return false;
+      return currentlyExcluded;
+    }
+
+    // ---- Match logic for search / filter ----
+    function matchesSearch(text, q) {
+      if (!q) return true;
+      return (text || '').toLowerCase().includes(q);
+    }
+    function fieldMatches(field, table, q) {
+      return matchesSearch(field.name, q)
+          || matchesSearch(field.description, q)
+          || matchesSearch(field.type, q)
+          || matchesSearch(field.qname, q);
+    }
+    function tableMatches(table, q) {
+      if (!q) return true;
+      if (matchesSearch(table.name, q)) return true;
+      if (matchesSearch(table.description, q)) return true;
+      if (matchesSearch(table.qname, q)) return true;
+      return (table.fields || []).some(f => fieldMatches(f, table, q));
+    }
+    function passesFilter(entity, kind) {
+      // kind = "table" | "field"
+      const q = pending[entity.qname];
+      const eff = effectivelyExcluded(entity.qname, entity.excluded);
+      switch (activeFilter) {
+        case 'all':      return true;
+        case 'active':   return !eff;
+        case 'excluded': return eff;
+        case 'unreviewed':
+          if (kind === 'table') {
+            return (entity.review_state === 'unreviewed') ||
+                   (entity.fields || []).some(f => f.review_state === 'unreviewed');
+          }
+          return entity.review_state === 'unreviewed';
+        case 'queued':   return !!q;
+        default:         return true;
+      }
+    }
+
+    // ---- Render ----
+    function renderField(field, table) {
+      const q = searchQ;
+      const eff = effectivelyExcluded(field.qname, field.excluded);
+      const queued = pending[field.qname];
+      const row = el('div', {
+        class: 'field-row'
+          + (eff ? ' excluded' : '')
+          + (queued ? ' queued-' + queued : ''),
+        'data-qname': field.qname,
+      });
+      // hidden if search or filter excludes
+      const showByFilter = passesFilter(field, 'field');
+      const showBySearch = !q || fieldMatches(field, table, q);
+      if (!showByFilter || !showBySearch) row.classList.add('hidden');
+
+      const name = el('div', { class: 'field-name' });
+      name.appendChild(highlight(field.name, q));
+      row.appendChild(name);
+
+      row.appendChild(el('div', { class: 'field-type', text: field.type || '' }));
+
+      const desc = el('div', { class: 'field-desc' + ((field.description || '').trim() === '' ? ' empty' : '') });
+      const d = (field.description || '').trim();
+      desc.appendChild(highlight(d || '(no description)', d ? q : ''));
+      row.appendChild(desc);
+
+      const actions = el('div', { class: 'field-actions' });
+      const wasExcluded = field.excluded;
+      const label = eff
+        ? (queued === 'include' ? '↻ Include (queued)' : 'Include')
+        : (queued === 'exclude' ? '✗ Excluded (queued)' : 'Exclude');
+      const btn = el('button', {
+        type: 'button',
+        class: queued ? 'queued-' + queued : '',
+        onclick: (ev) => {
+          ev.stopPropagation();
+          toggleEntity(field.qname, wasExcluded);
+        },
+      }, label);
+      actions.appendChild(btn);
+      row.appendChild(actions);
+      return row;
+    }
+
+    function renderTable(table) {
+      const q = searchQ;
+      const eff = effectivelyExcluded(table.qname, table.excluded);
+      const queued = pending[table.qname];
+      const visibleFields = (table.fields || []).filter(f => {
+        const passF = passesFilter(f, 'field');
+        const passS = !q || fieldMatches(f, table, q);
+        return passF && passS;
+      });
+
+      const card = el('div', {
+        class: 'table-card'
+          + (eff ? ' excluded' : '')
+          + (queued ? ' queued-' + queued : ''),
+        'data-qname': table.qname,
+      });
+
+      // Hide entire table if it fails both table-level filter and has no visible fields
+      const tablePassesFilter = passesFilter(table, 'table');
+      const tableMatchesQ = tableMatches(table, q);
+      if (!tableMatchesQ || (!tablePassesFilter && visibleFields.length === 0)) {
+        card.classList.add('hidden');
+      }
+
+      // Header
+      const header = el('div', { class: 'table-header' });
+      const startCollapsed = !q && !queued && (table.fields || []).length > 0;
+      header.appendChild(el('span', {
+        class: 'table-toggle' + (startCollapsed ? ' collapsed' : ''),
+        text: '▼',
+      }));
+
+      const nameEl = el('div', { class: 'table-name' });
+      nameEl.appendChild(el('span', { class: 'schema-prefix', text: table.schema + '.' }));
+      nameEl.appendChild(highlight(table.name, q));
+      header.appendChild(nameEl);
+
+      if (typeof table.row_count === 'number') {
+        header.appendChild(el('div', { class: 'table-rows',
+          text: fmtCount(table.row_count) + ' rows' }));
+      }
+
+      // State badges
+      if (eff) {
+        header.appendChild(el('span', { class: 'table-state-badge badge-excluded', text: 'excluded' }));
+      } else if (table.review_state === 'unreviewed') {
+        header.appendChild(el('span', { class: 'table-state-badge badge-unreviewed', text: 'unreviewed' }));
+      } else if (table.review_state === 'stale') {
+        header.appendChild(el('span', { class: 'table-state-badge badge-stale', text: 'stale' }));
+      }
+
+      const actions = el('div', { class: 'table-actions' });
+      const wasExcluded = table.excluded;
+      const lab = eff
+        ? (queued === 'include' ? '↻ Include all (queued)' : 'Include table')
+        : (queued === 'exclude' ? '✗ Excluded (queued)' : 'Exclude table');
+      const cls = (eff ? 'action-include' : 'action-exclude') + (queued ? ' queued' : '');
+      const btn = el('button', {
+        type: 'button',
+        class: cls,
+        onclick: (ev) => { ev.stopPropagation(); toggleEntity(table.qname, wasExcluded); },
+      }, lab);
+      actions.appendChild(btn);
+      header.appendChild(actions);
+
+      // Click-to-toggle body
+      header.addEventListener('click', () => {
+        const toggle = header.querySelector('.table-toggle');
+        const body = card.querySelector('.table-body');
+        if (!body) return;
+        const isCollapsed = body.classList.contains('collapsed');
+        if (isCollapsed) {
+          body.classList.remove('collapsed');
+          toggle.classList.remove('collapsed');
+        } else {
+          body.classList.add('collapsed');
+          toggle.classList.add('collapsed');
+        }
+      });
+
+      card.appendChild(header);
+
+      // Body
+      const body = el('div', { class: 'table-body' + (startCollapsed ? ' collapsed' : '') });
+
+      const dscText = (table.description || '').trim();
+      const dsc = el('div', { class: 'table-description' + (dscText ? '' : ' empty') });
+      dsc.appendChild(highlight(dscText || '(no table description)', dscText ? q : ''));
+      body.appendChild(dsc);
+
+      (table.fields || []).forEach(f => {
+        body.appendChild(renderField(f, table));
+      });
+
+      card.appendChild(body);
+      return card;
+    }
+
+    function renderManifest() {
+      const root = document.getElementById('schemas');
+      root.innerHTML = '';
+      let totalTablesShown = 0, totalFieldsShown = 0;
+
+      (manifest.schemas || []).forEach(schema => {
+        const sec = el('div', { class: 'schema-section' });
+        const header = el('div', { class: 'schema-header' });
+        header.appendChild(document.createTextNode(schema.name));
+        header.appendChild(el('span', {
+          class: 'schema-count',
+          text: (schema.tables || []).length + ' tables',
+        }));
+        sec.appendChild(header);
+
+        let anyTableVisible = false;
+        (schema.tables || []).forEach(table => {
+          // Decorate field/table with schema info for our renderer
+          table.schema = schema.name;
+          if (!table.qname) table.qname = schema.name + '.' + table.name;
+          (table.fields || []).forEach(f => {
+            if (!f.qname) f.qname = table.qname + '.' + f.name;
+          });
+          const card = renderTable(table);
+          if (!card.classList.contains('hidden')) {
+            anyTableVisible = true;
+            totalTablesShown += 1;
+            totalFieldsShown += (table.fields || []).filter(f =>
+              passesFilter(f, 'field') && (!searchQ || fieldMatches(f, table, searchQ))
+            ).length;
+          }
+          sec.appendChild(card);
+        });
+
+        if (!anyTableVisible) sec.classList.add('hidden');
+        root.appendChild(sec);
+      });
+
+      // Empty state
+      if (totalTablesShown === 0) {
+        const empty = el('div', { class: 'empty-state',
+          text: searchQ
+            ? `Nothing matches "${searchQ}" with the current filter.`
+            : 'No entries in this filter.' });
+        root.appendChild(empty);
+      }
+
+      const counts = document.getElementById('search-counts');
+      const totals = manifest.totals || {};
+      counts.textContent = searchQ || activeFilter !== 'all'
+        ? `Showing ${totalTablesShown}/${totals.tables || 0} tables · ${totalFieldsShown} matching fields`
+        : `${totals.tables || 0} tables · ${totals.fields || 0} fields`;
+    }
+
+    function renderMeta() {
+      const totals = manifest.totals || {};
+      document.getElementById('totals-meta').textContent =
+        `${totals.schemas || 0} schemas · ${totals.tables || 0} tables · ${totals.fields || 0} fields`;
+    }
+
+    // ---- Actions ----
+    function toggleEntity(qname, wasExcluded) {
+      // Three-state: undefined → opposite of current → undefined
+      const desired = wasExcluded ? 'include' : 'exclude';
+      if (pending[qname] === desired) {
+        delete pending[qname];
+      } else {
+        pending[qname] = desired;
+      }
+      renderManifest();
+      updateFooter();
+    }
+
+    function pendingCounts() {
+      let excludeTables = 0, includeTables = 0, excludeColumns = 0, includeColumns = 0;
+      Object.entries(pending).forEach(([qname, action]) => {
+        const parts = qname.split('.');
+        const isField = parts.length >= 3;   // schema.table.field
+        if (action === 'exclude') {
+          if (isField) excludeColumns++; else excludeTables++;
+        } else {
+          if (isField) includeColumns++; else includeTables++;
+        }
+      });
+      return { excludeTables, includeTables, excludeColumns, includeColumns };
+    }
+
+    function updateFooter() {
+      const c = pendingCounts();
+      const total = c.excludeTables + c.includeTables + c.excludeColumns + c.includeColumns;
+      const sum = document.getElementById('pending-summary');
+      const btn = document.getElementById('btn-generate');
+      if (total === 0) {
+        sum.textContent = 'No actions queued yet — click Exclude / Include on a table or field to start.';
+        btn.disabled = true;
+      } else {
+        const parts = [];
+        if (c.excludeTables) parts.push(`${c.excludeTables} table${c.excludeTables === 1 ? '' : 's'} to exclude`);
+        if (c.includeTables) parts.push(`${c.includeTables} table${c.includeTables === 1 ? '' : 's'} to include`);
+        if (c.excludeColumns) parts.push(`${c.excludeColumns} column${c.excludeColumns === 1 ? '' : 's'} to exclude`);
+        if (c.includeColumns) parts.push(`${c.includeColumns} column${c.includeColumns === 1 ? '' : 's'} to include`);
+        sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
+        btn.disabled = false;
+      }
+    }
+
+    function generateFeedback() {
+      // Group by action / kind for compact emit
+      const buckets = { excludeT: [], includeT: [], excludeC: [], includeC: [] };
+      Object.entries(pending).forEach(([qname, action]) => {
+        const isField = qname.split('.').length >= 3;
+        if (action === 'exclude' && isField) buckets.excludeC.push(qname);
+        else if (action === 'exclude') buckets.excludeT.push(qname);
+        else if (action === 'include' && isField) buckets.includeC.push(qname);
+        else if (action === 'include') buckets.includeT.push(qname);
+      });
+      const lines = [];
+      if (buckets.excludeT.length) lines.push('exclude tables: ' + buckets.excludeT.sort().join(', '));
+      if (buckets.includeT.length) lines.push('include tables: ' + buckets.includeT.sort().join(', '));
+      if (buckets.excludeC.length) lines.push('exclude columns: ' + buckets.excludeC.sort().join(', '));
+      if (buckets.includeC.length) lines.push('include columns: ' + buckets.includeC.sort().join(', '));
+      if (lines.length) lines.push('done');
+      document.getElementById('modal-text').value = lines.join('\n') + '\n';
+      document.getElementById('modal').hidden = false;
+      document.getElementById('modal-status').textContent = '';
+    }
+
+    // ---- Wire up ----
+    document.getElementById('search').addEventListener('input', (ev) => {
+      searchQ = ev.target.value.trim().toLowerCase();
+      renderManifest();
+    });
+    document.querySelectorAll('.filter-chips button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        activeFilter = btn.getAttribute('data-filter');
+        document.querySelectorAll('.filter-chips button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderManifest();
+      });
+    });
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      Object.keys(pending).forEach(k => delete pending[k]);
+      renderManifest();
+      updateFooter();
+    });
+    document.getElementById('btn-generate').addEventListener('click', generateFeedback);
+    document.getElementById('modal-close').addEventListener('click', () => {
+      document.getElementById('modal').hidden = true;
+    });
+    document.getElementById('modal-copy').addEventListener('click', async () => {
+      const txt = document.getElementById('modal-text').value;
+      const status = document.getElementById('modal-status');
+      try {
+        await navigator.clipboard.writeText(txt);
+        status.textContent = '✓ Copied — paste in Claude chat.';
+        status.style.color = 'var(--ok-fg)';
+      } catch (e) {
+        document.getElementById('modal-text').select();
+        status.textContent = '⚠ Clipboard blocked — text selected; press ⌘/Ctrl+C.';
+        status.style.color = 'var(--warn-fg)';
+      }
+    });
+
+    // ---- First render ----
+    renderMeta();
+    renderManifest();
+    updateFooter();
+  </script>
+</body>
+</html>

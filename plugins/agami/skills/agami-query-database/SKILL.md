@@ -128,6 +128,17 @@ relationships_by_endpoints : { (from, to) → relationship object }             
 metrics_by_name  : { metric.name → metric object }
 ```
 
+**Filter `rejected` entries out of every index above.** An entry whose `agami.review_state == "rejected"` was excluded by the curator via `/agami-review` or `/agami-model`. The runtime must skip it everywhere:
+
+- **Datasets with `review_state: rejected` → drop from `datasets_by_name` and `datasets_by_qname`.** They never appear in the schema context the SQL generator sees, never get loaded lazily in Phase 2b, never participate in join paths. Also drop every field inside that dataset and every relationship that names it as an endpoint — they're unreachable now.
+- **Fields with `review_state: rejected` (per-column exclusion) → drop from `fields_by_qname`.** Do not include the field's name or description in the schema context for its parent dataset. The dataset stays, but the field is hidden from the LLM.
+- **Relationships with `review_state: rejected` → drop from `relationships_by_endpoints`.** The join-path picker will route around them.
+- **Metrics with `review_state: rejected` → drop from `metrics_by_name`.** Same posture as rejected named_filters in `agami.named_filters[]` (filtered out of the model-level extension during this index step).
+
+Skip silently — no warning, no log line. Rejected entries are the curator's explicit choice; surfacing them in chat would re-introduce the noise the exclusion was meant to remove. The receipt panel doesn't mention rejected entries either.
+
+`stale` entries (drift) are also dropped from these indexes, but with a chat warning when a query would have touched one — *"This query would have used `<entity>`, but it's marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-review to reconcile."*
+
 Cross-schema relationships from `index.yaml.cross_schema_relationships[]` are merged into `relationships_by_endpoints` keyed by qualified `<schema>.<dataset>` endpoints. Within-schema relationships are keyed by bare `<dataset>` names. The graph traversal in Phase 2b's join-path picker handles both transparently.
 
 If two schemas have a same-named dataset, prefer the qualified form in prompts and warn the user once: `Note: 'users' exists in both 'public' and 'archive' — disambiguating by schema in this query.`
