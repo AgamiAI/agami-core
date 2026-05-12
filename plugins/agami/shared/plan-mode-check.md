@@ -1,6 +1,6 @@
 # Plan-mode preflight — read this before invoking any agami skill
 
-Claude Code's **Plan mode** restricts the assistant to read-only tools — no `Edit`, no `Write`, and Bash is locked down to commands the host considers safe. Every agami skill except trivial reopen-chart flows needs at least one of those: `agami-init` writes credentials.example (legacy `setup` mode), `agami-connect` writes the semantic model, `agami-query-database` writes charts and runs `psql`/`mysql`/`snowsql` via Bash, `agami-save-correction` writes corrections.
+Claude Code's **Plan mode** restricts the assistant to read-only tools — no `Edit`, no `Write`, and Bash is locked down to commands the host considers safe. Every agami skill except trivial reopen-chart flows needs at least one of those: `agami-connect` writes the credentials template (Phase 0a) and the semantic model, `agami-query-database` writes charts and runs `psql`/`mysql`/`snowsql` via Bash, `agami-save-correction` writes corrections, `agami-review` + `agami-model` edit YAMLs.
 
 If a skill starts in plan mode and barrels ahead, the failure happens partway through (a Bash or Write call gets blocked), the partial state is confusing, and the user has to start over. The fix: every skill detects plan mode at entry and asks the user to switch **before** doing any work.
 
@@ -45,21 +45,13 @@ After the user picks `Auto mode` or `Edit Automatically`:
 
 Plan mode CAN proceed for read-only flows. Each SKILL declares what's possible:
 
-### `agami-init`
-
-Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Earlier versions of this doc had agami-init emit a written plan as a fallback; that turned out to be noise — users in plan mode are almost always there by accident, and what they actually want is to switch and proceed, not read a description of what would have happened. Surface ONLY this:
-
-> I can't run setup in plan mode. Press Shift+Tab to switch to **Auto** or **Edit Automatically** mode, then send any message to continue.
-
-Then end the turn. No plan, no modal, no follow-up.
-
 ### `agami-connect`
 
-Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Introspection requires Bash (`psql -c`, etc.) and writes (the per-schema yaml files). Credential setup is handled by `agami-init` (a separate skill) — agami-connect itself doesn't write credentials. Surface ONLY this:
+Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Both the credential-bootstrap (Phase 0a — writes `~/.agami/credentials.example` + `.config`) and introspection (Bash for `psql -c`, etc., plus writes to the per-schema yaml files) need Write + Bash access. Surface ONLY this:
 
-> I can't introspect in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`.
+> I can't set up agami in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me. agami-connect needs to write the credentials template (first run) and the semantic model YAMLs.
 
-Then end the turn. No plan file describing what would happen — that's noise the user didn't ask for.
+Then end the turn. No plan file describing what would happen — that's noise the user didn't ask for. (Historical note: `/agami-init` used to be a separate skill with its own plan-mode refusal text; it was folded into `/agami-connect` Phase 0a in 2026-05.)
 
 ### `agami-query-database`
 

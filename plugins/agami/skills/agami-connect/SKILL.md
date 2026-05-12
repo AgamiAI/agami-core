@@ -1,13 +1,13 @@
 ---
 name: agami-connect
-description: "Introspects the user's database and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model at the per-profile YAML file inside the .agami home directory. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB) at the per-profile examples file, then runs one demo query so the user immediately sees the skill working. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
-when_to_use: "Auto-invoked by agami-query-database the first time it runs (when the semantic model YAML is missing). Invoke explicitly when the user says 'connect to my database', 'introspect the schema', 'reload schema', 'add a new database', or after the user changes their schema and wants the model refreshed. Requires agami-init to have run first (credentials must exist)."
+description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes ~/.agami/credentials.example for the user to fill in), introspects the live DB, and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model under <artifacts_dir>/<profile>/. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB), then renders an examples-validation dashboard. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
+when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect the schema' / 'reload schema' / 'add a new database', or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query-database the first time it runs (when the semantic model is missing). This skill handles credential setup (formerly /agami-init), introspection, and seed-example validation — one entry point for everything before the user can query."
 argument-hint: "[reintrospect | profile NAME]"
 ---
 
 # agami connect
 
-**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** All four agami slash commands (`/agami-init`, `/agami-connect`, `/agami-query-database`, `/agami-save-correction`) work. Never write the un-prefixed forms (`/init`, `/connect`, etc.) or colon forms (`/agami:connect`) — those don't exist. For chat replies, prefer natural language ("say 'reload the schema'", "say 'introspect my database'") — the agami-connect skill's `when_to_use` matcher routes correctly without an explicit slash command.
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** Agami slash commands: `/agami-connect`, `/agami-query-database`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/init`, `/connect`, etc.) or colon forms (`/agami:connect`) — those don't exist. **`/agami-init` is no longer a separate skill — its setup flow is now Phase 0 of this skill (`/agami-connect` handles credentials + introspect end-to-end).** For chat replies, prefer natural language ("say 'reload the schema'", "say 'introspect my database'") — the agami-connect skill's `when_to_use` matcher routes correctly without an explicit slash command.
 
 You are setting up the agami semantic model for the user's database. Goal: by the end, there is a **per-schema OSI v0.1.1 model** at `<artifacts_dir>/<profile>/` (`index.yaml` + one `<schema>.yaml` per database schema), a seeded examples library at `<artifacts_dir>/<profile>/examples.yaml`, an `ORGANIZATION.md` template the user can edit, and the user has seen one demo query execute end-to-end.
 
@@ -54,7 +54,7 @@ Use `content` for the imperative form and `activeForm` for the present-continuou
 
 **Mark each todo `in_progress` when its phase starts and `completed` immediately when the phase ends.** Exactly one `in_progress` at a time. Never batch completions.
 
-**Skip the seeding if the todo list already contains these items** (e.g., the skill is resuming a mid-run state because the user re-invoked after Phase 0 bailed to agami-init for credentials). Detect by inspecting the current todo list: if it already has todos matching this skill's phases (by content), don't re-create — just continue marking progress on the existing list.
+**Skip the seeding if the todo list already contains these items** (e.g., the skill is resuming a mid-run state because the user re-invoked after Phase 0 wrote the credentials template and waited for the user to fill it in). Detect by inspecting the current todo list: if it already has todos matching this skill's phases (by content), don't re-create — just continue marking progress on the existing list.
 
 When `$ARGUMENTS == reintrospect`, the same todos apply — re-introspection runs through the same phases.
 
@@ -81,9 +81,9 @@ If plan mode is not active, skip this phase silently and go to Phase 0.
 These are non-negotiable. They override every other instruction in this file when they conflict.
 
 1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or, if set, in `AGAMI_DATABASE_URL`). Never connect to anything else. Never probe `localhost` "to see if there's a database running there" unless the credentials file explicitly says `host = localhost`. Never substitute defaults for missing credential fields.
-2. **Never ask the user for host / port / database / user / password values in chat.** Not even "as a temporary thing while we set up". Credentials live in `~/.agami/credentials` only — that's the contract. The single authorized credential-collection path is `agami-init`, which writes a `credentials.example` template the user fills in and saves locally. This skill (`agami-connect`) only *reads* credentials, never *collects* them.
+2. **Never ask the user for host / port / database / user / password values in chat.** Not even "as a temporary thing while we set up". Credentials live in `~/.agami/credentials` only — that's the contract. The single authorized credential-collection path is **Phase 0a of this skill**, which writes a `credentials.example` template the user fills in and saves locally. Phase 0a never reads passwords inline — it writes a template, surfaces a hand-off message, and ends the turn.
 3. **Never scan or guess.** No `pgrep`, no `ps`, no `find /` for databases, no `ls /Applications/Postgres.app`, no `ls /Library/PostgreSQL`, no listing port-listeners, no testing connections to common hostnames. The only acceptable Bash probes in this phase are `which <tool>` (to find a CLI binary on `PATH`) and `python3 -c 'import <module>'` (to test a driver). Nothing else.
-4. **If credentials are missing for the active profile, hand off to `agami-init`** and stop this skill. agami-init runs the DB-type picker, writes the per-DB-type credentials template, and detects the runtime tool. The user fills in `~/.agami/credentials`, runs `chmod 600`, and re-invokes this skill (or asks a data question — `agami-query-database` auto-invokes us). Do NOT prompt for the connection URL in chat from here.
+4. **If credentials are missing for the active profile, run the inline first-time-setup at Phase 0a (below).** That sub-phase runs the DB-type picker, writes the per-DB-type `credentials.example` template, sets up `~/.agami/`, picks the runtime tool, and writes `~/.agami/.config`. After the user fills in the template, they re-invoke this skill (or just ask a data question — `agami-query-database` auto-invokes us). **Never prompt for the connection URL inline in chat** — credentials always go through the template file.
 5. **NEVER put the password (or any credential field) in a Bash command line.** That includes `export PGPASSWORD='<value>'`, `export MYSQL_PWD='<value>'`, `psql -W <password>`, `mysql -p<password>`, or any heredoc form that interpolates the password into stdin. Hosts render Bash tool calls in chat — anything in the command leaks. Use the auth files generated by `scripts/setup_pgauth.py` for runtime queries: `PGPASSFILE=$HOME/.agami/.pgpass psql -h ... -U ... -d ... -c "$SQL" --csv` (psql) or `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> ...` (mysql). For the Python driver path use `python3 scripts/execute_sql.py`. See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
 
 If you find yourself reaching for any command that doesn't fit the rules above, stop and re-read this section.
@@ -91,7 +91,7 @@ If you find yourself reaching for any command that doesn't fit the rules above, 
 ### Preflight steps
 
 1. **Resolve `<profile>`** in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"main"` (current default; older installs may still have `"default"` and that continues to work). The OSI `semantic_model[].name` MUST equal the resolved `<profile>`.
-2. **Credentials check (binding).** Read `~/.agami/credentials` if present and look for the `[<profile>]` section. If the file is missing, OR the section for the active profile is missing, OR `AGAMI_DATABASE_URL` is unset → **invoke `agami-init` and stop this skill.** Do not continue. Do not probe anything. Surface a one-liner before the handoff: *"No credentials yet for profile `<profile>` — running setup."*. If credentials exist, apply the chmod check (refuse if world-readable).
+2. **Credentials check (binding).** Read `~/.agami/credentials` if present and look for the `[<profile>]` section. If the file is missing, OR the section for the active profile is missing, OR `AGAMI_DATABASE_URL` is unset → **run Phase 0a (`First-time credential bootstrap`) inline and stop this skill.** Do not continue. Do not probe anything. Surface a one-liner before the handoff: *"No credentials yet for profile `<profile>` — running setup."*. If credentials exist, apply the chmod check (refuse if world-readable).
 3. **Resolve the connection fields** from the credentials file's `[<profile>]` section (or parse from `AGAMI_DATABASE_URL`):
    - **postgres / redshift / mysql:** either `url = ...` (DSN form, recommended for cloud DBs) or per-field `host`, `port`, `database`, `user`, `password` (+ optional `sslmode`).
    - **snowflake:** either DSN `url = snowflake://...` or per-field `account`, `user`, `password` (or `authenticator`), plus optional `warehouse`, `database`, `schema`, `role`. **No `host`/`port` for Snowflake** — the connector uses the account identifier directly.
@@ -99,10 +99,323 @@ If you find yourself reaching for any command that doesn't fit the rules above, 
    - **sqlite:** `path` (absolute).
 
    Never substitute a value that's missing — surface a clear "your credentials file is missing field X for profile Y; please add it" message and stop.
-4. **Tool detection.** Look up the cached connection method and tool paths from `~/.agami/.config`. If absent, run tool detection per [`agami-init/SKILL.md → Phase 3 (tool detection)`](../agami-init/SKILL.md#phase-3-tool-detection).
+4. **Tool detection.** Look up the cached connection method and tool paths from `~/.agami/.config`. If absent, run tool detection per Phase 0a below (the same logic that ran on first-time setup).
 5. **Resolve `<artifacts_dir>`** per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All semantic-model files (`index.yaml`, `<schema>.yaml`, `examples.yaml`, `ORGANIZATION.md`) for this skill go inside `<artifacts_dir>/<profile>/`. The directory is created lazily — if it doesn't exist yet, `mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`.
 6. **Update-check (best-effort, non-blocking).** Run the version probe from [`shared/version-check.md`](../../shared/version-check.md). If a newer plugin version exists on `main`, surface a one-line note ("agami X.Y.Z is available — run `/plugin marketplace update litebi && /reload-plugins`"). Never block on a network failure or stale local file — the probe is informational only.
 7. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch. **Hand-edits the user made (descriptions, ai_context, choice_fields, metrics, trust-layer sign-offs) MUST be preserved** — re-introspection only updates what the DB unambiguously tells us (table list, columns, types, PK, FK).
+
+---
+
+## Phase 0a: First-time credential bootstrap
+
+**This sub-phase runs only when step 2 of the preflight above failed (credentials missing).** Formerly this lived in a separate `/agami-init` skill — folded in here so the user has a single entry point.
+
+If `~/.agami/credentials` already exists with a `[<profile>]` section, **skip this entire Phase 0a** and continue with the preflight's remaining steps (chmod check, field resolution, tool detection from cache, etc.).
+
+### 0a.1 — Set up `~/.agami/`
+
+```bash
+mkdir -p ~/.agami
+chmod 700 ~/.agami
+```
+
+### 0a.2 — Ask the database type
+
+Skip this question if `AGAMI_DATABASE_URL` is set (the env var carries everything). Otherwise, use **AskUserQuestion**:
+
+> What kind of database are you connecting to?
+
+**No `(Recommended)` marker on this question** — fact-of-environment, not a preference. **Cap at 4 hard options + Other** so AskUserQuestion fits on one screen.
+
+| label | description |
+|---|---|
+| `PostgreSQL` | Postgres + Postgres-compatible: Supabase, Neon, RDS, Aurora, Cloud SQL, Timescale, and **Amazon Redshift** (Postgres wire protocol, port 5439, SSL required by default). |
+| `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
+| `Snowflake` | Snowflake. Account identifier instead of host. |
+| `BigQuery` | Google BigQuery. Auth via a service-account JSON key file (`service_account_path`) or Application Default Credentials. |
+| `Other (Other field)` | Anything else, or paste a DSN. Accepts `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `bigquery://`, `sqlite:///abs/path`, or a plain `.db` / `.sqlite` file path for **SQLite**. |
+
+Bind to `$DB_TYPE` (one of `postgres` | `mysql` | `snowflake` | `bigquery` | `sqlite` | `dsn` | `other`).
+
+**Routing**:
+- `PostgreSQL` → `$DB_TYPE = postgres`. If the user later enters port `5439` or a hostname matching `*.redshift.*.amazonaws.com`, transparently re-bind to `redshift`.
+- `MySQL`, `Snowflake`, `BigQuery` → straight pass-through.
+- `Other` → parse the free-form input: DSN scheme prefix → derive `db_type` from the scheme; `.db` / `.sqlite` suffix or absolute path → SQLite; unsupported DB names (`clickhouse`, `databricks`, `oracle`, `mssql`, `mongodb`) → surface "not supported yet, supported: Postgres / Redshift / MySQL / Snowflake / BigQuery / SQLite" and stop.
+
+### 0a.3 — Pick a profile name
+
+```
+> What should I call this database connection? You'll use this name to switch between databases later (e.g., AGAMI_PROFILE=production).
+```
+
+Options (mark `main` Recommended, place first; auto-Other captures any short custom name):
+
+| label | description |
+|---|---|
+| `main (Recommended)` | Generic catch-all. Good if you only have one DB. |
+| `production` | Prod / live database. |
+| `staging` | Staging / dev / pre-prod. |
+
+Validate the chosen name: lowercase letters / digits / dashes / underscores, 1–32 chars. Strip whitespace, lowercase the input. Bind to `$PROFILE_NAME`. The profile name persists to `~/.agami/.config.active_profile` later in this sub-phase.
+
+### 0a.4 — Write `~/.agami/credentials.example`
+
+Use the **Write tool**. The header is fixed; the active section body depends on `$DB_TYPE`. Substitute `[$PROFILE_NAME]` for the section header.
+
+**Shared header** (always written first):
+
+```ini
+# ~/.agami/credentials
+# Fill in your values and run: chmod 600 ~/.agami/credentials
+# Format reference: plugins/agami/shared/credentials-format.md
+# Switch profiles with AGAMI_PROFILE=<name>.
+```
+
+**`$DB_TYPE = postgres`** — lead with the URL form (Supabase / Neon / RDS hand you one):
+
+```ini
+# Postgres profile.
+[$PROFILE_NAME]
+type = postgres
+url  = postgresql://user:password@host:5432/database
+# (Accepts postgresql://, postgres://, postgresql+asyncpg://, postgresql+psycopg2://)
+# (Query params like ?sslmode=require are honored automatically.)
+
+# --- OR fill in fields instead of `url` (typical for self-hosted) ---
+# host     = your-host.example.com
+# port     = 5432
+# database = your-database-name
+# user     = your-username
+# password = your-password
+# sslmode  = require        # uncomment for cloud DBs
+```
+
+**`$DB_TYPE = redshift`**:
+
+```ini
+# Redshift profile.
+# Provisioned cluster: your-cluster.<region>.redshift.amazonaws.com (port 5439)
+# Redshift Serverless: <wg>.<acct>.<region>.redshift-serverless.amazonaws.com
+[$PROFILE_NAME]
+type = redshift
+url  = redshift://user:password@your-cluster.us-west-2.redshift.amazonaws.com:5439/db
+
+# --- OR fields ---
+# host     = your-cluster.example.region.redshift.amazonaws.com
+# port     = 5439
+# database = your-database
+# user     = your-username
+# password = your-password
+# sslmode  = require
+```
+
+**`$DB_TYPE = snowflake`**:
+
+```ini
+# Snowflake profile.
+# Account formats: xy12345 (legacy) | xy12345.us-east-1.aws | myorg-myaccount
+# Do NOT add .snowflakecomputing.com — the connector appends it.
+[$PROFILE_NAME]
+type      = snowflake
+account   = your-account-locator
+user      = your-username
+password  = your-password
+warehouse = COMPUTE_WH
+database  = ANALYTICS
+schema    = PUBLIC
+role      = ANALYST_ROLE
+
+# For SSO (Okta / Azure AD), remove the password line above and use:
+# authenticator = externalbrowser
+
+# OR — DSN form:
+# url = snowflake://user:pass@xy12345.us-east-1.aws/ANALYTICS/PUBLIC?warehouse=COMPUTE_WH&role=ANALYST_ROLE
+```
+
+**`$DB_TYPE = mysql`**:
+
+```ini
+# MySQL profile.
+[$PROFILE_NAME]
+type = mysql
+url  = mysql://user:password@host:3306/database
+# (mysql+pymysql:// also works; the +driver suffix is stripped.)
+
+# --- OR fields ---
+# host     = your-host.example.com
+# port     = 3306
+# database = your-database-name
+# user     = your-username
+# password = your-password
+```
+
+**`$DB_TYPE = bigquery`**:
+
+```ini
+# Google BigQuery profile.
+# Auth: service-account JSON key (recommended) or Application Default Credentials.
+# Create a key: GCP Console → IAM → Service Accounts → BigQuery Job User +
+# Data Viewer roles → Keys → Add Key → JSON. Download, chmod 600.
+[$PROFILE_NAME]
+type = bigquery
+project = your-gcp-project-id
+service_account_path = /absolute/path/to/your-sa-key.json
+# Optional default dataset (so SQL can use bare `table_name`).
+# dataset = your_default_dataset
+# Optional location (US / EU / asia-northeast1 / etc.).
+# location = US
+
+# OR — DSN URL:
+# url = bigquery://your-gcp-project-id/your_default_dataset?service_account=/path/to/key.json&location=US
+```
+
+**Important for BigQuery**: `chmod 600 /path/to/your-sa-key.json` after downloading. The JSON contains a private key. agami's `execute_sql.py` surfaces a warning if it's world-readable.
+
+**`$DB_TYPE = sqlite`**:
+
+```ini
+[$PROFILE_NAME]
+type = sqlite
+path = /absolute/path/to/your/database.db
+```
+
+**`$DB_TYPE = dsn`** (Other → DSN string):
+
+```ini
+[$PROFILE_NAME]
+url = paste-your-connection-string-here
+# Examples:
+#   postgresql://user:pass@host:5432/db
+#   postgresql+asyncpg://postgres.<ref>:<pw>@aws-1-<region>.pooler.supabase.com:5432/postgres
+#   mysql://user:pass@host:3306/db
+#   bigquery://your-gcp-project/your_dataset?service_account=/abs/path/key.json
+#   sqlite:///absolute/path.db
+```
+
+**Always finish** with the "additional profiles" hint — one commented block, not three:
+
+```ini
+
+# Add more profiles by appending another [section]. Switch with AGAMI_PROFILE=<name>.
+# Example:
+# [staging]
+# type = postgres
+# url  = postgresql://readonly:pass@staging-db.example.com:5432/mydb
+```
+
+### 0a.5 — Tool detection
+
+Detect which database tool(s) are available **only** with these commands:
+
+```bash
+which psql 2>/dev/null
+which mysql 2>/dev/null
+which snowsql 2>/dev/null
+which sqlite3 2>/dev/null
+which duckdb 2>/dev/null
+which bq 2>/dev/null
+python3 -c 'import psycopg2' 2>/dev/null && echo "psycopg2 OK"
+python3 -c 'import pymysql' 2>/dev/null && echo "pymysql OK"
+python3 -c 'import snowflake.connector' 2>/dev/null && echo "snowflake OK"
+python3 -c 'import google.cloud.bigquery' 2>/dev/null && echo "bq-python OK"
+```
+
+If `which psql` returns empty, try the common Homebrew location once: `ls /opt/homebrew/Cellar/libpq/*/bin/psql /opt/homebrew/opt/libpq/bin/psql 2>/dev/null | head -1`. Same for `/opt/homebrew/opt/mysql-client/bin/mysql`. **Do not** scan beyond those exact globs.
+
+**Forbidden** (do NOT run): `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, `ls /Library/PostgreSQL`, port-listener scans, connection tests to `localhost`. The user's database is the one they're about to put in `~/.agami/credentials` — no defaults, no guessing.
+
+Choose the connection method based on what's installed AND `$DB_TYPE`, per [`shared/connection-reference.md → How agami picks a connection method`](../../shared/connection-reference.md):
+
+1. **Native CLI** — `psql` (postgres / redshift), `mysql` (mysql), `snowsql` (snowflake), `bq` (bigquery), `sqlite3` (sqlite)
+2. **DuckDB** — universal binary; scans postgres / mysql / sqlite (not Snowflake or BigQuery)
+3. **Python driver** — `scripts/execute_sql.py` (psycopg2 / pymysql / snowflake-connector-python / google-cloud-bigquery / stdlib sqlite3)
+
+If none of these is available, surface the "no tool available" template from [`shared/connection-reference.md → When no tool is available`](../../shared/connection-reference.md) and offer to install via Bash (`brew install postgresql`, `brew install mysql`, etc.). **Confirm via AskUserQuestion** before running brew; don't install silently.
+
+### 0a.6 — Ask for `<artifacts_dir>`
+
+Ask via **AskUserQuestion** before writing `.config`. Two named options (never label one "Other" — AskUserQuestion auto-adds an Other with free-text input):
+
+> Where should agami save your semantic model, examples, and preferences?
+>
+> This is the **parent directory** for ALL your database profiles — each profile lands in a subdirectory (`<artifacts_dir>/finbud/`, `<artifacts_dir>/staging/`, etc.). Pick a profile-neutral path. These are non-secret files; pointing at a folder inside a git repo lets your team commit them and share. Credentials stay in `~/.agami/` either way.
+
+| label | description |
+|---|---|
+| `~/agami-artifacts/ (Recommended)` | Default — profile-neutral folder in home. Each profile gets `~/agami-artifacts/<profile>/`. |
+| `~/Documents/agami/` | If you keep code under `~/Documents/`. Each profile at `~/Documents/agami/<profile>/`. |
+
+The auto-added **Other** captures any other absolute path (e.g., inside a team repo).
+
+Validate the chosen path:
+- Must be absolute.
+- Must NOT be inside `~/.agami/` (refuse: "That's the secrets directory — pick a different location").
+- Parent must exist or be creatable.
+
+### 0a.7 — Write `~/.agami/.config`
+
+```json
+{
+  "schema_version": 1,
+  "tier": "<cli | duckdb | python>",
+  "host": "<claude-code-cli | unknown>",
+  "active_profile": "$PROFILE_NAME",
+  "artifacts_dir": "<resolved absolute path>",
+  "tool_paths": {
+    "psql": "/opt/homebrew/Cellar/libpq/.../bin/psql",
+    "mysql": null,
+    "snowsql": null,
+    "sqlite3": "/usr/bin/sqlite3",
+    "duckdb": null,
+    "bq": null,
+    "python3": "/usr/bin/python3"
+  },
+  "tool_imports": {
+    "psycopg2": false,
+    "pymysql": false,
+    "snowflake-connector-python": false,
+    "google-cloud-bigquery": false
+  },
+  "detected_at": "<ISO8601 UTC, from `date -u +\"%Y-%m-%dT%H:%M:%SZ\"`>"
+}
+```
+
+`chmod 600 ~/.agami/.config`.
+
+### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
+
+After `artifacts_dir` is resolved, check for `<artifacts_dir>/USER_MEMORY.md`. If missing, create the parent (`mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`) and write the default seed (per [`shared/user-memory-format.md → Default seed`](../../shared/user-memory-format.md)) via Write, `chmod 644` (sharable, not secret).
+
+Don't overwrite an existing file. **Migration:** if `~/.agami/USER_MEMORY.md` exists from a v1.1 install, move it: `mv "$HOME/.agami/USER_MEMORY.md" "$artifacts_dir/USER_MEMORY.md"`. Surface a one-line note about the move.
+
+### 0a.9 — Hand-off + END THE TURN
+
+```
+✓ ~/.agami/ ready (chmod 700)
+✓ Credentials template written to ~/.agami/credentials.example
+✓ Tool detected: <psql / mysql / snowsql / bq / sqlite3 / duckdb / python> (<tier>)
+✓ Artifacts dir: <resolved path>
+
+Next:
+1. Edit ~/.agami/credentials.example with your real connection details
+2. Save it as ~/.agami/credentials
+3. Run: chmod 600 ~/.agami/credentials
+4. Come back and ask a data question — I'll pick up the introspect from here.
+```
+
+**End the turn.** The user fills in the file and re-invokes (or asks a data question — query-database auto-invokes us, and the preflight's step 2 will pass this time). Do NOT continue to Phase 1.
+
+### 0a.10 — On re-entry (credentials now exist)
+
+When the user comes back, the preflight's step 2 succeeds. Continue to step 3 (resolve connection fields) and beyond.
+
+**Also run `setup_pgauth.py`** before the first native-CLI query — this writes the provider-native auth files (`~/.agami/.pgpass`, `~/.agami/.mysql.cnf`) that psql/mysql read silently, so we never put passwords on the command line:
+
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --all
+```
+
+(Or `--profile <name>` for one specific profile.) Idempotent and safe to re-run.
 
 ---
 
@@ -191,7 +504,7 @@ fi
     | `Verify and continue` | Validate the existing model (no DB queries), then continue to seed-examples / dashboard offer. |
     | `Skip to seeding examples` | Skip introspection and validation. Regenerate examples.yaml and run the validation dashboard. |
     | `Set up a different database (new profile)` | Add a separate profile for another DB (e.g., staging, analytics). Leaves `<profile>` untouched and starts the full first-run flow for the new profile name. |
-  - **If the user picks `Set up a different database`:** ask for the new profile name in a follow-up inline message: *"What should I call the new profile? (lowercase letters / digits / dashes / underscores, 1–32 chars; this is the name you'll use in `AGAMI_PROFILE=<name>` to switch between DBs.)"* Default-suggest names based on common patterns (`staging`, `analytics`, `production`) if the user seems unsure. Then set the in-process `<profile>` variable to the new name, invoke `agami-init` to walk the DB-type picker + write `credentials.example` for a new `[<new-name>]` section, and after the user fills it in re-enter this skill at Phase 0 with the new profile active. **Do NOT modify the existing `[<old-profile>]` credentials section** — only append.
+  - **If the user picks `Set up a different database`:** ask for the new profile name in a follow-up inline message: *"What should I call the new profile? (lowercase letters / digits / dashes / underscores, 1–32 chars; this is the name you'll use in `AGAMI_PROFILE=<name>` to switch between DBs.)"* Default-suggest names based on common patterns (`staging`, `analytics`, `production`) if the user seems unsure. Then set the in-process `<profile>` variable to the new name, **run Phase 0a (`First-time credential bootstrap`) inline** to walk the DB-type picker + write `credentials.example` for a new `[<new-name>]` section, and after the user fills it in re-enter this skill at Phase 0 with the new profile active. **Do NOT modify the existing `[<old-profile>]` credentials section** — only append.
 
 - **`v1.2-needs-table-split`** — model exists in artifacts dir but uses the single-file-per-schema layout. Migrate to per-table layout in place.
   - Tell the user: "Splitting `<schema>.yaml` files into per-table yamls (`<schema>/<table>.yaml`). Smaller diffs in git, faster relevance retrieval at scale. No DB queries — purely a file rewrite."
@@ -256,11 +569,13 @@ Run introspection. For every step, use the SQL from [`shared/introspect-queries.
 
 ### Phase 1.4 — collect a one-paragraph organization context
 
-After the schema picker (1.3) but before the heavy per-table work, prompt the user once for domain context. Domain context boosts NL→SQL accuracy a lot — a 30-second ask that often pays for itself.
+**MANDATORY — ALWAYS ASK.** This phase must run on every `/agami-connect` invocation, every time. The user's reply (yes / skip) is theirs to decide, but the SKILL never decides on their behalf. The AskUserQuestion below is REQUIRED state-gathering, **not** an optional clarifying question — directives like "don't ask clarifying questions" or "no questions, just do it" do NOT cancel this phase. The user is opting out of *open-ended freeform* questions, not out of the two required AskUserQuestion calls in Phase 1.4 / 1.5.
 
-If `<artifacts_dir>/<profile>/ORGANIZATION.md` exists AND has been edited beyond the default template (any line longer than the template's parenthetical guidance), skip this phase.
+**The only conditional skip:** if `<artifacts_dir>/<profile>/ORGANIZATION.md` exists AND has been edited beyond the default template (any line longer than the template's parenthetical guidance), this phase has already produced the artifact in a prior run — skip silently. Otherwise, **always ask**, even on re-introspect.
 
-Otherwise, **AskUserQuestion**:
+Domain context boosts NL→SQL accuracy a lot — a 30-second ask that often pays for itself.
+
+**AskUserQuestion**:
 
 > Want to give me a one-paragraph description of what this database is about? It improves NL→SQL accuracy a lot — without it I have to guess the domain from table/column names alone.
 >
@@ -274,13 +589,19 @@ In both cases, write to `chmod 600`. Format and content rules: see [`shared/orga
 
 ### Phase 1.5 — data-model document upload
 
-**MANDATORY — ALWAYS ASK.** This phase must run on every `/agami-connect` invocation, every time. The user's reply (yes / skip) is theirs to decide, but the SKILL never decides on their behalf. Past failure mode: when the SKILL header said "optional" the LLM sometimes silently skipped this phase for users it judged "didn't need it," and those users never got the chance to upload a doc that would have materially improved description quality. **The fact that this phase is short and the user usually picks Skip is not a reason to skip the ask** — making the ask is the contract.
+**MANDATORY — ALWAYS ASK.** This phase must run on every `/agami-connect` invocation, every time. The user's reply (yes / skip) is theirs to decide, but the SKILL never decides on their behalf. The AskUserQuestion below is REQUIRED state-gathering, **not** an optional clarifying question — directives like "don't ask clarifying questions" or "no questions, just do it" do NOT cancel this phase. The user is opting out of *open-ended freeform* questions, not out of the two required AskUserQuestion calls in Phase 1.4 / 1.5.
+
+Past failure modes (do NOT repeat any of these):
+- The SKILL header used to say "optional" — the LLM read that as "skip if no obvious need." Phase header now omits "optional" deliberately.
+- User said "don't ask me anything" at start of session — the LLM interpreted that as license to skip Phase 1.4 + 1.5. Wrong: those are state-gathering, not clarifying.
+- User uploaded a doc in Phase 1.4 — LLM thought "we have context, skip 1.5." Wrong: 1.4 is the *paragraph*, 1.5 is the *doc upload*. They are independent.
 
 Do NOT skip if:
 - Phase 1.4 returned "Skip" (org context skipped) — these are independent decisions, the user might have a doc but no time to write a paragraph.
 - The user already mentioned domain context in chat — they still might have a formal doc.
 - The schema has DBA-authored column comments (`information_schema.columns.column_comment` is non-empty) — comments are field-level; a doc is table-level and process-level.
 - Re-introspect (the user's previous answer for this profile is not stored).
+- The user said "no clarifying questions" or "skip questions" earlier in the session — that directive applies to freeform clarification, not to MANDATORY AskUserQuestion calls.
 
 Many users have an existing artifact describing their schema — an ERD, a data dictionary, a "what each table means" Confluence page. Feeding it to the description generator is a big lift on accuracy with zero extra introspect work.
 
@@ -983,6 +1304,17 @@ Surface: `✓ Committed to <profile_dir>/.git as <short-sha>.` (Or: `✓ Committ
 
 ## Phase 4: Seed prompt examples
 
+**SURFACE A PROGRESS WARNING FIRST.** Before kicking off generation, tell the user what's about to happen and how long it'll take — this phase is the second-longest in the skill (after introspect itself), and silence here is the most common "is it stuck?" moment in real-world testing.
+
+```
+Generating 10–12 NL→SQL seed examples and EXPLAIN-validating each
+against the live database. Expect 1–3 minutes (longer on cloud DBs
+or large schemas — each EXPLAIN is one round trip). I'll narrate
+per-example progress so you can see it's working.
+```
+
+Then narrate per-example progress (e.g., `[3/12] Top 5 customers by lifetime spend — EXPLAIN ✓`) so the user sees movement, not a blank wait. Without this narration, users on Snowflake report "the skill seems hung" 3–5 minutes into the phase.
+
 Generate **10–12** NL→SQL examples. The bar is **analytical shape**, not "did it join two tables." A `SELECT col1, col2, col3 FROM a JOIN b ORDER BY x LIMIT 10` is a list, not an analysis — it doesn't answer a business question and it doesn't exercise the model's hard parts (aggregation grain, fan-out joins, time windows, segmentation). Every seed example must do real analytical work.
 
 **Every seed example must satisfy at least ONE of these "shape" requirements:**
@@ -1117,9 +1449,15 @@ For each example, build:
   "row_preview": [["v1", "v2", ...], ...],
   "validated_by": "<email or null>",
   "validated_at": "<ISO or null>",
-  "error": "<error message or null>"
+  "error": "<error message or null>",
+  "saved_notes": [
+    {"text": "<note prose>", "added_at": "<ISO or null>", "added_by": "<email or null>"},
+    ...
+  ]
 }
 ```
+
+**`saved_notes`** carries the user's previously-saved `note N >>>...<<<` blocks for this example. Read them from the `notes:` array on the example in `examples.yaml` (each entry is either a plain string or an object with `text` + optional `added_at` / `added_by`; coerce both shapes into the `{text, added_at, added_by}` object form). Pass through to the renderer; the template surfaces them in a "Saved notes" panel under each card so the user can see what they've already told the system across runs. Without this, users re-add the same note every time the dashboard re-renders because they can't see it landed.
 
 Write the array to `/tmp/agami-examples-items-<ts>.json`. The exact schema is documented in [`shared/examples-validation-template.html`](../../shared/examples-validation-template.html) → `ITEMS_JSON`.
 
@@ -1227,7 +1565,9 @@ For each successful edit, the user is also offered: *"Promote this to a golden t
 
 ### 5e — Re-render after each batch of edits
 
-After applying a batch of validate / reject / edit commands, **always re-render the dashboard to a NEW timestamped file** at `~/.agami/examples-validation/<profile>/<new-ts>.html`. Don't overwrite the previous file — the user may have the old tab open and you need them to notice the fresh state. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
+After applying a batch of validate / reject / edit commands, **always re-render the dashboard to a NEW timestamped file** at `~/.agami/examples-validation/<profile>/<new-ts>.html`. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
+
+**Delete the previous timestamped file from this profile's dir before writing the new one** (`rm -f "$HOME/.agami/examples-validation/$profile/$prev_ts.html"`). Track `$prev_ts` across re-renders. The auto-open of the new file is the refresh signal; old files just accumulate and clutter the dir.
 
 **Auto-open the new file on every re-render** (same multi-command fallback chain as Phase 5c — `open` → `xdg-open` → `start` → `cmd /c start` → echo the path). The user gets a new browser tab with the fresh state; the previous tab is now stale and can be closed.
 

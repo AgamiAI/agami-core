@@ -29,6 +29,7 @@
       "validated_by":  string (email) or null
       "validated_at":  ISO8601 string or null
       "error":         string or null — if EXPLAIN or execution failed
+      "saved_notes":   [ {text, added_at, added_by}, ... ]  — previously-saved `note N >>>...<<<` blocks
     }
 -->
 <html lang="en">
@@ -226,6 +227,12 @@
       margin: 4px 0;
     }
     .signoff { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+    .saved-notes {
+      margin: 4px 0 8px;
+      border-left: 3px solid var(--ok-fg);
+      padding-left: 12px;
+    }
+    .saved-notes .saved-note { margin: 6px 0; }
 
     /* Per-card actions */
     .card-actions {
@@ -660,6 +667,44 @@
       } else {
         const frag = renderResultTable(item);
         card.appendChild(frag);
+      }
+
+      // Saved notes (any tab) — surface previously-saved `note N >>>...<<<`
+      // blocks so the user can see what they've already told the system
+      // across runs. Without this, users re-add the same note every time
+      // the dashboard re-renders because they can't see it landed.
+      if (Array.isArray(item.saved_notes) && item.saved_notes.length) {
+        card.appendChild(el('div', {
+          class: 'label-line',
+          style: 'color: var(--ok-fg); margin-top: 10px;',
+          text: '✓ Saved notes (' + item.saved_notes.length + ')',
+        }));
+        const wrap = el('div', { class: 'saved-notes' });
+        item.saved_notes.forEach(note => {
+          const block = el('div', { class: 'saved-note' });
+          block.appendChild(el('pre', {
+            class: 'sql',
+            style: 'background: var(--code-bg); margin: 0;',
+            text: note.text || '',
+          }));
+          if (note.added_by || note.added_at) {
+            const date = note.added_at ? new Date(note.added_at) : null;
+            const dateStr = (date && !isNaN(date.getTime()))
+              ? date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+              : '';
+            const parts = [];
+            if (note.added_by) parts.push(note.added_by);
+            if (dateStr) parts.push(dateStr);
+            if (parts.length) {
+              block.appendChild(el('div', {
+                style: 'font-size: 11px; color: var(--muted); margin-top: 2px;',
+                text: '— ' + parts.join(' · '),
+              }));
+            }
+          }
+          wrap.appendChild(block);
+        });
+        card.appendChild(wrap);
       }
 
       // Sign-off info (validated tab)

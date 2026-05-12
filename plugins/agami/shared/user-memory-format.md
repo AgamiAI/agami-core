@@ -32,7 +32,7 @@ If the preference is database-specific (e.g. "in this finance DB, always join or
 
 `agami-save-correction/SKILL.md` classifies each correction and routes the knowledge to the right file. A `user_preference` correction lands here. An `org_context` correction lands in ORGANIZATION.md. Other kinds land in the per-schema yamls (per the table in save-correction).
 
-## Default seed (written by `agami-init/SKILL.md` on first run)
+## Default seed (written by `agami-connect/SKILL.md` on first run)
 
 ```markdown
 # agami user memory
@@ -95,7 +95,7 @@ Three paths:
 
 This file is intentionally **not** schema-validated. It's free-form markdown the user owns. The agami skills read it as opaque context — they don't enforce structure beyond stripping HTML comments. If the user writes something contradictory or incoherent, the skill follows it anyway.
 
-The one rule: if the file is missing, skills behave as if it were empty. They never error out on an absent USER_MEMORY.md. The `agami-init/SKILL.md` ensures the seed is written on first run, so this case is rare.
+The one rule: if the file is missing, skills behave as if it were empty. They never error out on an absent USER_MEMORY.md. The `agami-connect/SKILL.md` ensures the seed is written on first run, so this case is rare.
 
 ## Size cap
 

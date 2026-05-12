@@ -67,6 +67,6 @@ The `user_preference` correction kind still routes to `USER_MEMORY.md` — those
 
 - **Never sent in telemetry.** The 11-field allowlist in [`telemetry-payload.md`](telemetry-payload.md) doesn't include any free-text field, period.
 - **Never read by anything other than the agami skills running locally.**
-- The `agami-init` skill enforces `chmod 600` on creation.
+- The agami-connect Phase 0a enforces `chmod 600` on creation.
 
 If the user shares `<artifacts_dir>/<profile>/` with a teammate (e.g. via dotfiles), the file goes with the model — that's a deliberate user action.

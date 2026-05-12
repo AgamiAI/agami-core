@@ -133,15 +133,16 @@ Phase 5 of `agami-connect` generates 10–12 NL→SQL seed examples that each sa
 /plugin marketplace add AgamiAI/LiteBi
 /plugin install agami@litebi
 
-# 2. Run init — picks your DB type, writes ~/.agami/credentials.example
-/agami-init
+# 2. Run connect — picks your DB type, writes ~/.agami/credentials.example
+#    (first time only; subsequent runs introspect directly)
+/agami-connect
 
 # 3. Edit the template with your DB connection details
 $EDITOR ~/.agami/credentials.example
 mv ~/.agami/credentials.example ~/.agami/credentials
 chmod 600 ~/.agami/credentials
 
-# 4. Introspect: build the per-schema semantic model + seed examples
+# 4. Re-run connect to introspect: build the per-schema semantic model + seed examples
 /agami-connect
 
 # 5. (Optional) walk the trust review queue
@@ -217,7 +218,7 @@ Detailed walkthrough: [`docs/install/claude-cowork.md`](docs/install/claude-cowo
 
 `agami` reads database connection details from `~/.agami/credentials`. Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`.
 
-The `agami-init` skill creates a template at `~/.agami/credentials.example`. Edit it and save as `~/.agami/credentials`:
+`/agami-connect` creates a template at `~/.agami/credentials.example` on first run (its Phase 0a — formerly the separate `/agami-init` skill). Edit it and save as `~/.agami/credentials`:
 
 ```ini
 [default]
@@ -335,7 +336,7 @@ The skill picks the first available connection method, in this order:
 | **DuckDB** universal binary | `duckdb` on `PATH` (covers Postgres / MySQL / SQLite, not Snowflake / BigQuery) | `brew install duckdb` (or [duckdb.org](https://duckdb.org/)) |
 | **Python driver** (fallback) | Python + `psycopg2-binary` / `pymysql` / `snowflake-connector-python` / `google-cloud-bigquery` | `pip install psycopg2-binary pymysql snowflake-connector-python google-cloud-bigquery` |
 
-The `agami-init` skill tells you exactly what to install for your OS if nothing is detected.
+`/agami-connect` Phase 0a tells you exactly what to install for your OS if nothing is detected.
 
 ---
 
@@ -343,8 +344,7 @@ The `agami-init` skill tells you exactly what to install for your OS if nothing 
 
 | Command | What it does |
 |---|---|
-| `/agami-init` | Picks your DB type (Postgres / MySQL / Snowflake / BigQuery / Redshift / SQLite / Other), writes `~/.agami/credentials.example` you fill in, and verifies the connection method. |
-| `/agami-connect` | Introspects the live DB, builds the per-schema OSI v0.1.1 semantic model at `~/agami-artifacts/<profile>/`, computes confidence on every entity, auto-approves the high-signal ones, generates 10–12 analytical-shape seed examples (each EXPLAIN-validated), and opens the examples-validation dashboard. Runs `git init` and snapshots the model under `.snapshots/<hash>/`. |
+| `/agami-connect` | **One-stop setup + introspect.** First run: detects missing credentials, runs the DB-type picker (Postgres / MySQL / Snowflake / BigQuery / Redshift / Other), writes `~/.agami/credentials.example` for you to fill in, verifies the connection method, and ends the turn. Re-invoke after filling in the file → introspects the live DB, builds the per-schema OSI v0.1.1 semantic model at `~/agami-artifacts/<profile>/`, computes confidence on every entity, auto-approves the high-signal ones, generates 10–12 analytical-shape seed examples (each EXPLAIN-validated), and opens the examples-validation dashboard. Runs `git init` and snapshots the model under `.snapshots/<hash>/`. |
 | `/agami-query-database` | Answers a NL question. Picks examples + relationships, generates SQL, runs it, formats the result, and surfaces a SQL receipt panel (provenance + model-version pin). Refuses if any required Rule 1 entry is unreviewed. (You usually don't need to type this — natural language routes here.) |
 | `/agami-review` | Opens the trust review dashboard: For Review / Approved Automatically / Manually Approved / Rejected tabs, grouped by entity type. Click-to-act buttons + inline edit textareas. Generates a chat-back-channel command block when you click "Generate feedback for Claude." |
 | `/agami-model` | Opens the model explorer — a static HTML browser of every schema / table / field with live search, filter chips, and per-table + per-column **Exclude / Include** buttons. Excluded entries are filtered out of the runtime model (joins, prompts, aggregates) but stay in the YAML for audit; the curator can include them back any time. |
@@ -358,13 +358,15 @@ Natural-language phrasing routes to each skill automatically — "open the revie
 ## First-run walkthrough
 
 ```
-$ /agami-init
+$ /agami-connect
+[Phase 0: preflight — no credentials yet, running first-time setup]
 > Pick your database: PostgreSQL · MySQL · Snowflake · BigQuery · Other
 You: Snowflake
-✓ Wrote ~/.agami/credentials.example with a [default] section for Snowflake.
+✓ Wrote ~/.agami/credentials.example with a [main] section for Snowflake.
   Fill it in (account, user, password OR authenticator=externalbrowser,
   warehouse, role, database, schema) then save as ~/.agami/credentials.
 
+# After filling in the file:
 $ /agami-connect
 [Phase 0: preflight]
   ✓ ~/.agami/credentials present (chmod 600)
@@ -611,13 +613,13 @@ rm -rf ~/.agami                               # credentials, .config, charts, ex
 # 4. Restart Claude Code (full quit, not just close window)
 ```
 
-If the slash commands `/agami-init`, `/agami-connect`, etc. still appear after step 4, you have another LiteBi version cached at a different path. `find ~/.claude -type d -name "litebi*"` will show every copy.
+If the slash commands `/agami-connect`, `/agami-query-database`, etc. still appear after step 4, you have another LiteBi version cached at a different path. `find ~/.claude -type d -name "litebi*"` will show every copy.
 
 ## Contributing
 
 Issues + PRs welcome at [github.com/AgamiAI/LiteBi](https://github.com/AgamiAI/LiteBi). See [CONTRIBUTING.md](CONTRIBUTING.md) for the test commands and the **version-bump discipline** — every user-visible change needs a version bump in `.claude-plugin/marketplace.json` (twice) and `plugins/agami/.claude-plugin/plugin.json`, otherwise existing installs stay on the cached old version forever.
 
-A community Discord will land soon — once it's live the link will appear here and in [`agami-init/SKILL.md`](plugins/agami/skills/agami-init/SKILL.md).
+A community Discord will land soon — once it's live the link will appear here and in [`agami-connect/SKILL.md`](plugins/agami/skills/agami-connect/SKILL.md).
 
 ---
 

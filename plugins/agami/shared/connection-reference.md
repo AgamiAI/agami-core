@@ -7,7 +7,7 @@ How `agami` connects to your database. Used by the `connect`, `query-database`, 
 These are non-negotiable. Skills that read this document must follow them under every circumstance.
 
 1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or `AGAMI_DATABASE_URL`). Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
-2. **Never ask the user for connection details in chat.** Credentials live in `~/.agami/credentials` only. If the file is missing, invoke the agami-init skill (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
+2. **Never ask the user for connection details in chat.** Credentials live in `~/.agami/credentials` only. If the file is missing, invoke agami-connect Phase 0a (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
 3. **Never scan or guess.** Tool detection is `which <tool>` and `python3 -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `~/.agami/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
@@ -76,7 +76,7 @@ The order, from most-preferred to least-preferred:
 
 ### How agami picks a connection method
 
-Detection runs **once**, in the agami-init skill's Phase 3. The result (chosen method + absolute paths of every detected tool) is persisted in `~/.agami/.config`. Every subsequent skill invocation reads the cached paths — they do NOT re-probe.
+Detection runs **once**, in agami-connect Phase 0a's Phase 3. The result (chosen method + absolute paths of every detected tool) is persisted in `~/.agami/.config`. Every subsequent skill invocation reads the cached paths — they do NOT re-probe.
 
 Init's selection pseudocode:
 
@@ -455,4 +455,4 @@ When introspecting databases, exclude system schemas:
 - **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `~/.agami/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.
 - **NEVER** generate DDL or DML statements (`DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, etc.)
 - Sanitize user input before including in SQL queries
-- `~/.agami/credentials` must be `chmod 600`. The `agami-init` skill enforces this; refuse to read otherwise.
+- `~/.agami/credentials` must be `chmod 600`. The agami-connect Phase 0a enforces this; refuse to read otherwise.

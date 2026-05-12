@@ -1049,13 +1049,20 @@
       const grouped = groupItemsByType(list);
       // Auto-collapse threshold: groups larger than this start collapsed so
       // the smaller, higher-priority groups lead.
+      // EXCEPTION: when this render is INSIDE the secondary "Optional" panel
+      // (keyPrefix === "review_secondary"), the panel itself is already
+      // collapsed by default — auto-collapsing groups inside it produces
+      // double-collapse (user expands the panel, then has to expand each
+      // group inside too). The user already opted in by opening the panel;
+      // show them everything.
       const AUTO_COLLAPSE_THRESHOLD = 30;
+      const insideSecondaryWrap = (keyPrefix === 'review_secondary');
 
       TYPE_ORDER.forEach(t => {
         const items = grouped[t] || [];
         if (!items.length) return;
         const key = keyPrefix + ':' + t;
-        if (!userTouchedGroups.has(key) && items.length > AUTO_COLLAPSE_THRESHOLD) {
+        if (!insideSecondaryWrap && !userTouchedGroups.has(key) && items.length > AUTO_COLLAPSE_THRESHOLD) {
           collapsedGroups.add(key);
         }
         const isCollapsed = collapsedGroups.has(key);

@@ -22,7 +22,7 @@ Everything in here is either a secret, an auth file derived from a secret, or pe
 
 ## `<artifacts_dir>/` — sharable, can be committed
 
-Everything in here is non-secret and team-useful. The default is `~/agami-artifacts/`, but the user picks the location during `agami-init` (see "Configuring the artifacts dir" below).
+Everything in here is non-secret and team-useful. The default is `~/agami-artifacts/`, but the user picks the location during `agami-connect (Phase 0a)` (see "Configuring the artifacts dir" below).
 
 | Path | What it is |
 |---|---|
@@ -39,12 +39,12 @@ Everything in here is non-secret and team-useful. The default is `~/agami-artifa
 
 ## Configuring `artifacts_dir`
 
-The location is set once during `agami-init` via an `AskUserQuestion`. The choice persists in `~/.agami/.config.artifacts_dir`.
+The location is set once during `agami-connect (Phase 0a)` via an `AskUserQuestion`. The choice persists in `~/.agami/.config.artifacts_dir`.
 
 ### Resolution order (every skill follows the same chain)
 
 1. **`AGAMI_ARTIFACTS_DIR` env var** — highest priority, for "this session only" overrides (e.g. testing a different team's model).
-2. **`~/.agami/.config.artifacts_dir`** — set by `agami-init`, persists across sessions.
+2. **`~/.agami/.config.artifacts_dir`** — set by `agami-connect (Phase 0a)`, persists across sessions.
 3. **Default**: `$HOME/agami-artifacts`.
 
 ### Resolving in bash

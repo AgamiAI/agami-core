@@ -7,7 +7,7 @@ argument-hint: "[corrected SQL or NL feedback]"
 
 # agami save-correction
 
-**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** All four agami slash commands (`/agami-init`, `/agami-connect`, `/agami-query-database`, `/agami-save-correction`) work. Never write the un-prefixed forms (`/save-correction`, `/init`, etc.) or colon forms (`/agami:save-correction`) — those don't exist. For chat replies, prefer natural language ("say 'save this as a correction'", "say 'remember this'") — the agami-save-correction skill's `when_to_use` matcher routes correctly.
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** Agami slash commands: `/agami-connect`, `/agami-query-database`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/save-correction`, `/init`, etc.) or colon forms (`/agami:save-correction`) — those don't exist. **`/agami-init` was folded into `/agami-connect` Phase 0a.** For chat replies, prefer natural language ("say 'save this as a correction'", "say 'remember this'") — the agami-save-correction skill's `when_to_use` matcher routes correctly.
 
 You are recording a user correction. Goal: persist the fix so similar questions get better answers next time.
 

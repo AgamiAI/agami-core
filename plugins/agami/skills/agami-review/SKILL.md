@@ -381,7 +381,9 @@ Best-effort — never block on git failure. The YAML files + curation log are th
 
 ## Phase 5: Re-render or close
 
-After a batch of edits applies cleanly, **always re-render the dashboard** with a **new timestamped filename** at `~/.agami/review/<profile>/<new-ts>.html` (don't overwrite the old one — the user may still have it open and you need them to notice the refresh). Recompute Phase 1 from scratch (re-walk the YAMLs, re-classify into tabs, re-count the summary). The numbering shifts as approved/rejected items leave the For Review tab — that's expected.
+After a batch of edits applies cleanly, **always re-render the dashboard** with a **new timestamped filename** at `~/.agami/review/<profile>/<new-ts>.html`. Recompute Phase 1 from scratch (re-walk the YAMLs, re-classify into tabs, re-count the summary). The numbering shifts as approved/rejected items leave the For Review tab — that's expected.
+
+**Delete the previous timestamped file from the same profile dir before writing the new one** (`rm -f "$HOME/.agami/review/$profile/$prev_ts.html"`). Earlier versions kept old files around so the user would "notice the refresh," but real testing showed the stale files accumulate, confuse the user about which tab is current, and clutter the directory. The auto-open of the new file is the refresh signal; the previous file is dead. Track `$prev_ts` in session state across re-renders so you always know which file to delete. If the user already had the old file open in a browser tab, the new auto-open opens a fresh tab — they can close the stale one (we mention that in the chat ack).
 
 **Surface BOTH the ack AND the new file path in one chat block** so the user can't miss it:
 

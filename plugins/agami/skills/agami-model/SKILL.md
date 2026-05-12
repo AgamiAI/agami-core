@@ -157,7 +157,9 @@ The script's stdout is a JSON document with `applied`, `skipped`, `errors`, `val
 
 ## Phase 4: Re-render
 
-Every successful apply produces a new explorer file at a new timestamp. The contract from `agami-review` applies: **always re-render to a NEW path** so the user notices the refresh; don't overwrite the previous file.
+Every successful apply produces a new explorer file at a new timestamp.
+
+**Delete the previous timestamped file from this profile's dir before writing the new one** (`rm -f "$HOME/.agami/model/$profile/$prev_ts.html"`). Track `$prev_ts` across re-renders. The auto-open of the new file is the refresh signal; old files just accumulate and confuse the user about which tab is current.
 
 ```bash
 new_ts=$(date -u +%Y%m%d-%H%M%S)
