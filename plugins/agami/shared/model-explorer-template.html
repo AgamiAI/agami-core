@@ -443,6 +443,8 @@
       </div>
     </div>
 
+    <div id="metrics-section"></div>
+    <div id="named-filters-section"></div>
     <div id="schemas"></div>
   </div>
 
@@ -770,8 +772,184 @@
 
     function renderMeta() {
       const totals = manifest.totals || {};
-      document.getElementById('totals-meta').textContent =
-        `${totals.schemas || 0} schemas · ${totals.tables || 0} tables · ${totals.fields || 0} fields`;
+      const parts = [
+        `${totals.schemas || 0} schemas`,
+        `${totals.tables || 0} tables`,
+        `${totals.fields || 0} fields`,
+      ];
+      if (totals.metrics) parts.push(`${totals.metrics} metric${totals.metrics === 1 ? '' : 's'}`);
+      if (totals.named_filters) parts.push(`${totals.named_filters} named filter${totals.named_filters === 1 ? '' : 's'}`);
+      document.getElementById('totals-meta').textContent = parts.join(' · ');
+    }
+
+    // ---- Metrics + Named filters at the top ----
+    //
+    // Metric / named-filter entries are *model-shaping* — they aren't tables
+    // or columns, but they ARE descriptions of business meaning the curator
+    // wrote into the semantic model. Surfacing them in the explorer means
+    // the user can see what metrics + filters exist without reading YAML.
+    //
+    // For v1: render-only (no per-entry exclude action). Sign-off / approve /
+    // reject happens through /agami-review (those are Rule 1 entries).
+    function renderMetricsSection() {
+      const root = document.getElementById('metrics-section');
+      root.innerHTML = '';
+      const items = (manifest.metrics || []).filter(m => {
+        if (!searchQ) return true;
+        const hay = (m.name + ' ' + m.expression + ' ' + m.description + ' '
+                     + m.definition_prose + ' ' + (m.assumptions || []).join(' ')).toLowerCase();
+        return hay.includes(searchQ);
+      });
+      if (!items.length) return;
+      const sec = el('div', { class: 'schema-section' });
+      const header = el('div', { class: 'schema-header' });
+      header.appendChild(document.createTextNode('Metrics'));
+      header.appendChild(el('span', { class: 'schema-count', text: items.length + ' total' }));
+      sec.appendChild(header);
+      items.forEach(m => sec.appendChild(renderMetricCard(m)));
+      root.appendChild(sec);
+    }
+
+    function renderNamedFiltersSection() {
+      const root = document.getElementById('named-filters-section');
+      root.innerHTML = '';
+      const items = (manifest.named_filters || []).filter(nf => {
+        if (!searchQ) return true;
+        const hay = (nf.name + ' ' + nf.expression + ' ' + nf.description + ' '
+                     + nf.definition_prose).toLowerCase();
+        return hay.includes(searchQ);
+      });
+      if (!items.length) return;
+      const sec = el('div', { class: 'schema-section' });
+      const header = el('div', { class: 'schema-header' });
+      header.appendChild(document.createTextNode('Named filters'));
+      header.appendChild(el('span', { class: 'schema-count', text: items.length + ' total' }));
+      sec.appendChild(header);
+      items.forEach(nf => sec.appendChild(renderNamedFilterCard(nf)));
+      root.appendChild(sec);
+    }
+
+    function renderMetricCard(m) {
+      const card = el('div', { class: 'table-card' });
+      const header = el('div', { class: 'table-header' });
+      const nameEl = el('div', { class: 'table-name' });
+      if (m.scope && m.scope !== 'model') {
+        nameEl.appendChild(el('span', { class: 'schema-prefix', text: m.scope + '.' }));
+      }
+      nameEl.appendChild(highlight(m.name, searchQ));
+      header.appendChild(nameEl);
+      if (m.review_state && m.review_state !== 'approved') {
+        const cls = m.review_state === 'rejected' ? 'badge-rejected'
+                  : m.review_state === 'stale' ? 'badge-stale'
+                  : 'badge-unreviewed';
+        header.appendChild(el('span', { class: 'table-state-badge ' + cls, text: m.review_state }));
+      }
+      card.appendChild(header);
+
+      const body = el('div', { class: 'table-body' });
+
+      // Expression
+      if (m.expression) {
+        body.appendChild(el('div', {
+          class: 'label-line',
+          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 18px 0;',
+          text: 'Expression',
+        }));
+        body.appendChild(el('pre', {
+          style: 'font-family: ui-monospace, monospace; font-size: 13px; background: var(--code-bg); padding: 8px 18px; margin: 4px 18px 8px; border-radius: 4px; white-space: pre-wrap;',
+          text: m.expression,
+        }));
+      }
+
+      // Definition prose (the canonical description — biggest signal)
+      const defProse = (m.definition_prose || '').trim();
+      if (defProse) {
+        body.appendChild(el('div', {
+          class: 'label-line',
+          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 18px;',
+          text: 'Definition',
+        }));
+        const div = el('div', {
+          class: 'table-description',
+          style: 'border-bottom: none; padding-top: 4px;',
+        });
+        div.appendChild(highlight(defProse, searchQ));
+        body.appendChild(div);
+      } else if (m.description) {
+        // Fall back to OSI description if no definition_prose.
+        const div = el('div', { class: 'table-description' });
+        div.appendChild(highlight(m.description, searchQ));
+        body.appendChild(div);
+      }
+
+      // Assumptions
+      const ass = (m.assumptions || []).filter(a => (a || '').trim());
+      if (ass.length) {
+        body.appendChild(el('div', {
+          class: 'label-line',
+          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 18px;',
+          text: 'Assumptions',
+        }));
+        const ul = el('ul', {
+          style: 'font-size: 13px; padding: 4px 18px 8px 36px; margin: 0;',
+        });
+        ass.forEach(a => {
+          const li = el('li');
+          li.appendChild(highlight(String(a), searchQ));
+          ul.appendChild(li);
+        });
+        body.appendChild(ul);
+      }
+
+      card.appendChild(body);
+      return card;
+    }
+
+    function renderNamedFilterCard(nf) {
+      const card = el('div', { class: 'table-card' });
+      const header = el('div', { class: 'table-header' });
+      const nameEl = el('div', { class: 'table-name' });
+      if (nf.scope && nf.scope !== 'model') {
+        nameEl.appendChild(el('span', { class: 'schema-prefix', text: nf.scope + '.' }));
+      }
+      nameEl.appendChild(highlight(nf.name, searchQ));
+      header.appendChild(nameEl);
+      if (nf.review_state && nf.review_state !== 'approved') {
+        const cls = nf.review_state === 'rejected' ? 'badge-rejected'
+                  : nf.review_state === 'stale' ? 'badge-stale'
+                  : 'badge-unreviewed';
+        header.appendChild(el('span', { class: 'table-state-badge ' + cls, text: nf.review_state }));
+      }
+      card.appendChild(header);
+
+      const body = el('div', { class: 'table-body' });
+      if (nf.expression) {
+        body.appendChild(el('div', {
+          class: 'label-line',
+          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 18px 0;',
+          text: 'Predicate',
+        }));
+        body.appendChild(el('pre', {
+          style: 'font-family: ui-monospace, monospace; font-size: 13px; background: var(--code-bg); padding: 8px 18px; margin: 4px 18px 8px; border-radius: 4px; white-space: pre-wrap;',
+          text: nf.expression,
+        }));
+      }
+      const defProse = (nf.definition_prose || nf.description || '').trim();
+      if (defProse) {
+        body.appendChild(el('div', {
+          class: 'label-line',
+          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 18px;',
+          text: 'Definition',
+        }));
+        const div = el('div', {
+          class: 'table-description',
+          style: 'border-bottom: none; padding-top: 4px;',
+        });
+        div.appendChild(highlight(defProse, searchQ));
+        body.appendChild(div);
+      }
+      card.appendChild(body);
+      return card;
     }
 
     // ---- Actions ----
@@ -783,7 +961,7 @@
       } else {
         pending[qname] = desired;
       }
-      renderManifest();
+      renderAll();
       updateFooter();
     }
 
@@ -844,7 +1022,7 @@
     // ---- Wire up ----
     document.getElementById('search').addEventListener('input', (ev) => {
       searchQ = ev.target.value.trim().toLowerCase();
-      renderManifest();
+      renderAll();
     });
     document.querySelectorAll('.filter-chips button').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -856,7 +1034,7 @@
     });
     document.getElementById('btn-reset').addEventListener('click', () => {
       Object.keys(pending).forEach(k => delete pending[k]);
-      renderManifest();
+      renderAll();
       updateFooter();
     });
     document.getElementById('btn-generate').addEventListener('click', generateFeedback);
@@ -877,9 +1055,15 @@
       }
     });
 
-    // ---- First render ----
+    // ---- Composite renderer + first render ----
+    function renderAll() {
+      renderMetricsSection();
+      renderNamedFiltersSection();
+      renderManifest();
+    }
+
     renderMeta();
-    renderManifest();
+    renderAll();
     updateFooter();
   </script>
 </body>

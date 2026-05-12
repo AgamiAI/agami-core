@@ -83,6 +83,139 @@ def _is_excluded(agami: dict) -> bool:
     return (agami.get("review_state") or "") == "rejected"
 
 
+def _collect_metrics_and_named_filters(profile_dir: Path, index: dict) -> tuple[list[dict], list[dict]]:
+    """Walk every YAML under the profile and pull out metrics + named_filters
+    with their definition prose. Both are model-shaping entities — they live
+    either at the model level (in index.yaml) or as a per-table block inside
+    each `<schema>/<table>.yaml`. Users browsing the model want to see them
+    *alongside* tables / fields, not buried in YAML.
+
+    Returns (metrics, named_filters), each a list of:
+      {
+        "name": str,
+        "qname": "<scope>.<name>",       # scope is "model" or "<schema>.<table>"
+        "scope": "model" | "<schema>.<table>",
+        "expression": "<SQL fragment>",
+        "definition_prose": "<prose>",
+        "assumptions": [str, ...],
+        "review_state": "<state>",
+        "origin": "<origin>",
+        "confidence": <float or None>,
+      }
+    """
+    metrics_out: list[dict] = []
+    named_filters_out: list[dict] = []
+
+    def _harvest(scope: str, sm_block: dict) -> None:
+        # Metrics at this scope (table-level or model-level).
+        for m in (sm_block.get("metrics") or []):
+            name = m.get("name")
+            if not name:
+                continue
+            m_agami = _extract_agami(m.get("custom_extensions"))
+            expr = ""
+            exp = m.get("expression") or {}
+            for d in (exp.get("dialects") or []):
+                if d.get("expression"):
+                    expr = d["expression"]
+                    break
+            metrics_out.append({
+                "name":             name,
+                "qname":            f"{scope}.{name}",
+                "scope":            scope,
+                "expression":       expr,
+                "description":      (m.get("description") or "").strip(),
+                "definition_prose": (m_agami.get("definition_prose") or "").strip(),
+                "assumptions":      m_agami.get("assumptions") or [],
+                "review_state":     m_agami.get("review_state") or "unreviewed",
+                "origin":           m_agami.get("origin") or "",
+                "confidence":       m_agami.get("confidence"),
+            })
+        # Named filters live in the agami extension on the model entry (not
+        # a top-level OSI field).
+        for ext in (sm_block.get("custom_extensions") or []):
+            data = ext.get("data") if isinstance(ext, dict) else None
+            if not isinstance(data, str):
+                continue
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            agami = payload.get("agami")
+            if not isinstance(agami, dict):
+                continue
+            for nf in (agami.get("named_filters") or []):
+                name = nf.get("name")
+                if not name:
+                    continue
+                named_filters_out.append({
+                    "name":             name,
+                    "qname":            f"{scope}.{name}",
+                    "scope":            scope,
+                    "expression":       (nf.get("expression") or "").strip(),
+                    "description":      (nf.get("description") or "").strip(),
+                    "definition_prose": (nf.get("definition_prose") or "").strip(),
+                    "review_state":     nf.get("review_state") or "unreviewed",
+                    "origin":           nf.get("origin") or "",
+                    "confidence":       nf.get("confidence"),
+                })
+
+    # 1. Model-level (index.yaml semantic_model entries).
+    for sm_block in (index.get("semantic_model") or []):
+        _harvest("model", sm_block)
+
+    # 2. Per-table (every <schema>/<table>.yaml).
+    for sm in (index.get("schemas") or []):
+        schema_name = sm.get("name")
+        if not schema_name:
+            continue
+        schema_dir = profile_dir / schema_name
+        if not schema_dir.is_dir():
+            continue
+        for tyaml_path in schema_dir.glob("*.yaml"):
+            if tyaml_path.name == "_schema.yaml":
+                continue
+            tyaml = _read_yaml(tyaml_path)
+            if tyaml is None:
+                continue
+            for sm_block in (tyaml.get("semantic_model") or []):
+                # The dataset name is the table — scope is "<schema>.<table>"
+                for ds in (sm_block.get("datasets") or []):
+                    ds_name = ds.get("name")
+                    if not ds_name:
+                        continue
+                    scope = f"{schema_name}.{ds_name}"
+                    # Per-dataset metrics live on the dataset itself.
+                    for m in (ds.get("metrics") or []):
+                        name = m.get("name")
+                        if not name:
+                            continue
+                        m_agami = _extract_agami(m.get("custom_extensions"))
+                        expr = ""
+                        exp = m.get("expression") or {}
+                        for d in (exp.get("dialects") or []):
+                            if d.get("expression"):
+                                expr = d["expression"]
+                                break
+                        metrics_out.append({
+                            "name":             name,
+                            "qname":            f"{scope}.{name}",
+                            "scope":            scope,
+                            "expression":       expr,
+                            "description":      (m.get("description") or "").strip(),
+                            "definition_prose": (m_agami.get("definition_prose") or "").strip(),
+                            "assumptions":      m_agami.get("assumptions") or [],
+                            "review_state":     m_agami.get("review_state") or "unreviewed",
+                            "origin":           m_agami.get("origin") or "",
+                            "confidence":       m_agami.get("confidence"),
+                        })
+                # Model-level metrics + named_filters can also live at the
+                # semantic_model level inside a per-table file (rare but valid).
+                _harvest(f"{schema_name}", sm_block)
+
+    return metrics_out, named_filters_out
+
+
 def build_manifest(profile_dir: Path, profile: str) -> dict:
     index = _read_yaml(profile_dir / "index.yaml") or {}
     schemas_meta = index.get("schemas") or []
@@ -194,6 +327,8 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "tables":      out_tables,
             })
 
+    metrics, named_filters = _collect_metrics_and_named_filters(profile_dir, index)
+
     return {
         "profile": profile,
         "totals": {
@@ -202,8 +337,12 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
             "fields":  total_fields,
             "excluded_tables": total_excluded_tables,
             "excluded_fields": total_excluded_fields,
+            "metrics": len(metrics),
+            "named_filters": len(named_filters),
         },
         "schemas": out_schemas,
+        "metrics": metrics,
+        "named_filters": named_filters,
     }
 
 

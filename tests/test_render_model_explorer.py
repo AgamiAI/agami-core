@@ -214,6 +214,131 @@ def test_manifest_qnames_are_qualified(profile_dir):
     assert cid["qname"] == "PUBLIC.orders.customer_id"
 
 
+# --- metrics + named_filters (Pillar #9, 2026-05-12) -----------------------
+
+def _profile_with_metric_and_named_filter(root: Path) -> Path:
+    """Reuse _build_profile and inject a metric + named_filter so we can
+    exercise the new manifest fields. The metric lives on the `orders`
+    dataset; the named_filter lives at the model level in index.yaml."""
+    pdir = _build_profile(root, profile="m_test")
+
+    # Inject a metric onto orders.
+    orders_yaml = pdir / "PUBLIC" / "orders.yaml"
+    doc = yaml.safe_load(orders_yaml.read_text())
+    ds = doc["semantic_model"][0]["datasets"][0]
+    ds["metrics"] = [{
+        "name": "order_revenue",
+        "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(amount)"}]},
+        "description": "Total order revenue (gross of refunds).",
+        "custom_extensions": [{
+            "vendor_name": "COMMON",
+            "data": _agami_data({
+                "definition_prose": "Sum of amount column. Gross — refunds NOT subtracted.",
+                "assumptions": [
+                    "amount is denominated in the order's currency",
+                    "refunds carry a negative sign and are kept (not removed)",
+                ],
+                "confidence": 0.85,
+                "review_state": "unreviewed",
+                "origin": "llm_suggested",
+                "signed_off_by": None,
+                "signed_off_at": None,
+                "signed_off_role": None,
+            }),
+        }],
+    }]
+    orders_yaml.write_text(yaml.safe_dump(doc, sort_keys=False))
+
+    # Inject a model-level named_filter into index.yaml's semantic_model
+    # extensions.
+    index_yaml = pdir / "index.yaml"
+    idx = yaml.safe_load(index_yaml.read_text())
+    idx.setdefault("semantic_model", []).append({
+        "name": "m_test",
+        "custom_extensions": [{
+            "vendor_name": "COMMON",
+            "data": _agami_data({
+                "named_filters": [{
+                    "name": "active_customer",
+                    "expression": "customers.last_purchase_at >= NOW() - INTERVAL '90 days'",
+                    "description": "Made a purchase in the last 90 days.",
+                    "definition_prose": "Customer made a purchase in the last 90 days.",
+                    "confidence": 0.7,
+                    "review_state": "unreviewed",
+                    "origin": "human_authored",
+                    "signed_off_by": None,
+                    "signed_off_at": None,
+                    "signed_off_role": None,
+                }],
+            }),
+        }],
+    })
+    index_yaml.write_text(yaml.safe_dump(idx, sort_keys=False))
+    return pdir
+
+
+def test_manifest_collects_metrics(tmp_path):
+    pdir = _profile_with_metric_and_named_filter(tmp_path)
+    m = build_manifest(pdir, "m_test")
+    metrics = m.get("metrics") or []
+    assert len(metrics) == 1
+    metric = metrics[0]
+    assert metric["name"] == "order_revenue"
+    assert metric["scope"] == "PUBLIC.orders"
+    assert metric["expression"] == "SUM(amount)"
+    assert "Gross" in metric["definition_prose"]
+    assert len(metric["assumptions"]) == 2
+    assert metric["review_state"] == "unreviewed"
+
+
+def test_manifest_collects_named_filters(tmp_path):
+    pdir = _profile_with_metric_and_named_filter(tmp_path)
+    m = build_manifest(pdir, "m_test")
+    nfs = m.get("named_filters") or []
+    assert len(nfs) == 1
+    nf = nfs[0]
+    assert nf["name"] == "active_customer"
+    assert nf["scope"] == "model"
+    assert "INTERVAL '90 days'" in nf["expression"]
+    assert nf["definition_prose"]
+    assert nf["review_state"] == "unreviewed"
+
+
+def test_manifest_totals_includes_metrics_and_named_filters(tmp_path):
+    pdir = _profile_with_metric_and_named_filter(tmp_path)
+    m = build_manifest(pdir, "m_test")
+    assert m["totals"]["metrics"] == 1
+    assert m["totals"]["named_filters"] == 1
+
+
+def test_manifest_empty_metrics_and_named_filters_when_absent(profile_dir):
+    """The base fixture has no metrics or named_filters — totals must show 0,
+    not missing keys (the template depends on the keys being present)."""
+    m = build_manifest(profile_dir, "test")
+    assert m["totals"]["metrics"] == 0
+    assert m["totals"]["named_filters"] == 0
+    assert m.get("metrics") == []
+    assert m.get("named_filters") == []
+
+
+def test_render_surfaces_metric_definition_prose(tmp_path):
+    pdir = _profile_with_metric_and_named_filter(tmp_path)
+    m = build_manifest(pdir, "m_test")
+    html = render(title="x", profile="m_test", manifest=m)
+    # The metric's definition prose, expression, and assumptions all reach the page.
+    assert "order_revenue" in html
+    assert "Gross" in html
+    assert "SUM(amount)" in html
+
+
+def test_render_surfaces_named_filter_predicate(tmp_path):
+    pdir = _profile_with_metric_and_named_filter(tmp_path)
+    m = build_manifest(pdir, "m_test")
+    html = render(title="x", profile="m_test", manifest=m)
+    assert "active_customer" in html
+    assert "INTERVAL" in html
+
+
 # --- render ------------------------------------------------------------------
 
 def test_render_substitutes_all_placeholders(profile_dir):
