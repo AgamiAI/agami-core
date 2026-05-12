@@ -48,7 +48,7 @@ The `agami-init` skill asks once. **Default is off.** If you opt in, every event
 | `install_id` | Random UUID generated on opt-in. Not tied to a user. | `f47ac10b-...` |
 | `db_type` | `postgres` / `mysql` / `sqlite` | `postgres` |
 | `os` | `darwin` / `linux` / `windows` | `darwin` |
-| `host` | `claude-code-cli`, `claude-code-vscode`, `claude-code-cursor`, `claude-cowork` | `claude-code-cli` |
+| `host` | `claude-code-cli`, `claude-code-vscode`, `claude-code-cursor` | `claude-code-cli` |
 | `tier` | Which connection method ran the event: `cli` (native CLI), `duckdb`, `python` (Python driver). Field name is `tier` for compatibility with the v1.0 wire format. | `cli` |
 | `error_kind` (only on errors) | One of nine categories like `auth`, `column_not_found`, `network`, `timeout` | `column_not_found` |
 | `latency_p50_ms` (optional) | Median latency, bucketed in 50ms increments | `250` |
@@ -86,7 +86,7 @@ The `agami-init` skill prompts you once during first-run, in plain English:
 >
 > What we send:
 > - Counts of installs, queries, errors (no content)
-> - Database type (postgres/mysql/sqlite), OS, which host (Claude Code / Cowork)
+> - Database type (postgres/mysql/sqlite), OS, which Claude Code host (CLI / VS Code / Cursor)
 > - Latency percentiles
 > - A random install ID — not tied to you
 >

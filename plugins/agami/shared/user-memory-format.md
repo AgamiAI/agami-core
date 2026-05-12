@@ -2,7 +2,7 @@
 
 Free-form Markdown file holding **cross-database user preferences and policies** that should apply no matter which profile the user connects to. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
 
-This is **separate** from the auto-memory file at `~/.claude/projects/<workspace>/memory/MEMORY.md` (Claude Code's auto-memory, which is host-managed and project-scoped). USER_MEMORY.md is **agami-managed**, lives alongside `credentials` and the per-profile directories, and persists across hosts (CLI, Cowork, Desktop) the same way credentials do.
+This is **separate** from the auto-memory file at `~/.claude/projects/<workspace>/memory/MEMORY.md` (Claude Code's auto-memory, which is host-managed and project-scoped). USER_MEMORY.md is **agami-managed**, lives alongside `credentials` and the per-profile directories, and persists across Claude Code hosts (CLI / VS Code extension / Cursor extension) the same way credentials do.
 
 USER_MEMORY.md is also **separate from `<artifacts_dir>/<profile>/ORGANIZATION.md`**:
 

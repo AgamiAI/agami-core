@@ -19,7 +19,7 @@ agami ships six skills, all prefixed `agami-` to avoid colliding with Claude Cod
 |---|---|
 | `/agami-<skill>` (e.g. `/agami-connect`) | Works as a bare slash command across hosts. The `agami-` prefix is what makes them safe. |
 | Plain natural language | Each skill's `when_to_use` carries trigger phrases. The model routes correctly without an explicit slash command. **Prefer this in chat** — it reads more naturally. |
-| `@agami` at-mention (some hosts) | Cowork / Desktop autocompletes `@agami` to the skill list. Don't assume it works on every host. |
+| `@agami` at-mention (some hosts) | Some Claude Code hosts autocomplete `@agami` to the skill list. Don't assume it works on every host. |
 
 ## What does NOT work — never write these in user-facing text
 

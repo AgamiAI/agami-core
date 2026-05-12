@@ -22,28 +22,24 @@ The first time you open the Claude pane (Cmd+Shift+P → "Claude Code: Open"), i
 
 ## 3. Add the agami marketplace and install
 
-In the Claude pane's chat input, paste each command on its own line:
+In the Claude pane's chat input, type `/plugin`. This surfaces a **Manage Plugins** option — click it.
 
-```
-/plugin marketplace add AgamiAI/LiteBi
-/plugin install agami@litebi
-```
+The plugins dialog opens. From here:
 
-Expected output mirrors the CLI flow: marketplace added, plugin installed, 4 skills registered.
+1. **Add the marketplace.** In the marketplace input, paste `AgamiAI/LiteBi` and click **Add**.
+2. **Install the plugin.** Switch to the **Plugins** tab in the dialog. Find `agami` in the list and click **Install**.
+
+The dialog confirms the install; agami's skills become available immediately.
 
 ## 4. Verify
 
-```
-/plugin list
-```
-
-Try a skill:
+Try a skill in the Claude pane chat input:
 
 ```
-/agami-init
+/agami-connect
 ```
 
-The skill responds in the Claude pane with the first-run state check.
+If you haven't set up credentials yet, the skill walks you through the DB-type picker and writes `~/.agami/credentials.example` for you to fill in. (No separate `/agami-init` — its setup flow was folded into `/agami-connect` Phase 0a.)
 
 ## 5. Set up credentials
 

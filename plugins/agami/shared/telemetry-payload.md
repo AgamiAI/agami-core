@@ -15,7 +15,7 @@ Telemetry payloads must contain ONLY these fields. Any other field causes the cl
 | `install_id` | UUIDv4 | Random per-install, generated on first opt-in. Never tied to a user. | `f47ac10b-58cc-4372-a567-0e02b2c3d479` |
 | `db_type` | enum | One of: `postgres`, `redshift`, `mysql`, `snowflake`, `sqlite` | `postgres` |
 | `os` | enum | One of: `darwin`, `linux`, `windows` | `darwin` |
-| `host` | enum | One of: `claude-code-cli`, `claude-code-vscode`, `claude-code-cursor`, `claude-cowork` | `claude-code-cli` |
+| `host` | enum | One of: `claude-code-cli`, `claude-code-vscode`, `claude-code-cursor` | `claude-code-cli` |
 | `error_kind` | enum (optional) | Only when `event_type = error`. One of: `auth`, `dsn`, `network`, `permission`, `column_not_found`, `table_not_found`, `syntax`, `timeout`, `driver_missing`, `other` | `column_not_found` |
 | `latency_p50_ms` | int (optional) | Median latency for the event in ms. Bucketed in 50ms increments. | `250` |
 | `latency_p95_ms` | int (optional) | p95 latency in ms. Bucketed in 50ms increments. | `1100` |
@@ -108,7 +108,7 @@ The agami-connect Phase 0a presents this to the user, verbatim:
 >
 > What we send:
 > - Counts of installs, queries, errors (no content)
-> - Database type (postgres/mysql/sqlite), OS, which host (Claude Code / Cowork)
+> - Database type (postgres/mysql/sqlite), OS, which Claude Code host (CLI / VS Code / Cursor)
 > - Latency percentiles
 > - A random install ID — not tied to you
 >

@@ -28,7 +28,7 @@ agami's state splits across two directories. See [`plugins/agami/shared/file-lay
 | `<artifacts_dir>/<profile>/ORGANIZATION.md` | Free-form Markdown — per-database domain context | Seeded by `agami-connect`, edited by user or appended by `agami-save-correction` |
 | `~/.agami/cross_profile_relationships.yaml` | Agami-bespoke YAML — declared JOIN paths across profiles for federation. **Lives in `~/.agami/` because it spans profiles** and isn't tied to one team's repo | User-edited (optional) |
 
-`USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives in the artifacts dir, and persists across hosts (CLI / Cowork / Desktop) the same way the rest of `<artifacts_dir>/` does.
+`USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives in the artifacts dir, and persists across Claude Code hosts (CLI / VS Code extension / Cursor extension) the same way the rest of `<artifacts_dir>/` does.
 
 `USER_MEMORY.md` covers **user preferences that apply across every database** (default time windows, display preferences, exclude rules). The per-database **`ORGANIZATION.md`** at `<artifacts_dir>/<profile>/ORGANIZATION.md` covers **domain knowledge for that specific database** (terminology, key metrics, what the data represents). See [`plugins/agami/shared/organization-context-format.md`](../plugins/agami/shared/organization-context-format.md).
 

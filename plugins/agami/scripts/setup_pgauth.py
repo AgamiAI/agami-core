@@ -5,10 +5,10 @@ agami skill can run psql / mysql WITHOUT ever putting the password on the
 command line.
 
 Why this exists: invoking psql via `export PGPASSWORD='<literal>' psql ...`
-puts the password in the visible Bash command. Hosts (Cursor, Claude Code,
-Cowork) render Bash tool calls in their UI, so the password leaks into the
-chat transcript. The fix is provider-native auth files that psql / mysql
-read automatically:
+puts the password in the visible Bash command. Claude Code hosts (CLI, VS
+Code extension, Cursor extension) render Bash tool calls in their UI, so
+the password leaks into the chat transcript. The fix is provider-native
+auth files that psql / mysql read automatically:
 
     ~/.agami/.pgpass         (chmod 600) — postgres "host:port:db:user:password"
     ~/.agami/.mysql.cnf      (chmod 600) — mysql "[client_<profile>]\\npassword=..."

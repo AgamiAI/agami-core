@@ -20,7 +20,7 @@ Ask plain-English questions of your **Postgres / MySQL / Snowflake / BigQuery / 
 - [Why agami](#why-agami)
 - [The trust layer](#the-trust-layer)
 - [Quickstart (under 5 minutes)](#quickstart-under-5-minutes)
-- [Install](#install) — [Claude Code CLI](#claude-code-cli) · [VS Code](#claude-code-in-vs-code) · [Cursor](#claude-code-in-cursor) · [Cowork](#claude-cowork)
+- [Install](#install) — [Claude Code CLI](#claude-code-cli) · [VS Code](#claude-code-in-vs-code) · [Cursor](#claude-code-in-cursor)
 - [Setup credentials](#setup-credentials)
 - [Skills (slash commands)](#skills-slash-commands)
 - [First-run walkthrough](#first-run-walkthrough)
@@ -127,9 +127,9 @@ Phase 5 of `agami-connect` generates 10–12 NL→SQL seed examples that each sa
 ## Quickstart (under 5 minutes)
 
 ```bash
-# 1. Install the plugin (any Claude Code variant — CLI / VS Code / Cursor / Cowork)
-/plugin marketplace add AgamiAI/LiteBi
-/plugin install agami@litebi
+# 1. Install the plugin — see the Install section below for the exact steps
+#    per host. CLI uses /plugin marketplace add; VS Code and Cursor use the
+#    "Manage Plugins" dialog.
 
 # 2. Run connect — picks your DB type, writes ~/.agami/credentials.example
 #    (first time only; subsequent runs introspect directly)
@@ -185,12 +185,12 @@ Detailed walkthrough: [`docs/install/claude-code-cli.md`](docs/install/claude-co
 
 1. Install the **Claude Code** extension from the VS Code marketplace (publisher: Anthropic).
 2. Open the Claude pane (Cmd+Shift+P → "Claude Code: Open").
-3. In the chat input, run:
-   ```
-   /plugin marketplace add AgamiAI/LiteBi
-   /plugin install agami@litebi
-   ```
-4. Verify with `/plugin list`.
+3. In the chat input, type `/plugin`. This opens a **Manage Plugins** option — click it.
+4. The plugins dialog opens. Add the marketplace:
+   - Paste `AgamiAI/LiteBi` in the marketplace input
+   - Click **Add**
+5. Switch to the **Plugins** tab in the dialog.
+6. Find `agami` in the list and click **Install**.
 
 Detailed walkthrough: [`docs/install/claude-code-vscode.md`](docs/install/claude-code-vscode.md).
 
@@ -198,19 +198,14 @@ Detailed walkthrough: [`docs/install/claude-code-vscode.md`](docs/install/claude
 
 1. Install the **Claude Code** extension from the Cursor extensions marketplace (or via `cursor --install-extension anthropic.claude-code`).
 2. Open the Claude pane.
-3. Run the same `/plugin marketplace add` + `/plugin install` commands.
-4. Verify.
+3. In the chat input, type `/plugin`. This opens a **Manage Plugins** option — click it.
+4. The plugins dialog opens. Add the marketplace:
+   - Paste `AgamiAI/LiteBi` in the marketplace input
+   - Click **Add**
+5. Switch to the **Plugins** tab in the dialog.
+6. Find `agami` in the list and click **Install**.
 
 Detailed walkthrough: [`docs/install/claude-code-cursor.md`](docs/install/claude-code-cursor.md).
-
-### Claude Cowork
-
-1. Open Claude Cowork in your browser.
-2. Settings → Plugins → **Add marketplace** → paste `AgamiAI/LiteBi` → submit.
-3. Find `agami` in the plugin list and click **Install**.
-4. Verify by typing `@agami` in a Cowork chat — autocomplete should suggest the agami skills.
-
-Detailed walkthrough: [`docs/install/claude-cowork.md`](docs/install/claude-cowork.md).
 
 ---
 
