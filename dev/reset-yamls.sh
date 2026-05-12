@@ -123,12 +123,19 @@ fi
 echo ""
 echo "✓ Done."
 echo ""
-echo "Preserved (unless --hard was set):"
+echo "Always preserved (this script never touches these regardless of flags):"
 echo "  ~/.agami/credentials              DB connection"
 echo "  ~/.agami/.config                  reviewer email, threshold"
-[[ -f "$PROFILE_DIR/ORGANIZATION.md" ]] && echo "  $PROFILE_DIR/ORGANIZATION.md"
-[[ -d "$PROFILE_DIR/.git" ]] && echo "  $PROFILE_DIR/.git                       (audit trail)"
-[[ -f "$PROFILE_DIR/curation_log.jsonl" ]] && echo "  $PROFILE_DIR/curation_log.jsonl"
+echo "  ~/agami-artifacts/USER_MEMORY.md  cross-DB preferences"
+echo "  ~/.agami/review/, charts/, ...    rendered dashboards / charts"
+if [[ $HARD -eq 0 ]]; then
+  echo ""
+  echo "Preserved in soft mode (would be dropped on --hard):"
+  [[ -f "$PROFILE_DIR/ORGANIZATION.md" ]] && echo "  $PROFILE_DIR/ORGANIZATION.md"
+  [[ -d "$PROFILE_DIR/.git" ]] && echo "  $PROFILE_DIR/.git                       (audit trail)"
+  [[ -f "$PROFILE_DIR/curation_log.jsonl" ]] && echo "  $PROFILE_DIR/curation_log.jsonl"
+  [[ -f "$PROFILE_DIR/corrections.jsonl" ]] && echo "  $PROFILE_DIR/corrections.jsonl"
+fi
 echo ""
 echo "Now run /agami-connect in Claude Code to regenerate the YAMLs."
 [[ -d "$PROFILE_DIR/.git" ]] && \
