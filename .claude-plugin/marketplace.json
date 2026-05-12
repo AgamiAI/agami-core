@@ -11,7 +11,7 @@
     "pluginRoot": "./plugins",
     "tags": ["data", "sql", "natural-language", "bi", "local-first", "open-source"],
     "repository": "https://github.com/AgamiAI/LiteBi",
-    "license": "MIT"
+    "license": "Apache-2.0"
   },
   "plugins": [
     {

@@ -2,7 +2,7 @@
 
 > **The trust layer between AI agents and your data warehouse. Local. Private. Yours.**
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Status](https://img.shields.io/badge/status-pre--public-orange)
 
@@ -43,7 +43,7 @@ Most NL→SQL tools either send your data through a hosted backend (Snowflake-fl
 - **Snapshot-pinned answers.** Every query records the model snapshot hash it ran against. Old answers reproduce exactly. Schema drift flips affected entries to `stale` instead of silently changing the number.
 - **Corrections persist with attribution.** When you say "no, the join should be on `customer_id`", the corrected SQL lands in `examples.yaml` with the author and date. When a future answer is influenced by it, the receipt names the correction's author so the audit trail stays clean.
 
-`agami` is open source under the MIT license. The code that runs on your machine is the code in this repo. Read it.
+`agami` is open source under the Apache 2.0 license (with an explicit patent grant). The code that runs on your machine is the code in this repo. Read it.
 
 ---
 
@@ -707,6 +707,6 @@ A community Discord will land soon — once it's live the link will appear here 
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Built by [Agami AI](https://agami.ai).
