@@ -546,6 +546,43 @@ If you flip a `review_state` from `unreviewed` to `approved` by hand, also set `
 
 Format reference: [`plugins/agami/shared/agami-osi-extensions.md`](plugins/agami/shared/agami-osi-extensions.md).
 
+### When the database schema changes (new tables / new columns / dropped columns)
+
+Re-run `/agami-connect reintrospect` (or just `/agami-connect` and pick "Refresh the schema"). agami doesn't watch your DB for drift automatically — you have to kick the refresh yourself.
+
+**What survives the re-introspect** (your hand-edits are not lost):
+- Descriptions, `choice_field` maps, metric definitions, named filters
+- Trust-layer sign-offs (`signed_off_by` / `signed_off_at` / `signed_off_role`) on every unchanged entry
+- The rule is: **the DB is canonical for structure (tables / columns / types / PK / FK); the YAML is canonical for meaning** (prose, business definitions, approvals)
+
+**What happens to the new stuff**:
+| Change | Behavior |
+|---|---|
+| **New tables** | Fresh trust blocks per Phase 2c.2. FK relationships auto-approve where the DB declares them; structural column-name patterns (`id`, `*_id`, `created_at`, `email`, ...) auto-approve via the dictionary. Anything else stays `unreviewed`. |
+| **New columns on existing tables** | Same — pattern-matched columns auto-approve, others land `unreviewed`. |
+| **New metric or named filter** | If Phase 3.5 detects any new Rule 1 candidates, the Rule 1 gate fires *before* Phase 4 regenerates seed examples. Sign them off, then seeds inherit approved definitions. |
+
+**What happens to drift** (column type change, FK target shift):
+- The entry's `agami.review_state` flips to `stale`. Prior `signed_off_*` is preserved for audit.
+- At runtime, `agami-query-database` refuses queries depending on a `stale` entry until you re-approve via `/agami-review` — surfaces as: *"This query would have used X, but it's marked stale (schema drift). Run /agami-review to reconcile."*
+
+**What happens to removed tables / columns** (the lossy case):
+- They drop out of the model on the next write. Hand-edits on them (descriptions, sign-offs) are lost.
+- `.git/` in `<artifacts_dir>/<profile>/` keeps the history — `git log` and `git show <commit>:<path>` recover prior versions if needed.
+- `.snapshots/` keeps prior model versions pinned, so old query receipts still resolve the entries they referenced.
+
+**Workflow**:
+```
+git -C ~/agami-artifacts/<profile> log -5  # optional: see what's there
+/agami-connect reintrospect
+# Walk Phase 3.5 if a Rule 1 gate fires (new metrics need sign-off)
+# Walk Phase 5 examples-validation (can skip with `done`)
+# Walk Phase 5.5's Rule 2 polish panel if you want (or skip)
+git -C ~/agami-artifacts/<profile> diff HEAD~1  # diff of what the schema change cost / added
+```
+
+**Known gap**: no automated drift detection yet. You have to know the schema changed. A "drift inbox" feature (watch DB metadata, surface changes proactively) is in the plan but unbuilt — the v1 contract is manual re-introspect.
+
 ### Snapshot reproducibility
 
 Every introspect writes the canonical model to `~/agami-artifacts/<profile>/.snapshots/<hash>/`. Every query records that hash in its receipt. To reproduce an old answer exactly, `git checkout` the matching commit in `<artifacts_dir>/<profile>/.git/` — the model that produced the original number is byte-identical.
@@ -597,7 +634,8 @@ To override per-user (e.g., to add commands you trust beyond agami), put them in
 | `snowsql` flag-guessing failures | Snowflake CLI is fussy about flag ordering; use the explicit invocation table in `connection-reference.md`. |
 | `connection refused` on a remote DB | Check VPN / firewall, then connect with your native CLI (`psql -h ... -U ...` or `snowsql -a ... -u ...`) directly to confirm. |
 | "I don't have a model for `<profile>`" | Tell agami "introspect my schema" or run `/agami-connect`. The skill picks up `AGAMI_PROFILE` automatically. |
-| The generated SQL keeps using a column that doesn't exist | The model is stale. Run `/agami-connect` again — it preserves your hand-edits, refreshes from the DB, and surfaces any new entries in the review queue. |
+| The generated SQL keeps using a column that doesn't exist | The model is stale. Run `/agami-connect reintrospect` — it preserves your hand-edits, refreshes from the DB, and surfaces any new entries in the review queue. See [When the database schema changes](#when-the-database-schema-changes-new-tables--new-columns--dropped-columns). |
+| Just added new tables / columns / metrics to your DB | Run `/agami-connect reintrospect`. Same as above — hand-edits + sign-offs survive; new structure flows in; drifted entries flip to `stale`. |
 | Query times out on a large table | Add a date filter or `LIMIT`; the skill flags HIGH-risk scans before running. |
 | "agami refused to answer because revenue is unreviewed" | Run `/agami-review`, walk the metric card, sign off (or fix the `definition_prose` if it's wrong), then re-ask. |
 | Validator rejects a hand-edited YAML | Read the error verbatim — it'll point at the exact line. Most common: Rule 1 metric set to `approved` without `definition_prose`, or `review_state: not_applicable` without `origin: no_description`. |
