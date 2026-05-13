@@ -1461,6 +1461,19 @@ For each example:
 - **Apply USER_MEMORY policies.** If USER_MEMORY says "exclude test users where email matches @example.com", every seed example that touches `customers` includes that filter. If it says "default time window: last 30 days", date-relevant examples honor that default.
 - **Apply ORGANIZATION.md domain vocabulary.** If ORGANIZATION.md defines "active user = signed in in the last 30 days", any "active user" example uses that definition.
 
+**HARD RULE for time-arithmetic SQL (added 2026-05-13 after a BigQuery type-mismatch report):** before emitting any SQL that does date / time arithmetic, look up the **`agami.original_type`** of the column being filtered or aggregated, and pick the matching function family. The introspect step preserved `original_type` precisely so SQL generation doesn't have to guess:
+
+| Column's `original_type` (BigQuery) | Function family in seed SQL | Current-time function |
+|---|---|---|
+| `DATE` | `DATE_TRUNC` / `DATE_ADD` / `DATE_SUB` / `DATE_DIFF` | `CURRENT_DATE()` |
+| `DATETIME` | `DATETIME_TRUNC` / `DATETIME_ADD` / `DATETIME_SUB` / `DATETIME_DIFF` | `CURRENT_DATETIME()` |
+| `TIMESTAMP` | `TIMESTAMP_TRUNC` / `TIMESTAMP_ADD` / `TIMESTAMP_SUB` / `TIMESTAMP_DIFF` | `CURRENT_TIMESTAMP()` |
+| `TIME` | `TIME_TRUNC` / `TIME_ADD` / `TIME_SUB` / `TIME_DIFF` | `CURRENT_TIME()` |
+
+**Real failure mode reported in production**: column `created_at` is `DATETIME`, seed SQL emitted `WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 180 DAY)`. BigQuery rejects with *"No matching signature for operator >= for argument types: DATETIME, TIMESTAMP"*. The LLM eventually self-corrected — but that's an iteration cost the original generation should have avoided. The agami extension's `original_type` is the answer; consult it before emitting.
+
+For non-BigQuery dialects: Postgres / MySQL / Snowflake collapse most of these to a single `TIMESTAMP` family, so the rule is mostly a no-op there. But the *check* should still happen — `original_type` is the source of truth across every dialect.
+
 ### 4b — EXPLAIN-validate + row-count check
 
 Two-pass validation before an example lands in `examples.yaml`:

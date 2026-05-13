@@ -244,7 +244,27 @@ Dialect is **GoogleSQL**. Identifiers are case-insensitive; type names in `CAST`
 - Format strings use `strftime`-style tokens (`%Y %m %d %H %M %S`).
 
 ### Date / time functions
-- **Argument order quirk:** the unit is a **bare identifier** (not a string), and for `*_TRUNC` it's the **second** arg; for `*_DIFF` it's the **third**.
+
+**HARD RULE — match the function family to the column's actual type.** BigQuery has FOUR distinct date / time types and they are NOT interchangeable in arithmetic:
+
+| Column type | Use this family | Current-time function |
+|---|---|---|
+| `DATE` | `DATE_TRUNC`, `DATE_ADD`, `DATE_SUB`, `DATE_DIFF` | `CURRENT_DATE()` |
+| `DATETIME` (no timezone) | `DATETIME_TRUNC`, `DATETIME_ADD`, `DATETIME_SUB`, `DATETIME_DIFF` | `CURRENT_DATETIME()` |
+| `TIMESTAMP` (timezone-aware, absolute point in time) | `TIMESTAMP_TRUNC`, `TIMESTAMP_ADD`, `TIMESTAMP_SUB`, `TIMESTAMP_DIFF` | `CURRENT_TIMESTAMP()` |
+| `TIME` (time of day, no date) | `TIME_TRUNC`, `TIME_ADD`, `TIME_SUB`, `TIME_DIFF` | `CURRENT_TIME()` |
+
+**Mixing families fails to compile.** A query like `WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 180 DAY)` against a `DATETIME` column raises *"No matching signature for operator >= for argument types: DATETIME, TIMESTAMP"*. The fix is to switch to the column's family: `WHERE created_at >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 180 DAY)`.
+
+**Before emitting any time-arithmetic SQL, look up the column's actual type** in the loaded model (`agami.original_type` on the field; falls back to `agami.type` mapped to BigQuery: `timestamp` could be DATETIME or TIMESTAMP — `original_type` is the canonical source). Then pick the matching function family. Don't default to `TIMESTAMP_SUB` / `CURRENT_TIMESTAMP()` — the introspect step preserves `original_type` precisely so SQL generation doesn't have to guess.
+
+**Convert between families when you must** (e.g., joining a DATETIME column to a TIMESTAMP literal):
+- `DATETIME(timestamp_expr, timezone)` — TIMESTAMP → DATETIME (timezone-naive)
+- `TIMESTAMP(datetime_expr, timezone)` — DATETIME → TIMESTAMP (assumes given timezone)
+- `DATE(timestamp_or_datetime_expr)` — strip time, keep date
+- `CAST(x AS DATE)` / `CAST(x AS DATETIME)` / `CAST(x AS TIMESTAMP)` — also work
+
+**Argument order quirk:** the unit is a **bare identifier** (not a string), and for `*_TRUNC` it's the **second** arg; for `*_DIFF` it's the **third**.
 - `CURRENT_DATE()`, `CURRENT_DATETIME()`, `CURRENT_TIMESTAMP()`. Optional timezone arg: `CURRENT_DATE('America/Los_Angeles')`.
 - `DATE(year, month, day)` or `DATE(timestamp, timezone)` or `DATE(datetime)` — DATE constructor.
 - `DATE_TRUNC(date_expr, part)` — e.g. `DATE_TRUNC(order_date, MONTH)`. Parts: `DAY`, `WEEK`, `WEEK(MONDAY)`, `ISOWEEK`, `MONTH`, `QUARTER`, `YEAR`, `ISOYEAR`.
