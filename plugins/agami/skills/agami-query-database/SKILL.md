@@ -745,7 +745,11 @@ The helper reads `shared/chart-template.html` + the two logo SVGs once, validate
 
 4. Delete the temp files: `rm -f /tmp/agami-sections-<ts>.json /tmp/agami-receipt-<ts>.json`.
 
-`--summary` is the executive summary used for multi-section reports; for single-section reports pass an empty string and the section's own insight covers it. `--title` is the user's original question. `--receipt-file` is **optional** for backward compatibility — if you can't build a receipt (legacy model, missing trust fields), omit the flag and the report renders without the receipt panel.
+`--summary` is the executive summary used for multi-section reports; for single-section reports pass an empty string and the section's own insight covers it. `--title` is the user's original question.
+
+`--receipt-file` is **MANDATORY — always build and pass it.** The receipt is the answer-side half of the trust pitch; without it, the chart renders but loses provenance (no tables-touched list, no relationships-used, no model-version pin, no warning banner). Real failure mode reported in production (2026-05-13, BigQuery user): a query rendered cleanly with the chart and SQL, but no provenance panel — the user (and any auditor) couldn't tell which model version produced it or whether any unreviewed entries were touched. The receipt panel being absent reads as "the trust layer isn't actually there."
+
+The receipt construction logic is in Phase 4e.iii.5 above. If trust fields are genuinely missing on every entry the SQL touched (very old model from before the trust spine shipped), build the receipt with empty `relationships: []`, `metrics: []`, `named_filters: []`, `warnings: []` — but always pass `tables_used`, `executed_sql`, and `model_version`. The receipt panel renders gracefully on partial data; what you must NEVER do is omit `--receipt-file` entirely.
 
 If the user pinned a chart type via `--chart bar` (etc.), the LLM still chooses per section — the flag from 2a is hint, not override. Multi-section reports often need different chart types per section.
 

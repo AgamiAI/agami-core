@@ -289,6 +289,67 @@ class TestStructuralPatternMatch:
         assert match_structural_pattern("x") is None
         assert match_structural_pattern("foobar") is None
 
+    # --- Prefixed universal terms (added 2026-05-13 after a BigQuery
+    # ---     CRM-schema report showed Lead_email / Lead_country /
+    # ---     Contact_Owner / Hubspot_Team falling through as "(no description)"
+    # ---     because the dictionary only matched bare `email` / `country` /
+    # ---     `owner` / `team`. Real DBs prefix constantly.)
+
+    def test_prefixed_contact_terms(self):
+        assert match_structural_pattern("Lead_email") == "email_field"
+        assert match_structural_pattern("contact_email_address") == "email_field"
+        assert match_structural_pattern("Lead_phone") == "phone_field"
+        assert match_structural_pattern("Customer_mobile") == "phone_field"
+
+    def test_prefixed_location_terms(self):
+        assert match_structural_pattern("Billing_address") == "address_field"
+        assert match_structural_pattern("Shipping_city") == "city_field"
+        assert match_structural_pattern("Lead_country") == "country_field"
+        assert match_structural_pattern("Billing_state") == "state_field"
+        assert match_structural_pattern("Lead_zip") == "postal_field"
+        assert match_structural_pattern("Lead_postal_code") == "postal_field"
+
+    def test_prefixed_name_terms(self):
+        assert match_structural_pattern("Lead_name") == "name_field"
+        assert match_structural_pattern("Contact_first_name") == "name_field"
+        assert match_structural_pattern("Customer_last_name") == "name_field"
+        assert match_structural_pattern("Owner_full_name") == "name_field"
+
+    def test_prefixed_categorical(self):
+        assert match_structural_pattern("Lead_status") == "status_field"
+        assert match_structural_pattern("Order_status") == "status_field"
+        assert match_structural_pattern("Account_type") == "type_field"
+        assert match_structural_pattern("Lead_category") == "category_field"
+        assert match_structural_pattern("Hubspot_Team") == "category_field"
+        assert match_structural_pattern("Lead_priority") == "priority_field"
+
+    def test_prefixed_ownership(self):
+        assert match_structural_pattern("Contact_Owner") == "audit_by"
+        assert match_structural_pattern("Lead_assignee") == "audit_by"
+        # `_by` suffix still wins for clearly-audit names:
+        assert match_structural_pattern("approved_by") == "audit_by"
+
+    def test_prefixed_date_buckets(self):
+        # New: *_day, *_week, *_month, *_quarter, *_year all → event_date
+        # so "Lead_create_day", "Webinar_day" etc. don't fall through.
+        assert match_structural_pattern("Lead_create_day") == "event_date"
+        assert match_structural_pattern("Webinar_day") == "event_date"
+        assert match_structural_pattern("report_week") == "event_date"
+        assert match_structural_pattern("billing_month") == "event_date"
+        assert match_structural_pattern("fiscal_quarter") == "event_date"
+        assert match_structural_pattern("birth_year") == "event_date"
+
+    def test_prefixed_url(self):
+        assert match_structural_pattern("Webhook_url") == "url_field"
+        assert match_structural_pattern("Lead_website") == "url_field"
+
+    def test_prefixed_measure_extras(self):
+        assert match_structural_pattern("conversion_rate") == "rate_field"
+        assert match_structural_pattern("success_pct") == "rate_field"
+        assert match_structural_pattern("retention_percent") == "rate_field"
+        assert match_structural_pattern("price_ratio") == "rate_field"
+        assert match_structural_pattern("credit_score") == "rate_field"
+
     def test_case_insensitive(self):
         assert match_structural_pattern("CREATED_AT") == "created_at"
         assert match_structural_pattern("Email") == "email_field"

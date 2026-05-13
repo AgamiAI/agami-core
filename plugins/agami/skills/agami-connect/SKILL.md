@@ -1123,6 +1123,24 @@ The signal inputs come from data the introspect step already collects:
 
 If a signal isn't observable for a given DB type (e.g., SQLite has no FK metadata when foreign_keys pragma is off; MySQL has no column comments unless the DBA wrote them), pass `False` for that signal — `compute_confidence.py` clamps appropriately.
 
+**HARD RULE for relationships (added 2026-05-13 after a BigQuery confidence-zero report):** every relationship — including LLM-inferred cross-schema ones with no FK metadata — MUST populate `column_type_match` and `column_name_similarity` (numeric Jaccard, 0.0–1.0) in `signal_breakdown`. If the LLM proposed the relationship from name shape alone, ALSO set `llm_inferred: true`. Real failure mode: cross-schema BigQuery relationships emitted with everything-false `signal_breakdown` → `confidence_for_join` returns 0.00 → the review dashboard shows "conf 0.00 UNREVIEWED" cards, which reads as "the system is certain this join is wrong" instead of "low confidence, needs review." A relationship that's a candidate at all has *some* signal supporting it; populate it.
+
+Minimum legal signal_breakdown for an LLM-proposed cross-schema relationship:
+```python
+score, signal_breakdown = confidence_for_join(
+    fk_declared=False,                                # truly no FK in BQ
+    pk_overlap=False,                                  # ditto
+    unique_index_match=False,                          # BQ doesn't have indexes
+    column_type_match=<bool>,                          # check it — string=string is true
+    column_name_similarity=<jaccard float, e.g. 0.62>, # token similarity over names
+    plural_pattern_match=<bool>,                       # heuristic — usually false cross-schema
+    llm_inferred=True,                                 # the proposer was the LLM
+)
+# Expect score ≈ 0.10–0.30 — low (it'll surface in review), but not the
+# misleading 0.00. The user sees "low confidence — your eyes needed,"
+# not "the system thinks this is broken."
+```
+
 Invocation pattern (pseudocode — Claude composes the actual YAML):
 
 ```python
@@ -1748,6 +1766,16 @@ Existing examples without these fields are treated as `state: unreviewed`. Backw
 ---
 
 ## Phase 5.5: Post-introspect summary (the trust-layer landing)
+
+**MANDATORY — NEVER SKIP. MUST run on every `/agami-connect` invocation that produces or refreshes a model.**
+
+Past failure mode (reported 2026-05-13, BigQuery early adopter): the LLM running the skill jumped from Phase 5 (examples validation complete) → Phase 6 (closing message), bypassing Phase 5.5 entirely. The user never saw the review dashboard offer, never opened the Rule 2 polish queue, and ended the session believing the skill was done — even though there were 9 unreviewed field descriptions + 2 unreviewed cross-schema relationships in the model. The receipt panel on their first answer then surfaced "unreviewed" warnings the user didn't have a path to clear.
+
+Do NOT skip if:
+- Phase 3.5 ran and Rule 1 was fully approved — Rule 2 still needs surfacing.
+- Phase 3.5 was skipped (no Rule 1 candidates) — Phase 5.5 still fires. Rule 2 candidates are independent.
+- All Rule 2 candidates are at confidence ≥ threshold — still surface the summary so the user sees the auto-approve numbers and the "no items need review" framing.
+- The user said "no clarifying questions" earlier — same rule as Phase 1.4/1.5: this is required state-gathering, not a clarifying question.
 
 This is the curator's checkout screen. Rule 1 sign-off already happened in Phase 3.5 (or was skipped because there was nothing to sign off), so by the time we land here the must-do work for the *current* introspect run is done. Everything surfaced here is **optional polish** — Rule 2 entries (low-confidence joins, field descriptions) that surface as warnings on answers but don't block.
 

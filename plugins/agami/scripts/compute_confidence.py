@@ -310,12 +310,20 @@ _SUFFIX_PATTERNS: list[tuple[str, str]] = [
     ("_id",        "fk_id_suffix"),
     ("_uuid",      "fk_uuid_suffix"),
     ("_guid",      "fk_guid_suffix"),
+    # Time / event suffixes
     ("_at",        "event_at"),
     ("_date",      "event_date"),
     ("_time",      "event_time"),
     ("_timestamp", "event_timestamp"),
     ("_ts",        "event_ts"),
+    ("_day",       "event_date"),
+    ("_week",      "event_date"),
+    ("_month",     "event_date"),
+    ("_quarter",   "event_date"),
+    ("_year",      "event_date"),
+    # Audit
     ("_by",        "audit_by"),
+    # Measure / count
     ("_count",     "count_field"),
     ("_amount",    "amount_field"),
     ("_total",     "total_field"),
@@ -324,6 +332,64 @@ _SUFFIX_PATTERNS: list[tuple[str, str]] = [
     ("_min",       "min_max_field"),
     ("_max",       "min_max_field"),
     ("_rate",      "rate_field"),
+    ("_pct",       "rate_field"),
+    ("_percent",   "rate_field"),
+    ("_ratio",     "rate_field"),
+    ("_score",     "rate_field"),
+    # Universal contact / location terms — prefixed forms catch
+    # `Lead_email`, `Contact_phone`, `Billing_city`, etc.
+    #
+    # Order matters: more-specific composites BEFORE their parts.
+    # `contact_email_address` should match email_field (its primary semantic),
+    # not address_field — so `_email_address` is listed before `_address`.
+    ("_email_address", "email_field"),
+    ("_email",        "email_field"),
+    ("_phone_number", "phone_field"),
+    ("_phone",        "phone_field"),
+    ("_mobile",       "phone_field"),
+    ("_address",      "address_field"),
+    ("_city",         "city_field"),
+    ("_state",        "state_field"),
+    ("_province",     "state_field"),
+    ("_region",       "state_field"),
+    ("_country",      "country_field"),
+    ("_zip",          "postal_field"),
+    ("_zipcode",      "postal_field"),
+    ("_postal_code",  "postal_field"),
+    ("_url",          "url_field"),
+    ("_website",      "url_field"),
+    ("_link",         "url_field"),
+    # Names
+    ("_name",         "name_field"),
+    ("_first_name",   "name_field"),
+    ("_last_name",    "name_field"),
+    ("_full_name",    "name_field"),
+    ("_display_name", "name_field"),
+    # Universal categorical
+    ("_status",       "status_field"),
+    ("_type",         "type_field"),
+    ("_kind",         "type_field"),
+    ("_category",     "category_field"),
+    ("_priority",     "priority_field"),
+    ("_severity",     "priority_field"),
+    # Ownership / team / group
+    ("_owner",        "audit_by"),
+    ("_assignee",     "audit_by"),
+    ("_team",         "category_field"),
+    ("_group",        "category_field"),
+    ("_org",          "category_field"),
+    ("_department",   "category_field"),
+    # Description / notes
+    ("_description",  "description_field"),
+    ("_notes",        "notes_field"),
+    ("_comments",     "notes_field"),
+    ("_remarks",      "notes_field"),
+    # Locale / config
+    ("_locale",       "locale_field"),
+    ("_language",     "locale_field"),
+    ("_lang",         "locale_field"),
+    ("_timezone",     "timezone_field"),
+    ("_currency",     "currency_field"),
 ]
 
 # Prefix patterns: column starts with the prefix AND has at least one char after.
