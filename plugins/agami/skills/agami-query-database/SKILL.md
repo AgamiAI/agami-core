@@ -804,7 +804,7 @@ test -f ~/.agami/.optins
 ```
 
 - **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
-- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. The full ask + handling logic is documented in [Phase 6 below](#phase-6-post-install-github-star-ask-interrupt-the-follow-ups-not-the-answer) — but the trigger lives here, in Phase 4e.5, because if it lives only in Phase 6 (which appears textually after Phase 4f) the LLM hits Phase 4f first and the ask never fires.
+- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. The full ask + handling logic is documented in [Phase 6 below](#phase-6-post-install-github-star-ask-interrupt-the-follow-ups-not-the-answer) — but the trigger lives here, in Phase 4e.5, because if it lives only in Phase 6 (which appears textually after Phase 4f) the LLM hits Phase 4f first and the ask never fires. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/LiteBi`) before emitting** — they exist because the LLM has hallucinated both the wording and the URL in production.
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la ~/.agami/.optins` will show whether the file exists, and `rm ~/.agami/.optins` re-arms the prompt for the next query.
 
@@ -902,6 +902,11 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 ## Phase 6: Post-install GitHub-star ask (full spec — triggered from Phase 4e.5)
 
 **This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (between 4e and 4f) — the textual order of phases here is misleading because the ask must run *between* 4e and 4f, not after Phase 5. If you read straight through Phase 4f → 5 → 6 the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
+
+**HARD RULES — read before emitting the ask (added 2026-05-13 after a hallucinated-URL bug):**
+
+1. **The repo URL is literally `https://github.com/AgamiAI/LiteBi`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not from the marketplace name (`litebi`), not from the plugin name (`agami`), not from the `/plugin install agami@litebi` slash command. Real failure mode reported in production: the LLM saw `agami@litebi` and emitted `https://github.com/litebi/agami` (a different, wrong repo). The URL has uppercase `A`'s and a capital `B` in "LiteBi" — copy it verbatim.
+2. **Use the prompt prose VERBATIM** from the `AskUserQuestion` text below — do not paraphrase, do not "improve" the wording, do not add emojis or marketing flourish. Real failure mode: the LLM emitted "Enjoying agami so far? It's open-source and growing fast — a ⭐ on GitHub helps others find it" instead of the actual text. Paraphrasing here drifts the ask further from the discrete-decision shape it's tuned for and undermines the "non-pushy" framing.
 
 A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 
