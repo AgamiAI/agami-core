@@ -1274,27 +1274,22 @@ If the validator can't be run for any reason (missing Python, missing dependenci
 
 After promotion succeeds, freeze the model under `.snapshots/<model_version>/`. The `model_version` is a 12-char content hash; the **directory name itself is the canonical version pin** — we don't stamp it into `index.yaml` (the OSI extension allowlist doesn't include it, and there's no need: the snapshot dir name is the source of truth, the receipt reads it at query time).
 
-```bash
-# Compute model_version: SHA-256 of every yaml file's content, sorted by relative path.
-# This is a content hash — identical introspects produce identical hashes (idempotent
-# snapshots), and any change to any yaml produces a new hash.
-model_version=$(
-  cd "$artifacts_dir/$profile"
-  find . -type f \( -name '*.yaml' -o -name '*.md' \) \
-    ! -path './.snapshots/*' ! -path './.git/*' \
-    | LC_ALL=C sort \
-    | xargs sha256sum \
-    | sha256sum | cut -d' ' -f1 | head -c 12
-)
+Use the Python helper. It computes the content hash, copies the model into `.snapshots/<hash>/`, and sets every file read-only — cross-platform (macOS / Linux / Windows). Stdlib only, no `rsync` / `find` / `xargs` / `chmod -R` dependency:
 
-# Snapshot the directory under .snapshots/<model_version>/ (immutable copy).
-mkdir -p "$artifacts_dir/$profile/.snapshots/$model_version"
-rsync -a --exclude '.snapshots' --exclude '.git' \
-  "$artifacts_dir/$profile/" "$artifacts_dir/$profile/.snapshots/$model_version/"
-chmod -R a-w "$artifacts_dir/$profile/.snapshots/$model_version"
+```bash
+model_version=$(
+  python3 "$AGAMI_PLUGIN_ROOT/scripts/snapshot_model.py" \
+    --profile-dir "$artifacts_dir/$profile"
+)
 ```
 
-Surface: `✓ Snapshot saved at .snapshots/<model_version>/ — query receipts pin this version.`
+The script prints only the 12-char hash on stdout (suitable for capture). On failure it exits non-zero and writes a one-line error to stderr; the SKILL should treat a non-zero exit as a snapshot failure and surface the error to the user — but **don't block the rest of the introspect**, the model is already written and validated. Snapshots are an audit nicety, not load-bearing for first-run.
+
+**Why Python and not bash:** the prior bash implementation used `rsync`, which isn't available on Windows by default and failed silently — early adopters on Windows lost their snapshots and didn't know. The Python helper works everywhere Python works.
+
+Surface on success: `✓ Snapshot saved at .snapshots/<model_version>/ — query receipts pin this version.`
+
+Surface on failure (rare): `⚠ Snapshot failed (<stderr>). Model + git history are intact; query receipts will pin the latest model state instead of a frozen hash.`
 
 **Do NOT add `model_version` as a field inside `index.yaml.introspect_meta`** — that's not in the OSI agami-extension allowlist (see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md) → `agami.introspect_meta`), and adding it would fail validation. The receipt builder in agami-query-database reads the version directly from the `.snapshots/` directory listing — see Phase 4e.iii.5 of agami-query-database for the lookup pattern.
 
