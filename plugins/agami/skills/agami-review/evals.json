@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "skill_name": "agami-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Show me what needs sign-off in the model.",
+      "expected_output": "Opens the trust-layer review dashboard (render_review.py). Lists entries needing human sign-off in two groups: Rule 1 (metrics + named filters, always queued) and Rule 2 (low-confidence items below the active threshold). Renders an HTML artifact under ~/.agami/review/<timestamp>/.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Approve the metric net_revenue.",
+      "expected_output": "Updates the review_state of net_revenue to 'approved' in the OSI model, validates via validate_semantic_model.py before writing, commits the change to the per-profile git repo with attribution, and re-renders the dashboard. Refuses if validation fails.",
+      "files": []
+    }
+  ]
+}

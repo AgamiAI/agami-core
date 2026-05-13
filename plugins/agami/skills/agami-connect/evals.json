@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "skill_name": "agami-connect",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just installed agami. Help me connect to my Postgres database.",
+      "expected_output": "Routes to agami-connect Phase 0 (credential setup). Prompts the user to choose a database type via AskUserQuestion, writes ~/.agami/credentials.example with a Postgres template, and explains how to fill it in. Does NOT skip the DB-type picker, does NOT auto-write real credentials.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "My schema changed yesterday — reload it.",
+      "expected_output": "Routes to agami-connect reintrospect path. Pulls fresh tables/columns/FKs from information_schema, rebuilds the OSI v0.1.1 model under <artifacts_dir>/<profile>/, runs validate_semantic_model.py before writing, surfaces any validation errors without persisting a broken model.",
+      "files": []
+    }
+  ]
+}

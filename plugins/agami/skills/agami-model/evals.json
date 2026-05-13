@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "skill_name": "agami-model",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Let me browse the semantic model.",
+      "expected_output": "Opens the model-explorer dashboard (render_model_explorer.py). Renders all tables and columns with live search, exclude/include actions, and the embedded manifest JSON. Waits for chat back-channel commands (e.g. 'exclude table audit_log').",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Exclude the audit_log table from the model.",
+      "expected_output": "Parses the command, invokes apply_model_exclusions.py to flip review_state on audit_log, validates via validate_semantic_model.py, commits to the per-profile git repo, and re-renders the dashboard. Refuses silently if audit_log is not present.",
+      "files": []
+    }
+  ]
+}

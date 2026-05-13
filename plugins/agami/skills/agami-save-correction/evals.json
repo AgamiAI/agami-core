@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "skill_name": "agami-save-correction",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Save that last query as a correction.",
+      "expected_output": "Appends the (question, corrected_sql) pair to <artifacts_dir>/<profile>/examples.yaml. If the correction implies a semantic-model edit (e.g., a relationship fix or a metric definition), surfaces the proposed surgical edit for confirmation and applies it via validate_semantic_model.py before committing.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "The monthly revenue query should exclude refunds. Save this correction.",
+      "expected_output": "Detects the metric-level disagreement (monthly_revenue definition needs a refund filter), proposes a surgical edit to the metric's SQL or filter clause, validates the resulting model, and on user confirmation writes the example + commits both the example and the model edit with a clear curation_log entry.",
+      "files": []
+    }
+  ]
+}

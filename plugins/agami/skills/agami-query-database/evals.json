@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "skill_name": "agami-query-database",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Who are my top 5 customers by total spend?",
+      "expected_output": "Generates SQL from the active OSI model + few-shot examples, executes it locally, returns the top-5 result rows plus a receipt panel showing the SQL, relationships used, confidence scores, and model version pin. Does NOT invoke an external service; never sends the rows off-machine.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "What was monthly revenue for 2024?",
+      "expected_output": "Resolves 'revenue' against any approved metric definition in the OSI model (Rule 1 metric) before generating SQL. If revenue is defined as a metric, uses that definition; if not, generates a candidate SQL and surfaces the metric definition for review. Returns 12 monthly rows ordered by month with the receipt panel.",
+      "files": []
+    }
+  ]
+}

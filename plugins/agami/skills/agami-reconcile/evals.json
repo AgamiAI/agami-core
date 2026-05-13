@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "skill_name": "agami-reconcile",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "/agami-reconcile ~/dashboards/q3_2024.csv",
+      "expected_output": "Parses the CSV via reconcile.py into (label, expected_value) pairs, generates a matching NL question per label, runs each through agami-query-database, diffs actual vs expected with currency/percentage/parens-tolerant normalization, and renders a markdown table with green matches and red mismatches plus drill-down receipts.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Do these Tableau numbers match what agami says?",
+      "expected_output": "Asks the user via AskUserQuestion for the CSV path or pasted table. Once provided, runs the standard reconcile pipeline. On any mismatch, surfaces the receipt drill-down so the user can identify the definitional disagreement (gross vs net, refunds in/out, FX rate timing) rather than treating the mismatch as a bug.",
+      "files": []
+    }
+  ]
+}
