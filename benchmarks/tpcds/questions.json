@@ -1,0 +1,42 @@
+{
+  "schema_version": "1",
+  "benchmark_name": "tpcds-reporting-subset",
+  "source": "https://github.com/gregrahn/tpcds-kit (reporting tier)",
+  "scale_factor": 0.01,
+  "questions": [
+    {
+      "id": 1,
+      "tpcds_ref": "q3",
+      "prompt": "What was total net profit by store and item-brand for the November sales of any year, returning the top 100 by profit?",
+      "expected_shape": {
+        "row_count_min": 90,
+        "row_count_max": 110,
+        "ordered_by": "net_profit desc",
+        "top_n": 100,
+        "non_null_columns": ["store_id", "brand_id", "net_profit"]
+      }
+    },
+    {
+      "id": 2,
+      "tpcds_ref": "q7",
+      "prompt": "Among customers with marital status 'M' aged 21-25 from a list of common education levels, what was the average sale list price, coupon amount, sale price, and net profit per item, returned by item id?",
+      "expected_shape": {
+        "row_count_min": 1,
+        "row_count_max": 100,
+        "non_null_columns": ["item_id", "avg_list_price", "avg_net_profit"],
+        "aggregate_tolerance_pct": 1
+      }
+    },
+    {
+      "id": 3,
+      "tpcds_ref": "q42",
+      "prompt": "What were the total extended sales price for each item category in November 2000?",
+      "expected_shape": {
+        "row_count_min": 5,
+        "row_count_max": 20,
+        "non_null_columns": ["category", "extended_sales_price"],
+        "aggregate_tolerance_pct": 1
+      }
+    }
+  ]
+}
