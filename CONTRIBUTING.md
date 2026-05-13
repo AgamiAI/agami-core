@@ -23,6 +23,35 @@ docker compose up -d
 docker compose down -v
 ```
 
+## Testing skills
+
+Editing a SKILL.md or a helper in `plugins/agami/scripts/` should be backed
+by a test. Four layers, increasing cost:
+
+| Layer | What it checks | Where | When it runs |
+|---|---|---|---|
+| Static lint | SKILL.md frontmatter, referenced scripts/shared docs exist, plugin version invariant, Bash allowlist coverage | `tests/test_skills_*.py`, `tests/test_plugin_manifest_versions.py` | Every PR via `pytest tests/ -q` |
+| Skill evals | Per-skill `evals.json` schema (Anthropic skill-creator format) | `plugins/agami/skills/<name>/evals.json`, validated by `tests/test_skills_evals.py` | Schema in CI; model runs manual |
+| Chained-skill test | `agami-connect` → `agami-query-database` against the existing Docker fixture | `tests/integration/test_skill_chain.py` | Opt-in: `LITEBI_RUN_CHAIN=1` |
+| TPC-DS benchmark | With-vs-without-semantic-model delta on a realistic workload | `benchmarks/tpcds/` | Opt-in: `LITEBI_BENCHMARK=tpcds` |
+
+**When adding a new skill**, add `plugins/agami/skills/<name>/evals.json`
+with at least 2 evals. The schema test will reject any skill that ships
+without it. Format follows [Anthropic skill-creator](https://github.com/anthropics/skills/tree/main/skills/skill-creator) so contributions are portable upstream.
+
+**To run model-graded evals locally** (requires `ANTHROPIC_API_KEY` and
+`pip install anthropic`):
+
+```bash
+python3 tools/run_skill_evals.py                          # all skills
+python3 tools/run_skill_evals.py --skill agami-connect    # one
+python3 tools/run_skill_evals.py --skill agami-connect --baseline   # with-vs-without
+```
+
+See `tools/README.md` and `benchmarks/tpcds/README.md` for details and
+cost notes. Model evals are deliberately kept out of CI — they cost
+tokens per call and need credentials.
+
 ## Version-bump discipline (read this before any release-shaped commit)
 
 Claude Code's plugin marketplace caches each plugin **by version number**. The cache key for any user who installed `agami@1.1.0` is pinned to that version — Claude Code does not re-fetch source files until the version changes, even if the upstream `main` branch has moved on.
