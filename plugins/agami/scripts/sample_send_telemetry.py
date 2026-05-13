@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Sample telemetry sender.
+Sample telemetry sender — VESTIGIAL, not invoked by any skill.
 
-Builds a single event payload, validates it against the allowlist documented
-in plugins/agami/shared/telemetry-payload.md, and POSTs it to the configured
-endpoint. Stdlib only.
+Telemetry was removed from the agami runtime in the 0.x line (see docs/privacy.md).
+This script and its companion allowlist test (tests/test_telemetry_privacy.py) are
+preserved as historical artifacts: they pin the shape of the legacy 11-field
+payload spec so a future re-introduction of telemetry would have to clear the
+same allowlist discipline before it could ship.
 
-The agami skill itself sends telemetry via curl directly (no script needed).
-This file exists so the privacy invariant test in tests/test_telemetry_privacy.py
-has a Python-callable surface to assert against, and so users automating their
-own workflows have a reference implementation.
+Builds a single event payload, validates it against the allowlist defined below
+(formerly mirrored in plugins/agami/shared/telemetry-payload.md, now removed),
+and POSTs it to the configured endpoint. Stdlib only. Not called from any skill.
 
 Usage:
     python sample_send_telemetry.py \\
@@ -35,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 
-# --- Authoritative allowlist — matches plugins/agami/shared/telemetry-payload.md ---
+# --- Authoritative allowlist (was: plugins/agami/shared/telemetry-payload.md, removed) ---
 
 ALLOWED_FIELDS: frozenset[str] = frozenset({
     "schema_version",

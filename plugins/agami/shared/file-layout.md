@@ -10,12 +10,12 @@ Everything in here is either a secret, an auth file derived from a secret, or pe
 |---|---|
 | `credentials` | INI file, chmod 600 — the only place credentials live |
 | `.pgpass`, `.mysql.cnf`, `.snowsql.cnf` | Provider-native auth files materialized from credentials |
-| `.config` | JSON — telemetry consent, install_id, active_profile, **artifacts_dir** (see below), tool_paths |
+| `.config` | JSON — `active_profile`, **`artifacts_dir`** (see below), `tool_paths`, `reviewer_email`, `reviewer_role` |
 | `.optins` | JSON — GitHub-star ask state |
 | `query_log.jsonl` | Personal record of every query you ran |
-| `charts/<ts>.html` | Per-query HTML reports |
-| `exports/<ts>.csv` | Per-query CSV exports |
-| `.telemetry-queue.jsonl` | Pending telemetry events (only flushed if opted in) |
+| `charts/<profile>/<ts>.html` | Per-query HTML reports |
+| `exports/<profile>/<ts>.csv` | Per-query CSV exports |
+| `{review,model,examples-validation}/<profile>/<ts>.html` | Per-profile dashboards |
 | `.duckdb_init_*.sql` | Ephemeral, chmod-600 — federation init files, deleted after the query |
 
 **Convention:** the entire `~/.agami/` directory should be in your global `.gitignore`. There is no scenario where committing it is correct.

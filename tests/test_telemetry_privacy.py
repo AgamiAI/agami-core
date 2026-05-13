@@ -1,14 +1,18 @@
 """
-Privacy invariant tests for the telemetry payload.
+Privacy invariant tests for the (vestigial) telemetry payload.
+
+Telemetry was removed from the agami runtime in the 0.x line (see docs/privacy.md).
+These tests pin the legacy payload shape against the allowlist defined inline
+in plugins/agami/scripts/sample_send_telemetry.py — the formerly-co-located
+spec doc (plugins/agami/shared/telemetry-payload.md) has been removed. The
+tests remain so any future re-introduction of telemetry would have to clear
+the same 11-field allowlist discipline before it could ship.
 
 Asserts that no matter what data sits in the user's environment (questions,
 schemas, hostnames, paths, PII), the constructed payload contains ONLY the
-allowlisted fields documented in plugins/agami/shared/telemetry-payload.md.
-
-These tests are the source of truth for "did we accidentally leak something
-into telemetry?". Any change to the allowlist requires updating both this
-file and shared/telemetry-payload.md, and ideally a code-review with someone
-other than the author.
+allowlisted fields. Source of truth for "did we accidentally leak something
+into telemetry?". Any change to the allowlist requires updating this file
+and the ALLOWED_FIELDS set in sample_send_telemetry.py.
 
 Run: pytest tests/test_telemetry_privacy.py -v
 """
@@ -53,9 +57,8 @@ EXPECTED_ALLOWED_DB_TYPES = frozenset({
 
 def test_allowed_fields_match_doc():
     """
-    The Python ALLOWED_FIELDS set must match the table in
-    plugins/agami/shared/telemetry-payload.md exactly. If you change one,
-    change both — and update this list.
+    The Python ALLOWED_FIELDS set in sample_send_telemetry.py must match the
+    pinned EXPECTED_ALLOWED_FIELDS below. If you change one, change both.
     """
     assert t.ALLOWED_FIELDS == EXPECTED_ALLOWED_FIELDS
 
@@ -230,9 +233,9 @@ def test_payload_batch_size_limit():
 
 def test_event_keys_match_doc_table_exactly():
     """
-    No extras, no missing-required. If you change ALLOWED_FIELDS,
-    you must also: (1) update shared/telemetry-payload.md, (2) update
-    services/telemetry-endpoint/src/worker.ts, and (3) bump schema_version.
+    No extras, no missing-required. If you change ALLOWED_FIELDS, you must
+    also: (1) update services/telemetry-endpoint/src/worker.ts (vestigial),
+    and (2) bump schema_version.
     """
     event = t.build_event(
         event_type="query", tier="cli", db_type="postgres",

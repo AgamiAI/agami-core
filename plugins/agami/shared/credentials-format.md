@@ -218,14 +218,13 @@ The active profile is the one `init` recorded in `~/.agami/.config.active_profil
 AGAMI_PROFILE=staging   # uses [staging] section
 ```
 
-To permanently change the active profile, edit `~/.agami/.config` and update `active_profile` (or re-run `init` and pick again).
+To permanently change the active profile, edit `~/.agami/.config` and update `active_profile` (or re-run `/agami-connect` and pick again).
 
 The skill writes the semantic model under `<artifacts_dir>/<profile>/` — one directory per profile, so multiple databases live side by side. `<artifacts_dir>` defaults to `~/agami-artifacts/` and is configurable per [`shared/file-layout.md`](file-layout.md).
 
 ## What the file does NOT contain
 
-- No telemetry consent flags (those live in `~/.agami/.config`)
-- No semantic model (that's `<artifacts_dir>/<profile>/index.yaml` + `<schema>.yaml` files)
+- No semantic model (that's `<artifacts_dir>/<profile>/index.yaml` + per-table `<schema>/<table>.yaml` files)
 - No example queries (those live in `<artifacts_dir>/<profile>/examples.yaml`)
 - No charts, exports, or query log
 

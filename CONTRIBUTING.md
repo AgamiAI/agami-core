@@ -79,4 +79,4 @@ We don't keep a `CHANGELOG.md` yet. The git log + version bumps are the changelo
 
 ## A community Discord will land soon
 
-Once it's live, the link will appear here and in [`agami-init/SKILL.md`](plugins/agami/skills/agami-init/SKILL.md).
+Once it's live, the link will appear here and in [`agami-connect/SKILL.md`](plugins/agami/skills/agami-connect/SKILL.md).

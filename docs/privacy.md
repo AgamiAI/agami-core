@@ -1,191 +1,73 @@
 # Privacy
 
-The short version: **your data never leaves your machine.** `agami` is a Claude Code skill that runs locally — credentials, schema, query results, and corrections all live in `~/.agami/` on your laptop. We do not host, proxy, or process any of them.
+The short version: **your data never leaves your machine.** `agami` is a Claude Code skill that runs locally — credentials, schema, query results, and corrections all live in `~/.agami/` and `~/agami-artifacts/` on your laptop. There is no agami server in the loop, no telemetry, no opt-in, no opt-out. The runtime is silent.
 
-> **Telemetry disabled (0.x line).** The plugin no longer asks for analytics consent and no longer sends anything to `analytics.agami.ai`. The server endpoint, the payload allowlist spec, and the privacy-invariant test suite are preserved in the repo (as hardened infrastructure for a future re-enable), but the runtime flow is silent. The "What we send if you opt into telemetry" section below describes what *would* be sent if telemetry were re-enabled in a future version — it does not describe current behavior.
-
-This page documents:
-- What we send if you opt into anonymous usage stats (and what we never send)
-- How to opt in and out
-- How we enforce the privacy invariant
-- Where the receiving server lives + what defenses sit in front of it
-
-For the canonical, machine-checked allowlist, see [`plugins/agami/shared/telemetry-payload.md`](../plugins/agami/shared/telemetry-payload.md). That doc and the test suite at [`tests/test_telemetry_privacy.py`](../tests/test_telemetry_privacy.py) are the source of truth — this page is the human-readable summary.
+This page documents what stays on your machine, what we'd never send anywhere even hypothetically, and how the one outbound interaction (the post-install GitHub-star ask) works.
 
 ---
 
-## What `agami` always keeps local
+## What `agami` keeps local
 
-These never leave your machine, opt-in or not:
+Every byte agami reads or writes stays on your machine:
 
-- **Credentials** (`~/.agami/credentials`)
-- **Semantic model** (`<artifacts_dir>/<profile>/index.yaml` + `<schema>.yaml` files; default `<artifacts_dir>` is `~/agami-artifacts/`)
+- **Credentials** (`~/.agami/credentials`) — chmod 600
+- **Auth files** (`~/.agami/.pgpass`, `.mysql.cnf`, `.snowsql.cnf`) — chmod 600, written by `setup_pgauth.py`
+- **Config** (`~/.agami/.config`) — `active_profile`, `artifacts_dir`, `tool_paths`, `reviewer_email`, `reviewer_role`
+- **Semantic model** (`<artifacts_dir>/<profile>/index.yaml` + `<schema>/<table>.yaml` files; default `<artifacts_dir>` is `~/agami-artifacts/`)
 - **Examples library** (`<artifacts_dir>/<profile>/examples.yaml`)
-- **Organization context** (`<artifacts_dir>/<profile>/ORGANIZATION.md`) — your description of what the database represents, domain terminology, etc.
-- **User memory** (`~/.agami/USER_MEMORY.md`) — your cross-database preferences
+- **Organization context** (`<artifacts_dir>/<profile>/ORGANIZATION.md`) — your description of what the database represents, domain terminology
+- **User memory** (`<artifacts_dir>/USER_MEMORY.md`) — your cross-database preferences
 - **Query results** (everything Claude shows you)
 - **Query log** (`~/.agami/query_log.jsonl`) — your personal record of every query you ran
-- **Charts** (`~/.agami/charts/<ts>.html`)
-- **CSV exports** (`~/.agami/exports/<ts>.csv`)
-- **Schema content** — table names, column names, descriptions, sample data
-- **Hostnames, IPs, paths beyond `~/.agami/`**
+- **Charts** (`~/.agami/charts/<profile>/<ts>.html`)
+- **CSV exports** (`~/.agami/exports/<profile>/<ts>.csv`)
+- **Review + model-explorer + examples-validation dashboards** (`~/.agami/{review,model,examples-validation}/<profile>/<ts>.html`)
+- **Snapshots** (`<artifacts_dir>/<profile>/.snapshots/<hash>/`) — immutable copies of past model versions for reproducibility
+- **Curation log** (`<artifacts_dir>/<profile>/curation_log.jsonl`) — append-only audit trail of review actions
+- **Corrections** (`<artifacts_dir>/<profile>/corrections.jsonl`) — append-only history of saved corrections
 
-There is no skill code that reads any of these and ships them anywhere. You can grep the source — the only outbound `curl` in the SKILL.md files goes to:
-- `analytics.agami.ai/v1/events` (telemetry, opt-in only) — sends only the 11 allowlisted fields
-
-That's it. The post-install GitHub-star ask opens `https://github.com/AgamiAI/LiteBi` in your browser — agami doesn't observe whether you actually star, and no email or other identifying data is ever sent.
-
----
-
-## What we send if you opt into telemetry
-
-The `agami-init` skill asks once. **Default is off.** If you opt in, every event sent contains exactly these fields and nothing else:
-
-| Field | What it is | Example |
-|---|---|---|
-| `schema_version` | Always `1` for v1 | `1` |
-| `event_type` | `install`, `connect`, `query`, `correction`, `chart`, `error`, `update_check` | `query` |
-| `install_id` | Random UUID generated on opt-in. Not tied to a user. | `f47ac10b-...` |
-| `db_type` | `postgres` / `mysql` / `sqlite` | `postgres` |
-| `os` | `darwin` / `linux` / `windows` | `darwin` |
-| `host` | `claude-code-cli`, `claude-code-vscode`, `claude-code-cursor` | `claude-code-cli` |
-| `tier` | Which connection method ran the event: `cli` (native CLI), `duckdb`, `python` (Python driver). Field name is `tier` for compatibility with the v1.0 wire format. | `cli` |
-| `error_kind` (only on errors) | One of nine categories like `auth`, `column_not_found`, `network`, `timeout` | `column_not_found` |
-| `latency_p50_ms` (optional) | Median latency, bucketed in 50ms increments | `250` |
-| `latency_p95_ms` (optional) | p95 latency, bucketed in 50ms increments | `1100` |
-| `client_version` | The skill version | `1.0.0` |
-| `timestamp` | UTC ISO8601 | `2026-05-06T15:14:00Z` |
-
-Eleven fields, all enums or numbers or UUIDs. No free-form strings. No metadata bag. No "extras" field.
+The skill never reads files outside those paths, with one carve-out: your DB tool's auth config (`~/.pg_service.conf`, `~/.snowsql/config`, etc.) is read when `setup_pgauth.py` materializes the auth files on first connect, with your permission.
 
 ---
 
-## What we never send (even if you opt in)
+## What agami never sends anywhere
 
-This list is exhaustive — if any future event would contain something in any of these categories, **the privacy invariant test fails, the build fails, the change does not ship**:
+There is no outbound network call from the skill code, period. To be explicit, the following categories are never collected, transmitted, or logged by agami:
 
 - Query text (the NL question or the generated SQL)
 - Schema content (table names, column names, descriptions, sample data)
 - Result rows or any subset thereof
 - Database hostnames, IPs, ports, credentials
-- File paths beyond `~/.agami/` (we don't actually send any path; this is defense-in-depth wording)
+- File paths beyond `~/.agami/` and `<artifacts_dir>/`
 - Email addresses, names, IPs, MAC addresses, machine IDs, hardware fingerprints
-- Stack traces, log lines, error messages (only the `error_kind` enum value)
+- Stack traces, log lines, error messages
 - Working directory contents, environment variables, git history
-- Anything from `~/.agami/credentials`, `~/.agami/<dbname>.yaml`, `~/.agami/<dbname>-examples.yaml`, `~/.agami/charts/*`, `~/.agami/exports/*`, or `~/.agami/query_log.jsonl`
+- Anything from `~/.agami/credentials`, the artifacts dir, charts, exports, or the query log
 
-If a future feature wants to add a field, we add it explicitly to the allowlist with user consent before shipping. There is no `extras: { ... }` slot.
-
----
-
-## How to opt in
-
-The `agami-init` skill prompts you once during first-run, in plain English:
-
-> **Help us improve agami by sending anonymous usage stats?**
->
-> What we send:
-> - Counts of installs, queries, errors (no content)
-> - Database type (postgres/mysql/sqlite), OS, which Claude Code host (CLI / VS Code / Cursor)
-> - Latency percentiles
-> - A random install ID — not tied to you
->
-> What we never send:
-> - Your queries, your schema, your data
-> - Your hostname, paths, credentials
-> - Anything we couldn't read out loud at a conference
->
-> Your choice. You can change it any time.
-
-Pick `Yes` or `No`. The choice is recorded in `~/.agami/.config`.
-
-## How to opt out
-
-If you previously said yes:
-
-```bash
-# Just edit the file
-$EDITOR ~/.agami/.config
-# Change "analytics_consent": true to "analytics_consent": false
-```
-
-Or in any agami skill conversation:
-
-```
-@agami turn off analytics
-```
-
-The next time you flush, the queue is dropped. No cleanup is required on the server side — your `install_id` stops appearing in events.
-
-To re-enable:
-
-```
-@agami turn on analytics
-```
+You can grep the source — there is no `curl` / `requests.post` / network call in any skill code path. The validator suite enforces this invariant: any change that would introduce a network call to a non-allowlisted host fails the build.
 
 ---
 
-## How we enforce the privacy invariant
+## The one outbound interaction: GitHub-star ask
 
-Three layers of enforcement:
+After your first successful query, the `agami-query-database` skill asks once whether you want to star the repo on GitHub. This is a chat-side `AskUserQuestion` modal with three options:
 
-### 1. Documented allowlist
-
-[`plugins/agami/shared/telemetry-payload.md`](../plugins/agami/shared/telemetry-payload.md) is the source of truth. Both the client and the server import from this list (semantically — they each have their own copy that must match).
-
-### 2. Test suite
-
-[`tests/test_telemetry_privacy.py`](../tests/test_telemetry_privacy.py) plants 12 categories of sensitive data into a fake `~/.agami/` and the environment, then builds a payload via the same code path the skill uses. It asserts:
-
-- No field outside the allowlist appears
-- None of the 12 planted strings appear (query text, hostnames, paths, PII, etc.)
-- The payload-builder function rejects bad input rather than silently coercing it
-
-The test runs on every PR. If it fails, the change does not merge.
-
-### 3. Server-side re-validation
-
-The Cloudflare Worker at [`services/telemetry-endpoint/`](../services/telemetry-endpoint/) re-validates every payload independently. Even if the open-source skill is tampered with to ship extra fields, the server still rejects them. This is defense-in-depth: a determined adversary running their own modified copy can't poison the analytics pipeline with PII.
-
----
-
-## Where the receiving server lives
-
-`https://analytics.agami.ai/v1/events` — a Cloudflare Worker, source code at [`services/telemetry-endpoint/src/worker.ts`](../services/telemetry-endpoint/src/worker.ts).
-
-Layered abuse defenses:
-
-| Layer | What |
-|---|---|
-| Cloudflare Bot Fight Mode | Edge-level filter on automated traffic, zone-wide |
-| Per-IP rate limit | 100 req/min/IP via the rate-limiter binding |
-| Body size cap | 64 KB max — a 100-event batch is ~25 KB |
-| Schema validation | Every field validated against the allowlist + UUID regex + ISO8601 regex |
-| Schema-version check | Future versions cleanly rejected with a 400 |
-| Outlier-aware aggregation | Anomalous-volume install_ids are filtered from DAU/MAU even if they slip past the rate limit |
-
-Storage: accepted events go into one R2 (Cloudflare object storage) JSONL file per UTC day at `events/YYYY-MM-DD.jsonl`. Aggregation runs out-of-band in a separate scheduled job.
-
-We do not log IP addresses alongside `install_id`. IPs hit the rate limiter and Cloudflare edge logs (which we do not export to long-term storage); the JSONL events do not contain them.
-
----
-
-## Compliance notes
-
-- **GDPR**: `install_id` is a random UUID generated locally and not tied to a user identity. It can be considered pseudonymous data. You can rotate yours by deleting `~/.agami/.config` and re-running `@agami init` — a fresh ID is generated.
-- **Data retention**: events are kept in R2 for 365 days, then auto-deleted via the bucket lifecycle policy.
-- **Deletion requests**: if you want a specific `install_id`'s events deleted, email `skills@agami.ai` with the ID. We can't otherwise identify you because we don't have anything else.
-
----
-
-## GitHub-star ask (separate from telemetry)
-
-After your first successful query, the `agami-query-database` skill asks once whether you want to star us on GitHub. **No email collection, no list, no follow-up** — just a one-click ask. Three response options:
-
-- **Yes — open GitHub now** — opens `https://github.com/AgamiAI/LiteBi` in your default browser. You decide whether to actually star.
+- **Yes — open GitHub now** — runs `open https://github.com/AgamiAI/LiteBi` (or platform equivalent), which hands the URL to your OS. Your browser handles it from there.
 - **Maybe later** — closes the prompt; we never ask again.
 - **Already starred — thank you!** — closes the prompt; we never ask again.
 
-Nothing about your response leaves your machine. agami can't observe whether you starred (we have no signal-collection on the GitHub side, and a star is public anyway). The decision lives in `~/.agami/.optins` so we don't ask twice. To re-prompt, delete that file and ask any agami skill a question.
+Nothing about your response leaves your machine. agami has no signal-collection on the GitHub side — we don't observe whether you actually star, and a star is public information anyway. The decision is recorded in `~/.agami/.optins` so the ask doesn't repeat. To re-prompt: `rm ~/.agami/.optins` and ask any agami skill a question.
 
-This is a separate question from the analytics opt-in — you can opt into one and not the other.
+That's the entire outbound surface: opening one well-known URL in your browser when you click "Yes." No background network calls, no opt-in telemetry, no analytics events.
+
+---
+
+## Vestigial telemetry code (preserved, not invoked)
+
+Early designs of agami had an opt-in telemetry path that sent anonymous usage counts to a hosted endpoint. That path was removed from the runtime in the 0.x line. The implementation code remains in the repo as historical artifacts:
+
+- `plugins/agami/scripts/sample_send_telemetry.py` — sample client (not invoked by any skill)
+- `tests/test_telemetry_privacy.py` — allowlist tests (asserts the sample script can't include unauthorized fields)
+- `services/telemetry-endpoint/` — Cloudflare Worker that would receive events
+
+None of these runs in the normal agami flow. The Worker isn't deployed against any active hostname; the sample script isn't called from any skill; the test just pins the shape of the legacy spec. If a future agami version re-introduces telemetry, it would be opt-in with the same allowlist discipline and a full privacy doc — not a silent re-enable.

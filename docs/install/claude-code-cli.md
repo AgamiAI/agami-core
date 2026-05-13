@@ -52,8 +52,8 @@ Added marketplace: litebi (AgamiAI)
 Expected output:
 
 ```
-Installed agami v1.0.0 (from litebi)
-4 skills available: agami-init, agami-connect, agami-query-database, agami-save-correction
+Installed agami v0.1.0 (from litebi)
+6 skills available: agami-connect, agami-query-database, agami-review, agami-model, agami-save-correction, agami-reconcile
 ```
 
 ## 5. Verify
@@ -62,19 +62,19 @@ Installed agami v1.0.0 (from litebi)
 /plugin list
 ```
 
-You should see `agami v1.0.0` in the active list.
+You should see `agami v0.1.0` in the active list.
 
 Try invoking it:
 
 ```
-/agami-init
+/agami-connect
 ```
 
-The skill should respond with the first-run state check, then walk you through credential setup.
+On first run, the skill detects there are no credentials and walks you through the DB-type picker, then writes a `~/.agami/credentials.example` template you fill in. (No separate `/agami-init` — the setup flow lives in `/agami-connect` Phase 0a.)
 
 ## 6. Set up credentials
 
-The `init` skill writes a template at `~/.agami/credentials.example`. Edit it with your DB connection, save as `~/.agami/credentials`, run `chmod 600 ~/.agami/credentials`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials) for format.
+`agami-connect` Phase 0a writes a template at `~/.agami/credentials.example`. Edit it with your DB connection, save as `~/.agami/credentials`, run `chmod 600 ~/.agami/credentials`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials) for format.
 
 ## Updating
 
@@ -93,9 +93,12 @@ Your `~/.agami/` directory and its contents are not touched by uninstall — del
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---|---|
-| `/plugin: command not found` | Update Claude Code: `claude update` |
-| `Failed to fetch marketplace` | Check your network; the marketplace lives on GitHub |
-| `Plugin not authorized` | Run `claude login` again |
-| Skill doesn't appear in autocomplete after install | Restart Claude Code (`/exit` then `claude` again) |
+
+| Symptom                                            | Fix                                                 |
+| -------------------------------------------------- | --------------------------------------------------- |
+| `/plugin: command not found`                       | Update Claude Code: `claude update`                 |
+| `Failed to fetch marketplace`                      | Check your network; the marketplace lives on GitHub |
+| `Plugin not authorized`                            | Run `claude login` again                            |
+| Skill doesn't appear in autocomplete after install | Restart Claude Code (`/exit` then `claude` again)   |
+
+

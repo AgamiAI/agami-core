@@ -65,7 +65,7 @@ The `user_preference` correction kind still routes to `USER_MEMORY.md` — those
 
 `ORGANIZATION.md` is local-only:
 
-- **Never sent in telemetry.** The 11-field allowlist in [`telemetry-payload.md`](telemetry-payload.md) doesn't include any free-text field, period.
+- **Never sent anywhere.** agami has no outbound network call from skill code — see [`docs/privacy.md`](../../../docs/privacy.md).
 - **Never read by anything other than the agami skills running locally.**
 - The agami-connect Phase 0a enforces `chmod 600` on creation.
 

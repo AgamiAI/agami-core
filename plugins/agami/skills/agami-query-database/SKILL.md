@@ -943,7 +943,7 @@ The existence of the file (with `github_star_asked: true`) is the never-re-promp
 
 ---
 
-(Phase 7 — telemetry flush — has been removed in the current 0.x line. The skill no longer reads `analytics_consent`, no longer appends to `.telemetry-queue.jsonl`, and no longer POSTs to `analytics.agami.ai`. The server endpoint + the privacy spec are preserved in the repo for future re-enable but the runtime flow is silent.)
+(Phase 7 — telemetry flush — has been removed in the current 0.x line. The skill no longer reads `analytics_consent`, no longer appends to `.telemetry-queue.jsonl`, and no longer POSTs to `analytics.agami.ai`. The vestigial server endpoint and sample client are preserved in the repo (see `docs/privacy.md`) but the runtime flow is silent.)
 
 ---
 

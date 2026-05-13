@@ -1,11 +1,13 @@
-# agami telemetry endpoint
+# agami telemetry endpoint — VESTIGIAL, not deployed
 
-Cloudflare Worker that receives anonymous usage events POSTed by the agami OSS skill running on users' machines.
+> Telemetry was removed from the agami runtime in the 0.x line. See [`docs/privacy.md`](../../docs/privacy.md) for the current stance: there is no outbound network call from skill code, period. This Worker is preserved as a historical artifact — it is **not** deployed against any active hostname, and no skill posts to it. The hostnames and URLs below are illustrative of the old design.
 
-## What it does
+Cloudflare Worker that *would* receive anonymous usage events POSTed by the agami OSS skill running on users' machines.
+
+## What it does (when running)
 
 - Accepts POST `https://analytics.agami.ai/v1/events`
-- Validates the payload **server-side** against the same allowlist documented in [`plugins/agami/shared/telemetry-payload.md`](../../plugins/agami/shared/telemetry-payload.md). Defense in depth — the open-source skill could be modified to send extra fields; the server still rejects them.
+- Validates the payload **server-side** against the 11-field allowlist (formerly documented in `plugins/agami/shared/telemetry-payload.md`, now removed — the authoritative copy lives inline in [`plugins/agami/scripts/sample_send_telemetry.py`](../../plugins/agami/scripts/sample_send_telemetry.py)). Defense in depth — the open-source skill could be modified to send extra fields; the server still rejects them.
 - Rate-limits 100 req/min per IP via the Cloudflare-managed rate-limiter binding
 - Writes accepted events to R2 (one JSONL object per UTC day at `events/YYYY-MM-DD.jsonl`)
 
@@ -51,7 +53,7 @@ ORDER BY day;
 
 ## What this endpoint never sees
 
-Per the allowlist in [`telemetry-payload.md`](../../plugins/agami/shared/telemetry-payload.md):
+Per the 11-field allowlist (inline in [`sample_send_telemetry.py`](../../plugins/agami/scripts/sample_send_telemetry.py)):
 
 - No query text (NL or SQL)
 - No schema or column names
@@ -91,9 +93,8 @@ curl -sS -X POST http://localhost:8787/v1/events \
 ## When to bump `schema_version`
 
 If you add a field to the allowlist, bump `schema_version` to `2` in:
-1. [`plugins/agami/shared/telemetry-payload.md`](../../plugins/agami/shared/telemetry-payload.md) (the doc)
-2. [`plugins/agami/scripts/sample_send_telemetry.py`](../../plugins/agami/scripts/sample_send_telemetry.py) (the client)
-3. [`tests/test_telemetry_privacy.py`](../../tests/test_telemetry_privacy.py) (the test)
-4. `src/worker.ts` (this server — `SUPPORTED_SCHEMA_VERSION`)
+1. [`plugins/agami/scripts/sample_send_telemetry.py`](../../plugins/agami/scripts/sample_send_telemetry.py) (the client + authoritative allowlist)
+2. [`tests/test_telemetry_privacy.py`](../../tests/test_telemetry_privacy.py) (the test)
+3. `src/worker.ts` (this server — `SUPPORTED_SCHEMA_VERSION`)
 
 Old clients on `schema_version: 1` will then 400 — that's deliberate. Decide your migration window before bumping.

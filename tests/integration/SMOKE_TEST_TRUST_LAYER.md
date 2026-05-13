@@ -31,11 +31,11 @@ Set `chmod 600 ~/.agami/credentials`.
 
 ---
 
-## 1. `/agami-init` — should be unchanged
+## 1. `/agami-connect` Phase 0a — credential preflight
 
-Behavior identical to today. No regression in the init path.
+The credential-setup path that used to live in a separate `/agami-init` skill is now Phase 0a of `/agami-connect`. The first time you invoke `/agami-connect` after a fresh install (no `~/.agami/credentials` present), it should drop into Phase 0a: DB-type picker → write `~/.agami/credentials.example` → exit cleanly.
 
-**Pass criteria:** the credentials check passes, tool detection succeeds (`sqlite3` on `PATH`).
+**Pass criteria:** the credentials check passes on the second invocation, tool detection succeeds (`sqlite3` on `PATH`).
 
 ---
 

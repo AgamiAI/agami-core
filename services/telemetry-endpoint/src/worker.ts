@@ -1,8 +1,14 @@
 /**
- * agami telemetry endpoint — Cloudflare Worker.
+ * agami telemetry endpoint — Cloudflare Worker. VESTIGIAL, not deployed.
+ *
+ * Telemetry was removed from the agami runtime in the 0.x line (see
+ * docs/privacy.md). This Worker is preserved as a historical artifact; no
+ * skill posts to it.
  *
  * Receives anonymous usage events from the agami skill running on users'
- * machines. Hard-coded allowlist matches plugins/agami/shared/telemetry-payload.md.
+ * machines. Hard-coded allowlist matches the inline allowlist in
+ * plugins/agami/scripts/sample_send_telemetry.py (the formerly-co-located
+ * spec doc plugins/agami/shared/telemetry-payload.md has been removed).
  * Defense in depth: even if the open-source skill is tampered with to send
  * extra fields, this endpoint rejects them.
  *

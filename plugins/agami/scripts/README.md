@@ -30,7 +30,6 @@ Exit codes are documented in `execute_sql.py`'s docstring. The skill routes non-
 | `sample_introspect_postgres.py` | Connects to Postgres, dumps `information_schema` to YAML matching [`schema-reference.md`](../shared/schema-reference.md) | `psycopg2-binary` |
 | `sample_introspect_mysql.py` | Same, for MySQL | `pymysql` |
 | `render_chart.py` | Substitutes `chart-template.html` placeholders programmatically. Used by the agami-query-database SKILL to produce HTML reports (Phase 4e). | stdlib only |
-| `sample_send_telemetry.py` | Builds + POSTs a telemetry payload, enforcing the allowlist from [`telemetry-payload.md`](../shared/telemetry-payload.md) | stdlib only |
 
 ## Install dependencies (only if you want the Python driver path)
 
