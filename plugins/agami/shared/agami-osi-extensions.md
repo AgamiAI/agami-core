@@ -16,6 +16,55 @@ custom_extensions:
 
 All Agami extension payloads sit under a single top-level `agami` key inside the JSON, so a consumer can find them with one `JSON.parse(data).agami` access. If multiple `COMMON` extensions exist on the same node, agami only reads the one whose payload has an `agami` key.
 
+### Escaping quotes inside the JSON-in-YAML payload (HARD RULE)
+
+The `data:` value is a YAML-single-quoted string that contains JSON. Two quoting systems are stacked — the YAML quotes wrap the JSON, the JSON quotes wrap individual keys and string values. **YAML single-quoted strings do NOT support backslash escapes.** The LLM keeps reaching for `\'` to embed a literal single quote (a C / Python / JSON instinct); YAML treats that as a literal backslash followed by an end-quote, and parsing fails.
+
+**Real failure mode reported in production**: a `recommended_filters[].reason` field of `"WHERE test_load = 'true' or use WHERE NOT test_load"` got emitted as:
+
+```yaml
+# BROKEN — YAML parse error at line 677
+data: '{"agami": {"performance_hints": {"recommended_filters": [
+  {"column": "test_load", "reason": "WHERE test_load = \'true\' or use WHERE NOT test_load"}
+]}}}'
+```
+
+The `\'` sequence is invalid in a YAML single-quoted context. Three valid ways to handle this:
+
+**Option A — avoid embedded single quotes inside the JSON.** Easiest. JSON allows single quotes inside a JSON-string-literal *without* any escaping (only `"` and `\` need JSON-escaping). And inside a YAML single-quoted string, a literal single quote is escaped by **doubling it**: `''`. So write the reason as a JSON string that uses no extra quoting, and double the single quotes for YAML:
+
+```yaml
+# OK — single quotes inside the JSON string are doubled for YAML
+data: '{"agami": {"performance_hints": {"recommended_filters": [
+  {"column": "test_load", "reason": "WHERE test_load = ''true'' or use WHERE NOT test_load"}
+]}}}'
+```
+
+**Option B — rephrase the prose to avoid quotes entirely.** Cleanest for `reason` / `description` / `definition_prose` fields where you control the wording:
+
+```yaml
+data: '{"agami": {"performance_hints": {"recommended_filters": [
+  {"column": "test_load", "reason": "filter to test_load=TRUE or use WHERE NOT test_load"}
+]}}}'
+```
+
+**Option C — use a YAML block scalar instead of a single-quoted string.** Works but loses inline readability:
+
+```yaml
+data: |-
+  {"agami": {"performance_hints": {"recommended_filters": [
+    {"column": "test_load", "reason": "WHERE test_load = 'true' or use WHERE NOT test_load"}
+  ]}}}
+```
+
+**Never do this** (the failure mode):
+
+```yaml
+data: '{... "reason": "WHERE test_load = \'true\' ..."}'  # YAML parser fails
+```
+
+The LLM running agami-connect / agami-save-correction MUST follow Option A or B. If a string would contain `\'`, rephrase or double the inner quotes.
+
 ---
 
 ## Trust-layer extensions (universal — applies to fields, datasets, relationships, metrics)

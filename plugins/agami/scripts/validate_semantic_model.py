@@ -121,6 +121,7 @@ ALLOWED_AGAMI_TYPES: frozenset[str] = frozenset({
 
 ALLOWED_PERFORMANCE_HINT_KEYS: frozenset[str] = frozenset({
     "estimated_row_count", "recommended_filters", "selective_filters", "indexes",
+    "data_range",
 })
 
 ALLOWED_FK_VALIDATION_KEYS: frozenset[str] = frozenset({
@@ -423,10 +424,49 @@ def _check_field_extensions(
     if "type" in field_agami:
         t = field_agami["type"]
         if t not in ALLOWED_AGAMI_TYPES:
-            out.append(
-                f"[Extension] {context}: agami.type '{t}' invalid. "
-                f"Must be one of {sorted(ALLOWED_AGAMI_TYPES)}."
-            )
+            # Common LLM mistakes — point at the right value instead of just
+            # listing the allowed set. Saves an iteration loop in agami-connect
+            # Phase 2c when the LLM is converting BigQuery / Snowflake types.
+            suggestion = {
+                "float": "decimal",
+                "float64": "decimal",
+                "float32": "decimal",
+                "double": "decimal",
+                "real": "decimal",
+                "numeric": "decimal",
+                "bignumeric": "decimal",
+                "money": "decimal",
+                "datetime": "timestamp",
+                "timestamptz": "timestamp",
+                "time": "string",        # times-of-day collapse to string in v1
+                "bool": "boolean",
+                "int": "integer",
+                "int64": "integer",
+                "bigint": "integer",
+                "smallint": "integer",
+                "tinyint": "integer",
+                "uuid": "string",
+                "json": "string",
+                "jsonb": "string",
+                "bytes": "string",
+                "geography": "string",
+                "array": "string",
+                "struct": "string",
+                "array_of_structs": "string",
+            }.get(str(t).lower())
+            if suggestion:
+                out.append(
+                    f"[Extension] {context}: agami.type '{t}' invalid — "
+                    f"use '{suggestion}' instead. "
+                    f"Allowed: {sorted(ALLOWED_AGAMI_TYPES)}."
+                )
+            else:
+                out.append(
+                    f"[Extension] {context}: agami.type '{t}' invalid. "
+                    f"Must be one of {sorted(ALLOWED_AGAMI_TYPES)}. "
+                    f"For nested / complex types (STRUCT, ARRAY, JSON, GEOGRAPHY), "
+                    f"use 'string' and put the raw type in agami.original_type."
+                )
 
     if "choice_field" in field_agami:
         cf = field_agami["choice_field"]
@@ -464,15 +504,40 @@ def _check_dataset_extensions(ds_agami: dict, context: str) -> list[str]:
         else:
             extras = set(ph.keys()) - ALLOWED_PERFORMANCE_HINT_KEYS
             if extras:
+                # Common LLM mistake: dumping `notes` or `description` inside
+                # performance_hints. Point at the right home for each.
+                hints = []
+                for k in sorted(extras):
+                    if k in ("notes", "comment", "comments", "description"):
+                        hints.append(
+                            f"'{k}' is not a performance_hints key — put per-table "
+                            f"commentary in the dataset's top-level `description` "
+                            f"field, not under performance_hints."
+                        )
+                    elif k == "row_count":
+                        hints.append(f"'row_count' should be 'estimated_row_count'.")
+                    else:
+                        hints.append(f"'{k}' is not allowed.")
                 out.append(
-                    f"[Extension] {context}.performance_hints: unknown key(s) "
-                    f"{sorted(extras)}. Allowed: {sorted(ALLOWED_PERFORMANCE_HINT_KEYS)}."
+                    f"[Extension] {context}.performance_hints: "
+                    f"{' '.join(hints)} "
+                    f"Allowed keys: {sorted(ALLOWED_PERFORMANCE_HINT_KEYS)}."
                 )
-            if "estimated_row_count" in ph and not isinstance(ph["estimated_row_count"], int):
-                out.append(
-                    f"[Extension] {context}.performance_hints.estimated_row_count "
-                    f"must be an integer"
-                )
+            if "estimated_row_count" in ph:
+                erc = ph["estimated_row_count"]
+                if erc is None:
+                    # null is the most common LLM mistake here — tell them to
+                    # omit the field instead of writing null.
+                    out.append(
+                        f"[Extension] {context}.performance_hints.estimated_row_count "
+                        f"must be an integer or omitted entirely (null is not allowed). "
+                        f"If the row count is unknown, drop the key — don't write null."
+                    )
+                elif isinstance(erc, bool) or not isinstance(erc, int):
+                    out.append(
+                        f"[Extension] {context}.performance_hints.estimated_row_count "
+                        f"must be an integer (got {type(erc).__name__}: {erc!r})."
+                    )
             for arr_key in ("recommended_filters", "selective_filters", "indexes"):
                 if arr_key in ph and not isinstance(ph[arr_key], list):
                     out.append(

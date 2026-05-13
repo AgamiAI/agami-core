@@ -779,6 +779,28 @@ Snowflake-only: for tables with `estimated_row_count > 10_000_000` use the `SAMP
 
 The sample is **never written to disk and never sent in telemetry.** It lives in the description-generation prompt's context, then is discarded.
 
+**Also capture the data's date range per time-dimension column.** Phase 4's seed-example generator anchors "last 30 days" / "this quarter" filters to the data's actual MAX, not to `NOW()` — otherwise time-bound seeds against a stale dataset return 0 rows and look broken in the validation dashboard. For each column whose type is `timestamp` or `date`:
+
+```sql
+SELECT MIN(<col>) AS min_ts, MAX(<col>) AS max_ts FROM <schema>.<table>;
+```
+
+Store the result as `agami.performance_hints.data_range`:
+
+```yaml
+performance_hints:
+  estimated_row_count: 1342000
+  data_range:
+    created_at:
+      min: "2023-01-15T00:00:00Z"
+      max: "2025-11-12T23:59:01Z"
+    paid_at:
+      min: "2023-02-01T00:00:00Z"
+      max: "2025-11-12T18:42:11Z"
+```
+
+Skip this scan for tables with `estimated_row_count > 50_000_000` — the MIN/MAX scan is expensive and the dominant time column on huge tables is usually already known. For BigQuery, this is cheap on partitioned tables (the query reads partition metadata) but expensive on unpartitioned ones — gate on `is_partitioning_column = TRUE` if you're worried about cost.
+
 #### 1d.ii — per-schema batched generation
 
 Process schemas one at a time. For each schema, build a prompt with:
@@ -1317,7 +1339,19 @@ Walk the freshly-written model under `<artifacts_dir>/<profile>/` and count:
 - Named filters with `agami.review_state != approved`
 - Stale items (any entity with `review_state: stale`)
 
-If the total is **0** (small DB, no metrics yet, no drift) → skip this whole phase. Continue to Phase 4.
+If the total is **0** (small DB, no metrics proposed, no drift) → skip the gate, but **surface a one-liner first** so the user understands why they didn't see a review dashboard before example generation. Real failure mode: users on fresh BigQuery introspects expected to walk a review queue before seeds got generated; agami silently skipped because no metrics had been proposed, jumped straight to Phase 4 examples, and the user thought "wait — wasn't there supposed to be a review step?"
+
+Surface exactly this:
+
+```
+No Rule 1 candidates to sign off (no metrics or named filters were
+proposed during introspect). Proceeding straight to seed-example
+generation. Low-confidence joins and field descriptions will surface
+as warnings on the answers that use them, in Phase 5.5's optional
+review panel — not now.
+```
+
+Then continue to Phase 4.
 
 ### 3.5b — surface the gate
 
@@ -1432,12 +1466,34 @@ For each example:
 - **Apply USER_MEMORY policies.** If USER_MEMORY says "exclude test users where email matches @example.com", every seed example that touches `customers` includes that filter. If it says "default time window: last 30 days", date-relevant examples honor that default.
 - **Apply ORGANIZATION.md domain vocabulary.** If ORGANIZATION.md defines "active user = signed in in the last 30 days", any "active user" example uses that definition.
 
-### 4b — EXPLAIN-validate each
+### 4b — EXPLAIN-validate + row-count check
 
-Before adding to the YAML, run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the chosen tool. If EXPLAIN fails:
+Two-pass validation before an example lands in `examples.yaml`:
+
+**Pass 1 — EXPLAIN.** Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite, or BigQuery's dry-run via `bq query --dry_run`) via the chosen tool. If EXPLAIN fails:
 1. Read the error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
 2. Make ONE auto-fix attempt (typically a column-name typo or missing alias).
 3. If still failing, move that example to `~/.agami/.rejected/` (with the error) and continue. Don't block.
+
+**Pass 2 — row-count check (MANDATORY).** EXPLAIN tells you the SQL parses and binds. It does **not** tell you the query returns data. A seed example that EXPLAINs cleanly but returns 0 rows is **useless as a few-shot anchor** — it teaches the LLM "this question has no answer in this DB," which is exactly the wrong lesson. Real failure mode reported in production: a fresh BigQuery introspect with a dataset where the latest row is months old; every "last 30 days" seed example EXPLAIN-passes and returns 0 rows.
+
+After EXPLAIN succeeds, run:
+
+```sql
+SELECT COUNT(*) FROM (<original_sql>) sub LIMIT 1
+```
+
+(BigQuery / Snowflake support this; for SQLite use the original with `LIMIT 1` instead, and trust the small-DB assumption.)
+
+If the count is **0**:
+1. Inspect the SQL for date predicates that reference "now-shaped" anchors: `NOW()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`, `GETDATE()`, hardcoded `'2024-…'` literals, etc.
+2. If a date predicate is present, regenerate the example with the data's actual date range. The introspect step (Phase 1d.i) should have stored `MAX(date_col)` per time-dimension column in `agami.performance_hints.data_range` — anchor the "last 30 days" / "this quarter" / etc. to that MAX, not to NOW. **If `data_range` is absent**, run a one-shot `SELECT MIN(date_col), MAX(date_col) FROM <table>` for the time column the example touched.
+3. If there's no date predicate (the 0-row result is genuine — the question has no answer in this data even with no filter), drop the example and regenerate with a different shape. Don't keep a 0-row example.
+4. After regenerating, repeat Pass 1 (EXPLAIN) and Pass 2 (row count) on the new SQL.
+
+Cap regeneration at 2 attempts per example. If the second attempt still returns 0 rows, log the rejection and move on.
+
+**Why this matters**: the user's first impression of seed quality is whether the examples-validation dashboard shows real numbers in the row-preview column. Zero rows everywhere reads as "this skill is broken" even when the SQL is correct.
 
 ### 4c — write `<artifacts_dir>/<profile>/examples.yaml`
 

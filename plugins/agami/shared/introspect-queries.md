@@ -580,14 +580,24 @@ The skill executes each query via the chosen tool (native CLI / DuckDB / Python 
 
 ## Type mapping
 
-Database-specific types collapse to the simple set used by [`schema-reference.md`](schema-reference.md):
+Database-specific types collapse to the simple set used by [`schema-reference.md`](schema-reference.md). The allowed `agami.type` values are: **`boolean, date, decimal, integer, string, timestamp`** — nothing else. **The mapping is case-insensitive** — `STRING`, `string`, `String` all match. Always do this mapping during introspect; never round-trip through the LLM to "infer" a type when the source DB has already told you.
 
-| Source type | Maps to |
+| Source type (case-insensitive) | Maps to |
 |---|---|
-| `varchar`, `text`, `char`, `nvarchar`, `string`, `uuid`, `enum`, `set` | `string` |
-| `int`, `bigint`, `smallint`, `tinyint`, `mediumint`, `integer` | `integer` |
-| `decimal`, `numeric`, `real`, `float`, `double`, `money` | `decimal` |
-| `timestamp`, `datetime`, `timestamptz` | `timestamp` |
-| `date` | `date` |
-| `bool`, `boolean`, `bit(1)`, `tinyint(1)` | `boolean` |
+| **Strings**: `varchar`, `text`, `char`, `nvarchar`, `string`, `uuid`, `enum`, `set` | `string` |
+| **GoogleSQL strings**: `STRING`, `BYTES` | `string` |
+| **Integers**: `int`, `bigint`, `smallint`, `tinyint`, `mediumint`, `integer` | `integer` |
+| **GoogleSQL integers**: `INT64` | `integer` |
+| **Decimals**: `decimal`, `numeric`, `real`, `float`, `double`, `money` | `decimal` |
+| **GoogleSQL decimals**: `FLOAT64`, `NUMERIC`, `BIGNUMERIC` | `decimal` |
+| **Timestamps**: `timestamp`, `datetime`, `timestamptz` | `timestamp` |
+| **GoogleSQL timestamps**: `TIMESTAMP`, `DATETIME` | `timestamp` |
+| **Dates**: `date`, `DATE` | `date` |
+| **Times-of-day**: `time`, `TIME`, `timetz` | `string` (no dedicated `time` type in agami v1; full timestamp preferred) |
+| **Booleans**: `bool`, `boolean`, `BOOL`, `bit(1)`, `tinyint(1)` | `boolean` |
+| **Nested / complex** (GoogleSQL / DuckDB / Postgres): `ARRAY<…>`, `STRUCT<…>`, `JSON`, `JSONB`, `GEOGRAPHY` | `string` (raw type stored under `agami.original_type`) |
 | anything else | `string` (with a comment in the description noting the original type) |
+
+**Hard rule for the introspect step**: when `INFORMATION_SCHEMA.COLUMNS.data_type` gives you a type, look it up in this table (case-insensitive) and emit the mapped value as `agami.type`. Store the raw type as `agami.original_type` either way — that's the data for receipts and is preserved across re-introspects. **Do not** sample column values to "infer" the type — that's a per-column DB round-trip that costs minutes on wide schemas. The catalog metadata is canonical; trust it.
+
+**Hard rule for nested types**: `ARRAY<INT64>`, `STRUCT<a INT64, b STRING>`, `JSON`, `GEOGRAPHY` all map to `agami.type: "string"`. Never emit `array`, `array_of_structs`, `struct`, `json`, `datetime`, `float`, `float64`, `bignumeric`, or anything else as `agami.type` — the validator will reject. If you find yourself wanting to, the table above tells you what to use instead.
