@@ -91,7 +91,7 @@ Everything else stays `unreviewed` and surfaces in the review dashboard. On a re
 
 At runtime, `agami-query-database` refuses to answer questions that depend on `unreviewed` metrics or named filters (the strict gate). Unreviewed joins / field descriptions surface as warnings in the receipt but don't block.
 
-**Hybrid review order in `/agami-connect`**: Phase 3.5 surfaces a Rule 1 sign-off gate *before* seed examples are generated (Phase 4). Reason: seed SQL exercises metric definitions; signing them off first means the seeds inherit approved truth instead of LLM guesses. Rule 2 polish (low-confidence joins / field descriptions) stays in Phase 5.5's optional collapsed panel — it self-approves as the user queries and never blocks the path to first answer.
+**Hybrid review order in `/agami-connect`**: Phase 4 surfaces a Rule 1 sign-off gate *before* seed examples are generated (Phase 5). Reason: seed SQL exercises metric definitions; signing them off first means the seeds inherit approved truth instead of LLM guesses. Rule 2 polish (low-confidence joins / field descriptions) stays in Phase 7's optional collapsed panel — it self-approves as the user queries and never blocks the path to first answer.
 
 ### The review dashboard
 
@@ -385,7 +385,7 @@ $ /agami-connect
   ✓ Snapshot pinned at .snapshots/45f0fefa2403/
   ✓ git init + initial commit
 
-[Phase 3.5: Rule 1 sign-off — BEFORE seed generation]
+[Phase 4: Rule 1 sign-off — BEFORE seed generation]
   8 metric proposals need your sign-off — seeds will exercise these
   definitions, so signing them off first means the seeds inherit
   approved truth instead of LLM guesses.
@@ -420,7 +420,7 @@ You (in chat): validate 1, 3, 4, 5, 7 by you@example.com
 
 ✓ Validation complete: 6 validated, 1 edited, 4 unreviewed (errors).
 
-[Phase 5.5: trust-layer landing — Rule 1 already done]
+[Phase 7: trust-layer landing — Rule 1 already done]
   ✓ Rule 1 sign-off complete · 7 items approved earlier this session
 
   Optional polish (low-confidence Rule 2 entries — won't block):
@@ -555,7 +555,7 @@ Re-run `/agami-connect reintrospect` (or just `/agami-connect` and pick "Refresh
 |---|---|
 | **New tables** | Fresh trust blocks per Phase 2c.2. FK relationships auto-approve where the DB declares them; structural column-name patterns (`id`, `*_id`, `created_at`, `email`, ...) auto-approve via the dictionary. Anything else stays `unreviewed`. |
 | **New columns on existing tables** | Same — pattern-matched columns auto-approve, others land `unreviewed`. |
-| **New metric or named filter** | If Phase 3.5 detects any new Rule 1 candidates, the Rule 1 gate fires *before* Phase 4 regenerates seed examples. Sign them off, then seeds inherit approved definitions. |
+| **New metric or named filter** | If Phase 4 detects any new Rule 1 candidates, the Rule 1 gate fires *before* Phase 5 regenerates seed examples. Sign them off, then seeds inherit approved definitions. |
 
 **What happens to drift** (column type change, FK target shift):
 - The entry's `agami.review_state` flips to `stale`. Prior `signed_off_*` is preserved for audit.
@@ -570,9 +570,9 @@ Re-run `/agami-connect reintrospect` (or just `/agami-connect` and pick "Refresh
 ```
 git -C ~/agami-artifacts/<profile> log -5  # optional: see what's there
 /agami-connect reintrospect
-# Walk Phase 3.5 if a Rule 1 gate fires (new metrics need sign-off)
+# Walk Phase 4 if a Rule 1 gate fires (new metrics need sign-off)
 # Walk Phase 5 examples-validation (can skip with `done`)
-# Walk Phase 5.5's Rule 2 polish panel if you want (or skip)
+# Walk Phase 7's Rule 2 polish panel if you want (or skip)
 git -C ~/agami-artifacts/<profile> diff HEAD~1  # diff of what the schema change cost / added
 ```
 

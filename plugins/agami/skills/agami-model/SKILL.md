@@ -1,7 +1,7 @@
 ---
 name: agami-model
 description: "Opens the model-explorer dashboard for the active profile's semantic model. Lets the user browse every schema, table, and field with live search, and queue Exclude / Include actions on tables and columns they don't want the runtime to use. Each action flips the entry's `agami.review_state` to `rejected` (exclude) or `unreviewed` (include) in the per-table YAML, gated by the validator and committed to the profile's git repo."
-when_to_use: "Use when the user says 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'take out the X table', 'I don't want PII columns', '/agami-model', or after agami-connect's Phase 5.6 summary prompts the user to inspect the model. Also use when the user replies to a previously-rendered model-explorer artifact with one of the chat back-channel commands (exclude tables: ... / include columns: ... / done)."
+when_to_use: "Use when the user says 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'take out the X table', 'I don't want PII columns', '/agami-model', or after agami-connect's Phase 7 trust-layer summary prompts the user to inspect the model. Also use when the user replies to a previously-rendered model-explorer artifact with one of the chat back-channel commands (exclude tables: ... / include columns: ... / done)."
 argument-hint: "(no args — opens the explorer for the active profile)"
 ---
 

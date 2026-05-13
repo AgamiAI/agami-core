@@ -61,7 +61,7 @@ Determine what the user gave:
 
 ### 1d — EXPLAIN-validate the corrected SQL
 
-Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `~/.agami/.config`. Same validate-then-save contract as `agami-connect/SKILL.md` Phase 4b:
+Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `~/.agami/.config`. Same validate-then-save contract as `agami-connect/SKILL.md` Phase 5b:
 
 - EXPLAIN succeeds → continue.
 - EXPLAIN fails → route through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Surface the one-line remediation. Do **not** save anything. Ask the user to fix the SQL and try again.
@@ -88,7 +88,7 @@ Read `<artifacts_dir>/<profile>/examples.yaml` via Read (fall back to `~/.agami/
 
 If a previous example has the same `question`: replace its `sql` and bump `created_at` rather than duplicating.
 
-This phase is **non-conditional** — every correction always lands in the examples library, even if Phase 4 (model update) declines or fails.
+This phase is **non-conditional** — every correction always lands in the examples library, even if Phase 5 (model update) declines or fails.
 
 Surface: `✓ Correction appended to <artifacts_dir>/<profile>/examples.yaml.`
 
@@ -162,7 +162,7 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 ### Anti-patterns the LLM keeps producing (do NOT do these)
 
 1. **Per-column rule → ORGANIZATION.md.** "`PII.GENDER` values normalize to Male" is NOT domain context — it's a column-value mapping. Route to `field_metadata` (`choice_field`).
-2. **Per-column rule → examples.yaml notes.** This skill never writes to `examples.yaml.notes[]` (that path lives in agami-connect Phase 5d). If you find yourself wanting to write "the CRIF total can be negative" as a note on example #12, route it to `field_metadata` on the actual column instead — the lesson applies to every future query, not just to one example.
+2. **Per-column rule → examples.yaml notes.** This skill never writes to `examples.yaml.notes[]` (that path lives in agami-connect Phase 6d). If you find yourself wanting to write "the CRIF total can be negative" as a note on example #12, route it to `field_metadata` on the actual column instead — the lesson applies to every future query, not just to one example.
 3. **Display preference → ORGANIZATION.md.** "Format counts with commas" is not a domain concept — it's a display preference. Route to `user_preference` (USER_MEMORY.md).
 4. **Display preference → prose without changing SQL.** If the correction is "always format like X," ALSO modify the seed example's SQL to demonstrate the formatting (so future answers actually apply it, not just describe it).
 
@@ -186,13 +186,13 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 > - **A display preference** — applies across every database (formatting, default filters, ...)
 > - **Domain context for this database** — abstract business concepts not tied to one column (e.g., "gold tier means lifetime spend > $10k")
 
-The user's answer determines Phase 4 routing.
+The user's answer determines Phase 5 routing.
 
 **Distinguishing `org_context` vs `user_preference` vs `field_metadata`:**
 - If the rule is tied to a specific column → `field_metadata`. **Always check this first.**
 - Else ask: "would this guidance apply if I connected to a different database?" If yes → `user_preference`. If no (it's specific to this domain) → `org_context`.
 
-### Phase 3.5 — surface classification + destination BEFORE Phase 4 writes anything
+### Phase 4 — surface classification + destination BEFORE Phase 5 writes anything
 
 After classifying, **always** surface the decision to the user in chat as a one-line summary with explicit reasoning, then proceed with the edit. The contract:
 
@@ -222,9 +222,9 @@ The user can override before any file is written. If they say "no, that belongs 
 
 ---
 
-## Phase 4: Apply surgical model edits (when applicable)
+## Phase 5: Apply surgical model edits (when applicable)
 
-If the correction kind is `sql_fix`: **stop here**. Phase 2 already saved the example. Surface the closing message and skip to Phase 5.
+If the correction kind is `sql_fix`: **stop here**. Phase 2 already saved the example. Surface the closing message and skip to Phase 6.
 
 For every other kind, you propose a model edit and run the validator BEFORE writing.
 
@@ -404,7 +404,7 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 
 ---
 
-(Phase 5 — telemetry emission on correction — has been removed in the current 0.x line. The skill no longer reads `analytics_consent` and no longer appends to `.telemetry-queue.jsonl`. The server endpoint + privacy spec are preserved in the repo for future re-enable but the runtime flow is silent.)
+(Phase 6 — telemetry emission on correction — has been removed in the current 0.x line. The skill no longer reads `analytics_consent` and no longer appends to `.telemetry-queue.jsonl`. The server endpoint + privacy spec are preserved in the repo for future re-enable but the runtime flow is silent.)
 
 ---
 
@@ -424,6 +424,6 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 ## Hard rules
 
 1. **Phase 2 (examples append) always runs.** Even if the user later changes their mind on the model edit, the example is already saved.
-2. **Phase 4 model writes are gated by the validator.** Exit-0 from `validate_semantic_model.py --directory` (or single-file mode for legacy installs) is the only way to write inside `<artifacts_dir>/<profile>/`. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
+2. **Phase 5 model writes are gated by the validator.** Exit-0 from `validate_semantic_model.py --directory` (or single-file mode for legacy installs) is the only way to write inside `<artifacts_dir>/<profile>/`. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
 3. **Edits stay OSI-conformant.** Don't invent fields. Don't add `custom_extensions` keys not listed in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md). When you can't express a correction within the OSI shape + documented Agami extensions, fall back to `sql_fix` (example only) and tell the user "I can save this as a few-shot example but it doesn't fit a model edit; want me to extend the spec?"
 4. **Show the diff before mutating the model.** The user always gets to see and approve the proposed change.

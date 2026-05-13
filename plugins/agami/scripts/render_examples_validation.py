@@ -5,7 +5,7 @@ Examples-validation dashboard renderer.
 Reads plugins/agami/shared/examples-validation-template.html, substitutes
 placeholders, and writes a self-contained HTML file. Stdlib only.
 
-Used by agami-connect Phase 5 to render every seed example as a card so the
+Used by agami-connect Phase 6 to render every seed example as a card so the
 user can validate / reject / edit each one before they're trusted as
 few-shot anchors. Validated examples are also candidates for tests.yaml.
 

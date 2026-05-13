@@ -1,7 +1,7 @@
 ---
 name: agami-review
 description: "Opens the trust-layer review dashboard for the active profile's semantic model. Lists every entry needing review (Rule 1 metrics + named filters, plus Rule 2 entries below the confidence threshold) as cards with the source-signal block that produced each entry. The user replies in chat with structured commands (approve / reject / edit / threshold / done) to mark entries reviewed. Each approval writes back to the canonical YAML files in <artifacts_dir>/<profile>/ and runs the validator before promotion."
-when_to_use: "Use when the user says 'open the review dashboard', 'review my model', 'show me what needs review', '/agami-review', 'walk through the review queue', or after agami-connect's Phase 5.5 summary box prompts to open the dashboard. Also use when the user replies to a previously-rendered dashboard with one of the chat back-channel commands (approve N / reject N / edit N / threshold X / approve all below X / done)."
+when_to_use: "Use when the user says 'open the review dashboard', 'review my model', 'show me what needs review', '/agami-review', 'walk through the review queue', or after agami-connect's Phase 7 summary box prompts to open the dashboard. Also use when the user replies to a previously-rendered dashboard with one of the chat back-channel commands (approve N / reject N / edit N / threshold X / approve all below X / done)."
 argument-hint: "[threshold N.NN | done]"
 ---
 
@@ -45,7 +45,7 @@ Resolve the active threshold:
 
 The dashboard now has **four tabs**: For Review · Approved Automatically · Manually Approved · Rejected. So this phase loads EVERY entity (not just review-needing) and tags each with a `tab` field. The template filters by tab.
 
-**Scope filter — `AGAMI_REVIEW_SCOPE=rule_1_only`** (added 2026-05-12 for the hybrid review order in `/agami-connect` Phase 3.5). When this env var is set, the dashboard shows ONLY Rule 1 + stale items (metrics, named filters, drift) in the For Review tab. Everything else (low-confidence joins / field descriptions — Rule 2) is excluded from the items array entirely. The Auto / Manual / Rejected tabs are unaffected — read-only inspection is always allowed. This scope is used during the post-introspect upfront review gate, where surfacing the long tail would defeat the "fast time to value" goal. Without the env var (the default), the dashboard shows everything as before.
+**Scope filter — `AGAMI_REVIEW_SCOPE=rule_1_only`** (added 2026-05-12 for the hybrid review order in `/agami-connect` Phase 4). When this env var is set, the dashboard shows ONLY Rule 1 + stale items (metrics, named filters, drift) in the For Review tab. Everything else (low-confidence joins / field descriptions — Rule 2) is excluded from the items array entirely. The Auto / Manual / Rejected tabs are unaffected — read-only inspection is always allowed. This scope is used during the post-introspect upfront review gate, where surfacing the long tail would defeat the "fast time to value" goal. Without the env var (the default), the dashboard shows everything as before.
 
 Load every yaml under `<artifacts_dir>/<profile>/` — `index.yaml`, every `<schema>/_schema.yaml`, every `<schema>/<table>.yaml`. Walk the structures.
 

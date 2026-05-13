@@ -16,8 +16,8 @@ This skill orchestrates four phases:
 1. **Introspect** — pull tables / columns / PK / FK from `information_schema` via the chosen database tool (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`). Ask once for a domain-context paragraph (Phase 1.4) and once for a data-model document upload (Phase 1.5). **Both AskUserQuestion calls are MANDATORY** — the user picks Skip or proceeds, but the SKILL always asks.
 2. **Build the OSI model** — assemble the YAML strictly to the OSI v0.1.1 spec, with Agami metadata (column types, choice fields, performance hints) packed under `custom_extensions[].vendor_name: COMMON` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
 3. **Validate, then write** — run the validator at `plugins/agami/scripts/validate_semantic_model.py`. If it fails, **DO NOT WRITE THE FILE.** Surface the errors and stop.
-3.5. **Rule 1 sign-off (BEFORE seed generation)** — gate the user on metrics + named filters that need approval. Seed SQL exercises these definitions, so signing them off first means the seeds inherit approved truth. Rule 2 polish (low-confidence joins / field descriptions) does NOT block here — that surfaces later in Phase 5.5's optional panel.
-4. **Seed examples + validate-via-dashboard** — generate 10–12 analytical-shape NL→SQL pairs, EXPLAIN-validate each against the live DB, then render the examples-validation dashboard. **The dashboard is MANDATORY — never skip rendering it, never auto-validate the examples on the user's behalf.** Phase 5 ends when the user types `done` or all examples are in `{validated, rejected, error}` state.
+4. **Rule 1 sign-off (BEFORE seed generation)** — gate the user on metrics + named filters that need approval. Seed SQL exercises these definitions, so signing them off first means the seeds inherit approved truth. Rule 2 polish (low-confidence joins / field descriptions) does NOT block here — that surfaces later in Phase 7's optional panel.
+5. **Seed examples + validate-via-dashboard** — generate 10–12 analytical-shape NL→SQL pairs, EXPLAIN-validate each against the live DB, then render the examples-validation dashboard. **The dashboard is MANDATORY — never skip rendering it, never auto-validate the examples on the user's behalf.** Phase 6 ends when the user types `done` or all examples are in `{validated, rejected, error}` state.
 
 For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
 For the bundled JSON schema: [`shared/osi-schema.json`](../../shared/osi-schema.json).
@@ -779,7 +779,7 @@ Snowflake-only: for tables with `estimated_row_count > 10_000_000` use the `SAMP
 
 The sample is **never written to disk and never sent in telemetry.** It lives in the description-generation prompt's context, then is discarded.
 
-**Also capture the data's date range per time-dimension column.** Phase 4's seed-example generator anchors "last 30 days" / "this quarter" filters to the data's actual MAX, not to `NOW()` — otherwise time-bound seeds against a stale dataset return 0 rows and look broken in the validation dashboard. For each column whose type is `timestamp` or `date`:
+**Also capture the data's date range per time-dimension column.** Phase 5's seed-example generator anchors "last 30 days" / "this quarter" filters to the data's actual MAX, not to `NOW()` — otherwise time-bound seeds against a stale dataset return 0 rows and look broken in the validation dashboard. For each column whose type is `timestamp` or `date`:
 
 ```sql
 SELECT MIN(<col>) AS min_ts, MAX(<col>) AS max_ts FROM <schema>.<table>;
@@ -895,7 +895,7 @@ If the user picks a single currency, set `agami.unit: "<CURRENCY_CODE>"` (lowerc
 
 #### 1e.iii — record and continue
 
-The unit annotation is part of `agami.unit` per the existing extension allowlist; no schema changes needed. Phase 4 (chart rendering) and Phase 3c (cell formatting) in agami-query-database already use `agami.unit` for currency / percent / duration formatting.
+The unit annotation is part of `agami.unit` per the existing extension allowlist; no schema changes needed. Phase 5 (chart rendering) and Phase 3c (cell formatting) in agami-query-database already use `agami.unit` for currency / percent / duration formatting.
 
 ### 1f — suggest metrics (user-confirmed only — never auto-write)
 
@@ -1309,7 +1309,7 @@ Surface on success: `✓ Snapshot saved at .snapshots/<model_version>/ — query
 
 Surface on failure (rare): `⚠ Snapshot failed (<stderr>). Model + git history are intact; query receipts will pin the latest model state instead of a frozen hash.`
 
-**Do NOT add `model_version` as a field inside `index.yaml.introspect_meta`** — that's not in the OSI agami-extension allowlist (see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md) → `agami.introspect_meta`), and adding it would fail validation. The receipt builder in agami-query-database reads the version directly from the `.snapshots/` directory listing — see Phase 4e.iii.5 of agami-query-database for the lookup pattern.
+**Do NOT add `model_version` as a field inside `index.yaml.introspect_meta`** — that's not in the OSI agami-extension allowlist (see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md) → `agami.introspect_meta`), and adding it would fail validation. The receipt builder in agami-query-database reads the version directly from the `.snapshots/` directory listing — see Phase 5e.iii.5 of agami-query-database for the lookup pattern.
 
 ### 3e — code-as-artifact: git init + commit
 
@@ -1339,20 +1339,20 @@ Surface: `✓ Committed to <profile_dir>/.git as <short-sha>.` (Or: `✓ Committ
 
 ---
 
-## Phase 3.5: Rule 1 sign-off (BEFORE example generation)
+## Phase 4: Rule 1 sign-off (BEFORE example generation)
 
-**Hybrid review order — added 2026-05-12.** Rule 1 entries (metrics + named filters) drive seed-example correctness, so they must be signed off before Phase 4 generates SQL that uses them. If Phase 4 fires against unreviewed metrics, the seed SQL exercises the *old* (or LLM-guessed) definition; the user signs off in Phase 6, and the seeds are now wrong relative to the approved truth.
+**Hybrid review order — added 2026-05-12.** Rule 1 entries (metrics + named filters) drive seed-example correctness, so they must be signed off before Phase 5 generates SQL that uses them. If Phase 5 fires against unreviewed metrics, the seed SQL exercises the *old* (or LLM-guessed) definition; the user signs off in Phase 8, and the seeds are now wrong relative to the approved truth.
 
-Rule 2 entries (low-confidence joins, field descriptions) do NOT block here. They surface in the Optional panel of Phase 5.5's review dashboard, where they self-approve as the user queries. The hybrid keeps Rule 1 strict + upfront; Rule 2 lazy + after-the-fact.
+Rule 2 entries (low-confidence joins, field descriptions) do NOT block here. They surface in the Optional panel of Phase 7's review dashboard, where they self-approve as the user queries. The hybrid keeps Rule 1 strict + upfront; Rule 2 lazy + after-the-fact.
 
-### 3.5a — count Rule 1 candidates
+### 4a — count Rule 1 candidates
 
 Walk the freshly-written model under `<artifacts_dir>/<profile>/` and count:
 - Metrics with `agami.review_state != approved`
 - Named filters with `agami.review_state != approved`
 - Stale items (any entity with `review_state: stale`)
 
-If the total is **0** (small DB, no metrics proposed, no drift) → skip the gate, but **surface a one-liner first** so the user understands why they didn't see a review dashboard before example generation. Real failure mode: users on fresh BigQuery introspects expected to walk a review queue before seeds got generated; agami silently skipped because no metrics had been proposed, jumped straight to Phase 4 examples, and the user thought "wait — wasn't there supposed to be a review step?"
+If the total is **0** (small DB, no metrics proposed, no drift) → skip the gate, but **surface a one-liner first** so the user understands why they didn't see a review dashboard before example generation. Real failure mode: users on fresh BigQuery introspects expected to walk a review queue before seeds got generated; agami silently skipped because no metrics had been proposed, jumped straight to Phase 5 examples, and the user thought "wait — wasn't there supposed to be a review step?"
 
 Surface exactly this:
 
@@ -1360,13 +1360,13 @@ Surface exactly this:
 No Rule 1 candidates to sign off (no metrics or named filters were
 proposed during introspect). Proceeding straight to seed-example
 generation. Low-confidence joins and field descriptions will surface
-as warnings on the answers that use them, in Phase 5.5's optional
+as warnings on the answers that use them, in Phase 7's optional
 review panel — not now.
 ```
 
-Then continue to Phase 4.
+Then continue to Phase 5.
 
-### 3.5b — surface the gate
+### 4b — surface the gate
 
 Tell the user upfront that this is required-now-or-Phase-4-will-fire-against-unreviewed-definitions:
 
@@ -1383,13 +1383,13 @@ can wait — they surface as warnings on answers later and approve
 themselves as you query.
 ```
 
-### 3.5c — render the Rule 1 dashboard via /agami-review (gated)
+### 4c — render the Rule 1 dashboard via /agami-review (gated)
 
 Invoke `/agami-review` with a `--rule-1-only` filter so the dashboard renders ONLY the Rule 1 + stale items — the user shouldn't be shown the long tail at this stage. The agami-review SKILL's Phase 1 partitioning already classifies items; pass an env hint `AGAMI_REVIEW_SCOPE=rule_1_only` so the SKILL hides everything else from the For Review tab.
 
 **End the turn after the dashboard renders.** Wait for the user to come back with their approval batch.
 
-### 3.5d — gate the return-to-Phase-4
+### 4d — gate the return-to-Phase-4
 
 When the user comes back with their approval batch and `/agami-review` has finished applying it, check:
 
@@ -1401,7 +1401,7 @@ remaining_rule1 = (
 )
 ```
 
-If `remaining_rule1 == 0` → continue to Phase 4. The seeds can now safely reference approved definitions.
+If `remaining_rule1 == 0` → continue to Phase 5. The seeds can now safely reference approved definitions.
 
 If `remaining_rule1 > 0` (user only partially approved, or rejected some, or `done`-d early) → ask:
 
@@ -1412,15 +1412,15 @@ If `remaining_rule1 > 0` (user only partially approved, or rejected some, or `do
 | `Continue (Recommended)` | Generate seeds against current state. The receipt panel on each answer will warn about unreviewed Rule 1 entries that were used. |
 | `Pause — I'll finish review first` | End the skill here; user re-invokes `/agami-connect` to resume after sign-off. |
 
-If the user picks Continue, proceed to Phase 4. If they pick Pause, surface "Resume by running `/agami-connect`" and end the turn.
+If the user picks Continue, proceed to Phase 5. If they pick Pause, surface "Resume by running `/agami-connect`" and end the turn.
 
-### 3.5e — re-introspect handling
+### 4e — re-introspect handling
 
-On `$ARGUMENTS == reintrospect`: if Phase 3.5a counts 0 (all metrics + named filters are still approved from a prior run, no new ones), skip silently. Otherwise the gate applies — re-introspection can introduce new Rule 1 candidates that need sign-off.
+On `$ARGUMENTS == reintrospect`: if Phase 4a counts 0 (all metrics + named filters are still approved from a prior run, no new ones), skip silently. Otherwise the gate applies — re-introspection can introduce new Rule 1 candidates that need sign-off.
 
 ---
 
-## Phase 4: Seed prompt examples
+## Phase 5: Seed prompt examples
 
 **SURFACE A PROGRESS WARNING FIRST.** Before kicking off generation, tell the user what's about to happen and how long it'll take — this phase is the second-longest in the skill (after introspect itself), and silence here is the most common "is it stuck?" moment in real-world testing.
 
@@ -1468,7 +1468,7 @@ A "list rows" example (`SELECT a, b, c FROM t1 JOIN t2 ORDER BY x LIMIT N`) **do
 
 **Schema-fit fallbacks**: if the schema lacks a dimension required by a pattern (no time column → skip S3/S5; only 2 connected tables → skip the ≥3-table requirement), document the skip in the staging log: `skipped pattern N: schema has no time column on any fact table`. Do not invent dimensions to satisfy the rules — emit fewer examples with a logged justification.
 
-### 4a — generate
+### 5a — generate
 
 First, **load `<artifacts_dir>/USER_MEMORY.md`** (strip HTML comments) and **`<artifacts_dir>/<profile>/ORGANIZATION.md`** (same — strip HTML comments). USER_MEMORY holds cross-database preferences; ORGANIZATION.md holds domain context for *this* database. Both improve seed-example quality.
 
@@ -1492,7 +1492,7 @@ For each example:
 
 For non-BigQuery dialects: Postgres / MySQL / Snowflake collapse most of these to a single `TIMESTAMP` family, so the rule is mostly a no-op there. But the *check* should still happen — `original_type` is the source of truth across every dialect.
 
-### 4b — EXPLAIN-validate + row-count check
+### 5b — EXPLAIN-validate + row-count check
 
 Two-pass validation before an example lands in `examples.yaml`:
 
@@ -1521,7 +1521,7 @@ Cap regeneration at 2 attempts per example. If the second attempt still returns 
 
 **Why this matters**: the user's first impression of seed quality is whether the examples-validation dashboard shows real numbers in the row-preview column. Zero rows everywhere reads as "this skill is broken" even when the SQL is correct.
 
-### 4c — write `<artifacts_dir>/<profile>/examples.yaml`
+### 5c — write `<artifacts_dir>/<profile>/examples.yaml`
 
 This file is **NOT OSI** — it's an agami-bespoke few-shot library. Format:
 
@@ -1552,25 +1552,25 @@ Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Sa
 
 ---
 
-## Phase 5: Validate every seed example (the trust onboarding)
+## Phase 6: Validate every seed example (the trust onboarding)
 
-**MANDATORY — NEVER SKIP. NEVER COMBINE WITH PHASE 4 OR PHASE 5.5.**
+**MANDATORY — NEVER SKIP. NEVER COMBINE WITH PHASE 5 OR PHASE 7.**
 
-This phase MUST run on every `/agami-connect` invocation that generated examples in Phase 4. The dashboard at 5c MUST render and the turn MUST end after it. Past failure mode: the LLM running this skill saw that Phase 4b had already EXPLAIN-validated each example and concluded "the examples are good — skip to Phase 5.5 / Phase 6." That is wrong: EXPLAIN-validation means the SQL parses against the schema, not that the SQL answers the question the user would actually ask. The user has to *see* the question + SQL + result rows and confirm before any of this is "validated" in the trust-spine sense.
+This phase MUST run on every `/agami-connect` invocation that generated examples in Phase 5. The dashboard at 5c MUST render and the turn MUST end after it. Past failure mode: the LLM running this skill saw that Phase 5b had already EXPLAIN-validated each example and concluded "the examples are good — skip to Phase 7 / Phase 8." That is wrong: EXPLAIN-validation means the SQL parses against the schema, not that the SQL answers the question the user would actually ask. The user has to *see* the question + SQL + result rows and confirm before any of this is "validated" in the trust-spine sense.
 
 Do NOT skip if:
-- All Phase 4 EXPLAIN checks passed (that's the floor for this phase to run, not a reason to skip it).
+- All Phase 5 EXPLAIN checks passed (that's the floor for this phase to run, not a reason to skip it).
 - The example count is small (3 examples still get a dashboard).
 - The user said something casual like "looks good" or "great" earlier in the turn — they haven't seen the SQL yet, so they can't have meant the examples.
-- The skill is rate-limited / nearing context budget — fewer Phase 6 suggestions is acceptable; skipping Phase 5 is not.
+- The skill is rate-limited / nearing context budget — fewer Phase 8 suggestions is acceptable; skipping Phase 6 is not.
 
-Do NOT combine with Phase 4's "✓ Generated <N> examples" surface (that's a separate turn boundary) or with Phase 5.5's post-introspect summary (the HARD STOP rule in 5e enforces this on the back end; this MANDATORY rule enforces it at entry).
+Do NOT combine with Phase 5's "✓ Generated <N> examples" surface (that's a separate turn boundary) or with Phase 7's post-introspect summary (the HARD STOP rule in 5e enforces this on the back end; this MANDATORY rule enforces it at entry).
 
 Earlier versions of this skill picked ONE seed example as a demo. Replaced — three independent sets of early-adopter feedback (Sourav + Intuit + Asana) said the same thing: "let me validate the queries you've inferred, not just see one of them work." Validating all 10–12 seeds in a single guided pass is what turns LLM-generated guesses into golden truths the query skill can trust.
 
 **Output of this phase:** an HTML dashboard at `~/.agami/examples-validation/<profile>/<ts>.html` listing every seed example with its question, SQL, and a 5-row result preview, plus a chat back-channel for the user to validate / reject / edit each one.
 
-### 5a — Run every seed example
+### 6a — Run every seed example
 
 Read `<artifacts_dir>/<profile>/examples.yaml`. For each example:
 
@@ -1587,7 +1587,7 @@ Read `<artifacts_dir>/<profile>/examples.yaml`. For each example:
 
 Run all examples sequentially (parallel execution risks overloading small DBs and is hard to attribute errors). Surface a one-line progress note: `Running 12 seed examples…`. Total time scales with example count × per-query latency — typically 30–60s for 12 examples on a small DB.
 
-### 5b — Build the items JSON for the dashboard
+### 6b — Build the items JSON for the dashboard
 
 For each example, build:
 
@@ -1614,7 +1614,7 @@ For each example, build:
 
 Write the array to `/tmp/agami-examples-items-<ts>.json`. The exact schema is documented in [`shared/examples-validation-template.html`](../../shared/examples-validation-template.html) → `ITEMS_JSON`.
 
-### 5c — Render the dashboard
+### 6c — Render the dashboard
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)
@@ -1647,11 +1647,11 @@ You can also type commands directly:
   done
 ```
 
-Auto-open with the same multi-command fallback chain as agami-query-database Phase 4e.vi (`open` → `xdg-open` → `start` → fall through with the path printed). End the turn here.
+Auto-open with the same multi-command fallback chain as agami-query-database Phase 5e.vi (`open` → `xdg-open` → `start` → fall through with the path printed). End the turn here.
 
-**HARD STOP rule (read this twice):** Do NOT surface Phase 5.5 (post-introspect summary) or offer the model-review dashboard in the same turn as 5c. The examples-validation flow and the model-review flow are sequential, not concurrent — a user who is mid-validation on examples should not see "open the review dashboard" anywhere on screen. Phase 5.5 may only run after the gate in 5e fires.
+**HARD STOP rule (read this twice):** Do NOT surface Phase 7 (post-introspect summary) or offer the model-review dashboard in the same turn as 5c. The examples-validation flow and the model-review flow are sequential, not concurrent — a user who is mid-validation on examples should not see "open the review dashboard" anywhere on screen. Phase 7 may only run after the gate in 5e fires.
 
-### 5d — Chat back-channel grammar
+### 6d — Chat back-channel grammar
 
 The user replies with one or more commands. Commands can come from the dashboard's "Generate feedback for Claude" button (newline-separated block) or be typed directly. Same grammar either way.
 
@@ -1671,7 +1671,7 @@ The user replies with one or more commands. Commands can come from the dashboard
   GROUP BY customer_id
   <<<
   ```
-  Parser: see a line matching `edit N sql>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line after it until `<<<`; that's the new SQL. Write it back to the example's `sql` field, re-EXPLAIN-validate via the chosen tool, re-execute, refresh the dashboard's row preview. **Apply the same SQL-safety checks as Phase 4b** (refuse DDL/DML, refuse system tables) — broken edits leave the example as `state: error` and the dashboard surfaces the error in the next render.
+  Parser: see a line matching `edit N sql>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line after it until `<<<`; that's the new SQL. Write it back to the example's `sql` field, re-EXPLAIN-validate via the chosen tool, re-execute, refresh the dashboard's row preview. **Apply the same SQL-safety checks as Phase 5b** (refuse DDL/DML, refuse system tables) — broken edits leave the example as `state: error` and the dashboard surfaces the error in the next render.
 - **`note N >>>` ... `<<<`** — separate from edit. For comments / formatting hints / context that isn't a SQL rewrite. Multi-line block:
   ```
   note 4 >>>
@@ -1699,7 +1699,7 @@ The user replies with one or more commands. Commands can come from the dashboard
   ```
   Parser: see a line starting with `add example:` — capture the rest of the line as the **question**. The next non-empty line MUST be `sql>>>`; everything after it until `<<<` on its own line is the **SQL**.
 
-  Validation: EXPLAIN-validate the SQL against the live DB before writing (same safety checks as Phase 4b — refuse DDL/DML, refuse system tables). If EXPLAIN fails, surface the one-line error and **don't write the example**. The user can resubmit a fixed version in the next batch.
+  Validation: EXPLAIN-validate the SQL against the live DB before writing (same safety checks as Phase 5b — refuse DDL/DML, refuse system tables). If EXPLAIN fails, surface the one-line error and **don't write the example**. The user can resubmit a fixed version in the next batch.
 
   On success: append a new entry to `<artifacts_dir>/<profile>/examples.yaml`:
   ```yaml
@@ -1712,17 +1712,17 @@ The user replies with one or more commands. Commands can come from the dashboard
     state: unreviewed        # The user can validate it on the next render
   ```
   Multiple `add example:` blocks in one batch are fine — process each independently. The next dashboard re-render shows the new examples with their assigned `n` (continues the existing numbering — appended at the end).
-- **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed, <A> added.` and continue to Phase 5.5.
+- **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed, <A> added.` and continue to Phase 7.
 
 For each successful edit, the user is also offered: *"Promote this to a golden test in `tests.yaml`? (yes / no / skip)"*. If yes → append a new test entry to `<artifacts_dir>/<profile>/tests.yaml` with the same question + an `equals` assertion against the actual returned value(s). This is the bridge to the Quality-Loop launch's `agami test`.
 
-### 5e — Re-render after each batch of edits
+### 6e — Re-render after each batch of edits
 
 After applying a batch of validate / reject / edit commands, **always re-render the dashboard to a NEW timestamped file** at `~/.agami/examples-validation/<profile>/<new-ts>.html`. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
 
 **Delete the previous timestamped file from this profile's dir before writing the new one** (`rm -f "$HOME/.agami/examples-validation/$profile/$prev_ts.html"`). Track `$prev_ts` across re-renders. The auto-open of the new file is the refresh signal; old files just accumulate and clutter the dir.
 
-**Auto-open the new file on every re-render** (same multi-command fallback chain as Phase 5c — `open` → `xdg-open` → `start` → `cmd /c start` → echo the path). The user gets a new browser tab with the fresh state; the previous tab is now stale and can be closed.
+**Auto-open the new file on every re-render** (same multi-command fallback chain as Phase 6c — `open` → `xdg-open` → `start` → `cmd /c start` → echo the path). The user gets a new browser tab with the fresh state; the previous tab is now stale and can be closed.
 
 **Surface the new file path in the chat ack** so the user can't miss the refresh:
 ```
@@ -1734,19 +1734,19 @@ Open: ~/.agami/examples-validation/<profile>/<new-ts>.html
 
 Then end the turn. Wait for the user.
 
-**HARD STOP — gate for advancing to Phase 5.5:** Phase 5.5 (post-introspect summary) and the model-review dashboard offer may only fire when **both** of the following are true:
+**HARD STOP — gate for advancing to Phase 7:** Phase 7 (post-introspect summary) and the model-review dashboard offer may only fire when **both** of the following are true:
 1. The user has explicitly typed `done`, OR every example in `examples.yaml` has `state ∈ {validated, rejected, error}` (no `unreviewed` examples remain).
 2. The current turn's batch of commands has been processed and the re-render is complete.
 
-If condition (1) is false — i.e., there are still `unreviewed` examples in the YAML after applying this batch — **end the turn after the re-render.** Do not surface Phase 5.5, do not offer the model-review dashboard, do not say "set up." The user is still mid-validation. They will return with another batch.
+If condition (1) is false — i.e., there are still `unreviewed` examples in the YAML after applying this batch — **end the turn after the re-render.** Do not surface Phase 7, do not offer the model-review dashboard, do not say "set up." The user is still mid-validation. They will return with another batch.
 
 When the gate fires, surface:
 ```
 ✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed (errors).
 ```
-…and continue to Phase 5.5 (the trust-layer summary) **in a new turn after the user replies** to any subsequent prompt — or, if you have remaining context budget, surface the Phase 5.5 summary as the next message in the same turn. Either way, the model-review dashboard is offered *only* via Phase 5.5's AskUserQuestion, never embedded earlier.
+…and continue to Phase 7 (the trust-layer summary) **in a new turn after the user replies** to any subsequent prompt — or, if you have remaining context budget, surface the Phase 7 summary as the next message in the same turn. Either way, the model-review dashboard is offered *only* via Phase 7's AskUserQuestion, never embedded earlier.
 
-### 5f — examples.yaml schema additions
+### 6f — examples.yaml schema additions
 
 Each example entry now supports trust-layer-style state:
 
@@ -1765,23 +1765,23 @@ Existing examples without these fields are treated as `state: unreviewed`. Backw
 
 ---
 
-## Phase 5.5: Post-introspect summary (the trust-layer landing)
+## Phase 7: Post-introspect summary (the trust-layer landing)
 
 **MANDATORY — NEVER SKIP. MUST run on every `/agami-connect` invocation that produces or refreshes a model.**
 
-Past failure mode (reported 2026-05-13, BigQuery early adopter): the LLM running the skill jumped from Phase 5 (examples validation complete) → Phase 6 (closing message), bypassing Phase 5.5 entirely. The user never saw the review dashboard offer, never opened the Rule 2 polish queue, and ended the session believing the skill was done — even though there were 9 unreviewed field descriptions + 2 unreviewed cross-schema relationships in the model. The receipt panel on their first answer then surfaced "unreviewed" warnings the user didn't have a path to clear.
+Past failure mode (reported 2026-05-13, BigQuery early adopter): the LLM running the skill jumped from Phase 6 (examples validation complete) → Phase 8 (closing message), bypassing Phase 7 entirely. The user never saw the review dashboard offer, never opened the Rule 2 polish queue, and ended the session believing the skill was done — even though there were 9 unreviewed field descriptions + 2 unreviewed cross-schema relationships in the model. The receipt panel on their first answer then surfaced "unreviewed" warnings the user didn't have a path to clear.
 
 Do NOT skip if:
-- Phase 3.5 ran and Rule 1 was fully approved — Rule 2 still needs surfacing.
-- Phase 3.5 was skipped (no Rule 1 candidates) — Phase 5.5 still fires. Rule 2 candidates are independent.
+- Phase 4 ran and Rule 1 was fully approved — Rule 2 still needs surfacing.
+- Phase 4 was skipped (no Rule 1 candidates) — Phase 7 still fires. Rule 2 candidates are independent.
 - All Rule 2 candidates are at confidence ≥ threshold — still surface the summary so the user sees the auto-approve numbers and the "no items need review" framing.
 - The user said "no clarifying questions" earlier — same rule as Phase 1.4/1.5: this is required state-gathering, not a clarifying question.
 
-This is the curator's checkout screen. Rule 1 sign-off already happened in Phase 3.5 (or was skipped because there was nothing to sign off), so by the time we land here the must-do work for the *current* introspect run is done. Everything surfaced here is **optional polish** — Rule 2 entries (low-confidence joins, field descriptions) that surface as warnings on answers but don't block.
+This is the curator's checkout screen. Rule 1 sign-off already happened in Phase 4 (or was skipped because there was nothing to sign off), so by the time we land here the must-do work for the *current* introspect run is done. Everything surfaced here is **optional polish** — Rule 2 entries (low-confidence joins, field descriptions) that surface as warnings on answers but don't block.
 
-**If Phase 3.5 ran**: lead with "Rule 1 sign-off complete · X items approved earlier this session" so the user remembers what they already did.
+**If Phase 4 ran**: lead with "Rule 1 sign-off complete · X items approved earlier this session" so the user remembers what they already did.
 
-**If Phase 3.5 was skipped** (no Rule 1 candidates): no opening — this is purely the Rule 2 polish summary.
+**If Phase 4 was skipped** (no Rule 1 candidates): no opening — this is purely the Rule 2 polish summary.
 
 Scan the freshly-written model under `<artifacts_dir>/<profile>/` and count entries by `agami.review_state` and entity type. The summary leads with the **must-do-to-ship** count (Rule 1 + drift) so the user sees a small number first, with the optional polish count broken out separately. Produce the summary block:
 
@@ -1824,18 +1824,18 @@ Then offer two surfaces via AskUserQuestion. The trust-layer review queue and th
 |---|---|
 | `Open the review dashboard` | Invoke the `agami-review` skill. The user lands on the queue and walks the items needing sign-off / approval. |
 | `Open the model explorer` | Invoke the `agami-model` skill. The user lands on the full schema tree (search + filter), can exclude entire tables or specific columns they don't want agami to use, and re-render after each batch. |
-| `Skip — I'll review later` (default) | Acknowledge: "OK — `<R1+R2+R3+R4>` items remain unreviewed. Run `/agami-review` to walk them, or `/agami-model` to browse + exclude tables/columns. Either skill works any time." Continue to Phase 6. |
+| `Skip — I'll review later` (default) | Acknowledge: "OK — `<R1+R2+R3+R4>` items remain unreviewed. Run `/agami-review` to walk them, or `/agami-model` to browse + exclude tables/columns. Either skill works any time." Continue to Phase 8. |
 | `Adjust the threshold` | Ask for a number (`0.0` – `1.0`). Re-render the summary using that threshold. Persist to `<artifacts_dir>/<profile>/agami.config.yaml` under `review.threshold`. |
 
 If a sibling skill (`agami-review` or `agami-model`) doesn't exist yet (mid-rollout build), surface the summary block but skip that option from the AskUserQuestion. Don't error.
 
 ---
 
-## Phase 6: Post-setup follow-up suggestions
+## Phase 8: Post-setup follow-up suggestions
 
 (Telemetry consent was previously asked here. It has been removed in the current 0.x line — there is no opt-in, no install event, no `~/.agami/.config.analytics_consent` field written, no `.telemetry-queue.jsonl` appended. The server-side telemetry endpoint and the privacy spec are preserved in the repo for future re-enable, but the runtime flow is silent. Don't surface anything about telemetry here.)
 
-### 6a — gate on Rule 1 review status
+### 8a — gate on Rule 1 review status
 
 **Before declaring `<profile> is set up`, check whether the trust-layer dashboard has any Rule 1 items unreviewed** (metrics with `review_state != approved`, named_filters with `review_state != approved`). Rule 1 items block at runtime — agami-query-database refuses to answer a question that depends on an unreviewed metric, per the strict-gate rule in §3.4 of `agami-osi-extensions.md`. Declaring "set up" while metrics are still unreviewed is misleading.
 
@@ -1849,7 +1849,7 @@ rule1_unreviewed = (
 
 If `rule1_unreviewed > 0`, **skip the "Now that you're set up" framing** and surface the **in-progress** variant in 6b. Otherwise, fall through to the **fully-set-up** variant in 6c.
 
-### 6b — in-progress framing (Rule 1 items still unreviewed)
+### 8b — in-progress framing (Rule 1 items still unreviewed)
 
 ```
 ✓ <artifacts_dir>/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
@@ -1880,7 +1880,7 @@ or similar unreviewed metrics will refuse. Reply with a number, or run
 
 Then end the turn.
 
-### 6c — fully-set-up framing (no Rule 1 items pending)
+### 8c — fully-set-up framing (no Rule 1 items pending)
 
 ```
 ✓ <artifacts_dir>/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
