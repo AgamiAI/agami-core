@@ -10,8 +10,10 @@ Two categories of Python scripts ship with agami:
 | Script | What it does | Requires |
 |---|---|---|
 | `execute_sql.py` | Reads `~/.agami/credentials`, opens a connection, runs ONE SQL statement, emits RFC 4180 CSV on stdout. Supports postgres / mysql / sqlite. Hard-exits with a clear message if credentials are missing — never asks in chat. | One of: `psycopg2-binary` (postgres), `pymysql` (mysql); sqlite uses stdlib |
+| `mcp_server.py` | **Optional** local stdio MCP server (`agami serve`) — exposes the local semantic model + read-only local SQL execution over the Model Context Protocol, so agami can be used from Claude Code / Claude Desktop and not just inside the plugin. Pure stdlib; routes execution through `execute_sql.py`; no network, no auth, no telemetry. See [`docs/mcp-server.md`](../../../docs/mcp-server.md). | stdlib only (plus the relevant `execute_sql.py` driver for non-SQLite DBs) |
+| `setup_desktop_mcp.py` | One-command wiring of `mcp_server.py` into the Claude Desktop app (used by the `agami-serve` skill). Auto-detects the right Python interpreter, copies the two self-contained server files to a stable `~/.agami/serve/`, and safely merges the entry into `claude_desktop_config.json` (timestamped backup + atomic write, preserving every other key). `--dry-run` previews; `--in-place` skips the copy for dev checkouts. | stdlib only |
 
-The agami skill calls it via:
+The agami skill calls `execute_sql.py` via:
 
 ```bash
 # Single-line SQL via --sql
