@@ -3,12 +3,12 @@
 > **The trust layer between AI agents and your data warehouse. Local. Private. Yours.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![Status](https://img.shields.io/badge/status-pre--public-orange)
 
 Ask plain-English questions of your **Postgres / MySQL / Snowflake / BigQuery / Redshift / SQLite** database, with a trust layer wrapped around every answer. Your credentials, schema, and query results never leave your machine — `agami` runs entirely inside Claude Code via the built-in Bash / Read / Write tools.
 
-- **No MCP server.** No backend. No `pip install` if you have a native CLI for your DB.
+- **No Agami backend.** Nothing you do touches a server we operate. The plugin runs inside Claude Code; an *optional* local MCP server (`agami serve`) lets other AI clients (e.g. Claude Desktop) use the same local model and execution — still entirely on your machine. No `pip install` if you have a native CLI for your DB. See [docs/mcp-server.md](docs/mcp-server.md).
 - **Every join is FK-derived or human-approved.** Every metric and named filter is signed off with a name, role, and timestamp. The dashboard tells you which, with the source signal.
 - **Every answer ships a receipt** — the literal SQL that ran, the model version it pinned, the relationships used, and the freshness of the source tables.
 - **Corrections persist with attribution.** Save a fix once → every subsequent query loads it as a few-shot example, with the original author and date surfaced when it influences a future answer.
@@ -177,7 +177,7 @@ Verify:
 ```
 /plugin list
 ```
-You should see `agami@litebi v0.1.0`.
+You should see `agami@litebi v0.2.0`.
 
 Detailed walkthrough: [`docs/install/claude-code-cli.md`](docs/install/claude-code-cli.md).
 

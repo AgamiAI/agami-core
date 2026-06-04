@@ -62,6 +62,23 @@ That's the entire outbound surface: opening one well-known URL in your browser w
 
 ---
 
+## The optional local MCP server keeps the same guarantee
+
+`agami serve` (`plugins/agami/scripts/mcp_server.py`) lets you use agami from
+Claude Code / Claude Desktop. It changes nothing about this privacy posture:
+
+- It speaks the MCP **stdio** transport — a child process of your AI client,
+  reading/writing OS pipes. It **never binds a network port** and makes **no
+  network call**. `tests/test_mcp_server.py` enforces this (the source is
+  asserted to contain no socket/http/urllib/requests primitives).
+- It reads only the same local paths listed above and executes SQL locally via
+  `execute_sql.py`. Only the rows you'd see anyway are returned to your client.
+- It has **no authentication** because it needs none: the trust boundary is your
+  OS user account. (Networked, authenticated, multi-user serving is the hosted
+  product — see [open-vs-hosted.md](open-vs-hosted.md).)
+
+---
+
 ## Vestigial telemetry code (preserved, not invoked)
 
 Early designs of agami had an opt-in telemetry path that sent anonymous usage counts to a hosted endpoint. That path was removed from the runtime in the 0.x line. The implementation code remains in the repo as historical artifacts:

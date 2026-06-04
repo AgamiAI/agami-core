@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Lightweight BI for Claude. Local-first natural-language SQL on your own database — no infra, no servers, no data leaves your machine.",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "pluginRoot": "./plugins",
     "tags": ["data", "sql", "natural-language", "bi", "local-first", "open-source"],
     "repository": "https://github.com/AgamiAI/LiteBi",
@@ -18,7 +18,7 @@
       "name": "agami",
       "source": "./plugins/agami",
       "description": "Connect a database, ask questions in natural language, save corrections, render charts. Runs entirely on your machine via Claude's Bash / Read / Write tools — no MCP server, no Python required if you have psql/mysql or DuckDB.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "keywords": ["database", "query", "sql", "natural-language", "chart", "postgres", "mysql"],
       "category": "data"
     }
