@@ -100,14 +100,17 @@ def _load_credentials(profile: str) -> dict[str, str]:
         )
         sys.exit(2)
 
-    # chmod check: refuse if too permissive
-    mode = stat.S_IMODE(CREDENTIALS_PATH.stat().st_mode)
-    if mode not in ALLOWED_PERMS:
-        sys.stderr.write(
-            f"~/.agami/credentials must be chmod 600 (currently {oct(mode)[2:]})\n"
-            f"Run: chmod 600 ~/.agami/credentials\n"
-        )
-        sys.exit(2)
+    # chmod check: refuse if too permissive. POSIX only — Windows file modes don't
+    # map to Unix permission bits (NTFS ACLs guard the file; a stat() there reports
+    # ~0o666, which would wrongly trip this gate and block the credentials read).
+    if os.name == "posix":
+        mode = stat.S_IMODE(CREDENTIALS_PATH.stat().st_mode)
+        if mode not in ALLOWED_PERMS:
+            sys.stderr.write(
+                f"~/.agami/credentials must be chmod 600 (currently {oct(mode)[2:]})\n"
+                f"Run: chmod 600 ~/.agami/credentials\n"
+            )
+            sys.exit(2)
 
     # IMPORTANT: enable inline-comment stripping for both `#` and `;`. Without
     # this, a credentials line like `account = xy12345  # locator + region`

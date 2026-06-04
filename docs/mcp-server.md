@@ -63,11 +63,14 @@ claude mcp add agami \
   -- python3 /ABS/PATH/to/LiteBi/plugins/agami/scripts/mcp_server.py
 ```
 
-## Connect it to Claude Desktop (the Mac app)
+## Connect it to Claude Desktop (macOS and Windows)
 
 Claude Desktop is a **separate program from Claude Code** — installing the agami
-plugin via the Claude Code marketplace does *not* register the server here. The
-Mac app reads only its own `claude_desktop_config.json`.
+plugin via the Claude Code marketplace does *not* register the server here.
+Claude Desktop reads only its own `claude_desktop_config.json`. This works on both
+**macOS and Windows**: the server is pure-stdlib Python and the setup helper writes
+the correct config path per OS. It's been validated on the macOS app; the Windows
+path is handled in code but is lightly tested (see the note at the end of this section).
 
 ### Recommended: one command
 
@@ -89,30 +92,34 @@ It removes all three sharp edges of hand-editing:
 - **safely merges** the entry into `claude_desktop_config.json` — timestamped
   backup, atomic write, every other key and MCP server preserved.
 
-Then **Cmd+Q** the app and reopen. Flags: `--profile NAME` (pin a profile),
-`--in-place` (point at a checkout instead of copying — for devs iterating on the
-server), `--config PATH` (target a different client's config file). Re-run after a
-plugin update to refresh the copied files.
+Then **fully quit** the app (Cmd+Q on macOS; quit from the system tray on Windows)
+and reopen. Flags: `--profile NAME` (pin a profile), `--in-place` (point at a
+checkout instead of copying — for devs iterating on the server), `--config PATH`
+(target a different client's config file). Re-run after a plugin update to refresh
+the copied files. The helper auto-resolves the macOS vs Windows config path for you.
 
 ### Manual (what the helper does under the hood)
 
 If you'd rather edit by hand, mind these two gotchas — both silently produce
 "no tools":
 
-1. **Use an absolute path to a Python that has your DB driver.** The Mac app
-   launches helpers with a *minimal PATH*, so a bare `python3` usually isn't
-   found — and it must be the interpreter where `psycopg2` (etc.) is installed.
-   Find it: `python3 -c 'import sys,psycopg2; print(sys.executable)'` in a
-   terminal (e.g. `/Library/Frameworks/Python.framework/Versions/3.12/bin/python3`).
+1. **Use an absolute path to a Python that has your DB driver.** Claude Desktop
+   launches helpers with a *minimal PATH*, so a bare `python3`/`python` usually
+   isn't found — and it must be the interpreter where `psycopg2` (etc.) is installed.
+   Find it: `python3 -c 'import sys,psycopg2; print(sys.executable)'` (Windows:
+   `python -c "import sys,psycopg2; print(sys.executable)"`). Example paths — macOS:
+   `/Library/Frameworks/Python.framework/Versions/3.12/bin/python3`; Windows:
+   `C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe`.
 2. **Use an absolute path to `mcp_server.py`.** If you installed via the Claude
    Code marketplace, the script lives in the version-pinned plugin cache, e.g.
    `~/.claude/plugins/cache/litebi/agami/<version>/scripts/mcp_server.py` — note
    that path changes on every plugin update. If you cloned the repo, point at your
    checkout instead.
 
-Edit `claude_desktop_config.json` (Settings → Developer → Edit Config; on macOS
-`~/Library/Application Support/Claude/claude_desktop_config.json`). `mcpServers`
-is a **top-level** key (a sibling of `preferences`, not nested inside it):
+Edit `claude_desktop_config.json` (Settings → Developer → Edit Config). Its path is
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS and
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows. `mcpServers` is a
+**top-level** key (a sibling of `preferences`, not nested inside it):
 
 ```json
 {
@@ -126,9 +133,11 @@ is a **top-level** key (a sibling of `preferences`, not nested inside it):
 }
 ```
 
-**Cmd+Q to fully quit** the app (not just close the window), then reopen. It
-spawns the server as a child process over stdin/stdout — **there is no URL and no
-port.** Logs are at `~/Library/Logs/Claude/mcp-server-agami.log`.
+**Fully quit** the app — Cmd+Q on macOS; quit from the system tray on Windows (not
+just closing the window) — then reopen. It spawns the server as a child process
+over stdin/stdout — **there is no URL and no port.** Logs:
+`~/Library/Logs/Claude/mcp-server-agami.log` on macOS,
+`%APPDATA%\Claude\logs\mcp-server-agami.log` on Windows.
 
 > **Containment — confirmed working (verified 2026-06 on the macOS app).** A
 > custom stdio MCP server runs with your full user access: it reads `~/.agami`
@@ -138,6 +147,13 @@ port.** Logs are at `~/Library/Logs/Claude/mcp-server-agami.log`.
 > future build changes it — `list_datasources` returns empty or `execute_sql`
 > reports missing-credentials/`not_found` — fall back to **Claude Code** (the CLI),
 > where it always runs with full local access.
+
+> **Windows status.** The wiring is cross-platform: the helper writes
+> `%APPDATA%\Claude\claude_desktop_config.json`, detects `python`/`python3`, and
+> the server is pure stdlib. `execute_sql.py` skips the POSIX `chmod 600`
+> credentials check on Windows (NTFS has no Unix mode bits; the file is guarded by
+> your user profile's ACL instead). This path is validated on macOS but **not yet
+> run end-to-end on a Windows box** — if you hit a snag there, please open an issue.
 
 ## Security model — no authentication, by design
 

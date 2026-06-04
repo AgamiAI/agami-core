@@ -134,6 +134,7 @@ def find_interpreter(module: str | None, forced: str | None) -> str | None:
         candidates = [
             sys.executable,
             shutil.which("python3") or "",
+            shutil.which("python") or "",   # Windows usually exposes `python`, not `python3`
             "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
             "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
             "/usr/local/bin/python3",
