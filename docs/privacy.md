@@ -44,7 +44,7 @@ There is no outbound network call from the skill code, period. To be explicit, t
 - Working directory contents, environment variables, git history
 - Anything from `~/.agami/credentials`, the artifacts dir, charts, exports, or the query log
 
-You can grep the source — there is no `curl` / `requests.post` / network call in any skill code path. The validator suite enforces this invariant: any change that would introduce a network call to a non-allowlisted host fails the build.
+You can grep the source — there is no `curl` / `requests.post` / network call in any skill or script code path. A test (`tests/test_privacy_no_network.py`) enforces this: any script that introduces a network-egress primitive fails the build.
 
 ---
 
@@ -79,12 +79,6 @@ Claude Code / Claude Desktop. It changes nothing about this privacy posture:
 
 ---
 
-## Vestigial telemetry code (preserved, not invoked)
+## No telemetry
 
-Early designs of agami had an opt-in telemetry path that sent anonymous usage counts to a hosted endpoint. That path was removed from the runtime in the 0.x line. The implementation code remains in the repo as historical artifacts:
-
-- `plugins/agami/scripts/sample_send_telemetry.py` — sample client (not invoked by any skill)
-- `tests/test_telemetry_privacy.py` — allowlist tests (asserts the sample script can't include unauthorized fields)
-- `services/telemetry-endpoint/` — Cloudflare Worker that would receive events
-
-None of these runs in the normal agami flow. The Worker isn't deployed against any active hostname; the sample script isn't called from any skill; the test just pins the shape of the legacy spec. If a future agami version re-introduces telemetry, it would be opt-in with the same allowlist discipline and a full privacy doc — not a silent re-enable.
+agami has **no telemetry** — no usage counts, no events, no install ping, no opt-in or opt-out. Earlier 0.x builds kept a vestigial (never-deployed, never-invoked) telemetry sample client + Cloudflare endpoint in the repo as historical artifacts; those were removed entirely. There is no network call anywhere in the codebase, and `tests/test_privacy_no_network.py` fails the build if any script introduces one. If a future agami version ever added telemetry, it would be opt-in with a full privacy doc — never a silent re-enable.

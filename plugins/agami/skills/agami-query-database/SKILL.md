@@ -943,7 +943,7 @@ The existence of the file (with `github_star_asked: true`) is the never-re-promp
 
 ---
 
-(Phase 7 — telemetry flush — has been removed in the current 0.x line. The skill no longer reads `analytics_consent`, no longer appends to `.telemetry-queue.jsonl`, and no longer POSTs to `analytics.agami.ai`. The vestigial server endpoint and sample client are preserved in the repo (see `docs/privacy.md`) but the runtime flow is silent.)
+(Phase 7 — telemetry flush — has been removed in the current 0.x line. The skill no longer reads `analytics_consent`, no longer appends to `.telemetry-queue.jsonl`, and no longer POSTs anywhere. agami has no telemetry — see `docs/privacy.md`.)
 
 ---
 
@@ -970,5 +970,4 @@ End with:
 | Auto-retry exhausted (2 tries) | Stop. Show all 3 attempts and their error kinds. |
 | HIGH-risk query without filter | Block, AskUserQuestion |
 | Chart for empty result | Skip the chart, just show empty-result message |
-| Telemetry POST fails | Silent — keep events in queue, retry next flush |
 | Browser open fails for the GitHub-star ask | Tell user "Couldn't open the browser — the link is github.com/AgamiAI/LiteBi". Save the response anyway. |

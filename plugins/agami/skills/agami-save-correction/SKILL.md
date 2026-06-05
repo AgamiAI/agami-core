@@ -404,7 +404,7 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 
 ---
 
-(Phase 6 — telemetry emission on correction — has been removed in the current 0.x line. The skill no longer reads `analytics_consent` and no longer appends to `.telemetry-queue.jsonl`. The vestigial server endpoint and sample client are preserved in the repo (see `docs/privacy.md`) but the runtime flow is silent.)
+(Phase 6 — telemetry emission on correction — has been removed in the current 0.x line. The skill no longer reads `analytics_consent` and no longer appends to `.telemetry-queue.jsonl`. agami has no telemetry — see `docs/privacy.md`.)
 
 ---
 

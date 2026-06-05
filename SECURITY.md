@@ -32,6 +32,5 @@ Out of scope:
 - Third-party databases, drivers, or services LiteBi connects to.
 - Vulnerabilities in Claude Code itself (report those to Anthropic).
 - Issues that require physical access to a user's machine or already-compromised credentials.
-- `services/telemetry-endpoint/` — historical artifact, not deployed; no skill posts to it (see [its README](services/telemetry-endpoint/README.md) and [docs/privacy.md](docs/privacy.md)).
 
 Thank you for helping keep LiteBi and its users safe.

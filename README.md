@@ -3,7 +3,7 @@
 > **The trust layer between AI agents and your data warehouse. Local. Private. Yours.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-0.2.1-blue)
+![Version](https://img.shields.io/badge/version-0.2.2-blue)
 ![Status](https://img.shields.io/badge/status-pre--public-orange)
 
 Ask plain-English questions of your **Postgres / MySQL / Snowflake / BigQuery / Redshift / SQLite** database, with a trust layer wrapped around every answer. Your credentials, schema, and query results never leave your machine — `agami` runs entirely inside Claude Code via the built-in Bash / Read / Write tools.
@@ -177,7 +177,7 @@ Verify:
 ```
 /plugin list
 ```
-You should see `agami@litebi v0.2.1`.
+You should see `agami@litebi v0.2.2`.
 
 Detailed walkthrough: [`docs/install/claude-code-cli.md`](docs/install/claude-code-cli.md).
 
