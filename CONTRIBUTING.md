@@ -10,7 +10,7 @@ Privacy-invariant + unit tests (no DB required):
 python3 -m pytest tests/ -q
 ```
 
-The privacy test (`tests/test_telemetry_privacy.py`) is a contract: when adding a feature that touches telemetry, the allowlist enforcement must still pass.
+The privacy test (`tests/test_privacy_no_network.py`) is a contract: no shipped script may make a network call — adding a network-egress primitive fails the build.
 
 End-to-end integration tests (Postgres + MySQL fixtures):
 

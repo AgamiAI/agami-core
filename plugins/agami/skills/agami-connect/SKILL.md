@@ -1833,7 +1833,7 @@ If a sibling skill (`agami-review` or `agami-model`) doesn't exist yet (mid-roll
 
 ## Phase 8: Post-setup follow-up suggestions
 
-(Telemetry consent was previously asked here. It has been removed in the current 0.x line — there is no opt-in, no install event, no `~/.agami/.config.analytics_consent` field written, no `.telemetry-queue.jsonl` appended. The vestigial server endpoint and sample client are preserved in the repo (see `docs/privacy.md` for the current stance), but the runtime flow is silent. Don't surface anything about telemetry here.)
+(Telemetry consent was previously asked here. It has been removed in the current 0.x line — there is no opt-in, no install event, no `~/.agami/.config.analytics_consent` field written, no `.telemetry-queue.jsonl` appended. agami has no telemetry (see `docs/privacy.md`). Don't surface anything about telemetry here.)
 
 ### 8a — gate on Rule 1 review status
 

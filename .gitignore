@@ -5,7 +5,7 @@
 *.swp
 *.swo
 
-# Python (only used by optional sample scripts and tests)
+# Python (scripts + tests)
 __pycache__/
 *.pyc
 *.pyo
@@ -13,11 +13,6 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
-
-# Cloudflare Worker (services/telemetry-endpoint)
-node_modules/
-.wrangler/
-.dev.vars
 
 # User-local agami state should NEVER appear in this repo
 .agami/
