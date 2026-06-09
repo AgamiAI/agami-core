@@ -81,6 +81,14 @@ def test_prepare_auto_rewrites_fan_trap(tmp_path):
     assert "deleted_at IS NULL" in d["sql"]           # + default_filter applied
 
 
+def test_no_model_root_exits_3_cleanly(tmp_path):
+    # an empty root has no org.yaml — the CLI returns a clean no_model signal (exit 3),
+    # not a traceback, so callers fold the existence check into their first real call
+    rc, out = _run(["areas", str(tmp_path)])
+    assert rc == 3
+    assert json.loads(out)["error"] == "no_model"
+
+
 def test_prepare_refuses_shape_changing_trap(tmp_path):
     _model(tmp_path)
     rc, out = _run(["prepare", str(tmp_path), "--area", "s", "--sql",

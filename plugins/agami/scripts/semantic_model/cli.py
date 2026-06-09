@@ -248,7 +248,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except FileNotFoundError as e:
+        # No model at this root yet. This is an expected, clean signal (not a crash):
+        # callers fold the "does a model exist?" check into their first real command
+        # (e.g. `sm areas`) instead of a separate filesystem probe. Exit 3 = "no model
+        # here — run agami-connect"; distinct from validation errors (1) and usage (2).
+        if "org.yaml" in str(e):
+            _print_json({"error": "no_model", "detail": str(e)})
+            return 3
+        raise
 
 
 if __name__ == "__main__":

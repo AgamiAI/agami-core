@@ -82,13 +82,15 @@ Read `~/.agami/credentials`. If the file (or the active profile's section) is mi
 Resolve `<profile>`: `AGAMI_PROFILE` → `active_profile` in `~/.agami/.config` → `"main"`.
 Resolve `<artifacts_dir>` per [`shared/file-layout.md`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `$HOME/agami-artifacts`.
 
-The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…`). **If `<artifacts_dir>/<profile>/org.yaml` does not exist → invoke `agami-connect`** (no model yet). There is no legacy-layout fallback — the model is the only format.
+The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…`). There is no legacy-layout fallback — the model is the only format.
 
-Don't read the whole tree by hand. Drive it through the CLI (run from `plugins/agami/scripts/`) or the MCP tools — both return the same shapes:
+**Don't run a separate existence probe** (no `ls org.yaml`, and never probe for the plugin's own scripts — `sm`, `execute_sql.py`, `semantic_model/` always ship with the plugin). Just make the first real call you need anyway (`sm areas`): if a model exists you get the index; if not, the CLI returns `{"error":"no_model"}` with **exit code 3** — that *is* your "not onboarded yet" signal → invoke `agami-connect` and stop. One call does both.
+
+Drive everything through the CLI (the `sm` wrapper resolves the interpreter + deps) or the MCP tools — both return the same shapes:
 
 ```bash
 ROOT="<artifacts_dir>/<profile>"
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" areas "$ROOT"                 # subject-area index (step 2a below)
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" areas "$ROOT"; rc=$?      # subject-area index; rc 3 = no model → agami-connect
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --area A --tables t1 t2   # compound table context
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" examples "$ROOT" --area A --query "…"     # examples-first ranking
 ```
