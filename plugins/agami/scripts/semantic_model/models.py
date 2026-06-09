@@ -79,7 +79,13 @@ StorageType = Literal[
     "Redshift",
     "SQLite",
     "DuckDB",
+    "SQLServer",
+    "Databricks",
+    "Trino",
+    "Oracle",
 ]
+# Supabase is hosted PostgreSQL — it maps to storage_type="PostgreSQL", not a
+# distinct value (same wire protocol, driver, and catalog).
 
 
 class _Base(BaseModel):

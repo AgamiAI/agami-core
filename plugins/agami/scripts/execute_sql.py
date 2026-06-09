@@ -494,6 +494,152 @@ def _execute_sqlite(creds: dict[str, str], sql: str) -> int:
     return 0
 
 
+def _execute_sqlserver(creds: dict[str, str], sql: str) -> int:
+    """Tier-3 path for SQL Server / Azure SQL using pymssql."""
+    try:
+        import pymssql  # type: ignore
+    except ImportError:
+        return _err("pymssql not installed. Run: pip install pymssql", code=3)
+    _require(creds, "host", "user", "password")
+    try:
+        conn = pymssql.connect(
+            server=creds["host"], port=int(creds.get("port", 1433)),
+            user=creds["user"], password=creds["password"],
+            database=creds.get("database", ""), login_timeout=15,
+        )
+    except Exception as e:
+        return _err(f"SQL Server connect failed: {e}", code=4)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        _write_cursor_csv(cur)
+    except Exception as e:
+        return _err(f"SQL Server execution error: {e}", code=5)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return 0
+
+
+def _execute_oracle(creds: dict[str, str], sql: str) -> int:
+    """Tier-3 path for Oracle using python-oracledb (thin mode — no client libs)."""
+    try:
+        import oracledb  # type: ignore
+    except ImportError:
+        return _err("python-oracledb not installed. Run: pip install oracledb", code=3)
+    _require(creds, "user", "password")
+    dsn = creds.get("dsn") or creds.get("url")
+    if not dsn:
+        _require(creds, "host", "service_name")
+        dsn = oracledb.makedsn(creds["host"], int(creds.get("port", 1521)),
+                               service_name=creds["service_name"])
+    try:
+        conn = oracledb.connect(user=creds["user"], password=creds["password"], dsn=dsn)
+    except Exception as e:
+        return _err(f"Oracle connect failed: {e}", code=4)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        _write_cursor_csv(cur)
+    except Exception as e:
+        return _err(f"Oracle execution error: {e}", code=5)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return 0
+
+
+def _execute_databricks(creds: dict[str, str], sql: str) -> int:
+    """Tier-3 path for Databricks SQL warehouses using databricks-sql-connector."""
+    try:
+        from databricks import sql as dbsql  # type: ignore
+    except ImportError:
+        return _err(
+            "databricks-sql-connector not installed. Run: pip install databricks-sql-connector",
+            code=3,
+        )
+    _require(creds, "host", "http_path", "token")
+    try:
+        conn = dbsql.connect(
+            server_hostname=creds["host"], http_path=creds["http_path"],
+            access_token=creds["token"],
+        )
+    except Exception as e:
+        return _err(f"Databricks connect failed: {e}", code=4)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        _write_cursor_csv(cur)
+    except Exception as e:
+        return _err(f"Databricks execution error: {e}", code=5)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return 0
+
+
+def _execute_trino(creds: dict[str, str], sql: str) -> int:
+    """Tier-3 path for Trino / Presto using the trino python client."""
+    try:
+        import trino  # type: ignore
+    except ImportError:
+        return _err("trino not installed. Run: pip install trino", code=3)
+    _require(creds, "host", "user")
+    try:
+        auth = None
+        if creds.get("password"):
+            auth = trino.auth.BasicAuthentication(creds["user"], creds["password"])
+        conn = trino.dbapi.connect(
+            host=creds["host"], port=int(creds.get("port", 8080)), user=creds["user"],
+            catalog=creds.get("catalog"), schema=creds.get("schema"),
+            http_scheme="https" if creds.get("password") else "http", auth=auth,
+        )
+    except Exception as e:
+        return _err(f"Trino connect failed: {e}", code=4)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        _write_cursor_csv(cur)
+    except Exception as e:
+        return _err(f"Trino execution error: {e}", code=5)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return 0
+
+
+def _execute_duckdb(creds: dict[str, str], sql: str) -> int:
+    """Tier-3 path for DuckDB using the duckdb python module (file or in-memory)."""
+    try:
+        import duckdb  # type: ignore
+    except ImportError:
+        return _err("duckdb not installed. Run: pip install duckdb", code=3)
+    path = creds.get("path") or creds.get("database") or ":memory:"
+    try:
+        conn = duckdb.connect(path, read_only=True)
+    except Exception as e:
+        return _err(f"DuckDB open failed: {e}", code=4)
+    try:
+        cur = conn.execute(sql)
+        _write_cursor_csv(cur)
+    except Exception as e:
+        return _err(f"DuckDB execution error: {e}", code=5)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return 0
+
+
 def _write_cursor_csv(cur: Any) -> None:
     writer = csv.writer(sys.stdout)
     if cur.description is not None:
@@ -543,9 +689,22 @@ def main() -> int:
         return _execute_snowflake(creds, sql)
     if db_type == "bigquery":
         return _execute_bigquery(creds, sql)
+    if db_type in ("sqlserver", "mssql"):
+        return _execute_sqlserver(creds, sql)
+    if db_type == "oracle":
+        return _execute_oracle(creds, sql)
+    if db_type == "databricks":
+        return _execute_databricks(creds, sql)
+    if db_type in ("trino", "presto"):
+        return _execute_trino(creds, sql)
+    if db_type == "duckdb":
+        return _execute_duckdb(creds, sql)
+    if db_type == "supabase":
+        # Supabase is hosted Postgres.
+        return _execute_postgres(creds, sql)
     return _err(
-        f"Unsupported db type {db_type!r}. "
-        f"Supported: postgres, redshift, mysql, sqlite, snowflake, bigquery."
+        f"Unsupported db type {db_type!r}. Supported: postgres, supabase, redshift, "
+        f"mysql, sqlite, snowflake, bigquery, sqlserver, oracle, databricks, trino, duckdb."
     )
 
 

@@ -96,6 +96,27 @@ def cmd_preflight(args) -> int:
     return 0
 
 
+def cmd_introspect(args) -> int:
+    from . import introspect as INTRO
+    from . import validator as V
+
+    runner = INTRO.make_execute_sql_runner(args.profile)
+    org, report = INTRO.introspect(
+        args.profile,
+        args.db_type,
+        runner=runner,
+        artifacts_dir=args.artifacts,
+        out_dir=args.out,
+        tables=args.tables,
+        dry_run=args.dry_run,
+        bigquery_region=args.bigquery_region,
+    )
+    res = V.validate(org)
+    print(report.render())
+    print(V.format_result(res))
+    return 0 if res.ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="semantic_model", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -143,6 +164,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--sql", required=True)
     sp.set_defaults(func=cmd_preflight)
+
+    sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
+    sp.add_argument("--profile", required=True)
+    sp.add_argument("--db-type", required=True, dest="db_type",
+                    help="postgres|mysql|snowflake|bigquery|redshift|sqlite|sqlserver|"
+                         "databricks|trino|oracle|duckdb|supabase")
+    sp.add_argument("--artifacts", required=True, help="artifacts_dir (output: <artifacts>/<profile>/)")
+    sp.add_argument("--out", default=None, help="override output dir")
+    sp.add_argument("--tables", nargs="*", default=None,
+                    help="explicit schema.table allowlist for the no-catalog (probe-only) case")
+    sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.set_defaults(func=cmd_introspect)
 
     return p
 
