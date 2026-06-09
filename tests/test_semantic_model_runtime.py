@@ -1,0 +1,193 @@
+"""Unit tests for semantic_model/runtime.py — traversal, entity ID, pre-flight."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("pydantic")
+pytest.importorskip("sqlglot")
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
+
+from semantic_model import models as m  # noqa: E402
+from semantic_model import runtime as rt  # noqa: E402
+
+
+def _sales_org():
+    rels = [
+        m.Relationship(from_table="order_items", to_table="orders", from_column="order_id",
+                       to_column="id", relationship="many_to_one"),
+        m.Relationship(from_table="orders", to_table="customers", from_column="customer_id",
+                       to_column="id", relationship="many_to_one"),
+        m.Relationship(from_table="tickets", to_table="customers", from_column="customer_id",
+                       to_column="id", relationship="many_to_one"),
+    ]
+    return m.Organization(organization="Shop",
+                          subject_areas=[m.SubjectArea(name="sales", relationships=rels)])
+
+
+# --- pre-flight ---
+
+
+def test_fan_trap_auto_rewrite():
+    org = _sales_org()
+    pf = rt.pre_flight_check(
+        "SELECT SUM(orders.total_amount) FROM orders JOIN order_items ON order_items.order_id = orders.id",
+        org)
+    assert pf.risk == "fan_trap" and pf.action == "auto_rewrite"
+    assert "order_items" not in pf.rewritten_sql
+
+
+def test_chasm_trap_refuse_with_suggestion():
+    org = _sales_org()
+    pf = rt.pre_flight_check(
+        "SELECT c.id, SUM(o.revenue), COUNT(t.id) FROM customers c "
+        "LEFT JOIN orders o ON o.customer_id=c.id LEFT JOIN tickets t ON t.customer_id=c.id "
+        "GROUP BY c.id", org)
+    assert pf.risk == "chasm_trap" and pf.action == "refuse" and pf.suggestion
+
+
+def test_fan_trap_mixed_raw_and_aggregate_refuse():
+    org = _sales_org()
+    pf = rt.pre_flight_check(
+        "SELECT orders.id, orders.created_at, SUM(orders.total_amount) FROM orders "
+        "JOIN order_items ON order_items.order_id=orders.id GROUP BY orders.id, orders.created_at",
+        org)
+    assert pf.risk == "fan_trap" and pf.action == "refuse"
+
+
+def test_explicit_cross_product_allowed():
+    org = _sales_org()
+    pf = rt.pre_flight_check(
+        "SELECT * FROM orders, tickets WHERE orders.customer_id = tickets.customer_id", org)
+    assert pf.action == "allow" and pf.risk is None
+
+
+def test_aggregating_many_side_is_allowed():
+    # aggregating the MANY side (order_items) is legitimate, not a fan trap
+    org = _sales_org()
+    pf = rt.pre_flight_check(
+        "SELECT SUM(order_items.quantity) FROM orders JOIN order_items ON order_items.order_id=orders.id",
+        org)
+    assert pf.action == "allow"
+
+
+# --- examples-first ---
+
+
+def test_examples_high_confidence_short_circuit():
+    exs = [{"question": "top 5 inspectors this month"}, {"question": "average soc by zone"}]
+    matches = rt.get_prompt_examples("average SOC by zone", exs)
+    assert matches[0].example["question"] == "average soc by zone"
+    assert rt.is_high_confidence(matches)
+
+
+def test_examples_low_confidence():
+    exs = [{"question": "something totally unrelated about widgets"}]
+    matches = rt.get_prompt_examples("how many battery packs were swapped", exs)
+    assert not rt.is_high_confidence(matches)
+
+
+# --- identify_entity ---
+
+
+def _entity_org():
+    bp = m.Entity(name="Battery Pack", value_pattern=r"^(BP|INSMOM)\w+$",
+                  maps_to=[m.EntityMapping(table="assets", column="bp_serial", primary=True)])
+    cust = m.Entity(name="Customer ID", value_pattern=r"^INSMOM\w+$",
+                    maps_to=[m.EntityMapping(table="cust", column="cid", primary=True)])
+    return m.Organization(organization="Sun",
+                          subject_areas=[m.SubjectArea(name="b", entities=[bp, cust])])
+
+
+def test_identify_entity_resolved():
+    org = _entity_org()
+    res = rt.identify_entity("INSMOMAH2304", org, probe=lambda t, c, v: t == "assets")
+    assert res.status == "resolved" and res.candidates[0]["entity"] == "Battery Pack"
+
+
+def test_identify_entity_overlap_clarify():
+    org = _entity_org()
+    res = rt.identify_entity("INSMOMAH2304", org, probe=lambda t, c, v: True)
+    assert res.status == "clarify" and len(res.candidates) == 2 and res.question_template
+
+
+def test_identify_entity_unrecognized():
+    org = _entity_org()
+    res = rt.identify_entity("ZZZ-not-matching", org, probe=lambda t, c, v: True)
+    assert res.status == "unrecognized"
+
+
+# --- instance resolution strategy ---
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    ({"sensitive": True}, "db_probe"),
+    ({"cardinality": 20}, "enum"),
+    ({"cardinality": 5000}, "cached_index"),
+    ({"cardinality": 50000}, "db_probe"),
+    ({}, "db_probe"),
+])
+def test_resolve_entity_instance(kwargs, expected):
+    e = m.Entity(name="X")
+    assert rt.resolve_entity_instance(e, **kwargs) == expected
+
+
+# --- apply_default_filters ---
+
+
+def _filter_org():
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o",
+                columns=[m.Column(name="id", type="integer"),
+                         m.Column(name="deleted_at", type="timestamp"),
+                         m.Column(name="total", type="decimal"),
+                         m.Column(name="tenant_id", type="integer")],
+                default_filters=["{alias}.deleted_at IS NULL"])
+    return m.Organization(organization="S",
+                          subject_areas=[m.SubjectArea(name="s",
+                              tables=[m.TableRef(storage_connection="c", schema="public", table="orders")],
+                              tables_defined=[t])])
+
+
+def test_apply_default_filters_with_where():
+    org = _filter_org()
+    new, applied = rt.apply_default_filters("SELECT SUM(o.total) FROM orders o WHERE o.total > 0",
+                                            org, area="s")
+    assert "deleted_at IS NULL" in new and "o.total > 0" in new and applied
+
+
+def test_apply_default_filters_no_where():
+    org = _filter_org()
+    new, applied = rt.apply_default_filters("SELECT SUM(orders.total) FROM orders", org, area="s")
+    assert "WHERE" in new.upper() and applied
+
+
+def test_apply_default_filters_skips_unresolved_param():
+    org = _filter_org()
+    org.subject_areas[0].tables_defined[0].default_filters.append("{alias}.tenant_id = :tenant_id")
+    new, applied = rt.apply_default_filters("SELECT 1 FROM orders o", org, area="s")
+    assert not any("tenant_id" in a for a in applied)
+
+
+# --- receipt ---
+
+
+def test_build_receipt_surfaces_trust_and_rewrite():
+    rel = m.Relationship(from_table="a", to_table="b", from_column="x", to_column="y",
+                         relationship="many_to_one", confidence="confirmed",
+                         signed_off_by="dl@x.com", signed_off_role="data_lead")
+    pf = rt.PreFlightResult("fan_trap", "auto_rewrite", "SELECT SUM(a.v) FROM a JOIN b ON ...",
+                            rewritten_sql="SELECT SUM(a.v) FROM a", reason="dropped fan-out join")
+    receipt = rt.build_receipt(sql="SELECT SUM(a.v) FROM a", relationships_used=[rel],
+                               pre_flight=pf, caveats=["heads up"],
+                               default_filters_applied=["a.deleted_at IS NULL"])
+    assert receipt["relationships"][0]["signed_off_by"] == "dl@x.com"
+    assert receipt["pre_flight"]["action"] == "auto_rewrite"
+    assert receipt["pre_flight"]["rewritten_sql"] == "SELECT SUM(a.v) FROM a"
+    assert receipt["caveats"] == ["heads up"]
+    assert receipt["default_filters_applied"] == ["a.deleted_at IS NULL"]

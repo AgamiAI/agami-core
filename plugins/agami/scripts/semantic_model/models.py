@@ -1,0 +1,532 @@
+"""Pydantic v2 models for the agami semantic-model-v2 hierarchy.
+
+Hierarchy (see the design doc's "The new hierarchy" section):
+
+    Organization
+    ├─ description
+    ├─ storage_connections[]        (physical — host, port, creds, dialect)
+    ├─ subject_areas[]              (logical — the primary semantic unit)
+    │  └─ SubjectArea
+    │     ├─ tables[]               (TableRef into storage connections)
+    │     ├─ tables_defined[]       (canonical Table definitions)
+    │     ├─ entities[]
+    │     ├─ metrics[]
+    │     └─ relationships[]
+    └─ cross_subject_area_relationships[]
+
+Design intent baked into the types:
+
+* **Provider portability** — declarative fields (default_filters, value_transform,
+  caveats, value_pattern, sensitive, default_time_window) live on the model, not
+  in prose the LLM must re-interpret.
+* **Standard concepts** — tables, columns, entities, metrics, relationships,
+  hierarchies, choice fields. No bespoke `rules[]` taxonomy.
+* **Trust block parity** — every Relationship (intra- and cross-area) carries the
+  same confidence / review_state / signed_off_* fields. No second-class shape.
+
+These models are the *parse + structural-validation* layer. Cross-cutting
+invariants that need the whole model in view (sizing, orphan refs, type-compat,
+name collisions, …) live in `validator.py`, which consumes parsed models.
+
+All models forbid unknown fields (`extra="forbid"`) so typos surface as errors
+rather than being silently dropped — the same guarantee the legacy jsonschema
+validator gives via `additionalProperties: false`.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal, Optional, Union
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+# ---------------------------------------------------------------------------
+# Shared enums / literals
+# ---------------------------------------------------------------------------
+
+# Simple, provider-neutral column types (mirrors the legacy agami.type set).
+ColumnType = Literal[
+    "string",
+    "integer",
+    "decimal",
+    "float",
+    "boolean",
+    "date",
+    "timestamp",
+    "time",
+    "json",
+    "array",
+    "uuid",
+    "bytes",
+]
+
+Confidence = Literal["confirmed", "inferred", "proposed"]
+ReviewState = Literal["unreviewed", "approved", "rejected", "stale", "not_applicable"]
+Cardinality = Literal["many_to_one", "one_to_many", "one_to_one"]
+JoinType = Literal["INNER", "LEFT", "RIGHT", "FULL", "CROSS"]
+Executable = Literal["same_engine", "split", "informational"]
+SourceType = Literal["table", "sql"]
+StorageType = Literal[
+    "PostgreSQL",
+    "MySQL",
+    "Snowflake",
+    "BigQuery",
+    "Redshift",
+    "SQLite",
+    "DuckDB",
+]
+
+
+class _Base(BaseModel):
+    """Base config shared by every v2 model: forbid unknown keys, strip strings."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+# ---------------------------------------------------------------------------
+# Trust block — carried by relationships (and reusable elsewhere)
+# ---------------------------------------------------------------------------
+
+
+class TrustBlock(_Base):
+    """Attribution + review state. Parity requirement: intra- and cross-area
+    relationships both carry this. `signed_off_*` become required once a thing
+    is `approved` (enforced in validator.py, which can see the whole model)."""
+
+    confidence: Confidence = "proposed"
+    review_state: ReviewState = "unreviewed"
+    signed_off_by: Optional[str] = None
+    signed_off_at: Optional[str] = None
+    signed_off_role: Optional[str] = None
+    # Provenance: set by the migration tool so re-runs are idempotent.
+    migrated_from: Optional["MigratedFrom"] = None
+
+
+class MigratedFrom(_Base):
+    """Idempotency marker emitted by the migration tool. Each migrated item
+    records where it came from so a second migration run is a no-op."""
+
+    source_file: str
+    source_line_hash: Optional[str] = None
+    tool_version: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Storage Connection (physical layer)
+# ---------------------------------------------------------------------------
+
+
+class StorageConnection(_Base):
+    """Physical storage: where the data lives + how to reach it. No conventions,
+    no rules, no entity definitions — purely physical. `storage_config` values
+    are env-var *names* or references, never literal secrets."""
+
+    name: str
+    storage_type: StorageType
+    storage_config: dict[str, Any] = Field(default_factory=dict)
+    storage_type_override: Optional[str] = None
+    entity_metadata_config: Optional[dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# Column
+# ---------------------------------------------------------------------------
+
+
+class ForeignKey(_Base):
+    """FK target. Supports the standard simple form plus the polymorphic
+    discriminator pattern (discriminator_column + target_tables + where)."""
+
+    table: Optional[str] = None
+    column: Optional[str] = None
+    # Polymorphic FK: the value of `discriminator_column` selects which of
+    # `target_tables` this row points at.
+    discriminator_column: Optional[str] = None
+    target_tables: Optional[list[str]] = None
+    where: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> "ForeignKey":
+        is_polymorphic = self.discriminator_column is not None or self.target_tables is not None
+        if is_polymorphic:
+            if not self.target_tables:
+                raise ValueError("polymorphic foreign_key requires non-empty target_tables")
+        else:
+            if not (self.table and self.column):
+                raise ValueError("simple foreign_key requires both table and column")
+        return self
+
+    @property
+    def is_polymorphic(self) -> bool:
+        return self.discriminator_column is not None or bool(self.target_tables)
+
+
+class DenormalizedFrom(_Base):
+    """This column mirrors a value reachable via FK; the MCP can skip the join."""
+
+    table: str
+    column: str
+    via: Optional[str] = None
+    where: Optional[str] = None
+    freshness: Optional[str] = None
+
+
+class Column(_Base):
+    name: str
+    type: ColumnType
+    description: str = ""
+    primary_key: bool = False
+    foreign_key: Optional[ForeignKey] = None
+    # enum semantics: maps stored value -> human meaning
+    choice_field: Optional[dict[str, str]] = None
+    sensitive: bool = False
+    # declarative cleaning/transform SQL (regexp_replace, TO_TIMESTAMP, …)
+    value_transform: Optional[str] = None
+    denormalized_from: Optional[DenormalizedFrom] = None
+    caveats: list[str] = Field(default_factory=list)
+
+    @field_validator("caveats")
+    @classmethod
+    def _caveats_nonempty(cls, v: list[str]) -> list[str]:
+        for c in v:
+            if not c or not c.strip():
+                raise ValueError("caveats entries must be non-empty strings")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Table
+# ---------------------------------------------------------------------------
+
+
+class IndexHint(_Base):
+    columns: list[str]
+    is_unique: bool = False
+
+
+class PerformanceHints(_Base):
+    estimated_row_count: Optional[int] = None
+    recommended_filters: list[str] = Field(default_factory=list)
+    indexes: list[IndexHint] = Field(default_factory=list)
+
+
+class Table(_Base):
+    """Canonical table definition (lives in a subject area's tables_defined[])."""
+
+    name: str
+    schema_name: Optional[str] = Field(default=None, alias="schema")
+    storage_connection: Optional[str] = None
+
+    source_type: SourceType = "table"
+    sql: Optional[str] = None  # required when source_type == "sql"
+
+    # composite-key-aware primary key; the source of truth for grain.
+    grain: list[str] = Field(default_factory=list)
+    description: str = ""  # ONE line — what is this table
+
+    default_filters: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+    parent_table: Optional[str] = None
+    child_table: Optional[str] = None
+
+    performance_hints: Optional[PerformanceHints] = None
+
+    # logical column groupings; REQUIRED on deep tables (enforced in validator).
+    column_groups: dict[str, list[str]] = Field(default_factory=dict)
+
+    # importer composition hook (v2; nothing consumes it in v1).
+    inherits_columns_from: Optional[str] = None
+
+    columns: list[Column] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _source_shape(self) -> "Table":
+        if self.source_type == "sql" and not (self.sql and self.sql.strip()):
+            raise ValueError(f"table {self.name!r}: source_type='sql' requires a non-empty sql field")
+        if self.source_type == "table" and self.sql:
+            raise ValueError(f"table {self.name!r}: sql must be empty when source_type='table'")
+        return self
+
+    @field_validator("caveats")
+    @classmethod
+    def _caveats_nonempty(cls, v: list[str]) -> list[str]:
+        for c in v:
+            if not c or not c.strip():
+                raise ValueError("caveats entries must be non-empty strings")
+        return v
+
+    # --- convenience accessors used by loader/validator ---
+
+    def column_names(self) -> set[str]:
+        return {c.name for c in self.columns}
+
+    def get_column(self, name: str) -> Optional[Column]:
+        for c in self.columns:
+            if c.name == name:
+                return c
+        return None
+
+    @property
+    def is_deep(self) -> bool:
+        """Deep tables (>= ~30 columns) must declare column_groups."""
+        return len(self.columns) >= DEEP_TABLE_COLUMN_THRESHOLD
+
+
+DEEP_TABLE_COLUMN_THRESHOLD = 30
+
+
+# ---------------------------------------------------------------------------
+# TableRef (subject-area membership reference)
+# ---------------------------------------------------------------------------
+
+
+class TableRef(_Base):
+    """A subject area references tables via TableRefs, not by duplicating them.
+    `expose_column_groups` scopes which of the canonical table's column_groups
+    are visible in *this* area (lets one wide table appear in several areas with
+    different views). None => all columns visible."""
+
+    storage_connection: str
+    schema_name: Optional[str] = Field(default=None, alias="schema")
+    table: str
+    expose_column_groups: Optional[list[str]] = None
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
+
+
+# ---------------------------------------------------------------------------
+# Entity
+# ---------------------------------------------------------------------------
+
+
+class EntityMapping(_Base):
+    table: str
+    column: str
+    primary: bool = False
+    default_filter: Optional[str] = None
+
+
+class Entity(_Base):
+    name: str
+    plural: Optional[str] = None
+    other_names: list[str] = Field(default_factory=list)
+    description: str = ""
+    maps_to: list[EntityMapping] = Field(default_factory=list)
+    # declarative opaque-literal identification (provider-neutral regex)
+    value_pattern: Optional[str] = None
+    value_format_hint: Optional[str] = None
+    parent_entity: Optional[str] = None
+    key_components: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+    # rare override: force a clarifying question even when resolution is confident
+    clarification_strictness: Optional[Literal["normal", "high"]] = None
+
+    @model_validator(mode="after")
+    def _one_primary(self) -> "Entity":
+        if self.maps_to:
+            primaries = [m for m in self.maps_to if m.primary]
+            if len(primaries) > 1:
+                raise ValueError(
+                    f"entity {self.name!r}: at most one maps_to entry may be primary "
+                    f"(found {len(primaries)})"
+                )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Metric (unified across table / DS-overlay / org-overlay levels)
+# ---------------------------------------------------------------------------
+
+
+class Metric(_Base):
+    name: str
+    description: str = ""
+    other_names: list[str] = Field(default_factory=list)
+    # prose intent (provider-portable; never empty so the model isn't binding-only)
+    calculation: str
+    # per-storage_type SQL bindings, e.g. {"PostgreSQL": "COUNT(DISTINCT ...)"}
+    bindings: dict[str, str] = Field(default_factory=dict)
+    source_tables: list[str] = Field(default_factory=list)
+    base_metrics: list[str] = Field(default_factory=list)
+    subject_areas: list[str] = Field(default_factory=list)
+    business_question: Optional[str] = None
+    confidence: Confidence = "proposed"
+    source: Optional[str] = None
+    review_state: ReviewState = "unreviewed"
+
+    @field_validator("calculation")
+    @classmethod
+    def _calc_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("metric calculation (prose intent) must be non-empty")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Relationship (intra-subject-area)
+# ---------------------------------------------------------------------------
+
+
+class Relationship(_Base):
+    """A join edge. Either the simple FK form (from_column + to_column) OR the
+    `on:` SQL-expression escape hatch — exactly one (enforced below). Carries a
+    REQUIRED cardinality (the fan-trap detector consumes it) and the full trust
+    block."""
+
+    from_table: str
+    to_table: str
+    from_column: Optional[str] = None
+    to_column: Optional[str] = None
+    # SQL-expression escape hatch (CAST, compound, function-based joins).
+    on: Optional[str] = None
+    join_type: JoinType = "LEFT"
+    # REQUIRED — no default. cardinality the planner needs.
+    relationship: Cardinality
+    executable: Executable = "same_engine"
+    description: str = ""
+    for_questions_about: list[str] = Field(default_factory=list)
+
+    # trust block (flattened for ergonomic YAML authoring)
+    confidence: Confidence = "proposed"
+    review_state: ReviewState = "unreviewed"
+    signed_off_by: Optional[str] = None
+    signed_off_at: Optional[str] = None
+    signed_off_role: Optional[str] = None
+    migrated_from: Optional[MigratedFrom] = None
+
+    @model_validator(mode="after")
+    def _completeness(self) -> "Relationship":
+        # Exactly one of (from_column + to_column) OR (on:).
+        simple = self.from_column is not None and self.to_column is not None
+        partial_simple = (self.from_column is not None) ^ (self.to_column is not None)
+        has_on = self.on is not None and self.on.strip() != ""
+        if partial_simple and not has_on:
+            raise ValueError(
+                f"relationship {self.from_table}->{self.to_table}: simple form requires "
+                "BOTH from_column and to_column"
+            )
+        if simple and has_on:
+            raise ValueError(
+                f"relationship {self.from_table}->{self.to_table}: specify exactly one of "
+                "(from_column + to_column) OR (on:), not both"
+            )
+        if not simple and not has_on:
+            raise ValueError(
+                f"relationship {self.from_table}->{self.to_table}: must specify either "
+                "(from_column + to_column) OR (on:)"
+            )
+        return self
+
+
+class CrossSubjectAreaRelationship(Relationship):
+    """Org-level edge between two subject areas. Same shape as Relationship plus
+    the area endpoints. Trust-block parity is inherited (Gap 1)."""
+
+    from_subject_area: str
+    to_subject_area: str
+
+
+# ---------------------------------------------------------------------------
+# Subject Area (the primary semantic unit)
+# ---------------------------------------------------------------------------
+
+
+class SubjectArea(_Base):
+    name: str
+    description: str = ""
+    default_time_window: Optional[str] = None
+    tables: list[TableRef] = Field(default_factory=list)
+    tables_defined: list[Table] = Field(default_factory=list)
+    entities: list[Entity] = Field(default_factory=list)
+    metrics: list[Metric] = Field(default_factory=list)
+    relationships: list[Relationship] = Field(default_factory=list)
+
+    def defined_table(self, name: str) -> Optional[Table]:
+        for t in self.tables_defined:
+            if t.name == name:
+                return t
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Organization (top level)
+# ---------------------------------------------------------------------------
+
+
+class Organization(_Base):
+    organization: str
+    version: int = 1
+    description: str = ""
+    fiscal_year_start_month: int = 1
+    storage_connections: list[StorageConnection] = Field(default_factory=list)
+    subject_areas: list[SubjectArea] = Field(default_factory=list)
+    cross_subject_area_relationships: list[CrossSubjectAreaRelationship] = Field(
+        default_factory=list
+    )
+    # cross-cutting unification targets (MeridianDemo customer_health pattern)
+    cross_subject_area_entities: list[Entity] = Field(default_factory=list)
+    cross_subject_area_metrics: list[Metric] = Field(default_factory=list)
+
+    @field_validator("fiscal_year_start_month")
+    @classmethod
+    def _fy_month(cls, v: int) -> int:
+        if not 1 <= v <= 12:
+            raise ValueError("fiscal_year_start_month must be 1..12")
+        return v
+
+    def subject_area(self, name: str) -> Optional[SubjectArea]:
+        for sa in self.subject_areas:
+            if sa.name == name:
+                return sa
+        return None
+
+    def storage_connection(self, name: str) -> Optional[StorageConnection]:
+        for sc in self.storage_connections:
+            if sc.name == name:
+                return sc
+        return None
+
+
+# Resolve forward references (TrustBlock.migrated_from -> MigratedFrom).
+TrustBlock.model_rebuild()
+
+
+__all__ = [
+    # enums
+    "ColumnType",
+    "Confidence",
+    "ReviewState",
+    "Cardinality",
+    "JoinType",
+    "Executable",
+    "SourceType",
+    "StorageType",
+    # models
+    "TrustBlock",
+    "MigratedFrom",
+    "StorageConnection",
+    "ForeignKey",
+    "DenormalizedFrom",
+    "Column",
+    "IndexHint",
+    "PerformanceHints",
+    "Table",
+    "TableRef",
+    "EntityMapping",
+    "Entity",
+    "Metric",
+    "Relationship",
+    "CrossSubjectAreaRelationship",
+    "SubjectArea",
+    "Organization",
+    # constants
+    "DEEP_TABLE_COLUMN_THRESHOLD",
+]

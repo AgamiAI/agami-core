@@ -1,0 +1,666 @@
+"""Cross-cutting validator for the agami semantic-model-v2 hierarchy.
+
+`models.py` handles per-object structural validation (required fields, enums,
+relationship completeness, one-primary-per-entity, …). This module handles the
+invariants that need the *whole* model in view — things a single object can't
+check on its own.
+
+Every rule listed in the design doc's "Validator" subsection + the
+ktx/BigQuery-gap additions is implemented here:
+
+  - Relationship cardinality required (handled in models; re-asserted here for the
+    structural gate, verification check #17).
+  - Relationship completeness: exactly one of (from/to_column) OR (on:)  [models].
+  - FK type-compatibility on simple-FK joins  → caps confidence at `proposed`,
+    emits a CAST suggestion (Gap 3).
+  - Trust-block parity: signed_off_* required when review_state == approved.
+  - Cross-area entity name-collision  → WARNING (not error).
+  - Subject-area sizing: warn at >=25 tables, error at >30.
+  - column_groups orphan check on deep tables (every column in >=1 group).
+  - TableRef.expose_column_groups must reference declared column_groups.
+  - Every TableRef.table resolves to a tables_defined entry.
+  - default_filters reference only existing columns.
+  - value_transform / on: parse with sqlglot.
+  - caveats non-empty strings  [models].
+  - executable on cross-area edges matches endpoint storage connections.
+  - choice_field values match column type (key parseability).
+  - metric calculation non-empty (backend-neutrality, check #4)  [models].
+
+The validator NEVER mutates the input model. The FK type-mismatch rule reports
+the *recommended* confidence cap + fix as a finding; callers (migration tool,
+review dashboard) apply it. This keeps the validator a pure function.
+
+Output: a `ValidationResult` with `errors` (deploy-blocking) and `warnings`
+(advisory). `ok` is True iff there are no errors. Mirrors the legacy validator's
+list[str] contract while adding structured findings for the review dashboard.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Iterable, Optional
+
+try:
+    import sqlglot
+    from sqlglot import exp as _sqlexp  # noqa: F401  (used indirectly)
+    from sqlglot.errors import ErrorLevel as _ErrorLevel
+    _HAVE_SQLGLOT = True
+except ImportError:  # pragma: no cover - sqlglot is in requirements
+    _HAVE_SQLGLOT = False
+
+from .models import (
+    Column,
+    CrossSubjectAreaRelationship,
+    Entity,
+    Organization,
+    Relationship,
+    SubjectArea,
+    Table,
+    TableRef,
+)
+
+# Sizing thresholds (design doc: warn at 25, error at 30).
+SIZING_WARN = 25
+SIZING_ERROR = 30
+
+# Type coercion table — pairs considered compatible for a simple-FK join even
+# when not byte-equal. Symmetric; checked both directions.
+_COERCIBLE_PAIRS: set[frozenset[str]] = {
+    frozenset({"integer", "decimal"}),
+    frozenset({"integer", "float"}),
+    frozenset({"decimal", "float"}),
+    frozenset({"date", "timestamp"}),
+    frozenset({"string", "uuid"}),
+}
+
+
+@dataclass
+class Finding:
+    """A single validator finding."""
+
+    severity: str  # "error" | "warning"
+    code: str
+    message: str
+    # Optional structured payload for the review dashboard (e.g. CAST suggestion).
+    suggestion: Optional[str] = None
+    locator: Optional[str] = None  # human path to the offending element
+
+
+@dataclass
+class ValidationResult:
+    findings: list[Finding] = field(default_factory=list)
+
+    @property
+    def errors(self) -> list[str]:
+        return [f.message for f in self.findings if f.severity == "error"]
+
+    @property
+    def warnings(self) -> list[str]:
+        return [f.message for f in self.findings if f.severity == "warning"]
+
+    @property
+    def ok(self) -> bool:
+        return not any(f.severity == "error" for f in self.findings)
+
+    def error(self, code: str, msg: str, **kw) -> None:
+        self.findings.append(Finding("error", code, msg, **kw))
+
+    def warn(self, code: str, msg: str, **kw) -> None:
+        self.findings.append(Finding("warning", code, msg, **kw))
+
+
+# ---------------------------------------------------------------------------
+# Public entrypoint
+# ---------------------------------------------------------------------------
+
+
+def validate(org: Organization) -> ValidationResult:
+    """Run every cross-cutting rule. Returns a ValidationResult (never raises on
+    a model-level problem — those surface as the model failing to parse upstream)."""
+    res = ValidationResult()
+
+    _check_storage_connection_refs(org, res)
+    # Canonical Table definitions resolve org-wide: a TableRef may point at a table
+    # defined in another area (multi-membership without duplication — the design
+    # doc's "defined once, TableRef'd from each subject area" pattern).
+    org_tables = _org_tables(org)
+    for sa in org.subject_areas:
+        _check_subject_area_sizing(sa, res)
+        _check_table_refs_resolve(sa, res, org_tables)
+        _check_expose_column_groups(sa, res, org_tables)
+        _check_deep_table_column_groups(sa, res)
+        _check_default_filters_columns(sa, res)
+        _check_value_transforms(sa, res)
+        _check_choice_fields(sa, res)
+        _check_entity_mappings(sa, res)
+        for rel in sa.relationships:
+            _check_relationship(rel, sa, org, res, cross=False)
+
+    for rel in org.cross_subject_area_relationships:
+        _check_cross_relationship(rel, org, res)
+
+    _check_cross_area_entity_collisions(org, res)
+    _check_metric_backend_neutrality(org, res)
+
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Individual rules
+# ---------------------------------------------------------------------------
+
+
+def _all_tables(sa: SubjectArea) -> dict[str, Table]:
+    return {t.name: t for t in sa.tables_defined}
+
+
+def _check_storage_connection_refs(org: Organization, res: ValidationResult) -> None:
+    known = {sc.name for sc in org.storage_connections}
+    for sa in org.subject_areas:
+        for ref in sa.tables:
+            if ref.storage_connection not in known:
+                res.error(
+                    "unknown_storage_connection",
+                    f"subject area {sa.name!r}: TableRef {ref.table!r} references unknown "
+                    f"storage_connection {ref.storage_connection!r}",
+                    locator=f"{sa.name}.tables[{ref.table}]",
+                )
+
+
+def _check_subject_area_sizing(sa: SubjectArea, res: ValidationResult) -> None:
+    n = len(sa.tables)
+    if n > SIZING_ERROR:
+        res.error(
+            "subject_area_too_large",
+            f"subject area {sa.name!r} has {n} tables (> {SIZING_ERROR}); split it into "
+            "smaller areas (target ceiling ~20-30).",
+            locator=sa.name,
+        )
+    elif n >= SIZING_WARN:
+        res.warn(
+            "subject_area_large",
+            f"subject area {sa.name!r} has {n} tables (>= {SIZING_WARN}); approaching the "
+            f"{SIZING_ERROR}-table ceiling. Consider splitting.",
+            locator=sa.name,
+        )
+
+
+def _org_tables(org: Organization) -> dict[str, Table]:
+    """Every canonical Table across the org, keyed by name (org-wide resolution)."""
+    out: dict[str, Table] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            out[t.name] = t
+    return out
+
+
+def _check_table_refs_resolve(
+    sa: SubjectArea, res: ValidationResult, org_tables: dict[str, Table]
+) -> None:
+    for ref in sa.tables:
+        if ref.table not in org_tables:
+            res.error(
+                "orphan_table_ref",
+                f"subject area {sa.name!r}: TableRef {ref.table!r} has no matching canonical "
+                "Table in any subject area's tables_defined[]",
+                locator=f"{sa.name}.tables[{ref.table}]",
+            )
+
+
+def _check_expose_column_groups(
+    sa: SubjectArea, res: ValidationResult, org_tables: dict[str, Table]
+) -> None:
+    for ref in sa.tables:
+        if not ref.expose_column_groups:
+            continue
+        table = org_tables.get(ref.table)
+        if table is None:
+            continue  # already reported by orphan check
+        for grp in ref.expose_column_groups:
+            if grp not in table.column_groups:
+                res.error(
+                    "unknown_column_group",
+                    f"subject area {sa.name!r}: TableRef {ref.table!r} exposes column_group "
+                    f"{grp!r} which is not declared in the table's column_groups "
+                    f"({sorted(table.column_groups)})",
+                    locator=f"{sa.name}.tables[{ref.table}].expose_column_groups",
+                )
+
+
+def _check_deep_table_column_groups(sa: SubjectArea, res: ValidationResult) -> None:
+    for table in sa.tables_defined:
+        cols = table.column_names()
+        # column_groups columns must exist on the table
+        grouped: set[str] = set()
+        for gname, gcols in table.column_groups.items():
+            for c in gcols:
+                if c not in cols:
+                    res.error(
+                        "column_group_missing_column",
+                        f"table {table.name!r}: column_group {gname!r} lists column {c!r} "
+                        "which does not exist on the table",
+                        locator=f"{table.name}.column_groups.{gname}",
+                    )
+                grouped.add(c)
+        # deep tables must declare column_groups AND have no orphan columns
+        if table.is_deep:
+            if not table.column_groups:
+                res.error(
+                    "deep_table_no_column_groups",
+                    f"table {table.name!r} is deep ({len(table.columns)} columns) and must "
+                    "declare column_groups",
+                    locator=table.name,
+                )
+            else:
+                orphans = sorted(cols - grouped)
+                if orphans:
+                    res.error(
+                        "column_group_orphans",
+                        f"table {table.name!r} (deep) has columns in no column_group: "
+                        f"{orphans}",
+                        locator=table.name,
+                    )
+
+
+def _check_default_filters_columns(sa: SubjectArea, res: ValidationResult) -> None:
+    for table in sa.tables_defined:
+        cols = table.column_names()
+        for flt in table.default_filters:
+            referenced = _columns_referenced(flt, table.name)
+            for col in referenced:
+                if col not in cols:
+                    res.error(
+                        "default_filter_unknown_column",
+                        f"table {table.name!r}: default_filter references column {col!r} "
+                        f"not present on the table: {flt!r}",
+                        locator=f"{table.name}.default_filters",
+                    )
+
+
+def _check_value_transforms(sa: SubjectArea, res: ValidationResult) -> None:
+    for table in sa.tables_defined:
+        for col in table.columns:
+            if col.value_transform:
+                err = _sqlparse_error(col.value_transform)
+                if err:
+                    res.error(
+                        "value_transform_unparseable",
+                        f"table {table.name!r} column {col.name!r}: value_transform does not "
+                        f"parse as SQL ({err}): {col.value_transform!r}",
+                        locator=f"{table.name}.{col.name}.value_transform",
+                    )
+
+
+def _check_choice_fields(sa: SubjectArea, res: ValidationResult) -> None:
+    for table in sa.tables_defined:
+        for col in table.columns:
+            if not col.choice_field:
+                continue
+            for key in col.choice_field:
+                if not _value_matches_type(key, col.type):
+                    res.error(
+                        "choice_field_type_mismatch",
+                        f"table {table.name!r} column {col.name!r} ({col.type}): choice_field "
+                        f"key {key!r} is not a valid {col.type} value",
+                        locator=f"{table.name}.{col.name}.choice_field",
+                    )
+
+
+def _check_entity_mappings(sa: SubjectArea, res: ValidationResult) -> None:
+    defined = _all_tables(sa)
+    for ent in sa.entities:
+        for mp in ent.maps_to:
+            table = defined.get(mp.table)
+            if table is None:
+                # entity may map to a table owned by another area / cross-cutting;
+                # only warn when it's clearly within this area's namespace.
+                continue
+            if mp.column not in table.column_names():
+                res.error(
+                    "entity_mapping_unknown_column",
+                    f"subject area {sa.name!r} entity {ent.name!r}: maps_to references "
+                    f"{mp.table}.{mp.column} but that column does not exist",
+                    locator=f"{sa.name}.entities[{ent.name}]",
+                )
+
+
+def _check_relationship(
+    rel: Relationship,
+    sa: SubjectArea,
+    org: Organization,
+    res: ValidationResult,
+    *,
+    cross: bool,
+) -> None:
+    # cardinality required (structural gate, check #17) — models enforces non-null,
+    # re-assert the value domain here for a clear validator-level error too.
+    if rel.relationship not in ("many_to_one", "one_to_many", "one_to_one"):
+        res.error(
+            "relationship_cardinality_invalid",
+            f"relationship {rel.from_table}->{rel.to_table}: invalid cardinality "
+            f"{rel.relationship!r}",
+        )
+
+    # trust-block parity: signed_off_* required when approved
+    if rel.review_state == "approved":
+        missing = [
+            n
+            for n in ("signed_off_by", "signed_off_at", "signed_off_role")
+            if not getattr(rel, n)
+        ]
+        if missing:
+            res.error(
+                "trust_block_incomplete",
+                f"relationship {rel.from_table}->{rel.to_table} is approved but missing "
+                f"{missing}",
+            )
+
+    # on: must parse if present
+    if rel.on:
+        err = _sqlparse_error(rel.on, as_condition=True)
+        if err:
+            res.error(
+                "relationship_on_unparseable",
+                f"relationship {rel.from_table}->{rel.to_table}: on: does not parse "
+                f"({err}): {rel.on!r}",
+            )
+        return  # user took explicit ownership; skip simple-form type check
+
+    # FK type-compatibility on the simple form (Gap 3)
+    _check_fk_type_compat(rel, sa, res)
+
+
+def _check_cross_relationship(
+    rel: CrossSubjectAreaRelationship, org: Organization, res: ValidationResult
+) -> None:
+    sa_from = org.subject_area(rel.from_subject_area)
+    sa_to = org.subject_area(rel.to_subject_area)
+    if sa_from is None:
+        res.error(
+            "cross_rel_unknown_area",
+            f"cross-area relationship references unknown from_subject_area "
+            f"{rel.from_subject_area!r}",
+        )
+    if sa_to is None:
+        res.error(
+            "cross_rel_unknown_area",
+            f"cross-area relationship references unknown to_subject_area "
+            f"{rel.to_subject_area!r}",
+        )
+
+    # trust-block parity + on: parse + cardinality (reuse intra checks)
+    _check_relationship(rel, sa_from or SubjectArea(name="<unknown>"), org, res, cross=True)
+
+    # executable must match the endpoints' storage connections
+    conn_from = _table_connection(sa_from, rel.from_table) if sa_from else None
+    conn_to = _table_connection(sa_to, rel.to_table) if sa_to else None
+    if conn_from and conn_to:
+        same = conn_from == conn_to
+        if rel.executable == "same_engine" and not same:
+            res.error(
+                "executable_mismatch",
+                f"cross-area relationship {rel.from_table}->{rel.to_table}: executable="
+                f"'same_engine' but endpoints are on different storage connections "
+                f"({conn_from} vs {conn_to}); use 'split' or 'informational'",
+            )
+        if rel.executable == "split" and same:
+            res.warn(
+                "executable_overcautious",
+                f"cross-area relationship {rel.from_table}->{rel.to_table}: executable="
+                f"'split' but both endpoints are on {conn_from}; 'same_engine' is achievable",
+            )
+
+
+def _check_cross_area_entity_collisions(org: Organization, res: ValidationResult) -> None:
+    """Two areas independently declaring the same entity name (or overlapping
+    other_names) with maps_to into different connections/schemas → warning + a
+    suggestion to unify in a cross-cutting area."""
+    # index: lowercased name/alias -> list[(area, entity)]
+    index: dict[str, list[tuple[str, Entity]]] = {}
+    for sa in org.subject_areas:
+        for ent in sa.entities:
+            keys = {ent.name.lower()} | {n.lower() for n in ent.other_names}
+            for k in keys:
+                index.setdefault(k, []).append((sa.name, ent))
+
+    # names already unified at the org level don't collide
+    unified = {e.name.lower() for e in org.cross_subject_area_entities}
+    for e in org.cross_subject_area_entities:
+        unified |= {n.lower() for n in e.other_names}
+
+    seen_pairs: set[tuple[str, str]] = set()
+    for key, occurrences in index.items():
+        if key in unified:
+            continue
+        if len(occurrences) < 2:
+            continue
+        # pairwise: collision only if the maps_to targets differ in connection/schema/table
+        for i in range(len(occurrences)):
+            for j in range(i + 1, len(occurrences)):
+                (area_a, ent_a), (area_b, ent_b) = occurrences[i], occurrences[j]
+                if area_a == area_b:
+                    continue
+                pair_key = tuple(sorted([area_a + "::" + ent_a.name, area_b + "::" + ent_b.name]))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                tgt_a = _entity_targets(org, area_a, ent_a)
+                tgt_b = _entity_targets(org, area_b, ent_b)
+                if tgt_a and tgt_b and tgt_a != tgt_b:
+                    res.warn(
+                        "cross_area_entity_collision",
+                        f"entity {ent_a.name!r} is declared independently in areas "
+                        f"{area_a!r} (-> {sorted(tgt_a)}) and {area_b!r} (-> {sorted(tgt_b)}). "
+                        "Consider declaring it ONCE in a cross-cutting subject area with "
+                        "maps_to across both, so the runtime never has to ask which was meant.",
+                        suggestion=(
+                            f"cross_subject_area_entities:\n  - name: {ent_a.name}\n"
+                            f"    maps_to: [<{area_a} mapping>, <{area_b} mapping>]"
+                        ),
+                    )
+
+
+def _check_metric_backend_neutrality(org: Organization, res: ValidationResult) -> None:
+    """Verification check #4: every metric's `calculation` (prose intent) must be
+    non-empty — no metric may depend ONLY on a SQL binding. (models enforces
+    non-empty; here we also flag binding-only metrics with placeholder prose.)"""
+    all_metrics = list(org.cross_subject_area_metrics)
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if met.bindings and not met.calculation.strip():
+            res.error(
+                "metric_binding_only",
+                f"metric {met.name!r} has SQL bindings but no prose calculation "
+                "(backend-neutrality violation)",
+            )
+
+
+# ---------------------------------------------------------------------------
+# FK type compatibility (Gap 3)
+# ---------------------------------------------------------------------------
+
+
+def _check_fk_type_compat(rel: Relationship, sa: SubjectArea, res: ValidationResult) -> None:
+    defined = _all_tables(sa)
+    from_t = defined.get(rel.from_table)
+    to_t = defined.get(rel.to_table)
+    if not (from_t and to_t and rel.from_column and rel.to_column):
+        return
+    from_c = from_t.get_column(rel.from_column)
+    to_c = to_t.get_column(rel.to_column)
+    if not (from_c and to_c):
+        return
+    if not _types_compatible(from_c.type, to_c.type):
+        cast = (
+            f'on: "CAST({rel.from_table}.{rel.from_column} AS {to_c.type}) '
+            f'= {rel.to_table}.{rel.to_column}"'
+        )
+        sev_msg = (
+            f"relationship {rel.from_table}.{rel.from_column} ({from_c.type}) = "
+            f"{rel.to_table}.{rel.to_column} ({to_c.type}): incompatible join column types. "
+            f"confidence is capped at 'proposed'; add a CAST in on: or reject."
+        )
+        # This is a finding that ALSO instructs the caller to cap confidence.
+        if rel.confidence == "confirmed":
+            res.error(
+                "fk_type_mismatch_confirmed",
+                sev_msg + " (currently marked 'confirmed' — not allowed on a type mismatch)",
+                suggestion=cast,
+            )
+        else:
+            res.warn(
+                "fk_type_mismatch",
+                sev_msg,
+                suggestion=cast,
+            )
+
+
+def recommended_confidence_cap(rel: Relationship, sa: SubjectArea) -> Optional[str]:
+    """Return 'proposed' if this relationship has a simple-FK type mismatch that
+    should cap its confidence; else None. Used by the migration tool / dashboard
+    to apply the cap (the validator itself never mutates)."""
+    if rel.on:
+        return None
+    defined = _all_tables(sa)
+    from_t = defined.get(rel.from_table)
+    to_t = defined.get(rel.to_table)
+    if not (from_t and to_t and rel.from_column and rel.to_column):
+        return None
+    from_c = from_t.get_column(rel.from_column)
+    to_c = to_t.get_column(rel.to_column)
+    if from_c and to_c and not _types_compatible(from_c.type, to_c.type):
+        return "proposed"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _types_compatible(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    return frozenset({a, b}) in _COERCIBLE_PAIRS
+
+
+def _entity_targets(org: Organization, area_name: str, ent: Entity) -> set[str]:
+    """Resolve an entity's maps_to into a set of 'connection.schema.table' strings."""
+    sa = org.subject_area(area_name)
+    out: set[str] = set()
+    if sa is None:
+        return out
+    defined = _all_tables(sa)
+    for mp in ent.maps_to:
+        t = defined.get(mp.table)
+        conn = t.storage_connection if t else "?"
+        schema = (t.schema_name if t else None) or "?"
+        out.add(f"{conn}.{schema}.{mp.table}")
+    return out
+
+
+def _table_connection(sa: Optional[SubjectArea], table_name: str) -> Optional[str]:
+    if sa is None:
+        return None
+    # table_name in cross-area edges may be "schema.table"; match on suffix too.
+    bare = table_name.split(".")[-1]
+    for ref in sa.tables:
+        if ref.table == table_name or ref.table == bare:
+            return ref.storage_connection
+    return None
+
+
+def _columns_referenced(expr: str, table_name: str) -> set[str]:
+    """Best-effort extraction of column names referenced in a default_filter.
+
+    Uses sqlglot when available; falls back to a conservative regex. Recognizes
+    bare columns and `table.col` / `{alias}.col` forms. Bind params (`:tenant_id`)
+    and the table's own name as a qualifier are ignored.
+    """
+    if _HAVE_SQLGLOT:
+        try:
+            tree = sqlglot.parse_one(expr, error_level="ignore")
+            if tree is not None:
+                cols: set[str] = set()
+                for c in tree.find_all(sqlglot.exp.Column):
+                    cols.add(c.name)
+                if cols:
+                    return cols
+        except Exception:
+            pass
+    # regex fallback
+    import re
+
+    cols = set()
+    # table.col or alias.col
+    for m in re.finditer(r"(?:\{?\w+\}?)\.(\w+)", expr):
+        cols.add(m.group(1))
+    # bare identifiers that look like columns (exclude SQL keywords + funcs)
+    return cols
+
+
+def _sqlparse_error(expr: str, *, as_condition: bool = False) -> Optional[str]:
+    """Return None if `expr` parses as SQL, else a short error string."""
+    if not _HAVE_SQLGLOT:
+        return None  # can't check; treat as ok (sqlglot optional, like legacy)
+    candidate = f"SELECT 1 WHERE {expr}" if as_condition else f"SELECT {expr}"
+    try:
+        parsed = sqlglot.parse_one(candidate, error_level=_ErrorLevel.RAISE)
+        return None if parsed is not None else "empty parse"
+    except Exception as e:  # sqlglot.errors.ParseError and friends
+        return str(e).splitlines()[0][:160]
+
+
+def _value_matches_type(value: str, ctype: str) -> bool:
+    """Is the string `value` a plausible literal of column type `ctype`?
+    Used for choice_field keys (which are always YAML strings)."""
+    v = value.strip()
+    if ctype == "string" or ctype in ("json", "array", "uuid", "bytes", "time"):
+        return True
+    if ctype == "boolean":
+        return v.lower() in ("true", "false", "0", "1", "t", "f", "yes", "no")
+    if ctype == "integer":
+        try:
+            int(v)
+            return True
+        except ValueError:
+            return False
+    if ctype in ("decimal", "float"):
+        try:
+            float(v)
+            return True
+        except ValueError:
+            return False
+    if ctype in ("date", "timestamp"):
+        # accept ISO-ish; choice_field on a date is unusual but allow YYYY...
+        import re
+
+        return bool(re.match(r"^\d{4}-\d{2}-\d{2}", v))
+    return True
+
+
+def format_result(res: ValidationResult) -> str:
+    """Human-readable summary (CLI output)."""
+    lines = []
+    for f in res.findings:
+        tag = "ERROR" if f.severity == "error" else "warn "
+        lines.append(f"[{tag}] {f.code}: {f.message}")
+        if f.suggestion:
+            lines.append(f"        suggestion: {f.suggestion}")
+    if not lines:
+        lines.append("OK — no findings.")
+    summary = f"{len(res.errors)} error(s), {len(res.warnings)} warning(s)"
+    lines.append(summary)
+    return "\n".join(lines)
+
+
+__all__ = [
+    "Finding",
+    "ValidationResult",
+    "validate",
+    "recommended_confidence_cap",
+    "format_result",
+    "SIZING_WARN",
+    "SIZING_ERROR",
+]

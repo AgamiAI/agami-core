@@ -1,0 +1,11 @@
+# agami semantic model dependencies.
+#
+# The model is parsed + validated with Pydantic and uses sqlglot for SQL-aware
+# checks (value_transform / on: parsing, fan-trap / chasm-trap pre-flight).
+# Install with:
+#
+#     python3 -m pip install -r plugins/agami/scripts/semantic_model/requirements.txt
+#
+pydantic>=2,<3
+PyYAML>=6
+sqlglot>=20            # SQL parsing for value_transform / on: / pre-flight fan-trap checks
