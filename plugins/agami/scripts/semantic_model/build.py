@@ -5,10 +5,6 @@ engine (`introspect.py`): infer grain/cardinality, derive column_groups on deep
 tables, flag sensitive columns, propose a subject-area split, extract cross-area
 edges, and write the canonical on-disk tree. Kept here (not in introspect.py) so
 the assembly logic is independently testable and reusable.
-
-(`migrate.py` — the transitional OSI→model converter — has its own copies of the
-equivalent helpers; it is deleted in the final cleanup PR, at which point this is
-the single home.)
 """
 
 from __future__ import annotations

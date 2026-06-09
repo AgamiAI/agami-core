@@ -5,7 +5,6 @@ One dispatch surface shared by the skills and the test suite, so behavior is
 identical wherever the model is exercised. Subcommands:
 
     validate  <root>                      — parse + validate a profile tree
-    migrate   --profile P --artifacts DIR — one-time convert a legacy OSI profile (transitional)
     context   <root> --area A --tables ... — assemble get_table_context output
     bundle    <root> --area A             — one-shot subject-area bundle
     areas     <root>                      — list subject areas
@@ -24,7 +23,6 @@ import sys
 from pathlib import Path
 
 from . import loader as L
-from . import migrate as M
 from . import runtime as RT
 from . import validator as V
 
@@ -39,17 +37,6 @@ def cmd_validate(args) -> int:
     res = V.validate(org)
     print(V.format_result(res))
     return 0 if res.ok else 1
-
-
-def cmd_migrate(args) -> int:
-    report = M.migrate_profile(
-        args.profile,
-        args.artifacts,
-        out_dir=args.out,
-        dry_run=args.dry_run,
-    )
-    print(report.render())
-    return 0 if not report.validator_errors else 1
 
 
 def cmd_context(args) -> int:
@@ -156,13 +143,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("validate", help="validate a profile tree")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_validate)
-
-    sp = sub.add_parser("migrate", help="one-time convert a legacy OSI profile (transitional)")
-    sp.add_argument("--profile", required=True)
-    sp.add_argument("--artifacts", required=True, help="artifacts_dir containing <profile>/")
-    sp.add_argument("--out", default=None, help="output dir (default <profile>/.semantic_v2)")
-    sp.add_argument("--dry-run", action="store_true")
-    sp.set_defaults(func=cmd_migrate)
 
     sp = sub.add_parser("context", help="assemble get_table_context")
     sp.add_argument("root")
