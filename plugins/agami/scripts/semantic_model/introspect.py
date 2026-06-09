@@ -50,6 +50,33 @@ from .models import (
 
 Runner = Callable[[str], list[dict]]
 
+
+class _Row(dict):
+    """Case-insensitive row lookup that preserves original key casing.
+
+    Catalog metadata queries read fixed lowercase keys (``r["column_name"]``),
+    but uppercasing dialects (Snowflake, Oracle, …) return the header as
+    ``COLUMN_NAME``. Lookups here fold case so the engine finds them, while
+    iteration / ``.keys()`` still yields the original casing — probe mode reads
+    real column names off ``.keys()`` and must keep the DB's true casing.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ci = {k.lower(): k for k in self.keys()}
+
+    def __getitem__(self, key):
+        if super().__contains__(key):  # exact hit first (preserves dict semantics)
+            return super().__getitem__(key)
+        return super().__getitem__(self._ci[key.lower()])
+
+    def __contains__(self, key):
+        return super().__contains__(key) or key.lower() in self._ci
+
+    def get(self, key, default=None):
+        return self[key] if key in self else default
+
+
 SCRIPT_DIR = Path(__file__).resolve().parent.parent  # plugins/agami/scripts
 SAMPLE_ROWS = 500
 ENUM_MAX_DISTINCT = 25
@@ -106,7 +133,7 @@ def make_execute_sql_runner(profile: str, python: Optional[str] = None) -> Runne
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or f"execute_sql exit {proc.returncode}")
-        return list(csv.DictReader(io.StringIO(proc.stdout)))
+        return [_Row(r) for r in csv.DictReader(io.StringIO(proc.stdout))]
 
     return run
 

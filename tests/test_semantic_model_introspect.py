@@ -99,6 +99,38 @@ def test_numeric_scale_maps_to_decimal(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Uppercasing dialects (Snowflake / Oracle return COLUMN_NAME, not column_name)
+# ---------------------------------------------------------------------------
+
+
+def _uppercase_row_runner(sql):
+    # Simulate an uppercasing dialect: same catalog data, but the header comes back
+    # UPPERCASE and wrapped in _Row exactly as the real make_execute_sql_runner does.
+    return [I._Row({k.upper(): v for k, v in r.items()}) for r in _catalog_runner(sql)]
+
+
+def test_row_case_insensitive_lookup_preserves_key_casing():
+    r = I._Row({"COLUMN_NAME": "id", "DATA_TYPE": "integer"})
+    # fixed lowercase lookups the engine uses must hit the uppercase header
+    assert r["column_name"] == "id" and r.get("data_type") == "integer"
+    assert "column_name" in r and r["COLUMN_NAME"] == "id"   # exact hit still works
+    assert r.get("missing") is None
+    # iteration / keys must keep the DB's true casing (probe mode reads real names here)
+    assert set(r.keys()) == {"COLUMN_NAME", "DATA_TYPE"}
+
+
+def test_catalog_mode_handles_uppercase_headers(tmp_path):
+    # Regression: Snowflake returns COLUMN_NAME/TABLE_NAME/etc.; the engine reads
+    # fixed lowercase keys. _Row folds case so catalog introspection still works —
+    # a blanket lowercase would instead break probe mode's real-name discovery.
+    org, rep = I.introspect("shop", "postgres", runner=_uppercase_row_runner,
+                            artifacts_dir=tmp_path, dry_run=True)
+    assert rep.table_count == 2 and rep.relationship_count == 1
+    assert V.validate(org).ok
+    assert org.subject_areas[0].defined_table("customers").grain == ["id"]
+
+
+# ---------------------------------------------------------------------------
 # Probe mode
 # ---------------------------------------------------------------------------
 
