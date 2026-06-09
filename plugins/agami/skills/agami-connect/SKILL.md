@@ -196,24 +196,38 @@ Always finish with the additional-profiles hint (one commented block):
 
 For BigQuery / Databricks / any key-or-token file: remind the user to `chmod 600` it.
 
-### 0a.5 — Tool detection
+### 0a.5 — Resolve the agami interpreter + detect tools
 
-Detect drivers **only** with `which`/import probes (no scanning):
+**First resolve the ONE Python agami uses for everything** — the model *and* DB connections. Call it `$PY`. This matters: **introspection always runs `scripts/execute_sql.py` under this interpreter** (via `sm`/`sys.executable`), on *every* tier — even when `psql` is installed. So the DB driver must live in `$PY`, not in some other Python on the box. The `sm` wrapper and the introspection engine both resolve to exactly this interpreter, so pinning it once removes all interpreter guessing.
+
+```bash
+PY="${AGAMI_PYTHON:-$(command -v python3 || command -v python)}"
+PY="$("$PY" -c 'import sys; print(sys.executable)')"   # canonical absolute path
+```
+Record `$PY` — it becomes `tool_paths.python3` in 0a.7. **If the user already has their DB driver in a specific interpreter** (a project venv, a framework Python), they can `export AGAMI_PYTHON=/that/python` and agami uses it for the model + every DB connection — no reinstall, no juggling.
+
+**Detect native CLIs** (optional fast path for *queries* — introspection doesn't use them) with `which` only:
 ```bash
 for t in psql mysql snowsql sqlite3 duckdb bq; do which $t 2>/dev/null; done
-python3 -c 'import psycopg2'        2>/dev/null && echo psycopg2 OK
-python3 -c 'import pymysql'         2>/dev/null && echo pymysql OK
-python3 -c 'import snowflake.connector' 2>/dev/null && echo snowflake OK
-python3 -c 'import google.cloud.bigquery' 2>/dev/null && echo bq-python OK
-python3 -c 'import pymssql'         2>/dev/null && echo pymssql OK
-python3 -c 'import oracledb'        2>/dev/null && echo oracledb OK
-python3 -c 'from databricks import sql' 2>/dev/null && echo databricks OK
-python3 -c 'import trino'           2>/dev/null && echo trino OK
-python3 -c 'import duckdb'          2>/dev/null && echo duckdb-py OK
 ```
 If `which psql` is empty, try the Homebrew libpq glob once. **Forbidden:** `pgrep`/`ps`/`lsof`/`find /`/`ls /Applications`/port scans.
 
-agami's introspection + execution route through `scripts/execute_sql.py` (the Python-driver tier), which speaks every supported dialect. Native CLIs (`psql`/`mysql`/`snowsql`/`sqlite3`/`bq`) are used for the fast path when present. If the relevant driver is missing, surface the install hint (`pip install pymssql` / `oracledb` / `databricks-sql-connector` / `trino` / `duckdb`, etc.) and **confirm via AskUserQuestion** before any `brew`/`pip` install.
+**Ensure the DB driver for `$DB_TYPE` is importable in `$PY`** (probe in `$PY`, NOT bare `python3` — they may differ):
+
+| `$DB_TYPE` | probe (`"$PY" -c '…'`) | pip package |
+|---|---|---|
+| postgres / redshift | `import psycopg2` | `psycopg2-binary` |
+| mysql | `import pymysql` | `pymysql` |
+| snowflake | `import snowflake.connector` | `snowflake-connector-python` |
+| bigquery | `import google.cloud.bigquery` | `google-cloud-bigquery` |
+| sqlserver | `import pymssql` | `pymssql` |
+| oracle | `import oracledb` | `oracledb` |
+| databricks | `from databricks import sql` | `databricks-sql-connector` |
+| trino | `import trino` | `trino` |
+| duckdb | `import duckdb` | `duckdb` |
+| sqlite | stdlib — always present | — |
+
+If the driver is missing, **confirm via AskUserQuestion**, then `"$PY" -m pip install --user <package>` (plain `pip install` fallback). Same "never install silently" convention as the model deps (0a.5b). Do this for `$PY` so `sm introspect` connects on the first try.
 
 ### 0a.5b — Ensure the semantic-model dependencies
 
@@ -251,11 +265,11 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
   "tier": "<cli | duckdb | python>",
   "active_profile": "$PROFILE_NAME",
   "artifacts_dir": "<resolved absolute path>",
-  "tool_paths": { "psql": "...", "python3": "..." },
+  "tool_paths": { "psql": "...", "python3": "$PY" },
   "detected_at": "<ISO8601 UTC from `date -u +%Y-%m-%dT%H:%M:%SZ`>"
 }
 ```
-`chmod 600 ~/.agami/.config`.
+`python3` MUST be the `$PY` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 ~/.agami/.config`.
 
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
 Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `~/.agami/USER_MEMORY.md` if present.
