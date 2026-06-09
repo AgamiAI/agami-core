@@ -194,14 +194,14 @@ CSV output: append `-csv` or wrap in `COPY (<query>) TO '/dev/stdout' (FORMAT CS
 
 Used when neither the native CLI nor DuckDB is available, but Python with the right driver is. The agami skill ships a runtime helper for this.
 
-**Always invoke it with `$PY` — the interpreter agami-connect installed the DB driver into — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. Resolve `$PY` once per session:
+**Always invoke it with `$PY` — the interpreter recorded in `~/.agami/.config` — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; **read it from there — the user never sets an environment variable**:
 
 ```bash
-PY="${AGAMI_PYTHON:-$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path("~/.agami/.config").expanduser().read_text()).get("tool_paths",{}).get("python3") or "")' 2>/dev/null)}"
+PY="$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path("~/.agami/.config").expanduser().read_text()).get("tool_paths",{}).get("python3") or "")' 2>/dev/null)"
 PY="${PY:-$(command -v python3 || command -v python)}"
 ```
 
-(This is the same interpreter the `sm` wrapper and the introspection engine resolve to — `~/.agami/.config` `tool_paths.python3`. Keeping them identical means the driver is present wherever a DB connection is opened.)
+(Same interpreter the `sm` wrapper and the introspection engine resolve to. Keeping them identical means the driver is present wherever a DB connection is opened.)
 
 ```bash
 "$PY" plugins/agami/scripts/execute_sql.py --profile <profile> --sql-file /tmp/agami-query.sql

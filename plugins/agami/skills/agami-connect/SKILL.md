@@ -198,13 +198,27 @@ For BigQuery / Databricks / any key-or-token file: remind the user to `chmod 600
 
 ### 0a.5 — Resolve the agami interpreter + detect tools
 
-**First resolve the ONE Python agami uses for everything** — the model *and* DB connections. Call it `$PY`. This matters: **introspection always runs `scripts/execute_sql.py` under this interpreter** (via `sm`/`sys.executable`), on *every* tier — even when `psql` is installed. So the DB driver must live in `$PY`, not in some other Python on the box. The `sm` wrapper and the introspection engine both resolve to exactly this interpreter, so pinning it once removes all interpreter guessing.
+**First resolve the ONE Python agami uses for everything** — the model *and* DB connections. Call it `$PY`. This matters: **introspection always runs `scripts/execute_sql.py` under this interpreter** (via `sm`/`sys.executable`), on *every* tier — even when `psql` is installed. So the DB driver must live in `$PY`. The `sm` wrapper and the engine both read this interpreter from `~/.agami/.config`, so resolving it once here removes all interpreter guessing — **no environment variables, the user sets nothing.**
+
+**Discover it automatically — prefer an interpreter that already has the DB driver** (so a user whose driver lives in a venv / framework / Homebrew Python is used as-is, with zero install). Probe a bounded candidate list for the `$DB_TYPE` driver + the model deps; first full match wins:
 
 ```bash
-PY="${AGAMI_PYTHON:-$(command -v python3 || command -v python)}"
+DRIVER_MOD="<import module for $DB_TYPE — see the table below; sqlite/duckdb skip the driver>"
+CANDIDATES="$(command -v python3) $(command -v python) ${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python} \
+  $(ls /opt/homebrew/bin/python3.* /usr/local/bin/python3.* 2>/dev/null) \
+  $(ls /Library/Frameworks/Python.framework/Versions/*/bin/python3 2>/dev/null) \
+  $(ls "$HOME"/.pyenv/versions/*/bin/python3 2>/dev/null)"
+PY=""
+for c in $CANDIDATES; do
+  [ -x "$c" ] || continue
+  "$c" -c "import ${DRIVER_MOD:-sys}, pydantic, sqlglot, yaml" 2>/dev/null && { PY="$c"; break; }
+done
+# Nothing fully equipped yet → take the first working base interpreter; 0a.5b + the
+# driver step below install what's missing INTO it.
+[ -z "$PY" ] && PY="$(command -v python3 || command -v python)"
 PY="$("$PY" -c 'import sys; print(sys.executable)')"   # canonical absolute path
 ```
-Record `$PY` — it becomes `tool_paths.python3` in 0a.7. **If the user already has their DB driver in a specific interpreter** (a project venv, a framework Python), they can `export AGAMI_PYTHON=/that/python` and agami uses it for the model + every DB connection — no reinstall, no juggling.
+Record `$PY` — it becomes `tool_paths.python3` in 0a.7. (`AGAMI_PYTHON`, if the user happens to have it set, is honored as a first-priority override — but it is **never required** and the skill never asks the user to set it.)
 
 **Detect native CLIs** (optional fast path for *queries* — introspection doesn't use them) with `which` only:
 ```bash
