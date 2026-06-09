@@ -119,6 +119,18 @@ def test_row_case_insensitive_lookup_preserves_key_casing():
     assert set(r.keys()) == {"COLUMN_NAME", "DATA_TYPE"}
 
 
+def test_areas_listing_is_a_complete_one_call_map(tmp_path):
+    # `sm areas` should expose the whole shape of each area — including
+    # relationship/entity/metric counts — so a caller never has to cat the YAML
+    # tree to discover e.g. where relationships live (area-level, not per-table).
+    from semantic_model import runtime as RT
+    org, _ = I.introspect("shop", "postgres", runner=_catalog_runner,
+                          artifacts_dir=tmp_path, dry_run=True)
+    a = RT.list_subject_areas(org)[0]
+    assert {"table_count", "entity_count", "metric_count", "relationship_count"} <= set(a)
+    assert a["table_count"] == 2 and a["relationship_count"] == 1
+
+
 def test_catalog_mode_handles_uppercase_headers(tmp_path):
     # Regression: Snowflake returns COLUMN_NAME/TABLE_NAME/etc.; the engine reads
     # fixed lowercase keys. _Row folds case so catalog introspection still works —

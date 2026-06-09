@@ -63,12 +63,17 @@ ENUM_MAX_CARDINALITY = 50
 
 
 def list_subject_areas(org: Organization) -> list[dict[str, Any]]:
-    """Compact listing for area selection by description."""
+    """Compact listing for area selection — also the one-call model map. The counts
+    tell a caller the whole shape of each area (and where things live: relationships
+    and entities/metrics are area-level, not per-table) without reading any YAML."""
     return [
         {
             "name": sa.name,
             "description": sa.description,
             "table_count": len(sa.tables),
+            "entity_count": len(sa.entities),
+            "metric_count": len(sa.metrics),
+            "relationship_count": len(sa.relationships),
             "default_time_window": sa.default_time_window,
         }
         for sa in org.subject_areas

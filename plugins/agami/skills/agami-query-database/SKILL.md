@@ -84,7 +84,9 @@ Resolve `<artifacts_dir>` per [`shared/file-layout.md`](../../shared/file-layout
 
 The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…`). There is no legacy-layout fallback — the model is the only format.
 
-**Don't run a separate existence probe** (no `ls org.yaml`, and never probe for the plugin's own scripts — `sm`, `execute_sql.py`, `semantic_model/` always ship with the plugin). Just make the first real call you need anyway (`sm areas`): if a model exists you get the index; if not, the CLI returns `{"error":"no_model"}` with **exit code 3** — that *is* your "not onboarded yet" signal → invoke `agami-connect` and stop. One call does both.
+**Never hand-read the YAML tree** to understand the model — don't `cat`/`Read` `org.yaml`, `subject_areas/**`, `tables/*.yaml`, or `relationships.yaml`. The CLI returns the same data structured, and the layout is already known (relationships + entities + metrics live at the **area** level, not inside a table file). `sm areas "$ROOT"` is the **one-call model map**: per area it returns `table_count`, `entity_count`, `metric_count`, `relationship_count` + description — the whole shape in a single call. (Column-level detail → `sm context`; browsable table/column tree → `sm model-tree`.)
+
+**Don't run a separate existence probe either** (no `ls org.yaml`, and never probe for the plugin's own scripts — `sm`, `execute_sql.py`, `semantic_model/` always ship with the plugin). That same first `sm areas` call doubles as the check: model present → you get the map; absent → the CLI returns `{"error":"no_model"}` with **exit code 3** → invoke `agami-connect` and stop.
 
 Drive everything through the CLI (the `sm` wrapper resolves the interpreter + deps) or the MCP tools — both return the same shapes:
 
