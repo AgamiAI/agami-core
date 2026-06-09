@@ -39,7 +39,7 @@ Most NL→SQL tools either send your data through a hosted backend (Snowflake-fl
 
 - **Local execution.** The skill reads your `~/.agami/credentials` file, runs SQL through your existing `psql` / `mysql` / `snowsql` / `bq` / `sqlite3` / DuckDB binary, parses the rows, and shows you the answer. No data path through any server we operate.
 - **Zero infra.** Just a Claude Code skill plugin and a tree of YAML files under `~/agami-artifacts/<profile>/`. If you have a DB CLI, you have everything you need.
-- **Diffable, git-native.** The semantic model is per-table YAML at `~/agami-artifacts/<profile>/<schema>/<table>.yaml`. `agami-connect` runs `git init` on that tree and commits each introspect — every model change is a diff you can review, blame, and revert.
+- **Diffable, git-native.** The semantic model is YAML under `~/agami-artifacts/<profile>/` (`org.yaml` + `subject_areas/<area>/…`). `agami-connect` runs `git init` on that tree and commits each introspect — every model change is a diff you can review, blame, and revert.
 - **Snapshot-pinned answers.** Every query records the model snapshot hash it ran against. Old answers reproduce exactly. Schema drift flips affected entries to `stale` instead of silently changing the number.
 - **Corrections persist with attribution.** When you say "no, the join should be on `customer_id`", the corrected SQL lands in `examples.yaml` with the author and date. When a future answer is influenced by it, the receipt names the correction's author so the audit trail stays clean.
 
@@ -339,11 +339,11 @@ The skill picks the first available connection method, in this order:
 
 | Command | What it does |
 |---|---|
-| `/agami-connect` | **One-stop setup + introspect.** First run: detects missing credentials, runs the DB-type picker (Postgres / MySQL / Snowflake / BigQuery / Redshift / Other), writes `~/.agami/credentials.example` for you to fill in, verifies the connection method, and ends the turn. Re-invoke after filling in the file → introspects the live DB, builds the per-schema OSI v0.1.1 semantic model at `~/agami-artifacts/<profile>/`, computes confidence on every entity, auto-approves the high-signal ones, generates 10–12 analytical-shape seed examples (each EXPLAIN-validated), and opens the examples-validation dashboard. Runs `git init` and snapshots the model under `.snapshots/<hash>/`. |
+| `/agami-connect` | **One-stop setup + introspect.** First run: detects missing credentials, runs the DB-type picker (Postgres / Supabase / Redshift / MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks / Trino / DuckDB / SQLite), writes `~/.agami/credentials.example` for you to fill in, verifies the connection method, and ends the turn. Re-invoke after filling in the file → introspects the live DB **directly into the semantic model** at `~/agami-artifacts/<profile>/` (subject areas, tables, columns, primary-key grain, foreign-key relationships with join cardinality, deep-table column groups, sensitive-column flags) — in catalog mode, or a probe-mode fallback when the catalog is locked down — then layers LLM enrichment (descriptions, entities, metrics), generates EXPLAIN-validated seed examples, and opens the examples-validation dashboard. Validator-gated; runs `git init` and snapshots under `.snapshots/<hash>/`. |
 | `/agami-query-database` | Answers a NL question. Picks examples + relationships, generates SQL, runs it, formats the result, and surfaces a SQL receipt panel (provenance + model-version pin). Refuses if any required Rule 1 entry is unreviewed. (You usually don't need to type this — natural language routes here.) |
 | `/agami-review` | Opens the trust review dashboard: For Review / Approved Automatically / Manually Approved / Rejected tabs, grouped by entity type. Click-to-act buttons + inline edit textareas. Generates a chat-back-channel command block when you click "Generate feedback for Claude." |
 | `/agami-model` | Opens the model explorer — a static HTML browser of every schema / table / field / **metric / named filter** with live search across descriptions, filter chips (All / Active / Excluded / Unreviewed / Queued), and per-table + per-column **Exclude / Include** buttons. Top of the explorer surfaces every metric (expression + `definition_prose` + assumptions) and every named filter (predicate + definition) so the user can see what the model contains without reading YAML. Excluded entries are filtered out of the runtime model (joins, prompts, aggregates) but stay in the YAML for audit. |
-| `/agami-save-correction` | Records a correction and routes it to the right destination via a 5-way classifier: SQL pattern → `examples.yaml`; per-column meaning / value normalization → the field's `description` or `agami.choice_field` in the semantic model; cross-DB display preference → `USER_MEMORY.md`; abstract business concept tied to this DB → `ORGANIZATION.md`; new reusable aggregation → `metric` in the semantic model. Surfaces the classification + destination + reasoning before writing, so you can override. The next answer that uses the correction surfaces its attribution in the receipt. |
+| `/agami-save-correction` | Records a correction and routes it to the right destination via a 5-way classifier: SQL pattern → `examples.yaml`; per-column meaning / value normalization → the column's `description` / `choice_field` in the semantic model; cross-DB display preference → `USER_MEMORY.md`; abstract business concept tied to this DB → `ORGANIZATION.md`; new reusable aggregation → `metric` in the semantic model. Surfaces the classification + destination + reasoning before writing, so you can override. The next answer that uses the correction surfaces its attribution in the receipt. |
 | `/agami-reconcile` | Reconciliation harness: point it at a legacy dashboard's CSV (label → number rows) and it generates each NL question, runs it through agami, and shows a side-by-side diff with tolerances. Use to validate the model against numbers you already trust. |
 | `/agami-serve` | **Use agami from the Claude Desktop app**, not just Claude Code. Wires up the optional local MCP server (`scripts/mcp_server.py`) in one step: auto-detects the right Python, copies the self-contained server to a stable `~/.agami/serve/`, and safely merges into `claude_desktop_config.json` (timestamped backup, every other key preserved). The server exposes the same tools as the hosted Agami connector, backed by your local model + local execution — stdio only, read-only SQL, no network, no auth. See [docs/mcp-server.md](docs/mcp-server.md). |
 
@@ -381,8 +381,8 @@ $ /agami-connect
   ⚠ 14 inferred relationships below threshold 0.7 (need review)
 
 [Phase 3: validate + write]
-  ✓ Validator passed (universal trust block + OSI v0.1.1 schema)
-  ✓ Wrote per-table YAMLs under ~/agami-artifacts/main/ANALYTICS/
+  ✓ Validator passed (semantic-model schema + trust block)
+  ✓ Wrote the model under ~/agami-artifacts/main/ (org.yaml + subject_areas/…)
   ✓ Snapshot pinned at .snapshots/45f0fefa2403/
   ✓ git init + initial commit
 
@@ -499,7 +499,7 @@ agami's save-correction classifier routes to one of five destinations based on w
 | What the correction fixes | Where it lands |
 |---|---|
 | SQL pattern (join columns, aggregation expression, filter shape) | `examples.yaml` as a new few-shot example |
-| Per-column meaning, unit, sign convention, or value normalization (Male/MALE/T → "Male") | The field's `description` or `agami.choice_field` in the per-table YAML |
+| Per-column meaning, unit, sign convention, or value normalization (Male/MALE/T → "Male") | The column's `description` / `choice_field` / `caveats` in its table YAML |
 | Cross-DB display preference (format counts with commas, default time window) | `USER_MEMORY.md` (+ updates the seed example's SQL to demonstrate the formatting) |
 | Abstract business concept tied to this DB ("gold tier means lifetime spend > $10k") | `ORGANIZATION.md` |
 | Reusable aggregation that didn't exist before ("MRR = SUM(price) WHERE plan_type='subscription'") | New `metric` in the semantic model (sign-off required — Rule 1) |
@@ -536,11 +536,11 @@ Parses the CSV (auto-detects headers + number formatting — currency, magnitude
 
 ### Edit the semantic model by hand
 
-Open the per-table YAML at `~/agami-artifacts/<profile>/<schema>/<table>.yaml`. Add a description, refine a metric's `expression`, populate `definition_prose`. Save. The next query picks it up — no skill restart needed.
+Open the table YAML at `~/agami-artifacts/<profile>/subject_areas/<area>/tables/<table>.yaml` (or the area's `metrics/`, `entities/`, `relationships.yaml`). Add a description, refine a metric's `calculation`/`bindings`, add `caveats`. Save. The next query picks it up — no skill restart needed.
 
-If you flip a `review_state` from `unreviewed` to `approved` by hand, also set `signed_off_by`, `signed_off_at`, and (for Rule 1) `signed_off_role` — the validator will reject the file otherwise.
+If you flip a `review_state` from `unreviewed` to `approved` by hand on a relationship or metric, also set `signed_off_by`, `signed_off_at`, and `signed_off_role` — the validator will reject the file otherwise.
 
-Format reference: [`plugins/agami/shared/agami-osi-extensions.md`](plugins/agami/shared/agami-osi-extensions.md).
+Format reference: [`docs/format-spec.md`](docs/format-spec.md) and the Pydantic models at [`plugins/agami/scripts/semantic_model/models.py`](plugins/agami/scripts/semantic_model/models.py).
 
 ### When the database schema changes (new tables / new columns / dropped columns)
 
@@ -600,7 +600,7 @@ Or in chat: *"switch to the staging profile"*. Per-profile artifacts live under 
 What lives on your machine:
 - `~/.agami/credentials` (chmod 600) — DB connection details. Never read by anything outside the skill scripts in this repo.
 - `~/.agami/.config` — your reviewer email + role (for trust-layer sign-offs) and optional `artifacts_dir` override.
-- `~/agami-artifacts/<profile>/` — the OSI semantic model (per-table YAML), examples, ORGANIZATION.md, snapshots, curation log, `corrections.jsonl`, `.git/` history.
+- `~/agami-artifacts/<profile>/` — the semantic model (org.yaml + subject_areas/), examples, ORGANIZATION.md, snapshots, curation log, `corrections.jsonl`, `.git/` history.
 - `~/.agami/charts/<profile>/<ts>.html` — rendered charts (per profile).
 - `~/.agami/exports/<profile>/<ts>.csv` — CSV exports (per profile).
 - `~/.agami/review/<profile>/<ts>.html`, `~/.agami/examples-validation/<profile>/<ts>.html`, `~/.agami/model/<profile>/<ts>.html` — dashboards (per profile).
@@ -613,7 +613,7 @@ The skill never reads files outside those paths (except your DB tool's auth conf
 
 Claude Code prompts for permission the first time it runs a Bash command pattern. agami ships its allowlist as part of the plugin's `.claude/settings.json` — when you install agami via the marketplace, the host picks up these defaults automatically. No copy-paste step needed.
 
-The shipped allowlist covers the common agami invocation shapes: `psql` / `mysql` / `snowsql` with auth files, the bundled scripts (`execute_sql.py` / `setup_pgauth.py` / `validate_semantic_model.py` / `render_chart.py` / `build_duckdb_attach.py`), `mkdir`/`chmod` on `~/.agami/` and `~/agami-artifacts/`, `open` on chart files, and the GitHub-star ask URL. It does NOT auto-allow arbitrary `psql` / `mysql` invocations against your DB — only the wrapper scripts that read credentials safely.
+The shipped allowlist covers the common agami invocation shapes: `psql` / `mysql` / `snowsql` with auth files, the bundled scripts (`execute_sql.py` / `setup_pgauth.py` / `render_chart.py` / `build_duckdb_attach.py` / the `semantic_model` package), `mkdir`/`chmod` on `~/.agami/` and `~/agami-artifacts/`, `open` on chart files, and the GitHub-star ask URL. It does NOT auto-allow arbitrary `psql` / `mysql` invocations against your DB — only the wrapper scripts that read credentials safely.
 
 To override per-user (e.g., to add commands you trust beyond agami), put them in `~/.claude/settings.local.json` — Claude Code merges that on top of the shipped allowlist. That file is gitignored; your additions stay private.
 
@@ -635,14 +635,14 @@ To override per-user (e.g., to add commands you trust beyond agami), put them in
 | Validator rejects a hand-edited YAML | Read the error verbatim — it'll point at the exact line. Most common: Rule 1 metric set to `approved` without `definition_prose`, or `review_state: not_applicable` without `origin: no_description`. |
 | Want to switch profiles | `AGAMI_PROFILE=staging` then re-ask the question. |
 
-If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/issues](https://github.com/AgamiAI/LiteBi/issues) with the exact error, your DB type, and what the validator says (`python3 plugins/agami/scripts/validate_semantic_model.py --directory ~/agami-artifacts/<profile>`).
+If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/issues](https://github.com/AgamiAI/LiteBi/issues) with the exact error, your DB type, and what the validator says (`python3 -m semantic_model.cli validate ~/agami-artifacts/<profile>`).
 
 ---
 
 ## Format reference
 
-- **Semantic model — OSI v0.1.1 base spec** (Open Semantic Interchange) — the universal `version`, `semantic_model`, `datasets`, `fields`, `relationships`, `metrics`, `custom_extensions` shape. See [`plugins/agami/shared/osi-schema.json`](plugins/agami/shared/osi-schema.json) for the bundled JSON Schema, and [`plugins/agami/shared/schema-reference.md`](plugins/agami/shared/schema-reference.md) for the prose spec.
-- **agami trust-layer extensions** ([`plugins/agami/shared/agami-osi-extensions.md`](plugins/agami/shared/agami-osi-extensions.md)) — the `agami` keys carried in `custom_extensions[].vendor_name=COMMON` (confidence, signal_breakdown, review_state, origin, signed_off_by/at/role, definition_prose, assumptions, excludes, named_filters, etc.).
+- **Semantic model** — a provider-portable, standard-concepts hierarchy: Organization → Storage Connection (physical) + Subject Area (logical) → Table / Column / Entity / Metric / Relationship, with declarative fields (default_filters, value_transform, caveats, value_pattern, sensitive, join cardinality) any LLM can traverse. The Pydantic models are the spec: [`plugins/agami/scripts/semantic_model/models.py`](plugins/agami/scripts/semantic_model/models.py); the on-disk layout + a worked example are in [`docs/format-spec.md`](docs/format-spec.md).
+- **Trust block** — every relationship + metric (and, for exclusion, every table/column/entity) carries `confidence` (confirmed/inferred/proposed), `review_state`, and `signed_off_by/at/role`. The validator + curation engine live in `plugins/agami/scripts/semantic_model/` (`validator.py`, `curate.py`).
 - **File layout** ([`plugins/agami/shared/file-layout.md`](plugins/agami/shared/file-layout.md)) — what lives where under `~/agami-artifacts/<profile>/` and how the snapshot directory works.
 - **Examples library YAML** — `<artifacts_dir>/<profile>/examples.yaml`, the NL→SQL few-shot library. Entries carry `source: seed|correction|manual`, `state: unreviewed|validated|rejected`, `validated_by`, `validated_at`.
 - **Credentials INI** ([`plugins/agami/shared/credentials-format.md`](plugins/agami/shared/credentials-format.md)) — `~/.agami/credentials` (all 6 DB types).

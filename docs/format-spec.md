@@ -23,10 +23,12 @@ agami's state splits across two directories. See `[plugins/agami/shared/file-lay
 | File                                              | Format                                                                                                                                                        | Owner                                                                            |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `<artifacts_dir>/USER_MEMORY.md`                  | Free-form Markdown — cross-database preferences                                                                                                               | Seeded by `agami-connect` Phase 0a, edited by user or appended by `agami-save-correction` |
-| `<artifacts_dir>/<profile>/index.yaml`            | Agami-bespoke YAML (top-level TOC: schemas + cross-schema relationships + introspect_meta)                                                                    | Skill-written, user-editable                                                     |
-| `<artifacts_dir>/<profile>/<schema>/_schema.yaml` | Agami-bespoke YAML (per-schema slim TOC: tables list + within-schema relationships + multi-table metrics)                                                     | Skill-written, user-editable                                                     |
-| `<artifacts_dir>/<profile>/<schema>/<table>.yaml` | **Open Semantic Interchange (OSI) v0.1.1** YAML — one dataset per file                                                                                        | Skill-written, user-editable                                                     |
-| `<artifacts_dir>/<profile>/examples.yaml`         | Agami-bespoke YAML                                                                                                                                            | Skill-written (seeds) + append-only via `agami-save-correction`                  |
+| `<artifacts_dir>/<profile>/org.yaml`              | Org description + storage-connection refs + subject-area refs + cross_subject_area_relationships                                                              | Skill-written, user-editable                                                     |
+| `<artifacts_dir>/<profile>/datasources/<conn>/storage.yaml` | Storage connection (physical): storage_type + storage_config (env-var refs, never secrets)                                                         | Skill-written, user-editable                                                     |
+| `<artifacts_dir>/<profile>/subject_areas/<area>/subject_area.yaml` | Subject area: description, default_time_window, TableRefs (with optional expose_column_groups)                                              | Skill-written, user-editable                                                     |
+| `<artifacts_dir>/<profile>/subject_areas/<area>/tables/<table>.yaml` | Canonical Table: columns, grain, default_filters, caveats, column_groups, performance_hints                                              | Skill-written, user-editable                                                     |
+| `<artifacts_dir>/<profile>/subject_areas/<area>/{entities,metrics}/<name>.yaml`, `relationships.yaml` | Entities, metrics, and the intra-area FK graph (join cardinality + trust block)             | Skill-written, user-editable                                                     |
+| `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml` | NL→SQL few-shot library (scope-tagged)                                                                                        | Skill-written (seeds) + append-only via `agami-save-correction`                  |
 | `<artifacts_dir>/<profile>/ORGANIZATION.md`       | Free-form Markdown — per-database domain context                                                                                                              | Seeded by `agami-connect`, edited by user or appended by `agami-save-correction` |
 | `~/.agami/cross_profile_relationships.yaml`       | Agami-bespoke YAML — declared JOIN paths across profiles for federation. **Lives in `~/.agami/` because it spans profiles** and isn't tied to one team's repo | User-edited (optional)                                                           |
 
@@ -63,122 +65,103 @@ password = mypassword
 
 ---
 
-## 2. Semantic model — OSI v0.1.1
+## 2. Semantic model
 
-The semantic model file is **strictly conformant to Open Semantic Interchange v0.1.1**. The OSI spec lives at [github.com/open-semantic-interchange/OSI](https://github.com/open-semantic-interchange/OSI); the JSON schema is bundled at `[plugins/agami/shared/osi-schema.json](../plugins/agami/shared/osi-schema.json)` so validation works offline.
+The model is a **provider-portable, standard-concepts hierarchy** that any LLM can traverse to build reliable SQL against any backend:
 
-Every write to this file is gated by the validator at `[plugins/agami/scripts/validate_semantic_model.py](../plugins/agami/scripts/validate_semantic_model.py)`. **No OSI-breaking change is ever persisted.**
-
-For the full reference: `[plugins/agami/shared/schema-reference.md](../plugins/agami/shared/schema-reference.md)`.
-For Agami's `custom_extensions` conventions: `[plugins/agami/shared/agami-osi-extensions.md](../plugins/agami/shared/agami-osi-extensions.md)`.
-
-### Worked example — minimal OSI-conformant model
-
-```yaml
-version: "0.1.1"
-
-semantic_model:
-  - name: shop
-    description: E-commerce shop database.
-    ai_context:
-      instructions: "Use this for sales analytics across orders, customers, and products."
-      synonyms: [shop, store, ecommerce]
-
-    custom_extensions:
-      - vendor_name: COMMON
-        data: '{"agami": {"profile": "default", "db_type": "postgres", "introspect_meta": {"introspected_at": "2026-05-06T12:00:00Z", "tier": "cli", "source_db_version": "PostgreSQL 16.2"}}}'
-
-    datasets:
-      - name: customers
-        source: shop.public.customers
-        primary_key: [id]
-        unique_keys: [[email]]
-        description: People who buy things.
-        fields:
-          - name: id
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "integer"}}'
-          - name: email
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: email }] }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "string"}}'
-          - name: region
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: region }] }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "string", "choice_field": {"NA": "North America", "EU": "Europe", "APAC": "Asia-Pacific"}}}'
-          - name: created_at
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: created_at }] }
-            dimension: { is_time: true }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "timestamp"}}'
-
-      - name: orders
-        source: shop.public.orders
-        primary_key: [id]
-        fields:
-          - name: id
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: id }] }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "integer"}}'
-          - name: customer_id
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: customer_id }] }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "integer"}}'
-          - name: status
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "string", "choice_field": {"pending": "Pending", "shipped": "Shipped", "delivered": "Delivered"}}}'
-          - name: amount
-            expression: { dialects: [{ dialect: ANSI_SQL, expression: amount }] }
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "decimal", "unit": "dollars"}}'
-
-    relationships:
-      - name: orders_to_customers
-        from: orders
-        to: customers
-        from_columns: [customer_id]
-        to_columns: [id]
-
-    metrics:
-      - name: total_revenue
-        expression:
-          dialects:
-            - dialect: ANSI_SQL
-              expression: SUM(orders.amount)
-        description: Total revenue across all orders.
-        ai_context:
-          synonyms: [revenue, total sales, gross]
+```
+Organization (org.yaml)
+├─ Storage Connections[]   (physical: host/creds/dialect — datasources/<conn>/storage.yaml)
+└─ Subject Areas[]         (logical — the primary unit the LLM consumes; cap ~20-30 tables)
+   ├─ tables[]             (TableRefs into storage connections; expose_column_groups scopes wide tables)
+   ├─ tables_defined[]     (canonical Table: columns, grain, default_filters, caveats, column_groups)
+   ├─ entities[]           (vocabulary → maps_to columns; value_pattern for opaque IDs)
+   ├─ metrics[]            (calculation prose + per-dialect bindings)
+   └─ relationships[]      (FK graph; REQUIRED join cardinality + trust block)
+└─ cross_subject_area_relationships[]   (org-level edges spanning areas)
 ```
 
-### Why OSI
+The Pydantic models in [`plugins/agami/scripts/semantic_model/models.py`](../plugins/agami/scripts/semantic_model/models.py) **are** the spec (they `forbid` unknown keys). Provider-portable declarative fields — `default_filters`, `value_transform`, `caveats`, `value_pattern`, `sensitive`, `default_time_window`, join `cardinality` — are applied generically by the MCP/runtime, so behavior is identical across LLMs.
 
-- **Vendor-neutral.** A model written by agami can be loaded by Snowflake, Tableau, dbt, or any other OSI-aware consumer.
-- **Stable spec.** OSI v0.1.1 was finalized in January 2026 by Snowflake, Salesforce, dbt Labs, and others. We track it.
-- **Type info via extensions.** OSI itself doesn't model column types — agami stores them under `custom_extensions[].vendor_name=COMMON` with a top-level `agami` key. Vanilla OSI consumers ignore the extensions; agami reads them. See `[agami-osi-extensions.md](../plugins/agami/shared/agami-osi-extensions.md)`.
+Every write is gated by the validator at [`plugins/agami/scripts/semantic_model/validator.py`](../plugins/agami/scripts/semantic_model/validator.py) (driven via `python3 -m semantic_model.cli validate <root>`). **No model that fails validation is ever persisted.**
+
+### Worked example — a minimal model on disk
+
+```yaml
+# org.yaml
+organization: shop
+version: 1
+description: E-commerce shop.
+storage_connections:
+  - { name: shop_postgres, ref: datasources/shop_postgres/storage.yaml }
+subject_areas: [subject_areas/sales]
+cross_subject_area_relationships: []
+```
+```yaml
+# datasources/shop_postgres/storage.yaml
+name: shop_postgres
+storage_type: PostgreSQL
+storage_config: { profile: shop, credentials_ref: "~/.agami/credentials" }
+```
+```yaml
+# subject_areas/sales/subject_area.yaml
+name: sales
+description: Sales analytics across orders and customers.
+tables:
+  - { storage_connection: shop_postgres, schema: public, table: orders }
+  - { storage_connection: shop_postgres, schema: public, table: customers }
+```
+```yaml
+# subject_areas/sales/tables/orders.yaml
+name: orders
+schema: public
+storage_connection: shop_postgres
+grain: [id]
+description: One row per order.
+default_filters: ["{alias}.deleted_at IS NULL"]
+columns:
+  - { name: id, type: integer, primary_key: true }
+  - { name: customer_id, type: integer, foreign_key: { table: customers, column: id } }
+  - { name: status, type: string, choice_field: { pending: Pending, shipped: Shipped } }
+  - { name: amount, type: decimal, caveats: ["Amount in USD; excludes refunds."] }
+```
+```yaml
+# subject_areas/sales/relationships.yaml
+relationships:
+  - from_table: orders
+    from_column: customer_id
+    to_table: customers
+    to_column: id
+    relationship: many_to_one        # REQUIRED — fan-trap detector consumes this
+    confidence: confirmed
+    review_state: approved
+    signed_off_by: agami_introspect
+    signed_off_role: system
+    signed_off_at: "2026-06-09T00:00:00Z"
+```
+```yaml
+# subject_areas/sales/metrics/total_revenue.yaml
+name: total_revenue
+calculation: Total revenue across all orders (USD, excludes refunds).
+bindings: { PostgreSQL: "SUM(orders.amount)" }
+source_tables: [orders]
+other_names: [revenue, gross sales]
+confidence: proposed
+review_state: unreviewed             # Rule 1: needs sign-off before the runtime uses it
+```
 
 ### Validation rules
 
-Run by `[plugins/agami/scripts/validate_semantic_model.py](../plugins/agami/scripts/validate_semantic_model.py)` before any write:
+The validator combines Pydantic structural validation (required fields, enums, relationship completeness — exactly one of `from_column`+`to_column` OR `on:`, one primary per entity) with cross-cutting invariants:
 
-1. **JSON Schema** (Layer 1) — entire document validates against `osi-schema.json`. Missing required fields, wrong types, unknown keys, bad enum values all fail here.
-2. **Unique names** (Layer 2) — datasets unique within model; fields unique within dataset; metrics unique; relationships unique.
-3. **Relationship refs** (Layer 2) — `from`/`to` match real datasets; `from_columns`/`to_columns` same length.
-4. **Agami extension allowlist** (Layer 2) — every key under `custom_extensions[].vendor_name=COMMON.agami` must be documented in `agami-osi-extensions.md`. Unknown keys fail.
-5. `**agami.type` value** (Layer 2) — must be one of `string | integer | decimal | timestamp | date | boolean`.
-6. **Choice field shape** (Layer 2) — `choice_field` keys and values must be strings.
-7. **SQL parse** (Layer 3, optional) — warning, not error. Requires `sqlglot` installed.
+1. **Relationship cardinality required** on every join; **trust-block parity** (`signed_off_*` required when `review_state: approved`).
+2. **FK type-compatibility** — a simple-FK join with mismatched column types caps `confidence` at `proposed` and suggests a `CAST` in `on:` (BigQuery `INT64 = STRING` class of bug).
+3. **Subject-area sizing** — warn at 25 tables, error at 30.
+4. **Deep-table column_groups** — tables ≥ 30 columns must declare `column_groups`; no column may be orphaned; `expose_column_groups` must reference declared groups; every `TableRef.table` resolves to a `tables_defined` entry (org-wide, for multi-membership).
+5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot; **caveats** non-empty; **choice_field** keys match the column type.
+6. **Cross-area entity name-collision** → warning + a suggested cross-cutting unification.
 
-The validator's verdict is **binding**. Exit 0 → write. Exit 1 → don't write.
+The verdict is **binding**: `cli validate` exits 0 → ok, 1 → errors. `cli curate` and the introspection engine refuse / revert on a non-zero verdict.
 
 ---
 
@@ -187,7 +170,7 @@ The validator's verdict is **binding**. Exit 0 → write. Exit 1 → don't write
 Few-shot NL→SQL pairs loaded by `query-database` (most-recent 50). Appended to by the `agami-save-correction` skill.
 
 ```yaml
-# ~/.agami/<profile>-examples.yaml
+# <artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml
 
 examples:
   - question: How many orders are there?
@@ -220,13 +203,13 @@ examples:
 | `confirmed_at` | ISO8601 | no       | When confirmed                                                                                    |
 
 
-**Why bespoke?** OSI doesn't model NL→SQL examples. The examples library is an agami implementation detail and intentionally not OSI.
+**Why separate?** The semantic model carries structure + metrics, not NL→SQL examples. The examples library is its own scope-tagged file per subject area.
 
 ---
 
 ## 4. User memory (free-form Markdown)
 
-`~/.agami/USER_MEMORY.md` holds free-form preferences and policies that don't belong in the OSI semantic model — default filters, domain vocabulary, display preferences, hard avoids. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
+`~/.agami/USER_MEMORY.md` holds free-form preferences and policies that don't belong in the semantic model — default filters, domain vocabulary, display preferences, hard avoids. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
 
 Seeded by `agami-connect` Phase 0a on first run with section hints (HTML comments). User edits by hand, OR the `agami-save-correction` skill appends a bullet when it classifies a correction as `user_preference` ("from now on, always exclude test users where email matches @example.com").
 

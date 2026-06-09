@@ -16,10 +16,12 @@ a weekend project and starts being real infrastructure.
 
 Everything you need to get value as one developer, on your own machine:
 
-- Schema introspection → an **OSI v0.1.1 semantic model** (the format itself is an
-  open standard — your model is portable, never locked in).
-- NL→SQL generation and **local execution** against your DB (Postgres / MySQL /
-  Snowflake / BigQuery / Redshift / SQLite).
+- Schema introspection → a **provider-portable semantic model** (subject areas,
+  tables, entities, metrics, relationships with join cardinality — plain YAML you
+  own, never locked in).
+- NL→SQL generation and **local execution** against your DB (Postgres / Supabase /
+  Redshift / MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks /
+  Trino / DuckDB / SQLite).
 - The **trust layer**: confidence scoring, single-reviewer sign-off, receipts,
   snapshots, git-native model history.
 - **Corrections** + the `examples.yaml` few-shot library.

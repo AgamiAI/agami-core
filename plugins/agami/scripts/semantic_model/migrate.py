@@ -1,10 +1,13 @@
-"""One-time, idempotent migration: legacy LiteBI profile -> semantic-model-v2.
+"""One-time OSI→semantic-model upgrade for a pre-existing profile.
 
-"Onboard-then-migrate": the migration reads an already-onboarded LiteBI profile
-(the per-table OSI layout produced by `agami-connect`) and emits the v2 hierarchy.
-It NEVER touches the legacy tree and NEVER git-commits. It writes the v2 tree to a
-sibling directory (`<artifacts_dir>/<profile>/.semantic_v2/` by default) plus a
-human-review report; a reviewer inspects and flips.
+The current onboarding path (`agami-connect` → `semantic_model.introspect`) builds
+the model directly from a live DB, so new profiles never touch OSI. This tool is the
+**upgrade path for a profile that was onboarded under the old OSI layout**: it reads
+the per-table OSI tree on disk and converts it to the semantic-model hierarchy,
+without re-introspecting the live DB. It NEVER touches the legacy tree and NEVER
+git-commits — it writes to a sibling dir (`<artifacts_dir>/<profile>/.semantic_v2/`
+by default) plus a human-review report; the reviewer inspects and promotes it to the
+profile root. (It also backs the no-info-loss parity tests.)
 
 Input it reads (per `file-layout.md`):
     <artifacts_dir>/<profile>/index.yaml

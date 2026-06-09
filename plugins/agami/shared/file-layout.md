@@ -68,7 +68,7 @@ artifacts_dir="${artifacts_dir:-$HOME/agami-artifacts}"
 
 ### Resolving in Python helpers
 
-`scripts/execute_sql.py`, `scripts/setup_pgauth.py`, `scripts/render_chart.py`, `scripts/build_duckdb_attach.py`, and `scripts/validate_semantic_model.py` all accept paths directly via flags (`--directory`, `--out`, etc.). They don't need to resolve the artifacts_dir themselves — the calling SKILL passes the resolved path.
+`scripts/execute_sql.py`, `scripts/setup_pgauth.py`, `scripts/render_chart.py`, and `scripts/build_duckdb_attach.py` accept paths directly via flags (`--directory`, `--out`, etc.). They don't need to resolve the artifacts_dir themselves — the calling SKILL passes the resolved path. The semantic-model tools (`python3 -m semantic_model.cli …`) take the profile root (`<artifacts_dir>/<profile>/`) as a positional argument.
 
 ## Permissions
 
