@@ -1,6 +1,6 @@
 ---
 name: agami-save-correction
-description: "Saves a user correction so future queries learn from it. Always appends a (question, corrected_sql) pair to the per-database examples YAML in the .agami home directory. Additionally, classifies the correction and — when applicable — applies a surgical edit to the OSI semantic model itself (relationship fix, field metadata, or new metric). Every model edit is OSI-conformant and validated before write; the validator is the binding gate. Shows the user a model diff for approval before any model mutation."
+description: "Saves a user correction so future queries learn from it. Always appends a (question, corrected_sql) pair to the subject area's example library under <artifacts_dir>/<profile>/prompt_examples/<area>/. Additionally, classifies the correction and — when applicable — applies a surgical edit to the semantic model itself (relationship fix, column metadata, or new metric) via the curation engine. Every model edit is validated before write; the validator is the binding gate, and a failed validation reverts. Shows the user a model diff for approval before any model mutation."
 when_to_use: "Use when the user says 'save this as a correction', '/agami-save-correction', 'remember this', 'use this SQL next time', or after the user manually fixes a query result and wants future similar questions to use the fix. Also use when the demo query in agami-connect/SKILL.md gets a 'No' answer — that's a correction in disguise."
 argument-hint: "[corrected SQL or NL feedback]"
 ---
@@ -13,11 +13,10 @@ You are recording a user correction. Goal: persist the fix so similar questions 
 
 This skill does two things, in this order:
 
-1. **Always**: append the `(question, corrected_sql)` pair to `<artifacts_dir>/<profile>/examples.yaml` (few-shot library).
-2. **When applicable**: surgically update one of the OSI semantic model files at `<artifacts_dir>/<profile>/` (e.g. `<schema>.yaml` for a relationship/field/metric edit, or `index.yaml` for a cross-schema relationship) with the knowledge implied by the correction. The model edit is **always** OSI-conformant and **always** validated before write. If the user's correction would break OSI, refuse the model update (the example still gets saved).
+1. **Always**: append the `(question, corrected_sql)` pair to the subject area's example library at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`.
+2. **When applicable**: surgically update the semantic model at `<artifacts_dir>/<profile>/` (a relationship/column/table edit, or a new metric) with the knowledge implied by the correction, **via the curation engine** (`semantic_model.cli curate`), which **validates** before write and reverts on failure. If the user's correction would break the model, refuse the model update (the example still gets saved).
 
-For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
-For Agami's `custom_extensions`: [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
+For the model format: [`scripts/semantic_model/__init__.py`](../../scripts/semantic_model/__init__.py) (layout) + `scripts/semantic_model/models.py`. The curation engine is `scripts/semantic_model/curate.py`.
 For SQL safety: [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md).
 For dialect rules: [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
 For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
@@ -56,7 +55,7 @@ If the log is empty: "I don't have a recent query to attach this correction to. 
 
 Determine what the user gave:
 - **They pasted SQL** (`$ARGUMENTS` looks like a SELECT, contains `FROM` / `JOIN` / `GROUP BY`) → use directly as the corrected SQL.
-- **They described what's wrong** ("the join should be on customer_id, not user_id"; "amount is in cents") → regenerate SQL using the OSI model + the original question + their feedback as additional context. Same prompt assembly as `query-database` Phase 2b.
+- **They described what's wrong** ("the join should be on customer_id, not user_id"; "amount is in cents") → regenerate SQL using the semantic model + the original question + their feedback as additional context. Same prompt assembly as `query-database` Phase 2b.
 - **No arguments and no recent feedback** → ask: "Paste the corrected SQL, or tell me what's wrong with the result."
 
 ### 1d — EXPLAIN-validate the corrected SQL
@@ -74,23 +73,23 @@ Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
 
 ## Phase 2: Always append to the examples library
 
-Read `<artifacts_dir>/<profile>/examples.yaml` via Read (fall back to `~/.agami/<profile>-examples.yaml` for v1.0 layouts). Append a new entry to `examples:` via Edit:
+Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`. Pick `<area>` = the subject area whose `tables_defined` includes the table(s) the corrected SQL references (run `python3 -m semantic_model.cli areas "$ROOT"` and match, or `get_table_context` to confirm membership; if the SQL spans areas, use the area of the primary/driving table). Read that file via Read (create it with `examples: []` if absent), and append via Edit:
 
 ```yaml
 - question: <the original NL question from query_log.jsonl>
   sql: |-
     <the corrected SQL>
   source: correction
+  status: confirmed
   created_at: <ISO8601 UTC now>
-  confirmed: true
   confirmed_at: <ISO8601 UTC now>
 ```
 
-If a previous example has the same `question`: replace its `sql` and bump `created_at` rather than duplicating.
+If a previous example in that area has the same `question`: replace its `sql` and bump `created_at` rather than duplicating.
 
 This phase is **non-conditional** — every correction always lands in the examples library, even if Phase 5 (model update) declines or fails.
 
-Surface: `✓ Correction appended to <artifacts_dir>/<profile>/examples.yaml.`
+Surface: `✓ Correction appended to <artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml.`
 
 ---
 
@@ -230,72 +229,54 @@ For every other kind, you propose a model edit and run the validator BEFORE writ
 
 ### 4a — propose the edit
 
-For OSI-model edits, identify the target file based on what's being edited and which layout the user has:
+Model edits go through the curation engine (`semantic_model.cli curate "$ROOT" --ops-file …`), which validates + commits + reverts on failure — you don't stage/validate/promote by hand. `ROOT="<artifacts_dir>/<profile>"`. Resolve the subject `<area>` for an affected table the same way as Phase 2 (the area whose `tables_defined` holds it). The new-metric case writes a YAML file directly (curate edits existing entries; it doesn't create files), then validates via `cli validate`.
 
-| Edit kind | Target file (v1.3) | Target file (v1.2) | Target file (v1.0) |
-|---|---|---|---|
-| `field_metadata`, `table_metadata`, single-table `new_metric` | `<artifacts_dir>/<profile>/<schema>/<table>.yaml` | `<artifacts_dir>/<profile>/<schema>.yaml` | `~/.agami/<profile>.yaml` |
-| Within-schema `relationship`, multi-table `new_metric` within one schema | `<artifacts_dir>/<profile>/<schema>/_schema.yaml` | `<artifacts_dir>/<profile>/<schema>.yaml` | `~/.agami/<profile>.yaml` |
-| Cross-schema `relationship` | `<artifacts_dir>/<profile>/index.yaml` (cross_schema_relationships[]) | `<artifacts_dir>/<profile>/index.yaml` (cross_schema_relationships[]) | `~/.agami/<profile>.yaml` |
-| `org_context` | `<artifacts_dir>/<profile>/ORGANIZATION.md` (no validator) | same | same |
-| `user_preference` | `<artifacts_dir>/USER_MEMORY.md` (no validator) | same | same |
-
-To resolve the schema for a dataset:
-
-1. Find the affected dataset in the merged in-memory view (built by `query-database` Phase 1c).
-2. Look up the dataset's `source: <db>.<schema>.<table>` — the middle component is the schema.
-3. Use the table from `agami.table` extension (v1.3) or the dataset's `name` (which equals the table name in v1.2).
-
-Detect layout by checking if `<artifacts_dir>/<profile>/<schema>/_schema.yaml` exists — present means v1.3, absent means v1.2.
-
-Build a **proposed new file** in memory by applying the edit type below.
+| Edit kind | How |
+|---|---|
+| `relationship` | `cli curate` `edit` op(s) on the relationship in `<area>` |
+| `field_metadata` | `cli curate` `edit` op(s) on the column (kind: table, + `column`) |
+| `table_metadata` | `cli curate` `edit` op(s) on the table |
+| `new_metric` | Write a new `subject_areas/<area>/metrics/<name>.yaml`, then `cli validate "$ROOT"` |
+| `org_context` | append to `ORGANIZATION.md` (no validator) |
+| `user_preference` | append to `USER_MEMORY.md` (no validator) |
 
 #### `relationship` edit
 
-If the user's corrected SQL implies a JOIN that:
-- **Doesn't exist in `relationships[]`** → add it. Choose a unique `name` (`<from>_to_<to>`; suffix with `_<col>` if there's a name collision). Set `from`, `to`, `from_columns`, `to_columns` from the JOIN's `ON` clause.
-- **Exists but with different columns** → update `from_columns` / `to_columns` on the matching `relationships[]` entry. Don't rename the relationship.
-- **Reverses an existing relationship's direction** → ask the user before flipping: "I see this changes the direction of `<rel.name>`. Is that intended, or should I add a new relationship?"
-
-If the user dropped a JOIN that was previously there, do **not** delete the relationship from the model — corrections delete only when the user explicitly says "remove the relationship".
-
-For **cross-schema relationships** (the JOIN spans datasets in different schemas), edit `<artifacts_dir>/<profile>/index.yaml.cross_schema_relationships[]` instead of any individual schema yaml. Endpoints must be qualified `<schema>.<dataset>` per [`shared/schema-reference.md`](../../shared/schema-reference.md).
+Find the relationship in `<area>`'s `relationships.yaml` (by `from_table`/`to_table`). The corrected SQL's `ON` clause tells you the fix:
+- **Different columns** → `edit` op setting `from_column` / `to_column` (or, for a CAST/compound join, set `on:` and null out `from_column`/`to_column` — the "approve with fix" shape).
+- **Missing relationship** → write a new entry into `relationships.yaml` (unique by from/to), with the **required** `relationship:` cardinality inferred from the join (many_to_one unless the keys are both unique), then `cli validate`.
+- **Spans two areas** → it's a `cross_subject_area_relationship` (org-level `cross_subject_area_relationships.yaml`), with `from_subject_area`/`to_subject_area` + `executable`.
+- **Reverses direction** → ask before flipping. Never delete a relationship unless the user explicitly says "remove the relationship".
 
 #### `table_metadata` edit
 
-For the dataset implicated:
-- Update its `description` to reflect the user's note ("Customer orders, including both completed and cancelled.").
-- If the user added domain instructions (e.g., "use this table for date ranges > 7 days"), append to `ai_context.instructions` (or set it if absent).
-- If the user gave alternate names, append to `ai_context.synonyms[]`.
-
-Never change `source`, `primary_key`, `unique_keys`, `fields`, or relationships from a `table_metadata` edit. Those are structural — table-metadata corrections are about WHAT the table represents, not HOW to read it.
+`edit` op(s) on the table: set `description` (what the table represents) or append a `caveats[]` entry (a usage note / quirk). Never change `grain`, `columns`, `source_type`, or relationships from a table-metadata correction — those are structural.
 
 #### `field_metadata` edit
 
-For the field implicated:
-- Update `description` to reflect the user's note ("Order amount in cents.").
-- If the user mentioned a unit (`cents`, `percent`, `dollars`), update the field's `custom_extensions[].vendor_name=COMMON` JSON to include `agami.unit: <value>`. Add the extension entry if absent; preserve existing keys (`type`, `original_type`).
-- If the user implied an enum mapping ("status `1` means active, `0` means inactive"), update `agami.choice_field` similarly.
-- Append the user's verbatim note as an `ai_context.synonyms[]` entry if it's a synonym ("revenue means amount/100").
-
-Never change `expression` from a `field_metadata` edit. Expressions are about HOW to read the column; descriptions/units/choices are about WHAT it means.
+`edit` op(s) on the column (`kind: table`, `area`, `name: <table>`, `column: <col>`):
+- Set `description` ("Order amount in cents.").
+- A unit / data-quality note → append a `caveats[]` entry ("Amounts in cents; divide by 100 for dollars.").
+- An enum mapping ("status `1` = active, `0` = inactive") → set `choice_field`.
+- A cleaning rule ("strip the brackets") → set `value_transform` (must parse as SQL — the validator checks).
+Never set a column's structural identity from a field-metadata correction.
 
 #### `new_metric` edit
 
-Add a new entry to top-level `metrics[]`:
+Write `subject_areas/<area>/metrics/<name>.yaml` (snake_case name, unique in the area):
 
 ```yaml
-- name: <derived_from_user_request>          # snake_case, unique within model
-  expression:
-    dialects:
-      - dialect: ANSI_SQL
-        expression: <the aggregation expression from the corrected SQL>
-  description: <one-sentence summary>
-  ai_context:
-    synonyms: [<the user's term, plus a few obvious variants>]
+name: <derived_from_user_request>
+calculation: <one-sentence prose intent — REQUIRED, never empty>
+bindings:
+  <storage_type>: <the aggregation SQL from the corrected SQL>
+source_tables: [<tables it reads>]
+other_names: [<the user's term + obvious variants>]
+confidence: proposed
+review_state: unreviewed
 ```
 
-**Always reference fields by `<dataset_name>.<field_name>`** in the metric expression — that's the OSI convention. Strip any WHERE clauses that are about specific user filtering (e.g., `WHERE customer_id = 42`) — keep only the WHERE clauses that are part of the metric's definition (e.g., `WHERE plan_type = 'subscription'` for MRR).
+Reference columns plainly (`<table>.<column>`). Strip user-specific WHERE filters (`WHERE customer_id = 42`); keep only definitional ones (`WHERE plan='subscription'`). Then `cli validate "$ROOT"`. A `proposed`/`unreviewed` metric needs sign-off via `/agami-review` before the runtime will use it (Rule 1) — tell the user.
 
 #### `user_preference` edit
 
@@ -305,7 +286,7 @@ A `user_preference` correction does NOT touch the OSI semantic model. It lands i
 2. **Pick the right section** (`Default filters`, `Naming and synonyms`, `Display preferences`, or `Avoid`) based on the policy's nature. Add a new section if none of the four fits — keep this rare.
 3. **Append the new bullet** under that section, in plain English (the user's wording, lightly cleaned). Don't paraphrase aggressively — preserve their voice.
 4. **Show the user the diff** (per Phase 4b below) before writing.
-5. **Strip nothing** — USER_MEMORY.md is intentionally free-form, not schema-validated. The validator (Phase 4c) is a no-op for `user_preference` corrections; the OSI model is unchanged.
+5. **Strip nothing** — USER_MEMORY.md is intentionally free-form, not schema-validated. The validator (Phase 4c) is a no-op for `user_preference` corrections; the semantic model is unchanged.
 
 The user's bullet should be self-contained — anyone reading USER_MEMORY.md should understand the policy without seeing the original conversation.
 
@@ -319,7 +300,7 @@ Steps:
 2. **Pick the right section.** Most domain-context entries land under `## Key terminology` as `- "<term>" = <definition>` bullets. If the user is describing what the data represents at a higher level, append a paragraph under `# About this database` instead. If they're describing *what's not in this database*, append under `## What we DON'T track here`. Add a new section only if none of the existing ones fit.
 3. **Append the new bullet (or paragraph)** in plain English, preserving the user's wording.
 4. **Show the user the diff** (Phase 4b) before writing.
-5. **No validation** — ORGANIZATION.md is free-form. The OSI model and all schema yamls are unchanged.
+5. **No validation** — ORGANIZATION.md is free-form. The semantic model is unchanged.
 
 The user's bullet should be self-contained — anyone reading ORGANIZATION.md should understand the term without seeing the original conversation. Example output:
 
@@ -339,7 +320,7 @@ Apply each individual edit as above. Show the user the combined diff in 4b befor
 
 Build a unified diff (or a compact "before / after" summary) of the proposed change against the existing target file. Name the file in the prompt so the user knows what they're approving. Show via AskUserQuestion:
 
-> I want to update `<artifacts_dir>/<profile>/public.yaml`:
+> I want to update the target file in `<artifacts_dir>/<profile>/subject_areas/<area>/:
 >
 > ```
 > [Relationship] orders_to_customers
@@ -356,46 +337,36 @@ For `org_context` / `user_preference` the file is `ORGANIZATION.md` / `USER_MEMO
 
 Always include the validator step in 4c regardless of which option they pick (since "Yes" still has to validate, except for ORGANIZATION.md / USER_MEMORY.md which aren't validated).
 
-### 4c — validate the proposed model BEFORE writing
+### 4c — apply with validation (the gate)
 
-This phase is binding for any edit that touches a `<table>.yaml`, `_schema.yaml`, or `index.yaml`. Stage the **whole target directory** at `/tmp/agami-staging-<profile>/` (copy all existing files, overwrite the one you're editing), then run the directory-mode validator — it walks every per-table yaml and merges per-schema before validating:
-
-```bash
-staging="/tmp/agami-staging-$profile"
-rm -rf "$staging" && cp -R "$artifacts_dir/$profile" "$staging"
-# Overwrite the one file the edit targets, e.g.:
-#   $staging/<schema>/<table>.yaml   for field/table edits
-#   $staging/<schema>/_schema.yaml   for within-schema relationship/metric edits
-#   $staging/index.yaml              for cross-schema relationship edits
-python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$staging"
-```
-
-For v1.2 layouts (single file per schema, no `_schema.yaml`), the same `--directory` invocation still works — the validator detects layout per-schema and dispatches accordingly.
-
-For v1.0 single-file installs, fall back to single-file validation:
+**For `relationship` / `field_metadata` / `table_metadata` edits** (existing entries): build the ops array and apply via the curation engine — it validates the whole model, commits to the profile git repo, logs to `curation_log.jsonl`, and **reverts every change if validation fails**:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" /tmp/agami-staging-<profile>.yaml
+printf '%s' "$OPS_JSON" > /tmp/agami-correction-ops.json
+python3 -m semantic_model.cli curate "$ROOT" --ops-file /tmp/agami-correction-ops.json
+rm -f /tmp/agami-correction-ops.json
 ```
 
-Three outcomes:
+Stdout: `{applied, skipped, errors, validated, committed}`.
+- `validated: true` → surface `✓ Model updated and validated.`
+- `validated: false` → the engine already reverted; surface `errors` verbatim: "Your correction would break the model — here's what's wrong: …. The example is saved either way; the model wasn't updated."
 
-- **Exit 0** (PASSED) → atomically promote the staging directory:
-  - Directory-mode: `mv "$artifacts_dir/$profile" "$artifacts_dir/$profile.tmp_old" && mv "$staging" "$artifacts_dir/$profile" && rm -rf "$artifacts_dir/$profile.tmp_old"`. `chmod 755` on dirs, `chmod 644` on yaml/md files.
-  - Single-file mode (v1.0): `mv /tmp/agami-staging-<profile>.yaml ~/.agami/<profile>.yaml && chmod 600 ~/.agami/<profile>.yaml`.
-  - Surface `✓ Model updated and validated.`
-- **Exit 1** (FAILED) → **DO NOT PROMOTE.** Surface the validator's errors verbatim. Tell the user: "Your correction would break the OSI model — here's what's wrong: …. The example is saved either way; the model wasn't updated." Offer to retry with a fix.
-- **Exit 2** (TOOLING ERROR) → tell the user the validator is unavailable; ask them to install `pyyaml` and `jsonschema`. Don't write the model.
+**For `new_metric`** (a new file): write `subject_areas/<area>/metrics/<name>.yaml`, then validate the whole tree:
 
-There is no override path. If validation fails, the user's `<artifacts_dir>/<profile>/` is unchanged. The example library still got the correction (Phase 2 already happened).
+```bash
+python3 -m semantic_model.cli validate "$ROOT"   # exit 0 = ok, 1 = errors
+```
+Exit 1 → delete the file you just wrote (revert) and surface the errors. Exit 0 → commit best-effort (`git -C "$ROOT" add -A && git -C "$ROOT" commit -m "correction: new metric <name>"`).
 
-For `org_context` / `user_preference` corrections (which only touch ORGANIZATION.md / USER_MEMORY.md): no validator step. Write the file directly with `chmod 600`.
+There is no override path — a model that fails validation is never persisted; `<artifacts_dir>/<profile>/` is left unchanged. The example library still got the correction (Phase 2 already happened).
+
+For `org_context` / `user_preference` corrections (ORGANIZATION.md / USER_MEMORY.md only): no validator step. Write the file directly with `chmod 600`.
 
 ### 4d — confirmation
 
 ```
-✓ Correction appended to <artifacts_dir>/<profile>/examples.yaml
-✓ Model updated in <artifacts_dir>/<profile>/public.yaml:
+✓ Correction appended to <artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml
+✓ Model updated in <artifacts_dir>/<profile>/subject_areas/<area>/:
     - relationship orders_to_customers from_columns: [user_id] → [customer_id]
 ✓ Validator passed.
 
@@ -412,7 +383,7 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 
 - **Empty examples file** — initialize it with the new entry as the only one.
 - **`examples.yaml` missing** — invoke `agami-connect` first to seed, then append.
-- **User pastes SQL referencing tables not in the OSI model** — EXPLAIN-validate catches it (`table_not_found`); surface the remediation, don't save.
+- **User pastes SQL referencing tables not in the model** — EXPLAIN-validate catches it (`table_not_found`); surface the remediation, don't save.
 - **User saves a duplicate of an existing seed** — replace the seed (`source: correction`, fresh `created_at`).
 - **Most-recent query is itself a correction** — that's fine, attach to it.
 - **Validator fails on a model edit but the user really wants it saved** — they can hand-edit `<artifacts_dir>/<profile>/<schema>.yaml` directly and the next `query-database` will (try to) read it. The validator runs again from `connect verify` if they want to confirm. There is no "skip validation" path from this skill.
@@ -424,6 +395,6 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 ## Hard rules
 
 1. **Phase 2 (examples append) always runs.** Even if the user later changes their mind on the model edit, the example is already saved.
-2. **Phase 5 model writes are gated by the validator.** Exit-0 from `validate_semantic_model.py --directory` (or single-file mode for legacy installs) is the only way to write inside `<artifacts_dir>/<profile>/`. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
-3. **Edits stay OSI-conformant.** Don't invent fields. Don't add `custom_extensions` keys not listed in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md). When you can't express a correction within the OSI shape + documented Agami extensions, fall back to `sql_fix` (example only) and tell the user "I can save this as a few-shot example but it doesn't fit a model edit; want me to extend the spec?"
+2. **Phase 5 model writes are gated by the validator.** `cli curate` (for edits) and `cli validate` (for a new metric file) are the only ways to write inside `<artifacts_dir>/<profile>/`, and both refuse / revert on a validation failure. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
+3. **Edits stay valid against the model.** Don't invent fields — the Pydantic models (`scripts/semantic_model/models.py`) forbid unknown keys, so an invalid edit is rejected by the validator. When you can't express a correction within the model shape, fall back to `sql_fix` (example only) and tell the user "I can save this as a few-shot example but it doesn't fit a model edit."
 4. **Show the diff before mutating the model.** The user always gets to see and approve the proposed change.
