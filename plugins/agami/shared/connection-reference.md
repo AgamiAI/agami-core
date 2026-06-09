@@ -6,7 +6,7 @@ How `agami` connects to your database. Used by the `connect`, `query-database`, 
 
 These are non-negotiable. Skills that read this document must follow them under every circumstance.
 
-1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or `AGAMI_DATABASE_URL`). Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
+1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** — the sole credential source; there is no env-var bypass. Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
 2. **Never ask the user for connection details in chat.** Credentials live in `~/.agami/credentials` only. If the file is missing, invoke agami-connect Phase 0a (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
 3. **Never scan or guess.** Tool detection is `which <tool>` and `python3 -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `~/.agami/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
@@ -400,7 +400,7 @@ The DuckDB scanner approach currently has a similar weakness for cloud-credentia
 
 ## Reading Credentials
 
-Credentials live in `~/.agami/credentials` (an INI-style file, `chmod 600`) or are passed via the `AGAMI_DATABASE_URL` env var. Format spec: [`credentials-format.md`](credentials-format.md).
+Credentials live in `~/.agami/credentials` (an INI-style file, `chmod 600`) — the only source. Format spec: [`credentials-format.md`](credentials-format.md).
 
 ### Reading the file
 
@@ -415,21 +415,14 @@ case "$perms" in
     ;;
 esac
 
-# Parse a profile (default: [default])
-profile="${AGAMI_PROFILE:-default}"
+# Parse a profile (default: [main])
+profile="${AGAMI_PROFILE:-main}"
 # Use awk or python to extract host/port/user/password/database/type for the named profile
 ```
 
-### `AGAMI_DATABASE_URL` override
-
-Standard DSN, parsed by the native CLI / DuckDB / the Python driver the same way:
-
-```
-AGAMI_DATABASE_URL=postgres://user:password@host:5432/database
-AGAMI_DATABASE_URL=mysql://user:password@host:3306/database
-```
-
-When set, `~/.agami/credentials` is ignored.
+(A profile may set `url = <DSN>` instead of per-field values — that DSN is parsed
+the same way. There is no `AGAMI_DATABASE_URL` env-var override: credentials come
+only from `~/.agami/credentials`, so the one path stays auditable and chmod-gated.)
 
 ---
 

@@ -15,8 +15,8 @@ is importable). Connect-side and query-database both shell out to:
 The --sql-file form is preferred over --sql so SQL containing quotes,
 backticks, or `$` doesn't get mangled by the shell.
 
-Connects ONLY to the host/port in ~/.agami/credentials (or
-AGAMI_DATABASE_URL). Never substitutes localhost. Never asks for
+Connects ONLY to the host/port in ~/.agami/credentials (the sole credential
+source — no env-var bypass). Never substitutes localhost. Never asks for
 credentials. Hard exits with a clear message if credentials are missing.
 
 Drivers (install only what you need):
@@ -81,18 +81,15 @@ def _err(msg: str, *, code: int = 2) -> int:
 
 
 def _load_credentials(profile: str) -> dict[str, str]:
-    """Resolve credentials from ~/.agami/credentials or AGAMI_DATABASE_URL.
+    """Resolve credentials from ~/.agami/credentials (the ONLY source).
 
-    Resolution order:
-      1. AGAMI_DATABASE_URL env var (full DSN, supports +driver suffixes)
-      2. The selected profile in ~/.agami/credentials. Within the profile:
-         - If `url = ...` is set, parse as a DSN (overrides per-field values)
-         - Otherwise read host / port / user / password / database / type / sslmode
+    Within the selected profile:
+      - If `url = ...` is set, parse it as a DSN (overrides per-field values)
+      - Otherwise read host / port / user / password / database / type / sslmode
+
+    Credentials come only from the file — there is no env-var bypass. This keeps
+    the one credential path auditable (chmod 600, never on a command line).
     """
-    env_dsn = os.environ.get("AGAMI_DATABASE_URL")
-    if env_dsn:
-        return _parse_dsn(env_dsn)
-
     if not CREDENTIALS_PATH.exists():
         sys.stderr.write(
             "~/.agami/credentials is missing. Run the agami `init` skill to set it up.\n"

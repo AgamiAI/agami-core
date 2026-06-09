@@ -206,18 +206,6 @@ Run: chmod 600 ~/.agami/credentials
 
 The agami-connect Phase 0a sets the right permissions automatically when it writes the file. If you create it by hand, run `chmod 600 ~/.agami/credentials` afterwards.
 
-## Env var override: `AGAMI_DATABASE_URL`
-
-Power users can skip the file entirely and pass a standard DSN:
-
-```bash
-export AGAMI_DATABASE_URL=postgres://user:password@host:5432/database
-export AGAMI_DATABASE_URL=mysql://user:password@host:3306/database
-export AGAMI_DATABASE_URL=sqlite:///absolute/path/to/file.db
-```
-
-When set, `~/.agami/credentials` is ignored. Useful for piping in from 1Password CLI, vault, sops, etc., on each invocation.
-
 ## Profile selection
 
 The active profile is the one `init` recorded in `~/.agami/.config.active_profile` when you first set up. Override per shell session with:

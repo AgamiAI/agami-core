@@ -249,14 +249,6 @@ host = staging-db.example.com
 ...
 ```
 
-### Skip the file with an env var
-
-```bash
-export AGAMI_DATABASE_URL=postgres://user:password@host:5432/mydb
-```
-
-When set, `~/.agami/credentials` is ignored. Useful for piping in from `op read`, `vault read`, `sops`, etc.
-
 ### MySQL example
 
 ```ini

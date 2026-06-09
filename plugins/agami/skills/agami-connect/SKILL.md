@@ -65,7 +65,7 @@ If plan mode is not active, skip silently.
 
 Non-negotiable. They override every other instruction here when they conflict.
 
-1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or `AGAMI_DATABASE_URL`). Never connect to anything else. Never probe `localhost` unless the credentials say so. Never substitute defaults for missing fields.
+1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`.** That file is the sole credential source — there is no env-var bypass. Never connect to anything else. Never probe `localhost` unless the credentials say so. Never substitute defaults for missing fields.
 2. **Never ask the user for connection values (host / port / user / password / token / DSN) in chat.** Not even temporarily. The single authorized credential path is **Phase 0a**, which writes a `credentials.example` template the user fills in and saves. Phase 0a never reads secrets inline — it writes a template, surfaces a hand-off, and ends the turn.
 3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `python3 -c 'import <module>'`.
 4. **If credentials are missing for the active profile, run Phase 0a.** After the user fills in the template they re-invoke (or just ask a data question — `agami-query-database` auto-invokes us).
@@ -76,8 +76,8 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 ### Preflight steps
 
 1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `~/.agami/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
-2. **Credentials check (binding).** Read `~/.agami/credentials`; look for `[<profile>]`. If the file or section is missing and `AGAMI_DATABASE_URL` is unset → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."* If credentials exist, apply the chmod check (refuse if world-readable).
-3. **Resolve connection fields** from the `[<profile>]` section (or `AGAMI_DATABASE_URL`). Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
+2. **Credentials check (binding).** Read `~/.agami/credentials`; look for `[<profile>]`. If the file or section is missing → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."* If credentials exist, apply the chmod check (refuse if world-readable).
+3. **Resolve connection fields** from the `[<profile>]` section. Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
 4. **Tool detection.** Read cached tool paths from `~/.agami/.config`; if absent, run detection per Phase 0a.
 5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → `~/.agami/.config.artifacts_dir` → `$HOME/agami-artifacts`. The model lives in `<artifacts_dir>/<profile>/`. Create lazily (`mkdir -p … && chmod 755 …`).
 6. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
@@ -96,7 +96,7 @@ mkdir -p ~/.agami && chmod 700 ~/.agami
 
 ### 0a.2 — Ask the database type
 
-Skip if `AGAMI_DATABASE_URL` is set. Otherwise **AskUserQuestion** (no `(Recommended)` — fact-of-environment). Cap at 4 visible + Other:
+**AskUserQuestion** (no `(Recommended)` — fact-of-environment). Cap at 4 visible + Other:
 
 | label | description |
 |---|---|
