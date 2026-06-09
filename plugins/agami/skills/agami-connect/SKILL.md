@@ -373,11 +373,12 @@ This runs on **every** invocation. The user's yes/skip is theirs; the skill neve
 
 Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Two very different sources qualify, so ask once and branch on the answer. **AskUserQuestion** (multi-select; the repo path is the high-value one — it encodes metrics + joins, not just structure):
 
-> Got an existing data model I can read? Two kinds help:
+> Got an existing data model or metrics list I can read? Three kinds help:
 > • **A doc** — ERD, data dictionary, schema diagram (PDF, PNG/JPG, text, markdown, CSV).
+> • **A metrics / KPI list** — a spreadsheet, CSV, or doc of your metrics and how each is defined (e.g. "Approval rate = approved ÷ applications"). I'll turn each into a reusable metric so answers match your numbers.
 > • **A semantic-layer / transform repo** — LookML, dbt, Cube, MetricFlow. These define your metrics, dimensions, and joins explicitly, which is gold for NL→SQL accuracy. They're usually git-backed — just point me at the folder.
 
-Options: `Doc — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Both` / `Skip — nothing to share`.
+Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Both` / `Skip — nothing to share`.
 
 **If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). `.xlsx`/`.docx` → ask for PDF, proceed without if not.
 
@@ -435,11 +436,21 @@ For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. V
 
 Propose `entities[]` per subject area — the names users actually say. For each, fill `name`, `plural`, `other_names` (synonyms), `maps_to` (table+column, one `primary: true`), and — for opaque-identifier columns — a `value_pattern` regex (e.g. a VIN `^[A-Z0-9]{17}$`, a `BP`-prefixed serial) so the runtime can recognize literals. Ground these in column names + samples + the domain doc; don't invent entities the schema doesn't support. Write into `subject_areas/<area>/entities/<name>.yaml`; validate.
 
-### 2c — Metrics (user-confirmed only — never auto-write)
+### 2c — Metrics
 
-Metrics drift fast across domains, so **suggest, don't auto-add.** Per subject area propose **at most 4** candidates (hard cap — AskUserQuestion fits ~4 + Other) from: aggregate-shaped numeric fields (SUM/AVG), fact tables (`count_<table>`), time fields (daily counts), and `ORGANIZATION.md` / data-doc KPI definitions.
+Metrics come from two sources, handled very differently. **Always prefer declared metrics** — schema-only inference is a shallow guess (it finds `AVG(score)`, a row count, an `AVG(FOIR)`; it misses the domain KPIs a lender actually tracks — DPD/delinquency buckets, disbursement, approval rate, PAR — because those aren't visible in column names).
 
-**AskUserQuestion** multi-select: "I'd suggest these reusable metrics — pick which make sense." Pre-check doc-grounded ones; `Other (Other field)` for "describe a metric I want". No "None" option — submitting with none checked is the skip. For each picked metric write `name`, prose `calculation` (intent — **required**, drafted from the column comment → ORGANIZATION.md → an LLM one-liner), per-dialect `bindings` (the SQL), `source_tables`, `other_names`, `confidence: proposed`. Validate before write; drop + one-liner on failure. Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join (then put them under the cross-cutting area).
+**(A) Declared metrics — extract in FULL, no cap.** If the user attached a semantic-layer repo or a metrics file in 1.5 (`$DATA_MODEL_DOC_TEXT`), those are the org's *real* definitions — pull **every** one, don't sample to 4:
+- **LookML** `measure {}` → metric: `type` + `sql` → `bindings`, `label`/`description` → `calculation`, `label`+`view_label` → `other_names`.
+- **dbt** `metrics:` / `semantic_models[].measures` (MetricFlow) → name, `agg`+`expr` → `bindings`, `description`/`label` → `calculation` + `other_names`.
+- **Cube** `measures` → `sql`+`type` → `bindings`.
+- **Metrics file** (CSV/YAML/markdown KPI dictionary the user uploaded) → one metric per row/entry: name, definition → `calculation`, formula → `bindings`.
+
+Translate the declared SQL/agg to the profile's dialect for `bindings`, set `source_tables`, write **`confidence: inferred, review_state: unreviewed`** (declared = strong signal, still wants a human sign-off in `/agami-review`). If there are many (> ~8), **don't** funnel them through a 4-item picker — write them all and tell the user once: *"Added N metrics from your `<LookML/dbt/file>` — review or trim them in /agami-review."* (Offer a single "add all N / let me pick a subset" confirm if you want, but never silently drop declared metrics to fit a cap.)
+
+**(B) Inferred metrics — only when there's no declared source (or to supplement a thin one).** These genuinely drift, so **suggest, don't auto-add**, capped at ~4 (AskUserQuestion fits ~4 + Other) from: aggregate-shaped numeric fields (SUM/AVG), fact tables (`count_<table>`), time fields, `ORGANIZATION.md` KPI mentions. **AskUserQuestion** multi-select: "I'd suggest these reusable metrics — pick which make sense." `Other (Other field)` for "describe a metric I want"; submitting none = skip. Write `confidence: proposed`.
+
+For every metric (A or B) fill `name`, prose `calculation` (intent — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`; validate before write, drop + one-liner on failure. Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join (then put them under the cross-cutting area).
 
 ### 2d — Caveats, value_transforms, currency
 
