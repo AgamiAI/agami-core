@@ -29,8 +29,12 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+# Introspection-run timestamp for system sign-offs on auto-approved structure.
+_NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 from . import build
 from . import dialects as D
@@ -366,10 +370,17 @@ def _build_relationships(
             card = build.infer_cardinality(ft, tt, [fc], [tc], grain_by_table)
             # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap
             confidence = "confirmed" if dialect.fk_enforced else "inferred"
+            # enforced-FK joins are trustworthy structure -> auto-approve with a system
+            # sign-off (don't flood the review queue); unenforced/probed ones need a glance.
+            kw: dict = {}
+            if dialect.fk_enforced:
+                kw = {"review_state": "approved", "signed_off_by": "agami_introspect",
+                      "signed_off_role": "system", "signed_off_at": _NOW}
+            else:
+                kw = {"review_state": "unreviewed"}
             rels.append(Relationship(
                 from_table=ft, from_column=fc, to_table=tt, to_column=tc,
-                relationship=card, join_type="LEFT", confidence=confidence,
-                review_state="unreviewed",
+                relationship=card, join_type="LEFT", confidence=confidence, **kw,
             ))
         return rels
 

@@ -195,6 +195,14 @@ class Column(_Base):
     value_transform: Optional[str] = None
     denormalized_from: Optional[DenormalizedFrom] = None
     caveats: list[str] = Field(default_factory=list)
+    # curation/trust — structure is trusted by default (introspected); the curator
+    # sets review_state='rejected' via /agami-model to exclude a column from the
+    # runtime, or signs off enriched detail via /agami-review.
+    confidence: Confidence = "confirmed"
+    review_state: ReviewState = "approved"
+    signed_off_by: Optional[str] = None
+    signed_off_at: Optional[str] = None
+    signed_off_role: Optional[str] = None
 
     @field_validator("caveats")
     @classmethod
@@ -248,6 +256,14 @@ class Table(_Base):
 
     # importer composition hook (v2; nothing consumes it in v1).
     inherits_columns_from: Optional[str] = None
+
+    # curation/trust — structure trusted by default; reject via /agami-model to
+    # exclude the whole table from the runtime.
+    confidence: Confidence = "confirmed"
+    review_state: ReviewState = "approved"
+    signed_off_by: Optional[str] = None
+    signed_off_at: Optional[str] = None
+    signed_off_role: Optional[str] = None
 
     columns: list[Column] = Field(default_factory=list)
 
@@ -334,6 +350,12 @@ class Entity(_Base):
     caveats: list[str] = Field(default_factory=list)
     # rare override: force a clarifying question even when resolution is confident
     clarification_strictness: Optional[Literal["normal", "high"]] = None
+    # curation/trust — LLM-proposed entities default approved; reject to drop.
+    confidence: Confidence = "confirmed"
+    review_state: ReviewState = "approved"
+    signed_off_by: Optional[str] = None
+    signed_off_at: Optional[str] = None
+    signed_off_role: Optional[str] = None
 
     @model_validator(mode="after")
     def _one_primary(self) -> "Entity":
@@ -367,6 +389,10 @@ class Metric(_Base):
     confidence: Confidence = "proposed"
     source: Optional[str] = None
     review_state: ReviewState = "unreviewed"
+    # sign-off attribution (Rule 1: metrics require sign-off before runtime use)
+    signed_off_by: Optional[str] = None
+    signed_off_at: Optional[str] = None
+    signed_off_role: Optional[str] = None
 
     @field_validator("calculation")
     @classmethod

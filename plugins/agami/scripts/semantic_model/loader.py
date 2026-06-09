@@ -65,8 +65,13 @@ def _read_yaml(path: Path) -> Any:
         return yaml.safe_load(fh)
 
 
-def load_organization(root: str | Path) -> Organization:
-    """Parse a v2 profile directory into an Organization model."""
+def load_organization(root: str | Path, *, include_rejected: bool = False) -> Organization:
+    """Parse a v2 profile directory into an Organization model.
+
+    By default, entries the curator excluded (`review_state: rejected`) are dropped
+    so the runtime never sees them. Pass `include_rejected=True` for the curation
+    tools (agami-model / agami-review), which must show excluded entries to toggle them.
+    """
     root = Path(root)
     org_path = root / "org.yaml"
     if not org_path.exists():
@@ -95,7 +100,7 @@ def load_organization(root: str | Path) -> Organization:
         if not sa_dir.exists():
             # also accept a bare name under subject_areas/
             sa_dir = root / "subject_areas" / str(sa_ref)
-        subject_areas.append(_load_subject_area(sa_dir))
+        subject_areas.append(_load_subject_area(sa_dir, include_rejected=include_rejected))
 
     org = Organization(
         organization=org_doc.get("organization", root.name),
@@ -111,26 +116,44 @@ def load_organization(root: str | Path) -> Organization:
     return org
 
 
-def _load_subject_area(sa_dir: Path) -> SubjectArea:
+def _rejected(obj) -> bool:
+    return getattr(obj, "review_state", None) == "rejected"
+
+
+def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectArea:
     sa_doc: dict[str, Any] = _read_yaml(sa_dir / "subject_area.yaml") or {}
 
     tables_defined: list[Table] = []
     tdir = sa_dir / "tables"
     if tdir.exists():
         for tf in sorted(tdir.glob("*.yaml")):
-            tables_defined.append(Table(**(_read_yaml(tf) or {})))
+            t = Table(**(_read_yaml(tf) or {}))
+            if not include_rejected:
+                if _rejected(t):
+                    continue  # whole table excluded by the curator
+                # drop per-column exclusions
+                t.columns = [c for c in t.columns if not _rejected(c)]
+            tables_defined.append(t)
+
+    live_tables = {t.name for t in tables_defined}
 
     entities: list[Entity] = []
     edir = sa_dir / "entities"
     if edir.exists():
         for ef in sorted(edir.glob("*.yaml")):
-            entities.append(Entity(**(_read_yaml(ef) or {})))
+            e = Entity(**(_read_yaml(ef) or {}))
+            if not include_rejected and _rejected(e):
+                continue
+            entities.append(e)
 
     metrics: list[Metric] = []
     mdir = sa_dir / "metrics"
     if mdir.exists():
         for mf in sorted(mdir.glob("*.yaml")):
-            metrics.append(Metric(**(_read_yaml(mf) or {})))
+            mm = Metric(**(_read_yaml(mf) or {}))
+            if not include_rejected and _rejected(mm):
+                continue
+            metrics.append(mm)
 
     relationships: list[Relationship] = []
     rel_file = sa_dir / "relationships.yaml"
@@ -139,13 +162,25 @@ def _load_subject_area(sa_dir: Path) -> SubjectArea:
         if isinstance(rels_doc, dict):
             rels_doc = rels_doc.get("relationships", [])
         for r in rels_doc:
-            relationships.append(Relationship(**r))
+            rel = Relationship(**r)
+            if not include_rejected:
+                # drop rejected joins, and joins whose endpoint table was excluded
+                if _rejected(rel):
+                    continue
+                if (rel.from_table.split(".")[-1] not in live_tables
+                        or rel.to_table.split(".")[-1] not in live_tables):
+                    continue
+            relationships.append(rel)
+
+    # TableRefs are kept as-is — they resolve org-wide (multi-membership), and a
+    # ref to a rejected table simply won't resolve at runtime.
+    table_refs = [TableRef(**t) for t in (sa_doc.get("tables", []) or [])]
 
     return SubjectArea(
         name=sa_doc.get("name", sa_dir.name),
         description=sa_doc.get("description", ""),
         default_time_window=sa_doc.get("default_time_window"),
-        tables=[TableRef(**t) for t in (sa_doc.get("tables", []) or [])],
+        tables=table_refs,
         tables_defined=tables_defined,
         entities=entities,
         metrics=metrics,

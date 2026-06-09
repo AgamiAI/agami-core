@@ -96,6 +96,31 @@ def cmd_preflight(args) -> int:
     return 0
 
 
+def cmd_review_queue(args) -> int:
+    from . import curate
+    org = L.load_organization(args.root)
+    _print_json(curate.review_queue(org))
+    return 0
+
+
+def cmd_model_tree(args) -> int:
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    _print_json(curate.model_tree(org))
+    return 0
+
+
+def cmd_curate(args) -> int:
+    from . import curate
+    with open(args.ops_file) as fh:
+        ops = json.load(fh)
+    if isinstance(ops, dict):
+        ops = ops.get("ops", [])
+    res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
+    _print_json(res.as_dict())
+    return 0 if res.validated else 1
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
@@ -164,6 +189,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--sql", required=True)
     sp.set_defaults(func=cmd_preflight)
+
+    sp = sub.add_parser("review-queue", help="trust-review items needing sign-off (Rule 1/2)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_review_queue)
+
+    sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_model_tree)
+
+    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
+    sp.add_argument("root")
+    sp.add_argument("--ops-file", required=True, help="JSON file: a list of op objects (or {ops:[...]})")
+    sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
+    sp.add_argument("--role", default=None, help="sign-off role for approve ops")
+    sp.set_defaults(func=cmd_curate)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)
