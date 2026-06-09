@@ -229,7 +229,7 @@ For every other kind, you propose a model edit and run the validator BEFORE writ
 
 ### 4a — propose the edit
 
-Model edits go through the curation engine (`semantic_model.cli curate "$ROOT" --ops-file …`), which validates + commits + reverts on failure — you don't stage/validate/promote by hand. `ROOT="<artifacts_dir>/<profile>"`. Resolve the subject `<area>` for an affected table the same way as Phase 2 (the area whose `tables_defined` holds it). The new-metric case writes a YAML file directly (curate edits existing entries; it doesn't create files), then validates via `cli validate`.
+Model edits go through the curation engine (`semantic_model.cli curate "$ROOT" --ops-file …`), which validates + commits + reverts on failure — you don't stage/validate/promote by hand. `ROOT="<artifacts_dir>/<profile>"`. Resolve the subject `<area>` for an affected table the same way as Phase 2 (the area whose `tables_defined` holds it). The new-metric case uses `cli add --kind metric` (curate's `--ops-file` edits existing entries; `add` creates them) — same validate + commit + revert guarantees.
 
 | Edit kind | How |
 |---|---|
@@ -351,12 +351,12 @@ Stdout: `{applied, skipped, errors, validated, committed}`.
 - `validated: true` → surface `✓ Model updated and validated.`
 - `validated: false` → the engine already reverted; surface `errors` verbatim: "Your correction would break the model — here's what's wrong: …. The example is saved either way; the model wasn't updated."
 
-**For `new_metric`** (a new file): write `subject_areas/<area>/metrics/<name>.yaml`, then validate the whole tree:
+**For `new_metric`** (creating an entry): use the packaged `add` command — don't hand-write the YAML. It validates the item + the whole tree, writes `subject_areas/<area>/metrics/<slug>.yaml`, reverts on failure, and commits. Put the one metric in a JSON array:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" validate "$ROOT"   # exit 0 = ok, 1 = errors
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file /tmp/agami-new-metric.json
 ```
-Exit 1 → delete the file you just wrote (revert) and surface the errors. Exit 0 → commit best-effort (`git -C "$ROOT" add -A && git -C "$ROOT" commit -m "correction: new metric <name>"`).
+Same `{applied, skipped, errors, validated, committed}` contract as above: `validated: false` → it already reverted, surface `errors`; `skipped` → the metric was structurally invalid (e.g. missing `calculation`), surface the reason.
 
 There is no override path — a model that fails validation is never persisted; `<artifacts_dir>/<profile>/` is left unchanged. The example library still got the correction (Phase 2 already happened).
 
@@ -395,6 +395,6 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 ## Hard rules
 
 1. **Phase 2 (examples append) always runs.** Even if the user later changes their mind on the model edit, the example is already saved.
-2. **Phase 5 model writes are gated by the validator.** `cli curate` (for edits) and `cli validate` (for a new metric file) are the only ways to write inside `<artifacts_dir>/<profile>/`, and both refuse / revert on a validation failure. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
+2. **Phase 5 model writes are gated by the validator.** `cli curate` (edits existing entries) and `cli add` (creates a new metric/entity) are the only ways to write inside `<artifacts_dir>/<profile>/`, and both refuse / revert on a validation failure. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
 3. **Edits stay valid against the model.** Don't invent fields — the Pydantic models (`scripts/semantic_model/models.py`) forbid unknown keys, so an invalid edit is rejected by the validator. When you can't express a correction within the model shape, fall back to `sql_fix` (example only) and tell the user "I can save this as a few-shot example but it doesn't fit a model edit."
 4. **Show the diff before mutating the model.** The user always gets to see and approve the proposed change.

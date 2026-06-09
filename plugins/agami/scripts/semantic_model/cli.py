@@ -142,6 +142,18 @@ def cmd_curate(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_add(args) -> int:
+    from . import curate
+    with open(args.file) as fh:
+        items = json.load(fh)
+    if isinstance(items, dict):
+        items = items.get(args.kind + "s", items.get("items", []))
+    res = curate.write_items(args.root, args.area, args.kind, items,
+                             signer=args.signer, role=args.role)
+    _print_json(res.as_dict())
+    return 0 if res.validated else 1
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
@@ -229,6 +241,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
     sp.add_argument("--role", default=None, help="sign-off role for approve ops")
     sp.set_defaults(func=cmd_curate)
+
+    sp = sub.add_parser("add", help="create metric/entity YAMLs from a JSON file (validated, revertable)")
+    sp.add_argument("root")
+    sp.add_argument("--kind", required=True, choices=["metric", "entity"])
+    sp.add_argument("--area", required=True)
+    sp.add_argument("--file", required=True, help="JSON: a list of items (or {metrics:[…]}/{entities:[…]})")
+    sp.add_argument("--signer", default=None)
+    sp.add_argument("--role", default=None)
+    sp.set_defaults(func=cmd_add)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)

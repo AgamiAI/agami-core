@@ -22,6 +22,7 @@ Locators address an entry uniquely: {kind, area, name, [column]} where kind ∈
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +32,7 @@ import yaml
 
 from . import validator as V
 from .loader import load_organization
-from .models import Organization
+from .models import Entity, Metric, Organization
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +347,80 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True)
 
 
+_KINDS = {"metric": ("metrics", Metric), "entity": ("entities", Entity)}
+
+
+def _slug(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return s or "unnamed"
+
+
+def write_items(root: str | Path, area: str, kind: str, items: list[dict],
+                *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
+    """Create metric/entity YAML files from structured dicts — one validated,
+    revertable batch. This is the packaged path for *creating* enrichment entries
+    (e.g. the many metrics extracted from a LookML/dbt repo), so a skill never
+    hand-writes YAML file-by-file or authors a throwaway script to loop. Each item
+    is structurally validated against its Pydantic model; the whole model is then
+    validated and the batch is reverted (new files removed, overwritten files
+    restored) if it fails — no git dependency for the revert."""
+    root = Path(root)
+    res = ApplyResult()
+    if kind not in _KINDS:
+        res.errors.append(f"unknown kind {kind!r} (expected metric|entity)")
+        return res
+    subdir, Model = _KINDS[kind]
+    dest = _area_dir(root, area) / subdir
+    backups: list[tuple[Path, Optional[str]]] = []  # (path, prior text or None if new)
+
+    for item in items:
+        try:
+            obj = Model(**item)  # structural validation (required fields, enums, …)
+        except Exception as e:
+            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
+            continue
+        path = dest / f"{_slug(obj.name)}.yaml"
+        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+        dest.mkdir(parents=True, exist_ok=True)
+        _dump(path, obj.model_dump(mode="json", exclude_none=True))
+        res.applied.append(f"{kind} {area}/{obj.name}")
+
+    if not res.applied:
+        return res  # nothing valid to write
+
+    # validate the whole model; revert the batch on any failure
+    try:
+        vres = V.validate(load_organization(root, include_rejected=True))
+        res.validated = vres.ok
+        if not vres.ok:
+            res.errors = vres.errors
+            _restore(backups)
+            res.applied = []
+            return res
+    except Exception as e:
+        res.errors.append(f"validation failed to run: {e}")
+        _restore(backups)
+        res.applied = []
+        return res
+
+    _append_curation_log(
+        root, [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]}
+               for a in res.applied], signer, role)
+    res.committed = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
+    return res
+
+
+def _restore(backups: list[tuple[Path, Optional[str]]]) -> None:
+    for path, prior in backups:
+        try:
+            if prior is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(prior, encoding="utf-8")
+        except OSError:
+            pass
+
+
 def _git_commit(root: Path, msg: str) -> bool:
     if not (root / ".git").exists():
         return False
@@ -377,4 +452,4 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
         pass
 
 
-__all__ = ["review_queue", "all_items", "model_tree", "apply", "ApplyResult"]
+__all__ = ["review_queue", "all_items", "model_tree", "apply", "write_items", "ApplyResult"]

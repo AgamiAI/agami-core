@@ -434,7 +434,12 @@ For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. V
 
 ### 2b — Entities (the semantic vocabulary)
 
-Propose `entities[]` per subject area — the names users actually say. For each, fill `name`, `plural`, `other_names` (synonyms), `maps_to` (table+column, one `primary: true`), and — for opaque-identifier columns — a `value_pattern` regex (e.g. a VIN `^[A-Z0-9]{17}$`, a `BP`-prefixed serial) so the runtime can recognize literals. Ground these in column names + samples + the domain doc; don't invent entities the schema doesn't support. Write into `subject_areas/<area>/entities/<name>.yaml`; validate.
+Propose `entities[]` per subject area — the names users actually say. For each, fill `name`, `plural`, `other_names` (synonyms), `maps_to` (table+column, one `primary: true`), and — for opaque-identifier columns — a `value_pattern` regex (e.g. a VIN `^[A-Z0-9]{17}$`, a `BP`-prefixed serial) so the runtime can recognize literals. Ground these in column names + samples + the domain doc; don't invent entities the schema doesn't support.
+
+**Write them with the packaged command, not by hand** — build a JSON array and run it once (it validates each item, writes `subject_areas/<area>/entities/<slug>.yaml`, validates the whole model, reverts on failure, commits). Never author a throwaway script to loop:
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind entity --area <area> --file /tmp/agami-entities.json
+```
 
 ### 2c — Metrics
 
@@ -450,7 +455,11 @@ Translate the declared SQL/agg to the profile's dialect for `bindings`, set `sou
 
 **(B) Inferred metrics — only when there's no declared source (or to supplement a thin one).** These genuinely drift, so **suggest, don't auto-add**, capped at ~4 (AskUserQuestion fits ~4 + Other) from: aggregate-shaped numeric fields (SUM/AVG), fact tables (`count_<table>`), time fields, `ORGANIZATION.md` KPI mentions. **AskUserQuestion** multi-select: "I'd suggest these reusable metrics — pick which make sense." `Other (Other field)` for "describe a metric I want"; submitting none = skip. Write `confidence: proposed`.
 
-For every metric (A or B) fill `name`, prose `calculation` (intent — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`; validate before write, drop + one-liner on failure. Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join (then put them under the cross-cutting area).
+For every metric (A or B) fill `name`, prose `calculation` (intent — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`. **Write them with the packaged command** — build a JSON array and run it once; never hand-write each YAML and never author a throwaway loop script. It validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, validates the whole model, and reverts the batch on failure:
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file /tmp/agami-metrics.json
+```
+Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join (then put them under the cross-cutting area).
 
 ### 2d — Caveats, value_transforms, currency
 

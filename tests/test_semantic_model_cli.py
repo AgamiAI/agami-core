@@ -81,6 +81,24 @@ def test_prepare_auto_rewrites_fan_trap(tmp_path):
     assert "deleted_at IS NULL" in d["sql"]           # + default_filter applied
 
 
+def test_add_writes_metrics_and_skips_invalid(tmp_path):
+    # packaged creation path (replaces hand-writing YAML / a throwaway loop script):
+    # writes validated metric files, and an invalid item is skipped — never written
+    _model(tmp_path)
+    from semantic_model import curate
+    res = curate.write_items(tmp_path, "s", "metric", [
+        {"name": "Total Outstanding", "calculation": "sum of balance",
+         "bindings": {"PostgreSQL": "SUM(orders.total)"}, "source_tables": ["orders"],
+         "other_names": ["exposure"], "confidence": "inferred", "review_state": "unreviewed"}])
+    assert res.validated and res.applied
+    assert (tmp_path / "subject_areas" / "s" / "metrics" / "total_outstanding.yaml").exists()
+
+    res2 = curate.write_items(tmp_path, "s", "metric",
+                              [{"name": "No Calc", "bindings": {"PostgreSQL": "SUM(x)"}}])
+    assert not res2.applied and res2.skipped              # missing required `calculation`
+    assert not (tmp_path / "subject_areas" / "s" / "metrics" / "no_calc.yaml").exists()
+
+
 def test_no_model_root_exits_3_cleanly(tmp_path):
     # an empty root has no org.yaml — the CLI returns a clean no_model signal (exit 3),
     # not a traceback, so callers fold the existence check into their first real call
