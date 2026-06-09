@@ -210,6 +210,21 @@ If `which psql` is empty, try the Homebrew libpq glob once. **Forbidden:** `pgre
 
 agami's introspection + execution route through `scripts/execute_sql.py` (the Python-driver tier), which speaks every supported dialect. Native CLIs (`psql`/`mysql`/`snowsql`/`sqlite3`/`bq`) are used for the fast path when present. If the relevant driver is missing, surface the install hint (`pip install pymssql` / `oracledb` / `databricks-sql-connector` / `trino` / `duckdb`, etc.) and **confirm via AskUserQuestion** before any `brew`/`pip` install.
 
+### 0a.5b — Ensure the semantic-model dependencies
+
+The model (introspection, validation, traversal, curation — everything the `sm` wrapper drives) needs **`pydantic` + `sqlglot` + `pyyaml`** in the interpreter agami uses. Check the resolved interpreter (`$AGAMI_PYTHON` → `.config` `tool_paths.python3` → `python3`):
+
+```bash
+"$PY" -c 'import pydantic, sqlglot, yaml' 2>/dev/null && echo "model deps OK"
+```
+
+If they're present, continue. If missing, **confirm via AskUserQuestion before installing** (same convention as the DB-driver install above — agami never installs silently):
+> agami needs `pydantic`, `sqlglot`, and `pyyaml` to build and read the semantic model. Install them now? (one-time, user-site — `pip install --user`)
+
+On **Yes**: `"$PY" -m pip install --user -r "$AGAMI_PLUGIN_ROOT/scripts/semantic_model/requirements.txt"` (fall back to a plain `pip install` if `--user` is rejected). On **No**: stop with *"Can't build the model without those — re-run when you're ready to install."* — don't proceed to introspect.
+
+(The `sm` wrapper also self-installs these on first use as a safety net, but doing it here makes it explicit, confirmed, and at a predictable moment rather than mid-introspection.)
+
 ### 0a.6 — Ask for `<artifacts_dir>`
 
 **AskUserQuestion** (two named options; never label one "Other"):
