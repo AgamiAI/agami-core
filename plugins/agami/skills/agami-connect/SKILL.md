@@ -1,7 +1,7 @@
 ---
 name: agami-connect
 description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes ~/.agami/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by scripts/semantic_model (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
-when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect the schema' / 'reload schema' / 'add a new database', or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query-database the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query."
+when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query-database the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query."
 argument-hint: "[reintrospect | profile NAME]"
 ---
 
@@ -76,7 +76,10 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 ### Preflight steps
 
 1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `~/.agami/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
-2. **Credentials check (binding).** Read `~/.agami/credentials`; look for `[<profile>]`. If the file or section is missing → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."* If credentials exist, apply the chmod check (refuse if world-readable).
+2. **Credentials check (binding).** Read `~/.agami/credentials`; look for `[<profile>]`.
+   - File present with the section → apply the chmod check (refuse if world-readable), continue.
+   - File missing **but `~/.agami/credentials.example` exists** → the user filled in the template; **run 0a.10 to promote it** (don't re-run 0a.4 — that would overwrite their edits).
+   - Neither present → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."*
 3. **Resolve connection fields** from the `[<profile>]` section. Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
 4. **Tool detection.** Read cached tool paths from `~/.agami/.config`; if absent, run detection per Phase 0a.
 5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → `~/.agami/.config.artifacts_dir` → `$HOME/agami-artifacts`. The model lives in `<artifacts_dir>/<profile>/`. Create lazily (`mkdir -p … && chmod 755 …`).
@@ -124,8 +127,10 @@ Use the **Write tool**. Shared header first, then the `$DB_TYPE` body with `[$PR
 
 **Header:**
 ```ini
-# ~/.agami/credentials
-# Fill in your values and save as ~/.agami/credentials, then: chmod 600 ~/.agami/credentials
+# ~/.agami/credentials.example
+# Fill in your values below, then come back and say "introspect my database".
+# agami moves this file to ~/.agami/credentials and chmod-600s it for you — no
+# manual save or chmod needed. (Don't rename it yourself.)
 # Format reference: plugins/agami/shared/credentials-format.md
 # Switch profiles with AGAMI_PROFILE=<name>.
 ```
@@ -256,15 +261,32 @@ Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`sh
 ✓ Artifacts dir: <resolved path>
 
 Next:
-1. Edit ~/.agami/credentials.example with your real connection details
-2. Save it as ~/.agami/credentials
-3. Run: chmod 600 ~/.agami/credentials
-4. Come back and ask a data question — I'll pick up the introspect from here.
+1. Open ~/.agami/credentials.example and fill in your real connection details
+   (keep the filename as-is — don't rename it).
+2. Come back and say "introspect my database" — I'll secure the file and run the
+   full introspect → enrich → seed flow.
+
+Heads-up: a cold cloud warehouse (Snowflake especially) makes introspect the slow
+step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
 ```
 **End the turn.** Do NOT continue to Phase 1.
 
-### 0a.10 — On re-entry (credentials now exist)
-Preflight step 2 succeeds; continue. **Run `setup_pgauth.py --all`** before the first native-CLI query (writes `.pgpass` / `.mysql.cnf` so passwords never hit the command line). Idempotent.
+### 0a.10 — On re-entry: promote the filled-in template, then continue
+The user filled in `~/.agami/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it for them** — no manual save, no `chmod` step, no helper script. One command: the `mv` consumes the template (we don't keep `.example` around); the `grep` guard refuses to promote a still-unedited template:
+
+```bash
+if [ ! -f ~/.agami/credentials ] && [ -f ~/.agami/credentials.example ]; then
+  if grep -qE 'your-(username|password|host|server|workspace|coordinator|database|token)|dapiXXX|/absolute/path/to|user:pass@host' ~/.agami/credentials.example; then
+    echo "PLACEHOLDERS_REMAIN"
+  else
+    mv ~/.agami/credentials.example ~/.agami/credentials && chmod 600 ~/.agami/credentials && echo "SECURED"
+  fi
+fi
+```
+- `PLACEHOLDERS_REMAIN` → tell the user which fields still hold template values and **stop** (never introspect against a template).
+- `SECURED` → `~/.agami/credentials` now exists (chmod 600, `.example` consumed). Preflight step 2 passes.
+
+**Run `setup_pgauth.py --all`** before the first native-CLI query (writes `.pgpass` / `.mysql.cnf` so passwords never hit the command line). Idempotent. Then continue to Phase 1.
 
 ---
 
@@ -312,12 +334,26 @@ This runs on **every** invocation. The user's yes/skip is theirs; the skill neve
 
 `Yes — I'll type it now (Other field)` → write to `<artifacts_dir>/<profile>/ORGANIZATION.md` under `# About this database` + the commented default template. `Skip — I'll edit ORGANIZATION.md later (Recommended)` → write the template untouched. `chmod 600`. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
 
-### 1.5 — Data-model document upload (MANDATORY — ALWAYS ASK)
+### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 
-Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. **AskUserQuestion:**
-> Got a data-model document I can read? An ERD, data dictionary, schema doc — PDF, PNG/JPG, text, markdown, or CSV. (Excel/Word → save as PDF first.)
+Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Two very different sources qualify, so ask once and branch on the answer. **AskUserQuestion** (multi-select; the repo path is the high-value one — it encodes metrics + joins, not just structure):
 
-`Yes — I'll attach it now (Other field)` → `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). Stash as `$DATA_MODEL_DOC_TEXT` for enrichment. **Never written to disk** — lives only in the enrichment prompt, then discarded. `.xlsx`/`.docx` → ask for PDF, proceed without if not. `Skip — no doc to share`.
+> Got an existing data model I can read? Two kinds help:
+> • **A doc** — ERD, data dictionary, schema diagram (PDF, PNG/JPG, text, markdown, CSV).
+> • **A semantic-layer / transform repo** — LookML, dbt, Cube, MetricFlow. These define your metrics, dimensions, and joins explicitly, which is gold for NL→SQL accuracy. They're usually git-backed — just point me at the folder.
+
+Options: `Doc — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Both` / `Skip — nothing to share`.
+
+**If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). `.xlsx`/`.docx` → ask for PDF, proceed without if not.
+
+**If a semantic-layer repo:** ask for the directory (a local clone / monorepo path — no upload needed since it's git-backed). Glob the **definition** files and `Read` them up to a budget (~30 files / ~250 KB total; if larger, prefer metric/model definitions and tell the user what you sampled). **Skip compiled SQL and data files** — you want the declared metrics/joins, not the warehouse output:
+> | Layer | Read these | Carries |
+> |---|---|---|
+> | **LookML** | `*.view.lkml`, `*.explore.lkml`, `*.model.lkml` | dimensions, **measures** (→ metrics), **joins** (→ relationships), `sql_table_name` |
+> | **dbt** | `models/**/*.yml` (esp. `schema.yml`), `semantic_models/**`, `metrics/**`, `dbt_project.yml` | column descriptions, `relationships` tests (→ FKs), MetricFlow metrics/measures |
+> | **Cube** | `model/**/*.{yml,js}` (or `schema/**`) | `measures`, `dimensions`, `joins` |
+
+Stash everything gathered (doc text + repo definitions) as `$DATA_MODEL_DOC_TEXT` for enrichment — give entities/metrics/relationships found here **`confidence: inferred`** (a declared metric is a strong signal but still wants a human sign-off; FK-derived joins stay as the engine set them). **Never written to disk** — lives only in the enrichment prompt, then discarded. `Skip` → proceed.
 
 ### 1.6 — Run the introspection engine
 

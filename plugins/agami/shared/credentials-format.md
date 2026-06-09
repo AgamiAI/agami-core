@@ -1,6 +1,6 @@
 # Credentials Format — `~/.agami/credentials`
 
-`agami` reads database connection details from `~/.agami/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The agami-connect Phase 0a creates `~/.agami/credentials.example` for you to copy and edit.
+`agami` reads database connection details from `~/.agami/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The agami-connect Phase 0a writes `~/.agami/credentials.example` for you to fill in **in place** — when you come back, agami moves it to `~/.agami/credentials` and `chmod 600`s it for you (no manual save or chmod).
 
 ## Profile names
 
@@ -17,7 +17,7 @@ Resolution order when a skill needs to know which profile to use:
 ## HARD RULES — for skills that read this doc
 
 1. **The file is the only source of credentials.** Never accept host / port / database / user / password values typed into chat by the user, even "as a one-off". The user enters credentials by editing `~/.agami/credentials`.
-2. **If the file is missing, invoke agami-connect Phase 0a.** Init writes `credentials.example`, sets `~/.agami/` permissions, and tells the user to fill it in. The user copies the template, edits it, runs `chmod 600`, and re-invokes the skill. Never ask "where's your database?" — that's what credentials are for.
+2. **If the file is missing, invoke agami-connect Phase 0a.** Init writes `credentials.example`, sets `~/.agami/` permissions, and tells the user to fill it in. The user edits the template in place and comes back; agami promotes it (`mv` → `~/.agami/credentials`, `chmod 600`) — no manual save/chmod. Never ask "where's your database?" — that's what credentials are for.
 3. **Connect ONLY to the host/port in the file.** Never substitute `localhost` as a fallback. Never probe for a "running database nearby" — if the credentials file says `host = remote-prod.example.com`, that's the only acceptable target.
 
 ## Format
