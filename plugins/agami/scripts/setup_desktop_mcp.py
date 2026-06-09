@@ -11,10 +11,10 @@ removes:
      PATH, so a bare `python3` isn't found — and it must be the interpreter that
      can import your DB driver (psycopg2 / pymysql / …). We auto-detect it.
   2. **The install-path gotcha.** A marketplace-installed plugin lives in a
-     version-pinned cache dir that moves on every update. We copy the two
-     self-contained files (`mcp_server.py` + `execute_sql.py`) to a STABLE
-     `~/.agami/serve/` so the Desktop config never needs to change again — and
-     keeps working even if the plugin is later uninstalled.
+     version-pinned cache dir that moves on every update. We copy the server
+     files (`mcp_server.py` + `execute_sql.py` + the `semantic_model/` package)
+     to a STABLE `~/.agami/serve/` so the Desktop config never needs to change
+     again — and keeps working even if the plugin is later uninstalled.
   3. **The merge gotcha.** `mcpServers` is a top-level key; a stray comma breaks
      the whole file. We back up, merge (preserving every other key), write
      atomically, and validate.
@@ -171,8 +171,15 @@ def desktop_config_path(override: str | None) -> Path:
 def stage_serve_files(scripts_dir: Path, in_place: bool) -> Path:
     """Return the directory the server will run from.
 
-    Default: copy the self-contained files to a stable ~/.agami/serve/ so the
-    Desktop config is update-proof. --in-place: run straight from scripts_dir.
+    Default: copy the server files to a stable ~/.agami/serve/ so the Desktop
+    config is update-proof. --in-place: run straight from scripts_dir.
+
+    Besides the two entry scripts, we also copy the `semantic_model/` package so
+    the model-backed tools (get_datasource_schema / traversal) work from the
+    serve dir — mcp_server.py adds its own dir to sys.path and imports it. Those
+    tools additionally need `pydantic` + `sqlglot` in the Python the Desktop app
+    launches; if they're absent the tool returns a clear "install the model deps"
+    error and the stdlib execute_sql path keeps working regardless.
     """
     if in_place:
         return scripts_dir
@@ -186,6 +193,13 @@ def stage_serve_files(scripts_dir: Path, in_place: bool) -> Path:
         if not src.exists():
             raise FileNotFoundError(f"missing {src} — run from the plugin's scripts dir or pass --scripts-dir")
         shutil.copy2(src, STABLE_SERVE_DIR / name)
+    # Copy the semantic_model package (skip caches), replacing any prior copy.
+    pkg_src = scripts_dir / "semantic_model"
+    if pkg_src.is_dir():
+        pkg_dst = STABLE_SERVE_DIR / "semantic_model"
+        if pkg_dst.exists():
+            shutil.rmtree(pkg_dst)
+        shutil.copytree(pkg_src, pkg_dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     return STABLE_SERVE_DIR
 
 

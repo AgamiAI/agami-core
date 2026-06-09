@@ -140,3 +140,7 @@ def test_stage_copies_self_contained_files(tmp_path, monkeypatch):
     assert out == stable
     for name in sd.SERVE_FILES:
         assert (stable / name).exists(), name
+    # the semantic_model package is staged too (model-backed tools need it),
+    # minus caches
+    assert (stable / "semantic_model" / "loader.py").exists()
+    assert not (stable / "semantic_model" / "__pycache__").exists()

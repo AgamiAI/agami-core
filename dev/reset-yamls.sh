@@ -4,11 +4,13 @@
 # hand-written docs, or the git audit trail.
 #
 # What gets nuked (default):
-#   <artifacts_dir>/<profile>/index.yaml
-#   <artifacts_dir>/<profile>/examples.yaml
+#   <artifacts_dir>/<profile>/org.yaml                   (model root)
+#   <artifacts_dir>/<profile>/datasources/               (storage connections)
+#   <artifacts_dir>/<profile>/subject_areas/             (tables/entities/metrics/relationships)
+#   <artifacts_dir>/<profile>/prompt_examples/           (NL→SQL example library)
 #   <artifacts_dir>/<profile>/agami.config.yaml          (if present)
-#   <artifacts_dir>/<profile>/<schema>/                  (every per-schema dir)
 #   <artifacts_dir>/<profile>/.snapshots/                (immutable past versions)
+#   <artifacts_dir>/<profile>/.semantic_v2/              (migrate scratch, if present)
 #
 # What gets preserved (default):
 #   ~/.agami/credentials                      DB connection details
@@ -16,6 +18,7 @@
 #   <artifacts_dir>/USER_MEMORY.md            cross-DB preferences
 #   <artifacts_dir>/<profile>/ORGANIZATION.md domain context the user wrote
 #   <artifacts_dir>/<profile>/.git/           audit trail of past curator edits
+#   <artifacts_dir>/<profile>/.osi_backup/    legacy OSI model backed up on upgrade
 #   <artifacts_dir>/<profile>/curation_log.jsonl
 #   <artifacts_dir>/<profile>/corrections.jsonl
 #   ~/.agami/review/                          rendered review dashboards
@@ -108,13 +111,14 @@ while IFS= read -r f; do
   action "rm -f '$f'"
 done < <(find "$PROFILE_DIR" -maxdepth 1 -name "*.yaml" -o -name "*.yml" 2>/dev/null)
 
-# 2. Per-schema directories (anything under the profile dir that isn't
-#    .git / .snapshots / .rejected — those are preserved or handled separately).
-for sub in "$PROFILE_DIR"/*/; do
+# 2. Model directories (datasources/, subject_areas/, prompt_examples/, and any
+#    other generated subdir). Preserve .git / .snapshots / .rejected (handled
+#    separately) and .osi_backup (the one-time legacy-OSI backup — never regenerable).
+for sub in "$PROFILE_DIR"/*/ "$PROFILE_DIR"/.*/; do
   [[ -d "$sub" ]] || continue
   bn="$(basename "$sub")"
   case "$bn" in
-    .git|.snapshots|.rejected) continue ;;
+    .|..|.git|.snapshots|.rejected|.osi_backup) continue ;;
   esac
   action "rm -rf '$sub'"
 done
