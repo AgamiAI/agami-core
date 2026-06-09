@@ -11,7 +11,7 @@ argument-hint: "[reintrospect | profile NAME]"
 
 You are setting up the agami **semantic model** for the user's database. Goal: by the end there is a validated semantic model at `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…` + `datasources/<connection>/storage.yaml`), a seeded examples library at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`, an `ORGANIZATION.md` the user can edit, and the user has seen one demo query execute end-to-end.
 
-**The structural model is built by a deterministic engine, not hand-authored.** `python3 -m semantic_model.cli introspect` (run from `plugins/agami/scripts/`) introspects the live DB across all supported dialects — **PostgreSQL (incl. Supabase / Redshift), MySQL/MariaDB, Snowflake, BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite** — into the model: storage connection, proposed subject areas, tables, columns + types, primary-key grain, foreign-key relationships **with join cardinality**, `column_groups` on wide tables, and `sensitive` flags on PII. When the catalog (`information_schema` / PRAGMA / data-dictionary) is reachable it runs in **catalog mode**; when a locked-down role denies the catalog it falls back **per-capability to probe mode** (describe via a zero-row header, infer types from a value sample, grain from uniqueness probes, FKs from name+overlap) and everything inferred lands `unreviewed` for sign-off. Your job is the layer the engine can't do: **enrichment** (prose descriptions, entities, metrics, caveats) and **curation** (subject-area boundaries, trust review).
+**The structural model is built by a deterministic engine, not hand-authored.** `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect` introspects the live DB across all supported dialects — **PostgreSQL (incl. Supabase / Redshift), MySQL/MariaDB, Snowflake, BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite** — into the model: storage connection, proposed subject areas, tables, columns + types, primary-key grain, foreign-key relationships **with join cardinality**, `column_groups` on wide tables, and `sensitive` flags on PII. When the catalog (`information_schema` / PRAGMA / data-dictionary) is reachable it runs in **catalog mode**; when a locked-down role denies the catalog it falls back **per-capability to probe mode** (describe via a zero-row header, infer types from a value sample, grain from uniqueness probes, FKs from name+overlap) and everything inferred lands `unreviewed` for sign-off. Your job is the layer the engine can't do: **enrichment** (prose descriptions, entities, metrics, caveats) and **curation** (subject-area boundaries, trust review).
 
 For the model format: [`scripts/semantic_model/__init__.py`](../../scripts/semantic_model/__init__.py) (layout) and the Pydantic models in `scripts/semantic_model/models.py`.
 For credentials: [`shared/credentials-format.md`](../../shared/credentials-format.md).
@@ -309,7 +309,7 @@ Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. **
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. From `plugins/agami/scripts/`:
 
 ```bash
-python3 -m semantic_model.cli introspect \
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
   --profile <profile> --db-type <db_type> \
   --artifacts "<artifacts_dir>" \
   [--tables schema.table …]      # only for the no-catalog case (1.2)

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# sm — run the agami semantic-model CLI with a model-capable Python.
+#
+# The semantic_model package needs pydantic + sqlglot + pyyaml. The interpreter
+# agami uses for execution (psql tier, or the python-driver tier) may not have
+# them, and bare `python3` on PATH often won't either. This wrapper is the ONE
+# place that resolves a usable interpreter, ensures the deps are present, and runs
+# the CLI — so every skill just calls `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" <cmd>`
+# and never has to think about interpreters or sys.path.
+#
+# Interpreter resolution order:
+#   $AGAMI_PYTHON               (explicit override)
+#   ~/.agami/.config tool_paths.python3   (agami's configured interpreter)
+#   python3 / python on PATH
+#
+# Deps: if pydantic/sqlglot/pyyaml aren't importable, install them once into that
+# interpreter (user site first, then plain) and tell the user. Idempotent.
+#
+# Usage:  bash scripts/sm <cli-subcommand> [args...]
+#   e.g.  bash scripts/sm areas   ~/agami-artifacts/finbud
+#         bash scripts/sm prepare ~/agami-artifacts/finbud --area finbud --sql "SELECT 1"
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REQ="$SCRIPT_DIR/semantic_model/requirements.txt"
+
+resolve_python() {
+  if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
+  # configured interpreter from ~/.agami/.config (best-effort)
+  local cfg
+  cfg="$(python3 - <<'PY' 2>/dev/null || true
+import json, pathlib
+try:
+    c = json.loads(pathlib.Path("~/.agami/.config").expanduser().read_text())
+    print(c.get("tool_paths", {}).get("python3") or "")
+except Exception:
+    print("")
+PY
+)"
+  if [ -n "$cfg" ] && [ -x "$cfg" ]; then echo "$cfg"; return; fi
+  command -v python3 || command -v python || true
+}
+
+PY="$(resolve_python)"
+if [ -z "$PY" ]; then
+  echo "agami: no Python interpreter found (tried \$AGAMI_PYTHON, ~/.agami/.config, PATH)." >&2
+  exit 3
+fi
+
+# Ensure the model deps are importable in $PY; install once if not.
+if ! "$PY" -c 'import pydantic, sqlglot, yaml' 2>/dev/null; then
+  echo "agami: installing semantic-model deps (pydantic, sqlglot, pyyaml) into $PY …" >&2
+  if ! "$PY" -m pip install --user -q -r "$REQ" >&2 2>/dev/null; then
+    if ! "$PY" -m pip install -q -r "$REQ" >&2; then
+      echo "agami: couldn't install the model deps into $PY." >&2
+      echo "       Run:  $PY -m pip install -r $REQ" >&2
+      echo "       Or point agami at a Python that has them:  export AGAMI_PYTHON=/path/to/python" >&2
+      exit 3
+    fi
+  fi
+fi
+
+exec env PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m semantic_model.cli "$@"

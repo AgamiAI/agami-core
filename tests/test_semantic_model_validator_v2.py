@@ -149,6 +149,17 @@ def test_default_filter_known_column_ok():
     assert "default_filter_unknown_column" not in _codes(res)
 
 
+def test_default_filter_alias_placeholder_and_param_ok():
+    # the canonical engine-emitted form uses the {alias} placeholder + :param bind
+    # markers — neither is a column and must NOT trip the unknown-column check
+    t = m.Table(name="orders", schema="s", storage_connection="c", grain=["id"], description="d",
+                columns=[_col("id"), _col("deleted_at", "timestamp"), _col("tenant_id")],
+                default_filters=["{alias}.deleted_at IS NULL", "{alias}.tenant_id = :tenant_id"])
+    refs = [m.TableRef(storage_connection="c", schema="s", table="orders")]
+    res = v.validate(_org(m.SubjectArea(name="a", tables=refs, tables_defined=[t])))
+    assert "default_filter_unknown_column" not in _codes(res)
+
+
 # --- value_transform ---
 
 

@@ -263,10 +263,19 @@ def _check_deep_table_column_groups(sa: SubjectArea, res: ValidationResult) -> N
 
 
 def _check_default_filters_columns(sa: SubjectArea, res: ValidationResult) -> None:
+    import re as _re
+
     for table in sa.tables_defined:
         cols = table.column_names()
+        alias = table.name.split(".")[-1]
         for flt in table.default_filters:
-            referenced = _columns_referenced(flt, table.name)
+            # `{alias}` is the runtime table-alias placeholder, and `:param` are bind
+            # markers the executor fills in — neither is a column. Resolve / strip them
+            # before extracting column references (collect_default_filters does the same).
+            resolved = flt.replace("{alias}", alias)
+            resolved = _re.sub(r":\w+", "1", resolved)  # bind marker -> literal for parsing
+            referenced = _columns_referenced(resolved, table.name)
+            referenced -= {alias}  # the (now-substituted) table qualifier is not a column
             for col in referenced:
                 if col not in cols:
                     res.error(

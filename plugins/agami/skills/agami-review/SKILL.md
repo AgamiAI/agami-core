@@ -46,7 +46,7 @@ Resolve the active threshold:
 The dashboard has **four tabs**: For Review · Approved Automatically · Manually Approved · Rejected. One command produces every entry, already tab-classified — run it from `plugins/agami/scripts/` with `ROOT="<artifacts_dir>/<profile>"`:
 
 ```bash
-python3 -m semantic_model.cli review-items "$ROOT" > /tmp/agami-review-items-$ts.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" > /tmp/agami-review-items-$ts.json
 ```
 
 Each item carries: `n` (stable global index — the number chat commands reference), `entity_type` (`metric` | `join` | `entity`), `rule` (1 = metrics, sign-off required; 2 = joins/entities, lazy), `title`, `source_signal` (the prose `calculation` for metrics, the `from.col → to.col` join + cardinality for relationships), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state`, `signed_off_*`, and `tab`:
@@ -235,7 +235,7 @@ One call applies the whole batch atomically — it flips `review_state`/sign-off
 
 ```bash
 printf '%s' "$OPS_JSON" > /tmp/agami-curate-ops.json
-python3 -m semantic_model.cli curate "$ROOT" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
   --ops-file /tmp/agami-curate-ops.json \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 rm -f /tmp/agami-curate-ops.json

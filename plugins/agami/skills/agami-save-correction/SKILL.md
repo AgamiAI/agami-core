@@ -73,7 +73,7 @@ Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
 
 ## Phase 2: Always append to the examples library
 
-Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`. Pick `<area>` = the subject area whose `tables_defined` includes the table(s) the corrected SQL references (run `python3 -m semantic_model.cli areas "$ROOT"` and match, or `get_table_context` to confirm membership; if the SQL spans areas, use the area of the primary/driving table). Read that file via Read (create it with `examples: []` if absent), and append via Edit:
+Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`. Pick `<area>` = the subject area whose `tables_defined` includes the table(s) the corrected SQL references (run `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" areas "$ROOT"` and match, or `get_table_context` to confirm membership; if the SQL spans areas, use the area of the primary/driving table). Read that file via Read (create it with `examples: []` if absent), and append via Edit:
 
 ```yaml
 - question: <the original NL question from query_log.jsonl>
@@ -343,7 +343,7 @@ Always include the validator step in 4c regardless of which option they pick (si
 
 ```bash
 printf '%s' "$OPS_JSON" > /tmp/agami-correction-ops.json
-python3 -m semantic_model.cli curate "$ROOT" --ops-file /tmp/agami-correction-ops.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-correction-ops.json
 rm -f /tmp/agami-correction-ops.json
 ```
 
@@ -354,7 +354,7 @@ Stdout: `{applied, skipped, errors, validated, committed}`.
 **For `new_metric`** (a new file): write `subject_areas/<area>/metrics/<name>.yaml`, then validate the whole tree:
 
 ```bash
-python3 -m semantic_model.cli validate "$ROOT"   # exit 0 = ok, 1 = errors
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" validate "$ROOT"   # exit 0 = ok, 1 = errors
 ```
 Exit 1 → delete the file you just wrote (revert) and surface the errors. Exit 0 → commit best-effort (`git -C "$ROOT" add -A && git -C "$ROOT" commit -m "correction: new metric <name>"`).
 

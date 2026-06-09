@@ -136,7 +136,7 @@ Translate the parsed exclude/include commands into a curation ops array. Targets
 
 ```bash
 printf '%s' "$OPS_JSON" > /tmp/agami-model-ops-$ts.json
-python3 -m semantic_model.cli curate "$ROOT" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
   --ops-file /tmp/agami-model-ops-$ts.json \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 rm -f /tmp/agami-model-ops-$ts.json

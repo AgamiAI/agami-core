@@ -83,6 +83,33 @@ def cmd_preflight(args) -> int:
     return 0
 
 
+def cmd_prepare(args) -> int:
+    """Tier-independent safety pass: run the fan/chasm pre-flight, then (unless it
+    refuses) apply the area's default_filters. Returns the SQL to actually execute.
+    The query skill calls this on EVERY tier before handing SQL to psql/mysql/etc.,
+    so the safety guarantees don't depend on going through execute_sql.py."""
+    sql = args.sql
+    if args.sql_file:
+        sql = Path(args.sql_file).read_text()
+    org = L.load_organization(args.root)
+    pf = RT.pre_flight_check(sql, org)
+    if pf.risk and pf.action == "refuse":
+        _print_json({"action": "refuse", "risk": pf.risk, "reason": pf.reason,
+                     "suggestion": pf.suggestion, "sql": sql})
+        return 1
+    run_sql = pf.rewritten_sql if (pf.action == "auto_rewrite" and pf.rewritten_sql) else sql
+    final_sql, applied = RT.apply_default_filters(run_sql, org, area=args.area)
+    _print_json({
+        "action": pf.action,
+        "risk": pf.risk,
+        "sql": final_sql,
+        "rewritten": bool(pf.action == "auto_rewrite"),
+        "applied_filters": applied,
+        "reason": pf.reason if pf.risk else None,
+    })
+    return 0
+
+
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_organization(args.root)
@@ -176,6 +203,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--sql", required=True)
     sp.set_defaults(func=cmd_preflight)
+
+    sp = sub.add_parser("prepare", help="tier-independent safety pass: pre-flight + default_filters → SQL to run")
+    sp.add_argument("root")
+    sp.add_argument("--area", default=None)
+    sp.add_argument("--sql", default=None)
+    sp.add_argument("--sql-file", default=None, dest="sql_file")
+    sp.set_defaults(func=cmd_prepare)
 
     sp = sub.add_parser("review-queue", help="trust-review items needing sign-off (Rule 1/2)")
     sp.add_argument("root")

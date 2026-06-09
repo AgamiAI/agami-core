@@ -88,9 +88,9 @@ Don't read the whole tree by hand. Drive it through the CLI (run from `plugins/a
 
 ```bash
 ROOT="<artifacts_dir>/<profile>"
-python3 -m semantic_model.cli areas "$ROOT"                 # subject-area index (step 2a below)
-python3 -m semantic_model.cli context "$ROOT" --area A --tables t1 t2   # compound table context
-python3 -m semantic_model.cli examples "$ROOT" --area A --query "…"     # examples-first ranking
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" areas "$ROOT"                 # subject-area index (step 2a below)
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --area A --tables t1 t2   # compound table context
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" examples "$ROOT" --area A --query "…"     # examples-first ranking
 ```
 
 The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-review` / `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-review to reconcile."*
@@ -224,7 +224,7 @@ For a single profile, follow the **examples-first canonical loop** — the subje
 5. **Few-shot examples** — the ranked matches from step 2.
 6. **User question.**
 
-**default_filters + fan/chasm safety are enforced at execution, not just in the prompt.** Pass `--area <area>` to `execute_sql.py` (Phase 3a) so it AND-s in the area's `default_filters` and runs the fan-trap / chasm-trap pre-flight (auto-rewrites the safe cases; refuses shape-changing ones with a suggested fix you then apply). You don't have to hand-apply default_filters — but the receipt panel surfaces what was applied.
+**default_filters + fan/chasm safety run via a pre-execution step, on every tier.** Before you execute the generated SQL, pass it through `sm prepare "$ROOT" --area <area> --sql-file <path>` (Phase 3a). It runs the fan-trap / chasm-trap pre-flight (auto-rewrites the safe cases; refuses shape-changing ones) AND AND-s in the area's `default_filters`, and returns the SQL to actually run. Tier-independent — works whether you execute via psql, the Python driver, or DuckDB — so the safety guarantees never depend on the execution path. The receipt panel surfaces the rewrite + applied filters.
 
 #### 2b.federation — cross-database queries
 
@@ -353,15 +353,20 @@ If the estimate exceeds 30s, also surface: "Cancel anytime — Ctrl+C in CLI, or
 
 The Bash result (CSV stdout, stderr, exit code) is for the skill to parse, not for the user to read. **Never paste the raw CSV / TSV from the Bash result into the assistant's response text.** No "Here's what came back: …", no markdown code-fence dumps of the result. Parse internally, then surface the polished output per Phase 4. The host shows the Bash tool call as a collapsible — that's enough provenance for users who want to dig.
 
-### 3a — run the SQL
+### 3a — safety pass, then run the SQL
 
-Invoke the tool-specific command from [`shared/connection-reference.md → CLI Connection Commands`](../../shared/connection-reference.md#cli-connection-commands). **For the Python-driver tier, pass `--area <area>`** (the subject area chosen in 2b) so `execute_sql.py` runs the fan-trap / chasm-trap pre-flight + auto-applies the area's `default_filters` before executing:
+**Step 1 — prepare (every tier).** Write the generated SQL to a temp file, then run the tier-independent safety pass:
 
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" prepare "$ROOT" --area <area> --sql-file /tmp/agami-q.sql
 ```
-python3 scripts/execute_sql.py --profile <profile> --area <area> --sql-file <path>
-```
 
-Wrap in a high-resolution timer to capture latency in ms. Capture: stdout (rows as CSV), stderr (errors), exit code. **Stderr may carry safety-pass notes** — `[agami] auto-corrected fan_trap: ran rewritten SQL …` or `[agami] applied default_filters: […]` (surface these in the receipt), or a JSON `{"error":{"kind":"preflight_refused", …}}` with a `suggestion` you must consume (regenerate the SQL per the suggestion, then re-run). The native-CLI / DuckDB tiers don't run the safety pass — prefer the Python tier when the profile has a model, or call the `pre_flight_check` MCP tool first.
+It returns JSON: `{action, risk, sql, rewritten, applied_filters, reason}`.
+- `action: "refuse"` (a fan/chasm trap that would change result shape) → **don't execute.** Read `suggestion`, regenerate the SQL accordingly (window function, or pre-aggregate in a CTE), and re-prepare.
+- `action: "auto_rewrite"` → a fan/chasm trap was auto-corrected; use the returned `sql` (note `rewritten: true` + `reason` in the receipt).
+- `action: "allow"` → use the returned `sql` (it already has `applied_filters` AND-ed in; surface them in the receipt).
+
+**Step 2 — execute the returned `sql`** via the tier's tool from [`shared/connection-reference.md → CLI Connection Commands`](../../shared/connection-reference.md#cli-connection-commands) — psql / mysql / snowsql / sqlite3 / DuckDB, or the Python driver. (If you use `execute_sql.py`, pass `--no-safety` since `prepare` already ran the pass — avoids doubling it.) Wrap in a high-resolution timer; capture stdout (CSV rows), stderr (errors), exit code. Route a non-zero exit through the error classifier (Phase 3b).
 
 ### 3b — error handling + auto-retry
 
