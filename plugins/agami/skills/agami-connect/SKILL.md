@@ -232,10 +232,17 @@ On **Yes**: `"$PY" -m pip install --user -r "$AGAMI_PLUGIN_ROOT/scripts/semantic
 
 ### 0a.6 — Ask for `<artifacts_dir>`
 
-**AskUserQuestion** (two named options; never label one "Other"):
-> Where should agami save your semantic model, examples, and preferences? This is the **parent** for ALL profiles — each lands in `<artifacts_dir>/<profile>/`. Non-secret; point it inside a git repo to share with your team. Credentials stay in `~/.agami/` either way.
+Detect the OS once so the options are platform-native — `uname -s` (`Darwin` = macOS, `Linux` = Linux) or treat `$OS == Windows_NT` / a `MINGW*`/`MSYS*` uname as Windows. Then **AskUserQuestion** with the two defaults for that OS as named options (Recommended first). The auto-provided **Other** lets the user type any absolute path — so this both gives sensible options *and* allows a full custom path:
 
-`~/agami-artifacts/ (Recommended)` / `~/Documents/agami/`. Validate: absolute, not inside `~/.agami/`, parent creatable.
+> Where should agami save your semantic model, examples, and preferences? This is the **parent** for ALL profiles — each lands in `<artifacts_dir>/<profile>/`. It's non-secret (no credentials) — point it inside a git repo to share the tuned model with your team. Credentials stay in `~/.agami/` regardless.
+
+| OS | Option 1 — Recommended | Option 2 |
+|---|---|---|
+| macOS | `~/agami-artifacts` | `~/Documents/agami-artifacts` |
+| Linux | `~/agami-artifacts` | `~/Documents/agami-artifacts` |
+| Windows | `%USERPROFILE%\agami-artifacts` | `%USERPROFILE%\Documents\agami-artifacts` |
+
+(For Other, suggest a team repo path as the example, e.g. `~/code/acme-data/agami`.) Expand `~` / `%USERPROFILE%` to an absolute path. Validate: absolute, not inside `~/.agami/`, parent creatable. Store the **resolved absolute path** in `.config.artifacts_dir`.
 
 ### 0a.7 — Write `~/.agami/.config`
 ```json
