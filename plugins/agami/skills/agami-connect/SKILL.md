@@ -1,78 +1,61 @@
 ---
 name: agami-connect
-description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes ~/.agami/credentials.example for the user to fill in), introspects the live DB, and emits a strict Open Semantic Interchange (OSI) v0.1.1 semantic model under <artifacts_dir>/<profile>/. Generates seed NL-to-SQL few-shot examples (each EXPLAIN-validated against the live DB), then renders an examples-validation dashboard. Every model write is gated by the OSI + Agami validator — no breaking model is ever persisted."
-when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect the schema' / 'reload schema' / 'add a new database', or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query-database the first time it runs (when the semantic model is missing). This skill handles credential setup (formerly /agami-init), introspection, and seed-example validation — one entry point for everything before the user can query."
+description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes ~/.agami/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by scripts/semantic_model (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
+when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect the schema' / 'reload schema' / 'add a new database', or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query-database the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query."
 argument-hint: "[reintrospect | profile NAME]"
 ---
 
 # agami connect
 
-**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** Agami slash commands: `/agami-connect`, `/agami-query-database`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/init`, `/connect`, etc.) or colon forms (`/agami:connect`) — those don't exist. **`/agami-init` is no longer a separate skill — its setup flow is now Phase 0 of this skill (`/agami-connect` handles credentials + introspect end-to-end).** For chat replies, prefer natural language ("say 'reload the schema'", "say 'introspect my database'") — the agami-connect skill's `when_to_use` matcher routes correctly without an explicit slash command.
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** Agami slash commands: `/agami-connect`, `/agami-query-database`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/init`, `/connect`, etc.) or colon forms (`/agami:connect`) — those don't exist. For chat replies, prefer natural language ("say 'reload the schema'", "say 'introspect my database'") — the `when_to_use` matcher routes correctly without an explicit slash command.
 
-You are setting up the agami semantic model for the user's database. Goal: by the end, there is a **per-schema OSI v0.1.1 model** at `<artifacts_dir>/<profile>/` (`index.yaml` + one `<schema>.yaml` per database schema), a seeded examples library at `<artifacts_dir>/<profile>/examples.yaml`, an `ORGANIZATION.md` template the user can edit, and the user has seen one demo query execute end-to-end.
+You are setting up the agami **semantic model** for the user's database. Goal: by the end there is a validated semantic model at `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…` + `datasources/<connection>/storage.yaml`), a seeded examples library at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`, an `ORGANIZATION.md` the user can edit, and the user has seen one demo query execute end-to-end.
 
-This skill orchestrates four phases:
+**The structural model is built by a deterministic engine, not hand-authored.** `python3 -m semantic_model.cli introspect` (run from `plugins/agami/scripts/`) introspects the live DB across all supported dialects — **PostgreSQL (incl. Supabase / Redshift), MySQL/MariaDB, Snowflake, BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite** — into the model: storage connection, proposed subject areas, tables, columns + types, primary-key grain, foreign-key relationships **with join cardinality**, `column_groups` on wide tables, and `sensitive` flags on PII. When the catalog (`information_schema` / PRAGMA / data-dictionary) is reachable it runs in **catalog mode**; when a locked-down role denies the catalog it falls back **per-capability to probe mode** (describe via a zero-row header, infer types from a value sample, grain from uniqueness probes, FKs from name+overlap) and everything inferred lands `unreviewed` for sign-off. Your job is the layer the engine can't do: **enrichment** (prose descriptions, entities, metrics, caveats) and **curation** (subject-area boundaries, trust review).
 
-1. **Introspect** — pull tables / columns / PK / FK from `information_schema` via the chosen database tool (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`). Ask once for a domain-context paragraph (Phase 1.4) and once for a data-model document upload (Phase 1.5). **Both AskUserQuestion calls are MANDATORY** — the user picks Skip or proceeds, but the SKILL always asks.
-2. **Build the OSI model** — assemble the YAML strictly to the OSI v0.1.1 spec, with Agami metadata (column types, choice fields, performance hints) packed under `custom_extensions[].vendor_name: COMMON` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
-3. **Validate, then write** — run the validator at `plugins/agami/scripts/validate_semantic_model.py`. If it fails, **DO NOT WRITE THE FILE.** Surface the errors and stop.
-4. **Rule 1 sign-off (BEFORE seed generation)** — gate the user on metrics + named filters that need approval. Seed SQL exercises these definitions, so signing them off first means the seeds inherit approved truth. Rule 2 polish (low-confidence joins / field descriptions) does NOT block here — that surfaces later in Phase 7's optional panel.
-5. **Seed examples + validate-via-dashboard** — generate 10–12 analytical-shape NL→SQL pairs, EXPLAIN-validate each against the live DB, then render the examples-validation dashboard. **The dashboard is MANDATORY — never skip rendering it, never auto-validate the examples on the user's behalf.** Phase 6 ends when the user types `done` or all examples are in `{validated, rejected, error}` state.
-
-For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
-For the bundled JSON schema: [`shared/osi-schema.json`](../../shared/osi-schema.json).
-For Agami's documented `custom_extensions`: [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
-For introspection SQL: [`shared/introspect-queries.md`](../../shared/introspect-queries.md).
-For FK validation: [`shared/fk-validation.md`](../../shared/fk-validation.md).
-For SQL dialect rules: [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
-For SQL safety: [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md).
+For the model format: [`scripts/semantic_model/__init__.py`](../../scripts/semantic_model/__init__.py) (layout) and the Pydantic models in `scripts/semantic_model/models.py`.
+For credentials: [`shared/credentials-format.md`](../../shared/credentials-format.md).
+For connection method + local execution: [`shared/connection-reference.md`](../../shared/connection-reference.md).
 For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
 
 ## Conversation style
 
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
-- **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. **Use `(Recommended)` only when there's a genuine recommendation.** For fact-of-environment questions ("which database type?", "which schemas should I introspect?"), don't mark any option Recommended — the user picks what they have.
+- **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Use `(Recommended)` only when there's a genuine recommendation. For fact-of-environment questions ("which database type?", "which schemas?"), don't mark any option Recommended — the user picks what they have.
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 
 ## Progress tracking — set up a todo list at the very start
 
-This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to call `TodoWrite` with the skill's major phases as todos**, so the user can see what's coming and watch progress in real time. This was validated as a strong UX signal — users reported it makes the wait feel intentional rather than opaque.
+This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to call `TodoWrite`** with the skill's major phases, so the user can watch progress. Validated as a strong UX signal — it makes the wait feel intentional rather than opaque.
 
-The exact todo list to seed (one task per major phase, in this order):
+Seed (one task per major phase, in order):
 
 ```
 1. Preflight: credentials check + tool detection
-2. Introspect database schema (list tables, columns, PK, FK)
-3. Build OSI semantic model (with trust-layer confidence per entry)
-4. Validate + write model; snapshot under .snapshots/<hash>/; git init
-5. Rule 1 sign-off — metrics + named filters reviewed BEFORE example gen
-6. Generate seed NL→SQL examples (EXPLAIN-validated)
-7. Validate every seed example (user reviews via dashboard)
-8. Post-introspect trust summary + Rule 2 polish dashboard
-9. Follow-up suggestions
+2. Introspect database → semantic model (engine: tables, columns, grain, FK cardinality)
+3. Enrich: descriptions, entities, metrics (LLM, validated into the model)
+4. Review subject-area split + trust queue (relationships/metrics sign-off)
+5. Generate seed NL→SQL examples (EXPLAIN-validated)
+6. Validate every seed example (user reviews via dashboard)
+7. Post-introspect trust summary
+8. Follow-up suggestions
 ```
 
-Use `content` for the imperative form and `activeForm` for the present-continuous form, e.g. `content: "Introspect database schema"` / `activeForm: "Introspecting database schema"`.
+Use `content` for the imperative form and `activeForm` for the present-continuous form. **Mark each todo `in_progress` when its phase starts and `completed` immediately when it ends.** Exactly one `in_progress` at a time.
 
-**Mark each todo `in_progress` when its phase starts and `completed` immediately when the phase ends.** Exactly one `in_progress` at a time. Never batch completions.
-
-**Skip the seeding if the todo list already contains these items** (e.g., the skill is resuming a mid-run state because the user re-invoked after Phase 0 wrote the credentials template and waited for the user to fill it in). Detect by inspecting the current todo list: if it already has todos matching this skill's phases (by content), don't re-create — just continue marking progress on the existing list.
-
-When `$ARGUMENTS == reintrospect`, the same todos apply — re-introspection runs through the same phases.
+**Skip the seeding if the todo list already contains these items** (the skill is resuming after Phase 0 wrote the credentials template and waited). When `$ARGUMENTS == reintrospect`, the same todos apply.
 
 ---
 
 ## Phase −1: Plan-mode check
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-connect needs Bash (introspection queries) and Write (per-schema yaml files) — both are blocked in plan mode.
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-connect needs Bash (introspection) and Write (model files) — both blocked in plan mode.
 
-**If plan mode is active and the user picks `Stay in plan mode` (or this skill is invoked under an active plan-mode context with no prompt available):** refuse with the one-liner below and **end the turn**. **DO NOT write a plan file describing what would happen. DO NOT call `ExitPlanMode`.** Generating "a brief plan of what introspect would do" is noise the user did not ask for — they invoked this skill to do its job, not to read a description of its job. The user switches modes via Shift+Tab and re-invokes.
+**If plan mode is active and the user stays in plan mode** (or the skill is invoked under plan mode with no prompt): refuse with the one-liner below and **end the turn**. DO NOT write a plan file. DO NOT call `ExitPlanMode`.
 
-Refusal text (verbatim — don't elaborate):
+> I can't introspect in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me. Introspection, enrichment, and the demo query all need write access to `<artifacts_dir>/<profile>/`.
 
-> I can't introspect in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me. The schema picker, description generation, and demo query all need write access to `<artifacts_dir>/<profile>/`.
-
-If plan mode is not active, skip this phase silently and go to Phase 0.
+If plan mode is not active, skip silently.
 
 ---
 
@@ -80,322 +63,181 @@ If plan mode is not active, skip this phase silently and go to Phase 0.
 
 ### HARD RULES — read before doing anything
 
-These are non-negotiable. They override every other instruction in this file when they conflict.
+Non-negotiable. They override every other instruction here when they conflict.
 
-1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or, if set, in `AGAMI_DATABASE_URL`). Never connect to anything else. Never probe `localhost` "to see if there's a database running there" unless the credentials file explicitly says `host = localhost`. Never substitute defaults for missing credential fields.
-2. **Never ask the user for host / port / database / user / password values in chat.** Not even "as a temporary thing while we set up". Credentials live in `~/.agami/credentials` only — that's the contract. The single authorized credential-collection path is **Phase 0a of this skill**, which writes a `credentials.example` template the user fills in and saves locally. Phase 0a never reads passwords inline — it writes a template, surfaces a hand-off message, and ends the turn.
-3. **Never scan or guess.** No `pgrep`, no `ps`, no `find /` for databases, no `ls /Applications/Postgres.app`, no `ls /Library/PostgreSQL`, no listing port-listeners, no testing connections to common hostnames. The only acceptable Bash probes in this phase are `which <tool>` (to find a CLI binary on `PATH`) and `python3 -c 'import <module>'` (to test a driver). Nothing else.
-4. **If credentials are missing for the active profile, run the inline first-time-setup at Phase 0a (below).** That sub-phase runs the DB-type picker, writes the per-DB-type `credentials.example` template, sets up `~/.agami/`, picks the runtime tool, and writes `~/.agami/.config`. After the user fills in the template, they re-invoke this skill (or just ask a data question — `agami-query-database` auto-invokes us). **Never prompt for the connection URL inline in chat** — credentials always go through the template file.
-5. **NEVER put the password (or any credential field) in a Bash command line.** That includes `export PGPASSWORD='<value>'`, `export MYSQL_PWD='<value>'`, `psql -W <password>`, `mysql -p<password>`, or any heredoc form that interpolates the password into stdin. Hosts render Bash tool calls in chat — anything in the command leaks. Use the auth files generated by `scripts/setup_pgauth.py` for runtime queries: `PGPASSFILE=$HOME/.agami/.pgpass psql -h ... -U ... -d ... -c "$SQL" --csv` (psql) or `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> ...` (mysql). For the Python driver path use `python3 scripts/execute_sql.py`. See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
+1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** (or `AGAMI_DATABASE_URL`). Never connect to anything else. Never probe `localhost` unless the credentials say so. Never substitute defaults for missing fields.
+2. **Never ask the user for connection values (host / port / user / password / token / DSN) in chat.** Not even temporarily. The single authorized credential path is **Phase 0a**, which writes a `credentials.example` template the user fills in and saves. Phase 0a never reads secrets inline — it writes a template, surfaces a hand-off, and ends the turn.
+3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `python3 -c 'import <module>'`.
+4. **If credentials are missing for the active profile, run Phase 0a.** After the user fills in the template they re-invoke (or just ask a data question — `agami-query-database` auto-invokes us).
+5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `scripts/execute_sql.py` (every driver, reads `~/.agami/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
 
-If you find yourself reaching for any command that doesn't fit the rules above, stop and re-read this section.
+If you reach for a command that doesn't fit, stop and re-read this section.
 
 ### Preflight steps
 
-1. **Resolve `<profile>`** in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"main"` (current default; older installs may still have `"default"` and that continues to work). The OSI `semantic_model[].name` MUST equal the resolved `<profile>`.
-2. **Credentials check (binding).** Read `~/.agami/credentials` if present and look for the `[<profile>]` section. If the file is missing, OR the section for the active profile is missing, OR `AGAMI_DATABASE_URL` is unset → **run Phase 0a (`First-time credential bootstrap`) inline and stop this skill.** Do not continue. Do not probe anything. Surface a one-liner before the handoff: *"No credentials yet for profile `<profile>` — running setup."*. If credentials exist, apply the chmod check (refuse if world-readable).
-3. **Resolve the connection fields** from the credentials file's `[<profile>]` section (or parse from `AGAMI_DATABASE_URL`):
-   - **postgres / redshift / mysql:** either `url = ...` (DSN form, recommended for cloud DBs) or per-field `host`, `port`, `database`, `user`, `password` (+ optional `sslmode`).
-   - **snowflake:** either DSN `url = snowflake://...` or per-field `account`, `user`, `password` (or `authenticator`), plus optional `warehouse`, `database`, `schema`, `role`. **No `host`/`port` for Snowflake** — the connector uses the account identifier directly.
-   - **bigquery:** either DSN `url = bigquery://<project>[/<dataset>]?service_account=/path/to/key.json&location=US` or per-field `project` (required), `service_account_path` (recommended; falls back to Application Default Credentials if omitted), and optional `dataset`, `location`. **No `host`/`port`** — BigQuery is HTTPS-only via the Google Cloud REST API.
-   - **sqlite:** `path` (absolute).
-
-   Never substitute a value that's missing — surface a clear "your credentials file is missing field X for profile Y; please add it" message and stop.
-4. **Tool detection.** Look up the cached connection method and tool paths from `~/.agami/.config`. If absent, run tool detection per Phase 0a below (the same logic that ran on first-time setup).
-5. **Resolve `<artifacts_dir>`** per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All semantic-model files (`index.yaml`, `<schema>.yaml`, `examples.yaml`, `ORGANIZATION.md`) for this skill go inside `<artifacts_dir>/<profile>/`. The directory is created lazily — if it doesn't exist yet, `mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`.
-6. **Update-check (best-effort, non-blocking).** Run the version probe from [`shared/version-check.md`](../../shared/version-check.md). If a newer plugin version exists on `main`, surface a one-line note ("agami X.Y.Z is available — run `/plugin marketplace update litebi && /reload-plugins`"). Never block on a network failure or stale local file — the probe is informational only.
-7. If `$ARGUMENTS` is `reintrospect`: skip Phase 1's "already-have-a-model?" check and re-introspect from scratch. **Hand-edits the user made (descriptions, ai_context, choice_fields, metrics, trust-layer sign-offs) MUST be preserved** — re-introspection only updates what the DB unambiguously tells us (table list, columns, types, PK, FK).
+1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `~/.agami/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
+2. **Credentials check (binding).** Read `~/.agami/credentials`; look for `[<profile>]`. If the file or section is missing and `AGAMI_DATABASE_URL` is unset → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."* If credentials exist, apply the chmod check (refuse if world-readable).
+3. **Resolve connection fields** from the `[<profile>]` section (or `AGAMI_DATABASE_URL`). Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
+4. **Tool detection.** Read cached tool paths from `~/.agami/.config`; if absent, run detection per Phase 0a.
+5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → `~/.agami/.config.artifacts_dir` → `$HOME/agami-artifacts`. The model lives in `<artifacts_dir>/<profile>/`. Create lazily (`mkdir -p … && chmod 755 …`).
+6. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
+7. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
 
 ---
 
 ## Phase 0a: First-time credential bootstrap
 
-**This sub-phase runs only when step 2 of the preflight above failed (credentials missing).** Formerly this lived in a separate `/agami-init` skill — folded in here so the user has a single entry point.
-
-If `~/.agami/credentials` already exists with a `[<profile>]` section, **skip this entire Phase 0a** and continue with the preflight's remaining steps (chmod check, field resolution, tool detection from cache, etc.).
+**Runs only when preflight step 2 failed (credentials missing).** If `~/.agami/credentials` already has the `[<profile>]` section, **skip Phase 0a entirely.**
 
 ### 0a.1 — Set up `~/.agami/`
-
 ```bash
-mkdir -p ~/.agami
-chmod 700 ~/.agami
+mkdir -p ~/.agami && chmod 700 ~/.agami
 ```
 
 ### 0a.2 — Ask the database type
 
-Skip this question if `AGAMI_DATABASE_URL` is set (the env var carries everything). Otherwise, use **AskUserQuestion**:
-
-> What kind of database are you connecting to?
-
-**No `(Recommended)` marker on this question** — fact-of-environment, not a preference. **Cap at 4 hard options + Other** so AskUserQuestion fits on one screen.
+Skip if `AGAMI_DATABASE_URL` is set. Otherwise **AskUserQuestion** (no `(Recommended)` — fact-of-environment). Cap at 4 visible + Other:
 
 | label | description |
 |---|---|
-| `PostgreSQL` | Postgres + Postgres-compatible: Supabase, Neon, RDS, Aurora, Cloud SQL, Timescale, and **Amazon Redshift** (Postgres wire protocol, port 5439, SSL required by default). |
+| `PostgreSQL` | Postgres + compatible: Supabase, Neon, RDS, Aurora, Cloud SQL, Timescale, and **Amazon Redshift** (port 5439, SSL by default). |
 | `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
 | `Snowflake` | Snowflake. Account identifier instead of host. |
-| `BigQuery` | Google BigQuery. Auth via a service-account JSON key file (`service_account_path`) or Application Default Credentials. |
-| `Other (Other field)` | Anything else, or paste a DSN. Accepts `postgresql://`, `redshift://`, `snowflake://`, `mysql://`, `bigquery://`, `sqlite:///abs/path`, or a plain `.db` / `.sqlite` file path for **SQLite**. |
+| `BigQuery` | Google BigQuery. Auth via service-account JSON or ADC. |
+| `Other (Other field)` | **SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite**, or paste any DSN. |
 
-Bind to `$DB_TYPE` (one of `postgres` | `mysql` | `snowflake` | `bigquery` | `sqlite` | `dsn` | `other`).
+Bind `$DB_TYPE` ∈ `postgres | mysql | snowflake | bigquery | sqlserver | oracle | databricks | trino | duckdb | sqlite | dsn`.
 
-**Routing**:
-- `PostgreSQL` → `$DB_TYPE = postgres`. If the user later enters port `5439` or a hostname matching `*.redshift.*.amazonaws.com`, transparently re-bind to `redshift`.
-- `MySQL`, `Snowflake`, `BigQuery` → straight pass-through.
-- `Other` → parse the free-form input: DSN scheme prefix → derive `db_type` from the scheme; `.db` / `.sqlite` suffix or absolute path → SQLite; unsupported DB names (`clickhouse`, `databricks`, `oracle`, `mssql`, `mongodb`) → surface "not supported yet, supported: Postgres / Redshift / MySQL / Snowflake / BigQuery / SQLite" and stop.
+**Routing:**
+- `PostgreSQL` → `postgres`; if the user later enters port `5439` or a `*.redshift.*.amazonaws.com` host, transparently re-bind to `redshift`. A `*.pooler.supabase.com` host stays `postgres` (Supabase is hosted Postgres).
+- `MySQL`/`Snowflake`/`BigQuery` → pass-through.
+- `Other` → parse the free-form input: a DSN scheme → derive `db_type`; `.db`/`.sqlite`/`.duckdb` suffix or absolute file path → SQLite or DuckDB; a named DB (`sqlserver`/`mssql`, `oracle`, `databricks`, `trino`/`presto`, `duckdb`) → that dialect. Only refuse with "not supported yet" for engines outside the supported set above (e.g. MongoDB, Cassandra, ClickHouse).
 
 ### 0a.3 — Pick a profile name
+> What should I call this connection? You'll use this name to switch databases later (e.g. `AGAMI_PROFILE=production`).
 
-```
-> What should I call this database connection? You'll use this name to switch between databases later (e.g., AGAMI_PROFILE=production).
-```
-
-Options (mark `main` Recommended, place first; auto-Other captures any short custom name):
-
-| label | description |
-|---|---|
-| `main (Recommended)` | Generic catch-all. Good if you only have one DB. |
-| `production` | Prod / live database. |
-| `staging` | Staging / dev / pre-prod. |
-
-Validate the chosen name: lowercase letters / digits / dashes / underscores, 1–32 chars. Strip whitespace, lowercase the input. Bind to `$PROFILE_NAME`. The profile name persists to `~/.agami/.config.active_profile` later in this sub-phase.
+Options (`main` Recommended, first): `main` / `production` / `staging`. Validate: lowercase letters/digits/dashes/underscores, 1–32 chars. Bind `$PROFILE_NAME`.
 
 ### 0a.4 — Write `~/.agami/credentials.example`
 
-Use the **Write tool**. The header is fixed; the active section body depends on `$DB_TYPE`. Substitute `[$PROFILE_NAME]` for the section header.
+Use the **Write tool**. Shared header first, then the `$DB_TYPE` body with `[$PROFILE_NAME]` as the section.
 
-**Shared header** (always written first):
-
+**Header:**
 ```ini
 # ~/.agami/credentials
-# Fill in your values and run: chmod 600 ~/.agami/credentials
+# Fill in your values and save as ~/.agami/credentials, then: chmod 600 ~/.agami/credentials
 # Format reference: plugins/agami/shared/credentials-format.md
 # Switch profiles with AGAMI_PROFILE=<name>.
 ```
 
-**`$DB_TYPE = postgres`** — lead with the URL form (Supabase / Neon / RDS hand you one):
+Bodies — `postgres`, `redshift`, `snowflake`, `mysql`, `bigquery`, `sqlite` are unchanged from [`shared/credentials-format.md`](../../shared/credentials-format.md) (URL-form first for Postgres/MySQL/Redshift; account fields for Snowflake; `project`+`service_account_path` for BigQuery; `path` for SQLite). The new dialects:
 
 ```ini
-# Postgres profile.
+# SQL Server / Azure SQL.
 [$PROFILE_NAME]
-type = postgres
-url  = postgresql://user:password@host:5432/database
-# (Accepts postgresql://, postgres://, postgresql+asyncpg://, postgresql+psycopg2://)
-# (Query params like ?sslmode=require are honored automatically.)
-
-# --- OR fill in fields instead of `url` (typical for self-hosted) ---
-# host     = your-host.example.com
-# port     = 5432
-# database = your-database-name
-# user     = your-username
-# password = your-password
-# sslmode  = require        # uncomment for cloud DBs
+type = sqlserver
+host = your-server.database.windows.net
+port = 1433
+database = your-database
+user = your-username
+password = your-password
 ```
-
-**`$DB_TYPE = redshift`**:
-
 ```ini
-# Redshift profile.
-# Provisioned cluster: your-cluster.<region>.redshift.amazonaws.com (port 5439)
-# Redshift Serverless: <wg>.<acct>.<region>.redshift-serverless.amazonaws.com
+# Oracle.
 [$PROFILE_NAME]
-type = redshift
-url  = redshift://user:password@your-cluster.us-west-2.redshift.amazonaws.com:5439/db
-
-# --- OR fields ---
-# host     = your-cluster.example.region.redshift.amazonaws.com
-# port     = 5439
-# database = your-database
-# user     = your-username
-# password = your-password
-# sslmode  = require
+type = oracle
+host = your-host.example.com
+port = 1521
+service_name = ORCLPDB1
+user = your-username
+password = your-password
+# OR a full DSN:  dsn = host:1521/ORCLPDB1
 ```
-
-**`$DB_TYPE = snowflake`**:
-
 ```ini
-# Snowflake profile.
-# Account formats: xy12345 (legacy) | xy12345.us-east-1.aws | myorg-myaccount
-# Do NOT add .snowflakecomputing.com — the connector appends it.
+# Databricks SQL warehouse.
 [$PROFILE_NAME]
-type      = snowflake
-account   = your-account-locator
-user      = your-username
-password  = your-password
-warehouse = COMPUTE_WH
-database  = ANALYTICS
-schema    = PUBLIC
-role      = ANALYST_ROLE
-
-# For SSO (Okta / Azure AD), remove the password line above and use:
-# authenticator = externalbrowser
-
-# OR — DSN form:
-# url = snowflake://user:pass@xy12345.us-east-1.aws/ANALYTICS/PUBLIC?warehouse=COMPUTE_WH&role=ANALYST_ROLE
+type = databricks
+host = your-workspace.cloud.databricks.com
+http_path = /sql/1.0/warehouses/abc123
+token = dapiXXXXXXXXXXXX
+# catalog = main      # optional Unity Catalog
 ```
-
-**`$DB_TYPE = mysql`**:
-
 ```ini
-# MySQL profile.
+# Trino / Presto.
 [$PROFILE_NAME]
-type = mysql
-url  = mysql://user:password@host:3306/database
-# (mysql+pymysql:// also works; the +driver suffix is stripped.)
-
-# --- OR fields ---
-# host     = your-host.example.com
-# port     = 3306
-# database = your-database-name
-# user     = your-username
-# password = your-password
+type = trino
+host = your-coordinator.example.com
+port = 8080
+user = your-username
+catalog = your_catalog
+schema = your_schema
+# password = ...       # uncomment for HTTPS + basic auth
 ```
-
-**`$DB_TYPE = bigquery`**:
-
 ```ini
-# Google BigQuery profile.
-# Auth: service-account JSON key (recommended) or Application Default Credentials.
-# Create a key: GCP Console → IAM → Service Accounts → BigQuery Job User +
-# Data Viewer roles → Keys → Add Key → JSON. Download, chmod 600.
+# DuckDB (local file or in-memory).
 [$PROFILE_NAME]
-type = bigquery
-project = your-gcp-project-id
-service_account_path = /absolute/path/to/your-sa-key.json
-# Optional default dataset (so SQL can use bare `table_name`).
-# dataset = your_default_dataset
-# Optional location (US / EU / asia-northeast1 / etc.).
-# location = US
-
-# OR — DSN URL:
-# url = bigquery://your-gcp-project-id/your_default_dataset?service_account=/path/to/key.json&location=US
+type = duckdb
+path = /absolute/path/to/your.duckdb
 ```
 
-**Important for BigQuery**: `chmod 600 /path/to/your-sa-key.json` after downloading. The JSON contains a private key. agami's `execute_sql.py` surfaces a warning if it's world-readable.
-
-**`$DB_TYPE = sqlite`**:
-
-```ini
-[$PROFILE_NAME]
-type = sqlite
-path = /absolute/path/to/your/database.db
-```
-
-**`$DB_TYPE = dsn`** (Other → DSN string):
-
-```ini
-[$PROFILE_NAME]
-url = paste-your-connection-string-here
-# Examples:
-#   postgresql://user:pass@host:5432/db
-#   postgresql+asyncpg://postgres.<ref>:<pw>@aws-1-<region>.pooler.supabase.com:5432/postgres
-#   mysql://user:pass@host:3306/db
-#   bigquery://your-gcp-project/your_dataset?service_account=/abs/path/key.json
-#   sqlite:///absolute/path.db
-```
-
-**Always finish** with the "additional profiles" hint — one commented block, not three:
-
+Always finish with the additional-profiles hint (one commented block):
 ```ini
 
 # Add more profiles by appending another [section]. Switch with AGAMI_PROFILE=<name>.
-# Example:
 # [staging]
 # type = postgres
 # url  = postgresql://readonly:pass@staging-db.example.com:5432/mydb
 ```
 
+For BigQuery / Databricks / any key-or-token file: remind the user to `chmod 600` it.
+
 ### 0a.5 — Tool detection
 
-Detect which database tool(s) are available **only** with these commands:
-
+Detect drivers **only** with `which`/import probes (no scanning):
 ```bash
-which psql 2>/dev/null
-which mysql 2>/dev/null
-which snowsql 2>/dev/null
-which sqlite3 2>/dev/null
-which duckdb 2>/dev/null
-which bq 2>/dev/null
-python3 -c 'import psycopg2' 2>/dev/null && echo "psycopg2 OK"
-python3 -c 'import pymysql' 2>/dev/null && echo "pymysql OK"
-python3 -c 'import snowflake.connector' 2>/dev/null && echo "snowflake OK"
-python3 -c 'import google.cloud.bigquery' 2>/dev/null && echo "bq-python OK"
+for t in psql mysql snowsql sqlite3 duckdb bq; do which $t 2>/dev/null; done
+python3 -c 'import psycopg2'        2>/dev/null && echo psycopg2 OK
+python3 -c 'import pymysql'         2>/dev/null && echo pymysql OK
+python3 -c 'import snowflake.connector' 2>/dev/null && echo snowflake OK
+python3 -c 'import google.cloud.bigquery' 2>/dev/null && echo bq-python OK
+python3 -c 'import pymssql'         2>/dev/null && echo pymssql OK
+python3 -c 'import oracledb'        2>/dev/null && echo oracledb OK
+python3 -c 'from databricks import sql' 2>/dev/null && echo databricks OK
+python3 -c 'import trino'           2>/dev/null && echo trino OK
+python3 -c 'import duckdb'          2>/dev/null && echo duckdb-py OK
 ```
+If `which psql` is empty, try the Homebrew libpq glob once. **Forbidden:** `pgrep`/`ps`/`lsof`/`find /`/`ls /Applications`/port scans.
 
-If `which psql` returns empty, try the common Homebrew location once: `ls /opt/homebrew/Cellar/libpq/*/bin/psql /opt/homebrew/opt/libpq/bin/psql 2>/dev/null | head -1`. Same for `/opt/homebrew/opt/mysql-client/bin/mysql`. **Do not** scan beyond those exact globs.
-
-**Forbidden** (do NOT run): `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, `ls /Library/PostgreSQL`, port-listener scans, connection tests to `localhost`. The user's database is the one they're about to put in `~/.agami/credentials` — no defaults, no guessing.
-
-Choose the connection method based on what's installed AND `$DB_TYPE`, per [`shared/connection-reference.md → How agami picks a connection method`](../../shared/connection-reference.md):
-
-1. **Native CLI** — `psql` (postgres / redshift), `mysql` (mysql), `snowsql` (snowflake), `bq` (bigquery), `sqlite3` (sqlite)
-2. **DuckDB** — universal binary; scans postgres / mysql / sqlite (not Snowflake or BigQuery)
-3. **Python driver** — `scripts/execute_sql.py` (psycopg2 / pymysql / snowflake-connector-python / google-cloud-bigquery / stdlib sqlite3)
-
-If none of these is available, surface the "no tool available" template from [`shared/connection-reference.md → When no tool is available`](../../shared/connection-reference.md) and offer to install via Bash (`brew install postgresql`, `brew install mysql`, etc.). **Confirm via AskUserQuestion** before running brew; don't install silently.
+agami's introspection + execution route through `scripts/execute_sql.py` (the Python-driver tier), which speaks every supported dialect. Native CLIs (`psql`/`mysql`/`snowsql`/`sqlite3`/`bq`) are used for the fast path when present. If the relevant driver is missing, surface the install hint (`pip install pymssql` / `oracledb` / `databricks-sql-connector` / `trino` / `duckdb`, etc.) and **confirm via AskUserQuestion** before any `brew`/`pip` install.
 
 ### 0a.6 — Ask for `<artifacts_dir>`
 
-Ask via **AskUserQuestion** before writing `.config`. Two named options (never label one "Other" — AskUserQuestion auto-adds an Other with free-text input):
+**AskUserQuestion** (two named options; never label one "Other"):
+> Where should agami save your semantic model, examples, and preferences? This is the **parent** for ALL profiles — each lands in `<artifacts_dir>/<profile>/`. Non-secret; point it inside a git repo to share with your team. Credentials stay in `~/.agami/` either way.
 
-> Where should agami save your semantic model, examples, and preferences?
->
-> This is the **parent directory** for ALL your database profiles — each profile lands in a subdirectory (`<artifacts_dir>/finbud/`, `<artifacts_dir>/staging/`, etc.). Pick a profile-neutral path. These are non-secret files; pointing at a folder inside a git repo lets your team commit them and share. Credentials stay in `~/.agami/` either way.
-
-| label | description |
-|---|---|
-| `~/agami-artifacts/ (Recommended)` | Default — profile-neutral folder in home. Each profile gets `~/agami-artifacts/<profile>/`. |
-| `~/Documents/agami/` | If you keep code under `~/Documents/`. Each profile at `~/Documents/agami/<profile>/`. |
-
-The auto-added **Other** captures any other absolute path (e.g., inside a team repo).
-
-Validate the chosen path:
-- Must be absolute.
-- Must NOT be inside `~/.agami/` (refuse: "That's the secrets directory — pick a different location").
-- Parent must exist or be creatable.
+`~/agami-artifacts/ (Recommended)` / `~/Documents/agami/`. Validate: absolute, not inside `~/.agami/`, parent creatable.
 
 ### 0a.7 — Write `~/.agami/.config`
-
 ```json
 {
   "schema_version": 1,
   "tier": "<cli | duckdb | python>",
-  "host": "<claude-code-cli | unknown>",
   "active_profile": "$PROFILE_NAME",
   "artifacts_dir": "<resolved absolute path>",
-  "tool_paths": {
-    "psql": "/opt/homebrew/Cellar/libpq/.../bin/psql",
-    "mysql": null,
-    "snowsql": null,
-    "sqlite3": "/usr/bin/sqlite3",
-    "duckdb": null,
-    "bq": null,
-    "python3": "/usr/bin/python3"
-  },
-  "tool_imports": {
-    "psycopg2": false,
-    "pymysql": false,
-    "snowflake-connector-python": false,
-    "google-cloud-bigquery": false
-  },
-  "detected_at": "<ISO8601 UTC, from `date -u +\"%Y-%m-%dT%H:%M:%SZ\"`>"
+  "tool_paths": { "psql": "...", "python3": "..." },
+  "detected_at": "<ISO8601 UTC from `date -u +%Y-%m-%dT%H:%M:%SZ`>"
 }
 ```
-
 `chmod 600 ~/.agami/.config`.
 
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
-
-After `artifacts_dir` is resolved, check for `<artifacts_dir>/USER_MEMORY.md`. If missing, create the parent (`mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`) and write the default seed (per [`shared/user-memory-format.md → Default seed`](../../shared/user-memory-format.md)) via Write, `chmod 644` (sharable, not secret).
-
-Don't overwrite an existing file. **Migration:** if `~/.agami/USER_MEMORY.md` exists from a v1.1 install, move it: `mv "$HOME/.agami/USER_MEMORY.md" "$artifacts_dir/USER_MEMORY.md"`. Surface a one-line note about the move.
+Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `~/.agami/USER_MEMORY.md` if present.
 
 ### 0a.9 — Hand-off + END THE TURN
-
 ```
 ✓ ~/.agami/ ready (chmod 700)
-✓ Credentials template written to ~/.agami/credentials.example
-✓ Tool detected: <psql / mysql / snowsql / bq / sqlite3 / duckdb / python> (<tier>)
+✓ Credentials template → ~/.agami/credentials.example
+✓ Tool detected: <tool> (<tier>)
 ✓ Artifacts dir: <resolved path>
 
 Next:
@@ -404,1507 +246,237 @@ Next:
 3. Run: chmod 600 ~/.agami/credentials
 4. Come back and ask a data question — I'll pick up the introspect from here.
 ```
-
-**End the turn.** The user fills in the file and re-invokes (or asks a data question — query-database auto-invokes us, and the preflight's step 2 will pass this time). Do NOT continue to Phase 1.
+**End the turn.** Do NOT continue to Phase 1.
 
 ### 0a.10 — On re-entry (credentials now exist)
-
-When the user comes back, the preflight's step 2 succeeds. Continue to step 3 (resolve connection fields) and beyond.
-
-**Also run `setup_pgauth.py`** before the first native-CLI query — this writes the provider-native auth files (`~/.agami/.pgpass`, `~/.agami/.mysql.cnf`) that psql/mysql read silently, so we never put passwords on the command line:
-
-```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --all
-```
-
-(Or `--profile <name>` for one specific profile.) Idempotent and safe to re-run.
+Preflight step 2 succeeds; continue. **Run `setup_pgauth.py --all`** before the first native-CLI query (writes `.pgpass` / `.mysql.cnf` so passwords never hit the command line). Idempotent.
 
 ---
 
-## Phase 1: Introspect
+## Phase 1: Introspect → semantic model
 
-### Phase 1.0 — set expectations before kicking off
+### 1.0 — Set expectations before kicking off
 
-Introspecting can take a while, especially against cloud DBs. Tell the user **before** the first probe so they don't think the skill has hung. The estimate depends on the database type:
+Introspection can take a while against cloud DBs. Tell the user **before** the first probe. Honest estimates — **don't lowball** (a user told "5 min" who waits 4 thinks "almost there"; one told "1 min" thinks "stuck").
 
-| db_type | Typical setup time | Why |
+| db_type | Typical | Why |
 |---|---|---|
-| `sqlite` | < 5 seconds | Local file, instant metadata. |
-| `postgres` (local) | 5–15 seconds | Local network, fast `information_schema` queries. |
-| `postgres` (cloud — Supabase / Neon / RDS) | 15–60 seconds | Network round-trip per query, plus FK validation join checks. |
-| `mysql` | 10–30 seconds | Similar to postgres. |
-| `redshift` | 1–5 minutes | Cloud + Redshift's metadata can be slow to return; FK validation joins amplify the cost. |
-| **`snowflake`** | **5–15 minutes (longer with many tables / large data)** | Cold warehouse spin-up (often the dominant cost), per-table SHOW commands, EXPLAIN-validation against the live warehouse, FK-validation join checks, choice-field cardinality scans, and per-table sample-row queries for description generation. Real-world tested against a 100-table credit-bureau Snowflake account: ~12 minutes. Accounts with hundreds of tables or huge warehouses can push past 30 minutes. **Always set the user's expectation honestly** — narrate per-table progress so they can see it's working, not stuck. |
+| sqlite / duckdb | < 5s | local file |
+| postgres / mysql (local) | 5–15s | fast catalog |
+| postgres / mysql (cloud) | 15–60s | network RTT per query + FK overlap checks |
+| redshift | 1–5 min | slow metadata + overlap joins |
+| **snowflake** | **5–15 min** | cold-warehouse spin-up dominates; per-table queries, sample scans, EXPLAIN validation. A 100-table account measured ~12 min. |
+| sqlserver / oracle / databricks / trino | 30s–5 min | network + per-table catalog |
 
-Surface a one-liner with **per-step duration estimates** so the user can tell the skill apart from a hang at any moment, not just the first. **Don't lowball — err on the high side.** A user told "5 min" who waits 4 minutes thinks "almost there"; one told "1 min" who waits 4 minutes thinks "stuck or broken." Honest estimates buy patience.
+Surface a one-liner with per-step estimates and **narrate per-table progress** so it never looks hung. For `reintrospect`, prepend "Re-introspecting (about as long as initial setup)."
 
-> Setting up your `<profile>` connection — for `<db_type>` this typically runs:
-> - Listing schemas (~5s)
-> - Discovering tables (~<10–60>s depending on schema size)
-> - Generating descriptions (~30–60s per ~50 tables — scales linearly)
-> - Choice-field detection (~5–10s per ~50 tables)
-> - FK validation joins (~<5–60>s depending on table sizes)
-> - Seeding examples (~20s)
-> - Demo query (~5s)
->
-> **Total: <high-end estimate>.** I'll narrate progress so you can see it's working.
+### 1.1 — Existing-model check
 
-For Snowflake specifically, write the total as a range like "5–15 minutes (longer if your warehouse needs to spin up cold)" — never lowball it as "60–180 seconds" the way earlier versions of this skill did. Real users on real warehouses regularly take 10+ minutes, and the under-promise-over-deliver framing keeps them patient.
+If `<artifacts_dir>/<profile>/org.yaml` exists and `$ARGUMENTS != reintrospect`: the profile is already onboarded. Offer (AskUserQuestion): re-introspect (refresh structure, preserve enrichment) / open the model explorer / cancel. The engine **auto-backs-up any legacy OSI** (`index.yaml` + per-schema `_schema.yaml`) it finds at the profile root into `.osi_backup/` before writing — so a first run over an old OSI profile is safe and reversible; surface a one-liner when that happens.
 
-**For reintrospect:** prepend "Re-introspecting (this takes about as long as initial setup)." so the user knows the estimate still applies.
+### 1.2 — Scope: schemas, and the no-catalog case
 
-### Phase 1.1 — existing-model check + legacy-layout migration
+Run `cli areas`/probe is not needed yet — schema discovery happens inside the engine. But **decide scope first**:
 
-The current layout (v1.3) is `<artifacts_dir>/<profile>/index.yaml` + `<artifacts_dir>/<profile>/<schema>/_schema.yaml` + per-table yamls. Three earlier layouts exist and need migration:
+- **Catalog reachable (common):** after the engine lists schemas, it introspects all of them. If the DB has many schemas (Snowflake with 50+), narrow first — ask the user which schemas matter (multi-select), then pass them as the engine's table allowlist scope. Pre-check `public` (Postgres) / `PUBLIC` (Snowflake) / the credentials' `database` (MySQL).
+- **Catalog denied (locked-down role):** if a quick probe shows the catalog isn't readable, the engine **cannot enumerate tables** — ask the user for the table list:
+  > Your role can read the data but not the catalog, so I can't list tables automatically. Paste the tables to model (e.g. `sales.orders, sales.customers`) — I'll describe each from the data itself.
 
-- **v1.0** — single file at `~/.agami/<profile>.yaml` (plus `<profile>-examples.yaml`).
-- **v1.1** — per-schema directory at `~/.agami/<profile>/<schema>.yaml` (under secrets dir, not yet split to artifacts).
-- **v1.2** — per-schema directory at `<artifacts_dir>/<profile>/<schema>.yaml` (under artifacts, but each schema is one big file with all its tables).
+  Pass these to the engine via `--tables schema.table …`. Everything the engine then infers (types, grain, FKs) lands `unreviewed` for sign-off.
 
-Detection (check in order — first match wins):
+### 1.3 — Schema picker (multi-select)
+
+For non-SQLite/DuckDB with multiple schemas, **AskUserQuestion** multi-select: "Which schemas should I introspect?" One option per schema + `All schemas` + `Just <default> for now`. Record `selected_schemas`; the engine scopes to these.
+
+### 1.4 — Organization context (MANDATORY — ALWAYS ASK)
+
+This runs on **every** invocation. The user's yes/skip is theirs; the skill never decides for them. "don't ask clarifying questions" does NOT cancel this — it's required state-gathering, not a clarifying question. **Only conditional skip:** `ORGANIZATION.md` exists and has been edited beyond the template.
+
+**AskUserQuestion:**
+> Want to give me a one-paragraph description of what this database is about? It improves NL→SQL accuracy a lot. Examples: what the company/product is, what "MRR" or "active user" means in your terms.
+
+`Yes — I'll type it now (Other field)` → write to `<artifacts_dir>/<profile>/ORGANIZATION.md` under `# About this database` + the commented default template. `Skip — I'll edit ORGANIZATION.md later (Recommended)` → write the template untouched. `chmod 600`. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+
+### 1.5 — Data-model document upload (MANDATORY — ALWAYS ASK)
+
+Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. **AskUserQuestion:**
+> Got a data-model document I can read? An ERD, data dictionary, schema doc — PDF, PNG/JPG, text, markdown, or CSV. (Excel/Word → save as PDF first.)
+
+`Yes — I'll attach it now (Other field)` → `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). Stash as `$DATA_MODEL_DOC_TEXT` for enrichment. **Never written to disk** — lives only in the enrichment prompt, then discarded. `.xlsx`/`.docx` → ask for PDF, proceed without if not. `Skip — no doc to share`.
+
+### 1.6 — Run the introspection engine
+
+This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. From `plugins/agami/scripts/`:
 
 ```bash
-artifacts_profile_dir="$artifacts_dir/$profile"
-v11_profile_dir="$HOME/.agami/$profile"
-v10_legacy_file="$HOME/.agami/$profile.yaml"
-v10_legacy_examples="$HOME/.agami/$profile-examples.yaml"
-v11_user_memory="$HOME/.agami/USER_MEMORY.md"
-
-is_v13_artifacts() {
-  # v1.3: artifacts dir + index.yaml + at least one <schema>/_schema.yaml
-  [ -d "$artifacts_profile_dir" ] && [ -f "$artifacts_profile_dir/index.yaml" ] && \
-    find "$artifacts_profile_dir" -mindepth 2 -name "_schema.yaml" -print -quit | grep -q .
-}
-
-is_v12_artifacts() {
-  # v1.2: artifacts dir + index.yaml + at least one top-level <schema>.yaml (no _schema.yaml subdirs)
-  [ -d "$artifacts_profile_dir" ] && [ -f "$artifacts_profile_dir/index.yaml" ] && \
-    ls "$artifacts_profile_dir"/*.yaml 2>/dev/null | grep -v -E '/(index|examples)\.yaml$' | grep -q .
-}
-
-if is_v13_artifacts; then
-  layout=existing-v13
-elif is_v12_artifacts; then
-  layout=v1.2-needs-table-split
-elif [ -d "$v11_profile_dir" ] && [ -f "$v11_profile_dir/index.yaml" ]; then
-  layout=v1.1-under-agami-home
-elif [ -f "$v10_legacy_file" ]; then
-  layout=v1.0-single-file
-else
-  layout=fresh
-fi
+python3 -m semantic_model.cli introspect \
+  --profile <profile> --db-type <db_type> \
+  --artifacts "<artifacts_dir>" \
+  [--tables schema.table …]      # only for the no-catalog case (1.2)
 ```
 
-**Branch on `layout`:**
+It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII, cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) and everything from probe mode are confirmed-by-overlap or `unreviewed`. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 
-- **`existing-v13`** and `$ARGUMENTS` is not `reintrospect`:
-  - "I already have a model for `<profile>` at `<artifacts_dir>/<profile>/`. What would you like to do?"
-  - AskUserQuestion options (no `(Recommended)` — user picks based on intent):
-    | label | description |
-    |---|---|
-    | `Re-introspect from DB` | Drop everything not hand-edited and pull fresh from the database. Preserves descriptions, ai_context, choice_fields, metrics, and human-approved trust-layer sign-offs. |
-    | `Verify and continue` | Validate the existing model (no DB queries), then continue to seed-examples / dashboard offer. |
-    | `Skip to seeding examples` | Skip introspection and validation. Regenerate examples.yaml and run the validation dashboard. |
-    | `Set up a different database (new profile)` | Add a separate profile for another DB (e.g., staging, analytics). Leaves `<profile>` untouched and starts the full first-run flow for the new profile name. |
-  - **If the user picks `Set up a different database`:** ask for the new profile name in a follow-up inline message: *"What should I call the new profile? (lowercase letters / digits / dashes / underscores, 1–32 chars; this is the name you'll use in `AGAMI_PROFILE=<name>` to switch between DBs.)"* Default-suggest names based on common patterns (`staging`, `analytics`, `production`) if the user seems unsure. Then set the in-process `<profile>` variable to the new name, **run Phase 0a (`First-time credential bootstrap`) inline** to walk the DB-type picker + write `credentials.example` for a new `[<new-name>]` section, and after the user fills it in re-enter this skill at Phase 0 with the new profile active. **Do NOT modify the existing `[<old-profile>]` credentials section** — only append.
+The validator gates the write — **if it fails, the model is not persisted.** Surface the errors verbatim and stop (this should be rare; the engine emits valid models).
 
-- **`v1.2-needs-table-split`** — model exists in artifacts dir but uses the single-file-per-schema layout. Migrate to per-table layout in place.
-  - Tell the user: "Splitting `<schema>.yaml` files into per-table yamls (`<schema>/<table>.yaml`). Smaller diffs in git, faster relevance retrieval at scale. No DB queries — purely a file rewrite."
-  - For each `<schema>.yaml` at the top level:
-    - Read the file, parse YAML.
-    - `mkdir -p "$artifacts_profile_dir/<schema>"`.
-    - For each `dataset` in `semantic_model[0].datasets[]`: write `<schema>/<table>.yaml` as a standalone OSI doc with one dataset (per Phase 2 shape above). Keep all the field definitions, custom_extensions, etc. as-is. Add `agami.table` to the model-level extension.
-    - Write `<schema>/_schema.yaml` with the table TOC + the original schema yaml's `relationships[]` and `metrics[]`.
-    - `rm "$artifacts_profile_dir/<schema>.yaml"`.
-  - Update `index.yaml.schemas[].file` from `<schema>.yaml` to `<schema>/_schema.yaml` for each migrated schema.
-  - Run validator in `--directory` mode to confirm. If it fails, restore from `<schema>.yaml.bak` (which the migration creates first) and surface the errors. Don't leave a half-migrated state.
-
-- **`v1.1-under-agami-home`** — move the per-schema dir to artifacts AND split into per-table.
-  - Tell the user: "Moving your model from `~/.agami/<profile>/` to `<artifacts_dir>/<profile>/` (sharable location), and splitting each schema into per-table files."
-  - `mkdir -p "$artifacts_dir" && chmod 755 "$artifacts_dir"`
-  - `mv "$v11_profile_dir" "$artifacts_profile_dir"`
-  - `chmod 644` on `*.yaml` and `*.md` inside.
-  - Then run the v1.2-needs-table-split path on the moved directory.
-  - Also migrate `$v11_user_memory` if `<artifacts_dir>/USER_MEMORY.md` doesn't exist: `mv "$v11_user_memory" "$artifacts_dir/USER_MEMORY.md" && chmod 644 "$artifacts_dir/USER_MEMORY.md"`.
-
-- **`v1.0-single-file`** — ancient single-file install.
-  - Tell the user: "Upgrading your model to the new per-table layout (faster, sharable, supports cross-schema relationships). Backing up your old model and re-introspecting now (~30–90s)."
-  - `mkdir -p "$artifacts_profile_dir" && chmod 755 "$artifacts_profile_dir"`
-  - `mv "$v10_legacy_file" "$artifacts_profile_dir/_legacy.yaml.bak"`
-  - Migrate `$v10_legacy_examples` and `$v11_user_memory` if present.
-  - Force `$ARGUMENTS=reintrospect` so we re-introspect from the DB into the new layout.
-
-- **`fresh`** — first install.
-  - `mkdir -p "$artifacts_profile_dir" && chmod 755 "$artifacts_profile_dir"`
-  - Continue to introspection.
-
-In every migration case, surface a one-liner pointing at the new location: "Your semantic model lives at `<artifacts_dir>/<profile>/` now. Credentials and per-user state stay in `~/.agami/`. See [`shared/file-layout.md`](../../shared/file-layout.md) for the split."
-
-Otherwise, continue to schema selection.
-
-### Phase 1.2 — list schemas
-
-Run the dialect-specific schema query from [`shared/introspect-queries.md`](../../shared/introspect-queries.md). For SQLite, skip this entirely and use the single implicit `main` schema.
-
-Capture: list of schema names the connected user has access to.
-
-Surface: `Found <K> schemas: <name1>, <name2>, …`
-
-### Phase 1.3 — schema picker (multi-select)
-
-For non-SQLite databases, ask the user which schemas to introspect. Skipping this step means the skill defaults to *every* schema, which is rarely what the user wants on a Snowflake account with 50+ schemas.
-
-**AskUserQuestion** with multi-select:
-
-> Which schemas should I introspect? (Pick one or more — I'll only build the model for what you select.)
-
-Options:
-- One option per discovered schema. Pre-check `public` (Postgres), the credentials' `database` (MySQL), or `PUBLIC` (Snowflake) by default.
-- A top option `All schemas (Recommended for small DBs)` — useful when the user has only 2–3 schemas.
-- A `Just <default> for now (skip the rest)` shortcut — useful when the user knows they only need one schema right now.
-
-Record the selection: `selected_schemas := [...]`. The next phases (1a list tables, 1b per-table, 1c FK validation, 1d descriptions) constrain to these schemas only. Reintrospect later only touches the same schemas unless the user explicitly says "also introspect the `<x>` schema."
-
-The selection is recorded in `index.yaml.schemas[]` (see Phase 2). Schemas not selected do NOT appear in `index.yaml`.
-
-Run introspection. For every step, use the SQL from [`shared/introspect-queries.md`](../../shared/introspect-queries.md), executed via the chosen tool (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`):
-
-### Phase 1.4 — collect a one-paragraph organization context
-
-**MANDATORY — ALWAYS ASK.** This phase must run on every `/agami-connect` invocation, every time. The user's reply (yes / skip) is theirs to decide, but the SKILL never decides on their behalf. The AskUserQuestion below is REQUIRED state-gathering, **not** an optional clarifying question — directives like "don't ask clarifying questions" or "no questions, just do it" do NOT cancel this phase. The user is opting out of *open-ended freeform* questions, not out of the two required AskUserQuestion calls in Phase 1.4 / 1.5.
-
-**The only conditional skip:** if `<artifacts_dir>/<profile>/ORGANIZATION.md` exists AND has been edited beyond the default template (any line longer than the template's parenthetical guidance), this phase has already produced the artifact in a prior run — skip silently. Otherwise, **always ask**, even on re-introspect.
-
-Domain context boosts NL→SQL accuracy a lot — a 30-second ask that often pays for itself.
-
-**AskUserQuestion**:
-
-> Want to give me a one-paragraph description of what this database is about? It improves NL→SQL accuracy a lot — without it I have to guess the domain from table/column names alone.
->
-> Examples of useful context: what the company / product is, what "MRR" or "active user" means in your terms, what kinds of users / customers you have.
-
-Options:
-- `Yes — I'll type it now (Other field)` — capture the user's free-form paragraph and write it to `<artifacts_dir>/<profile>/ORGANIZATION.md` under a `# About this database` heading. Add the rest of the default template (terminology / who's in this data / what we don't track) as commented prompts the user can fill in later.
-- `Skip — I'll edit ORGANIZATION.md later (Recommended)` — write only the default template (untouched) so the user knows where the file lives.
-
-In both cases, write to `chmod 600`. Format and content rules: see [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
-
-### Phase 1.5 — data-model document upload
-
-**MANDATORY — ALWAYS ASK.** This phase must run on every `/agami-connect` invocation, every time. The user's reply (yes / skip) is theirs to decide, but the SKILL never decides on their behalf. The AskUserQuestion below is REQUIRED state-gathering, **not** an optional clarifying question — directives like "don't ask clarifying questions" or "no questions, just do it" do NOT cancel this phase. The user is opting out of *open-ended freeform* questions, not out of the two required AskUserQuestion calls in Phase 1.4 / 1.5.
-
-Past failure modes (do NOT repeat any of these):
-- The SKILL header used to say "optional" — the LLM read that as "skip if no obvious need." Phase header now omits "optional" deliberately.
-- User said "don't ask me anything" at start of session — the LLM interpreted that as license to skip Phase 1.4 + 1.5. Wrong: those are state-gathering, not clarifying.
-- User uploaded a doc in Phase 1.4 — LLM thought "we have context, skip 1.5." Wrong: 1.4 is the *paragraph*, 1.5 is the *doc upload*. They are independent.
-
-Do NOT skip if:
-- Phase 1.4 returned "Skip" (org context skipped) — these are independent decisions, the user might have a doc but no time to write a paragraph.
-- The user already mentioned domain context in chat — they still might have a formal doc.
-- The schema has DBA-authored column comments (`information_schema.columns.column_comment` is non-empty) — comments are field-level; a doc is table-level and process-level.
-- Re-introspect (the user's previous answer for this profile is not stored).
-- The user said "no clarifying questions" or "skip questions" earlier in the session — that directive applies to freeform clarification, not to MANDATORY AskUserQuestion calls.
-
-Many users have an existing artifact describing their schema — an ERD, a data dictionary, a "what each table means" Confluence page. Feeding it to the description generator is a big lift on accuracy with zero extra introspect work.
-
-Ask **once per `/agami-connect` invocation**, low-friction:
-
-**AskUserQuestion**:
-
-> Got a data-model document I can read for additional context? Things like an ERD diagram, data dictionary, schema doc, or anything else that explains what your tables are for.
->
-> Drag-and-drop a file here, or paste a path. **PDF, PNG / JPG, plain text, markdown, or CSV** all work. For Excel or Word docs, save them as PDF first (File → Save As PDF) — it's the fastest way and works in every editor.
-
-Options:
-- `Yes — I'll attach it now (Other field)` — user pastes a path or drags a file into chat.
-- `Skip — no doc to share` — proceed to introspection. (No `(Recommended)` marker — sharing a doc genuinely improves accuracy when you have one; it's a fact-of-environment question, not a default we'd push.)
-
-If the user provides a path:
-
-1. Use the `Read` tool against the path. Claude's `Read` handles PDFs (with `pages` for large files), images (multimodal — can see diagrams), markdown, plain text, and CSV natively. No format-specific parsing logic needed in the skill.
-2. If the file is `.xlsx` / `.docx` / another binary office format, surface a one-liner: "I can't read `.xlsx` / `.docx` directly. Save it as PDF (File → Save As PDF) and re-attach, or paste the relevant content as text and I'll use it as-is." Don't block — proceed without the doc.
-3. If the file is huge (> 50 pages PDF or > 100KB markdown), trim to a summary: read the first 20 pages, surface "Loaded the first 20 pages of <name>; let me know if there's a specific section I should focus on." For tabular data (CSV with > 200 rows), keep only the first 50 rows + the header.
-4. Stash the loaded content in a working-memory variable: `$DATA_MODEL_DOC_TEXT` (or for images, the multimodal block).
-5. **Phase 1d's description-generation prompt** receives this content under a labeled heading: `## User-provided data-model document` (placed BEFORE the schema's tables/columns/sample rows so the LLM treats it as a domain prior, similar to ORGANIZATION.md).
-
-The doc is **never written to disk** — it lives only in the description-generation prompt's context, then is discarded. Same privacy posture as the per-table sample rows from Phase 1d.i.
-
-If the user uploads but the file is unreadable (corrupted PDF, unreachable path, etc.), surface "Couldn't read `<path>` — proceeding without it. You can always re-introspect later if you want to retry." Don't block.
-
-### 1a — list tables (within `selected_schemas` only)
-
-Filter to the `selected_schemas` from Phase 1.3. (System schemas are already filtered by Phase 1.2's discovery query, so they're not in `selected_schemas`.)
-
-For Postgres / Redshift:
-
-```sql
-SELECT table_schema, table_name
-FROM information_schema.tables
-WHERE table_type = 'BASE TABLE'
-  AND table_schema IN (<selected_schemas>);
-```
-
-Adapt the `IN (...)` clause for MySQL / Snowflake / SQLite (SQLite always introspects the implicit `main` schema).
-
-Surface: `Found <N> tables across <K> schema(s).`
-
-### 1b — for each table, pull columns + PK + FK + row count + indexes
-
-Use the per-dialect queries from [`shared/introspect-queries.md`](../../shared/introspect-queries.md).
-
-For each column: capture `name`, `data_type` (raw DB type), nullability. Map to the simple OSI-extension type set (`string | integer | decimal | timestamp | date | boolean`) using the type mapping table at the bottom of `introspect-queries.md`. Keep the raw DB type as `agami.original_type`.
-
-For each table:
-- **Row count** from `pg_stat_user_tables` (Postgres) or `information_schema.tables.table_rows` (MySQL). Tables with > 100k rows get a `agami.performance_hints` extension; tables ≤ 100k don't need one.
-- **Indexes** via the index-discovery query (Postgres `pg_indexes`, MySQL `information_schema.statistics`, Snowflake doesn't have traditional indexes — use clustering keys instead, SQLite `PRAGMA index_list`). Capture each index as a list of column names. Skip auto-generated PK indexes (the PK is already in `primary_key`). Persist as `agami.performance_hints.indexes: [[col1], [col2, col3], ...]`.
-  - **Why we capture indexes**: the SQL generator in agami-query-database (Phase 2b) uses this to prefer indexed columns for `WHERE` filters and `JOIN` conditions on large tables. A query that filters on an indexed column runs in milliseconds; the same query on an un-indexed column scans the whole table. The LLM doesn't know which columns are indexed unless we tell it.
-  - **For all tables, not just > 100k rows**: even on smaller tables, knowing which columns are indexed informs join planning. The `agami.performance_hints` extension is created for any table with indexes, even if `estimated_row_count` is small. (Earlier guidance was "only if > 100k" — overruling that here for indexes specifically.)
-
-**Progress narration (Phase F):** print one line per table as it completes, so the user can see the skill working through their schema. Format:
-
-```
-[3/47] public.orders — 12 columns, 2 FKs (description: "Customer-facing orders…")
-```
-
-`<i>/<N>` is the table index across all selected schemas. For batched description generation (Phase 1d below), additionally print one line per batch:
-
-```
-[batch 2/3] generating descriptions for tables 51–100 in public…
-```
-
-Keep narration to ≤ 80 chars per line — long lines wrap in some hosts and look messy.
-
-### 1c — FK validation (live join check)
-
-Run the orphan-ratio query from [`shared/fk-validation.md`](../../shared/fk-validation.md) against every detected FK. Drop any with > 5% orphans. For each FK that survives, record the result as a `agami.fk_validation` extension on the resulting `relationships[]` entry.
-
-If the database had **zero declared FKs**, run heuristic FK inference per `fk-validation.md` and ask:
-
-> I detected N likely foreign-key relationships from column-name conventions:
-> - `orders.customer_id` → `customers.id` (1 orphan in 2403 rows)
-> - …
->
-> Add these to the model?
-
-AskUserQuestion: `Add all (Recommended)` / `Add only zero-orphan ones` / `Skip — let me edit by hand later`.
-
-### 1c.5 — detect `agami.choice_field` (low-cardinality scan)
-
-For each candidate column in each introspected dataset, run the low-cardinality detection query from [`shared/introspect-queries.md → Choice-field detection`](../../shared/introspect-queries.md#choice-field-detection-low-cardinality-scan). If the column has ≤ 20 distinct non-null values, capture them as a `choice_field` map under the field's `agami` extension.
-
-**Candidate selection** (apply all):
-
-- `agami.type` is `string` or `integer`
-- Not in the dataset's `primary_key`
-- Not in any FK's `from_columns` (foreign-key values aren't enums even when finite)
-- Column name matches enum-y patterns (`status`, `state`, `type`, `kind`, `category`, `priority`, `tier`, `level`, `mode`, `flag`, `role`, `phase`, `stage`) **OR** the name is ≤ 32 chars and not in the free-text exclusion list (`name`, `description`, `notes`, `comment`, `body`, `content`, `email`, `address`, `url`, `path`, `slug`, `title`, `subject`, `message`)
-
-**For tables with `estimated_row_count > 10_000_000`**, sample first per the introspect-queries doc — don't scan the full column.
-
-**Output.** For each detected choice_field, write into the field's `custom_extensions` JSON:
-
-```yaml
-- name: status
-  expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
-  custom_extensions:
-    - vendor_name: COMMON
-      data: '{"agami": {"type": "string", "choice_field": {"pending": "pending", "shipped": "shipped", "delivered": "delivered", "cancelled": "cancelled"}}}'
-```
-
-Display labels default to the stored value (`label = value`). Don't invent prettier labels — that's a `field_metadata` correction the user can apply later via agami-save-correction.
-
-**Progress narration:** print one line per detected choice_field so the user sees what was found:
-
-```
-[choice_field] public.orders.status — 4 values: pending, shipped, delivered, cancelled
-```
-
-If a candidate column has > 20 distinct values, skip silently. Don't narrate misses.
-
-### 1c.7 — propose `agami.performance_hints.recommended_filters` (the targeted-warning unlock)
-
-Phase 2d in agami-query-database treats any query against an `estimated_row_count > 1_000_000` table as **HIGH risk** unless the WHERE clause matches a column listed in `recommended_filters`. Without that field populated, every query against every big table blocks with a "this is heavy, want to add a filter?" prompt — even queries that already have a perfectly good filter. That's blunt.
-
-For each table with `estimated_row_count > 1_000_000`, propose a list of recommended filter columns. Heuristic candidates, in priority order:
-
-1. **Primary key columns.** Equality on PK is always cheap.
-2. **Indexed columns.** Already captured in Phase 1b's `agami.performance_hints.indexes` — every leading column of every index is a recommended filter (single-col equality OR range on a covered prefix). For composite indexes `(a, b, c)`, only `a` is index-eligible without `a` first.
-3. **Time / date dimensions.** Any column with `agami.type` in `{date, timestamp}` AND a name suggesting recency (`created_at`, `updated_at`, `_at` suffix, `_date` suffix, `event_time`, `as_of`) — date-range filters are universally useful.
-4. **Identity / FK columns.** Columns named like `*_id` (especially the customer/user/account/applicant kind) — common per-entity-narrowing filters.
-5. **Choice-field columns from Phase 1c.5.** A `WHERE status='active'` is selective enough to count as a recommended filter for tables where `status` is a choice_field with ≤ 5 values.
-
-Persist as `{column, kind, reason}` per [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md):
-
-```yaml
-custom_extensions:
-  - vendor_name: COMMON
-    data: '{"agami": {"performance_hints": {"estimated_row_count": 134000000, "indexes": [["created_at"], ["payment_status"]], "recommended_filters": [{"column": "id", "kind": "equality", "reason": "primary key"}, {"column": "applicant_id", "kind": "equality", "reason": "FK to applicant — the natural per-entity narrowing"}, {"column": "report_date", "kind": "range", "reason": "indexed time dimension"}]}}}'
-```
-
-`kind` is machine-read by Phase 2d's risk classifier:
-- `equality` — `WHERE col = ?` is the expected shape (PK, FK, choice_field).
-- `range` — `WHERE col BETWEEN ? AND ?` or `WHERE col >= ?` is the expected shape (time/date columns).
-
-`reason` is short free-form prose for humans hand-editing the schema yaml later — keep it under one line.
-
-The Phase 2d risk classifier checks both `column` AND `kind` against the user's WHERE clause: an equality filter matches an `equality` entry, a range filter matches a `range`. A column queried by both `=` and `BETWEEN` is allowed — list it twice (one entry per kind).
-
-**Why this matters for finbud-shaped schemas:** without recommended_filters, every query against a 134M-row credit-bureau table blocks the user with a HIGH-risk warning. With recommended_filters listing `applicant_id`, `pan`, and `report_date`, queries that filter on any of those are LOW risk and run silently. Queries that DON'T filter on any of those still warn — that's the targeted behavior.
-
-**Cap at ~6 filters per table.** More than that and the list stops being a recommendation and becomes "everything's a filter" — the user should hand-edit if they need to add more.
-
-Don't narrate per-table — just emit a single line per schema:
-
-```
-[recommended_filters] public — proposed filter columns on 8 of 47 tables (>1M rows). Validator will surface them in the schema yaml.
-```
-
-For tables with `estimated_row_count <= 1_000_000`, skip — no need to propose recommended_filters when the whole table fits in a few seconds of scan.
-
-**Note on Snowflake clustering keys:** Snowflake has clustering keys (organize micro-partitions for cheaper range scans), which sound like indexes but behave differently — equality on a clustered column is no faster than on any other column once partitions are pruned. We deliberately do NOT capture clustering keys as a separate field; the validator's `agami.performance_hints` allowlist excludes `clustering_keys`. If clustering matters for a specific column, it shows up naturally as a `recommended_filters` entry with `kind: range`. Don't add a `clustering_keys` field — it would mislead the SQL generator into treating clustered columns like indexed ones.
-
-### 1d — auto-generate descriptions (per-schema batched, evidence-grounded)
-
-Generate a one-line `description` for **every table and every column** in the selected schemas. Without descriptions, NL→SQL quality drops sharply on large schemas — this pass is mandatory, not optional.
-
-#### 1d.i — sample rows per table
-
-For each table fetch up to 5 sample rows for evidence:
-
-```sql
-SELECT * FROM <schema>.<table> LIMIT 5;
-```
-
-Snowflake-only: for tables with `estimated_row_count > 10_000_000` use the `SAMPLE` clause to avoid scanning a huge prefix. See [`shared/introspect-queries.md`](../../shared/introspect-queries.md#sample-rows-for-phase-c).
-
-The sample is **never written to disk and never sent in telemetry.** It lives in the description-generation prompt's context, then is discarded.
-
-**Also capture the data's date range per time-dimension column.** Phase 5's seed-example generator anchors "last 30 days" / "this quarter" filters to the data's actual MAX, not to `NOW()` — otherwise time-bound seeds against a stale dataset return 0 rows and look broken in the validation dashboard. For each column whose type is `timestamp` or `date`:
-
-```sql
-SELECT MIN(<col>) AS min_ts, MAX(<col>) AS max_ts FROM <schema>.<table>;
-```
-
-Store the result as `agami.performance_hints.data_range`:
-
-```yaml
-performance_hints:
-  estimated_row_count: 1342000
-  data_range:
-    created_at:
-      min: "2023-01-15T00:00:00Z"
-      max: "2025-11-12T23:59:01Z"
-    paid_at:
-      min: "2023-02-01T00:00:00Z"
-      max: "2025-11-12T18:42:11Z"
-```
-
-Skip this scan for tables with `estimated_row_count > 50_000_000` — the MIN/MAX scan is expensive and the dominant time column on huge tables is usually already known. For BigQuery, this is cheap on partitioned tables (the query reads partition metadata) but expensive on unpartitioned ones — gate on `is_partitioning_column = TRUE` if you're worried about cost.
-
-#### 1d.ii — per-schema batched generation
-
-Process schemas one at a time. For each schema, build a prompt with:
-
-- The user-provided data-model document from Phase 1.5 (`$DATA_MODEL_DOC_TEXT`, or multimodal image block if it's a diagram), if present — placed **first** so it acts as the dominant domain prior. Header: `## User-provided data-model document`.
-- The user's `<artifacts_dir>/<profile>/ORGANIZATION.md` (if non-empty) — domain context for the database. Header: `## Organization context`.
-- The schema's tables, columns (with types), FKs, choice-field hints
-- The 5 sample rows per table
-
-Ask the model to emit, for each table:
-- A 1-line `description` summarizing what the table holds
-- For each column, a 1-line `description` **only if you can say something the column name doesn't already say**. **Empty is the default, not the exception.** Every empty `description` field skips the review queue entirely (the trust spine marks it `not_applicable`), so the user has fewer cards to walk. Examples the LLM must follow:
-
-  | Column | Bad (rejected) | Good (kept) | Empty (preferred) |
-  |---|---|---|---|
-  | `id` | "Primary key" | (always leave empty — structural) | `""` |
-  | `customer_id` | "The customer ID" | "FK to customers.id; 1:N with orders" | `""` if no extra context to add |
-  | `created_at` | "When the row was created" | (always leave empty — structural) | `""` |
-  | `status` | "A status code" | "lifecycle: pending → shipped → cancelled" (only if you know the enum) | `""` if no enum is known |
-  | `revenue_usd` | "Revenue in USD" | "Net revenue, USD at invoice date, excludes refunds" (only if sample data or domain doc supports it) | `""` if you can't tell whether refunds are in |
-  | `email` | "Email address" | (always leave empty — structural) | `""` |
-  | `v_1`, `tmp_col`, `x` | "A value" | (leave empty — opaque) | `""` |
-  | `pl_outstanding` | "PL outstanding" | "Total outstanding balance on personal loans, INR" (if samples show INR-shaped amounts) | `""` if you can't tell what `pl` stands for |
-
-  **Disqualifying patterns — always output `""` for these:**
-  - The description would essentially restate the column name (`status` → "A status").
-  - The description is generic boilerplate ("An identifier", "A flag", "A value", "A code").
-  - The description merely translates an abbreviation ("amt" → "amount") without adding meaning.
-  - The column name is opaque (`v_1`, `x`, `tmp_col`) and the sample rows / domain doc give no clue.
-  - The column matches a structural / universal pattern that Pillar A auto-approves (`id`, `*_id`, `created_at`, `*_at`, `email`, `phone`, `name`, `status`, `*_count`, `*_amount`, etc. — see [`shared/column-name-dictionary.md`](../../shared/column-name-dictionary.md)). The introspect step's auto-approve rule writes the canonical description for these *if* you leave them empty; if you write a description, you're competing with the dictionary and your text needs to add real value or it'll be rejected as boilerplate.
-
-  **What counts as "real value":** the description tells the user something they couldn't have learned by looking at the column name + type. Business rules (excludes / includes / currency conventions), unit assumptions, lifecycle enums, FK target tables, sample-grounded specifics. If you can't articulate one of those, leave empty.
-
-  Empty is encouraged. Cards in the review queue are a cost. A short, honest empty is better than padded prose.
-
-#### 1d.iii — width bounding for large schemas
-
-If a single schema has > 100 tables, batch within the schema: process **50 tables at a time**. Each batch sees the full column list + sample rows for *its* tables, but only summary names of the rest of the schema (for FK context).
-
-Print one line per batch (Phase F narration):
-
-```
-[batch 2/4] Generated descriptions for tables 51–100 of public.
-```
-
-#### 1d.iv — validate-then-write per schema
-
-After every schema completes, validate that schema's yaml as a standalone OSI doc:
-
-```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" "/tmp/agami-staging-<profile>/<schema>.yaml"
-```
-
-If a schema fails validation, the staging file stays at `/tmp/agami-staging-<profile>/<schema>.yaml`. Surface the errors and continue with the next schema — don't block the rest of the introspection. The user gets a single end-of-Phase-1 summary listing which schemas need attention. Phase 3 then runs `--directory` mode on the merged result.
-
-#### 1d.v — what NOT to invent
-
-- Don't invent column meanings for opaque names (`v_1`, `tmp_col`, `x`). Leave empty.
-- Don't invent business semantics not supported by sample rows (e.g., don't claim a `status` column is "active vs cancelled" if the samples only show `pending`).
-- Don't translate column names ("`amt`" → "amount") — keep descriptions about what the column *means*, not what it's *named*.
-- The user can hand-edit any `<artifacts_dir>/<profile>/<schema>.yaml` and the changes will survive future re-introspections (Phase 2 hard rule #8 — preserve descriptions, ai_context, choice_fields, metrics).
-
-### 1e — detect units (`agami.unit`) + currency ask
-
-After descriptions but before metric suggestions, scan numeric fields for unit hints. Three categories of unit can be inferred or asked for:
-
-#### 1e.i — auto-detect (no user prompt)
-
-For each `decimal` or `integer` field, infer unit from:
-
-- **Percent**: column name ends with `_pct`, `_percent`, `_rate`, `_ratio` AND sample values are between 0 and 100 (or 0 and 1). Set `agami.unit: "percent"`.
-- **Duration**: column name ends with `_seconds`, `_sec`, `_secs`, `_ms`, `_milliseconds`, `_minutes`, `_min`, `_hours`, `_hrs`, `_days`. Set `agami.unit: "<seconds|ms|minutes|hours|days>"` matching the suffix.
-- **Bytes**: column name ends with `_bytes`, `_kb`, `_mb`, `_gb`. Set `agami.unit: "<bytes|kb|mb|gb>"`.
-
-These don't need user input — the unit is unambiguous from naming convention.
-
-#### 1e.ii — currency ask (one prompt per profile)
-
-For each numeric field whose name suggests a money amount — `amount`, `price`, `cost`, `revenue`, `total`, `subtotal`, `fee`, `tax`, `discount`, `paid`, `balance`, `salary`, `wage`, `payment`, `charge`, or anything ending in `_usd`, `_eur`, `_gbp`, etc. (the suffix is the answer; skip the prompt for those) — collect the field into a list of currency-candidates.
-
-If the candidate list is non-empty AND there's no per-column suffix giving the answer, ask the user **once per profile** (not per column):
-
-**AskUserQuestion**:
-
-> I detected `<N>` numeric fields that look like money amounts: `<table.field>, <table.field>, ...`. **What currency are these in?**
->
-> Pick one — I'll annotate every field with the right unit so charts and totals format correctly.
-
-Options: `USD` / `EUR` / `GBP` / `JPY` / `INR` / `Other (Other field — e.g., AUD, CAD, CHF)` / `Mixed — different fields use different currencies, I'll edit by hand`
-
-If the user picks a single currency, set `agami.unit: "<CURRENCY_CODE>"` (lowercase ISO 4217: `usd`, `eur`, `gbp`, etc.) on every detected money column. If "Mixed", skip — no auto-annotation, surface a one-liner ("OK, leaving currency fields unannotated. Edit by hand or save as a correction later.")
-
-#### 1e.iii — record and continue
-
-The unit annotation is part of `agami.unit` per the existing extension allowlist; no schema changes needed. Phase 5 (chart rendering) and Phase 3c (cell formatting) in agami-query-database already use `agami.unit` for currency / percent / duration formatting.
-
-### 1f — suggest metrics (user-confirmed only — never auto-write)
-
-agami-query-database treats `metrics[]` as canonical aggregations the user wants reused across queries (e.g., `total_revenue` is `SUM(orders.amount)` filtered to non-cancelled). Metrics drift fast across domains, so we don't auto-detect — but we do **suggest** plausible ones during introspection so the user can pick.
-
-#### 1f.i — generate candidates
-
-Per schema, propose **at most 4 candidate metrics** (cap is hard — AskUserQuestion's multi-select fits about 4 options + Other on one screen; more than that triggers the "Metrics / More metrics" tab split that confuses users into thinking they need to click another tab to confirm). Pick the highest-confidence 4 from these signals:
-
-- Numeric fields named like aggregates (`amount`, `revenue`, `cost`, `quantity`, `count`) — propose a SUM metric and (if the field has multiple decimals) an AVG metric.
-- Tables that look fact-shaped (have FKs to dimension tables, time field, numeric measures) — propose `count_<table>` (`COUNT(*) FROM <table>`) as a baseline metric.
-- Time fields — for tables with timestamps, propose a `daily_<count|sum>_<x>` metric grouped by day, especially if the table looks high-traffic (`> 100k` rows).
-- ORGANIZATION.md hints — if it defines vocabulary like "MRR" or "active user", propose a metric matching that definition.
-- The user-uploaded data-model document (Phase 1.5) — if it lists KPIs by name, propose those.
-
-For each candidate, include:
-- A snake_case `name` (e.g. `total_revenue`, `count_orders`, `avg_order_value`)
-- The aggregation expression in ANSI_SQL referencing `<dataset>.<field>`
-- A 1-line description
-- 2-3 synonyms
-
-#### 1f.ii — confirm with the user, batch-style
-
-**AskUserQuestion** with the candidate list as multi-select:
-
-> I'd suggest adding these metrics to your model — they're reusable aggregations the skill will use whenever you ask about them by name (or synonym). Pick which ones make sense for your domain.
-
-Options: one option per candidate (pre-checked when the candidate is grounded in ORGANIZATION.md or the data-model doc; un-checked otherwise). Plus `Other (Other field)` for "describe a metric I want — e.g. 'MRR = SUM(price) where plan=subscription'". The user types a free-form metric description and the skill drafts the SQL + adds it. **No "None / skip" option** — leaving every candidate unchecked and submitting is the implicit skip.
-
-**Hard cap: 4 candidate options + Other (5 total).** Above that, the AskUserQuestion modal splits across tabs ("Metrics" / "More metrics") with a confusing "Already answered above" entry. If you've identified more than 4 high-confidence candidates, surface only the top 4 and tell the user inline: "I had 3 more metric ideas (`<name>`, `<name>`, `<name>`). Say 'add the X metric' anytime and I'll wire it via save-correction."
-
-For each metric the user picks: write into the schema yaml's `metrics[]`. **Always include a draft `agami.definition_prose`** — without it the metric can never be approved later (Rule 1 of the trust layer requires non-empty prose for approval). Source the draft in this order:
-
-1. Use the **column comment** of the metric's source column if present (DBA-authored — strongest signal).
-2. Else use the **ORGANIZATION.md** definition if the metric's name matches a defined business term.
-3. Else generate a one-sentence LLM draft from the metric name + expression + a sample of values (e.g., `"Sum of orders.amount_usd across all rows — total revenue in USD."`).
-
-The user will edit this prose later via `agami-review` if it's wrong; the point is to ship something non-empty so the validator + the approval flow have a starting state.
-
-Validate before write (the per-schema yaml must still pass OSI). If a metric fails validation (e.g., references a non-existent column), drop it silently and surface a one-liner: "Skipped `<name>` — couldn't validate against your model."
-
-If the user picks "None", write nothing. They can add metrics later via agami-save-correction (`new_metric` correction kind).
-
-#### 1f.iii — what NOT to suggest
-
-- Don't suggest metrics that depend on choice_field literals you didn't detect (e.g., don't propose `MRR = SUM(price) WHERE plan='subscription'` if you never saw `plan='subscription'` in the choice_field detection).
-- Don't suggest more than 4 candidates per schema — the AskUserQuestion splits across tabs above that. Pick the highest-confidence ones; mention the rest in chat prose for the user to add later via save-correction.
-- Don't propose metrics that span multiple schemas in the multi-schema case unless `cross_schema_relationships` already wires the join. Cross-schema metrics belong in `index.yaml` (future) — for now, scope each metric to a single schema.
+Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe> mode); <R> relationships, <D> deep tables, <S> sensitive columns flagged.`
 
 ---
 
-## Phase 2: Build the per-table OSI model
+## Phase 2: Enrich (the LLM layer — validated into the model)
 
-Output is a directory tree: `<artifacts_dir>/<profile>/` contains `index.yaml`, plus one subdirectory per schema. Each schema subdirectory contains `_schema.yaml` (slim TOC + within-schema relationships) and one `<table>.yaml` per table (full OSI doc for that table). The split lets the two-pass retrieval (Pass 1) read only `_schema.yaml` files for relevance picking, then lazy-load only the picked tables' yamls in Pass 2 — much smaller prompt for 1000+-table schemas.
+The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
 
-### Per-table yaml shape (one file per table)
+### 2a — Descriptions (evidence-grounded; empty is the default)
 
-Each `<artifacts_dir>/<profile>/<schema>/<table>.yaml` is a **standalone OSI v0.1.1 document** with exactly one dataset:
+For each table fetch up to 5 sample rows for evidence (`SELECT * FROM <t> LIMIT 5`; Snowflake `SAMPLE` for >10M rows). **Samples are never written to disk** — context only, then discarded. Also capture MIN/MAX of each time column → record under the table's `performance_hints` so Phase 5 anchors "last 30 days" to the data's real MAX, not `NOW()`.
 
-```yaml
-version: "0.1.1"
+Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `ORGANIZATION.md`, then tables/columns/sample rows. Emit a **1-line** table `description`, and a column `description` **only if it says something the column name + type doesn't.** Empty is preferred — there's no review cost to an empty description.
 
-semantic_model:
-  - name: <profile>
-    custom_extensions:
-      - vendor_name: COMMON
-        data: '{"agami": {"profile": "<profile>", "db_type": "<db_type>", "schema": "<schema_name>", "table": "<table_name>"}}'
+| Column | Bad (reject) | Good (keep) | Empty (preferred) |
+|---|---|---|---|
+| `id`, `created_at`, `email` | "Primary key" / "When created" / "Email" | (always empty — structural) | `""` |
+| `customer_id` | "The customer ID" | "FK to customers.id; 1:N with orders" | `""` if nothing to add |
+| `status` | "A status code" | "lifecycle: pending → shipped → cancelled" (only if enum known) | `""` |
+| `revenue_usd` | "Revenue in USD" | "Net revenue, USD at invoice date, excludes refunds" (only if samples/doc support it) | `""` |
+| `v_1`, `tmp_col`, `x` | "A value" | (leave empty — opaque) | `""` |
 
-    datasets:
-      - name: <table_name>                                # source table name verbatim
-        source: <database>.<schema>.<table>               # ALWAYS three-part
-        primary_key: [<col>, ...]
-        unique_keys:
-          - [<col>]
-        description: <plain English or empty string>
-        ai_context:
-          synonyms: [...]
-        fields:
-          - name: <column_name>
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: <column_name>
-            dimension:
-              is_time: <true if timestamp/date else false>
-            description: <empty string is OK>
-            custom_extensions:
-              - vendor_name: COMMON
-                data: '{"agami": {"type": "<simple_type>", "original_type": "<DB native type>"}}'
-        custom_extensions:
-          - vendor_name: COMMON
-            data: '{"agami": {"performance_hints": {"estimated_row_count": <int>, "indexes": [["col1"], ["col1","col2"]]}}}'
+**What NOT to invent:** opaque-name meanings; business semantics not in the samples; name translations (`amt`→"amount"). Write only what tells the user something they couldn't learn from the name + type.
 
-    # No `relationships:` here — they live in <schema>/_schema.yaml.
-    # No `metrics:` here either — single-table metrics live in the same dataset's
-    # `custom_extensions` if measure-like; multi-table go in _schema.yaml; multi-
-    # schema go in index.yaml.
-```
+For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. Validate after each schema; on failure, surface errors and continue with the rest, then report which need attention.
 
-`agami.schema` and `agami.table` at the model level **must match** the file's location — the validator rejects mismatches. Each table file MUST have exactly one dataset (one file per table).
+### 2b — Entities (the semantic vocabulary)
 
-### `<schema>/_schema.yaml` shape (agami-bespoke, slim TOC)
+Propose `entities[]` per subject area — the names users actually say. For each, fill `name`, `plural`, `other_names` (synonyms), `maps_to` (table+column, one `primary: true`), and — for opaque-identifier columns — a `value_pattern` regex (e.g. a VIN `^[A-Z0-9]{17}$`, a `BP`-prefixed serial) so the runtime can recognize literals. Ground these in column names + samples + the domain doc; don't invent entities the schema doesn't support. Write into `subject_areas/<area>/entities/<name>.yaml`; validate.
 
-```yaml
-version: "0.1.1"
-schema: <schema_name>
-description: <one-line schema role>
-tables:
-  - name: <table_name>
-    file: <table_name>.yaml
-    description: <one-line — what the table holds (used by Pass 1 retrieval)>
-    primary_key: [<col>, ...]
-    estimated_row_count: <int>           # optional, helps Pass 2 risk assessment
-relationships:                             # within-schema only
-  - name: <from>_to_<to>
-    from: <table_name>                   # bare names — both must be in this schema's tables[]
-    to: <table_name>
-    from_columns: [<col>, ...]
-    to_columns: [<col>, ...]
-    custom_extensions:
-      - vendor_name: COMMON
-        data: '{"agami": {"fk_validation": {...}}}'
-metrics:                                   # multi-table within this schema (optional)
-  - name: <metric_name>
-    expression: { dialects: [{ dialect: ANSI_SQL, expression: SUM(orders.amount) }] }
-    description: <one-line>
-```
+### 2c — Metrics (user-confirmed only — never auto-write)
 
-`_schema.yaml` is **NOT OSI** — it's agami-bespoke. The validator has its own allowlist for it.
+Metrics drift fast across domains, so **suggest, don't auto-add.** Per subject area propose **at most 4** candidates (hard cap — AskUserQuestion fits ~4 + Other) from: aggregate-shaped numeric fields (SUM/AVG), fact tables (`count_<table>`), time fields (daily counts), and `ORGANIZATION.md` / data-doc KPI definitions.
 
-### `index.yaml` shape (top-level TOC)
+**AskUserQuestion** multi-select: "I'd suggest these reusable metrics — pick which make sense." Pre-check doc-grounded ones; `Other (Other field)` for "describe a metric I want". No "None" option — submitting with none checked is the skip. For each picked metric write `name`, prose `calculation` (intent — **required**, drafted from the column comment → ORGANIZATION.md → an LLM one-liner), per-dialect `bindings` (the SQL), `source_tables`, `other_names`, `confidence: proposed`. Validate before write; drop + one-liner on failure. Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join (then put them under the cross-cutting area).
 
-```yaml
-version: "0.1.1"
-profile: <profile>
-db_type: <db_type>
-schemas:
-  - name: <schema_name>
-    file: <schema_name>/_schema.yaml      # path to the schema's TOC, NOT a single yaml
-    table_count: <int>
-    description: <one-line schema summary or empty>
-cross_schema_relationships:                # relationships that span schemas
-  - name: <from_schema>_<from_table>_to_<to_schema>_<to_table>
-    from: <from_schema>.<from_dataset>    # qualified
-    to: <to_schema>.<to_dataset>          # qualified
-    from_columns: [<col>, ...]
-    to_columns: [<col>, ...]
-    description: <optional>
-introspect_meta:
-  introspected_at: <ISO>
-  tier: <cli|duckdb|python>
-  source_db_version: <version string>
-```
+### 2d — Caveats, value_transforms, currency
 
-The `file` field for each schema is `<schema>/_schema.yaml` (path with subdirectory) in v1.3, replacing the v1.2 `<schema>.yaml` (top-level single file). The validator detects layout from this path and dispatches accordingly.
+From samples + the domain doc, add provider-portable cleaning where evidence supports it:
+- **Caveats** (`caveats[]` on table/column/entity): data-quality notes, anti-patterns ("use `tiu_date` not `tiu_time` for date filters"), dedup warnings.
+- **value_transform** on columns whose raw value needs cleaning (`regexp_replace(...)` for bracketed text, `TO_TIMESTAMP(...)` for epoch). Must parse as SQL (validator checks).
+- **Currency (one ask per profile):** if numeric fields look like money (`amount`/`price`/`revenue`/…, no `_usd` suffix giving the answer), ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). Record it as a caveat on those columns (e.g. "Amounts in INR.") so charts/totals format correctly. `Mixed` → leave unannotated, one-liner.
 
-**Where each kind of metadata lives:**
+### 2e — Reintrospect merge
 
-| Metadata | Lives in | Why |
-|---|---|---|
-| One table's columns / indexes / FKs / row count | `<schema>/<table>.yaml` (datasets[0]) | Per-table — load only when the table is picked |
-| Within-schema relationships | `<schema>/_schema.yaml` | Span tables in one schema |
-| Cross-schema relationships | `index.yaml.cross_schema_relationships[]` | Span schemas |
-| Single-table metrics (e.g. `SUM(orders.amount)`) | `<schema>/<table>.yaml` (model-level metrics or measures via custom_extensions) | Aggregates one table |
-| Multi-table-within-schema metrics | `<schema>/_schema.yaml.metrics[]` | Need the schema's relationships to compute |
-| Multi-schema metrics | `index.yaml.metrics[]` (future) | Need cross-schema relationships |
-| Per-database (profile-wide) settings | `index.yaml.introspect_meta` | One per profile |
-| User preferences (any DB) | `<artifacts_dir>/USER_MEMORY.md` | Cross-database |
-| Domain context (this DB) | `<artifacts_dir>/<profile>/ORGANIZATION.md` | Per-database, free-form |
-
-### Hard rules when building
-
-1. **Every field must have an `expression.dialects[]` with at least one entry.** Even for plain column references — write `expression: { dialects: [{ dialect: ANSI_SQL, expression: <column_name> }] }`. No exceptions.
-2. **`agami.type` is mandatory** on every field. If the DB native type is exotic and you can't map it, default to `string` and put the original in `agami.original_type`.
-3. **Relationships are top-level** under the model. Never nest them inside datasets. Each one needs a unique `name`. Within-schema: `<from>_to_<to>` (suffix with `_<col>` if multiple FK pairs share endpoints). Cross-schema: include the schema names: `<from_schema>_<from>_to_<to_schema>_<to>`.
-4. **`from_columns` and `to_columns` MUST have the same length.** Composite keys are arrays.
-5. **`source` must be three-part dotted notation.** `database.schema.table` — never bare table name. For sqlite use `file_basename.main.<table>`.
-6. **Don't invent `custom_extensions` keys.** Only emit the keys documented in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md). Adding a new key requires updating that doc + the validator's allowlist + a test.
-7. **Dataset name uniqueness within a schema.** The validator merges all `<schema>/<table>.yaml` files in a schema and rejects duplicates. (Across schemas, duplicate table names ARE allowed in v1.3 because the qualified `<schema>.<table>` is the addressable name.)
-8. **Each `<table>.yaml` MUST have exactly one dataset.** The validator rejects multi-dataset table files. If you need a synthetic view that combines tables, that's a metric (model-level) or a separate yaml the user hand-creates — not something Phase 2 generates.
-9. **`agami.schema` and `agami.table` at the model level must match the file's location.** Validator-enforced. The mapping `<schema>/<table>.yaml` ↔ `agami.schema = "<schema>"` and `agami.table = "<table>"` is the only valid combination.
-10. **Reintrospect preserves hand-edits.** When `$ARGUMENTS == reintrospect` and existing `<artifacts_dir>/<profile>/<schema>/<table>.yaml` files exist:
-    - Read each existing table yaml.
-    - For each existing field: keep its `description`, `ai_context`, and any `agami.choice_field` / `agami.unit` extensions. Refresh only `agami.type` / `agami.original_type` from the DB.
-    - For each existing dataset: keep its `description`, `ai_context`. Refresh `agami.performance_hints` from the DB.
-    - For each `_schema.yaml` relationship: keep it as-is if both endpoints still exist. Drop if the underlying FK is gone.
-    - Keep all existing `metrics[]` entries (per-table or per-schema) — user-authored, never lose them.
-    - For `index.yaml.cross_schema_relationships`: same preservation rules.
-    - **Trust-layer fields preserved.** For every entry whose `agami.review_state` is `approved` or `rejected` in the existing yaml, keep the full trust block (`confidence`, `signal_breakdown`, `review_state`, `origin`, `signed_off_*`) verbatim — human review is never lost on reintrospect. New entries (those that didn't exist before) get fresh trust blocks per Phase 2c. Entries whose underlying schema element changed (column type, FK target, etc.) get their `agami.review_state` flipped to `stale` (drift signal), preserving prior `signed_off_*` for audit.
-11. **Trust-layer fields on every entry.** Every dataset, field, and relationship MUST carry the universal trust-layer keys (`confidence`, `signal_breakdown`, `review_state`, `origin`, `signed_off_by`, `signed_off_at`, `signed_off_role`) inside its `custom_extensions[].vendor_name=COMMON` agami payload. The validator rejects any entry without them. See Phase 2c below for how to compute the values.
+On `reintrospect`, the engine rewrites the structural skeleton. **Preserve hand-edits**: descriptions, entities, metrics, caveats, value_transforms, and trust sign-offs (`confidence`/`review_state`/`signed_off_*`) carry over for tables/columns that still exist. Only structure the DB unambiguously reports (table list, columns, types, PK, FK) is refreshed. Mark entries `stale` only when their underlying column/table changed.
 
 ---
 
-## Phase 2c: Confidence and auto-approve (the trust spine)
+## Phase 3: Review the subject-area split
 
-Before promoting any yaml from staging, every dataset / field / relationship gets a **trust block** populated. The trust spine has two pieces:
+The engine **proposes** the split (one area for small DBs; prefix-family clusters for large ones, each table owned once, cross-area joins as `cross_subject_area_relationships`). For a multi-area split, **surface it for the user to adjust** — boundaries are a curation decision, not a fact:
 
-1. **Compute a confidence number** in `[0, 1]` from the signals the introspect step already collected.
-2. **Apply auto-approve rules** — entries with strong-enough provenance flip `review_state` straight to `approved` with `signed_off_by: agami_introspect_v1`. Everything else stays `unreviewed`.
-
-This is what makes the trust marketing claim defensible: every join is either FK-derived (auto-approved) or human-approved later via the review dashboard. Nothing slips through silently.
-
-### 2c.1 — compute confidence per entity
-
-Use [`plugins/agami/scripts/compute_confidence.py`](../../scripts/compute_confidence.py) — one pure function per entity type:
-
-- `confidence_for_join(...)` — for each relationship in `_schema.yaml` and every cross-schema relationship in `index.yaml`
-- `confidence_for_field_description(...)` — for every field with a non-empty `description` (hand-edits, DBA column comments, or LLM-generated descriptions)
-- `confidence_for_metric(...)` — for any future-proposed metrics (Phase 2 currently doesn't auto-propose metrics; metrics that exist were hand-authored and stay `human_authored` / `approved` if they were already approved)
-- `confidence_for_named_filter(...)` — same — named filters aren't auto-proposed in v1
-
-The signal inputs come from data the introspect step already collects:
-
-| Signal | Where it comes from |
-|---|---|
-| `fk_declared` | `information_schema.table_constraints` rows where `constraint_type = 'FOREIGN KEY'` |
-| `pk_overlap` | both endpoints listed as PK in `information_schema.table_constraints` |
-| `unique_index_match` | the target column has a unique index (`pg_indexes` for postgres, `SHOW INDEXES` for mysql) |
-| `column_type_match` | `data_type` matches between source and target columns |
-| `column_name_similarity` | Jaccard similarity over the columns' name tokens |
-| `plural_pattern_match` | `<table>.<col>` matches `<plural-of-target-table>.<col>` (heuristic) |
-| `dba_column_comment` | `pg_description` / `INFORMATION_SCHEMA.COLUMNS.COMMENT` is non-empty |
-| `business_term_match` | column name appears in the introspect dictionary (`status`, `email`, `country`, `name`, etc.) |
-| `enum_like_distribution` | sampled distinct values are ≤ 50 short strings (already used today for `choice_field`) |
-
-If a signal isn't observable for a given DB type (e.g., SQLite has no FK metadata when foreign_keys pragma is off; MySQL has no column comments unless the DBA wrote them), pass `False` for that signal — `compute_confidence.py` clamps appropriately.
-
-**HARD RULE for relationships (added 2026-05-13 after a BigQuery confidence-zero report):** every relationship — including LLM-inferred cross-schema ones with no FK metadata — MUST populate `column_type_match` and `column_name_similarity` (numeric Jaccard, 0.0–1.0) in `signal_breakdown`. If the LLM proposed the relationship from name shape alone, ALSO set `llm_inferred: true`. Real failure mode: cross-schema BigQuery relationships emitted with everything-false `signal_breakdown` → `confidence_for_join` returns 0.00 → the review dashboard shows "conf 0.00 UNREVIEWED" cards, which reads as "the system is certain this join is wrong" instead of "low confidence, needs review." A relationship that's a candidate at all has *some* signal supporting it; populate it.
-
-Minimum legal signal_breakdown for an LLM-proposed cross-schema relationship:
-```python
-score, signal_breakdown = confidence_for_join(
-    fk_declared=False,                                # truly no FK in BQ
-    pk_overlap=False,                                  # ditto
-    unique_index_match=False,                          # BQ doesn't have indexes
-    column_type_match=<bool>,                          # check it — string=string is true
-    column_name_similarity=<jaccard float, e.g. 0.62>, # token similarity over names
-    plural_pattern_match=<bool>,                       # heuristic — usually false cross-schema
-    llm_inferred=True,                                 # the proposer was the LLM
-)
-# Expect score ≈ 0.10–0.30 — low (it'll surface in review), but not the
-# misleading 0.00. The user sees "low confidence — your eyes needed,"
-# not "the system thinks this is broken."
+```
+I split <N> tables into <A> subject areas:
+  • <area1> — <t1, t2, …>
+  • <area2> — <…>
+<C> joins span areas (kept as cross-area relationships).
 ```
 
-Invocation pattern (pseudocode — Claude composes the actual YAML):
-
-```python
-# For a relationship between orders.customer_id → customers.id:
-score, signal_breakdown = confidence_for_join(
-    fk_declared=True,
-    pk_overlap=False,
-    unique_index_match=True,
-    column_type_match=True,
-    column_name_similarity=0.92,
-    plural_pattern_match=True,
-)
-# score ≈ 0.95 (typical FK-declared join with corroborating signals)
-```
-
-### 2c.2 — auto-approve rules (the queue-shrinkers)
-
-These produce `review_state: approved` upfront, with `signed_off_by: agami_introspect_v1`, `signed_off_role: system`, `signed_off_at: <UTC ISO8601 of introspect run>`. Do NOT use auto-approve for `metrics` or `named_filters` — those are Rule 1 and require human sign-off. Auto-approve for the remaining entity types is **narrow on purpose** — the auto-approved set is the foundation the dashboard rests on, so a false-positive here puts an unreviewed-quality entry behind a "trusted" badge. Only these cases:
-
-- **Relationship — FK declared** in DB metadata → `review_state: approved`, `origin: fk`.
-- **Relationship — Single-column unique index + plural-of-table-name pattern + column type match** → `review_state: approved`, `origin: introspect_heuristic`. (Supplementary case for DBs that don't surface FK metadata, e.g. some Snowflake schemas.)
-- **Field description — DBA-authored column comment present** (description text comes from `pg_description` / `INFORMATION_SCHEMA.COLUMNS.COMMENT`) → `review_state: approved`, `origin: column_comment`.
-- **Dataset (table-level) description — DBA-authored table comment present** → `review_state: approved`, `origin: column_comment`.
-- **Field — structural / well-known column-name pattern match** (Pillar A, added 2026-05-12) → `review_state: approved`, `origin: introspect_heuristic`, with `signal_breakdown.structural_pattern_match` set to the pattern name. See full pattern list at [`shared/column-name-dictionary.md`](../../shared/column-name-dictionary.md). Categories:
-  - Identity: `id`, `uuid`, `guid`, `*_id`, `*_uuid`, `*_guid`, `id_*`
-  - Timestamps: `created_at`, `updated_at`, `deleted_at`, `*_at`, `*_date`, `*_time`, `*_timestamp`, `*_ts`, `dob` / `date_of_birth`
-  - Audit: `created_by`, `updated_by`, `deleted_by`, `*_by`, `version`, `revision`, `etag`
-  - Boolean flags: `is_*`, `has_*`, `can_*`, `should_*`, lifecycle (`enabled` / `disabled` / `active` / `archived` / ...)
-  - Contact / location: `name`, `email`, `phone`, `address`, `city`, `state`, `country`, `zip`, `lat`, `lng`, `url`, ...
-  - Text / metadata: `description`, `title`, `notes`, `slug`, `tag`, `metadata`, ...
-  - Categorical: `status`, `type`, `category`, `priority`
-  - Measure / currency: `*_count`, `*_amount`, `*_total`, `*_avg`, `*_min`/`max`, `*_rate`, `currency`, `locale`, `timezone`
-  - **PK columns**: any field the introspect step identified as a primary key — auto-approve with `structural_pattern_match: "primary_key"`.
-  - **FK columns**: any field whose relationship was auto-approved via the FK or unique-index rule above — auto-approve with `structural_pattern_match: "foreign_key"`.
-  - Use `compute_confidence.match_structural_pattern(column_name)` to look up the pattern name; the function lives in [`scripts/compute_confidence.py`](../../scripts/compute_confidence.py) and is the source of truth for the pattern list.
-  - **Canonical-description fallback**: when a field matches a pattern AND the LLM left `description: ""`, the introspect step writes the canonical description from the dictionary (e.g., `customer_id` → "FK to the named table's id column.") instead of leaving the field with an empty description. The trust block still records `origin: introspect_heuristic` (not `human_authored`) since it's mechanically derived.
-
-**Do NOT auto-approve a field just because the introspect step ran on it.** Specifically:
-
-- A field whose `description` is empty (`""` or whitespace) is **not** a reviewable description — set the agami extension's `review_state: not_applicable`, `origin: no_description`, `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null`, and `confidence: null`. These fields **do not appear in the review dashboard** — there's nothing to review. The dashboard filters on `review_state ∈ {unreviewed, approved, rejected, stale}`, so `not_applicable` is the explicit "skip the card" state. The field still exists in the YAML with its name and `agami.type`; it just has no description for the curator to look at.
-- A field whose `description` was generated by the LLM (`origin: llm_suggested`) is **not** auto-approved — it stays `unreviewed` even if its confidence ≥ 0.7, because the description prose is the user-visible text and must pass through human eyes at least once.
-- The `agami.type` value (`string`, `integer`, `decimal`, etc.) is mechanical and does not itself require review — but it does NOT confer auto-approval on the surrounding field description.
-
-Anything that doesn't match an auto-approve case above and isn't `not_applicable` gets `review_state: unreviewed`, `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null`.
-
-**Validator note:** `validate_semantic_model.py` accepts `review_state: not_applicable` only when `description` is empty AND `origin == "no_description"`. Any other use is a hard error — this prevents the "no_description" escape hatch from being misused.
-
-### 2c.3 — origin enum (which path produced this entry)
-
-Pick exactly one:
-
-- `fk` — derived from FK metadata in the source DB
-- `introspect_heuristic` — derived from name-similarity / unique-index-match / etc.
-- `column_comment` — derived from a DBA-authored column comment
-- `llm_suggested` — proposed by an LLM during introspect (e.g., generated description) with no stronger signal
-- `human_authored` — written by a human (e.g., preserved from a prior reintrospect, or hand-edited)
-
-### 2c.4 — example: a relationship with the trust block filled in
-
-```yaml
-- name: orders_to_customers
-  from: orders
-  to: customers
-  from_columns: [customer_id]
-  to_columns: [id]
-  custom_extensions:
-    - vendor_name: COMMON
-      data: '{"agami": {"fk_validation": {"validated_at": "2026-05-10T14:23:11Z", "orphan_count": 0, "total_rows": 4213, "orphan_ratio": 0.0}, "confidence": 1.0, "signal_breakdown": {"fk_declared": true, "pk_overlap": true, "unique_index_match": true, "column_type_match": true, "column_name_similarity": 0.95, "plural_pattern_match": true, "llm_inferred": false}, "review_state": "approved", "origin": "fk", "signed_off_by": "agami_introspect_v1", "signed_off_at": "2026-05-10T14:23:11Z", "signed_off_role": "system"}}'
-```
-
-### 2c.5 — example: a field description below threshold (review queue)
-
-```yaml
-- name: status
-  expression:
-    dialects:
-      - dialect: ANSI_SQL
-        expression: status
-  description: "Customer lifecycle status (active / churned / trial / inactive)"
-  custom_extensions:
-    - vendor_name: COMMON
-      data: '{"agami": {"type": "string", "choice_field": {"active": "Active", "churned": "Churned", "trial": "Trial", "inactive": "Inactive"}, "confidence": 0.55, "signal_breakdown": {"dba_column_comment": false, "business_term_match": true, "enum_like_distribution": true, "llm_inferred": true}, "review_state": "unreviewed", "origin": "llm_suggested", "signed_off_by": null, "signed_off_at": null, "signed_off_role": null}}'
-```
-
-### 2c.6 — example: a field with no description proposed (skipped from review)
-
-```yaml
-- name: CITY
-  expression:
-    dialects:
-      - dialect: ANSI_SQL
-        expression: CITY
-  description: ""
-  custom_extensions:
-    - vendor_name: COMMON
-      data: '{"agami": {"type": "string", "original_type": "text", "confidence": null, "signal_breakdown": {"dba_column_comment": false, "business_term_match": false, "enum_like_distribution": false, "llm_inferred": false}, "review_state": "not_applicable", "origin": "no_description", "signed_off_by": null, "signed_off_at": null, "signed_off_role": null}}'
-```
-
-The field still appears in the model (with its `agami.type` so the runtime can pick the right SQL emitter), but the review dashboard skips it — there's nothing to look at. If a curator later wants to add a description, they edit the YAML directly and flip `review_state: unreviewed`, `origin: human_authored`.
+**AskUserQuestion:** `Looks good (Recommended)` / `Adjust — merge/rename/move tables (Other field)` / `Open the model explorer`. If they adjust, edit the `subject_areas/` tree accordingly and re-validate (sizing warns at 25 tables, errors at 30). For a single-area small DB, skip this phase silently.
 
 ---
 
-## Phase 3: Validate, then write
+## Phase 4: Trust review — sign-off before examples
 
-This phase is the keystone. **No file is ever written to `<artifacts_dir>/<profile>/` without the directory-mode validator passing.**
+Relationships, metrics, and entities carry a trust block (`confidence` ∈ confirmed/inferred/proposed, `review_state`, `signed_off_*`). Mirror the hybrid review order:
 
-### 3a — stage the directory tree
+- **Rule 1 (sign-off required NOW):** metrics + named filters — they drive what the seed examples *mean*. If Phase 5 fires against unreviewed metrics, the seeds exercise a guessed definition.
+- **Rule 2 (lazy, after-the-fact):** inferred/proposed relationships + field descriptions — they surface as receipt warnings on the answers that use them and self-approve as the user queries.
 
-Stage the full directory tree at `/tmp/agami-staging-<profile>/` (a fresh directory), then run the validator. Never touch `<artifacts_dir>/<profile>/` until validation passes.
+**4a — count Rule 1:** metrics/named-filters with `review_state != approved` + any `stale`. If **0**, surface the one-liner ("No Rule 1 candidates — proceeding straight to seed generation; low-confidence joins surface as warnings later") and continue to Phase 5 — don't silently skip (users expect a review step).
 
-```bash
-staging="/tmp/agami-staging-$profile"
-rm -rf "$staging" && mkdir -p "$staging"
-# Write index.yaml at the top, then for each schema:
-#   mkdir "$staging/<schema>"
-#   write "$staging/<schema>/_schema.yaml"
-#   write "$staging/<schema>/<table>.yaml" for each table
-python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$staging"
-```
+**4b/4c — gate:** if Rule 1 count > 0, tell the user upfront, then invoke `/agami-review` scoped to Rule 1 (`AGAMI_REVIEW_SCOPE=rule_1_only`). **End the turn** and wait for their approval batch.
 
-### 3b — handle the result
+**4d — return gate:** when they're back, recount. If 0 → Phase 5. If > 0 (partial) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`).
 
-- **Exit 0** (PASSED): atomically promote the staging directory to `<artifacts_dir>/<profile>/`.
-  ```bash
-  rm -rf "$artifacts_dir/$profile.tmp_old" 2>/dev/null
-  if [ -d "$artifacts_dir/$profile" ]; then
-    # Preserve ORGANIZATION.md and examples.yaml from the existing dir on reintrospect.
-    cp -p "$artifacts_dir/$profile/ORGANIZATION.md" "$staging/" 2>/dev/null || true
-    cp -p "$artifacts_dir/$profile/examples.yaml"   "$staging/" 2>/dev/null || true
-    mv "$artifacts_dir/$profile" "$artifacts_dir/$profile.tmp_old"
-  fi
-  mv "$staging" "$artifacts_dir/$profile"
-  chmod 755 "$artifacts_dir/$profile"
-  find "$artifacts_dir/$profile" -type d -exec chmod 755 {} +
-  find "$artifacts_dir/$profile" -type f \( -name '*.yaml' -o -name '*.md' \) -exec chmod 644 {} +
-  rm -rf "$artifacts_dir/$profile.tmp_old"
-  ```
-  Surface: `✓ Validator passed. Wrote <artifacts_dir>/<profile>/ (<K> schemas, <N> tables, <M> fields, <R> relationships).`
-
-- **Exit 1** (FAILED): surface the validator's error list verbatim. **Do NOT promote the staging directory.** Tell the user "I built a model but it failed OSI validation. Here's what's wrong: …" and offer to attempt a fix or stop. Re-validate after every edit until clean. The staging dir remains at `/tmp/agami-staging-<profile>/` for inspection.
-
-- **Exit 2** (TOOLING ERROR — missing dependencies, missing schema): surface the error and ask the user to install `pyyaml` and `jsonschema`.
-
-### 3c — never bypass
-
-If the validator can't be run for any reason (missing Python, missing dependencies, missing schema file), **DO NOT PROMOTE THE STAGING DIRECTORY**. Tell the user the validator is unavailable and offer to install the dependencies. The files in `<artifacts_dir>/<profile>/` are the source of truth for every future query — a broken model breaks every query that follows.
-
-### 3d — snapshot for reproducibility
-
-After promotion succeeds, freeze the model under `.snapshots/<model_version>/`. The `model_version` is a 12-char content hash; the **directory name itself is the canonical version pin** — we don't stamp it into `index.yaml` (the OSI extension allowlist doesn't include it, and there's no need: the snapshot dir name is the source of truth, the receipt reads it at query time).
-
-Use the Python helper. It computes the content hash, copies the model into `.snapshots/<hash>/`, and sets every file read-only — cross-platform (macOS / Linux / Windows). Stdlib only, no `rsync` / `find` / `xargs` / `chmod -R` dependency:
-
-```bash
-model_version=$(
-  python3 "$AGAMI_PLUGIN_ROOT/scripts/snapshot_model.py" \
-    --profile-dir "$artifacts_dir/$profile"
-)
-```
-
-The script prints only the 12-char hash on stdout (suitable for capture). On failure it exits non-zero and writes a one-line error to stderr; the SKILL should treat a non-zero exit as a snapshot failure and surface the error to the user — but **don't block the rest of the introspect**, the model is already written and validated. Snapshots are an audit nicety, not load-bearing for first-run.
-
-**Why Python and not bash:** the prior bash implementation used `rsync`, which isn't available on Windows by default and failed silently — early adopters on Windows lost their snapshots and didn't know. The Python helper works everywhere Python works.
-
-Surface on success: `✓ Snapshot saved at .snapshots/<model_version>/ — query receipts pin this version.`
-
-Surface on failure (rare): `⚠ Snapshot failed (<stderr>). Model + git history are intact; query receipts will pin the latest model state instead of a frozen hash.`
-
-**Do NOT add `model_version` as a field inside `index.yaml.introspect_meta`** — that's not in the OSI agami-extension allowlist (see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md) → `agami.introspect_meta`), and adding it would fail validation. The receipt builder in agami-query-database reads the version directly from the `.snapshots/` directory listing — see Phase 5e.iii.5 of agami-query-database for the lookup pattern.
-
-### 3e — code-as-artifact: git init + commit
-
-The model is files. Diffable, PR-able, git-blame-able is the trust property — *the dashboard is a view; YAML is canonical*. On first introspect, init a git repo at `<artifacts_dir>/<profile>/` so every change a curator makes via the dashboard creates a traceable diff.
-
-```bash
-profile_dir="$artifacts_dir/$profile"
-if [ ! -d "$profile_dir/.git" ]; then
-  ( cd "$profile_dir" && git init -q -b main ) || true
-  cat > "$profile_dir/.gitignore" <<'EOF'
-# Internal — don't commit ephemeral state
-.snapshots/
-EOF
-fi
-
-# Stage and commit (best-effort — never block the introspect on git failure).
-( cd "$profile_dir" && git add -A && git -c user.name="agami" \
-  -c user.email="agami_introspect_v1@local" \
-  commit -q -m "introspect: $profile @ $model_version" --allow-empty ) || true
-```
-
-`.snapshots/` is gitignored — snapshots are local-only audit history, not source-controllable content. The user can `cd <artifacts_dir>/<profile> && git log` to see every model change over time.
-
-If the user already committed the directory to a wider repo (e.g., they `git init`'d their whole `~/agami-artifacts/` for cross-profile tracking), skip the per-profile init and just commit there. Detect via `git rev-parse --show-toplevel` from `$profile_dir`.
-
-Surface: `✓ Committed to <profile_dir>/.git as <short-sha>.` (Or: `✓ Committed to existing repo at <toplevel>.`)
-
----
-
-## Phase 4: Rule 1 sign-off (BEFORE example generation)
-
-**Hybrid review order — added 2026-05-12.** Rule 1 entries (metrics + named filters) drive seed-example correctness, so they must be signed off before Phase 5 generates SQL that uses them. If Phase 5 fires against unreviewed metrics, the seed SQL exercises the *old* (or LLM-guessed) definition; the user signs off in Phase 8, and the seeds are now wrong relative to the approved truth.
-
-Rule 2 entries (low-confidence joins, field descriptions) do NOT block here. They surface in the Optional panel of Phase 7's review dashboard, where they self-approve as the user queries. The hybrid keeps Rule 1 strict + upfront; Rule 2 lazy + after-the-fact.
-
-### 4a — count Rule 1 candidates
-
-Walk the freshly-written model under `<artifacts_dir>/<profile>/` and count:
-- Metrics with `agami.review_state != approved`
-- Named filters with `agami.review_state != approved`
-- Stale items (any entity with `review_state: stale`)
-
-If the total is **0** (small DB, no metrics proposed, no drift) → skip the gate, but **surface a one-liner first** so the user understands why they didn't see a review dashboard before example generation. Real failure mode: users on fresh BigQuery introspects expected to walk a review queue before seeds got generated; agami silently skipped because no metrics had been proposed, jumped straight to Phase 5 examples, and the user thought "wait — wasn't there supposed to be a review step?"
-
-Surface exactly this:
-
-```
-No Rule 1 candidates to sign off (no metrics or named filters were
-proposed during introspect). Proceeding straight to seed-example
-generation. Low-confidence joins and field descriptions will surface
-as warnings on the answers that use them, in Phase 7's optional
-review panel — not now.
-```
-
-Then continue to Phase 5.
-
-### 4b — surface the gate
-
-Tell the user upfront that this is required-now-or-Phase-4-will-fire-against-unreviewed-definitions:
-
-```
-Before generating seed examples, I need your sign-off on the Rule 1
-entries — these drive what the seeds mean. <R1+stale> items need
-your eyes:
-  - <M> metric proposals (sign-off required)
-  - <K> named-filter proposals (sign-off required)
-  - <S> stale entries from prior drift (need re-approval)
-
-The other <R2> low-confidence entries (joins / field descriptions)
-can wait — they surface as warnings on answers later and approve
-themselves as you query.
-```
-
-### 4c — render the Rule 1 dashboard via /agami-review (gated)
-
-Invoke `/agami-review` with a `--rule-1-only` filter so the dashboard renders ONLY the Rule 1 + stale items — the user shouldn't be shown the long tail at this stage. The agami-review SKILL's Phase 1 partitioning already classifies items; pass an env hint `AGAMI_REVIEW_SCOPE=rule_1_only` so the SKILL hides everything else from the For Review tab.
-
-**End the turn after the dashboard renders.** Wait for the user to come back with their approval batch.
-
-### 4d — gate the return-to-Phase-4
-
-When the user comes back with their approval batch and `/agami-review` has finished applying it, check:
-
-```
-remaining_rule1 = (
-  count(metrics where review_state != approved) +
-  count(named_filters where review_state != approved) +
-  count(any entity where review_state == stale)
-)
-```
-
-If `remaining_rule1 == 0` → continue to Phase 5. The seeds can now safely reference approved definitions.
-
-If `remaining_rule1 > 0` (user only partially approved, or rejected some, or `done`-d early) → ask:
-
-> You still have <N> Rule 1 items unreviewed. I can proceed to seed generation, but the seeds will exercise the unreviewed definitions and may need re-running after you sign them off. Continue, or wait until you've finished sign-off?
-
-| Option | What happens |
-|---|---|
-| `Continue (Recommended)` | Generate seeds against current state. The receipt panel on each answer will warn about unreviewed Rule 1 entries that were used. |
-| `Pause — I'll finish review first` | End the skill here; user re-invokes `/agami-connect` to resume after sign-off. |
-
-If the user picks Continue, proceed to Phase 5. If they pick Pause, surface "Resume by running `/agami-connect`" and end the turn.
-
-### 4e — re-introspect handling
-
-On `$ARGUMENTS == reintrospect`: if Phase 4a counts 0 (all metrics + named filters are still approved from a prior run, no new ones), skip silently. Otherwise the gate applies — re-introspection can introduce new Rule 1 candidates that need sign-off.
+On `reintrospect` with no new Rule 1 candidates, skip silently.
 
 ---
 
 ## Phase 5: Seed prompt examples
 
-**SURFACE A PROGRESS WARNING FIRST.** Before kicking off generation, tell the user what's about to happen and how long it'll take — this phase is the second-longest in the skill (after introspect itself), and silence here is the most common "is it stuck?" moment in real-world testing.
+**Surface a progress warning first** (second-longest phase): "Generating 10–12 NL→SQL seeds and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud). I'll narrate per-example progress."
 
-```
-Generating 10–12 NL→SQL seed examples and EXPLAIN-validating each
-against the live database. Expect 1–3 minutes (longer on cloud DBs
-or large schemas — each EXPLAIN is one round trip). I'll narrate
-per-example progress so you can see it's working.
-```
+**5a — generate** 10–12 examples grounded in the model: a count, a top-N, a time-bucketed trend, a breakdown, a recency filter, plus domain-specific ones from entities/metrics. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset. Tag each example with its subject area, tables, columns, and metric.
 
-Then narrate per-example progress (e.g., `[3/12] Top 5 customers by lifetime spend — EXPLAIN ✓`) so the user sees movement, not a blank wait. Without this narration, users on Snowflake report "the skill seems hung" 3–5 minutes into the phase.
+**5b — EXPLAIN-validate** each via the chosen tool (one round trip each). Auto-fix once on failure; if still bad, drop it to `~/.agami/.rejected/` — don't block the flow. Also run a row-count sanity check (a 0-row seed looks broken in the dashboard).
 
-Generate **10–12** NL→SQL examples. The bar is **analytical shape**, not "did it join two tables." A `SELECT col1, col2, col3 FROM a JOIN b ORDER BY x LIMIT 10` is a list, not an analysis — it doesn't answer a business question and it doesn't exercise the model's hard parts (aggregation grain, fan-out joins, time windows, segmentation). Every seed example must do real analytical work.
-
-**Every seed example must satisfy at least ONE of these "shape" requirements:**
-
-- **S1 — Aggregation with a measure**: `SUM`, `COUNT(DISTINCT ...)`, `AVG`, or a derived ratio over a numeric column. Not just `COUNT(*)`.
-- **S2 — Segmentation**: `GROUP BY` on a meaningful dimension (segment / category / status / cohort / region), returning a row per group.
-- **S3 — Time comparison**: this period vs. last period (WoW, MoM, YoY) using window functions, CTEs, or self-joins on a date.
-- **S4 — Filtered top-N with context**: top-N ordered by a measure, but with at least one non-trivial filter (active-only, paying-only, last-90-days) AND extra columns that explain *why* each top-N row qualifies.
-- **S5 — Cohort / retention**: bucket entities by their first-event date and measure their behavior in subsequent periods.
-
-A "list rows" example (`SELECT a, b, c FROM t1 JOIN t2 ORDER BY x LIMIT N`) **does not qualify** as a seed. If the schema is genuinely too narrow for shape S1–S5 (e.g., one fact table, no time dimension), say so in the staging log and emit fewer examples — quality over count.
-
-**Suggested distribution** (the LLM has discretion to mix, but the count constraints are binding):
-
-| # | Shape | Min tables | Example |
-|---|---|---|---|
-| 1 | S1: aggregation | 1–2 | "Average loan amount per applicant by employment type" |
-| 2 | S2: segment counts | 1–2 | "Applicants by score band (650–700, 700–750, 750+)" |
-| 3 | S2: revenue per segment | 2–3 | "Total revenue per customer segment" |
-| 4 | S4: filtered top-N | 2–3 | "Top 10 customers by lifetime spend who placed an order in the last 90 days" |
-| 5 | S3: time comparison | 2–3 | "Monthly active customer count for the last 6 months" |
-| 6 | S1 + S2: two-dimension breakdown | 3+ | "Revenue per product category per region last quarter" |
-| 7 | S4 + S2: top-N within group | 3+ | "Top 3 products by units sold within each category last 30 days" |
-| 8 | S3: MoM growth | 2–3 | "Month-over-month % change in new sign-ups for the last 6 months" |
-| 9 | S5: cohort retention | 3+ | "% of customers who placed a second order within 30 days of their first, by sign-up month" |
-| 10 | Composite (S1+S2+S3+S4) | 3+ | "Top 5 product categories by revenue this quarter vs. last quarter, % change" |
-
-**Hard count constraints** (binding when the schema supports them):
-- **≥ 6 examples must be multi-table** (≥ 2 tables joined). Not just "join exists" — the join must be load-bearing for the answer (you can't drop a joined table without losing a column the user asked for).
-- **≥ 3 examples must touch ≥ 3 tables.**
-- **≥ 1 example must use a time-comparison shape (S3) or cohort shape (S5)** — these are the analytical patterns most likely to expose grain bugs, and seeding one teaches the query skill the right CTE shape.
-- **≥ 1 example must include a derived ratio or percentage** (e.g., `revenue / row_count`, `100.0 * COUNT(active) / COUNT(*)`).
-
-**Schema-fit fallbacks**: if the schema lacks a dimension required by a pattern (no time column → skip S3/S5; only 2 connected tables → skip the ≥3-table requirement), document the skip in the staging log: `skipped pattern N: schema has no time column on any fact table`. Do not invent dimensions to satisfy the rules — emit fewer examples with a logged justification.
-
-### 5a — generate
-
-First, **load `<artifacts_dir>/USER_MEMORY.md`** (strip HTML comments) and **`<artifacts_dir>/<profile>/ORGANIZATION.md`** (same — strip HTML comments). USER_MEMORY holds cross-database preferences; ORGANIZATION.md holds domain context for *this* database. Both improve seed-example quality.
-
-For each example:
-- Build `(question, sql)` using the model from Phase 3.
-- Reference fields by their **OSI dataset.field name** (which equals the DB column name in the simple introspect case).
-- Use SQL safety rules from [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md) and dialect-specific syntax from [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
-- **Apply USER_MEMORY policies.** If USER_MEMORY says "exclude test users where email matches @example.com", every seed example that touches `customers` includes that filter. If it says "default time window: last 30 days", date-relevant examples honor that default.
-- **Apply ORGANIZATION.md domain vocabulary.** If ORGANIZATION.md defines "active user = signed in in the last 30 days", any "active user" example uses that definition.
-
-**HARD RULE for time-arithmetic SQL (added 2026-05-13 after a BigQuery type-mismatch report):** before emitting any SQL that does date / time arithmetic, look up the **`agami.original_type`** of the column being filtered or aggregated, and pick the matching function family. The introspect step preserved `original_type` precisely so SQL generation doesn't have to guess:
-
-| Column's `original_type` (BigQuery) | Function family in seed SQL | Current-time function |
-|---|---|---|
-| `DATE` | `DATE_TRUNC` / `DATE_ADD` / `DATE_SUB` / `DATE_DIFF` | `CURRENT_DATE()` |
-| `DATETIME` | `DATETIME_TRUNC` / `DATETIME_ADD` / `DATETIME_SUB` / `DATETIME_DIFF` | `CURRENT_DATETIME()` |
-| `TIMESTAMP` | `TIMESTAMP_TRUNC` / `TIMESTAMP_ADD` / `TIMESTAMP_SUB` / `TIMESTAMP_DIFF` | `CURRENT_TIMESTAMP()` |
-| `TIME` | `TIME_TRUNC` / `TIME_ADD` / `TIME_SUB` / `TIME_DIFF` | `CURRENT_TIME()` |
-
-**Real failure mode reported in production**: column `created_at` is `DATETIME`, seed SQL emitted `WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 180 DAY)`. BigQuery rejects with *"No matching signature for operator >= for argument types: DATETIME, TIMESTAMP"*. The LLM eventually self-corrected — but that's an iteration cost the original generation should have avoided. The agami extension's `original_type` is the answer; consult it before emitting.
-
-For non-BigQuery dialects: Postgres / MySQL / Snowflake collapse most of these to a single `TIMESTAMP` family, so the rule is mostly a no-op there. But the *check* should still happen — `original_type` is the source of truth across every dialect.
-
-### 5b — EXPLAIN-validate + row-count check
-
-Two-pass validation before an example lands in `examples.yaml`:
-
-**Pass 1 — EXPLAIN.** Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite, or BigQuery's dry-run via `bq query --dry_run`) via the chosen tool. If EXPLAIN fails:
-1. Read the error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
-2. Make ONE auto-fix attempt (typically a column-name typo or missing alias).
-3. If still failing, move that example to `~/.agami/.rejected/` (with the error) and continue. Don't block.
-
-**Pass 2 — row-count check (MANDATORY).** EXPLAIN tells you the SQL parses and binds. It does **not** tell you the query returns data. A seed example that EXPLAINs cleanly but returns 0 rows is **useless as a few-shot anchor** — it teaches the LLM "this question has no answer in this DB," which is exactly the wrong lesson. Real failure mode reported in production: a fresh BigQuery introspect with a dataset where the latest row is months old; every "last 30 days" seed example EXPLAIN-passes and returns 0 rows.
-
-After EXPLAIN succeeds, run:
-
-```sql
-SELECT COUNT(*) FROM (<original_sql>) sub LIMIT 1
-```
-
-(BigQuery / Snowflake support this; for SQLite use the original with `LIMIT 1` instead, and trust the small-DB assumption.)
-
-If the count is **0**:
-1. Inspect the SQL for date predicates that reference "now-shaped" anchors: `NOW()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`, `GETDATE()`, hardcoded `'2024-…'` literals, etc.
-2. If a date predicate is present, regenerate the example with the data's actual date range. The introspect step (Phase 1d.i) should have stored `MAX(date_col)` per time-dimension column in `agami.performance_hints.data_range` — anchor the "last 30 days" / "this quarter" / etc. to that MAX, not to NOW. **If `data_range` is absent**, run a one-shot `SELECT MIN(date_col), MAX(date_col) FROM <table>` for the time column the example touched.
-3. If there's no date predicate (the 0-row result is genuine — the question has no answer in this data even with no filter), drop the example and regenerate with a different shape. Don't keep a 0-row example.
-4. After regenerating, repeat Pass 1 (EXPLAIN) and Pass 2 (row count) on the new SQL.
-
-Cap regeneration at 2 attempts per example. If the second attempt still returns 0 rows, log the rejection and move on.
-
-**Why this matters**: the user's first impression of seed quality is whether the examples-validation dashboard shows real numbers in the row-preview column. Zero rows everywhere reads as "this skill is broken" even when the SQL is correct.
-
-### 5c — write `<artifacts_dir>/<profile>/examples.yaml`
-
-This file is **NOT OSI** — it's an agami-bespoke few-shot library. Format:
-
-```yaml
-# <artifacts_dir>/<profile>/examples.yaml
-# NL → SQL few-shot examples loaded by the agami-query-database skill.
-# Corrections appended by /agami-save-correction.
-
-examples:
-  - question: How many orders are there?
-    sql: SELECT COUNT(*) AS order_count FROM orders
-    source: seed
-    created_at: 2026-05-06T12:00:00Z
-
-  - question: Orders by status
-    sql: |-
-      SELECT status, COUNT(*) AS count
-      FROM orders
-      GROUP BY status
-      ORDER BY count DESC
-    source: seed
-    created_at: 2026-05-06T12:00:00Z
-```
-
-`source` is `seed` here, `correction` for entries added by `/agami-save-correction`. The query-database skill loads at most 50 most-recent.
-
-Surface: `✓ Generated <N> examples (<R> rejected, see ~/.agami/.rejected/). Saved to <artifacts_dir>/<profile>/examples.yaml.`
+**5c — write** `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml` (`status: confirmed` for EXPLAIN-passing seeds). Corrections later append here via `/agami-save-correction`.
 
 ---
 
 ## Phase 6: Validate every seed example (the trust onboarding)
 
-**MANDATORY — NEVER SKIP. NEVER COMBINE WITH PHASE 5 OR PHASE 7.**
-
-This phase MUST run on every `/agami-connect` invocation that generated examples in Phase 5. The dashboard at 5c MUST render and the turn MUST end after it. Past failure mode: the LLM running this skill saw that Phase 5b had already EXPLAIN-validated each example and concluded "the examples are good — skip to Phase 7 / Phase 8." That is wrong: EXPLAIN-validation means the SQL parses against the schema, not that the SQL answers the question the user would actually ask. The user has to *see* the question + SQL + result rows and confirm before any of this is "validated" in the trust-spine sense.
-
-Do NOT skip if:
-- All Phase 5 EXPLAIN checks passed (that's the floor for this phase to run, not a reason to skip it).
-- The example count is small (3 examples still get a dashboard).
-- The user said something casual like "looks good" or "great" earlier in the turn — they haven't seen the SQL yet, so they can't have meant the examples.
-- The skill is rate-limited / nearing context budget — fewer Phase 8 suggestions is acceptable; skipping Phase 6 is not.
-
-Do NOT combine with Phase 5's "✓ Generated <N> examples" surface (that's a separate turn boundary) or with Phase 7's post-introspect summary (the HARD STOP rule in 5e enforces this on the back end; this MANDATORY rule enforces it at entry).
-
-Earlier versions of this skill picked ONE seed example as a demo. Replaced — three independent sets of early-adopter feedback (Sourav + Intuit + Asana) said the same thing: "let me validate the queries you've inferred, not just see one of them work." Validating all 10–12 seeds in a single guided pass is what turns LLM-generated guesses into golden truths the query skill can trust.
-
-**Output of this phase:** an HTML dashboard at `~/.agami/examples-validation/<profile>/<ts>.html` listing every seed example with its question, SQL, and a 5-row result preview, plus a chat back-channel for the user to validate / reject / edit each one.
-
-### 6a — Run every seed example
-
-Read `<artifacts_dir>/<profile>/examples.yaml`. For each example:
-
-1. Execute the SQL via the same tool used by agami-query-database (psql / mysql / snowsql / sqlite3 / DuckDB / `execute_sql.py`). **Add a `LIMIT 5` (or dialect-specific equivalent) wrapped via a CTE for the row preview** — but ALSO capture the full `row_count`. Pseudo:
-   ```sql
-   -- For the count:
-   SELECT COUNT(*) FROM (<original_sql>) sub;
-   -- For the preview:
-   SELECT * FROM (<original_sql>) sub LIMIT 5;
-   ```
-   (For SQLite/Postgres/Redshift/MySQL this works. For Snowflake, use the same pattern with `LIMIT 5`.)
-2. Capture: `row_count`, `row_headers` (column names from the result), `row_preview` (up to 5 rows as arrays of stringified values).
-3. If the SQL fails: capture the one-line error from the db_error_classifier; set `error: <message>`. Do NOT block — broken examples become `state: error` cards in the dashboard, the user can fix them via `edit N`.
-
-Run all examples sequentially (parallel execution risks overloading small DBs and is hard to attribute errors). Surface a one-line progress note: `Running 12 seed examples…`. Total time scales with example count × per-query latency — typically 30–60s for 12 examples on a small DB.
-
-### 6b — Build the items JSON for the dashboard
-
-For each example, build:
-
-```json
-{
-  "n": <1-indexed display number>,
-  "question": "<NL question>",
-  "sql": "<SQL string, multi-line OK>",
-  "state": "<state from examples.yaml: unreviewed | validated | rejected>",
-  "row_count": <int>,
-  "row_headers": ["col1", "col2", ...],
-  "row_preview": [["v1", "v2", ...], ...],
-  "validated_by": "<email or null>",
-  "validated_at": "<ISO or null>",
-  "error": "<error message or null>",
-  "saved_notes": [
-    {"text": "<note prose>", "added_at": "<ISO or null>", "added_by": "<email or null>"},
-    ...
-  ]
-}
-```
-
-**`saved_notes`** carries the user's previously-saved `note N >>>...<<<` blocks for this example. Read them from the `notes:` array on the example in `examples.yaml` (each entry is either a plain string or an object with `text` + optional `added_at` / `added_by`; coerce both shapes into the `{text, added_at, added_by}` object form). Pass through to the renderer; the template surfaces them in a "Saved notes" panel under each card so the user can see what they've already told the system across runs. Without this, users re-add the same note every time the dashboard re-renders because they can't see it landed.
-
-Write the array to `/tmp/agami-examples-items-<ts>.json`. The exact schema is documented in [`shared/examples-validation-template.html`](../../shared/examples-validation-template.html) → `ITEMS_JSON`.
-
-### 6c — Render the dashboard
-
-```bash
-ts=$(date +%Y%m%d-%H%M%S)
-# Per-profile subdir so multi-profile users can tell renders apart.
-mkdir -p ~/.agami/examples-validation/"$profile"
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_examples_validation.py" \
-  --title "Seed examples · $profile" \
-  --profile "$profile" \
-  --items-file "/tmp/agami-examples-items-$ts.json" \
-  --out "$HOME/.agami/examples-validation/$profile/$ts.html"
-rm -f "/tmp/agami-examples-items-$ts.json"
-```
-
-Surface in chat (single block):
-
-```
-Validating <N> seed examples — dashboard rendered:
-  ~/.agami/examples-validation/<profile>/<ts>.html
-
-The dashboard has 3 tabs (For Validation · Validated · Rejected) and
-click-to-act buttons on each card. Click Validate / Reject / Edit on
-the items you want, then hit "Generate feedback for Claude" at the
-bottom and paste the result back here.
-
-You can also type commands directly:
-  validate N           (or `validate 1, 3, 5`)
-  validate all         (bulk — skips errored examples)
-  reject N
-  edit N               (I'll prompt for the new SQL in chat)
-  done
-```
-
-Auto-open with the same multi-command fallback chain as agami-query-database Phase 5e.vi (`open` → `xdg-open` → `start` → fall through with the path printed). End the turn here.
-
-**HARD STOP rule (read this twice):** Do NOT surface Phase 7 (post-introspect summary) or offer the model-review dashboard in the same turn as 5c. The examples-validation flow and the model-review flow are sequential, not concurrent — a user who is mid-validation on examples should not see "open the review dashboard" anywhere on screen. Phase 7 may only run after the gate in 5e fires.
-
-### 6d — Chat back-channel grammar
-
-The user replies with one or more commands. Commands can come from the dashboard's "Generate feedback for Claude" button (newline-separated block) or be typed directly. Same grammar either way.
-
-- **`validate N`** (or `validate N, M, …` / `validate N, M by you@example.com`) — for each item, set `state: validated`, `validated_at: <UTC ISO>`, and `validated_by` sourced in this order (stop at the first hit):
-  1. **The chat command** itself if it includes `by <email>` — use it.
-  2. **`~/.agami/.config`'s `reviewer_email`** if present.
-  3. **Otherwise, ask the user once**: *"What's your email? I'll save it to `~/.agami/.config.reviewer_email` so future validations and Rule 1 approvals don't re-ask."* Validate the email shape, persist to `.config` (merge — don't overwrite `tier`, `host`, etc.). See the same persistence block in [`agami-review/SKILL.md → Phase 3a`](../agami-review/SKILL.md#3a--validate-the-command). Never infer from `git config`, environment, or credentials — that path produces silent inconsistency.
-- **`validate all`** — bulk-set every non-errored example to `validated`. Skip errored ones; surface the count: *"Validated 9 examples; 3 had errors and stay unreviewed (use `edit N` to fix)."*
-- **`reject N`** — set `state: rejected`. Don't delete the example from the YAML (preserves audit trail).
-- **`edit N`** — interactive form: surface the example's current SQL in chat, accept the user's edit conversationally, write back, re-execute, update the dashboard.
-- **`edit N sql>>>` ... `<<<`** — inline form (dashboard generates this when the user clicks Edit + Save edit in the textarea on the page). Multi-line block:
-  ```
-  edit 8 sql>>>
-  SELECT customer_id, SUM(amount) AS total
-  FROM orders
-  WHERE status = 'shipped'
-  GROUP BY customer_id
-  <<<
-  ```
-  Parser: see a line matching `edit N sql>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line after it until `<<<`; that's the new SQL. Write it back to the example's `sql` field, re-EXPLAIN-validate via the chosen tool, re-execute, refresh the dashboard's row preview. **Apply the same SQL-safety checks as Phase 5b** (refuse DDL/DML, refuse system tables) — broken edits leave the example as `state: error` and the dashboard surfaces the error in the next render.
-- **`note N >>>` ... `<<<`** — separate from edit. For comments / formatting hints / context that isn't a SQL rewrite. Multi-line block:
-  ```
-  note 4 >>>
-  Format counts with commas — applies to every result, not just this example.
-  <<<
-  ```
-  Parser: same pattern as edit (token `note N >>>`, closing `<<<` on its own line, body in between).
-
-  **Where to write the note** — classify by the note's content:
-    - **Cross-cutting preference** (mentions formatting, defaults, "always", "every", "from now on") → append to `<artifacts_dir>/USER_MEMORY.md` under a `## Preferences` section. This is the cross-database file applied to every query.
-    - **Per-example commentary** (specific to this example only — e.g., "this counts active users only, excluding trials") → append to the example's entry in `examples.yaml` as a new `notes:` array. Append rather than overwrite if a `notes` array already exists.
-    - **Per-database / domain context** (mentions a metric definition, a business term, a table-meaning clarification specific to this DB) → append to `<artifacts_dir>/<profile>/ORGANIZATION.md` under a `## Notes from review` section.
-
-  If the note's classification is ambiguous, default to `USER_MEMORY.md` (the broadest scope) and surface a one-liner: *"Saved to USER_MEMORY.md (applies across every database). Reply 'move that to ORGANIZATION.md' if it's specific to this DB."*
-
-  Notes do NOT mutate the example's `state` — they're additive context. The user can `validate N` and `note N` in the same batch.
-- **`add example: <question>` followed by a `sql>>>` ... `<<<` block** — a new user-authored example to append to `examples.yaml`. The dashboard generates this when the user clicks "+ Add example" in the sticky footer. Multi-line block:
-  ```
-  add example: How many invoices are still unpaid?
-  sql>>>
-  SELECT COUNT(*) AS unpaid_count
-  FROM invoices
-  WHERE status != 'paid'
-  <<<
-  ```
-  Parser: see a line starting with `add example:` — capture the rest of the line as the **question**. The next non-empty line MUST be `sql>>>`; everything after it until `<<<` on its own line is the **SQL**.
-
-  Validation: EXPLAIN-validate the SQL against the live DB before writing (same safety checks as Phase 5b — refuse DDL/DML, refuse system tables). If EXPLAIN fails, surface the one-line error and **don't write the example**. The user can resubmit a fixed version in the next batch.
-
-  On success: append a new entry to `<artifacts_dir>/<profile>/examples.yaml`:
-  ```yaml
-  - question: <question text verbatim>
-    sql: |-
-      <SQL with original indentation>
-    source: manual          # NEW source value — distinguishes from seed/correction
-    created_at: <UTC ISO>
-    created_by: <reviewer_email from ~/.agami/.config, or "<unknown>">
-    state: unreviewed        # The user can validate it on the next render
-  ```
-  Multiple `add example:` blocks in one batch are fine — process each independently. The next dashboard re-render shows the new examples with their assigned `n` (continues the existing numbering — appended at the end).
-- **`done`** — close the session. Surface `✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed, <A> added.` and continue to Phase 7.
-
-For each successful edit, the user is also offered: *"Promote this to a golden test in `tests.yaml`? (yes / no / skip)"*. If yes → append a new test entry to `<artifacts_dir>/<profile>/tests.yaml` with the same question + an `equals` assertion against the actual returned value(s). This is the bridge to the Quality-Loop launch's `agami test`.
-
-### 6e — Re-render after each batch of edits
-
-After applying a batch of validate / reject / edit commands, **always re-render the dashboard to a NEW timestamped file** at `~/.agami/examples-validation/<profile>/<new-ts>.html`. Numbering stays stable (don't renumber after rejects — the chat history references specific Ns).
-
-**Delete the previous timestamped file from this profile's dir before writing the new one** (`rm -f "$HOME/.agami/examples-validation/$profile/$prev_ts.html"`). Track `$prev_ts` across re-renders. The auto-open of the new file is the refresh signal; old files just accumulate and clutter the dir.
-
-**Auto-open the new file on every re-render** (same multi-command fallback chain as Phase 6c — `open` → `xdg-open` → `start` → `cmd /c start` → echo the path). The user gets a new browser tab with the fresh state; the previous tab is now stale and can be closed.
-
-**Surface the new file path in the chat ack** so the user can't miss the refresh:
-```
-✓ Applied: validated 3 (#1, #3, #5), rejected 1 (#7). Re-rendered.
-
-Open: ~/.agami/examples-validation/<profile>/<new-ts>.html
-(Previous tab is stale and can be closed.)
-```
-
-Then end the turn. Wait for the user.
-
-**HARD STOP — gate for advancing to Phase 7:** Phase 7 (post-introspect summary) and the model-review dashboard offer may only fire when **both** of the following are true:
-1. The user has explicitly typed `done`, OR every example in `examples.yaml` has `state ∈ {validated, rejected, error}` (no `unreviewed` examples remain).
-2. The current turn's batch of commands has been processed and the re-render is complete.
-
-If condition (1) is false — i.e., there are still `unreviewed` examples in the YAML after applying this batch — **end the turn after the re-render.** Do not surface Phase 7, do not offer the model-review dashboard, do not say "set up." The user is still mid-validation. They will return with another batch.
-
-When the gate fires, surface:
-```
-✓ Validation complete: <V> validated, <R> rejected, <U> unreviewed (errors).
-```
-…and continue to Phase 7 (the trust-layer summary) **in a new turn after the user replies** to any subsequent prompt — or, if you have remaining context budget, surface the Phase 7 summary as the next message in the same turn. Either way, the model-review dashboard is offered *only* via Phase 7's AskUserQuestion, never embedded earlier.
-
-### 6f — examples.yaml schema additions
-
-Each example entry now supports trust-layer-style state:
-
-```yaml
-examples:
-  - question: How many orders are there?
-    sql: SELECT COUNT(*) AS order_count FROM orders
-    source: seed
-    created_at: 2026-05-06T12:00:00Z
-    state: validated                          # NEW: unreviewed | validated | rejected
-    validated_by: ashwin@agami.ai             # NEW (when state=validated)
-    validated_at: 2026-05-10T14:30:00Z        # NEW (when state=validated)
-```
-
-Existing examples without these fields are treated as `state: unreviewed`. Backward-compatible — agami-query-database loads everything regardless of state, with `validated` examples weighted slightly higher in the few-shot mix (future enhancement; for v1, equal weighting).
+Run every seed, build the items JSON, and render the examples-validation dashboard (per-profile subdir). The user reviews matches (green) / mismatches (red) with drill-down. Support the chat back-channel grammar (approve/reject/edit/done) and re-render after each batch. This is the strongest "do these numbers match?" trust moment — surface it.
 
 ---
 
-## Phase 7: Post-introspect summary (the trust-layer landing)
+## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
-**MANDATORY — NEVER SKIP. MUST run on every `/agami-connect` invocation that produces or refreshes a model.**
+Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved. (Past failure: the skill jumped Phase 6 → 8, leaving the user with unreviewed entries and no path to clear them.) Lead with the **must-do** count, break out optional polish separately.
 
-Past failure mode (reported 2026-05-13, BigQuery early adopter): the LLM running the skill jumped from Phase 6 (examples validation complete) → Phase 8 (closing message), bypassing Phase 7 entirely. The user never saw the review dashboard offer, never opened the Rule 2 polish queue, and ended the session believing the skill was done — even though there were 9 unreviewed field descriptions + 2 unreviewed cross-schema relationships in the model. The receipt panel on their first answer then surfaced "unreviewed" warnings the user didn't have a path to clear.
-
-Do NOT skip if:
-- Phase 4 ran and Rule 1 was fully approved — Rule 2 still needs surfacing.
-- Phase 4 was skipped (no Rule 1 candidates) — Phase 7 still fires. Rule 2 candidates are independent.
-- All Rule 2 candidates are at confidence ≥ threshold — still surface the summary so the user sees the auto-approve numbers and the "no items need review" framing.
-- The user said "no clarifying questions" earlier — same rule as Phase 1.4/1.5: this is required state-gathering, not a clarifying question.
-
-This is the curator's checkout screen. Rule 1 sign-off already happened in Phase 4 (or was skipped because there was nothing to sign off), so by the time we land here the must-do work for the *current* introspect run is done. Everything surfaced here is **optional polish** — Rule 2 entries (low-confidence joins, field descriptions) that surface as warnings on answers but don't block.
-
-**If Phase 4 ran**: lead with "Rule 1 sign-off complete · X items approved earlier this session" so the user remembers what they already did.
-
-**If Phase 4 was skipped** (no Rule 1 candidates): no opening — this is purely the Rule 2 polish summary.
-
-Scan the freshly-written model under `<artifacts_dir>/<profile>/` and count entries by `agami.review_state` and entity type. The summary leads with the **must-do-to-ship** count (Rule 1 + drift) so the user sees a small number first, with the optional polish count broken out separately. Produce the summary block:
+Scan the model; count by `confidence`/`review_state`/type:
 
 ```
 agami-connect just ran. Here's what we found:
 
-  ✓  <N>  datasets, <M> fields                            (auto-approved)
-  ✓  <K>  FK relationships                                 (auto-approved)
-  ✓  <J>  field descriptions from DBA column comments      (auto-approved)
-  ✓  <S>  field descriptions from column-name patterns     (auto-approved)
-  ⚠  <R1> inferred relationships from column-name matches  (review)
-  ⚠  <R2> field descriptions below confidence 0.7          (review)
-  ⚠  <R3> metric proposals (sign-off required — Rule 1)
-  ⚠  <R4> named-filter proposals (sign-off required — Rule 1)
+  ✓  <N> tables, <M> columns across <A> subject areas   (structure)
+  ✓  <K> relationships with join cardinality              (<E> confirmed from declared FKs)
+  ⚠  <R1> inferred/probed relationships                   (review — confirm the join)
+  ⚠  <R2> proposed metrics                                (sign-off — Rule 1)
+  ✓  <S> sensitive columns flagged (never extracted)
 
-  <R3+R4+stale> items need your sign-off to start querying.
-  <R1+R2> low-confidence entries can wait — they surface as warnings on the
-  answers that use them, and the system can self-approve them as you query.
+  <R2 + stale> items need your sign-off to start querying.
+  <R1> low-confidence joins can wait — they surface as warnings on the answers
+  that use them and self-approve as you query.
 ```
+(Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
 
-The closing two lines are **mandatory** — they tell the user "you can ship now; the long tail is optional." Without them the user reads the total as the must-do count and gets stuck.
-
-Counting rules (read the YAMLs after promotion, not the staging dir):
-
-- `auto-approved datasets/fields` — `agami.review_state == "approved"` AND `agami.signed_off_by == "agami_introspect_v1"`. Count datasets and fields separately and combine in the first row.
-- `FK relationships` — `agami.review_state == "approved"` AND `agami.origin == "fk"` (across `_schema.yaml` and `index.yaml.cross_schema_relationships`).
-- `field descriptions from DBA column comments` — fields with `agami.review_state == "approved"` AND `agami.origin == "column_comment"`.
-- **`field descriptions from column-name patterns`** (Pillar A) — fields with `agami.review_state == "approved"` AND `agami.origin == "introspect_heuristic"` AND `agami.signal_breakdown.structural_pattern_match` is non-null. If `<S>` is `0`, omit the line.
-- `inferred relationships ... (review)` — relationships with `agami.review_state == "unreviewed"` AND `agami.origin == "introspect_heuristic"`.
-- `field descriptions below confidence 0.7 (review)` — fields with `agami.review_state == "unreviewed"` AND `agami.confidence < 0.7`.
-- `metric proposals` and `named-filter proposals` — count `metrics[]` entries in any yaml + `named_filters[]` entries in `index.yaml`'s model-level extension where `agami.review_state == "unreviewed"`.
-
-If a category's count is `0`, omit that line entirely — don't show "0 metric proposals". A small DB might collapse the summary to two or three lines, which is fine.
-
-**For the must-do / optional split at the bottom**: count only `metric proposals` + `named-filter proposals` + `stale` items as must-do. Count `inferred relationships` + `low-confidence field descriptions` as optional. Even if both numbers are non-zero, surface them on separate lines as shown above — the order communicates priority.
-
-Then offer two surfaces via AskUserQuestion. The trust-layer review queue and the model explorer are sibling activities — review is "approve / reject what the introspect inferred"; the explorer is "browse + remove tables and columns I don't want the runtime to use at all." Both are linked to the same `review_state` field; the curator picks whichever shape they want first.
-
-| Option | What happens |
-|---|---|
-| `Open the review dashboard` | Invoke the `agami-review` skill. The user lands on the queue and walks the items needing sign-off / approval. |
-| `Open the model explorer` | Invoke the `agami-model` skill. The user lands on the full schema tree (search + filter), can exclude entire tables or specific columns they don't want agami to use, and re-render after each batch. |
-| `Skip — I'll review later` (default) | Acknowledge: "OK — `<R1+R2+R3+R4>` items remain unreviewed. Run `/agami-review` to walk them, or `/agami-model` to browse + exclude tables/columns. Either skill works any time." Continue to Phase 8. |
-| `Adjust the threshold` | Ask for a number (`0.0` – `1.0`). Re-render the summary using that threshold. Persist to `<artifacts_dir>/<profile>/agami.config.yaml` under `review.threshold`. |
-
-If a sibling skill (`agami-review` or `agami-model`) doesn't exist yet (mid-rollout build), surface the summary block but skip that option from the AskUserQuestion. Don't error.
+Then **AskUserQuestion**: `Open the review dashboard` (→ `/agami-review`) / `Open the model explorer` (→ `/agami-model`, browse + exclude tables/columns) / `Skip — I'll review later` (default) / `Adjust the threshold`. If a sibling skill isn't built yet, omit that option — don't error.
 
 ---
 
-## Phase 8: Post-setup follow-up suggestions
+## Phase 8: Follow-up suggestions
 
-(Telemetry consent was previously asked here. It has been removed in the current 0.x line — there is no opt-in, no install event, no `~/.agami/.config.analytics_consent` field written, no `.telemetry-queue.jsonl` appended. agami has no telemetry (see `docs/privacy.md`). Don't surface anything about telemetry here.)
+(No telemetry — agami has none; don't surface anything about it.)
 
-### 8a — gate on Rule 1 review status
+**8a — gate on Rule 1 status:** count metrics/named-filters with `review_state != approved`. If > 0, use the **in-progress** framing (8b); else the **fully-set-up** framing (8c). Rule 1 items block at runtime (query-database refuses questions depending on an unreviewed metric), so "set up" is misleading while they're pending.
 
-**Before declaring `<profile> is set up`, check whether the trust-layer dashboard has any Rule 1 items unreviewed** (metrics with `review_state != approved`, named_filters with `review_state != approved`). Rule 1 items block at runtime — agami-query-database refuses to answer a question that depends on an unreviewed metric, per the strict-gate rule in §3.4 of `agami-osi-extensions.md`. Declaring "set up" while metrics are still unreviewed is misleading.
-
-Count:
-```python
-rule1_unreviewed = (
-  count(metrics where review_state != "approved") +
-  count(named_filters where review_state != "approved")
-)
+**8b — in-progress:**
 ```
-
-If `rule1_unreviewed > 0`, **skip the "Now that you're set up" framing** and surface the **in-progress** variant in 6b. Otherwise, fall through to the **fully-set-up** variant in 6c.
-
-### 8b — in-progress framing (Rule 1 items still unreviewed)
-
-```
-✓ <artifacts_dir>/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
-✓ <artifacts_dir>/<profile>/examples.yaml — <N> NL→SQL examples
-✓ Snapshot pinned at .snapshots/<hash>/
-
+✓ <artifacts_dir>/<profile>/ — semantic model (<A> subject areas, validated)
+✓ prompt_examples/ — <N> NL→SQL examples
 ⚠ Setup is partial — <rule1_unreviewed> Rule 1 items still need sign-off:
-   - <M> metric proposal<s> (run /agami-review to walk them)
-   - <K> named-filter proposal<s>
+   - <M> metric proposal(s) (run /agami-review)
+Until those are reviewed, agami-query-database refuses questions that depend on
+them. Run /agami-review (or "open the review dashboard"). Or /agami-model to
+browse + exclude tables/columns.
 
-Until those are reviewed, agami-query-database will refuse questions that
-depend on them (the trust-layer strict gate). Run `/agami-review` (or say
-"open the review dashboard") to finish. Or run `/agami-model` to browse
-the full model and exclude tables/columns you don't want agami to use.
-
-Here are five things you could already ask that don't depend on Rule 1 items:
-
-1. <a count question — "How many orders are in the database?">
-2. <a top-N from a single FK-approved table>
-3. <a time-bucketed count>
-4. <a status / category breakdown>
-5. <a recency filter>
-
-Pick deliberately — anything that touches `revenue`, `MRR`, `active_customer`,
-or similar unreviewed metrics will refuse. Reply with a number, or run
-`/agami-review` first.
+Five things you could already ask that don't depend on Rule 1 items:
+1.–5. <count / top-N / time-bucket / breakdown / recency — all on FK-approved tables>
+Pick a number, or run /agami-review first.
 ```
 
-Then end the turn.
-
-### 8c — fully-set-up framing (no Rule 1 items pending)
-
+**8c — fully set up:**
 ```
-✓ <artifacts_dir>/<profile>/ — OSI v0.1.1 semantic model (<K> schemas, validated)
-✓ <artifacts_dir>/<profile>/examples.yaml — <N> NL→SQL examples
-✓ Snapshot pinned at .snapshots/<hash>/
-✓ All metrics + named filters signed off
+✓ <artifacts_dir>/<profile>/ — semantic model (<A> subject areas, validated)
+✓ prompt_examples/ — <N> NL→SQL examples
+✓ All metrics signed off
 
-(Want to remove tables or columns you don't want agami to use? Run
- `/agami-model` for the browse + exclude flow.)
+(Want to remove tables/columns agami shouldn't use? Run /agami-model.)
 
 Now that <profile> is set up, here are five things you could ask:
-
-1. <a count question grounded in a real table — "How many orders shipped last month?">
-2. <a top-N grouped question — "Top 10 customers by total spend">
-3. <a time-series — "Revenue trend over the last 6 months">
-4. <a comparison or breakdown — "Order count by status this quarter">
-5. <a broader narrative — "How is the business doing this quarter?">
-
+1.–5. <count / top-N / trend / breakdown / narrative — grounded in the schema's distinctive tables>
 Reply with a number, or ask anything else.
 ```
-
-Then end the turn. The user picking a number routes the chosen question into `query-database` for a real answer.
-
-Pick suggestions that show off the schema's distinctive shape. If the model has tables like `orders` and `customers`, suggest things grounded in those. If it's a content/CRM schema, pick something domain-relevant. Keep each under 80 characters.
+End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
 
 ---
 
@@ -1914,8 +486,10 @@ Pick suggestions that show off the schema's distinctive shape. If the model has 
 |---|---|
 | Credentials chmod wrong | Refuse, offer to `chmod 600` |
 | Cached connection tool no longer works | Re-detect, update `~/.agami/.config` |
-| Introspection SQL fails | Route through `db_error_classifier.md`, surface the one-line remediation |
-| **Validator fails** | **Refuse to promote `/tmp/agami-staging-<profile>/` to `<artifacts_dir>/<profile>/`. Show errors verbatim. Loop on edits + re-validate.** |
-| EXPLAIN fails for a seed example | Auto-fix once → if still bad, move to `~/.agami/.rejected/`. Don't block the connect flow. |
-| Reintrospect would lose hand-edits | Phase 2 hard rule #8 — preserve descriptions, ai_context, choice_fields, metrics. |
-| Legacy single-file install detected | Auto-migrate: backup to `<artifacts_dir>/<profile>/_legacy.yaml.bak`, re-introspect into the new directory layout. |
+| Catalog denied (no `information_schema`/PRAGMA/dict access) | Engine falls back to probe mode; if even table enumeration is denied, ask for the table allowlist (Phase 1.2) |
+| Introspection SQL fails | Route through `db_error_classifier.md`; surface the one-line remediation |
+| **Validator fails** | **Model is NOT persisted. Show errors verbatim, fix, re-validate.** |
+| EXPLAIN fails for a seed | Auto-fix once → else move to `~/.agami/.rejected/`. Don't block. |
+| Reintrospect would lose hand-edits | Phase 2e — preserve descriptions, entities, metrics, caveats, sign-offs |
+| Legacy OSI profile at the root | Engine backs it up to `.osi_backup/` before writing; surface a one-liner |
+| Unsupported engine (MongoDB, Cassandra, …) | "Not supported yet — supported: Postgres/Redshift/Supabase, MySQL, Snowflake, BigQuery, SQL Server, Oracle, Databricks, Trino, DuckDB, SQLite." |

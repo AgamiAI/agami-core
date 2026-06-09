@@ -181,7 +181,15 @@ The connector / snowsql appends `.snowflakecomputing.com` automatically — don'
 | `redshift` | `host`, `port`, `database`, `user`, `password` | Same shape as Postgres. Default port 5439. SSL required (`sslmode = require` is the default). |
 | `mysql` | `host`, `port`, `database`, `user`, `password` | |
 | `snowflake` | `account`, `user`, `password` (or `authenticator`) | `host`/`port` not used. Optional: `warehouse`, `database`, `schema`, `role`. |
-| `sqlite` | `path` | |
+| `bigquery` | `project` | Auth: `service_account_path` (JSON key) or ADC. `host`/`port` not used. Optional: `dataset`, `location`. |
+| `sqlite` | `path` | Absolute path to the `.db` file. |
+| `duckdb` | `path` | Absolute path to the `.duckdb` file (or `:memory:`). |
+| `sqlserver` | `host`, `user`, `password` | Default port 1433. Optional: `database`. Driver: `pymssql`. (`mssql` is an accepted alias.) |
+| `oracle` | `user`, `password`, and either `dsn` or (`host` + `service_name`) | Default port 1521. Driver: `oracledb` (thin mode — no Oracle client libs needed). |
+| `databricks` | `host`, `http_path`, `token` | SQL warehouse. Optional: `catalog`. Driver: `databricks-sql-connector`. |
+| `trino` | `host`, `user` | Default port 8080. Optional: `catalog`, `schema`, `password` (HTTPS + basic auth). `presto` is an accepted alias. |
+
+`supabase` is hosted PostgreSQL — use `type = postgres` (the Supabase pooler host is detected automatically).
 
 Optional in all profiles: `schema` (default `public` for Postgres / `PUBLIC` for Snowflake), `sslmode` (Postgres / Redshift), `ssl` (MySQL).
 
