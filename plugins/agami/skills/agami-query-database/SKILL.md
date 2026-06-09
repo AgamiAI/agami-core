@@ -1,24 +1,23 @@
 ---
 name: agami-query-database
-description: "Answers natural-language questions about the user's database. Loads the OSI v0.1.1 semantic model and few-shot examples from the .agami home directory, generates SQL by composing OSI datasets/fields/relationships/metrics into a prompt (and reading Agami extensions for type info, choice fields, and performance hints), executes it locally via the user's chosen tool (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver `execute_sql.py`), returns results as a markdown table with optional CSV export, and renders Chart.js HTML charts on request. All execution is local — no data leaves the machine."
+description: "Answers natural-language questions about the user's database. Loads the agami semantic model (subject areas, tables, columns, relationships with join cardinality, entities, metrics) and few-shot examples from <artifacts_dir>/<profile>/, generates SQL via the examples-first traversal (pick subject area → match examples → resolve entities/metrics → compound table context), executes it locally via the user's chosen tool (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver `execute_sql.py` — which runs a fan-trap/chasm-trap pre-flight + auto-applies default_filters), returns results as a markdown table with optional CSV export, and renders Chart.js HTML charts on request. All execution is local — no data leaves the machine."
 when_to_use: "Use when the user asks 'how many', 'show me', 'top N', 'trend over time', 'compare', 'breakdown by', 'group by', 'average', or any other data question against their configured database. Also use for CSV export ('export this'), chart rendering ('make that a bar chart'), or to follow up on a previous result ('drill into the EU region')."
 argument-hint: "[question] [--csv] [--chart bar|line|pie|doughnut|scatter]"
 ---
 
 # agami query-database
 
-You answer the user's natural-language question about their database. Goal: generate correct SQL from the OSI semantic model + the few-shot examples, execute it locally, return rows + an insight, and offer a chart / export when appropriate. Everything runs on the user's machine.
+You answer the user's natural-language question about their database. Goal: generate correct SQL from the semantic model + the few-shot examples via the examples-first traversal, execute it locally, return rows + an insight, and offer a chart / export when appropriate. Everything runs on the user's machine.
 
 This skill orchestrates:
 
-1. **Setup** (once per session) — load the OSI model and examples library, verify the configured database tool still works.
-2. **Generate SQL** — compose a prompt from the OSI structure (datasets/fields/relationships/metrics + Agami extensions for type info / choice fields / performance hints), produce one SQL statement, run safety checks.
-3. **Execute** — run via the chosen tool; auto-retry on classified errors; risk-assess large-table queries.
+1. **Setup** (once per session) — resolve the profile + the semantic model at `<artifacts_dir>/<profile>/`, verify the configured database tool still works.
+2. **Generate SQL** — examples-first traversal: pick the subject area → match curated examples → (cold start) resolve entities/metrics + identify opaque literals → compound `get_table_context` → produce one SQL statement → safety checks.
+3. **Execute** — run via the chosen tool; the Python tier runs the fan/chasm pre-flight + applies default_filters; auto-retry on classified errors; risk-assess large-table queries.
 4. **Present** — markdown table; CSV via `--csv` or "export this"; Chart.js HTML via `--chart` or "make that a chart".
-5. **Log + post-install GitHub-star ask** — write `~/.agami/query_log.jsonl` and ask the user (once, after first successful query) to star us on GitHub. (Telemetry was previously flushed here; removed in the current 0.x line.)
+5. **Log + post-install GitHub-star ask** — write `~/.agami/query_log.jsonl` and ask the user (once, after first successful query) to star us on GitHub.
 
-For the OSI format spec: [`shared/schema-reference.md`](../../shared/schema-reference.md).
-For Agami's `custom_extensions`: [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md).
+For the model format: [`scripts/semantic_model/__init__.py`](../../scripts/semantic_model/__init__.py) (layout) + `scripts/semantic_model/models.py`.
 For SQL safety: [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md).
 For dialect-specific syntax: [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
 For connection method + execution: [`shared/connection-reference.md`](../../shared/connection-reference.md).
@@ -76,88 +75,41 @@ These rules apply to every phase of this skill, not just Phase 1.
 
 ### 1a — credentials check (binding)
 
-Read `~/.agami/credentials` (or check `AGAMI_DATABASE_URL`). If neither exists, invoke `/agami-connect` (its Phase 0a handles first-time credential setup) and **stop this skill**. Do not continue to load the OSI model. Do not run any other Bash commands.
+Read `~/.agami/credentials` (or check `AGAMI_DATABASE_URL`). If neither exists, invoke `/agami-connect` (its Phase 0a handles first-time credential setup) and **stop this skill**. Do not continue to load the semantic model. Do not run any other Bash commands.
 
-### 1b — load the OSI model (per-table layout, lazy)
+### 1b — load the semantic model
 
-Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback).
+Resolve `<profile>`: `AGAMI_PROFILE` → `active_profile` in `~/.agami/.config` → `"main"`.
+Resolve `<artifacts_dir>` per [`shared/file-layout.md`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `$HOME/agami-artifacts`.
 
-Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`.
+The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…`). **If `<artifacts_dir>/<profile>/org.yaml` does not exist → invoke `agami-connect`** (no model yet). There is no legacy-layout fallback — the model is the only format.
 
-Look for the model in this priority order:
-
-1. **v1.3 (per-table)** — `<artifacts_dir>/<profile>/index.yaml` exists AND `index.yaml.schemas[0].file` ends with `_schema.yaml`. Load `index.yaml` + every `<schema>/_schema.yaml` (slim TOC + within-schema relationships). **Do NOT load every `<table>.yaml` upfront** — those are lazy-loaded in Phase 2b based on relevance picking. This is the win of the per-table layout: Pass 1 of two-pass retrieval reads only the schema TOCs.
-2. **v1.2 (per-schema)** — `<artifacts_dir>/<profile>/index.yaml` exists AND `index.yaml.schemas[0].file` ends with `<name>.yaml` (no subdirectory). Load every schema's full yaml. Surface: "v1.2 layout detected — `agami-connect` will split this into per-table files on the next reintrospect for faster retrieval."
-3. **v1.1 (under ~/.agami/)** — `~/.agami/<profile>/index.yaml` exists, no artifacts dir. Surface: "Detected v1.1 layout — your model is under `~/.agami/`. Say 'reload the schema' to migrate to the sharable artifacts dir." Read as-is for now.
-4. **v1.0 (single file)** — `~/.agami/<profile>.yaml` exists. Surface: "Detected v1.0 layout — migrating takes ~30–90s. Say 'reload the schema' to migrate."
-5. **None of the above** → invoke `agami-connect`.
-
-For v1.3, build these views after loading `index.yaml` + every `_schema.yaml`:
-
-```text
-table_index : { "<schema>.<table>" → { description, primary_key, file_path, schema, name, est_row_count } }
-relationships_within_schema : { schema_name → list of relationships from <schema>/_schema.yaml }
-relationships_cross_schema : list from index.yaml.cross_schema_relationships
-schemas_meta : { schema_name → schema description from _schema.yaml }
-profile_meta : { profile, db_type, introspect_meta from index.yaml }
-```
-
-`table_index` is the **slim** index Pass 1 of Phase 2b uses for relevance picking. Each entry is ~100 bytes vs ~5KB for a full table yaml. A 1000-table schema's slim index is ~100KB; the full schema would be ~5MB.
-
-For v1.2, fall back to the existing flow: load every `<schema>.yaml` upfront, build full `datasets_by_qname` index. (Same shape as Phase 1c below, just eagerly populated.)
-
-### 1b.x — lazy-load a table yaml (called from Phase 2b)
-
-When Pass 1 picks a table, load its full yaml on demand:
+Don't read the whole tree by hand. Drive it through the CLI (run from `plugins/agami/scripts/`) or the MCP tools — both return the same shapes:
 
 ```bash
-table_yaml="<artifacts_dir>/<profile>/<schema>/<table>.yaml"
+ROOT="<artifacts_dir>/<profile>"
+python3 -m semantic_model.cli areas "$ROOT"                 # subject-area index (step 2a below)
+python3 -m semantic_model.cli context "$ROOT" --area A --tables t1 t2   # compound table context
+python3 -m semantic_model.cli examples "$ROOT" --area A --query "…"     # examples-first ranking
 ```
 
-Cache loaded tables in `loaded_tables_by_qname` so subsequent queries in the same session don't re-read from disk. The cache is per-session, not persistent.
+The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-review` / `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-review to reconcile."*
 
-### 1c — index the model for fast access
+### 1c — what the model gives you
 
-Build these in-memory views you'll reference repeatedly during SQL generation. For directory-layout the inputs are the merged datasets / relationships / metrics across every loaded `<schema>.yaml`, plus `index.yaml.cross_schema_relationships[]`.
+You don't build hand-rolled indexes — the loader returns structured objects. The pieces you'll use during SQL generation:
 
-```text
-datasets_by_name : { dataset.name → dataset object }                           # bare names
-datasets_by_qname: { "<schema>.<dataset>" → dataset object }                   # qualified
-fields_by_qname  : { "<dataset.name>.<field.name>" → field object }
-relationships_by_endpoints : { (from, to) → relationship object }              # both within-schema and cross-schema
-metrics_by_name  : { metric.name → metric object }
-```
-
-**Filter `rejected` entries out of every index above.** An entry whose `agami.review_state == "rejected"` was excluded by the curator via `/agami-review` or `/agami-model`. The runtime must skip it everywhere:
-
-- **Datasets with `review_state: rejected` → drop from `datasets_by_name` and `datasets_by_qname`.** They never appear in the schema context the SQL generator sees, never get loaded lazily in Phase 2b, never participate in join paths. Also drop every field inside that dataset and every relationship that names it as an endpoint — they're unreachable now.
-- **Fields with `review_state: rejected` (per-column exclusion) → drop from `fields_by_qname`.** Do not include the field's name or description in the schema context for its parent dataset. The dataset stays, but the field is hidden from the LLM.
-- **Relationships with `review_state: rejected` → drop from `relationships_by_endpoints`.** The join-path picker will route around them.
-- **Metrics with `review_state: rejected` → drop from `metrics_by_name`.** Same posture as rejected named_filters in `agami.named_filters[]` (filtered out of the model-level extension during this index step).
-
-Skip silently — no warning, no log line. Rejected entries are the curator's explicit choice; surfacing them in chat would re-introduce the noise the exclusion was meant to remove. The receipt panel doesn't mention rejected entries either.
-
-`stale` entries (drift) are also dropped from these indexes, but with a chat warning when a query would have touched one — *"This query would have used `<entity>`, but it's marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-review to reconcile."*
-
-Cross-schema relationships from `index.yaml.cross_schema_relationships[]` are merged into `relationships_by_endpoints` keyed by qualified `<schema>.<dataset>` endpoints. Within-schema relationships are keyed by bare `<dataset>` names. The graph traversal in Phase 2b's join-path picker handles both transparently.
-
-If two schemas have a same-named dataset, prefer the qualified form in prompts and warn the user once: `Note: 'users' exists in both 'public' and 'archive' — disambiguating by schema in this query.`
-
-For each field, also extract:
-- `type`     ← `agami.type` from `custom_extensions[].vendor_name=COMMON` JSON. If the extension is absent, fall back to inferring from the SQL expression (treat unknown as `string`).
-- `choice_field` ← `agami.choice_field` if present (used for synonym matching: "closed-won deals" → `WHERE stage_name = 'Closed Won'`).
-- `unit`     ← `agami.unit` if present (used for currency / percentage formatting in result presentation).
-- `is_time`  ← `dimension.is_time` if present.
-
-For each dataset, extract `agami.performance_hints` if present — feeds Phase 2d risk assessment.
-
-For each relationship, treat as a directed JOIN edge in a graph: `from` → `to` via `from_columns`/`to_columns`. The SQL generator uses this graph to pick the shortest join path between two datasets the user references.
+- **Subject areas** — the primary scoping unit (replaces "load every table"). Each has a description, a table list, entities, metrics, and an intra-area relationship graph (each edge carries join **cardinality** + a trust block).
+- **`get_table_context(area, tables)`** — columns (scoped by `expose_column_groups`), `default_filters`, relationships, `caveats`, `value_transforms`, metrics — in one call.
+- **Entities** — the vocabulary users say (name/plural/other_names → `maps_to` table.column, with a `value_pattern` for opaque IDs). Use `resolve_entities` / `identify_entity`.
+- **Metrics** — reusable aggregations with prose `calculation` + per-dialect `bindings`. **Use the binding SQL VERBATIM** when the user asks for a metric by name or synonym; don't hand-roll the aggregate.
+- **Cross-subject-area relationships** (org level) — for joins that span two areas.
 
 ### 1d — load the examples library
 
-Read `<artifacts_dir>/<profile>/examples.yaml` (current layout). Fall back to `~/.agami/<profile>-examples.yaml` if only the v1.0 layout exists. Take the **most recent 50** entries (newest `created_at` first).
+Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`. Use `cli examples "$ROOT" --area <area> --query "<question>"` to rank them (the **examples-first** signal — step 2a). If a high-confidence match returns, mirror its tagged tables/columns/SQL shape and skip cold-start resolution.
 
-If empty → warn the user, e.g. "I don't have any few-shot examples for this database yet — answers may be lower quality. Say 'introspect the schema' or 'connect to my database' and I'll seed the examples library." (Natural language reads better than a slash command in chat — `/agami-connect` works too, but only suggest the slash form when the user specifically asks "what do I type?".)
+If there are no examples for the relevant area → warn: "I don't have few-shot examples for this database yet — answers may be lower quality. Say 'introspect the schema' to seed them." (Slash form `/agami-connect` only if the user asks "what do I type?".)
 
 ### 1d.1 — load USER_MEMORY.md
 
@@ -172,7 +124,7 @@ Read `<artifacts_dir>/<profile>/ORGANIZATION.md` (if present). Strip HTML commen
 This file holds **domain context for this specific database** (terminology, key metrics, what the data represents). Inject into the SQL-generation prompt in Phase 2b under `## Organization context`, **before** the `## User memory` section — domain knowledge precedes display preferences in the LLM's reading order.
 
 Order in Phase 2b prompt:
-1. Schema context (datasets / fields / relationships from the OSI model)
+1. Schema context (tables / columns / relationships / metrics from the semantic model)
 2. `## Organization context` ← from ORGANIZATION.md
 3. `## User memory (preferences and policies)` ← from USER_MEMORY.md
 4. Few-shot examples
@@ -249,96 +201,30 @@ If the user's intent is to re-display the most recent chart:
 
 This phase neither logs anything new to `query_log.jsonl` nor sends telemetry — re-opening an existing artifact isn't a query event.
 
-### 2b — assemble the prompt for the SQL generator
+### 2b — assemble the prompt via the examples-first traversal
 
-The prompt assembly branches on **two axes**: profile count and dataset count.
+For a single profile, follow the **examples-first canonical loop** — the subject area is the scoping unit, so you never dump the whole schema. (Cross-profile federation is **2b.federation** below; it's orthogonal to this loop.)
 
-| Axis | Branch | When |
-|---|---|---|
-| Profile count | **single-profile** | The question routes to one profile only (the default) |
-| Profile count | **federation** | The question references datasets from ≥ 2 different profiles (cross-DB join) |
-| Dataset count | **small mode** | ≤ 50 datasets in scope |
-| Dataset count | **large mode** | > 50 datasets — use two-pass retrieval |
+**Step 1 — pick the subject area(s).** `cli areas "$ROOT"` → choose the area(s) whose description matches the question's intent. Most questions touch one area; cross-area ones (a join spanning two areas) select both, and the org's `cross_subject_area_relationships` supply the join.
 
-Federation mode is described in **2b.federation** further below. The single-profile branches (small mode and large mode) are described first.
+**Step 2 — examples first (strongest signal).** `cli examples "$ROOT" --area <area> --query "<question>"`. If `high_confidence` is true, mirror the top match's tagged tables / columns / metric / SQL shape and jump to step 5 — skip cold-start resolution.
 
-Users can override the threshold by writing `always use full-schema mode` (or similar) in `<artifacts_dir>/USER_MEMORY.md`. Default to large mode for `> 50` datasets.
+**Step 3 *(cold start only)* — resolve entities + metrics + opaque literals.** Match the question's terms to the area's entities (and `metrics`). For any opaque literal in the question (an ID-looking token), `cli`/MCP `identify_entity` recognizes its type via `value_pattern`; if it returns `clarify`, ask the user one targeted question rather than guessing.
 
-#### Small mode (≤ 50 datasets)
+**Step 4 *(cold start only)* — choose tables + columns** from what resolved (entity `maps_to`, metric `source_tables`).
 
-Build the prompt in this order:
+**Step 5 — compound context fetch.** `cli context "$ROOT" --area <area> --tables … [--columns …]` returns columns (scoped by the area's `expose_column_groups` — wide tables disclose only their exposed groups), `default_filters`, relationships (with cardinality + signers), `caveats`, `value_transforms`, and metrics, in one round-trip.
 
-1. **System** — "You are a SQL generator. Write one valid SQL statement for `<DB_TYPE>` (dialect: ANSI_SQL with `<DB_TYPE>`-specific tweaks per dialect-rules.md) that answers the user's question. Output ONLY the SQL, no commentary. **When filtering or joining on a large table** (`estimated_row_count > 100k`), prefer columns that appear in that table's `Indexes:` list — index lookups are orders of magnitude faster than full scans. For composite indexes `(a, b, c)`, only the left-prefix is index-eligible (`WHERE a = ?` uses the index, `WHERE b = ?` doesn't)."
+**Step 6 — assemble the generator prompt** in this order, then produce ONE SQL statement (first statement only if several are emitted):
 
-2. **Schema context** — render the merged OSI model as compact text the LLM can reason over. The shape matters:
-   ```
-   Datasets:
-     <schema>.<dataset.name> (<dataset.source>) [<row_count if known>]
-       Description: <dataset.description>
-       Synonyms: <ai_context.synonyms>
-       Fields:
-         <field.name>  type=<agami.type>  expr=<expression>  [time]  [choices: a,b,c]
-       Indexes (prefer these for WHERE / JOIN on this dataset):
-         (col1)
-         (col1, col2)         # composite — left-prefix matches
-       Performance hints: <if present, list recommended_filters and selective_filters>
+1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **Never SELECT a `sensitive` column's raw values** — aggregate or omit. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
+2. **Schema context** — the `get_table_context` output for the chosen tables (columns + types + caveats + value_transforms), the area's relationships (rendered as `from.col → to.col [cardinality]`), and the area's metrics (`<name>: <binding> -- <calculation>` + synonyms). `default_filters` need not be enumerated — `execute_sql` auto-applies them (step below) — but DO honor any caveats.
+3. **Organization context** — `ORGANIZATION.md` (step 1d.2), heading `## Organization context`. Binding domain context.
+4. **User memory** — `USER_MEMORY.md` (step 1d.1), heading `## User memory (preferences and policies)`.
+5. **Few-shot examples** — the ranked matches from step 2.
+6. **User question.**
 
-   Relationships:
-     <name>: <from>.<from_cols> → <to>.<to_cols>           # within-schema (bare)
-     <name>: <schema>.<from>.<from_cols> → <schema>.<to>.<to_cols>   # cross-schema (qualified)
-
-   Metrics:
-     <name>: <expression>  -- <description>
-       Synonyms: <ai_context.synonyms>
-   ```
-   The schema-qualified prefix on dataset names disambiguates same-named datasets across schemas. Within a single-schema setup, the prefix is still emitted but harmless.
-
-3. **Organization context** — content of `<artifacts_dir>/<profile>/ORGANIZATION.md` from Step 1d.2, under a heading `## Organization context`. Skip if empty after stripping comments. The LLM treats this as binding domain context — apply terminology, respect business-rule definitions.
-
-4. **User memory** — content of `<artifacts_dir>/USER_MEMORY.md` from Step 1d.1, under a heading `## User memory (preferences and policies)`. Skip if empty. Cross-database preferences (default filters, display rules).
-
-5. **Few-shot examples** — the up-to-50 `(question, sql)` pairs from the examples library.
-
-6. **User question** — the question from Step 2a.
-
-Generate one SQL statement. If the model produces multiple statements separated by `;`, take only the first.
-
-**Use OSI metrics by name when applicable.** If the user asks about "revenue" and the model has a `metrics[]` entry named `total_revenue` (with a synonym matching), prefer that metric's expression over building a fresh aggregate from scratch.
-
-#### Large mode (> 50 datasets) — two-pass retrieval
-
-Two-pass uses the existing model — no embedding store, no new dependencies.
-
-**Pass 1 — relevance.** Build a *table-index* prompt from the slim `table_index` view loaded in Phase 1b (each entry is one line: `<schema>.<table>` + 1-line description + primary key). **For v1.3 layouts this is essentially free — no per-table yamls have been loaded yet.** For v1.2 layouts, derive the slim view from the already-loaded full schema yamls.
-
-```
-You are a relevance picker. Given a question, return the JSON list of every
-<schema>.<table> tuple that's likely needed to answer it. Don't include
-peripheral tables — only what the SQL would actually FROM/JOIN.
-
-Tables (all <K> across <S> schemas):
-  public.orders — Customer-facing orders.
-  public.customers — End-customer accounts.
-  analytics.daily_revenue — Pre-aggregated daily revenue.
-  ... (full list)
-
-Relationships:
-  public.orders.customer_id → public.customers.id
-  analytics.daily_revenue.customer_id → public.customers.id
-  ... (full list)
-
-Question: <user's question>
-
-Output: JSON array of {"schema": "<schema>", "table": "<table>"} objects.
-```
-
-The model returns a small list (typically 1–5 tuples). Validate that every returned tuple resolves to a real loaded dataset; drop any that don't.
-
-**Pass 2 — SQL generation.** **For v1.3 layouts, lazy-load each picked table's yaml** (`<artifacts_dir>/<profile>/<schema>/<table>.yaml`) via Phase 1b.x — these are small files, one per picked table. Cache in the session's `loaded_tables_by_qname` so same-session re-queries skip re-reading. Then build the small-mode prompt using **only the picked tables' full field definitions** plus any relationships whose endpoints are entirely within the picked set. Cross-schema relationships are included if both endpoints are picked.
-
-If Pass 1 picks zero tables (the model couldn't infer relevance), fall back to small mode and surface a one-liner: "I couldn't narrow down which tables to use — sending the full schema. This may be slower."
-
-**Why no embedding store:** the table count we're optimizing for is 1000s, not 100k+. The model can re-rank a 1000-tuple list per query within latency budget. Embedding-based retrieval is a future option if users hit > 5000 tables; it's deliberately out of scope for v1.1.
+**default_filters + fan/chasm safety are enforced at execution, not just in the prompt.** Pass `--area <area>` to `execute_sql.py` (Phase 3a) so it AND-s in the area's `default_filters` and runs the fan-trap / chasm-trap pre-flight (auto-rewrites the safe cases; refuses shape-changing ones with a suggested fix you then apply). You don't have to hand-apply default_filters — but the receipt panel surfaces what was applied.
 
 #### 2b.federation — cross-database queries
 
@@ -469,9 +355,13 @@ The Bash result (CSV stdout, stderr, exit code) is for the skill to parse, not f
 
 ### 3a — run the SQL
 
-Invoke the tool-specific command from [`shared/connection-reference.md → CLI Connection Commands`](../../shared/connection-reference.md#cli-connection-commands). Wrap in a high-resolution timer to capture latency in ms.
+Invoke the tool-specific command from [`shared/connection-reference.md → CLI Connection Commands`](../../shared/connection-reference.md#cli-connection-commands). **For the Python-driver tier, pass `--area <area>`** (the subject area chosen in 2b) so `execute_sql.py` runs the fan-trap / chasm-trap pre-flight + auto-applies the area's `default_filters` before executing:
 
-Capture: stdout (rows as CSV), stderr (errors), exit code.
+```
+python3 scripts/execute_sql.py --profile <profile> --area <area> --sql-file <path>
+```
+
+Wrap in a high-resolution timer to capture latency in ms. Capture: stdout (rows as CSV), stderr (errors), exit code. **Stderr may carry safety-pass notes** — `[agami] auto-corrected fan_trap: ran rewritten SQL …` or `[agami] applied default_filters: […]` (surface these in the receipt), or a JSON `{"error":{"kind":"preflight_refused", …}}` with a `suggestion` you must consume (regenerate the SQL per the suggestion, then re-run). The native-CLI / DuckDB tiers don't run the safety pass — prefer the Python tier when the profile has a model, or call the `pre_flight_check` MCP tool first.
 
 ### 3b — error handling + auto-retry
 
@@ -482,7 +372,7 @@ Route any non-zero exit through [`shared/db_error_classifier.md`](../../shared/d
 | `auth`, `dsn`, `network` | Stop. Surface the one-line remediation. No retry. |
 | `driver_missing` | Fall through to the next available method (native CLI → DuckDB → Python driver). |
 | `permission` | Stop. DB user lacks SELECT on the touched dataset. |
-| `column_not_found`, `table_not_found`, `syntax` | Auto-retry up to **2** times. Pass the error back to the SQL generator: "The previous SQL failed with `<one-line classifier message>`. Regenerate using only OSI dataset / field names from the schema context above." |
+| `column_not_found`, `table_not_found`, `syntax` | Auto-retry up to **2** times. Pass the error back to the SQL generator: "The previous SQL failed with `<one-line classifier message>`. Regenerate using only table / column names from the schema context above." |
 | `timeout` | Stop. Suggest adding a filter using the `recommended_filters` from the dataset's performance hints. |
 | `other` | Stop. Surface raw error truncated to 200 chars. |
 
@@ -709,8 +599,8 @@ How to populate each field:
   If `.snapshots/` doesn't exist or is empty (legacy v1.2 model that pre-dates trust-layer), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."* **Do not look for `model_version` inside `index.yaml`** — it's not stored there; the snapshot directory is the source of truth.
 - **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the count returned by the EXPLAIN or post-execution counter (skip if uncertain).
   **`freshness`** — pass the **raw ISO timestamp** from `agami.introspect_meta.introspected_at` (e.g., `"2026-05-10T11:57:13Z"`). The chart template prettifies it to `"introspected May 10, 2026, 11:57 AM"` automatically. Don't prefix with "introspected" yourself or you'll double-prefix. If the upstream load cadence is known (e.g., daily ETL at 2am UTC), pass a pre-formatted string instead — e.g., `"2026-05-10T02:00:00Z (daily 2am UTC ETL)"` — and the template passes it through unchanged. Pass `null` when freshness is unknowable.
-- **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the loaded OSI model (Phase 1c's `relationships_by_endpoints` index). **Pull EVERY trust field** from its `agami` extension: `confidence` (number), `review_state` (enum), `origin` (enum), `signed_off_by`, `signed_off_role`, `signed_off_at`. Don't skip any — the template's `approvalPhrase` reads all of them to render "auto-approved (FK declared)" vs "approved by jane@x.com (cfo), Mar 15" vs "unreviewed (confidence 0.62)". Missing fields → ugly "unreviewed (confidence ?)" rendering. For composite or multi-hop joins, list each edge.
-- **`metrics`** — every OSI metric whose `expression` matches a fragment in the SQL. **Pull EVERY trust field** from the metric's `agami` extension: `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships — partial population produces a meaningless receipt. If a metric is genuinely unreviewed in the YAML, that's fine: the receipt will show "unreviewed (confidence 0.85)" which is honest and actionable. If you populate only `definition_prose` + sign-off and skip `review_state` + `confidence`, the template falls back to "unreviewed (?)" and the user wonders if their approval was lost.
+- **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the model (from `get_table_context`). **Pull EVERY trust field** carried on the relationship: `relationship` (cardinality), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state` (enum), `signed_off_by`, `signed_off_role`, `signed_off_at`, plus `on:` if it's a CAST/compound join. The template's `approvalPhrase` reads all of them to render "confirmed (FK declared)" vs "approved by jane@x.com (cfo), Mar 15" vs "proposed (inferred join — confirm)". For composite or multi-hop joins, list each edge. Also surface any **auto-rewrite** the pre-flight applied (fan/chasm) and the **default_filters** that were applied (from execute_sql's stderr notes).
+- **`metrics`** — every model metric whose `bindings` SQL matches a fragment in the generated SQL. **Pull EVERY trust field:** `calculation` (prose intent), `confidence`, `review_state`, `signed_off_by`, `signed_off_role`, `signed_off_at`, `source`. If a metric is genuinely unreviewed, that's fine — the receipt shows "proposed" honestly. Don't half-populate (it renders a meaningless "unreviewed (?)").
 - **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING. **Pull EVERY trust field** from the filter's entry: `expression`, `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships and metrics.
 - **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning naming the entry and its confidence. Examples: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`, `"Used metric `revenue` which has not been signed off."`. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-review to walk these items, or say 'open the review dashboard'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely — no need for an action line if everything is approved.
 

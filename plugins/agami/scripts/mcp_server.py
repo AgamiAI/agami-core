@@ -7,19 +7,25 @@ Context Protocol so a developer can use agami from any MCP-capable client
 that launches a local stdio server as a child process — chiefly **Claude
 Code** (`claude mcp add`) and **Claude Desktop** (`claude_desktop_config.json`).
 
-This is the local mirror of the hosted "Ask Agami" connector: the same tool
+This is the local mirror of the hosted "Ask Agami" connector: the same core tool
 surface (list_datasources / get_datasource_schema / get_prompt_examples /
-execute_sql / log_feedback), but backed by the user's local .agami files and
+execute_sql / log_feedback) plus the semantic-model traversal tools
+(list_subject_areas / get_subject_area_bundle / get_table_context /
+identify_entity / pre_flight_check), backed by the user's local .agami files and
 local DB execution instead of a cloud registry. Going from local → team is a
 backend swap, not a new product.
 
 Design constraints (match the rest of agami):
-  - **Zero third-party dependencies.** Pure stdlib: the MCP stdio protocol is
-    newline-delimited JSON-RPC 2.0, which we speak by hand. Grep the source —
-    there is no network call here, no auth, no telemetry.
+  - **No network call, no auth, no telemetry.** The MCP stdio protocol is
+    newline-delimited JSON-RPC 2.0, spoken by hand. Grep the source.
+  - The execute_sql + log_feedback tools are pure-stdlib. The model-backed tools
+    (schema / traversal) import `scripts/semantic_model` (Pydantic) lazily and
+    surface a clear "install the model deps" error if it's absent — so execution
+    still works on a bare install.
   - **No data leaves the machine.** SQL is executed locally by shelling out to
-    the sibling `execute_sql.py` (the same Tier-3 executor the skills use); the
-    semantic model is read from `<artifacts_dir>/<profile>/` and returned as-is.
+    the sibling `execute_sql.py` (the same Tier-3 executor the skills use), which
+    runs the fan/chasm pre-flight + default_filters safety pass; the semantic
+    model is read from `<artifacts_dir>/<profile>/` (org.yaml + subject_areas/…).
   - **Security model = the OS user boundary.** A stdio server is a child process
     of the client, running as you, reading the creds you already have. There is
     deliberately NO authentication (the MCP spec defines auth for the HTTP
@@ -204,6 +210,26 @@ def check_read_only(sql: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _load_org(profile: str):
+    """Lazily load the semantic model for a profile. Raises a clear error if the
+    model package (pydantic) isn't importable or there's no model on disk.
+
+    The schema/traversal tools need the model; the execute_sql + log_feedback tools
+    stay pure-stdlib so the server runs for execution even without the model deps.
+    """
+    if str(SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPT_DIR))
+    from semantic_model import loader as L  # may raise ImportError (pydantic)
+
+    root = resolve_artifacts_dir() / profile
+    if not (root / "org.yaml").exists():
+        raise FileNotFoundError(
+            f"No semantic model at {root}/org.yaml. Run the agami-connect skill to "
+            f"introspect this database."
+        )
+    return L.load_organization(root)
+
+
 def tool_list_datasources(_args: dict[str, Any]) -> str:
     """Local analog of Ask Agami `list_organizations`: enumerate local profiles."""
     creds = _credentials_sections()
@@ -212,18 +238,15 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
     out = []
     for profile in sorted(creds.keys()):
         pdir = artifacts / profile
-        dataset_count = 0
+        table_count = 0
         if pdir.is_dir():
-            dataset_count = sum(
-                1
-                for f in pdir.rglob("*.yaml")
-                if f.name not in ("index.yaml", "_schema.yaml")
-            )
+            table_count = sum(1 for _ in (pdir / "subject_areas").glob("*/tables/*.yaml")) \
+                if (pdir / "subject_areas").is_dir() else 0
         out.append({
             "datasource": profile,
             "database_type": _db_type_for(profile, creds),
-            "dataset_count": dataset_count,
-            "model_present": (pdir / "index.yaml").exists(),
+            "table_count": table_count,
+            "model_present": (pdir / "org.yaml").exists(),
             "is_active": profile == active,
         })
     if not out:
@@ -242,63 +265,70 @@ def _read_text(path: Path) -> str | None:
 
 
 def tool_get_datasource_schema(args: dict[str, Any]) -> str:
-    """Local analog of Ask Agami `get_datasource_schema`.
+    """Local analog of Ask Agami `get_datasource_schema`, backed by the semantic model.
 
-    Returns the curated semantic-model context as text — exactly the files the
-    agami-query-database skill reads: index.yaml + every <schema>/_schema.yaml
-    (the Pass-1 slim TOC), plus the full per-table yaml for any `dataset_names`
-    passed (Pass-2 lazy-load), plus ORGANIZATION.md and USER_MEMORY.md context.
+    Pass 1 (no `dataset_names`): the subject-area index — each area's name +
+    description + table list (compact). Pass 2 (`dataset_names: [...]`): the full
+    `get_table_context` for those tables (columns scoped by the area's
+    expose_column_groups, default_filters, relationships, caveats, value_transforms).
+    Plus ORGANIZATION.md / USER_MEMORY.md domain context.
     """
     profile = resolve_profile(args.get("datasource"))
     artifacts = resolve_artifacts_dir()
-    pdir = artifacts / profile
-    if not (pdir / "index.yaml").exists():
-        return json.dumps({
-            "error": {
-                "kind": "not_found",
-                "remediation": f"No semantic model at {pdir}/index.yaml. "
-                               f"Run the agami-connect skill to introspect this database.",
-            }
-        }, indent=2)
+    try:
+        org = _load_org(profile)
+    except FileNotFoundError as e:
+        return json.dumps({"error": {"kind": "not_found", "remediation": str(e)}}, indent=2)
+    except ImportError:
+        return json.dumps({"error": {"kind": "driver_missing", "remediation":
+            "semantic model deps not installed. Run: pip install -r "
+            "plugins/agami/scripts/semantic_model/requirements.txt"}}, indent=2)
 
-    parts: list[str] = [f"# Semantic model for datasource '{profile}'  (source: {pdir})\n"]
+    from semantic_model import loader as L
 
-    idx = _read_text(pdir / "index.yaml")
-    if idx is not None:
-        parts.append(f"## index.yaml\n```yaml\n{idx}\n```\n")
-
-    # Pass 1: every <schema>/_schema.yaml (slim TOC + relationships)
-    for schema_file in sorted(pdir.glob("*/_schema.yaml")):
-        text = _read_text(schema_file)
-        if text is not None:
-            rel = schema_file.relative_to(pdir)
-            parts.append(f"## {rel}\n```yaml\n{text}\n```\n")
-
-    # Pass 2: full per-table yaml for explicitly requested datasets.
     requested = args.get("dataset_names") or []
-    if requested:
-        wanted = {str(n).split(".")[-1].lower() for n in requested}
-        for table_file in sorted(pdir.glob("*/*.yaml")):
-            if table_file.name in ("index.yaml", "_schema.yaml"):
-                continue
-            if table_file.stem.lower() in wanted:
-                text = _read_text(table_file)
-                if text is not None:
-                    rel = table_file.relative_to(pdir)
-                    parts.append(f"## {rel}  (full table model)\n```yaml\n{text}\n```\n")
-
-    org = _read_text(pdir / "ORGANIZATION.md")
-    if org and org.strip():
-        parts.append(f"## ORGANIZATION.md (domain context)\n{org}\n")
-    user_mem = _read_text(artifacts / "USER_MEMORY.md")
-    if user_mem and user_mem.strip():
-        parts.append(f"## USER_MEMORY.md (cross-database preferences)\n{user_mem}\n")
+    result: dict[str, Any] = {"datasource": profile, "organization": org.description or None}
 
     if not requested:
-        parts.append(
-            "\n> Note: per-table field detail is lazy-loaded. Call get_datasource_schema "
-            "again with `dataset_names: [...]` to pull the full model for the tables you need."
-        )
+        result["subject_areas"] = [{
+            "name": sa.name,
+            "description": sa.description,
+            "default_time_window": sa.default_time_window,
+            "tables": [tr.table for tr in sa.tables],
+        } for sa in org.subject_areas]
+        result["cross_area_relationships"] = [
+            {"from": r.from_subject_area, "to": r.to_subject_area,
+             "for_questions_about": r.for_questions_about}
+            for r in org.cross_subject_area_relationships
+        ]
+        result["note"] = ("Per-table detail is lazy-loaded. Call again with "
+                          "`dataset_names: [...]` for full columns + relationships.")
+    else:
+        wanted = [str(n).split(".")[-1] for n in requested]
+        # find the area each table belongs to (for expose_column_groups scoping)
+        area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+        by_area: dict[str, list[str]] = {}
+        for t in wanted:
+            by_area.setdefault(area_of.get(t), []).append(t)
+        contexts = {}
+        for area, tbls in by_area.items():
+            ctx = L.get_table_context(org, tbls, area=area,
+                                      include=["default_filters", "relationships",
+                                               "caveats", "value_transforms", "metrics"])
+            contexts.update(ctx.get("tables", {}))
+            if ctx.get("relationships"):
+                result.setdefault("relationships", []).extend(ctx["relationships"])
+            if ctx.get("metrics"):
+                result.setdefault("metrics", []).extend(ctx["metrics"])
+        result["tables"] = contexts
+
+    parts = [json.dumps(result, indent=2, default=str)]
+    org_md = _read_text(artifacts / profile / "ORGANIZATION.md")
+    if org_md and org_md.strip():
+        parts.append(f"\n## ORGANIZATION.md (domain context)\n{org_md}")
+    user_mem = _read_text(artifacts / "USER_MEMORY.md")
+    if user_mem and user_mem.strip():
+        parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
     return "\n".join(parts)
 
 
@@ -312,22 +342,26 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     """
     profile = resolve_profile(args.get("datasource"))
     artifacts = resolve_artifacts_dir()
-    examples_path = artifacts / profile / "examples.yaml"
-    text = _read_text(examples_path)
-    if text is None:
-        # v1.0 fallback layout
-        text = _read_text(AGAMI_HOME / f"{profile}-examples.yaml")
-    if text is None:
+    ex_dir = artifacts / profile / "prompt_examples"
+    blocks: list[str] = []
+    if ex_dir.is_dir():
+        for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
+            text = _read_text(ex_file)
+            if text and text.strip():
+                area = ex_file.parent.name
+                blocks.append(f"## subject area: {area}\n```yaml\n{text}\n```")
+    if not blocks:
         return json.dumps({
             "examples": [],
-            "note": f"No examples library at {examples_path}. "
+            "note": f"No examples under {ex_dir}/<area>/examples.yaml. "
                     f"Corrections saved via agami-save-correction will appear here.",
         }, indent=2)
     header = (
-        f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {examples_path})\n"
-        f"# Use these to ground SQL dialect and house style.\n"
+        f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {ex_dir})\n"
+        f"# Each block is one subject area's curated library. Match on the question, "
+        f"then reuse the tagged tables/columns/SQL shape.\n"
     )
-    return header + "\n```yaml\n" + text + "\n```\n"
+    return header + "\n" + "\n\n".join(blocks) + "\n"
 
 
 def _classify_exit(code: int) -> str:
@@ -366,10 +400,16 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     if max_rows is not None:
         max_rows = max(1, min(max_rows, 10_000))
 
+    # The model safety pass (fan/chasm pre-flight + default_filters) runs inside
+    # execute_sql.py; pass the subject area so default_filters scope correctly.
+    cmd = [sys.executable, str(EXECUTE_SQL), "--profile", profile, "--sql", sql]
+    if args.get("area"):
+        cmd += ["--area", str(args["area"])]
+
     started = time.monotonic()
     try:
         proc = subprocess.run(
-            [sys.executable, str(EXECUTE_SQL), "--profile", profile, "--sql", sql],
+            cmd,
             capture_output=True,
             text=True,
             timeout=240,
@@ -461,6 +501,74 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Semantic-model traversal tools (examples-first loop). These need the model
+# package (pydantic); they surface a clear error if it isn't installed, while the
+# execute_sql / log_feedback tools stay pure-stdlib.
+# ---------------------------------------------------------------------------
+
+
+def _model_error_json(exc: Exception) -> str:
+    if isinstance(exc, FileNotFoundError):
+        return json.dumps({"error": {"kind": "not_found", "remediation": str(exc)}}, indent=2)
+    if isinstance(exc, ImportError):
+        return json.dumps({"error": {"kind": "driver_missing", "remediation":
+            "semantic model deps not installed. Run: pip install -r "
+            "plugins/agami/scripts/semantic_model/requirements.txt"}}, indent=2)
+    return json.dumps({"error": {"kind": "other", "remediation": str(exc)}}, indent=2)
+
+
+def tool_list_subject_areas(args: dict[str, Any]) -> str:
+    try:
+        org = _load_org(resolve_profile(args.get("datasource")))
+        from semantic_model import runtime as RT
+        return json.dumps(RT.list_subject_areas(org), indent=2)
+    except Exception as e:
+        return _model_error_json(e)
+
+
+def tool_get_subject_area_bundle(args: dict[str, Any]) -> str:
+    try:
+        org = _load_org(resolve_profile(args.get("datasource")))
+        from semantic_model import loader as L
+        return json.dumps(L.get_subject_area_bundle(org, args["area"]), indent=2, default=str)
+    except Exception as e:
+        return _model_error_json(e)
+
+
+def tool_get_table_context(args: dict[str, Any]) -> str:
+    try:
+        org = _load_org(resolve_profile(args.get("datasource")))
+        from semantic_model import loader as L
+        return json.dumps(L.get_table_context(
+            org, args["tables"], area=args.get("area"),
+            columns=args.get("columns"), include=args.get("include"),
+        ), indent=2, default=str)
+    except Exception as e:
+        return _model_error_json(e)
+
+
+def tool_identify_entity(args: dict[str, Any]) -> str:
+    try:
+        org = _load_org(resolve_profile(args.get("datasource")))
+        from semantic_model import runtime as RT
+        res = RT.identify_entity(args["literal"], org, area=args.get("area"),
+                                 query_context=args.get("query_context", ""))
+        return json.dumps({"status": res.status, "candidates": res.candidates,
+                           "question_template": res.question_template}, indent=2, default=str)
+    except Exception as e:
+        return _model_error_json(e)
+
+
+def tool_pre_flight_check(args: dict[str, Any]) -> str:
+    try:
+        org = _load_org(resolve_profile(args.get("datasource")))
+        from semantic_model import runtime as RT
+        return json.dumps(RT.pre_flight_check(args["sql"], org).as_dict(), indent=2, default=str)
+    except Exception as e:
+        return _model_error_json(e)
+
+
+# ---------------------------------------------------------------------------
 # Tool registry (name → (handler, description, inputSchema))
 # ---------------------------------------------------------------------------
 
@@ -477,10 +585,11 @@ TOOLS: dict[str, dict[str, Any]] = {
     "get_datasource_schema": {
         "handler": tool_get_datasource_schema,
         "description": (
-            "Fetch the local semantic model for a datasource: index + per-schema TOCs (Pass 1), "
-            "plus the full per-table model for any `dataset_names` you pass (Pass 2 lazy-load), "
-            "plus ORGANIZATION.md / USER_MEMORY.md context. Use the metric/measure `calculation` "
-            "fields VERBATIM when generating SQL."
+            "Fetch the local semantic model for a datasource: the subject-area index (Pass 1 — "
+            "each area's name + description + table list), plus full get_table_context (columns "
+            "scoped by expose_column_groups, default_filters, relationships, caveats, "
+            "value_transforms, metrics) for any `dataset_names` you pass (Pass 2 lazy-load), plus "
+            "ORGANIZATION.md / USER_MEMORY.md context. Use metric `calculation`/`bindings` VERBATIM."
         ),
         "inputSchema": {
             "type": "object",
@@ -499,9 +608,9 @@ TOOLS: dict[str, dict[str, Any]] = {
     "get_prompt_examples": {
         "handler": tool_get_prompt_examples,
         "description": (
-            "Fetch the curated few-shot NL→SQL examples (examples.yaml) for a datasource. "
-            "Use before generating SQL to ground dialect and house style. Local analog of the "
-            "hosted get_prompt_examples; returns the full curated library (no cosine ranking locally)."
+            "Fetch the curated few-shot NL→SQL examples for a datasource (one block per subject "
+            "area, from prompt_examples/<area>/examples.yaml). Use before generating SQL to ground "
+            "dialect and house style; match on the question, then reuse the tagged tables/columns/SQL."
         ),
         "inputSchema": {
             "type": "object",
@@ -526,6 +635,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "properties": {
                 "sql": {"type": "string", "description": "One SELECT or WITH...SELECT statement."},
                 "datasource": {"type": "string", "description": "Profile name; defaults to the active profile."},
+                "area": {"type": "string", "description": "Subject area — scopes the fan/chasm pre-flight + default_filters safety pass."},
                 "raw_query": {"type": "string", "description": "The user's NL question (recorded in the query log)."},
                 "max_rows": {"type": "integer", "description": "Row cap (clamped 1–10000)."},
             },
@@ -548,6 +658,92 @@ TOOLS: dict[str, dict[str, Any]] = {
                 "datasource": {"type": "string", "description": "Profile name; defaults to the active profile."},
             },
             "required": ["raw_query", "rating"],
+            "additionalProperties": False,
+        },
+    },
+    "list_subject_areas": {
+        "handler": tool_list_subject_areas,
+        "description": (
+            "List the subject areas (the primary semantic unit) for a datasource. "
+            "Examples-first traversal step 1: pick the area whose description matches the "
+            "question's intent, then fetch its tables."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"datasource": {"type": "string", "description": "Profile; defaults to active."}},
+            "additionalProperties": False,
+        },
+    },
+    "get_subject_area_bundle": {
+        "handler": tool_get_subject_area_bundle,
+        "description": (
+            "One-shot bundle for a small subject area: tables, columns (scoped by the area's "
+            "expose_column_groups), default_filters, relationships, entities, metrics. Use for "
+            "small areas to avoid multiple round-trips."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource": {"type": "string", "description": "Profile; defaults to active."},
+                "area": {"type": "string", "description": "Subject area name."},
+            },
+            "required": ["area"],
+            "additionalProperties": False,
+        },
+    },
+    "get_table_context": {
+        "handler": tool_get_table_context,
+        "description": (
+            "Compound context fetch — columns (+ default_filters, relationships, caveats, "
+            "value_transforms, metrics) for a set of tables in one round-trip. Honors the area's "
+            "expose_column_groups so wide tables disclose only the scoped columns. Use metric "
+            "`calculation`/`bindings` VERBATIM and apply any column `value_transform` when generating SQL."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource": {"type": "string", "description": "Profile; defaults to active."},
+                "area": {"type": "string", "description": "Subject area (scopes column-group visibility)."},
+                "tables": {"type": "array", "items": {"type": "string"}, "description": "Tables to fetch."},
+                "columns": {"type": "array", "items": {"type": "string"}, "description": "Optional column subset."},
+                "include": {"type": "array", "items": {"type": "string"}, "description": "Optional include list."},
+            },
+            "required": ["tables"],
+            "additionalProperties": False,
+        },
+    },
+    "identify_entity": {
+        "handler": tool_identify_entity,
+        "description": (
+            "Identify what kind of entity an opaque literal is, via the entity value_pattern regexes. "
+            "Returns resolved / clarify (ranked candidates + question) / unrecognized."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource": {"type": "string", "description": "Profile; defaults to active."},
+                "area": {"type": "string", "description": "Optional subject area to scope to."},
+                "literal": {"type": "string", "description": "The opaque value to identify."},
+                "query_context": {"type": "string", "description": "Surrounding query text (disambiguation)."},
+            },
+            "required": ["literal"],
+            "additionalProperties": False,
+        },
+    },
+    "pre_flight_check": {
+        "handler": tool_pre_flight_check,
+        "description": (
+            "Fan-trap / chasm-trap pre-flight on a proposed SELECT using join cardinality. Returns "
+            "{risk, action: auto_rewrite|refuse|allow, rewritten_sql, reason, suggestion}. execute_sql "
+            "runs this automatically; call it directly only to check SQL before committing to it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource": {"type": "string", "description": "Profile; defaults to active."},
+                "sql": {"type": "string", "description": "The SELECT to check."},
+            },
+            "required": ["sql"],
             "additionalProperties": False,
         },
     },

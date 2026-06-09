@@ -75,6 +75,35 @@ def test_v2_model_covers_legacy_columns(profile, tmp_path):
         missing = cols - v2[table]
         assert not missing, f"{table}: v2 dropped columns {missing}"
 
-# Live execution-parity (execute_sql --v2-area is a no-op for trap-free,
-# filter-free queries) lands with the query-path port in PR3, once execute_sql
-# speaks the semantic model.
+
+@pytest.mark.skipif(
+    os.environ.get("AGAMI_LIVE_DB_TESTS", "").lower() not in ("1", "true", "yes", "on"),
+    reason="set AGAMI_LIVE_DB_TESTS=true to run live execution-parity (hits the real DB)",
+)
+@pytest.mark.parametrize("profile", ["finbud", "main"])
+def test_execute_sql_safety_pass_is_noop(profile, tmp_path):
+    """With a model present at the profile root, execute_sql's safety pass
+    (--area: pre-flight + default_filters) must NOT change results for a trap-free,
+    filter-free query: identical CSV with --area vs --no-safety."""
+    import subprocess
+    import sys as _sys
+
+    if not _has(profile):
+        pytest.skip(f"{profile} profile not installed locally")
+    # build the model at <tmp>/<profile>/ and point AGAMI_ARTIFACTS_DIR there
+    M.migrate_profile(profile, ARTIFACTS, out_dir=tmp_path / profile, dry_run=False)
+    area = L.load_organization(tmp_path / profile).subject_areas[0].name
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(tmp_path)}
+    exe = str(SCRIPTS / "execute_sql.py")
+    sql = "SELECT 1 AS one"
+
+    def run(extra):
+        return subprocess.run([_sys.executable, exe, "--profile", profile, "--sql", sql, *extra],
+                              capture_output=True, text=True, cwd=str(SCRIPTS), env=env)
+
+    base = run(["--no-safety"])
+    if base.returncode != 0:
+        pytest.skip(f"no live DB for {profile}: {base.stderr.strip()[:120]}")
+    hooked = run(["--area", area])
+    assert hooked.returncode == 0, hooked.stderr
+    assert base.stdout == hooked.stdout

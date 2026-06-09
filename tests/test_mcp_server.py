@@ -161,8 +161,12 @@ def test_initialize_and_tools_list():
 
     tools = {t["name"] for t in by_id[2]["result"]["tools"]}
     assert tools == {
+        # core Ask-Agami-parity surface
         "list_datasources", "get_datasource_schema",
         "get_prompt_examples", "execute_sql", "log_feedback",
+        # semantic-model traversal tools
+        "list_subject_areas", "get_subject_area_bundle", "get_table_context",
+        "identify_entity", "pre_flight_check",
     }
 
 

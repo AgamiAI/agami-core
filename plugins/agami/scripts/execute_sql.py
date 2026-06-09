@@ -648,6 +648,52 @@ def _write_cursor_csv(cur: Any) -> None:
             writer.writerow(row)
 
 
+def _model_safety(sql: str, profile: str, area: str | None):
+    """Semantic-model safety pass before execution: fan-trap / chasm-trap pre-flight
+    + default_filters auto-application, reading the model at <artifacts>/<profile>/.
+
+    Returns (sql_to_run, exit_code). exit_code is None to continue, or an int to
+    short-circuit (a fan/chasm-trap refusal the caller must consume). Inert (returns
+    the SQL unchanged) when there is no model, or the model package isn't importable.
+    """
+    try:
+        scripts_dir = Path(__file__).resolve().parent
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        from semantic_model import loader as L
+        from semantic_model import runtime as RT
+    except Exception:
+        return sql, None  # model package not available -> no-op
+    artifacts = Path(
+        os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")
+    )
+    root = artifacts / profile
+    if not (root / "org.yaml").exists():
+        return sql, None  # no model for this profile -> no-op
+    try:
+        org = L.load_organization(root)
+    except Exception as e:
+        sys.stderr.write(f"[agami] could not load semantic model; skipping safety pass: {e}\n")
+        return sql, None
+
+    pf = RT.pre_flight_check(sql, org)
+    if pf.risk and pf.action == "refuse":
+        json.dump({"error": {"kind": "preflight_refused", "risk": pf.risk,
+                             "reason": pf.reason, "suggestion": pf.suggestion,
+                             "triggering_joins": pf.triggering_joins}}, sys.stderr)
+        sys.stderr.write("\n")
+        return sql, 1
+    if pf.risk and pf.action == "auto_rewrite" and pf.rewritten_sql:
+        sys.stderr.write(f"[agami] auto-corrected {pf.risk}: ran rewritten SQL. {pf.reason}\n")
+        sql = pf.rewritten_sql
+
+    new_sql, applied = RT.apply_default_filters(sql, org, area=area)
+    if applied:
+        sys.stderr.write(f"[agami] applied default_filters: {applied}\n")
+        sql = new_sql
+    return sql, None
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Tier-3 Python SQL executor for agami. Reads credentials, runs SQL, emits CSV.",
@@ -660,6 +706,10 @@ def main() -> int:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--sql", help="SQL statement (use --sql-file for SQL with special characters)")
     src.add_argument("--sql-file", help="Path to a file containing one SQL statement")
+    p.add_argument("--area", default=None,
+                   help="Subject area for the semantic-model safety pass (pre-flight + default_filters).")
+    p.add_argument("--no-safety", action="store_true",
+                   help="Skip the semantic-model pre-flight / default_filters pass.")
     args = p.parse_args()
 
     if args.sql_file:
@@ -668,6 +718,13 @@ def main() -> int:
         sql = args.sql
 
     profile = args.profile or _resolve_default_profile()
+
+    # Semantic-model safety pass (fan/chasm pre-flight + default_filters). Inert when
+    # there's no model for the profile, so this is safe for every caller.
+    if not args.no_safety:
+        sql, _rc = _model_safety(sql, profile, args.area)
+        if _rc is not None:
+            return _rc
     creds = _load_credentials(profile)
     db_type = creds.get("type", "").lower()
     if not db_type:
