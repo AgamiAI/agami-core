@@ -17,7 +17,7 @@ This skill orchestrates:
 4. **Apply** — for each command, read+edit the relevant YAML file, run the validator, commit if it passes, otherwise revert and report.
 5. **Re-render** — after each batch of changes, regenerate the dashboard with updated counts. The user keeps walking the queue until they type `done`.
 
-Trust-layer spec lives in [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md) (the canonical contract). Confidence formulas live in [`scripts/compute_confidence.py`](../../scripts/compute_confidence.py).
+The trust block (`confidence` ∈ confirmed/inferred/proposed, `review_state`, `signed_off_*`) lives on each entry in the semantic model (`scripts/semantic_model/models.py`). The review queue + the apply path are the `curate` engine (`scripts/semantic_model/curate.py`), driven via `semantic_model.cli`.
 
 ## Conversation style
 
@@ -32,7 +32,7 @@ Trust-layer spec lives in [`shared/agami-osi-extensions.md`](../../shared/agami-
 Run the same plan-mode + credentials checks as `agami-query-database`:
 - Plan-mode: this skill needs Read + Bash + Write. **If plan mode is active: refuse and end the turn. DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/review/<profile>/<ts>.html`.)"*
 - Resolve `<profile>` and `<artifacts_dir>` per the standard chain (`AGAMI_PROFILE` env → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` env → `~/.agami/.config.artifacts_dir` → `~/agami-artifacts`).
-- If `<artifacts_dir>/<profile>/index.yaml` doesn't exist, invoke `agami-connect` and stop.
+- If `<artifacts_dir>/<profile>/org.yaml` doesn't exist, invoke `agami-connect` and stop.
 - Probe the validator is runnable: `python3 -c 'import yaml, jsonschema'`. If not, surface the install hint and stop — we won't write YAML edits without the validator gate.
 
 Resolve the active threshold:
@@ -41,101 +41,30 @@ Resolve the active threshold:
 
 ---
 
-## Phase 1: Walk every entity and classify into tabs
+## Phase 1: Build the review items from the model
 
-The dashboard now has **four tabs**: For Review · Approved Automatically · Manually Approved · Rejected. So this phase loads EVERY entity (not just review-needing) and tags each with a `tab` field. The template filters by tab.
+The dashboard has **four tabs**: For Review · Approved Automatically · Manually Approved · Rejected. One command produces every entry, already tab-classified — run it from `plugins/agami/scripts/` with `ROOT="<artifacts_dir>/<profile>"`:
 
-**Scope filter — `AGAMI_REVIEW_SCOPE=rule_1_only`** (added 2026-05-12 for the hybrid review order in `/agami-connect` Phase 4). When this env var is set, the dashboard shows ONLY Rule 1 + stale items (metrics, named filters, drift) in the For Review tab. Everything else (low-confidence joins / field descriptions — Rule 2) is excluded from the items array entirely. The Auto / Manual / Rejected tabs are unaffected — read-only inspection is always allowed. This scope is used during the post-introspect upfront review gate, where surfacing the long tail would defeat the "fast time to value" goal. Without the env var (the default), the dashboard shows everything as before.
-
-Load every yaml under `<artifacts_dir>/<profile>/` — `index.yaml`, every `<schema>/_schema.yaml`, every `<schema>/<table>.yaml`. Walk the structures.
-
-For each entity (dataset, field, relationship, metric, named_filter), parse its `agami` extension payload (one entry per `custom_extensions[]` whose `vendor_name=COMMON` and JSON has an `agami` top-level key — see [`shared/agami-osi-extensions.md`](../../shared/agami-osi-extensions.md)).
-
-**Skip fields with empty descriptions entirely.** A field whose `description` is empty (`""` or whitespace) has nothing for the curator to look at — do not include it in any tab. This rule applies regardless of `review_state` and `origin`:
-- New introspects produce `review_state: not_applicable` + `origin: no_description` on these fields (the canonical shape).
-- Legacy YAMLs (introspected before this rule existed) may have these fields stamped with `review_state: approved` + `origin: introspect_heuristic`. Still skip them — the empty `description` is the trigger, not the trust block.
-
-The field stays in the YAML (with its name and `agami.type`); the dashboard just doesn't surface a card. If a curator wants to add a description for such a field, they edit the YAML directly (or, in a future build, via an "Add description" action on the table-level card — not in scope here).
-
-For the remaining entries, classify:
-
-```
-needs_review(entry) =
-  (entity_type ∈ {metric, named_filter} AND review_state != approved)         # Rule 1
-  OR
-  (review_state == unreviewed AND confidence < threshold)                      # Rule 2
-  OR
-  (review_state == stale)                                                      # drift
-
-tab(entry) =
-  "rejected"  if review_state == "rejected"
-  "review"    if needs_review(entry)
-  "auto"      if review_state == "approved" AND (signed_off_by == "agami_introspect_v1"
-                                                  OR signed_off_role == "system")
-  "manual"    otherwise (review_state == "approved" with a human signer)
+```bash
+python3 -m semantic_model.cli review-items "$ROOT" > /tmp/agami-review-items-$ts.json
 ```
 
-Set `item.tab` on each item. The template:
-- **For Review** tab: shows action buttons (Approve / Reject / Edit / Skip), groups by entity type, sorts by ascending confidence within each group.
-- **Approved Automatically** tab: read-only, shows the approval phrase (e.g., "auto-approved (FK declared in DB)").
-- **Manually Approved** tab: read-only, shows "approved by jane@example.com (cfo), Mar 15".
-- **Rejected** tab: shows a single "Move to For Review" button per card, which generates `unreject N`.
+Each item carries: `n` (stable global index — the number chat commands reference), `entity_type` (`metric` | `join` | `entity`), `rule` (1 = metrics, sign-off required; 2 = joins/entities, lazy), `title`, `source_signal` (the prose `calculation` for metrics, the `from.col → to.col` join + cardinality for relationships), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state`, `signed_off_*`, and `tab`:
 
-**No per-tab item cap.** Earlier versions of this SKILL capped the For Review tab at 50 items because the old flat layout became a wall past that. The new dashboard groups by entity type with collapsible sections — 237 items split across 4 groups (Metrics / Named Filters / Joins / Field Descriptions) is navigable. The user expands the group they want to work on; the others stay collapsed.
+```
+tab = "rejected"  if review_state == "rejected"
+      "review"    if review_state in (unreviewed, stale)        # actionable
+      "auto"      if approved by a system signer (agami_introspect / role=system)
+      "manual"    if approved by a human signer
+```
 
-(If a user reports the page is sluggish on a model with, say, 5000+ unreviewed field descriptions, *then* introduce a per-group cap with "Show more" pagination. Don't optimize speculatively.)
+The template renders: **For Review** → action buttons (Approve / Reject / Edit / Skip), grouped by entity type, Rule 1 (metrics) in a primary "must-do-to-ship" section + Rule 2 collapsed below; **Auto** / **Manual** → read-only with the approval phrase; **Rejected** → a "Move to For Review" button (`unreject N`).
 
-Number items 1, 2, 3… **globally across all tabs**, in a stable order — Rule 1 first (metrics, then named_filters), then Rule 2 by ascending confidence, then approved entries grouped by entity type, then rejected. The numbering corresponds to chat commands, so it must stay stable across re-renders.
+**Scope filter — `AGAMI_REVIEW_SCOPE=rule_1_only`** (used by `/agami-connect` Phase 4's upfront gate): when set, drop Rule 2 items (`rule == 2`) from the For Review tab so only metrics/sign-off-required items show. The Auto/Manual/Rejected tabs are unaffected (read-only inspection always allowed).
 
-### 1a — count the auto-approved entries (for the summary card)
+**Summary counts** for the summary card: count items by `tab` and `rule` (e.g. `review` Rule 1 = metrics needing sign-off; `review` Rule 2 = inferred joins; `auto`/`manual`/`rejected` totals). Write to `--summary-file`.
 
-Walk the same yamls and count, per category:
-- `auto_approved.datasets` — datasets with `review_state: approved` (typically all, since the dataset itself is mechanical)
-- `auto_approved.fields` — fields with `review_state: approved`
-- `auto_approved.fk_relationships` — relationships with `review_state: approved` AND `origin: fk`
-- `auto_approved.field_descriptions_from_comments` — fields with `review_state: approved` AND `origin: column_comment`
-- `needs_review.inferred_relationships` — relationships with `review_state: unreviewed` AND `origin: introspect_heuristic`
-- `needs_review.low_confidence_field_descriptions` — fields with `review_state: unreviewed` AND `confidence < threshold`
-- `needs_review.metric_proposals` — metrics with `review_state: unreviewed`
-- `needs_review.named_filter_proposals` — named_filters with `review_state: unreviewed`
-- `needs_review.stale` — any entry with `review_state: stale`
-
-These feed the summary card via `--summary-file`.
-
-### 1b — build per-item card data
-
-For each item, build the item object per [`shared/review-dashboard-template.html` → `ITEMS_JSON`](../../shared/review-dashboard-template.html). Specifically:
-
-- **`signals`** — translate the entry's `agami.signal_breakdown` into a list of `{ok: bool, text: string}`. The text should be human-readable — not just `fk_declared: false` but `✗ No FK declared in DB metadata`. See examples below.
-- **`inferred`** — the SQL fragment / definition / mapping the system proposed:
-  - For joins: `<from>.<from_col> = <to>.<to_col>`
-  - For metrics: the metric's `expression.dialects[0].expression`
-  - For field descriptions: the description text
-  - For named filters: the predicate
-- **`extra_lines`** — for metrics, include `Definition` (from `agami.definition_prose`) and `Assumptions` (from `agami.assumptions`). For field descriptions, include `Choices` (formatted from `agami.choice_field`).
-- **`reply_hint`** — for Rule 1 items: `approve N by you@example.com role=cfo`. For Rule 2 items: `approve N`.
-- **`rule_1`** — boolean. `true` if `entity_type ∈ {metric, named_filter}`. **The dashboard uses this to split the For Review tab into a primary "must-do-to-ship" section (Rule 1 + drift/stale) and a secondary "Optional" collapsed section (everything else).** Pillar D, added 2026-05-12. Don't forget to set this — missing `rule_1: true` on a metric pushes it into the optional collapsed section and the user might miss the sign-off.
-
-Signal-text translation table (used to render the ✓/✗ list):
-
-| signal_breakdown key | When `true` (✓ text) | When `false` (✗ text) |
-|---|---|---|
-| `fk_declared` | `FK declared in DB metadata` | `No FK declared in DB metadata` |
-| `pk_overlap` | `Both endpoints are primary keys` | `No primary key on the source side` |
-| `unique_index_match` | `Target column has a unique index` | `Target column has no unique index` |
-| `column_type_match` | `Column types match exactly` | `Column types do not match` |
-| `column_name_similarity` | (number — show only if ≥ 0.7: `Column-name similarity: <X>`) | (omit) |
-| `plural_pattern_match` | `Plural-of-table-name pattern matches` | (omit) |
-| `dba_column_comment` | `DBA-authored column comment present` | `No DBA column comment` |
-| `well_known_measure_pattern` | `Column name matches a known measure pattern` | (omit) |
-| `numeric_type` | `Source column is numeric` | `Source column is not numeric` |
-| `aggregate_friendly_distribution` | `Distribution looks aggregate-friendly` | (omit) |
-| `business_term_match` | `Column name matches a known business term` | (omit) |
-| `enum_like_distribution` | `Distinct values look enum-like` | (omit) |
-| `synonym_match` | `Synonym matches an already-approved entry` | (omit) |
-| `llm_inferred` | `LLM proposed this with no DB-side signal` | (omit) |
-
-Skip a signal entirely if its truthful rendering would be empty. Negative signals are interesting only when their absence is meaningful — `column_type_match=False` is a red flag; `plural_pattern_match=False` is just noise.
+There's no per-tab cap — the template groups by entity type with collapsible sections. The numbering is stable across re-renders because `review-items` sorts deterministically (Rule 1 first, then by tab, then by name).
 
 ---
 
@@ -215,12 +144,12 @@ threshold <number>
 done
 ```
 
-`edit N <kind>>>>\n...\n<<<` is the **inline-edit form** the dashboard generates when the user fills in the per-card Edit textarea. `<kind>` ∈ `{description, definition_prose}`:
+`edit N <kind>>>>\n...\n<<<` is the **inline-edit form** the dashboard generates when the user fills in the per-card Edit textarea. `<kind>` ∈ `{description, calculation}`:
 
-- `description` — write the new prose to the entry's `description` field (or to `dataset.description` for a dataset entry).
-- `definition_prose` — write the new prose to the entry's `agami.definition_prose` field. Used for metrics and named filters. After the write, set `agami.review_state` to whatever the user batched it with (or, if no approve was queued for this item, leave it as-is — the edit alone does not re-trigger sign-off).
+- `description` — set the entry's `description` field → an `edit` op with `field: "description"`.
+- `calculation` — set a metric's prose `calculation` (the Rule 1 intent) → an `edit` op with `field: "calculation"`. The edit alone doesn't re-trigger sign-off; queue an `approve` op too if the user wants it approved.
 
-Parser: see a line matching `edit N <kind>>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line between as the new value. Apply via the same Edit-tool flow as Phase 4c/4d, then re-run the validator. If validator fails, revert and surface the error.
+Parser: see a line matching `edit N <kind>>>>` (case-sensitive, exact closing token `<<<` on its own line); read every line between as the new value. Emit it as an `edit` op (Phase 3b) and apply via `cli curate` (Phase 4) — the engine validates + reverts on failure.
 
 The bare `edit N` form (no `>>>...<<<` block) is the **chat-side form** — Claude reads the current entry, surfaces it as a fenced code block, accepts the new content conversationally, and writes back. Use this for entity types without an inline form (joins, dataset trust blocks).
 
@@ -281,109 +210,50 @@ Per command:
 - **threshold X** — change the threshold for this render. Persist to `agami.config.yaml`. Re-render.
 - **done** — close the session. Surface: *"Closed. Run `/agami-review` anytime to reopen."* and stop.
 
-### 3b — group edits by yaml path
+### 3b — translate commands to an ops array
 
-Multiple commands often touch the same YAML file. Group commands by `yaml_path` so we read each file once, apply all relevant edits, validate, then move to the next file. Don't read+write per command — too many round-trips and harder to revert atomically.
+Map the parsed commands (by item `n` → its `{entity_type, area, name}` from the rendered items) to curation ops, one object per change:
+
+```json
+[
+  {"op": "approve", "kind": "metric",       "area": "sales",  "name": "total_revenue", "at": "<UTC ISO>"},
+  {"op": "reject",  "kind": "relationship", "area": "sales",  "name": "orders->tickets"},
+  {"op": "include", "kind": "metric",       "area": "sales",  "name": "old_metric"}
+]
+```
+
+`kind` is the item's `entity_type` mapped to the model kind: `metric`→`metric`, `join`→`relationship`, `entity`→`entity` (and `table`/`column` come from the model explorer, not here). `unreject` → `op: include`. For **edit**, surface the entry's editable block in chat, apply the user's plain-English change as `{"op":"edit","kind":...,"area":...,"name":...,"field":"<field>","value":<new>}` (e.g. set a metric's `calculation`, or a relationship's `on:` for the "approve with fix" flow), then ask "Approve this entry too?" and append an `approve` op if yes.
+
+**Rule 1 sign-off requires a non-empty `calculation`.** Before emitting an `approve` op for a metric, check its `source_signal` (the prose calculation) in the rendered items. If empty, refuse upfront — don't let the validator catch it after:
+> Item #N is a metric and Rule 1 needs a non-empty `calculation` before approval. Reply `edit N` to add it, then approve.
 
 ---
 
-## Phase 4: Apply edits to YAML
+## Phase 4: Apply via the curation engine
 
-For each `(yaml_path, list_of_edits)` group:
-
-### 4a — read
-
-Use the Read tool on `<artifacts_dir>/<profile>/<yaml_path>`. Parse mentally — locate the entity by its qualified ID (e.g., `relationships.orders_to_customers` ↔ the relationship array entry whose `name == "orders_to_customers"`).
-
-### 4b — locate the agami JSON payload
-
-Each entity has a `custom_extensions[]` array. Find the entry with `vendor_name: COMMON` AND a `data:` JSON string whose top-level key is `agami`. That's the trust block.
-
-### 4c — apply the edit
-
-For **approve** (Rule 2 item):
-- Update the JSON: `review_state: approved`, `signed_off_by: "<email>"` (the user's email from credentials or default to a placeholder string the user provides), `signed_off_at: "<UTC ISO>"`, `signed_off_role: "<role>"` (if provided; else omit).
-
-For **approve** (Rule 1 item — metric / named_filter):
-- Same as above, but `signed_off_role` is REQUIRED. If missing in the command, surface a refusal as in Phase 3a.
-- **CHECK `definition_prose` BEFORE attempting any YAML write.** Read the entry's current `agami.definition_prose`. If it's missing, empty, or whitespace-only, **refuse the approve upfront** with this exact message — don't write to the YAML, don't let the validator catch it after the fact (validator rollback is a worse UX than upfront refusal):
-
-  > Item #N is a `<metric | named_filter>` and Rule 1 requires a non-empty `definition_prose` before it can be approved. Reply `edit N` and I'll walk you through adding the definition, then re-issue the approve.
-
-  This check happens for every Rule 1 item in the batch *before* the first Edit tool call. If multiple Rule 1 items in the batch fail this check, list all of them in one message: *"Items #3, #7, #12 are metrics with empty `definition_prose`. Reply `edit 3`, `edit 7`, `edit 12` to fill them in (one per turn or batch them in the dashboard), then approve. Other items in this batch will proceed."* Then continue applying the non-blocked items.
-
-For **reject**:
-- `review_state: rejected`. Per Hard Rule #10, set `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null` (rejected entries don't carry sign-off attribution; the rejecter is recorded in the curation log instead).
-
-For **unreject**:
-- `review_state: unreviewed`. Set `signed_off_by: null`, `signed_off_at: null`, `signed_off_role: null`. The entry's `confidence` and `signal_breakdown` are preserved — only the review state flips. Item reappears on the For Review tab on the next re-render. Append a `unreject` event to `curation_log.jsonl` with the curator's identity so the audit trail captures it.
-
-For **edit**:
-- Read the current entity.
-- Surface the editable block in chat as a fenced code block.
-- The user replies with the edit instructions in plain English. You apply them — typically updating `description`, `expression`, `definition_prose`, or `choice_field`.
-- After the edit, ask: *"Approve this entry as well? (yes/no)"*. If yes, fall through to the approve flow.
-
-### 4d — write back via the Edit tool
-
-Use the Edit tool with `old_string` = the original JSON-string line for that entity, `new_string` = the updated JSON-string line. Preserve indentation (the JSON sits inside a YAML `data: '...'` value — the YAML quoting is what you preserve; the JSON inside the quotes is what you change).
-
-For convenience, build the new JSON string with `json.dumps(...)` ordering keys consistently — `agami` outermost, then the existing keys in the order they appeared (so diffs stay clean).
-
-### 4e — validate
-
-After all edits in a single `(yaml_path)` group are applied, run:
+One call applies the whole batch atomically — it flips `review_state`/sign-off on the canonical YAMLs, **validates the model, commits to the profile git repo, appends to `curation_log.jsonl`, and reverts every change if validation fails**. You don't hand-edit YAML or run the validator yourself.
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/validate_semantic_model.py" --directory "$artifacts_dir/$profile"
+printf '%s' "$OPS_JSON" > /tmp/agami-curate-ops.json
+python3 -m semantic_model.cli curate "$ROOT" \
+  --ops-file /tmp/agami-curate-ops.json \
+  --signer "${reviewer_email}" --role "${reviewer_role}"
+rm -f /tmp/agami-curate-ops.json
 ```
 
-- **Exit 0**: edits stick. Continue to the next yaml file.
-- **Exit 1**: revert the file using `git checkout <yaml_path>` (the `<artifacts_dir>/<profile>/.git` repo is initialized by agami-connect Phase 3e). Surface the validator errors verbatim. Tell the user which command caused the failure (best-effort — usually the most recent one). Do NOT continue applying further edits.
-- **Exit 2**: tooling error. Stop. The validator gate is non-bypassable.
+`--signer`/`--role` come from the user's approve command (`approve N by you@x.com role=cfo`) or `~/.agami/.config` (`reviewer_email`/`reviewer_role`); they stamp `signed_off_*` on approved entries. The command prints JSON: `{applied, skipped, errors, validated, committed}`.
 
-### 4f — append to curation log
+- `validated: true` → the batch stuck. Surface the applied count, continue to Phase 5 (re-render).
+- `validated: false` → **nothing stuck** (the engine reverted via git). Surface `errors` verbatim and tell the user which op likely caused it; do not re-apply blindly.
+- `skipped[]` → ops that couldn't be located (bad item number / already-changed); surface them.
 
-For every applied edit (approve / reject / edit), append one line to `<artifacts_dir>/<profile>/curation_log.jsonl`:
-
-```bash
-jq -nc \
-  --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg actor "$user_email_or_placeholder" \
-  --arg action "approve" \
-  --arg entity_type "relationship" \
-  --arg entity_qname "orders_to_customers" \
-  --arg from_state "unreviewed" \
-  --arg to_state "approved" \
-  --argjson confidence 0.62 \
-  '{ts:$ts, actor:$actor, action:$action, entity_type:$entity_type,
-    entity_qname:$entity_qname, from_state:$from_state, to_state:$to_state,
-    confidence:$confidence}' \
->> "$artifacts_dir/$profile/curation_log.jsonl"
-```
-
-The curation log is the audit trail — append-only, chmod 600. It captures rejecter identity (which we don't keep on the entity itself, per Hard Rule #10).
-
-### 4g — git commit (best-effort)
-
-After all edits in this turn are applied and validated, commit to the repo at `<artifacts_dir>/<profile>/.git`:
-
-```bash
-( cd "$artifacts_dir/$profile" \
-  && git add -A \
-  && git -c user.name="${USER_NAME:-curator}" \
-       -c user.email="${USER_EMAIL:-curator@local}" \
-       commit -q -m "review: <N> entries approved/rejected by ${USER_EMAIL:-curator}" \
-  ) || true
-```
-
-Best-effort — never block on git failure. The YAML files + curation log are the source of truth.
+The validator gate is non-bypassable — a model that fails validation is never persisted. The curation log + git history are the audit trail (the engine records the rejecter there; rejected entries carry no sign-off attribution on the entry itself).
 
 ---
 
 ## Phase 5: Re-render or close
 
-After a batch of edits applies cleanly, **always re-render the dashboard** with a **new timestamped filename** at `~/.agami/review/<profile>/<new-ts>.html`. Recompute Phase 1 from scratch (re-walk the YAMLs, re-classify into tabs, re-count the summary). The numbering shifts as approved/rejected items leave the For Review tab — that's expected.
+After a batch of edits applies cleanly, **always re-render the dashboard** with a **new timestamped filename** at `~/.agami/review/<profile>/<new-ts>.html`. Recompute Phase 1 from scratch (re-run `cli review-items`, re-classify into tabs, re-count the summary). The numbering shifts as approved/rejected items leave the For Review tab — that's expected.
 
 **Delete the previous timestamped file from the same profile dir before writing the new one** (`rm -f "$HOME/.agami/review/$profile/$prev_ts.html"`). Earlier versions kept old files around so the user would "notice the refresh," but real testing showed the stale files accumulate, confuse the user about which tab is current, and clutter the directory. The auto-open of the new file is the refresh signal; the previous file is dead. Track `$prev_ts` in session state across re-renders so you always know which file to delete. If the user already had the old file open in a browser tab, the new auto-open opens a fresh tab — they can close the stale one (we mention that in the chat ack).
 
@@ -427,7 +297,7 @@ If the user types `done`, close. Don't re-render.
 
 | Symptom | Action |
 |---|---|
-| `index.yaml` missing | Invoke `agami-connect`. Stop. |
+| `org.yaml` missing | Invoke `agami-connect`. Stop. |
 | `agami.config.yaml` missing | Use defaults (threshold 0.7). Don't error. |
 | Validator missing | Refuse to run. Tell the user `pip install pyyaml jsonschema`. |
 | User replies with a number that's out of range | Surface: *"Item #N doesn't exist — current queue has 1..K. Re-render to see numbering."* |

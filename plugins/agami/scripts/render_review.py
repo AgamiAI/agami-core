@@ -42,7 +42,7 @@ LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
 LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
 
 
-VALID_ENTITY_TYPES = {"join", "metric", "field_description", "named_filter", "dataset"}
+VALID_ENTITY_TYPES = {"join", "metric", "field_description", "named_filter", "dataset", "entity"}
 # All four review states are now valid — the dashboard's tabs surface each
 # group separately (For Review / Approved Automatically / Manually Approved /
 # Rejected). The SKILL classifies each entity into a tab via `item.tab`.
@@ -76,10 +76,17 @@ def _validate_item(item: dict, idx: int) -> None:
             f"item {idx}: tab must be one of {sorted(VALID_TABS)}, got {item['tab']!r}"
         )
     c = item.get("confidence")
-    if c is not None and (not isinstance(c, (int, float)) or isinstance(c, bool)):
-        raise ValueError(f"item {idx}: confidence must be a number")
-    if c is not None and not (0.0 <= float(c) <= 1.0):
-        raise ValueError(f"item {idx}: confidence {c} outside [0, 1]")
+    # confidence may be a 0-1 number (legacy) OR a categorical label from the
+    # semantic model ("confirmed" | "inferred" | "proposed").
+    if c is not None and isinstance(c, str):
+        if c not in ("confirmed", "inferred", "proposed"):
+            raise ValueError(
+                f"item {idx}: categorical confidence must be confirmed/inferred/proposed, got {c!r}")
+    elif c is not None:
+        if isinstance(c, bool) or not isinstance(c, (int, float)):
+            raise ValueError(f"item {idx}: confidence must be a number or categorical label")
+        if not (0.0 <= float(c) <= 1.0):
+            raise ValueError(f"item {idx}: confidence {c} outside [0, 1]")
     sig = item.get("signals")
     if sig is not None and not isinstance(sig, list):
         raise ValueError(f"item {idx}: signals must be a list")

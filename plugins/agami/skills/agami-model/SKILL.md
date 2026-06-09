@@ -1,6 +1,6 @@
 ---
 name: agami-model
-description: "Opens the model-explorer dashboard for the active profile's semantic model. Lets the user browse every schema, table, and field with live search, and queue Exclude / Include actions on tables and columns they don't want the runtime to use. Each action flips the entry's `agami.review_state` to `rejected` (exclude) or `unreviewed` (include) in the per-table YAML, gated by the validator and committed to the profile's git repo."
+description: "Opens the model-explorer dashboard for the active profile's semantic model. Lets the user browse every subject area, table, and field with live search, and queue Exclude / Include actions on tables and columns they don't want the runtime to use. Each action flips the entry's `review_state` to `rejected` (exclude) or `unreviewed` (include) via the curation engine, gated by the validator and committed to the profile's git repo."
 when_to_use: "Use when the user says 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'take out the X table', 'I don't want PII columns', '/agami-model', or after agami-connect's Phase 7 trust-layer summary prompts the user to inspect the model. Also use when the user replies to a previously-rendered model-explorer artifact with one of the chat back-channel commands (exclude tables: ... / include columns: ... / done)."
 argument-hint: "(no args — opens the explorer for the active profile)"
 ---
@@ -13,16 +13,16 @@ This skill orchestrates:
 
 1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `~/.agami/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**.
 2. **Open + wait** — auto-open the file, end the turn, wait for the user to come back with exclude / include commands from the dashboard's "Generate feedback for Claude" button.
-3. **Apply** — for each batch of commands, invoke `apply_model_exclusions.py` with a JSON actions file. The script edits the YAMLs, runs the validator, reverts via `git checkout` on failure, appends to `curation_log.jsonl` on success, and commits to the profile's git repo.
+3. **Apply** — for each batch of commands, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state, runs the validator, reverts via git on failure, appends to `curation_log.jsonl`, and commits to the profile's git repo.
 4. **Re-render** — render to a new timestamped file and re-open. Wait for the next batch.
 
-Trust-spine semantics: "exclude" flips `agami.review_state` to `rejected`. The runtime model loader in `agami-query-database` Phase 1c skips `rejected` datasets and fields entirely — they never appear in prompts, never get joined to, never get aggregated. "Include" flips back to `unreviewed`; the user can re-approve via `/agami-review` if they want a sign-off badge.
+Trust-spine semantics: "exclude" flips `review_state` to `rejected`. The model loader drops `rejected` tables, columns, and relationships entirely (it loads with `include_rejected=False` for the runtime) — they never appear in prompts, never get joined to, never get aggregated. "Include" flips back to `unreviewed`; the user can re-approve via `/agami-review` if they want a sign-off badge.
 
 ## Conversation style
 
 - **Tight loops.** The dashboard is the surface; the chat is just the input channel.
 - **Don't restate the dashboard in chat.** A successful apply gets a one-line ack with the count and the new file path.
-- **Qualified names everywhere.** Tables are `<schema>.<table>`. Columns are `<schema>.<table>.<column>`. No bare names — they're ambiguous across schemas.
+- **Qualified names everywhere.** Tables are `<area>.<table>`. Columns are `<area>.<table>.<column>` (area = subject area). No bare names.
 
 ---
 
@@ -32,7 +32,7 @@ Same shape as `agami-review`:
 
 - **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered model-explorer artifact at `~/.agami/model/<profile>/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
-- **If `<artifacts_dir>/<profile>/index.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
+- **If `<artifacts_dir>/<profile>/org.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
 - **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
 
 Resolve the curator's identity for `curation_log.jsonl` + git commits:
@@ -68,10 +68,10 @@ buttons. Click your way through, hit "Generate feedback for Claude" at
 the bottom, paste back here.
 
 You can also type commands directly:
-  exclude tables:  <schema>.<table>, <schema>.<table>
-  include tables:  <schema>.<table>
-  exclude columns: <schema>.<table>.<column>, <schema>.<table>.<column>
-  include columns: <schema>.<table>.<column>
+  exclude tables:  <area>.<table>, <area>.<table>
+  include tables:  <area>.<table>
+  exclude columns: <area>.<table>.<column>, <area>.<table>.<column>
+  include columns: <area>.<table>.<column>
   done
 ```
 
@@ -111,47 +111,48 @@ done
 ```
 
 Where `<qname-list>` is comma-separated, whitespace-tolerant:
-- Table qname: `<schema>.<table>` (e.g., `BUREAU_DATA.NOHIT_DATA`)
-- Column qname: `<schema>.<table>.<column>` (e.g., `BUREAU_DATA.GENERAL_INFO.PAN`)
+- Table qname: `<area>.<table>` (e.g., `bureau_data.NOHIT_DATA`)
+- Column qname: `<area>.<table>.<column>` (e.g., `bureau_data.PII.AADHAAR`)
 
 Tolerate trailing commas, mixed-case schema/table/column names (the YAMLs typically preserve the DB's casing — pass them through verbatim).
 
-**Reject malformed targets in chat, not by silently dropping them.** If a user types `exclude tables: NOHIT_DATA` without the schema prefix, surface: *"Tables need a schema prefix — `BUREAU_DATA.NOHIT_DATA` not just `NOHIT_DATA`. Did you mean that?"* and stop.
+**Reject malformed targets in chat, not by silently dropping them.** If a user types `exclude tables: NOHIT_DATA` without the schema prefix, surface: *"Tables need a schema prefix — `bureau_data.NOHIT_DATA` not just `NOHIT_DATA`. Did you mean that?"* and stop.
 
 ---
 
-## Phase 3: Apply via apply_model_exclusions.py
+## Phase 3: Apply via the curation engine
 
-Build the actions JSON:
+Translate the parsed exclude/include commands into a curation ops array. Targets are `<area>.<table>` (a whole table) or `<area>.<table>.<column>` (a single column). `exclude` → `op: reject`, `include` → `op: include`:
 
-```bash
-cat > /tmp/agami-model-actions-$ts.json <<EOF
-{
-  "exclude_tables":  ["BUREAU_DATA.NOHIT_DATA", "BUREAU_DATA.UNSCRUBBED_DATA"],
-  "include_tables":  ["BUREAU_DATA.LOAN_REPAYMENT"],
-  "exclude_columns": ["BUREAU_DATA.GENERAL_INFO.PAN", "BUREAU_DATA.GENERAL_INFO.AADHAAR"],
-  "include_columns": []
-}
-EOF
-
-python3 "$AGAMI_PLUGIN_ROOT/scripts/apply_model_exclusions.py" \
-  --profile "$profile" \
-  --artifacts-dir "$artifacts_dir" \
-  --actor "$reviewer_email" \
-  --actions-file "/tmp/agami-model-actions-$ts.json"
+```json
+[
+  {"op": "reject",  "kind": "table", "area": "bureau_data", "name": "NOHIT_DATA"},
+  {"op": "include", "kind": "table", "area": "bureau_data", "name": "LOAN_REPAYMENT"},
+  {"op": "reject",  "kind": "table", "area": "bureau_data", "name": "PII", "column": "AADHAAR"}
+]
 ```
 
-The script's stdout is a JSON document with `applied`, `skipped`, `errors`, `validator_ok`, `validator_output`. Parse it.
+(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) Apply the whole batch atomically — the engine flips `review_state`, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
 
-**Success case** (`validator_ok: true`, no errors):
-- Surface a one-line ack: *"✓ Applied: <X> tables excluded, <Y> columns excluded, <Z> re-included. Re-rendering…"*
-- If `skipped[]` is non-empty, list each on its own line: *"⚠ Skipped: BUREAU_DATA.X.Y (column not found on dataset)"* — the apply script returns these for targets it couldn't resolve.
+```bash
+printf '%s' "$OPS_JSON" > /tmp/agami-model-ops-$ts.json
+python3 -m semantic_model.cli curate "$ROOT" \
+  --ops-file /tmp/agami-model-ops-$ts.json \
+  --signer "${reviewer_email}" --role "${reviewer_role}"
+rm -f /tmp/agami-model-ops-$ts.json
+```
+
+`ROOT="<artifacts_dir>/<profile>"`. Stdout is JSON: `{applied, skipped, errors, validated, committed}`.
+
+**Success** (`validated: true`):
+- Ack: *"✓ Applied: <X> tables excluded, <Y> columns excluded, <Z> re-included. Re-rendering…"*
+- List any `skipped[]` (bad target / not found) on their own lines.
 - Continue to Phase 4 (re-render).
 
-**Failure case** (`validator_ok: false`):
-- The applier has already reverted all changes via `git checkout`. Surface: *"⚠ Validator rejected the batch — all changes reverted. No YAML files were modified."*
-- Show the validator output verbatim (the contract for Phase 4 → 4d in agami-review applies here too).
-- Stop. Do not re-render. The user can adjust and resubmit.
+**Failure** (`validated: false`):
+- The engine already reverted via git. Surface: *"⚠ Validator rejected the batch — all changes reverted. No files were modified."* Show `errors` verbatim. Stop; don't re-render.
+
+Excluded entries vanish from the runtime model (the loader drops `review_state: rejected`) but stay visible in the explorer (which loads with `include_rejected=True`) so the user can re-include them.
 
 ---
 

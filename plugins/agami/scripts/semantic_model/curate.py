@@ -79,6 +79,44 @@ def review_queue(org: Organization) -> dict[str, Any]:
     }
 
 
+def _tab(obj) -> str:
+    rs = getattr(obj, "review_state", "approved")
+    if rs == "rejected":
+        return "rejected"
+    if _needs_review(obj):
+        return "review"
+    if rs == "approved" and (getattr(obj, "signed_off_role", None) == "system"
+                             or getattr(obj, "signed_off_by", None) in (None, "agami_introspect")):
+        return "auto"
+    return "manual"
+
+
+def all_items(org: Organization) -> list[dict]:
+    """Every curatable entry (metric / relationship / entity), tab-classified, for
+    the 4-tab review dashboard (For Review · Auto · Manual · Rejected). Tables and
+    columns are curated in the model explorer, not here."""
+    items: list[dict] = []
+    for sa in org.subject_areas:
+        for mm in sa.metrics:
+            items.append({**_metric_item(sa.name, mm), "tab": _tab(mm)})
+        for rel in sa.relationships:
+            items.append({**_rel_item(sa.name, rel), "tab": _tab(rel)})
+        for ent in sa.entities:
+            items.append({**_entity_item(sa.name, ent), "tab": _tab(ent)})
+    for mm in org.cross_subject_area_metrics:
+        items.append({**_metric_item(None, mm), "tab": _tab(mm)})
+    for rel in org.cross_subject_area_relationships:
+        it = {**_rel_item(getattr(rel, "from_subject_area", None), rel), "tab": _tab(rel),
+              "cross_area": True}
+        items.append(it)
+    # stable order: Rule 1 first, then by tab (review → auto → manual → rejected)
+    order = {"review": 0, "auto": 1, "manual": 2, "rejected": 3}
+    items.sort(key=lambda it: (0 if it["rule"] == 1 else 1, order.get(it["tab"], 9), it["name"]))
+    for i, it in enumerate(items, 1):
+        it["n"] = i
+    return items
+
+
 def _trust(obj) -> dict:
     return {
         "confidence": getattr(obj, "confidence", None),
@@ -90,7 +128,8 @@ def _trust(obj) -> dict:
 
 
 def _metric_item(area: Optional[str], mm) -> dict:
-    return {"kind": "metric", "rule": 1, "area": area, "name": mm.name,
+    # `entity_type` matches render_review.py's vocabulary so items pass straight through.
+    return {"kind": "metric", "entity_type": "metric", "rule": 1, "area": area, "name": mm.name,
             "title": mm.name, "source_signal": mm.calculation,
             "bindings": mm.bindings, "business_question": mm.business_question,
             **_trust(mm)}
@@ -99,14 +138,14 @@ def _metric_item(area: Optional[str], mm) -> dict:
 def _rel_item(area: Optional[str], rel) -> dict:
     join = (f"{rel.from_table}.{rel.from_column} → {rel.to_table}.{rel.to_column}"
             if rel.from_column else f"{rel.from_table} → {rel.to_table} ON {rel.on}")
-    return {"kind": "relationship", "rule": 2, "area": area,
+    return {"kind": "relationship", "entity_type": "join", "rule": 2, "area": area,
             "name": f"{rel.from_table}->{rel.to_table}", "title": join,
             "cardinality": rel.relationship, "source_signal": rel.description or join,
             **_trust(rel)}
 
 
 def _entity_item(area: Optional[str], ent) -> dict:
-    return {"kind": "entity", "rule": 2, "area": area, "name": ent.name,
+    return {"kind": "entity", "entity_type": "entity", "rule": 2, "area": area, "name": ent.name,
             "title": ent.name, "source_signal": ent.description or "",
             "maps_to": [f"{m.table}.{m.column}" for m in ent.maps_to], **_trust(ent)}
 
@@ -338,4 +377,4 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
         pass
 
 
-__all__ = ["review_queue", "model_tree", "apply", "ApplyResult"]
+__all__ = ["review_queue", "all_items", "model_tree", "apply", "ApplyResult"]

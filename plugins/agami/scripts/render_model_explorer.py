@@ -217,6 +217,69 @@ def _collect_metrics_and_named_filters(profile_dir: Path, index: dict) -> tuple[
 
 
 def build_manifest(profile_dir: Path, profile: str) -> dict:
+    """Build the explorer manifest from the semantic model. Subject areas map to
+    the explorer's top-level groups ("schemas"), tables → tables, columns → fields.
+    Loads with include_rejected=True so excluded entries show (toggleable in the UI).
+    """
+    import sys as _sys
+    _scripts = str(Path(__file__).resolve().parent)
+    if _scripts not in _sys.path:
+        _sys.path.insert(0, _scripts)
+    from semantic_model import loader as _L
+
+    org = _L.load_organization(profile_dir, include_rejected=True)
+    out_schemas: list[dict] = []
+    total_tables = total_fields = total_excluded_tables = total_excluded_fields = 0
+    metrics_out: list[dict] = []
+
+    for sa in org.subject_areas:
+        out_tables: list[dict] = []
+        for t in sa.tables_defined:
+            total_tables += 1
+            t_excluded = t.review_state == "rejected"
+            if t_excluded:
+                total_excluded_tables += 1
+            qname = f"{sa.name}.{t.name}"
+            fields_out: list[dict] = []
+            for c in t.columns:
+                total_fields += 1
+                f_excluded = c.review_state == "rejected"
+                if f_excluded:
+                    total_excluded_fields += 1
+                fields_out.append({
+                    "name": c.name, "qname": f"{qname}.{c.name}", "type": c.type,
+                    "description": c.description, "review_state": c.review_state,
+                    "origin": "", "confidence": c.confidence, "excluded": f_excluded,
+                    "sensitive": c.sensitive,
+                })
+            out_tables.append({
+                "name": t.name, "qname": qname, "description": t.description,
+                "row_count": (t.performance_hints.estimated_row_count
+                              if t.performance_hints else None),
+                "review_state": t.review_state, "origin": "", "excluded": t_excluded,
+                "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
+                "synonyms": [], "area": sa.name, "fields": fields_out,
+            })
+        for mm in sa.metrics:
+            metrics_out.append({"name": mm.name, "qname": f"{sa.name}.{mm.name}",
+                                "definition": mm.calculation, "review_state": mm.review_state,
+                                "area": sa.name})
+        if out_tables:
+            out_schemas.append({"name": sa.name, "description": sa.description,
+                                "tables": out_tables})
+
+    return {
+        "profile": profile,
+        "totals": {
+            "schemas": len(out_schemas), "tables": total_tables, "fields": total_fields,
+            "excluded_tables": total_excluded_tables, "excluded_fields": total_excluded_fields,
+            "metrics": len(metrics_out), "named_filters": 0,
+        },
+        "schemas": out_schemas, "metrics": metrics_out, "named_filters": [],
+    }
+
+
+def _build_manifest_OSI_LEGACY(profile_dir: Path, profile: str) -> dict:
     index = _read_yaml(profile_dir / "index.yaml") or {}
     schemas_meta = index.get("schemas") or []
 
