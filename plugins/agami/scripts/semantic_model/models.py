@@ -199,6 +199,16 @@ class Column(_Base):
     # structured home for the onboarding "what currency are these in?" answer —
     # beats a prose caveat the LLM has to re-interpret on every query.
     unit: Optional[str] = None
+    # How a date/time value is ENCODED in storage, when the column type doesn't
+    # already say it (sniffed at introspection). Drives deterministic human-readable
+    # rendering: epoch_s/epoch_ms/epoch_us/epoch_ns (integer Unix time → UTC datetime),
+    # yyyymmdd (integer 20240115 → date), iso8601 (string). None for native
+    # date/timestamp columns (the DB already returns a readable value).
+    date_format: Optional[str] = None
+    # Timezone the column's timestamps are in, when known. Epoch is always "UTC";
+    # a native TIMESTAMPTZ may carry an offset; a naive TIMESTAMP is "naive" (no tz
+    # stored). Surfaced so answers can state it and SQL converts correctly.
+    timezone: Optional[str] = None
     denormalized_from: Optional[DenormalizedFrom] = None
     caveats: list[str] = Field(default_factory=list)
     # curation/trust — structure is trusted by default (introspected); the curator

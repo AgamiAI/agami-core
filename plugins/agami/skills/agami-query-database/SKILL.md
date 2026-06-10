@@ -423,9 +423,12 @@ Format every cell per its column's `type` and **`unit`** (both come from `get_ta
 | `integer` | (no currency unit) | `1,234` (commas, no decimals) |
 | `date` | — | **`May 6, 2026`** (`MMM D, YYYY`) — never raw ISO `2026-05-06`, never epoch numbers |
 | `timestamp` | — | **`May 6, 2026 3:14 PM`** (`MMM D, YYYY h:mm A`) — never raw ISO with `T` separator, never microsecond precision |
+| `integer` / `string` | `epoch_s`/`epoch_ms`/`epoch_us`/`epoch_ns`, `yyyymmdd` | a **date encoding** — `format-table` renders it human-readably (epoch → `YYYY-MM-DD HH:MM:SS UTC`) deterministically; don't hand-format. **In the SQL, convert it** (`to_timestamp(created_ts)` for epoch_s, `to_timestamp(created_ts/1000)` for ms, etc.) so filters/grouping work and the result is a real date. |
 | `boolean` | — | `Yes` / `No` (or `true` / `false` if the user prefers — read USER_MEMORY) |
 | `string` (with `choice_field`) | — | the choice's display label, not the stored value |
 | `string` (other) | — | as-is |
+
+**Timezone:** when a date/timestamp result column has a `timezone` in `get_table_context` (e.g. `UTC` for epoch columns, `offset-aware` for a TZ-aware timestamp), **state it once in the prose insight** ("times shown in UTC") so the reader isn't guessing — and especially flag it when the stored value is a naive/`offset-aware` timestamp whose zone differs from the user's. Epoch columns are UTC by definition; `format-table` already labels each rendered cell `… UTC`.
 
 **Hard rule for currency:** if the field has a currency `agami.unit`, show the symbol or code in **every** cell value — never omit it because the column header already mentions the currency. The user's screenshot showed bare `2,162,087` in an "Avg Outstanding (INR)" column; the cell should read `₹2,162,087`. Headers can drop redundant unit (the column header `Avg Outstanding` is enough when every cell is `₹...`), but cells should always carry the symbol so a screenshot or copy-paste of a single cell stays unambiguous.
 

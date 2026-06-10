@@ -92,6 +92,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "description": c.description, "review_state": c.review_state,
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
                     "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
+                    "date_format": c.date_format, "timezone": c.timezone,
                 })
             out_tables.append({
                 "name": t.name, "qname": qname, "description": t.description,

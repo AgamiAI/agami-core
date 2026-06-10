@@ -809,6 +809,9 @@
           { field: 'description', label: 'Column description', current: field.description, rows: 2 },
           { field: 'caveats', label: 'Caveats', type: 'list', current: field.caveats, rows: 2 },
           { field: 'unit', label: 'Unit (e.g. INR, percent)', current: field.unit, rows: 1 },
+          { field: 'date_format', label: 'Date encoding', type: 'select', current: field.date_format,
+            options: ['', 'epoch_s', 'epoch_ms', 'epoch_us', 'epoch_ns', 'yyyymmdd', 'iso8601'] },
+          { field: 'timezone', label: 'Timezone (e.g. UTC)', current: field.timezone, rows: 1 },
         ]));
         return wrap;
       }

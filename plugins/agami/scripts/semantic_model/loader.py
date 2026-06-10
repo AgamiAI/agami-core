@@ -383,6 +383,10 @@ def _column_detail(col: Column, include: list[str]) -> dict[str, Any]:
         d["sensitive"] = True
     if col.unit:
         d["unit"] = col.unit
+    if col.date_format:
+        d["date_format"] = col.date_format   # e.g. epoch_s → convert in SQL + show as a date
+    if col.timezone:
+        d["timezone"] = col.timezone
     if "value_transforms" in include and col.value_transform:
         d["value_transform"] = col.value_transform
     if col.denormalized_from:

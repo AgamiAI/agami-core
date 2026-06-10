@@ -279,6 +279,9 @@ def _build_table(
             c.sensitive = True
             report.sensitive_columns += 1
 
+    # date encoding + timezone (epoch / yyyymmdd / iso) sniffed from a live sample
+    _sniff_dates_into(dialect, runner, schema, table, cols)
+
     column_groups = build.maybe_column_groups(cols)
     if column_groups:
         report.deep_tables.append(table)
@@ -479,6 +482,81 @@ _FLOAT_RE = re.compile(r"^[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 _BOOL_VALUES = {"true", "false", "t", "f", "0", "1", "yes", "no"}
+
+
+# Column names that suggest a date/time value (gates epoch/yyyymmdd detection so a
+# random 10-digit id isn't mistaken for a Unix timestamp).
+_DATE_NAME_RE = re.compile(
+    r"(^|_)(date|time|datetime|timestamp|ts|epoch|created|updated|modified|deleted|"
+    r"expir\w*|scheduled|started|ended|completed|occurred|dob|birth\w*)($|_)"
+    r"|_at$|_on$|_dt$|_ts$|_time$|_date$", re.I)
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?")
+_OFFSET_RE = re.compile(r"(Z|[+-]\d{2}:?\d{2})$")
+_INT_ONLY_RE = re.compile(r"-?\d+$")
+# (date_format, low, high) epoch ranges by scale — ~2001..2286 for seconds, ×1000 each step
+_EPOCH_RANGES = (
+    ("epoch_s", 1_000_000_000, 9_999_999_999),
+    ("epoch_ms", 1_000_000_000_000, 9_999_999_999_999),
+    ("epoch_us", 1_000_000_000_000_000, 9_999_999_999_999_999),
+    ("epoch_ns", 1_000_000_000_000_000_000, 9_999_999_999_999_999_999),
+)
+
+
+def _looks_time_named(name: str) -> bool:
+    return bool(_DATE_NAME_RE.search(name or ""))
+
+
+def _sniff_date(name: str, ctype: str, values: list) -> tuple[Optional[str], Optional[str]]:
+    """Sniff a column's date storage encoding + timezone from sample values, returning
+    (date_format, timezone). Conservative — an encoded date (epoch/yyyymmdd/iso) is only
+    claimed for a time-named column whose sample values all fit the shape:
+      - native date/timestamp/time → date_format None (DB returns it readable); tz only
+        if the sample carries an offset;
+      - integer epoch in a plausible range (time-named) → epoch_s/ms/us/ns, tz UTC;
+      - integer 20240115 (time-named) → yyyymmdd;
+      - ISO-8601 strings (time-named) → iso8601, tz offset-aware if an offset is present.
+    """
+    vals = [str(v).strip() for v in values if v not in (None, "")][:50]
+    if not vals:
+        return (None, None)
+    if ctype in ("date", "timestamp", "time"):
+        if ctype == "timestamp" and any(_OFFSET_RE.search(v) for v in vals):
+            return (None, "offset-aware")
+        return (None, None)
+    if not _looks_time_named(name):
+        return (None, None)
+    if all(_INT_ONLY_RE.match(v) for v in vals):
+        ints = [int(v) for v in vals]
+        if all(19000101 <= i <= 29991231 and 1 <= (i // 100) % 100 <= 12 and 1 <= i % 100 <= 31
+               for i in ints):
+            return ("yyyymmdd", None)
+        for fmt, lo, hi in _EPOCH_RANGES:
+            if all(lo <= i <= hi for i in ints):
+                return (fmt, "UTC")
+        return (None, None)
+    if all(_ISO_RE.match(v) for v in vals):
+        tz = "offset-aware" if any(_OFFSET_RE.search(v) for v in vals) else None
+        return ("iso8601", tz)
+    return (None, None)
+
+
+def _sniff_dates_into(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column]
+) -> None:
+    """Set date_format/timezone on date-candidate columns from a small live sample."""
+    candidates = [c for c in cols if c.type in ("date", "timestamp", "time")
+                  or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
+    if not candidates:
+        return
+    sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
+    if not sample:
+        return
+    for c in candidates:
+        df, tz = _sniff_date(c.name, c.type, [row.get(c.name) for row in sample])
+        if df:
+            c.date_format = df
+        if tz:
+            c.timezone = tz
 
 
 def _infer_value_type(values: list) -> str:

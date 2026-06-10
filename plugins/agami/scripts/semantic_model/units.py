@@ -9,6 +9,7 @@ identically everywhere.
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Optional
 
 # ISO code -> symbol. Extend freely; unknown codes fall back to the bare code.
@@ -54,9 +55,49 @@ def _group_indian(int_part: str) -> str:
     return ",".join(chunks)[::-1] + "," + tail
 
 
+# Date storage encodings → seconds divisor for the integer value.
+_EPOCH_DIVISORS = {"epoch_s": 1.0, "epoch_ms": 1_000.0, "epoch_us": 1_000_000.0,
+                   "epoch_ns": 1_000_000_000.0}
+_DATE_FORMATS = set(_EPOCH_DIVISORS) | {"yyyymmdd", "iso8601"}
+
+
+def is_date_format(token: Optional[str]) -> bool:
+    return (token or "").strip().lower() in _DATE_FORMATS
+
+
+def format_date(value, date_format: Optional[str]) -> str:
+    """Render a stored date/time value human-readably. Deterministic.
+
+    - epoch_s/ms/us/ns → `YYYY-MM-DD HH:MM:SS UTC` (Unix time is UTC by definition).
+    - yyyymmdd (integer 20240115) → `YYYY-MM-DD`.
+    - iso8601 / anything else → passed through (the DB already returns it readable).
+    Non-numeric epoch values pass through unchanged.
+    """
+    if value is None:
+        return ""
+    t = (date_format or "").strip().lower()
+    if t in _EPOCH_DIVISORS:
+        try:
+            secs = float(value) / _EPOCH_DIVISORS[t]
+        except (TypeError, ValueError):
+            return str(value)
+        return _dt.datetime.fromtimestamp(secs, tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+    if t == "yyyymmdd":
+        try:
+            i = int(float(value))
+        except (TypeError, ValueError):
+            return str(value)
+        try:
+            return _dt.date(i // 10000, (i // 100) % 100, i % 100).strftime("%Y-%m-%d")
+        except ValueError:
+            return str(value)
+    return str(value)
+
+
 def format_value(value, unit: Optional[str]) -> str:
     """Format a numeric value for display given its unit. Deterministic.
 
+    - a date encoding (epoch_s/ms/us/ns, yyyymmdd) → human-readable date via `format_date`.
     - currency → `<symbol><grouped number>` (Indian grouping for INR, western else;
       2 decimals, or 0 for zero-decimal currencies like JPY).
     - `percent`/`%` → `<n>%`.
@@ -65,6 +106,8 @@ def format_value(value, unit: Optional[str]) -> str:
     """
     if value is None:
         return ""
+    if is_date_format(unit):
+        return format_date(value, unit)
     try:
         num = float(value)
     except (TypeError, ValueError):
@@ -145,5 +188,5 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
     return "\n".join([head, sep, body]) if body else "\n".join([head, sep])
 
 
-__all__ = ["CURRENCY_SYMBOLS", "is_currency", "currency_symbol",
-           "format_value", "format_cell", "format_table"]
+__all__ = ["CURRENCY_SYMBOLS", "is_currency", "currency_symbol", "is_date_format",
+           "format_value", "format_date", "format_cell", "format_table"]

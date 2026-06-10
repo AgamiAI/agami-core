@@ -256,3 +256,16 @@ def test_deep_table_column_groups_no_orphans():
     assert groups  # deep table -> groups derived
     grouped = {c for g in groups.values() for c in g}
     assert grouped == {c.name for c in cols}  # every column covered
+
+
+def test_sniff_date_detects_epoch_yyyymmdd_iso_and_rejects_ids():
+    # epoch + yyyymmdd only when the column is time-named AND values fit the shape
+    assert I._sniff_date("created_ts", "integer", [1704067200, 1709000000]) == ("epoch_s", "UTC")
+    assert I._sniff_date("updated_at", "integer", [1704067200000, 1709000000000]) == ("epoch_ms", "UTC")
+    assert I._sniff_date("order_date", "integer", [20240115, 20240116]) == ("yyyymmdd", None)
+    assert I._sniff_date("event_at", "string", ["2024-01-15T10:00:00Z"]) == ("iso8601", "offset-aware")
+    # a non-time-named integer in epoch range is NOT mistaken for a timestamp
+    assert I._sniff_date("user_id", "integer", [1704067200, 1709000000]) == (None, None)
+    # native timestamp: no re-encoding; tz only when the sample carries an offset
+    assert I._sniff_date("updated_at", "timestamp", ["2024-01-01 10:00:00+05:30"]) == (None, "offset-aware")
+    assert I._sniff_date("updated_at", "timestamp", ["2024-01-01 10:00:00"]) == (None, None)

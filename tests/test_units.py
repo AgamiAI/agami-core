@@ -133,6 +133,51 @@ def test_resolve_result_units_dimensional_ratios(tmp_path):
     assert R("SELECT SUM(npa)/SUM(total)*100 AS pct FROM loans") == {}       # computed % → exact, unlabeled
 
 
+def test_format_date_epoch_yyyymmdd_and_passthrough():
+    # epoch is UTC by definition → human datetime + explicit UTC label
+    assert units.format_date(1704067200, "epoch_s") == "2024-01-01 00:00:00 UTC"
+    assert units.format_date(1704067200000, "epoch_ms") == "2024-01-01 00:00:00 UTC"
+    assert units.format_date(1704067200000000, "epoch_us") == "2024-01-01 00:00:00 UTC"
+    assert units.format_date(20240115, "yyyymmdd") == "2024-01-15"
+    # iso / native → passthrough (DB already returns it readable)
+    assert units.format_date("2024-01-15T10:00:00Z", "iso8601") == "2024-01-15T10:00:00Z"
+    # non-numeric epoch value passes through, never crashes
+    assert units.format_date("N/A", "epoch_s") == "N/A"
+    assert units.is_date_format("epoch_ms") and not units.is_date_format("INR")
+
+
+def test_format_value_and_table_render_epoch_as_date():
+    # the date token flows through the same pipeline as units
+    assert units.format_value(1704067200, "epoch_s") == "2024-01-01 00:00:00 UTC"
+    md = units.format_table(["id", "created"], [["1", "1704067200"]], {"created": "epoch_s"})
+    assert md.splitlines()[2] == "| 1 | 2024-01-01 00:00:00 UTC |"
+
+
+def test_resolve_result_units_emits_date_format_token(tmp_path):
+    pytest.importorskip("sqlglot")
+    import yaml
+    from semantic_model import runtime as RT
+    from semantic_model.loader import load_organization
+    (tmp_path / "datasources" / "c").mkdir(parents=True)
+    (tmp_path / "subject_areas" / "s" / "tables").mkdir(parents=True)
+    (tmp_path / "org.yaml").write_text(yaml.safe_dump({
+        "organization": "p", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/s"]}))
+    (tmp_path / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    (tmp_path / "subject_areas" / "s" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "s", "tables": [{"storage_connection": "c", "schema": "public", "table": "orders"}]}))
+    (tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"], "description": "o",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "created_ts", "type": "integer", "date_format": "epoch_s", "timezone": "UTC"}]}))
+    org = load_organization(tmp_path)
+    assert RT.resolve_result_units(org, "SELECT created_ts FROM orders")["created_ts"] == "epoch_s"
+    # propagates through MAX (the last timestamp is still that encoding)
+    assert RT.resolve_result_units(org, "SELECT MAX(created_ts) AS last FROM orders")["last"] == "epoch_s"
+
+
 def test_format_table_applies_units_by_position():
     # the positional fallback formats a DB-auto-named column (e.g. Postgres "max")
     md = units.format_table(["max"], [["250000.5"]], {"#0": "INR"})

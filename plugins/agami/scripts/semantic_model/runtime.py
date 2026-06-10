@@ -754,8 +754,11 @@ def resolve_result_units(org: Organization, sql: str) -> dict[str, str]:
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             for c in t.columns:
-                if c.unit:
-                    col_units.setdefault(c.name.lower(), c.unit)
+                # a date-encoded column contributes its date_format token (so an
+                # epoch column renders as a human date); otherwise its unit/currency.
+                token = c.date_format or c.unit
+                if token:
+                    col_units.setdefault(c.name.lower(), token)
         for m in sa.metrics:
             if m.unit:
                 metric_units.setdefault(m.name.lower(), m.unit)
