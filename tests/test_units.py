@@ -72,6 +72,39 @@ def test_units_module_has_no_heavy_deps():
     assert "import pydantic" not in src and "import sqlglot" not in src
 
 
+def _currency_model(root):
+    import yaml
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "subject_areas" / "s" / "tables").mkdir(parents=True)
+    (root / "org.yaml").write_text(yaml.safe_dump({
+        "organization": "p", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/s"]}))
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    (root / "subject_areas" / "s" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "s", "tables": [{"storage_connection": "c", "schema": "public", "table": "loans"}]}))
+    (root / "subject_areas" / "s" / "tables" / "loans.yaml").write_text(yaml.safe_dump({
+        "name": "loans", "schema": "public", "storage_connection": "c", "grain": ["id"], "description": "l",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "amount", "type": "decimal", "unit": "INR"}]}))
+
+
+def test_resolve_result_units_traces_aggregates(tmp_path):
+    # the reliability fix: a SUM/AVG over a currency column keeps the currency, even
+    # under an alias; COUNT and ratios do not become currency
+    pytest.importorskip("sqlglot")
+    from semantic_model import runtime as RT
+    from semantic_model.loader import load_organization
+    _currency_model(tmp_path)
+    org = load_organization(tmp_path)
+    assert RT.resolve_result_units(org, "SELECT SUM(amount) AS total FROM loans") == {"total": "INR"}
+    assert RT.resolve_result_units(org, "SELECT AVG(amount) AS a FROM loans") == {"a": "INR"}
+    assert RT.resolve_result_units(org, "SELECT amount FROM loans") == {"amount": "INR"}
+    assert RT.resolve_result_units(org, "SELECT COUNT(*) AS cnt FROM loans") == {}
+    assert RT.resolve_result_units(org, "SELECT SUM(amount)/COUNT(*) AS avg_ticket FROM loans") == {}
+
+
 def test_unit_round_trips_on_column_and_surfaces_in_context(tmp_path):
     import yaml
     from semantic_model.loader import load_organization, get_table_context

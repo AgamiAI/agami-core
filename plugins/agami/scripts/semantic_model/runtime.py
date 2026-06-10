@@ -735,9 +735,66 @@ def _term_score(query_lower: str, name: str) -> float:
     return 0.0
 
 
+def resolve_result_units(org: Organization, sql: str) -> dict[str, str]:
+    """Map each SELECT output column -> display unit, **tracing the SQL** (not matching
+    names): an aggregate/expression over a column inherits that column's unit, so
+    `SUM(amount) AS total_outstanding` correctly resolves to amount's currency — the
+    BI-common total that a bare name match would miss. Rules:
+      - output name that matches a metric name -> the metric's unit;
+      - otherwise inherit the unit of the column(s) referenced, IF they share exactly
+        one unit (so SUM/AVG/MIN/MAX/`col*1.1` of a currency column stay that currency);
+      - COUNT(...) and ratios (any division) get NO currency unit (a count / rate isn't
+        money). Returns {} if the model carries no units or sqlglot can't parse.
+    """
+    import sqlglot
+    from sqlglot import expressions as exp
+
+    col_units: dict[str, str] = {}
+    metric_units: dict[str, str] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for c in t.columns:
+                if c.unit:
+                    col_units.setdefault(c.name.lower(), c.unit)
+        for m in sa.metrics:
+            if m.unit:
+                metric_units.setdefault(m.name.lower(), m.unit)
+    for m in getattr(org, "cross_subject_area_metrics", []):
+        if getattr(m, "unit", None):
+            metric_units.setdefault(m.name.lower(), m.unit)
+    if not col_units and not metric_units:
+        return {}
+
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return {}
+    select = tree.find(exp.Select) if tree is not None else None
+    if select is None:
+        return {}
+
+    out: dict[str, str] = {}
+    for proj in select.expressions:
+        name = proj.alias_or_name
+        if not name:
+            continue
+        if name.lower() in metric_units:
+            out[name] = metric_units[name.lower()]
+            continue
+        # a count or a ratio is not currency, regardless of the columns inside it
+        if proj.find(exp.Count) is not None or proj.find(exp.Div) is not None:
+            continue
+        units = {col_units[c.name.lower()] for c in proj.find_all(exp.Column)
+                 if c.name and c.name.lower() in col_units}
+        if len(units) == 1:
+            out[name] = next(iter(units))
+    return out
+
+
 __all__ = [
     "Prober",
     "AMBIGUITY_DELTA",
+    "resolve_result_units",
     "list_subject_areas",
     "ExampleMatch",
     "get_prompt_examples",

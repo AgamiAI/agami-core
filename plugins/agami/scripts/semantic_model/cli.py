@@ -106,6 +106,9 @@ def cmd_prepare(args) -> int:
         "sql": final_sql,
         "rewritten": bool(pf.action == "auto_rewrite"),
         "applied_filters": applied,
+        # {output_column: unit}, traced through the final SQL — feed straight to
+        # `format-table --units` so summed/aliased currency formats correctly.
+        "units": RT.resolve_result_units(org, final_sql),
         "reason": pf.reason if pf.risk else None,
     })
     return 0

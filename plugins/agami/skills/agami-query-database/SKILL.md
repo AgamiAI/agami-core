@@ -365,7 +365,7 @@ The Bash result (CSV stdout, stderr, exit code) is for the skill to parse, not f
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" prepare "$ROOT" --area <area> --sql-file /tmp/agami-q.sql
 ```
 
-It returns JSON: `{action, risk, sql, rewritten, applied_filters, reason}`.
+It returns JSON: `{action, risk, sql, rewritten, applied_filters, units, reason}`. (`units` is the `{output_column: unit}` map traced through the final SQL — keep it for the table render in 4d.)
 - `action: "refuse"` (a fan/chasm trap that would change result shape) → **don't execute.** Read `suggestion`, regenerate the SQL accordingly (window function, or pre-aggregate in a CTE), and re-prepare.
 - `action: "auto_rewrite"` → a fan/chasm trap was auto-corrected; use the returned `sql` (note `rewritten: true` + `reason` in the receipt).
 - `action: "allow"` → use the returned `sql` (it already has `applied_filters` AND-ed in; surface them in the receipt).
@@ -488,11 +488,11 @@ For multi-section: a 1–3 sentence executive summary across all sections (the s
 
 ### 4d — Markdown table (single-section reports only)
 
-**Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 30 rows, headers sanitized per 3c) and the header→unit map through the packaged formatter, then **embed its output verbatim**:
+**Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 30 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" format-table --csv-file /tmp/agami-result.csv --units '{"Total Outstanding":"INR","NPA %":"percent"}'
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" format-table --csv-file /tmp/agami-result.csv --units "$PREPARE_UNITS"
 ```
-It formats every numeric cell in full via `units.py` (currency symbol + Indian/western grouping, exact decimals preserved) and passes non-numbers through. The unit per column comes from the column's (or the metric's) `unit` in the model — same source as the chart. This is the formatter the **MCP** will call too, so the numbers a user verifies are identical no matter which host/LLM renders the answer. Wide tables (> 8 cols) → vertical layout + "wide table — see HTML for the full grid".
+`prepare`'s `units` is keyed by output column and **traced through the SQL** — so `SUM(amount) AS total_outstanding` correctly carries amount's currency (a bare name match would miss the summed total). `format-table` then formats every numeric cell in full via `units.py` (symbol + Indian/western grouping, exact decimals) and passes non-numbers through. Same map + formatter the **MCP** uses, so verification numbers are identical regardless of host/LLM. (If a header was prettified in 3c, key the units to the prettified name.) Wide tables (> 8 cols) → vertical layout + "wide table — see HTML for the full grid".
 
 **Cap the chat preview at 30 rows** per Phase 3c — even when the user asked for "all leads with credit rating > 700" and the result is 4,213 rows, the chat shows the first 30 and points them at the CSV + HTML report. The full set lives in the artifacts on disk. The footer line ("Showing first 30 of 4,213 rows · full set in CSV: …") is the contract that tells the user where to find everything.
 

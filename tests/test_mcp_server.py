@@ -137,14 +137,16 @@ def test_resolve_units_maps_result_columns(monkeypatch, tmp_path):
     (p / "subject_areas" / "s" / "metrics" / "total_outstanding.yaml").write_text(yaml.safe_dump({
         "name": "total_outstanding", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(loans.amount)"},
         "unit": "INR", "source_tables": ["loans"], "confidence": "inferred", "review_state": "unreviewed"}))
-    got = _resolve_units("p", ["amount", "cnt", "total_outstanding"])
-    assert got == {"amount": "INR", "total_outstanding": "INR"}  # cnt has no unit
+    # traces the SQL: SUM(amount) inherits amount's INR; COUNT(*) is not currency
+    got = _resolve_units("p", "SELECT SUM(amount) AS total_outstanding, COUNT(*) AS cnt FROM loans")
+    assert got.get("total_outstanding") == "INR" and "cnt" not in got
+    assert _resolve_units("p", "SELECT amount FROM loans") == {"amount": "INR"}
 
 
 def test_resolve_units_degrades_to_empty_without_model(monkeypatch, tmp_path):
     # pure-stdlib guarantee: no model on disk -> {} (numbers still format, just no symbol)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
-    assert _resolve_units("nonexistent", ["amount"]) == {}
+    assert _resolve_units("nonexistent", "SELECT 1") == {}
 
 
 # --- Exit-code classification ----------------------------------------------

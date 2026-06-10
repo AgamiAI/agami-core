@@ -230,25 +230,17 @@ def _load_org(profile: str):
     return L.load_organization(root)
 
 
-def _resolve_units(profile: str, columns: list[str]) -> dict[str, str]:
-    """Best-effort {result-column -> unit} from the model, so currency/units format
-    deterministically in the response. Returns {} if the model deps (pydantic) aren't
-    installed — execute_sql stays pure-stdlib; numbers still format exactly via
-    units.py, just without a currency symbol."""
+def _resolve_units(profile: str, sql: str) -> dict[str, str]:
+    """Best-effort {result-column -> unit} by **tracing the SQL** (so `SUM(amount) AS
+    total` inherits amount's currency, not just bare-name matches). Returns {} if the
+    model deps (pydantic/sqlglot) aren't installed — execute_sql stays pure-stdlib;
+    numbers still format exactly via units.py, just without a currency symbol."""
     try:
         org = _load_org(profile)
+        from semantic_model import runtime as RT
+        return RT.resolve_result_units(org, sql)
     except Exception:
         return {}
-    by_name: dict[str, str] = {}
-    for sa in getattr(org, "subject_areas", []):
-        for t in getattr(sa, "tables_defined", []):
-            for c in getattr(t, "columns", []):
-                if getattr(c, "unit", None):
-                    by_name.setdefault(c.name.lower(), c.unit)
-        for m in getattr(sa, "metrics", []):
-            if getattr(m, "unit", None):
-                by_name.setdefault(m.name.lower(), m.unit)
-    return {col: by_name[col.lower()] for col in columns if col.lower() in by_name}
 
 
 def tool_list_datasources(_args: dict[str, Any]) -> str:
@@ -462,7 +454,7 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     # Deterministic, exact rendering — so the numbers a user verifies don't depend on
     # how the host LLM chooses to format them. `markdown` is the table to display
     # verbatim; `rows` stays raw (exact CSV values) for charting / programmatic use.
-    unit_map = _resolve_units(profile, columns)
+    unit_map = _resolve_units(profile, sql)
     try:
         from semantic_model import units  # stdlib-only; safe even without model deps
         markdown = units.format_table(columns, data_rows, unit_map)
