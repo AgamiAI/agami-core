@@ -10,7 +10,7 @@
 
   Per-render placeholders (names bare on purpose — a real "{{...}}" token in
   this comment would catch the blanket replace and, if the substituted JSON
-  contained a user "-->", close the comment early and leak raw JSON to the page):
+  carried an HTML comment-close sequence, close the comment early and leak JSON):
     REPORT_TITLE             — "Seed examples · <profile>"
     GENERATED_AT             — ISO8601 UTC timestamp
     ITEMS_JSON                — JSON array of example-item objects

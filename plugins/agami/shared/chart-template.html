@@ -13,8 +13,9 @@
 
   NOTE: placeholder names are written WITHOUT their double-brace wrappers here
   on purpose — the renderer does a blanket string replace, so a real "{{...}}"
-  token inside this comment would get the substituted JSON (which can contain a
-  user "-->") and close this comment early, dumping raw JSON into the page.
+  token inside this comment would get the substituted JSON (which can carry an
+  HTML comment-close sequence from user text) and close this comment early,
+  dumping raw JSON into the page.
 
   Per-report placeholders the renderer substitutes every time (in the body below):
     REPORT_TITLE     — the user's original question (or a tight title)

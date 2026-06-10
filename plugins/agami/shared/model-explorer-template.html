@@ -9,8 +9,8 @@
   NOTE: the placeholder names here are written WITHOUT their double-brace
   wrappers on purpose — the renderer does a blanket string replace, and if a
   real "{{...}}" token appeared inside this comment the substituted MANIFEST
-  JSON (which can contain a "-->" from ORGANIZATION.md's HTML comment) would
-  close this comment early and dump raw JSON into the page. Keep them bare.
+  JSON (which can carry an HTML comment-close sequence from ORGANIZATION.md)
+  would close this comment early and dump raw JSON into the page. Keep them bare.
 
   Per-render placeholders (always substituted in the body below):
     REPORT_TITLE          — "Model explorer · <profile>"

@@ -8,8 +8,8 @@
 
   NOTE: placeholder names are bare (no double-brace wrappers) on purpose — the
   renderer does a blanket string replace, so a real "{{...}}" token in this
-  comment would get the substituted JSON (which can contain a user "-->") and
-  close the comment early, dumping raw JSON into the page.
+  comment would get the substituted JSON (which can carry an HTML comment-close
+  sequence from user text) and close the comment early, dumping raw JSON into the page.
 
   Per-render placeholders (substituted in the body below):
     REPORT_TITLE             — "Review queue · <profile> · threshold <X>"
