@@ -31,6 +31,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from mcp_server import (  # noqa: E402
     _classify_exit,
+    _resolve_units,
     check_read_only,
     resolve_artifacts_dir,
     resolve_profile,
@@ -108,6 +109,42 @@ def test_resolve_profile_env_over_config(monkeypatch):
 def test_resolve_artifacts_dir_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     assert resolve_artifacts_dir() == tmp_path
+
+
+def test_resolve_units_maps_result_columns(monkeypatch, tmp_path):
+    # the MCP execute_sql response formats currency deterministically by resolving
+    # result columns -> the model's column/metric `unit`
+    import pytest
+    pytest.importorskip("pydantic")
+    yaml = pytest.importorskip("yaml")
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    p = tmp_path / "p"
+    (p / "datasources" / "c").mkdir(parents=True)
+    (p / "subject_areas" / "s" / "tables").mkdir(parents=True)
+    (p / "subject_areas" / "s" / "metrics").mkdir(parents=True)
+    (p / "org.yaml").write_text(yaml.safe_dump({
+        "organization": "p", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/s"]}))
+    (p / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    (p / "subject_areas" / "s" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "s", "tables": [{"storage_connection": "c", "schema": "public", "table": "loans"}]}))
+    (p / "subject_areas" / "s" / "tables" / "loans.yaml").write_text(yaml.safe_dump({
+        "name": "loans", "schema": "public", "storage_connection": "c", "grain": ["id"], "description": "l",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "amount", "type": "decimal", "unit": "INR"}]}))
+    (p / "subject_areas" / "s" / "metrics" / "total_outstanding.yaml").write_text(yaml.safe_dump({
+        "name": "total_outstanding", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(loans.amount)"},
+        "unit": "INR", "source_tables": ["loans"], "confidence": "inferred", "review_state": "unreviewed"}))
+    got = _resolve_units("p", ["amount", "cnt", "total_outstanding"])
+    assert got == {"amount": "INR", "total_outstanding": "INR"}  # cnt has no unit
+
+
+def test_resolve_units_degrades_to_empty_without_model(monkeypatch, tmp_path):
+    # pure-stdlib guarantee: no model on disk -> {} (numbers still format, just no symbol)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    assert _resolve_units("nonexistent", ["amount"]) == {}
 
 
 # --- Exit-code classification ----------------------------------------------
