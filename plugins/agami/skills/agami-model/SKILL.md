@@ -64,8 +64,10 @@ Model explorer rendered — <N> schemas · <M> tables · <K> fields.
 
 The dashboard has live search, filter chips (All / Active / Excluded /
 Unreviewed / Queued), and per-table + per-column Exclude / Include
-buttons. Click your way through, hit "Generate feedback for Claude" at
-the bottom, paste back here.
+buttons. When you exclude a column, it offers **"exclude all N named
+<col>"** — one click drops that column across every table (PII like
+`aadhaar`/`ssn`, audit columns, etc.). Click your way through, hit
+"Generate feedback for Claude" at the bottom, paste back here.
 
 You can also type commands directly:
   exclude tables:  <area>.<table>, <area>.<table>

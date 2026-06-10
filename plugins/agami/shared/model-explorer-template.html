@@ -326,6 +326,11 @@
     .field-actions button.queued-include {
       background: var(--ok-fg); color: white; border-color: var(--ok-fg);
     }
+    .field-actions button.btn-propagate {
+      background: transparent; color: var(--accent); border: 1px dashed var(--accent);
+      white-space: nowrap;
+    }
+    .field-actions button.btn-propagate:hover { background: var(--ok-bg); }
 
     /* Search highlights */
     .hl { background: var(--hi-bg); padding: 0 2px; border-radius: 2px; }
@@ -614,6 +619,21 @@
         },
       }, label);
       actions.appendChild(btn);
+
+      // Propagate-to-similar: once a column is queued for exclude, offer to exclude
+      // every other column with the SAME name in one click (the "this comment/decision
+      // applies to many" case — e.g. dropping `aadhaar` everywhere).
+      if (pending[field.qname] === 'exclude') {
+        const others = fieldsNamed(field.name)
+          .filter(f => f.qname !== field.qname && !f.excluded && pending[f.qname] !== 'exclude');
+        if (others.length) {
+          actions.appendChild(el('button', {
+            type: 'button', class: 'btn-propagate',
+            title: 'Queue exclude for every column named "' + field.name + '" across all tables',
+            onclick: (ev) => { ev.stopPropagation(); excludeAllNamed(field.name); },
+          }, '+ exclude all ' + (others.length + 1) + ' named "' + field.name + '"'));
+        }
+      }
       row.appendChild(actions);
       return row;
     }
@@ -961,6 +981,23 @@
       } else {
         pending[qname] = desired;
       }
+      renderAll();
+      updateFooter();
+    }
+
+    // ---- Propagate to similar: same column name across every table ----
+    function fieldsNamed(name) {
+      const lower = (name || '').toLowerCase();
+      const out = [];
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => (t.fields || []).forEach(f => {
+        if ((f.name || '').toLowerCase() === lower) {
+          out.push({ qname: s.name + '.' + t.name + '.' + f.name, excluded: f.excluded });
+        }
+      })));
+      return out;
+    }
+    function excludeAllNamed(name) {
+      fieldsNamed(name).forEach(f => { if (!f.excluded) pending[f.qname] = 'exclude'; });
       renderAll();
       updateFooter();
     }
