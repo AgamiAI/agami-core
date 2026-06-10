@@ -154,6 +154,17 @@ def cmd_add(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_add_example(args) -> int:
+    from . import curate
+    with open(args.file) as fh:
+        items = json.load(fh)
+    if isinstance(items, dict):
+        items = items.get("examples", items.get("items", []))
+    res = curate.add_examples(args.root, args.area, items, signer=args.signer, role=args.role)
+    _print_json(res.as_dict())
+    return 0 if (res.applied or not res.skipped) else 1
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
@@ -252,6 +263,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add)
+
+    sp = sub.add_parser("add-example", help="append/replace NL→SQL examples (prompt_examples/<area>/examples.yaml)")
+    sp.add_argument("root")
+    sp.add_argument("--area", required=True)
+    sp.add_argument("--file", required=True,
+                    help="JSON list of {question, sql, [tables, columns, metric, source, status, created_at]}")
+    sp.add_argument("--signer", default=None)
+    sp.add_argument("--role", default=None)
+    sp.set_defaults(func=cmd_add_example)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)

@@ -514,7 +514,11 @@ On `reintrospect` with no new Rule 1 candidates, skip silently.
 
 **5b — EXPLAIN-validate** each via the chosen tool (one round trip each). Auto-fix once on failure; if still bad, drop it to `~/.agami/.rejected/` — don't block the flow. Also run a row-count sanity check (a 0-row seed looks broken in the dashboard).
 
-**5c — write** `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml` (`status: confirmed` for EXPLAIN-passing seeds). Corrections later append here via `/agami-save-correction`.
+**5c — write** the EXPLAIN-passing seeds with the packaged writer — **don't hand-write the YAML or grep the source for its schema.** Build a JSON array and run it once (it appends, dedups by `question`, creates the file/dirs, commits):
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file /tmp/agami-seeds.json
+```
+Each example — **required:** `question`, `sql`. **Scope tags** (the ranking reads these): `tables`, `columns`, `metric`, `default_filters`. **Provenance:** `source: seed`, `status: confirmed`. Corrections later append the same way via `/agami-save-correction`.
 
 ---
 

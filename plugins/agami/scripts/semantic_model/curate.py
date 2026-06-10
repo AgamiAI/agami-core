@@ -442,6 +442,46 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     return res
 
 
+def add_examples(root: str | Path, area: str, examples: list[dict],
+                 *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
+    """Append/replace scope-tagged NL→SQL examples in prompt_examples/<area>/examples.yaml.
+    The packaged writer so skills never hand-edit that YAML or reverse-engineer its schema.
+
+    Each example — required: `question`, `sql`. Optional scope tags (the ranking reads
+    these): `tables`, `columns`, `metric`, `default_filters`. Optional provenance:
+    `source` (seed | correction), `status` (confirmed | proposed), `created_at`.
+
+    Dedups by `question`: a new example with an existing question replaces it (so a
+    correction supersedes the earlier answer) rather than duplicating."""
+    from .loader import list_prompt_examples
+    root = Path(root)
+    res = ApplyResult()
+    existing = list(list_prompt_examples(root, area))
+    by_q = {e.get("question"): i for i, e in enumerate(existing) if e.get("question")}
+    for ex in examples:
+        q, sql = (ex or {}).get("question"), (ex or {}).get("sql")
+        if not q or not sql:
+            res.skipped.append({"item": q or "?", "reason": "question and sql are required"})
+            continue
+        if q in by_q:
+            existing[by_q[q]] = ex
+            res.applied.append(f"example (replaced) {area}/{q[:50]}")
+        else:
+            by_q[q] = len(existing)
+            existing.append(ex)
+            res.applied.append(f"example {area}/{q[:50]}")
+    if not res.applied:
+        return res
+    path = root / "prompt_examples" / area / "examples.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _dump(path, existing)  # bare list — list_prompt_examples accepts list or {examples:[…]}
+    res.validated = True    # examples aren't model-validated; the skill EXPLAIN-checks the SQL
+    _append_curation_log(root, [{"op": "add", "kind": "example", "area": area,
+                                 "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
+    res.committed = _git_commit(root, f"examples: +{len(res.applied)} in {area}")
+    return res
+
+
 def _restore(backups: list[tuple[Path, Optional[str]]]) -> None:
     for path, prior in backups:
         try:
@@ -484,4 +524,5 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
         pass
 
 
-__all__ = ["review_queue", "all_items", "model_tree", "apply", "write_items", "ApplyResult"]
+__all__ = ["review_queue", "all_items", "model_tree", "apply", "write_items",
+           "add_examples", "ApplyResult"]

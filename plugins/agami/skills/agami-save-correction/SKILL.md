@@ -73,19 +73,18 @@ Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
 
 ## Phase 2: Always append to the examples library
 
-Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`. Pick `<area>` = the subject area whose `tables_defined` includes the table(s) the corrected SQL references (run `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" areas "$ROOT"` and match, or `get_table_context` to confirm membership; if the SQL spans areas, use the area of the primary/driving table). Read that file via Read (create it with `examples: []` if absent), and append via Edit:
+Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`. Pick `<area>` = the subject area whose `tables_defined` includes the table(s) the corrected SQL references (run `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" areas "$ROOT"` and match, or `get_table_context` to confirm membership; if the SQL spans areas, use the area of the primary/driving table).
 
-```yaml
-- question: <the original NL question from query_log.jsonl>
-  sql: |-
-    <the corrected SQL>
-  source: correction
-  status: confirmed
-  created_at: <ISO8601 UTC now>
-  confirmed_at: <ISO8601 UTC now>
+**Use the packaged writer — don't Read/Edit the YAML by hand or grep the source for its schema.** It creates the file if absent, appends, and **dedups by `question`** (a same-question correction replaces the earlier answer). One entry in a JSON array:
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file /tmp/agami-correction-example.json
 ```
-
-If a previous example in that area has the same `question`: replace its `sql` and bump `created_at` rather than duplicating.
+```json
+[{"question": "<original NL question from query_log.jsonl>", "sql": "<corrected SQL>",
+  "tables": ["..."], "source": "correction", "status": "confirmed", "created_at": "<ISO8601 UTC>"}]
+```
+Required: `question`, `sql`. Optional scope tags (improve ranking): `tables`, `columns`, `metric`.
 
 This phase is **non-conditional** — every correction always lands in the examples library, even if Phase 5 (model update) declines or fails.
 

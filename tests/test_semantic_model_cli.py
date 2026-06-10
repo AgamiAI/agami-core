@@ -137,6 +137,25 @@ def test_review_items_scope_rule1_returns_only_signoff_items(tmp_path):
     assert len(curate.all_items(org, scope="all")) >= len(rule1)
 
 
+def test_add_examples_appends_dedups_and_skips_invalid(tmp_path):
+    # packaged examples writer (so skills don't hand-edit YAML or grep its schema):
+    # appends, dedups by question, skips an entry missing sql
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    r1 = curate.add_examples(tmp_path, "sales", [
+        {"question": "revenue", "sql": "SELECT SUM(total) FROM orders", "tables": ["orders"],
+         "source": "seed", "status": "confirmed"},
+        {"question": "customers", "sql": "SELECT COUNT(*) FROM customers", "source": "seed"}])
+    assert len(r1.applied) == 2 and r1.validated
+    r2 = curate.add_examples(tmp_path, "sales", [
+        {"question": "revenue", "sql": "SELECT SUM(amount) FROM orders", "source": "correction"},
+        {"question": "no sql"}])
+    assert any("replaced" in a for a in r2.applied) and r2.skipped
+    ex = list_prompt_examples(tmp_path, "sales")
+    assert len(ex) == 2  # dedup by question — not 3
+    assert next(e for e in ex if e["question"] == "revenue")["sql"] == "SELECT SUM(amount) FROM orders"
+
+
 def test_no_model_root_exits_3_cleanly(tmp_path):
     # an empty root has no org.yaml — the CLI returns a clean no_model signal (exit 3),
     # not a traceback, so callers fold the existence check into their first real call
