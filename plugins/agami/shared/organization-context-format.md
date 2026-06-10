@@ -13,7 +13,9 @@ Local-only. Never sent in telemetry. The skill reads it on each query, but neith
 | `<artifacts_dir>/USER_MEMORY.md` | Profile-agnostic (one global file) | **User preferences** that apply across every database | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
 | `<artifacts_dir>/<profile>/ORGANIZATION.md` | Per-profile (one per database) | **Domain knowledge** about this specific database | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
 
-The skill loads both on every query. `ORGANIZATION.md` answers *what does this data mean*, `USER_MEMORY.md` answers *how should I display / filter results*. The one shared category is **display/formatting rules**, which split by scope: a personal tic ("I like top-10") goes in USER_MEMORY; an org-wide convention that everyone querying this database should get (currency symbol, units, number formatting) goes in `ORGANIZATION.md` under `## Display & formatting conventions`. agami **asks** which when you save such a rule, so the team-wide ones land here and travel with the shared model.
+The skill loads both on every query. `ORGANIZATION.md` answers *what does this data mean*, `USER_MEMORY.md` answers *how should I display / filter results*.
+
+**Note on display/formatting rules.** Most aren't free-text at all: a currency/unit fact ("amounts are in INR → show ₹") attaches to the **column** in the semantic model (a `caveat`/`value_transform`) — org-wide by construction, since the model is shared. `ORGANIZATION.md` `## Display & formatting conventions` is only for genuinely *cross-cutting* presentation rules not tied to one column (e.g. "present money with lakh/crore grouping"). A purely personal tic ("I like top-10") goes in `USER_MEMORY.md`. agami classifies these like any correction — it asks about scope only when personal-vs-org is genuinely unclear.
 
 ## Format
 

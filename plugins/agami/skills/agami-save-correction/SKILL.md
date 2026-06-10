@@ -133,21 +133,25 @@ Else: does the corrected SQL define a REUSABLE AGGREGATION that didn't exist?
          the predicate alone deserves a named_filter — same Rule 1 sign-off.
 
 Else: is the correction a DISPLAY / FORMATTING / DEFAULT-FILTER preference?
-   (e.g., "always exclude @example.com test users", "default time window is
-    last 30 days", "format counts with commas", "amounts are in INR — show ₹")
-   → a display/formatting rule. **ASK where it should live — never auto-file it.**
-     The personal-vs-org call is the user's, not yours (a currency symbol is usually
-     org-wide; "I prefer top-10 not top-5" is personal). **AskUserQuestion** (ask
-     ONCE for a batch of rules captured together, not per rule):
-     > Apply this just for you, or org-wide for `<profile>`?
-     - `Just me` → `user_preference` → `USER_MEMORY.md` (your prefs across **every**
-       database — travels with you, not the team).
-     - `Org-wide for <profile> (Recommended for currency/units)` → `org_context` →
-       `ORGANIZATION.md` (everyone who queries this database gets it).
-   → In EITHER case, if it's about how SQL renders results (TO_CHAR, ROUND, ::text,
-     AS aliases, a currency symbol), ALSO update the relevant seed example's SQL so
-     future answers actually apply the formatting — the prose tells the LLM what the
-     user wants; the example demonstrates how.
+   **Classify it like everything else — don't reflexively ask. Route to the MOST
+   SPECIFIC home, structured-model-first:**
+   - It's a fact about specific column(s) — "amounts are in INR → show ₹", "amount is
+     in cents", "this code maps to <label>" → **`field_metadata`**: a `caveat` (or
+     `value_transform` / `choice_field`) on that column. **This IS the org-wide home**
+     — it's in the shared model and applies wherever that column appears (no prose
+     rule to re-interpret).
+   - It's a default filter on a table — "exclude soft-deleted", "tenancy filter" →
+     the table's `default_filters` (model), via `cli curate`.
+   - It's a cross-cutting presentation convention for THIS database, not tied to one
+     column — "present money with lakh/crore grouping" → `org_context` →
+     `ORGANIZATION.md` (`## Display & formatting conventions`).
+   - It's a personal stylistic tic that would hold on ANY database — "I like top-10
+     not top-5", "my date format" → `user_preference` → `USER_MEMORY.md`.
+   Only when you genuinely can't tell personal vs org-wide → **AskUserQuestion** (the
+   ambiguity fallback below). Default a currency/unit/data fact to the **model**, not a
+   prose file.
+   → In all cases, if it changes how SQL renders results (TO_CHAR, ROUND, a symbol),
+     ALSO bake it into the affected seed example's SQL so future answers apply it.
 
 Else: is the correction about a BUSINESS TERM specific to this database's domain?
    (e.g., "gold tier means lifetime spend > $10k" — used as a category in many
@@ -168,7 +172,7 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 
 1. **Per-column rule → ORGANIZATION.md.** "`PII.GENDER` values normalize to Male" is NOT domain context — it's a column-value mapping. Route to `field_metadata` (`choice_field`).
 2. **Per-column rule → examples.yaml notes.** This skill never writes to `examples.yaml.notes[]` (that path lives in agami-connect Phase 6d). If you find yourself wanting to write "the CRIF total can be negative" as a note on example #12, route it to `field_metadata` on the actual column instead — the lesson applies to every future query, not just to one example.
-3. **Auto-filing a display preference without asking.** Don't silently route formatting/currency/unit rules to USER_MEMORY (the old default). **Ask** personal (`user_preference` → USER_MEMORY.md) vs org-wide (`org_context` → ORGANIZATION.md) — a currency symbol / unit is usually org-wide (everyone querying this DB wants it); a "top-10 not top-5" tic is personal. Ask once per batch.
+3. **Dumping a column-fact into a prose file (or USER_MEMORY).** "Amounts are in INR → show ₹" is a fact about the `amount` column → a `caveat`/`value_transform` on that column (org-wide, structured, in the shared model) — NOT a USER_MEMORY line and NOT an ORGANIZATION.md prose rule. Route data-facts to the column/table; reserve the prose files for cross-cutting conventions (ORGANIZATION.md) and personal tics (USER_MEMORY). Don't reflexively ask — classify; ask only when personal-vs-org is genuinely unclear.
 4. **Display preference → prose without changing SQL.** If the correction is "always format like X," ALSO modify the seed example's SQL to demonstrate the formatting (so future answers actually apply it, not just describe it).
 
 ### Diff-based hints (look at SQL changes for classification clues)
@@ -177,7 +181,7 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 - Math applied to one column (`/100`, `* 100.0`, `CAST(...)`) → likely `field_metadata` (with a `unit` correction).
 - `CASE WHEN col = 'X' THEN 'Y' ELSE 'Z' END` for a column's display value → likely `field_metadata` with `choice_field` update.
 - New WHERE clause referencing a specific business term (e.g., `plan_type='subscription'`) AND new aggregation → likely `new_metric`.
-- `TO_CHAR(...)`, `ROUND(...)`, `AS my_alias`, a currency symbol purely on the output side → a display rule: **ask** personal (`user_preference` → USER_MEMORY.md) vs org-wide (`org_context` → ORGANIZATION.md) — ALSO update the seed example's SQL.
+- `TO_CHAR(...)`, `ROUND(...)`, `AS my_alias`, a currency symbol purely on the output side → a display rule. If it's about a specific column (a currency/unit) → that column's `caveat`/`value_transform` (model, org-wide). If it's a personal style tic → `user_preference`. ALSO update the seed example's SQL either way.
 - Only structural / cosmetic SQL changes → `sql_fix`.
 
 ### When ambiguous, AskUserQuestion (use the rubric above as your option set)
@@ -188,7 +192,7 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 > - **A join correction** — relationships in the model need updating
 > - **A table meaning change** — the description / context for a whole table
 > - **A new business metric** — let's add this as a reusable metric
-> - **A display / formatting rule** — formatting, currency/units, default filters (I'll ask: just for you, or org-wide for this database)
+> - **A display / formatting rule** — number formatting, currency/units, default filters (currency/units attach to the column; I only ask about scope if it's genuinely unclear)
 > - **Domain context for this database** — abstract business concepts not tied to one column (e.g., "gold tier means lifetime spend > $10k")
 
 The user's answer determines Phase 5 routing.

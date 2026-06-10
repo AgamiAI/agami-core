@@ -549,7 +549,7 @@ Open it: green = numbers match, red = mismatch (drill in to see the SQL).
 Reply: approve N · reject N · edit N · done (when you're through).
 ```
 
-**Processing the batch:** an `edit N` that fixes *that example's* SQL → update the example. But when the user gives a **cross-cutting display/formatting rule** (currency symbol, number formatting, units — applies to many examples, not one), do NOT silently file it to USER_MEMORY. Route it through the [`agami-save-correction`](../agami-save-correction/SKILL.md) display-rule path: **ASK whether it's personal (`USER_MEMORY.md`) or org-wide for `<profile>` (`ORGANIZATION.md`, so the team gets it)** — ask once for the batch of rules — then also bake the formatting into the affected examples' SQL.
+**Processing the batch:** an `edit N` that fixes *that example's* SQL → update the example. When the user gives a **cross-cutting display/formatting rule** (currency, units, number formatting — applies to many examples, not one), classify it like any correction (see [`agami-save-correction`](../agami-save-correction/SKILL.md) → "DISPLAY / FORMATTING preference"): a currency/unit fact attaches to the **column** (a `caveat`/`value_transform` in the shared model — org-wide by construction); a cross-cutting presentation convention → `ORGANIZATION.md`; a personal tic → `USER_MEMORY.md`. Don't reflexively file to USER_MEMORY, and don't reflexively ask — only ask if personal-vs-org is genuinely unclear. Then bake the formatting into the affected examples' SQL.
 
 ---
 
