@@ -538,6 +538,71 @@
       d.appendChild(highlight(text, searchQ));
       return d;
     }
+    // ---- Inline editing ----
+    // edits[qname] = {kind, area, name, [column], fields:{field:value}} — field edits
+    //   applied via curate edit ops. exampleEdits[key] = {area, question, sql}.
+    //   orgEdit = new ORGANIZATION.md text or null.
+    const edits = {};
+    const exampleEdits = {};
+    let orgEdit = null;
+    const editOpen = new Set();   // qnames whose inline edit form is expanded
+
+    function editCount() {
+      return Object.keys(edits).length + Object.keys(exampleEdits).length + (orgEdit !== null ? 1 : 0);
+    }
+    function btn(label, onclick, extra) {
+      return el('button', {
+        type: 'button', onclick,
+        style: 'font-size:11px;padding:4px 10px;border-radius:5px;cursor:pointer;margin:8px 18px;'
+             + 'background:var(--bg);color:var(--muted);border:1px solid var(--border);' + (extra || ''),
+      }, label);
+    }
+    function textarea(value, rows) {
+      const ta = el('textarea', { rows: String(rows || 2) });
+      ta.value = value || '';
+      ta.style.cssText = 'width:calc(100% - 36px);margin:4px 18px;padding:6px 8px;border-radius:5px;'
+        + 'border:1px solid var(--border);background:var(--bg);color:var(--fg);font:13px ui-monospace,monospace;';
+      return ta;
+    }
+    // Render an inline edit form for `item` with the given editable fields.
+    // fieldDefs: [{field, label, current, rows}]. Saving stores a curate edit per
+    // changed field under edits[item.qname].
+    function renderEditForm(item, kind, fieldDefs) {
+      const wrap = el('div', { style: 'border-top:1px dashed var(--border);margin-top:6px;' });
+      const inputs = {};
+      fieldDefs.forEach(fd => {
+        wrap.appendChild(labelLine(fd.label));
+        const cur = (edits[item.qname] && edits[item.qname].fields[fd.field]);
+        const ta = textarea(cur !== undefined ? cur : (fd.current || ''), fd.rows);
+        inputs[fd.field] = ta;
+        wrap.appendChild(ta);
+      });
+      const save = btn('Save', () => {
+        const fields = {};
+        fieldDefs.forEach(fd => {
+          const v = inputs[fd.field].value;
+          if (v !== (fd.current || '')) fields[fd.field] = v;
+        });
+        if (Object.keys(fields).length) {
+          edits[item.qname] = { kind, area: item.area, name: item.name || relName(item),
+                                column: item.column, fields };
+        } else { delete edits[item.qname]; }
+        editOpen.delete(item.qname);
+        renderAll(); updateFooter();
+      }, 'background:var(--accent);color:#fff;border-color:var(--accent);');
+      wrap.appendChild(save);
+      return wrap;
+    }
+    function editToggle(item) {
+      const open = editOpen.has(item.qname);
+      const queued = !!edits[item.qname];
+      return btn(open ? 'Cancel' : (queued ? '✎ Edited (queued)' : 'Edit'), (ev) => {
+        ev.stopPropagation();
+        if (open) editOpen.delete(item.qname); else editOpen.add(item.qname);
+        renderAll();
+      }, queued ? 'border-color:var(--accent);color:var(--accent);' : '');
+    }
+
     // Generic flat section: title + count + cards, search-filtered on `hay(item)`.
     function renderFlatSection(rootId, title, items, hay, cardFn) {
       const root = document.getElementById(rootId);
@@ -696,7 +761,18 @@
           }, '+ exclude all ' + (others.length + 1) + ' named "' + field.name + '"'));
         }
       }
+      // Column description edit (curate edit op: kind=table, name=<table>, column=<col>)
+      const editItem = { qname: field.qname, area: table.area, name: table.name, column: field.name };
+      actions.appendChild(editToggle(editItem));
       row.appendChild(actions);
+      if (editOpen.has(field.qname)) {
+        const wrap = el('div');
+        wrap.appendChild(row);
+        wrap.appendChild(renderEditForm(editItem, 'table', [
+          { field: 'description', label: 'Column description', current: field.description, rows: 2 },
+        ]));
+        return wrap;
+      }
       return row;
     }
 
@@ -789,6 +865,10 @@
       const dsc = el('div', { class: 'table-description' + (dscText ? '' : ' empty') });
       dsc.appendChild(highlight(dscText || '(no table description)', dscText ? q : ''));
       body.appendChild(dsc);
+      body.appendChild(editToggle(table));
+      if (editOpen.has(table.qname)) body.appendChild(renderEditForm(table, 'table', [
+        { field: 'description', label: 'Table description', current: table.description, rows: 2 },
+      ]));
 
       (table.fields || []).forEach(f => {
         body.appendChild(renderField(f, table));
@@ -904,7 +984,21 @@
       header.appendChild(el('span', { class: 'schema-count', text: 'ORGANIZATION.md' }));
       sec.appendChild(header);
       const card = el('div', { class: 'table-card' });
-      card.appendChild(preBlock(md || '(empty — add domain context so answers know what the data means)'));
+      card.appendChild(preBlock((orgEdit !== null ? orgEdit : md) || '(empty — add domain context so answers know what the data means)'));
+      const ORG = '__org__';
+      const queued = orgEdit !== null;
+      card.appendChild(btn(editOpen.has(ORG) ? 'Cancel' : (queued ? '✎ Edited (queued)' : 'Edit'),
+        (ev) => { ev.stopPropagation(); if (editOpen.has(ORG)) editOpen.delete(ORG); else editOpen.add(ORG); renderAll(); },
+        queued ? 'border-color:var(--accent);color:var(--accent);' : ''));
+      if (editOpen.has(ORG)) {
+        const wrap = el('div', { style: 'border-top:1px dashed var(--border);margin-top:6px;' });
+        const ta = textarea(orgEdit !== null ? orgEdit : md, 14);
+        wrap.appendChild(ta);
+        wrap.appendChild(btn('Save', () => {
+          orgEdit = ta.value; editOpen.delete(ORG); renderAll(); updateFooter();
+        }, 'background:var(--accent);color:#fff;border-color:var(--accent);'));
+        card.appendChild(wrap);
+      }
       sec.appendChild(card);
       root.appendChild(sec);
     }
@@ -952,7 +1046,13 @@
       });
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
-      body.appendChild(excludeBtn('metric', m));
+      const mActions = el('div'); mActions.appendChild(excludeBtn('metric', m)); mActions.appendChild(editToggle(m));
+      body.appendChild(mActions);
+      if (editOpen.has(m.qname)) body.appendChild(renderEditForm(m, 'metric', [
+        { field: 'calculation', label: 'Calculation (prose)', current: m.calculation, rows: 2 },
+        { field: 'unit', label: 'Unit (e.g. INR, percent)', current: m.unit, rows: 1 },
+        { field: 'description', label: 'Description', current: m.description, rows: 2 },
+      ]));
       card.appendChild(body);
       return card;
     }
@@ -965,7 +1065,11 @@
       if ((e.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(e.other_names.join(', '))); }
       if (e.value_pattern) { body.appendChild(labelLine('Value pattern')); body.appendChild(preBlock(e.value_pattern)); }
       if (e.description) { body.appendChild(labelLine('Description')); body.appendChild(descBlock(e.description)); }
-      body.appendChild(excludeBtn('entity', e));
+      const eActions = el('div'); eActions.appendChild(excludeBtn('entity', e)); eActions.appendChild(editToggle(e));
+      body.appendChild(eActions);
+      if (editOpen.has(e.qname)) body.appendChild(renderEditForm(e, 'entity', [
+        { field: 'description', label: 'Description', current: e.description, rows: 2 },
+      ]));
       card.appendChild(body);
       return card;
     }
@@ -991,6 +1095,25 @@
       if (x.sql) { body.appendChild(labelLine('SQL')); body.appendChild(preBlock(x.sql)); }
       const meta = [x.area, x.source, x.status].filter(Boolean).join(' · ');
       if (meta) body.appendChild(descBlock(meta));
+      const queued = !!exampleEdits[x.qname];
+      body.appendChild(btn(editOpen.has(x.qname) ? 'Cancel' : (queued ? '✎ Edited (queued)' : 'Edit'),
+        (ev) => { ev.stopPropagation(); if (editOpen.has(x.qname)) editOpen.delete(x.qname); else editOpen.add(x.qname); renderAll(); },
+        queued ? 'border-color:var(--accent);color:var(--accent);' : ''));
+      if (editOpen.has(x.qname)) {
+        const wrap = el('div', { style: 'border-top:1px dashed var(--border);margin-top:6px;' });
+        wrap.appendChild(labelLine('Question'));
+        const qTa = textarea((exampleEdits[x.qname] || {}).question ?? x.question, 2);
+        wrap.appendChild(qTa);
+        wrap.appendChild(labelLine('SQL'));
+        const sTa = textarea((exampleEdits[x.qname] || {}).sql ?? x.sql, 4);
+        wrap.appendChild(sTa);
+        wrap.appendChild(btn('Save', () => {
+          exampleEdits[x.qname] = { area: x.area, question: qTa.value, sql: sTa.value,
+                                    source: 'correction', status: 'confirmed' };
+          editOpen.delete(x.qname); renderAll(); updateFooter();
+        }, 'background:var(--accent);color:#fff;border-color:var(--accent);'));
+        body.appendChild(wrap);
+      }
       card.appendChild(body);
       return card;
     }
@@ -1089,7 +1212,8 @@
     function updateFooter() {
       const c = pendingCounts();
       const opCount = Object.keys(ops).length;
-      const total = c.excludeTables + c.includeTables + c.excludeColumns + c.includeColumns + opCount;
+      const eCount = editCount();
+      const total = c.excludeTables + c.includeTables + c.excludeColumns + c.includeColumns + opCount + eCount;
       const sum = document.getElementById('pending-summary');
       const btn = document.getElementById('btn-generate');
       if (total === 0) {
@@ -1101,7 +1225,8 @@
         if (c.includeTables) parts.push(`${c.includeTables} table${c.includeTables === 1 ? '' : 's'} to include`);
         if (c.excludeColumns) parts.push(`${c.excludeColumns} column${c.excludeColumns === 1 ? '' : 's'} to exclude`);
         if (c.includeColumns) parts.push(`${c.includeColumns} column${c.includeColumns === 1 ? '' : 's'} to include`);
-        if (opCount) parts.push(`${opCount} metric/entity/relationship change${opCount === 1 ? '' : 's'}`);
+        if (opCount) parts.push(`${opCount} exclude/include`);
+        if (eCount) parts.push(`${eCount} edit${eCount === 1 ? '' : 's'}`);
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
         btn.disabled = false;
       }
@@ -1122,12 +1247,29 @@
       if (buckets.includeT.length) lines.push('include tables: ' + buckets.includeT.sort().join(', '));
       if (buckets.excludeC.length) lines.push('exclude columns: ' + buckets.excludeC.sort().join(', '));
       if (buckets.includeC.length) lines.push('include columns: ' + buckets.includeC.sort().join(', '));
-      // entity / metric / relationship exclude-includes carry an explicit kind, so
-      // they go as a curate-ops JSON block (Claude writes it to a file + runs sm curate).
-      const opList = Object.values(ops);
+      // curate-ops JSON: exclude/include on metrics/entities/relationships (explicit
+      // kind) + field edits (description/calculation/unit) as `op:"edit"` ops.
+      const opList = Object.values(ops).slice();
+      Object.values(edits).forEach(e => {
+        Object.keys(e.fields).forEach(field => {
+          const op = { op: 'edit', kind: e.kind, area: e.area, name: e.name, field, value: e.fields[field] };
+          if (e.column) op.column = e.column;
+          opList.push(op);
+        });
+      });
       if (opList.length) {
         lines.push('curate-ops:');
         lines.push(JSON.stringify(opList));
+      }
+      // edited prompt examples → add-example (one JSON line)
+      const exList = Object.values(exampleEdits);
+      if (exList.length) {
+        lines.push('example-edits:');
+        lines.push(JSON.stringify(exList));
+      }
+      // edited ORGANIZATION.md → JSON-encoded so newlines survive on one line
+      if (orgEdit !== null) {
+        lines.push('organization-md: ' + JSON.stringify(orgEdit));
       }
       if (lines.length) lines.push('done');
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
@@ -1151,6 +1293,10 @@
     document.getElementById('btn-reset').addEventListener('click', () => {
       Object.keys(pending).forEach(k => delete pending[k]);
       Object.keys(ops).forEach(k => delete ops[k]);
+      Object.keys(edits).forEach(k => delete edits[k]);
+      Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
+      orgEdit = null;
+      editOpen.clear();
       renderAll();
       updateFooter();
     });

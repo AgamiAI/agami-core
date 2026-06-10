@@ -110,7 +110,10 @@ include tables:  <qname-list>
 exclude columns: <qname-list>
 include columns: <qname-list>
 curate-ops:
-[{"op":"exclude","kind":"metric","area":"...","name":"..."}, ...]
+[{"op":"exclude","kind":"metric","area":"...","name":"..."}, {"op":"edit","kind":"table","area":"...","name":"orders","column":"amount","field":"description","value":"..."}, ...]
+example-edits:
+[{"area":"sales","question":"...","sql":"...","source":"correction","status":"confirmed"}]
+organization-md: "<full new ORGANIZATION.md text, JSON-encoded>"
 done
 ```
 
@@ -118,7 +121,12 @@ Where `<qname-list>` is comma-separated, whitespace-tolerant:
 - Table qname: `<area>.<table>` (e.g., `bureau_data.NOHIT_DATA`)
 - Column qname: `<area>.<table>.<column>` (e.g., `bureau_data.PII.AADHAAR`)
 
-The `curate-ops:` line (if present) is followed by **one JSON array** — exclude/include actions on **metrics / entities / relationships** (which carry an explicit `kind`, unlike tables/columns). It's already a valid curate ops array (`op` is `exclude`/`include`, which the engine maps to reject/unreviewed). Parse it verbatim and merge with the table/column ops below.
+Three optional blocks may follow, each a single JSON line (the dashboard emits whichever the user touched):
+- **`curate-ops:`** — exclude/include on metrics/entities/relationships AND field **edits** (`op:"edit"` with `field`/`value` — table/column/metric/entity descriptions, metric `calculation`/`unit`). Already a valid curate ops array; merge it verbatim with the table/column ops below and apply via one `sm curate` call.
+- **`example-edits:`** — edited prompt examples `[{area, question, sql, source, status}]`. Group by `area` and apply each group with `sm add-example "$ROOT" --area <area> --file <json>` (it dedups by `question`, so an edit replaces the prior example). Write the per-area JSON with the **Write tool**.
+- **`organization-md:`** — a JSON-encoded string of the full new `ORGANIZATION.md`. JSON-decode it and **Write** it to `<artifacts_dir>/<profile>/ORGANIZATION.md` (overwrite; free-form Markdown, no validator).
+
+Show the user a one-line summary of what each block changed before applying.
 
 Tolerate trailing commas, mixed-case schema/table/column names (the YAMLs typically preserve the DB's casing — pass them through verbatim).
 
