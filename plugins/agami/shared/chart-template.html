@@ -388,6 +388,7 @@
     .feedback-bar #feedback-summary { font-size: 13px; color: var(--muted); margin-right: auto; }
     .feedback-bar button, .modal-actions button { font-size: 13px; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer; }
     .feedback-bar button.primary, .modal-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .feedback-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 50; }
     .modal-backdrop[hidden] { display: none; }
     .modal-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: min(680px, 92vw); }
@@ -426,17 +427,18 @@
     </footer>
   </div>
 
-  <div class="feedback-bar" id="feedback-bar" hidden>
+  <div class="feedback-bar" id="feedback-bar">
     <span id="feedback-summary"></span>
-    <button type="button" id="btn-feedback" class="primary">Send feedback to Claude</button>
+    <button type="button" id="btn-looks-good">👍 This looks good</button>
+    <button type="button" id="btn-feedback" class="primary" disabled>Send a fix / note to Claude</button>
   </div>
 
   <div class="modal-backdrop" id="fb-modal" hidden>
     <div class="modal-card">
       <h2>Paste this back to Claude</h2>
-      <p>Claude routes each item — a corrected query becomes a saved example, a note about
-         a column / units / formatting goes to the model or your memory — and tells you
-         where each landed. (This calls <code>/agami-save-correction</code> for you.)</p>
+      <p>Claude reads this and acts on it — a corrected (or confirmed-good) query can become
+         a saved example, a note about a column / units / formatting goes to the model or your
+         memory — and it tells you what it did.</p>
       <textarea id="fb-text" readonly></textarea>
       <div class="modal-actions">
         <button type="button" id="fb-copy" class="primary">Copy to clipboard</button>
@@ -474,9 +476,22 @@
       const n = Object.keys(feedback).length;
       const bar = document.getElementById('feedback-bar');
       if (!bar) return;
-      bar.hidden = n === 0;
-      if (n) document.getElementById('feedback-summary').textContent =
-        n + (n === 1 ? ' section' : ' sections') + ' with a fix or note queued';
+      document.getElementById('feedback-summary').textContent = n
+        ? n + (n === 1 ? ' section' : ' sections') + ' with a fix or note queued'
+        : 'Was this answer right?';
+      document.getElementById('btn-feedback').disabled = n === 0;
+    }
+    function buildPositiveText() {
+      const lines = ['This agami answer looked correct — the query was right.', ''];
+      lines.push('Question: ' + (reportTitle || '(see report)'));
+      sections.forEach((sec, i) => {
+        if (!sec.sql) return;
+        if (sections.length > 1) lines.push('', '--- ' + (sec.title || ('Section ' + (i + 1))) + ' ---');
+        lines.push('SQL:', sec.sql);
+      });
+      lines.push('', 'If this is a useful, non-trivial pattern, save it as a confirmed prompt '
+                 + 'example — your discretion (skip it if it’s trivial or already covered).');
+      return lines.join('\n');
     }
     function buildFeedbackText() {
       const lines = ['Save this as a correction (route via /agami-save-correction).', ''];
@@ -1020,6 +1035,12 @@
       document.getElementById('fb-modal').hidden = false;
       document.getElementById('fb-status').textContent = '';
     });
+    document.getElementById('btn-looks-good').addEventListener('click', () => {
+      document.getElementById('fb-text').value = buildPositiveText();
+      document.getElementById('fb-modal').hidden = false;
+      document.getElementById('fb-status').textContent = '';
+    });
+    refreshFeedbackBar();  // populate the bar on load
     document.getElementById('fb-close').addEventListener('click', () => {
       document.getElementById('fb-modal').hidden = true;
     });

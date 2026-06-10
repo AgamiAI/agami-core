@@ -788,6 +788,8 @@ The correction can arrive two ways: the user **types** it, or they paste the blo
 
 **Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `lending`, and set `LOAN_DETAILS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
 
+**Positive confirmation ("This looks good").** The report also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
+
 ---
 
 ## Phase 5: Log
