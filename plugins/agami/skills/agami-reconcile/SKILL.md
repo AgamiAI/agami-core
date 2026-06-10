@@ -1,17 +1,17 @@
 ---
 name: agami-reconcile
-description: "Reconciles a CSV of (label, expected_value) pairs from an existing dashboard against agami's answers. For each row, the skill generates a matching NL question, runs it through the active profile's semantic model, diffs actual vs expected, and surfaces matches in green and mismatches in red with drill-down receipts. The strongest onboarding demo for a skeptical data engineer — either we agree with their numbers (trust earned via evidence) or we surface a real definitional disagreement (trust earned via transparency)."
-when_to_use: "Use when the user says 'reconcile against this dashboard', 'do these numbers match?', 'validate against my Tableau export', '/agami-reconcile <csv>', or pastes a CSV / table of known numbers and asks agami to reproduce them. Requires agami-connect to have been run first (need a semantic model + examples library). Three independent customer asks (Sourav + Intuit + Asana data teams) anchor this as the highest-leverage validation surface for early adopters."
-argument-hint: "<path-to-csv>"
+description: "Reconciles known (label, expected_value) numbers from an existing dashboard against agami's answers. Input can be a SCREENSHOT of a Metabase / Power BI / Tableau / Looker dashboard (Claude's vision extracts the pairs), a CSV, or numbers pasted inline — the user doesn't need to know which; they can just ask. For each pair, the skill generates a matching NL question, runs it through the active profile's semantic model, diffs actual vs expected, and surfaces matches in green and mismatches in red with drill-down receipts. The strongest onboarding demo for a skeptical data engineer — either we agree with their numbers (trust earned via evidence) or we surface a real definitional disagreement (trust earned via transparency)."
+when_to_use: "Use when the user says 'reconcile against this dashboard', 'do these numbers match?', 'validate against my Tableau export', '/agami-reconcile <csv>', drops a screenshot of a BI dashboard (Metabase/Power BI/Tableau/Looker/spreadsheet) and asks agami to reproduce the numbers, or pastes a CSV / table of known numbers. Requires agami-connect to have been run first (need a semantic model + examples library). Three independent customer asks (Sourav + Intuit + Asana data teams) anchor this as the highest-leverage validation surface for early adopters."
+argument-hint: "<screenshot | path-to-csv | pasted numbers>"
 ---
 
 # agami reconcile
 
-You are running the reconciliation harness. Goal: take a CSV of labeled numbers from an existing dashboard (Tableau / Looker / Mode / Metabase / spreadsheet) and prove agami can reproduce each number. When numbers match, that's evidence the semantic model is right. When they don't, the receipt drill-down explains why — typically a definitional disagreement (gross vs net, refunds in vs out, FX rate at booking vs reporting date) — which is exactly the trust signal that makes a DE relax.
+You are running the reconciliation harness. Goal: take labeled numbers from an existing dashboard (Tableau / Looker / Mode / Metabase / Power BI / spreadsheet) — most often a **screenshot**, sometimes a CSV or pasted list — and prove agami can reproduce each number. When numbers match, that's evidence the semantic model is right. When they don't, the receipt drill-down explains why — typically a definitional disagreement (gross vs net, refunds in vs out, FX rate at booking vs reporting date) — which is exactly the trust signal that makes a DE relax.
 
 This skill orchestrates:
 
-1. **Parse** the CSV into a list of `(label, expected_value)` pairs.
+1. **Extract** the `(label, expected_value)` pairs from the input — a dashboard screenshot (via vision, confirmed with the user), a CSV, or a pasted list. Number parsing is always deterministic (`reconcile.py`).
 2. **Generate a matching NL question** for each label.
 3. **Run** each question through the same NL→SQL→execute pipeline as agami-query-database.
 4. **Diff** actual vs expected with a tolerance.
@@ -34,19 +34,33 @@ Same checks as agami-query-database / agami-connect:
 1. **Plan-mode check** per [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash + Read + Write — refuse if locked in plan mode. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the CSV path."*
 2. **Credentials present** — read `~/.agami/credentials` for the active profile. If missing, invoke `/agami-connect` to set up first; this skill needs a working DB connection.
 3. **Model present** — `<artifacts_dir>/<profile>/org.yaml` must exist. If not, invoke `/agami-connect`. This skill needs an introspected model to generate questions against.
-4. **Argument** — `$ARGUMENTS` should be a path to a CSV file. If not provided, ask once: *"Paste the path to a CSV with two columns: `label,value`. (Or paste the CSV inline as a code block and I'll extract it.)"* Accept inline-pasted CSV — write it to `/tmp/agami-reconcile-<ts>.csv` and proceed.
-5. **Validate the file exists**. If not, surface error and stop.
+4. **Input — accept any of three shapes; the user needn't know which.** Detect what they gave:
+   - **A screenshot / image** of a dashboard (Metabase, Power BI, Tableau, Looker, a spreadsheet) — the common case. Go to Phase 1's **vision branch**.
+   - **A CSV** — a path in `$ARGUMENTS`, or pasted inline (write inline CSV to `/tmp/agami-reconcile-<ts>.csv`). Go to Phase 1's **CSV branch**.
+   - **Numbers pasted inline** as a list/table — treat as inline CSV.
+   If they gave nothing (or just asked "can you check my dashboard?"), ask once, welcoming all three: *"Show me the numbers you want to check against — easiest is a **screenshot of your dashboard** (Metabase, Power BI, Tableau, a spreadsheet — whatever you have), but a CSV or a pasted list of `label: value` works too."* Don't make them figure out an export format.
+5. **If they gave a file path, validate it exists.** If not, surface the error and stop.
 
 ---
 
-## Phase 1: Parse the CSV
+## Phase 1: Extract the (label, value) pairs
+
+Whatever the input shape, the goal is the same normalized rows JSON. **Number parsing is always deterministic — it goes through `reconcile.py`, never the LLM eyeballing a value** (a misread expected number would manufacture a false mismatch on a verification surface).
+
+### Vision branch — a dashboard screenshot
+
+1. **Read the image** and extract every labeled number you can see — KPI tiles, table cells, chart value labels — as `(label, raw_value)` pairs. Keep the label the user would recognize ("Total Revenue", "Active Users — Apr"), and the value **exactly as shown, verbatim** (`$4.2M`, `₹2.16Cr`, `42%`, `1,234`) — don't convert it; the normalizer does that.
+2. **Write the pairs as a 2-column CSV** (Write tool — never a heredoc/`python3 -c`) to `/tmp/agami-reconcile-<ts>.csv`, then run the SAME normalizer as the CSV branch (below) so value parsing stays deterministic.
+3. **Confirm before reconciling — vision can misread.** Show the extracted pairs as a small table and ask the user to fix any misread label/number: *"I read these N numbers off your screenshot — correct anything I got wrong, then I'll reconcile."* This confirm step is **mandatory**: a wrong expected-value isn't a model bug but it reads like one. If a tile is ambiguous or partly cut off, say so and skip it rather than guess.
+
+### CSV branch — a CSV path or inline-pasted CSV
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" parse --csv "<csv_path>" \
   > /tmp/agami-reconcile-rows-<ts>.json
 ```
 
-The helper handles:
+The helper (used by **both** branches) handles:
 - Header detection (with-or-without first-row column names)
 - 2-column or 3+ column inputs (3rd onward are appended to the label as context)
 - Currency symbols / magnitude suffixes / accounting parens / percent (`$4.2M`, `₹2.16Cr`, `(123.45)`, `42%`)
@@ -55,7 +69,7 @@ The helper handles:
 Read the JSON. Each row is `{label, expected_value, raw_value}`. Discard rows where `expected_value` is null (unparseable) — surface a one-liner: *"Skipped 2 rows where the value couldn't be parsed: 'X', 'Y'."*
 
 Surface to the user:
-> Parsed `<N>` rows from `<csv_path>`. Reconciling now — typically `<N> × 5–15s` per row depending on query latency.
+> Parsed `<N>` rows from `<the screenshot / csv_path>`. Reconciling now — typically `<N> × 5–15s` per row depending on query latency.
 
 ---
 
@@ -205,12 +219,18 @@ End the turn. The user typically:
 | Every row errors out | Surface a meta-error: "All <N> rows errored — likely a model-coverage problem (the questions don't map to your schema). Run `/agami-connect reintrospect` if your schema changed; check the model has the relevant tables." |
 | Single mismatch but huge delta (> 100%) | Note in the interpretation: "The delta is large enough to suggest a unit mismatch (cents vs dollars, count vs percentage) rather than a definition gap. Check `agami.unit` on the relevant field." |
 | User pastes inline CSV instead of a path | Accept it. Write to `/tmp/agami-reconcile-pasted-<ts>.csv` and proceed. |
+| Screenshot is blurry / a value is cut off / can't read a tile | Don't guess the number. Extract what's legible, and tell the user which tiles you skipped: "Couldn't read 'Pipeline value' clearly — re-snip it or type that one in." |
+| User says "reconcile my dashboard" but attaches nothing | Ask for the screenshot (or CSV / pasted numbers) per Phase 0.4 — don't proceed without the expected numbers. |
+
+---
+
+## Hard rule for screenshots
+
+The screenshot is an **image of numbers**, and a misread expected value reads exactly like a model bug. So: (1) the value is parsed by `reconcile.py`, never by eyeballing; (2) the extracted `(label, value)` table is **always confirmed with the user before any query runs** (Phase 1 vision branch). The image stays local — same as the CSV (Hard rule #4); it's never uploaded or summarized off-machine.
 
 ---
 
 ## Roadmap (not in v1)
 
-- **Vision input** — extract `(label, value)` pairs from a screenshot of a dashboard via Claude's vision capability. Currently CSV-only.
-- **Tableau JSON export support** — parse `.twb` / `.twbx` exports directly.
-- **Looker JSON / Mode export** — same.
-- **Recurring reconcile runs** — wire into `agami test` so the golden-test suite includes reconciliation against a pinned dashboard CSV.
+- **Tableau / Looker / Mode export parsing** — parse `.twb` / `.twbx` / JSON exports directly (today a screenshot of any of them already works via the vision branch).
+- **Recurring reconcile runs** — wire into `agami test` so the golden-test suite includes reconciliation against a pinned dashboard.
