@@ -482,6 +482,34 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     return res
 
 
+def validate_seeds(candidates: list[dict], runner) -> tuple[list[dict], list[dict]]:
+    """Split candidate examples into (passing, rejected) by validating each SQL against
+    the live DB — dialect-agnostically and scanning no data. Each SQL is wrapped to
+    return zero rows (`SELECT * FROM (<sql>) WHERE 1=0`) and run via `runner` (which
+    raises on a bad query). This is the packaged Phase-5 validation loop, so the skill
+    never writes a throwaway script to EXPLAIN seeds one by one. Passing examples get
+    `source: seed` / `status: confirmed` defaults; rejected carry the DB error."""
+    passing: list[dict] = []
+    rejected: list[dict] = []
+    for c in candidates:
+        sql = (c or {}).get("sql")
+        q = (c or {}).get("question")
+        if not sql or not q:
+            rejected.append({"question": q or "?", "error": "question and sql are required"})
+            continue
+        probe = "SELECT * FROM (\n" + str(sql).strip().rstrip(";") + "\n) AS _agami_seed_validate WHERE 1=0"
+        try:
+            runner(probe)
+        except Exception as e:
+            rejected.append({"question": q, "error": str(e)[:200]})
+            continue
+        ex = dict(c)
+        ex.setdefault("source", "seed")
+        ex.setdefault("status", "confirmed")
+        passing.append(ex)
+    return passing, rejected
+
+
 def _restore(backups: list[tuple[Path, Optional[str]]]) -> None:
     for path, prior in backups:
         try:
@@ -525,4 +553,4 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
 
 
 __all__ = ["review_queue", "all_items", "model_tree", "apply", "write_items",
-           "add_examples", "ApplyResult"]
+           "add_examples", "validate_seeds", "ApplyResult"]

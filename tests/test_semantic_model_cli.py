@@ -156,6 +156,26 @@ def test_add_examples_appends_dedups_and_skips_invalid(tmp_path):
     assert next(e for e in ex if e["question"] == "revenue")["sql"] == "SELECT SUM(amount) FROM orders"
 
 
+def test_validate_seeds_splits_pass_fail_via_runner():
+    # the packaged Phase-5 loop: each candidate SQL is wrapped to return zero rows and
+    # run via the live-DB runner; passing get seed/confirmed defaults, rejects carry the error
+    from semantic_model import curate
+
+    def fake_runner(sql):
+        assert "WHERE 1=0" in sql  # validated as a zero-row probe, never scans data
+        if "BADCOL" in sql:
+            raise RuntimeError("column BADCOL does not exist")
+        return []
+
+    passing, rejected = curate.validate_seeds([
+        {"question": "good", "sql": "SELECT 1 FROM orders"},
+        {"question": "bad", "sql": "SELECT BADCOL FROM orders"},
+        {"question": "no sql"}], fake_runner)
+    assert [p["question"] for p in passing] == ["good"]
+    assert passing[0]["source"] == "seed" and passing[0]["status"] == "confirmed"
+    assert {r["question"] for r in rejected} == {"bad", "no sql"}
+
+
 def test_no_model_root_exits_3_cleanly(tmp_path):
     # an empty root has no org.yaml — the CLI returns a clean no_model signal (exit 3),
     # not a traceback, so callers fold the existence check into their first real call

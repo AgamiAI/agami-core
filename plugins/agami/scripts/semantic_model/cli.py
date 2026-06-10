@@ -165,6 +165,23 @@ def cmd_add_example(args) -> int:
     return 0 if (res.applied or not res.skipped) else 1
 
 
+def cmd_seed_examples(args) -> int:
+    """Validate candidate seed examples against the live DB and write the passing ones —
+    the whole Phase-5 mechanical loop in one call (no throwaway validate-and-write script)."""
+    from . import curate
+    from .introspect import make_execute_sql_runner
+    with open(args.file) as fh:
+        cands = json.load(fh)
+    if isinstance(cands, dict):
+        cands = cands.get("examples", cands.get("items", []))
+    runner = make_execute_sql_runner(args.profile)
+    passing, rejected = curate.validate_seeds(cands, runner)
+    res = curate.add_examples(args.root, args.area, passing) if passing else curate.ApplyResult()
+    _print_json({"added": res.applied, "written": res.validated,
+                 "committed": res.committed, "rejected": rejected})
+    return 0
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
@@ -272,6 +289,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add_example)
+
+    sp = sub.add_parser("seed-examples", help="validate candidate seeds against the live DB + write the passing ones")
+    sp.add_argument("root")
+    sp.add_argument("--area", required=True)
+    sp.add_argument("--profile", required=True, help="credentials profile (for the live-DB validation)")
+    sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metric]}")
+    sp.set_defaults(func=cmd_seed_examples)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)

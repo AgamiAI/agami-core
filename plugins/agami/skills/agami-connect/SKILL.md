@@ -510,15 +510,13 @@ On `reintrospect` with no new Rule 1 candidates, skip silently.
 
 **Surface a progress warning first** (second-longest phase): "Generating 10–12 NL→SQL seeds and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud). I'll narrate per-example progress."
 
-**5a — generate** 10–12 examples grounded in the model: a count, a top-N, a time-bucketed trend, a breakdown, a recency filter, plus domain-specific ones from entities/metrics. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset. Tag each example with its subject area, tables, columns, and metric.
+**5a — generate** (your job — the LLM step) 10–12 candidate examples grounded in the model: a count, a top-N, a time-bucketed trend, a breakdown, a recency filter, plus domain-specific ones from entities/metrics. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset. Tag each with its `tables`, `columns`, and `metric`. Write the candidates as a JSON array to `/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metric`.
 
-**5b — EXPLAIN-validate** each via the chosen tool (one round trip each). Auto-fix once on failure; if still bad, drop it to `~/.agami/.rejected/` — don't block the flow. Also run a row-count sanity check (a 0-row seed looks broken in the dashboard).
-
-**5c — write** the EXPLAIN-passing seeds with the packaged writer — **don't hand-write the YAML or grep the source for its schema.** Build a JSON array and run it once (it appends, dedups by `question`, creates the file/dirs, commits):
+**5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error:
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file /tmp/agami-seeds.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-examples "$ROOT" --area <area> --profile <profile> --file /tmp/agami-seeds.json
 ```
-Each example — **required:** `question`, `sql`. **Scope tags** (the ranking reads these): `tables`, `columns`, `metric`, `default_filters`. **Provenance:** `source: seed`, `status: confirmed`. Corrections later append the same way via `/agami-save-correction`.
+Output `{added, written, committed, rejected:[{question, error}]}`. For each `rejected`, optionally regenerate once and re-run with just those; don't block the flow on a few drops. Corrections later append via `/agami-save-correction` (same `add-example` path).
 
 ---
 
