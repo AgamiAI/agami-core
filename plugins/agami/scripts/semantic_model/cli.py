@@ -257,8 +257,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("review-items", help="curatable entries, tab-classified (4-tab dashboard)")
     sp.add_argument("root")
-    sp.add_argument("--scope", default="all", choices=["all", "rule1", "rule2"],
-                    help="all (default) | rule1 (metrics/named-filters needing sign-off) | rule2")
+    sp.add_argument("--scope", default="all", choices=["all", "rule1", "rule2", "preseed"],
+                    help="all | rule1 (metrics/named-filters) | rule2 | preseed (metrics+entities seeds depend on)")
     sp.set_defaults(func=cmd_review_items)
 
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")

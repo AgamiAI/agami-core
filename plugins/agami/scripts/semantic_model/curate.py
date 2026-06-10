@@ -103,7 +103,10 @@ def all_items(org: Organization, *, scope: str = "all") -> list[dict]:
       "rule1" — only Rule-1 items needing sign-off (metrics + named filters in the
                 review tab). The agami-connect Phase 4 gate uses this; the rendered
                 item count then equals the sign-off count exactly.
-      "rule2" — only Rule-2 items needing review (relationships + entities)."""
+      "rule2" — only Rule-2 items needing review (relationships + entities).
+      "preseed" — what NL→SQL seeds depend on: metrics + named filters + entities
+                needing review (relationships excluded — those stay lazy). The
+                agami-connect "curate before examples" gate uses this."""
     items: list[dict] = []
     for sa in org.subject_areas:
         for mm in sa.metrics:
@@ -122,8 +125,11 @@ def all_items(org: Organization, *, scope: str = "all") -> list[dict]:
         items = [it for it in items if it["rule"] == 1 and it["tab"] == "review"]
     elif scope == "rule2":
         items = [it for it in items if it["rule"] == 2 and it["tab"] == "review"]
+    elif scope == "preseed":
+        items = [it for it in items
+                 if it["entity_type"] in ("metric", "named_filter", "entity") and it["tab"] == "review"]
     elif scope != "all":
-        raise ValueError(f"unknown scope {scope!r} (expected all|rule1|rule2)")
+        raise ValueError(f"unknown scope {scope!r} (expected all|rule1|rule2|preseed)")
     # stable order: Rule 1 first, then by tab (review → auto → manual → rejected)
     order = {"review": 0, "auto": 1, "manual": 2, "rejected": 3}
     items.sort(key=lambda it: (0 if it["rule"] == 1 else 1, order.get(it["tab"], 9), it["name"]))

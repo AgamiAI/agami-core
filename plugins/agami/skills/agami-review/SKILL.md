@@ -2,7 +2,7 @@
 name: agami-review
 description: "Opens the trust-layer review dashboard for the active profile's semantic model. Lists every entry needing review (Rule 1 metrics + named filters, plus Rule 2 entries below the confidence threshold) as cards with the source-signal block that produced each entry. The user replies in chat with structured commands (approve / reject / edit / threshold / done) to mark entries reviewed. Each approval writes back to the canonical YAML files in <artifacts_dir>/<profile>/ and runs the validator before promotion."
 when_to_use: "Use when the user says 'open the review dashboard', 'review my model', 'show me what needs review', '/agami-review', 'walk through the review queue', or after agami-connect's Phase 7 summary box prompts to open the dashboard. Also use when the user replies to a previously-rendered dashboard with one of the chat back-channel commands (approve N / reject N / edit N / threshold X / approve all below X / done)."
-argument-hint: "[threshold N.NN | rule1 | done]"
+argument-hint: "[threshold N.NN | rule1 | preseed | done]"
 ---
 
 # agami review
@@ -35,7 +35,7 @@ Run the same plan-mode + credentials checks as `agami-query-database`:
 - If `<artifacts_dir>/<profile>/org.yaml` doesn't exist, invoke `agami-connect` and stop.
 - Probe the validator is runnable: `python3 -c 'import yaml, jsonschema'`. If not, surface the install hint and stop — we won't write YAML edits without the validator gate.
 
-**Scope:** if `$ARGUMENTS` contains `rule1` (the agami-connect Phase 4 sign-off gate invokes `/agami-review rule1`), build the items file with `review-items --scope rule1` so only the Rule-1 sign-off items render. Otherwise build with no `--scope` (all four tabs).
+**Scope:** if `$ARGUMENTS` contains `preseed` (the agami-connect Phase 4 "curate before examples" gate invokes `/agami-review preseed`), build with `review-items --scope preseed` — metrics + named-filters + entities needing review (relationships excluded). If it contains `rule1`, use `--scope rule1` (metrics + named-filters only). Otherwise build with no `--scope` (all four tabs).
 
 Resolve the active threshold:
 - If `$ARGUMENTS` starts with `threshold`, parse the number and use it for this session, AND persist it to `<artifacts_dir>/<profile>/agami.config.yaml` under `review.threshold`.

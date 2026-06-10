@@ -34,8 +34,8 @@ Seed (one task per major phase, in order):
 1. Preflight: credentials check + tool detection
 2. Introspect database → semantic model (engine: tables, columns, grain, FK cardinality)
 3. Enrich: descriptions, entities, metrics (LLM, validated into the model)
-4. Review subject-area split + trust queue (relationships/metrics sign-off)
-5. Generate seed NL→SQL examples (EXPLAIN-validated)
+4. Curate before examples: exclude columns/tables + sign off metrics & entities
+5. Generate seed NL→SQL examples (validated against the live DB)
 6. Validate every seed example (user reviews via dashboard)
 7. Post-introspect trust summary
 8. Follow-up suggestions
@@ -439,7 +439,7 @@ For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. V
 
 ### 2b — Entities (the semantic vocabulary)
 
-Propose `entities[]` per subject area — the names users actually say. For each, fill `name`, `plural`, `other_names` (synonyms), `maps_to` (table+column, one `primary: true`), and — for opaque-identifier columns — a `value_pattern` regex (e.g. a VIN `^[A-Z0-9]{17}$`, a `BP`-prefixed serial) so the runtime can recognize literals. Ground these in column names + samples + the domain doc; don't invent entities the schema doesn't support.
+Propose `entities[]` per subject area — the names users actually say. For each, fill `name`, `plural`, `other_names` (synonyms), `maps_to` (table+column, one `primary: true`), and — for opaque-identifier columns — a `value_pattern` regex (e.g. a VIN `^[A-Z0-9]{17}$`, a `BP`-prefixed serial) so the runtime can recognize literals. Ground these in column names + samples + the domain doc; don't invent entities the schema doesn't support. Because these are LLM-proposed, write them **`confidence: inferred, review_state: unreviewed`** so they surface in the Phase 4 pre-seed review (seeds reference entity vocabulary).
 
 **Write them with the packaged command, not by hand** — build a JSON array and run it once (it validates each item, writes `subject_areas/<area>/entities/<slug>.yaml`, validates the whole model, reverts on failure, commits). Never author a throwaway script to loop:
 ```bash
@@ -505,20 +505,20 @@ I split <N> tables into <A> subject areas:
 
 ---
 
-## Phase 4: Trust review — sign-off before examples
+## Phase 4: Curate before examples — exclude + sign off what seeds depend on
 
-Relationships, metrics, and entities carry a trust block (`confidence` ∈ confirmed/inferred/proposed, `review_state`, `signed_off_*`). Mirror the hybrid review order:
+Seeds reference **columns, tables, metrics, and entities** — so settle those *before* generating examples (a seed that uses a column you'd later exclude breaks at query time, and a seed built on an unreviewed metric bakes in a guessed definition). **Relationships are NOT gated here** — they stay lazy: FK joins are already auto-approved by the engine (the DB declared them), and inferred joins self-approve as you query / surface as receipt warnings. So you're not asked to rubber-stamp database-declared foreign keys.
 
-- **Rule 1 (sign-off required NOW):** metrics + named filters — they drive what the seed examples *mean*. If Phase 5 fires against unreviewed metrics, the seeds exercise a guessed definition.
-- **Rule 2 (lazy, after-the-fact):** inferred/proposed relationships + field descriptions — they surface as receipt warnings on the answers that use them and self-approve as the user queries.
+**4a — Exclude columns/tables you don't want queried.** Offer the model explorer so the user drops PII / scratch / internal-only tables and columns before seeds reference them. **AskUserQuestion:**
+> Before I generate example queries, want to exclude any tables or columns from the model? (PII, scratch/temp tables, internal-only fields — anything you don't want answers built on.)
 
-**4a — count Rule 1:** run `sm review-items "$ROOT" --scope rule1` — its length *is* the Rule-1 sign-off count (metrics + named-filters needing review, plus any `stale`). If **0**, surface the one-liner ("No Rule 1 candidates — proceeding straight to seed generation; low-confidence joins surface as warnings later") and continue to Phase 5 — don't silently skip (users expect a review step).
+`Open the model explorer (Recommended)` → invoke `/agami-model`, **end the turn**, wait for their exclude batch. `Nothing to exclude — continue` → proceed. (Exclusions apply via the model-explorer's curate path; the loader then drops them so seeds never reference them.)
 
-**4b/4c — gate:** if Rule 1 count > 0, tell the user upfront, then invoke `/agami-review rule1` (the `rule1` argument scopes the dashboard to exactly those sign-off items — no env var). **End the turn** and wait for their approval batch.
+**4b — Sign off metrics + entities.** These define what seeds *mean* and *say*. Count via `sm review-items "$ROOT" --scope preseed` — its length is the sign-off count (metrics + named-filters + entities needing review; relationships excluded). If **0**, surface the one-liner ("Nothing to sign off before examples — proceeding") and continue to Phase 5. If **> 0**, tell the user upfront, then invoke `/agami-review preseed` (the `preseed` argument scopes the dashboard to exactly these — metrics + entities, not joins — no env var). **End the turn** and wait for their approval batch.
 
-**4d — return gate:** when they're back, recount. If 0 → Phase 5. If > 0 (partial) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`).
+**4c — return gate:** when they're back, recount via `--scope preseed`. If 0 → Phase 5. If > 0 (partial) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`).
 
-On `reintrospect` with no new Rule 1 candidates, skip silently.
+On `reintrospect` with no new exclusions and nothing unreviewed, skip silently.
 
 ---
 

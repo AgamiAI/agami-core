@@ -120,6 +120,26 @@ def test_review_item_matches_dashboard_contract(tmp_path):
     assert rel["rule_1"] is False and rel["origin"] == "fk" and rel["tab"] == "auto"
 
 
+def test_review_items_scope_preseed_covers_metrics_and_entities_not_joins(tmp_path):
+    # the "curate before examples" gate: seeds depend on metrics + entities, so preseed
+    # includes both — but NOT relationships (those stay lazy / auto-approved FKs)
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)  # has a system-approved relationship (auto, FK)
+    curate.write_items(tmp_path, "s", "metric", [
+        {"name": "rev", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
+         "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
+    curate.write_items(tmp_path, "s", "entity", [
+        {"name": "order", "plural": "orders", "maps_to": [{"table": "orders", "column": "id", "primary": True}],
+         "confidence": "inferred", "review_state": "unreviewed"}])
+    org = load_organization(tmp_path, include_rejected=True)
+    preseed = curate.all_items(org, scope="preseed")
+    types = {it["entity_type"] for it in preseed}
+    assert "metric" in types and "entity" in types
+    assert "join" not in types  # relationships are NOT in the pre-seed gate
+    assert all(it["tab"] == "review" for it in preseed)
+
+
 def test_review_items_scope_rule1_returns_only_signoff_items(tmp_path):
     # the Phase 4 gate uses --scope rule1 so the rendered count == the sign-off count;
     # no skill-side hand-filtering, no env var. rule1 = metrics/named-filters in review tab.
