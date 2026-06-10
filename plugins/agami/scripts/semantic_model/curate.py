@@ -143,9 +143,18 @@ def _trust(obj) -> dict:
 
 
 def _metric_item(area: Optional[str], mm) -> dict:
-    # `entity_type` matches render_review.py's vocabulary so items pass straight through.
-    return {"kind": "metric", "entity_type": "metric", "rule": 1, "area": area, "name": mm.name,
-            "title": mm.name, "source_signal": mm.calculation,
+    # Fields match BOTH render_review.py's vocabulary (entity_type) AND the dashboard
+    # ITEMS_JSON contract (rule_1, signals, extra_lines, …) so the card renders the
+    # calculation and the feedback generator emits `by <email> role=` for sign-off.
+    binding_lines = [{"label": d, "text": sql} for d, sql in (mm.bindings or {}).items()]
+    primary_sql = next(iter((mm.bindings or {}).values()), "")
+    return {"kind": "metric", "entity_type": "metric", "rule": 1, "rule_1": True,
+            "area": area, "name": mm.name, "title": mm.name,
+            "subtitle": f"metric · {area}" if area else "metric",
+            "source_signal": mm.calculation,
+            "signals": [{"ok": True, "text": mm.calculation}],
+            "extra_lines": [{"label": "Definition", "text": mm.calculation}] + binding_lines,
+            "inferred": primary_sql, "origin": "llm_suggested",
             "bindings": mm.bindings, "business_question": mm.business_question,
             **_trust(mm)}
 
@@ -153,16 +162,25 @@ def _metric_item(area: Optional[str], mm) -> dict:
 def _rel_item(area: Optional[str], rel) -> dict:
     join = (f"{rel.from_table}.{rel.from_column} → {rel.to_table}.{rel.to_column}"
             if rel.from_column else f"{rel.from_table} → {rel.to_table} ON {rel.on}")
-    return {"kind": "relationship", "entity_type": "join", "rule": 2, "area": area,
-            "name": f"{rel.from_table}->{rel.to_table}", "title": join,
-            "cardinality": rel.relationship, "source_signal": rel.description or join,
+    origin = "fk" if getattr(rel, "signed_off_role", None) == "system" else "introspect_heuristic"
+    return {"kind": "relationship", "entity_type": "join", "rule": 2, "rule_1": False,
+            "area": area, "name": f"{rel.from_table}->{rel.to_table}", "title": join,
+            "subtitle": rel.relationship, "cardinality": rel.relationship,
+            "source_signal": rel.description or join,
+            "signals": [{"ok": True, "text": rel.description or f"{rel.relationship} · {join}"}],
+            "inferred": join, "origin": origin,
             **_trust(rel)}
 
 
 def _entity_item(area: Optional[str], ent) -> dict:
-    return {"kind": "entity", "entity_type": "entity", "rule": 2, "area": area, "name": ent.name,
-            "title": ent.name, "source_signal": ent.description or "",
-            "maps_to": [f"{m.table}.{m.column}" for m in ent.maps_to], **_trust(ent)}
+    maps = [f"{m.table}.{m.column}" for m in ent.maps_to]
+    why = ent.description or (("maps to " + ", ".join(maps)) if maps else "entity")
+    return {"kind": "entity", "entity_type": "entity", "rule": 2, "rule_1": False,
+            "area": area, "name": ent.name, "title": ent.name, "subtitle": "entity",
+            "source_signal": ent.description or "",
+            "signals": [{"ok": True, "text": why}],
+            "inferred": ", ".join(maps), "origin": "llm_suggested",
+            "maps_to": maps, **_trust(ent)}
 
 
 def model_tree(org: Organization) -> dict[str, Any]:

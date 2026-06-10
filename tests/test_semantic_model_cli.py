@@ -99,6 +99,27 @@ def test_add_writes_metrics_and_skips_invalid(tmp_path):
     assert not (tmp_path / "subject_areas" / "s" / "metrics" / "no_calc.yaml").exists()
 
 
+def test_review_item_matches_dashboard_contract(tmp_path):
+    # the dashboard reads rule_1 (bool), signals[], extra_lines[] — a metric item must
+    # carry them, else the card shows no description (bug 2) and the feedback generator
+    # omits `by <email> role=` for sign-off (bug 3, which buckets by rule_1).
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    curate.write_items(tmp_path, "s", "metric", [
+        {"name": "revenue", "calculation": "Total revenue (USD)",
+         "bindings": {"PostgreSQL": "SUM(orders.total)"}, "source_tables": ["orders"],
+         "confidence": "inferred", "review_state": "unreviewed"}])
+    org = load_organization(tmp_path, include_rejected=True)
+    m = next(it for it in curate.all_items(org, scope="all") if it["entity_type"] == "metric")
+    assert m["rule_1"] is True
+    assert any(s["text"] == "Total revenue (USD)" for s in m["signals"])
+    assert any(l["label"] == "Definition" and l["text"] == "Total revenue (USD)" for l in m["extra_lines"])
+    # the system-approved relationship is origin=fk on the auto tab (not a phantom count)
+    rel = next(it for it in curate.all_items(org, scope="all") if it["entity_type"] == "join")
+    assert rel["rule_1"] is False and rel["origin"] == "fk" and rel["tab"] == "auto"
+
+
 def test_review_items_scope_rule1_returns_only_signoff_items(tmp_path):
     # the Phase 4 gate uses --scope rule1 so the rendered count == the sign-off count;
     # no skill-side hand-filtering, no env var. rule1 = metrics/named-filters in review tab.

@@ -740,7 +740,7 @@
 
     // ---- Entity-type group ordering inside a tab ----
     // Sort entity types: Rule 1 first (metric, named_filter), then field_description, join, dataset.
-    const TYPE_ORDER = ['metric', 'named_filter', 'join', 'field_description'];
+    const TYPE_ORDER = ['metric', 'named_filter', 'join', 'entity', 'field_description'];
     // Primary (must-do-to-ship) vs Secondary (polish over time). Pillar D split.
     // The runtime *blocks* on Rule 1 (metric / named_filter) and on drift
     // (stale entries); everything else is "Optional" — surfaces as a warning
@@ -750,6 +750,7 @@
       metric:             'Metrics',
       named_filter:       'Named Filters',
       join:               'Joins',
+      entity:             'Entities',
       field_description:  'Field Descriptions',
     };
 
