@@ -549,6 +549,8 @@ Open it: green = numbers match, red = mismatch (drill in to see the SQL).
 Reply: approve N · reject N · edit N · done (when you're through).
 ```
 
+**Processing the batch:** an `edit N` that fixes *that example's* SQL → update the example. But when the user gives a **cross-cutting display/formatting rule** (currency symbol, number formatting, units — applies to many examples, not one), do NOT silently file it to USER_MEMORY. Route it through the [`agami-save-correction`](../agami-save-correction/SKILL.md) display-rule path: **ASK whether it's personal (`USER_MEMORY.md`) or org-wide for `<profile>` (`ORGANIZATION.md`, so the team gets it)** — ask once for the batch of rules — then also bake the formatting into the affected examples' SQL.
+
 ---
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)

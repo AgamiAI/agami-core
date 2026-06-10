@@ -13,7 +13,7 @@ Local-only. Never sent in telemetry. The skill reads it on each query, but neith
 | `<artifacts_dir>/USER_MEMORY.md` | Profile-agnostic (one global file) | **User preferences** that apply across every database | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
 | `<artifacts_dir>/<profile>/ORGANIZATION.md` | Per-profile (one per database) | **Domain knowledge** about this specific database | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
 
-The skill loads both on every query. `ORGANIZATION.md` answers *what does this data mean*, `USER_MEMORY.md` answers *how should I display / filter results*. They don't overlap.
+The skill loads both on every query. `ORGANIZATION.md` answers *what does this data mean*, `USER_MEMORY.md` answers *how should I display / filter results*. The one shared category is **display/formatting rules**, which split by scope: a personal tic ("I like top-10") goes in USER_MEMORY; an org-wide convention that everyone querying this database should get (currency symbol, units, number formatting) goes in `ORGANIZATION.md` under `## Display & formatting conventions`. agami **asks** which when you save such a rule, so the team-wide ones land here and travel with the shared model.
 
 ## Format
 
@@ -35,6 +35,14 @@ query as domain context.)
 - "MRR" = monthly recurring revenue, computed as SUM(price) WHERE plan='subscription'
 - "active user" = signed in within the last 30 days
 - "fiscal year" starts in October
+
+## Display & formatting conventions
+
+(Org-wide rules for how this database's results should be presented — everyone
+querying it gets these. Added when you save a formatting rule and choose "org-wide".)
+
+- Monetary amounts are in INR — show with a ₹ symbol and Indian comma grouping.
+- Format large counts with thousands separators.
 
 ## Who's in this data
 

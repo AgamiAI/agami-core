@@ -11,12 +11,12 @@ USER_MEMORY.md is also **separate from `<artifacts_dir>/<profile>/ORGANIZATION.m
 | `<artifacts_dir>/USER_MEMORY.md` | **Cross-database** preferences (one global file) | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
 | `<artifacts_dir>/<profile>/ORGANIZATION.md` | **Per-database** domain context (one per profile) | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
 
-The skill loads both on every query. USER_MEMORY answers *how should I display / filter results, no matter which database*; ORGANIZATION.md answers *what does the data mean for this specific database*. They don't overlap.
+The skill loads both on every query. USER_MEMORY answers *how should I display / filter results, no matter which database*; ORGANIZATION.md answers *what does the data mean for this specific database*. The one shared category is **display/formatting rules**: a personal one (here) vs an org-wide one that the whole team should get (→ `ORGANIZATION.md` `## Display & formatting conventions`). agami **asks** which when you save such a rule — so keep only your *personal* display tics here.
 
 ## What goes in here (USER_MEMORY)
 
 - **Default filters** the user always wants applied across every database (e.g. "exclude test users where email matches `%@example.com`")
-- **Display preferences** (currency formatting, date format, "always show top 10 not top 5")
+- **Display preferences that are personal to you** (date format you like, "always show top 10 not top 5"). Org-wide formatting — a currency symbol / units everyone querying a database should get — goes in that database's `ORGANIZATION.md` instead (agami asks).
 - **Hard avoids that apply broadly** (don't query rows where `is_test = true`)
 
 If the preference is database-specific (e.g. "in this finance DB, always join orders to invoices"), it belongs in the OSI model or in `ORGANIZATION.md`, not here.

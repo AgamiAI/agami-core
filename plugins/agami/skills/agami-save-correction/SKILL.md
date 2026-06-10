@@ -132,15 +132,22 @@ Else: does the corrected SQL define a REUSABLE AGGREGATION that didn't exist?
        → if also touches the predicate side (active customers), consider whether
          the predicate alone deserves a named_filter — same Rule 1 sign-off.
 
-Else: is the correction a DISPLAY / FORMATTING / DEFAULT-FILTER preference that
-   should apply to every database?
+Else: is the correction a DISPLAY / FORMATTING / DEFAULT-FILTER preference?
    (e.g., "always exclude @example.com test users", "default time window is
-    last 30 days", "format counts with commas", "always show currency with $")
-   → user_preference (writes to USER_MEMORY.md)
-       → if it's about how SQL renders results (TO_CHAR, ROUND, ::text, AS aliases),
-         ALSO update the relevant seed example's SQL so future answers actually
-         apply the formatting — prose in USER_MEMORY.md tells the LLM what the
-         user wants; the example demonstrates how to achieve it.
+    last 30 days", "format counts with commas", "amounts are in INR — show ₹")
+   → a display/formatting rule. **ASK where it should live — never auto-file it.**
+     The personal-vs-org call is the user's, not yours (a currency symbol is usually
+     org-wide; "I prefer top-10 not top-5" is personal). **AskUserQuestion** (ask
+     ONCE for a batch of rules captured together, not per rule):
+     > Apply this just for you, or org-wide for `<profile>`?
+     - `Just me` → `user_preference` → `USER_MEMORY.md` (your prefs across **every**
+       database — travels with you, not the team).
+     - `Org-wide for <profile> (Recommended for currency/units)` → `org_context` →
+       `ORGANIZATION.md` (everyone who queries this database gets it).
+   → In EITHER case, if it's about how SQL renders results (TO_CHAR, ROUND, ::text,
+     AS aliases, a currency symbol), ALSO update the relevant seed example's SQL so
+     future answers actually apply the formatting — the prose tells the LLM what the
+     user wants; the example demonstrates how.
 
 Else: is the correction about a BUSINESS TERM specific to this database's domain?
    (e.g., "gold tier means lifetime spend > $10k" — used as a category in many
@@ -161,7 +168,7 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 
 1. **Per-column rule → ORGANIZATION.md.** "`PII.GENDER` values normalize to Male" is NOT domain context — it's a column-value mapping. Route to `field_metadata` (`choice_field`).
 2. **Per-column rule → examples.yaml notes.** This skill never writes to `examples.yaml.notes[]` (that path lives in agami-connect Phase 6d). If you find yourself wanting to write "the CRIF total can be negative" as a note on example #12, route it to `field_metadata` on the actual column instead — the lesson applies to every future query, not just to one example.
-3. **Display preference → ORGANIZATION.md.** "Format counts with commas" is not a domain concept — it's a display preference. Route to `user_preference` (USER_MEMORY.md).
+3. **Auto-filing a display preference without asking.** Don't silently route formatting/currency/unit rules to USER_MEMORY (the old default). **Ask** personal (`user_preference` → USER_MEMORY.md) vs org-wide (`org_context` → ORGANIZATION.md) — a currency symbol / unit is usually org-wide (everyone querying this DB wants it); a "top-10 not top-5" tic is personal. Ask once per batch.
 4. **Display preference → prose without changing SQL.** If the correction is "always format like X," ALSO modify the seed example's SQL to demonstrate the formatting (so future answers actually apply it, not just describe it).
 
 ### Diff-based hints (look at SQL changes for classification clues)
@@ -170,7 +177,7 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 - Math applied to one column (`/100`, `* 100.0`, `CAST(...)`) → likely `field_metadata` (with a `unit` correction).
 - `CASE WHEN col = 'X' THEN 'Y' ELSE 'Z' END` for a column's display value → likely `field_metadata` with `choice_field` update.
 - New WHERE clause referencing a specific business term (e.g., `plan_type='subscription'`) AND new aggregation → likely `new_metric`.
-- `TO_CHAR(...)`, `ROUND(...)`, `AS my_alias` purely on the output side → likely `user_preference` (display) — ALSO update the seed example's SQL.
+- `TO_CHAR(...)`, `ROUND(...)`, `AS my_alias`, a currency symbol purely on the output side → a display rule: **ask** personal (`user_preference` → USER_MEMORY.md) vs org-wide (`org_context` → ORGANIZATION.md) — ALSO update the seed example's SQL.
 - Only structural / cosmetic SQL changes → `sql_fix`.
 
 ### When ambiguous, AskUserQuestion (use the rubric above as your option set)
@@ -181,7 +188,7 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 > - **A join correction** — relationships in the model need updating
 > - **A table meaning change** — the description / context for a whole table
 > - **A new business metric** — let's add this as a reusable metric
-> - **A display preference** — applies across every database (formatting, default filters, ...)
+> - **A display / formatting rule** — formatting, currency/units, default filters (I'll ask: just for you, or org-wide for this database)
 > - **Domain context for this database** — abstract business concepts not tied to one column (e.g., "gold tier means lifetime spend > $10k")
 
 The user's answer determines Phase 5 routing.
@@ -296,7 +303,7 @@ An `org_context` correction lands in `<artifacts_dir>/<profile>/ORGANIZATION.md`
 Steps:
 
 1. **Read** `<artifacts_dir>/<profile>/ORGANIZATION.md` (create with the default template if missing — `init`/`connect` normally seed it, but this is a safe fallback).
-2. **Pick the right section.** Most domain-context entries land under `## Key terminology` as `- "<term>" = <definition>` bullets. If the user is describing what the data represents at a higher level, append a paragraph under `# About this database` instead. If they're describing *what's not in this database*, append under `## What we DON'T track here`. Add a new section only if none of the existing ones fit.
+2. **Pick the right section.** Most domain-context entries land under `## Key terminology` as `- "<term>" = <definition>` bullets. If the user is describing what the data represents at a higher level, append a paragraph under `# About this database` instead. If they're describing *what's not in this database*, append under `## What we DON'T track here`. **For an org-wide display/formatting rule** (currency symbol, units, number formatting that everyone querying this DB should get), append under `## Display & formatting conventions` (create the section if absent). Add a new section only if none fit.
 3. **Append the new bullet (or paragraph)** in plain English, preserving the user's wording.
 4. **Show the user the diff** (Phase 4b) before writing.
 5. **No validation** — ORGANIZATION.md is free-form. The semantic model is unchanged.
