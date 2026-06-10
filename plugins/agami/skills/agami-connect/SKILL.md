@@ -538,13 +538,24 @@ Output `{added, written, committed, rejected:[{question, error}]}`. For each `re
 
 ## Phase 6: Validate every seed example (the trust onboarding)
 
-Run every seed, build the items JSON, and render the examples-validation dashboard (per-profile subdir). The user reviews matches (green) / mismatches (red) with drill-down. Support the chat back-channel grammar (approve/reject/edit/done) and re-render after each batch. This is the strongest "do these numbers match?" trust moment — surface it.
+Run every seed, build the items JSON, and render the examples-validation dashboard (per-profile subdir). The user reviews matches (green) / mismatches (red) with drill-down. This is the strongest "do these numbers match?" trust moment — surface it.
+
+**Then END THE TURN and WAIT — do NOT continue to Phase 7/8 in the same message.** Like the Phase 4 gate, this is a hard stop: render the dashboard, give the one-line hand-off + the chat grammar (`approve` / `reject` / `edit` / `done`), and **stop**. The user is *in* the dashboard validating; printing the post-introspect summary or the "things you could ask" closing now (before they've validated) is exactly the bug we're avoiding. Re-render after each batch they send back, and only when they reply **`done`** (or have actioned every example) do you proceed to Phase 7.
+
+Hand-off line (then end the turn):
+```
+Examples validated against your live DB → ~/.agami/examples-validation/<profile>/<ts>.html
+Open it: green = numbers match, red = mismatch (drill in to see the SQL).
+Reply: approve N · reject N · edit N · done (when you're through).
+```
 
 ---
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
-Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved. (Past failure: the skill jumped Phase 6 → 8, leaving the user with unreviewed entries and no path to clear them.) Lead with the **must-do** count, break out optional polish separately.
+**Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after they replied `done` (or actioned everything) at the Phase 6 examples gate, and after the Phase 4 curate gate returned. **Never print this summary or the Phase 8 closing in the same turn that you rendered a dashboard, and never while the user is mid-review.** If a dashboard (Phase 4 review, Phase 6 validation) is still open and unanswered, you should have ended the turn there — wait for the user, don't summarize over them.
+
+Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved. Lead with the **must-do** count, break out optional polish separately.
 
 Scan the model; count by `confidence`/`review_state`/type:
 
