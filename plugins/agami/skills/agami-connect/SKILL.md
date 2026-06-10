@@ -367,7 +367,7 @@ This runs on **every** invocation. The user's yes/skip is theirs; the skill neve
 **AskUserQuestion:**
 > Want to give me a one-paragraph description of what this database is about? It improves NL→SQL accuracy a lot. Examples: what the company/product is, what "MRR" or "active user" means in your terms.
 
-`Yes — I'll type it now (Other field)` → write to `<artifacts_dir>/<profile>/ORGANIZATION.md` under `# About this database` + the commented default template. `Skip — I'll edit ORGANIZATION.md later (Recommended)` → write the template untouched. `chmod 600`. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+`Yes — I'll type it now (Other field)` → write to `<artifacts_dir>/<profile>/ORGANIZATION.md` under `# About this database` + the commented default template. `Skip — I'll auto-fill it from my data (Recommended)` → **don't write the bare template** — leave ORGANIZATION.md absent for now; Phase 2f auto-drafts it from the enriched model so it's never blank. `chmod 600` whatever you write. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 
@@ -487,6 +487,17 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveat
 ### 2e — Reintrospect merge
 
 On `reintrospect`, the engine rewrites the structural skeleton. **Preserve hand-edits**: descriptions, entities, metrics, caveats, value_transforms, and trust sign-offs (`confidence`/`review_state`/`signed_off_*`) carry over for tables/columns that still exist. Only structure the DB unambiguously reports (table list, columns, types, PK, FK) is refreshed. Mark entries `stale` only when their underlying column/table changed.
+
+### 2f — Auto-draft ORGANIZATION.md if the user didn't write one
+
+ORGANIZATION.md must never be blank. If it's **missing or empty** (the user skipped 1.4, or only HTML comments remain), generate a factual draft from the now-enriched model and write it:
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" org-draft "$ROOT" > "$ROOT/ORGANIZATION.md"
+chmod 600 "$ROOT/ORGANIZATION.md"
+```
+
+`org-draft` is deterministic — it states only what the model *contains* (tables + descriptions + row counts, metrics, entities, units/currency) and leaves a `## Key terminology` prompt for the domain vocabulary only the user knows. It invents no business semantics. If the user **did** write context in 1.4 (the file has prose beyond comments), leave it untouched. Mention in the Phase 7 summary that ORGANIZATION.md was auto-drafted and is theirs to edit (in the model explorer or directly).
 
 ---
 

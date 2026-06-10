@@ -65,6 +65,14 @@ def cmd_areas(args) -> int:
     return 0
 
 
+def cmd_org_draft(args) -> int:
+    # factual ORGANIZATION.md draft from the model, so it's never blank
+    from . import org_draft
+    org = L.load_organization(args.root, include_rejected=False)
+    sys.stdout.write(org_draft.draft_organization_md(org))
+    return 0
+
+
 def cmd_examples(args) -> int:
     examples = L.list_prompt_examples(args.root, args.area)
     matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k)
@@ -252,6 +260,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("areas", help="list subject areas")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_areas)
+
+    sp = sub.add_parser("org-draft", help="print a factual ORGANIZATION.md draft from the model")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_org_draft)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
     sp.add_argument("root")
