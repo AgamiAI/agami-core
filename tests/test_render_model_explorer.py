@@ -104,7 +104,34 @@ def test_manifest_qnames_use_area(profile_dir):
 def test_manifest_collects_metrics(profile_dir):
     m = build_manifest(profile_dir, "test")
     assert m["totals"]["metrics"] == 1
-    assert m["metrics"][0]["name"] == "order_count"
+    met = m["metrics"][0]
+    assert met["name"] == "order_count"
+    assert "calculation" in met and "bindings" in met  # full metric fields, not just a name
+
+
+def test_manifest_surfaces_full_model(profile_dir):
+    # the comprehensive explorer needs everything in the manifest, not just tables
+    area = profile_dir / "subject_areas" / "sales"
+    (area / "entities").mkdir(parents=True, exist_ok=True)
+    (area / "entities" / "customer.yaml").write_text(yaml.safe_dump({
+        "name": "customer", "plural": "customers",
+        "maps_to": [{"table": "customers", "column": "id", "primary": True}],
+        "confidence": "inferred", "review_state": "unreviewed"}))
+    (profile_dir / "prompt_examples" / "sales").mkdir(parents=True, exist_ok=True)
+    (profile_dir / "prompt_examples" / "sales" / "examples.yaml").write_text(yaml.safe_dump([
+        {"question": "how many orders", "sql": "SELECT COUNT(*) FROM orders", "source": "seed"}]))
+    (profile_dir / "ORGANIZATION.md").write_text("# About\nA shop. MRR = monthly recurring revenue.")
+    (area / "relationships.yaml").write_text(yaml.safe_dump({"relationships": [
+        {"from_table": "orders", "from_column": "customer_id", "to_table": "customers",
+         "to_column": "id", "relationship": "many_to_one", "review_state": "approved",
+         "confidence": "confirmed", "signed_off_by": "agami_introspect",
+         "signed_off_role": "system", "signed_off_at": "t"}]}))
+    m = build_manifest(profile_dir, "test")
+    assert "MRR = monthly recurring revenue" in m["organization_md"]
+    assert any(e["name"] == "customer" and e["maps_to"] == ["customers.id"] for e in m["entities"])
+    assert any(x["question"] == "how many orders" for x in m["examples"])
+    # the fixture's orders→customers FK relationship is surfaced
+    assert any(r["from_table"] == "orders" and r["to_table"] == "customers" for r in m["relationships"])
 
 
 def test_render_embeds_manifest_and_substitutes(profile_dir):

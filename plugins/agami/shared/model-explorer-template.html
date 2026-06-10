@@ -448,7 +448,11 @@
       </div>
     </div>
 
+    <div id="org-context-section"></div>
     <div id="metrics-section"></div>
+    <div id="entities-section"></div>
+    <div id="relationships-section"></div>
+    <div id="examples-section"></div>
     <div id="named-filters-section"></div>
     <div id="schemas"></div>
   </div>
@@ -489,7 +493,65 @@
     // pending[qname] = "exclude" | "include" | undefined
     //   qname is "<schema>.<table>" for tables, "<schema>.<table>.<field>" for fields
     const pending = {};
+    // ops[qname] = {op, kind, area, name} — exclude/include for entities/metrics/
+    // relationships (they carry an explicit `kind` so the curate engine routes them;
+    // tables/columns stay in `pending` + the text grammar for back-compat).
+    const ops = {};
     let activeFilter = 'all';
+
+    function opOf(qname) { return ops[qname] ? ops[qname].op : undefined; }
+    function relName(item) {
+      return item.name || (item.from_table ? item.from_table + '->' + item.to_table
+                                            : (item.qname.split('.').slice(1).join('.')));
+    }
+    function toggleOp(kind, item) {
+      const q = item.qname;
+      const desired = item.excluded ? 'include' : 'exclude';
+      if (ops[q] && ops[q].op === desired) delete ops[q];
+      else ops[q] = { op: desired, kind, area: item.area, name: relName(item) };
+      renderAll();
+      updateFooter();
+    }
+    function excludeBtn(kind, item) {
+      const queued = opOf(item.qname);
+      const label = item.excluded
+        ? (queued === 'include' ? '↻ Include (queued)' : 'Include')
+        : (queued === 'exclude' ? '✗ Excluded (queued)' : 'Exclude');
+      return el('button', {
+        type: 'button', class: 'field-actions-btn ' + (queued ? 'queued-' + queued : ''),
+        style: 'font-size:11px;padding:4px 10px;border-radius:5px;cursor:pointer;'
+             + 'background:var(--bg);color:var(--muted);border:1px solid var(--border);margin:8px 18px;',
+        onclick: (ev) => { ev.stopPropagation(); toggleOp(kind, item); },
+      }, label);
+    }
+    function labelLine(text) {
+      return el('div', { class: 'label-line', text,
+        style: 'color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;padding:8px 18px 0;' });
+    }
+    function preBlock(text) {
+      return el('pre', { text,
+        style: 'font-family:ui-monospace,monospace;font-size:13px;background:var(--code-bg);'
+             + 'padding:8px 18px;margin:4px 18px 8px;border-radius:4px;white-space:pre-wrap;' });
+    }
+    function descBlock(text) {
+      const d = el('div', { class: 'table-description', style: 'border-bottom:none;padding-top:4px;' });
+      d.appendChild(highlight(text, searchQ));
+      return d;
+    }
+    // Generic flat section: title + count + cards, search-filtered on `hay(item)`.
+    function renderFlatSection(rootId, title, items, hay, cardFn) {
+      const root = document.getElementById(rootId);
+      root.innerHTML = '';
+      const matched = (items || []).filter(it => !searchQ || hay(it).toLowerCase().includes(searchQ));
+      if (!matched.length) return;
+      const sec = el('div', { class: 'schema-section' });
+      const header = el('div', { class: 'schema-header' });
+      header.appendChild(document.createTextNode(title));
+      header.appendChild(el('span', { class: 'schema-count', text: matched.length + ' total' }));
+      sec.appendChild(header);
+      matched.forEach(it => sec.appendChild(cardFn(it)));
+      root.appendChild(sec);
+    }
     let searchQ = '';
 
     // ---- Helpers ----
@@ -812,21 +874,38 @@
     // For v1: render-only (no per-entry exclude action). Sign-off / approve /
     // reject happens through /agami-review (those are Rule 1 entries).
     function renderMetricsSection() {
-      const root = document.getElementById('metrics-section');
+      renderFlatSection('metrics-section', 'Metrics', manifest.metrics,
+        m => `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`,
+        renderMetricCard);
+    }
+    function renderEntitiesSection() {
+      renderFlatSection('entities-section', 'Entities', manifest.entities,
+        e => `${e.name} ${e.plural} ${(e.other_names || []).join(' ')} ${(e.maps_to || []).join(' ')} ${e.description} ${e.area}`,
+        renderEntityCard);
+    }
+    function renderRelationshipsSection() {
+      renderFlatSection('relationships-section', 'Relationships', manifest.relationships,
+        r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area}`,
+        renderRelCard);
+    }
+    function renderExamplesSection() {
+      renderFlatSection('examples-section', 'Prompt examples', manifest.examples,
+        x => `${x.question} ${x.sql} ${x.area}`,
+        renderExampleCard);
+    }
+    function renderOrgContextSection() {
+      const root = document.getElementById('org-context-section');
       root.innerHTML = '';
-      const items = (manifest.metrics || []).filter(m => {
-        if (!searchQ) return true;
-        const hay = (m.name + ' ' + m.expression + ' ' + m.description + ' '
-                     + m.definition_prose + ' ' + (m.assumptions || []).join(' ')).toLowerCase();
-        return hay.includes(searchQ);
-      });
-      if (!items.length) return;
+      const md = manifest.organization_md || '';
+      if (searchQ && !md.toLowerCase().includes(searchQ)) return;
       const sec = el('div', { class: 'schema-section' });
       const header = el('div', { class: 'schema-header' });
-      header.appendChild(document.createTextNode('Metrics'));
-      header.appendChild(el('span', { class: 'schema-count', text: items.length + ' total' }));
+      header.appendChild(document.createTextNode('Organization context'));
+      header.appendChild(el('span', { class: 'schema-count', text: 'ORGANIZATION.md' }));
       sec.appendChild(header);
-      items.forEach(m => sec.appendChild(renderMetricCard(m)));
+      const card = el('div', { class: 'table-card' });
+      card.appendChild(preBlock(md || '(empty — add domain context so answers know what the data means)'));
+      sec.appendChild(card);
       root.appendChild(sec);
     }
 
@@ -849,78 +928,69 @@
       root.appendChild(sec);
     }
 
-    function renderMetricCard(m) {
-      const card = el('div', { class: 'table-card' });
+    function cardHeader(title, item) {
       const header = el('div', { class: 'table-header' });
       const nameEl = el('div', { class: 'table-name' });
-      if (m.scope && m.scope !== 'model') {
-        nameEl.appendChild(el('span', { class: 'schema-prefix', text: m.scope + '.' }));
-      }
-      nameEl.appendChild(highlight(m.name, searchQ));
+      nameEl.appendChild(highlight(title, searchQ));
       header.appendChild(nameEl);
-      if (m.review_state && m.review_state !== 'approved') {
-        const cls = m.review_state === 'rejected' ? 'badge-rejected'
-                  : m.review_state === 'stale' ? 'badge-stale'
-                  : 'badge-unreviewed';
-        header.appendChild(el('span', { class: 'table-state-badge ' + cls, text: m.review_state }));
+      const rs = item && item.review_state;
+      if (rs && rs !== 'approved') {
+        const cls = rs === 'rejected' ? 'badge-rejected' : rs === 'stale' ? 'badge-stale' : 'badge-unreviewed';
+        header.appendChild(el('span', { class: 'table-state-badge ' + cls, text: rs }));
       }
-      card.appendChild(header);
+      return header;
+    }
 
+    function renderMetricCard(m) {
+      const card = el('div', { class: 'table-card' + (m.excluded ? ' excluded' : '') });
+      card.appendChild(cardHeader(m.name, m));
       const body = el('div', { class: 'table-body' });
+      if (m.calculation) { body.appendChild(labelLine('Calculation')); body.appendChild(descBlock(m.calculation)); }
+      const bindings = m.bindings || {};
+      Object.keys(bindings).forEach(dialect => {
+        body.appendChild(labelLine(dialect)); body.appendChild(preBlock(bindings[dialect]));
+      });
+      if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
+      if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
+      body.appendChild(excludeBtn('metric', m));
+      card.appendChild(body);
+      return card;
+    }
 
-      // Expression
-      if (m.expression) {
-        body.appendChild(el('div', {
-          class: 'label-line',
-          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 18px 0;',
-          text: 'Expression',
-        }));
-        body.appendChild(el('pre', {
-          style: 'font-family: ui-monospace, monospace; font-size: 13px; background: var(--code-bg); padding: 8px 18px; margin: 4px 18px 8px; border-radius: 4px; white-space: pre-wrap;',
-          text: m.expression,
-        }));
-      }
+    function renderEntityCard(e) {
+      const card = el('div', { class: 'table-card' + (e.excluded ? ' excluded' : '') });
+      card.appendChild(cardHeader(e.name + (e.plural ? ' / ' + e.plural : ''), e));
+      const body = el('div', { class: 'table-body' });
+      if ((e.maps_to || []).length) { body.appendChild(labelLine('Maps to')); body.appendChild(descBlock(e.maps_to.join(', '))); }
+      if ((e.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(e.other_names.join(', '))); }
+      if (e.value_pattern) { body.appendChild(labelLine('Value pattern')); body.appendChild(preBlock(e.value_pattern)); }
+      if (e.description) { body.appendChild(labelLine('Description')); body.appendChild(descBlock(e.description)); }
+      body.appendChild(excludeBtn('entity', e));
+      card.appendChild(body);
+      return card;
+    }
 
-      // Definition prose (the canonical description — biggest signal)
-      const defProse = (m.definition_prose || '').trim();
-      if (defProse) {
-        body.appendChild(el('div', {
-          class: 'label-line',
-          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 18px;',
-          text: 'Definition',
-        }));
-        const div = el('div', {
-          class: 'table-description',
-          style: 'border-bottom: none; padding-top: 4px;',
-        });
-        div.appendChild(highlight(defProse, searchQ));
-        body.appendChild(div);
-      } else if (m.description) {
-        // Fall back to OSI description if no definition_prose.
-        const div = el('div', { class: 'table-description' });
-        div.appendChild(highlight(m.description, searchQ));
-        body.appendChild(div);
-      }
+    function renderRelCard(r) {
+      const card = el('div', { class: 'table-card' + (r.excluded ? ' excluded' : '') });
+      const join = r.from_column
+        ? `${r.from_table}.${r.from_column} → ${r.to_table}.${r.to_column}`
+        : `${r.from_table} → ${r.to_table}${r.on ? ' ON ' + r.on : ''}`;
+      card.appendChild(cardHeader(join, r));
+      const body = el('div', { class: 'table-body' });
+      if (r.cardinality) { body.appendChild(labelLine('Cardinality')); body.appendChild(descBlock(r.cardinality)); }
+      if (r.description) { body.appendChild(labelLine('Description')); body.appendChild(descBlock(r.description)); }
+      body.appendChild(excludeBtn('relationship', r));
+      card.appendChild(body);
+      return card;
+    }
 
-      // Assumptions
-      const ass = (m.assumptions || []).filter(a => (a || '').trim());
-      if (ass.length) {
-        body.appendChild(el('div', {
-          class: 'label-line',
-          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 18px;',
-          text: 'Assumptions',
-        }));
-        const ul = el('ul', {
-          style: 'font-size: 13px; padding: 4px 18px 8px 36px; margin: 0;',
-        });
-        ass.forEach(a => {
-          const li = el('li');
-          li.appendChild(highlight(String(a), searchQ));
-          ul.appendChild(li);
-        });
-        body.appendChild(ul);
-      }
-
+    function renderExampleCard(x) {
+      const card = el('div', { class: 'table-card' });
+      card.appendChild(cardHeader(x.question || '(no question)', x));
+      const body = el('div', { class: 'table-body' });
+      if (x.sql) { body.appendChild(labelLine('SQL')); body.appendChild(preBlock(x.sql)); }
+      const meta = [x.area, x.source, x.status].filter(Boolean).join(' · ');
+      if (meta) body.appendChild(descBlock(meta));
       card.appendChild(body);
       return card;
     }
@@ -1018,11 +1088,12 @@
 
     function updateFooter() {
       const c = pendingCounts();
-      const total = c.excludeTables + c.includeTables + c.excludeColumns + c.includeColumns;
+      const opCount = Object.keys(ops).length;
+      const total = c.excludeTables + c.includeTables + c.excludeColumns + c.includeColumns + opCount;
       const sum = document.getElementById('pending-summary');
       const btn = document.getElementById('btn-generate');
       if (total === 0) {
-        sum.textContent = 'No actions queued yet — click Exclude / Include on a table or field to start.';
+        sum.textContent = 'No actions queued yet — click Exclude / Include on a table, column, metric, entity, or relationship to start.';
         btn.disabled = true;
       } else {
         const parts = [];
@@ -1030,6 +1101,7 @@
         if (c.includeTables) parts.push(`${c.includeTables} table${c.includeTables === 1 ? '' : 's'} to include`);
         if (c.excludeColumns) parts.push(`${c.excludeColumns} column${c.excludeColumns === 1 ? '' : 's'} to exclude`);
         if (c.includeColumns) parts.push(`${c.includeColumns} column${c.includeColumns === 1 ? '' : 's'} to include`);
+        if (opCount) parts.push(`${opCount} metric/entity/relationship change${opCount === 1 ? '' : 's'}`);
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
         btn.disabled = false;
       }
@@ -1050,6 +1122,13 @@
       if (buckets.includeT.length) lines.push('include tables: ' + buckets.includeT.sort().join(', '));
       if (buckets.excludeC.length) lines.push('exclude columns: ' + buckets.excludeC.sort().join(', '));
       if (buckets.includeC.length) lines.push('include columns: ' + buckets.includeC.sort().join(', '));
+      // entity / metric / relationship exclude-includes carry an explicit kind, so
+      // they go as a curate-ops JSON block (Claude writes it to a file + runs sm curate).
+      const opList = Object.values(ops);
+      if (opList.length) {
+        lines.push('curate-ops:');
+        lines.push(JSON.stringify(opList));
+      }
       if (lines.length) lines.push('done');
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
       document.getElementById('modal').hidden = false;
@@ -1071,6 +1150,7 @@
     });
     document.getElementById('btn-reset').addEventListener('click', () => {
       Object.keys(pending).forEach(k => delete pending[k]);
+      Object.keys(ops).forEach(k => delete ops[k]);
       renderAll();
       updateFooter();
     });
@@ -1094,7 +1174,11 @@
 
     // ---- Composite renderer + first render ----
     function renderAll() {
+      renderOrgContextSection();
       renderMetricsSection();
+      renderEntitiesSection();
+      renderRelationshipsSection();
+      renderExamplesSection();
       renderNamedFiltersSection();
       renderManifest();
     }

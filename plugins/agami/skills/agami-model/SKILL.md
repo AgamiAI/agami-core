@@ -109,12 +109,16 @@ exclude tables:  <qname-list>
 include tables:  <qname-list>
 exclude columns: <qname-list>
 include columns: <qname-list>
+curate-ops:
+[{"op":"exclude","kind":"metric","area":"...","name":"..."}, ...]
 done
 ```
 
 Where `<qname-list>` is comma-separated, whitespace-tolerant:
 - Table qname: `<area>.<table>` (e.g., `bureau_data.NOHIT_DATA`)
 - Column qname: `<area>.<table>.<column>` (e.g., `bureau_data.PII.AADHAAR`)
+
+The `curate-ops:` line (if present) is followed by **one JSON array** — exclude/include actions on **metrics / entities / relationships** (which carry an explicit `kind`, unlike tables/columns). It's already a valid curate ops array (`op` is `exclude`/`include`, which the engine maps to reject/unreviewed). Parse it verbatim and merge with the table/column ops below.
 
 Tolerate trailing commas, mixed-case schema/table/column names (the YAMLs typically preserve the DB's casing — pass them through verbatim).
 
@@ -124,13 +128,15 @@ Tolerate trailing commas, mixed-case schema/table/column names (the YAMLs typica
 
 ## Phase 3: Apply via the curation engine
 
-Translate the parsed exclude/include commands into a curation ops array. Targets are `<area>.<table>` (a whole table) or `<area>.<table>.<column>` (a single column). `exclude` → `op: reject`, `include` → `op: include`:
+Translate the parsed exclude/include commands into a curation ops array, **then merge in the `curate-ops:` JSON array** (metric/entity/relationship actions) verbatim. Table targets are `<area>.<table>`, column targets `<area>.<table>.<column>`. `exclude` → `op: exclude` (the engine treats it as reject), `include` → `op: include`:
 
 ```json
 [
-  {"op": "reject",  "kind": "table", "area": "bureau_data", "name": "NOHIT_DATA"},
+  {"op": "exclude", "kind": "table", "area": "bureau_data", "name": "NOHIT_DATA"},
   {"op": "include", "kind": "table", "area": "bureau_data", "name": "LOAN_REPAYMENT"},
-  {"op": "reject",  "kind": "table", "area": "bureau_data", "name": "PII", "column": "AADHAAR"}
+  {"op": "exclude", "kind": "table", "area": "bureau_data", "name": "PII", "column": "AADHAAR"},
+  {"op": "exclude", "kind": "metric", "area": "bureau_data", "name": "avg_score"},
+  {"op": "exclude", "kind": "relationship", "area": "bureau_data", "name": "loans->customers"}
 ]
 ```
 

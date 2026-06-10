@@ -57,7 +57,15 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     org = _L.load_organization(profile_dir, include_rejected=True)
     out_schemas: list[dict] = []
     total_tables = total_fields = total_excluded_tables = total_excluded_fields = 0
+    # flat top-level lists (each entry tagged with its `area`) — mirrors the existing
+    # flat metrics section, so the template renders them with one proven pattern
     metrics_out: list[dict] = []
+    entities_out: list[dict] = []
+    rels_out: list[dict] = []
+    examples_out: list[dict] = []
+
+    org_md_path = profile_dir / "ORGANIZATION.md"
+    organization_md = org_md_path.read_text(encoding="utf-8") if org_md_path.exists() else ""
 
     for sa in org.subject_areas:
         out_tables: list[dict] = []
@@ -77,7 +85,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "name": c.name, "qname": f"{qname}.{c.name}", "type": c.type,
                     "description": c.description, "review_state": c.review_state,
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
-                    "sensitive": c.sensitive,
+                    "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
                 })
             out_tables.append({
                 "name": t.name, "qname": qname, "description": t.description,
@@ -85,24 +93,58 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                               if t.performance_hints else None),
                 "review_state": t.review_state, "origin": "", "excluded": t_excluded,
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
+                "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
                 "synonyms": [], "area": sa.name, "fields": fields_out,
             })
+
+        for e in sa.entities:
+            entities_out.append({
+                "name": e.name, "qname": f"{sa.name}.{e.name}", "plural": e.plural,
+                "other_names": e.other_names, "value_pattern": e.value_pattern,
+                "maps_to": [f"{m.table}.{m.column}" for m in e.maps_to],
+                "description": e.description, "review_state": e.review_state,
+                "excluded": e.review_state == "rejected", "area": sa.name,
+            })
+
         for mm in sa.metrics:
-            metrics_out.append({"name": mm.name, "qname": f"{sa.name}.{mm.name}",
-                                "definition": mm.calculation, "review_state": mm.review_state,
-                                "area": sa.name})
-        if out_tables:
-            out_schemas.append({"name": sa.name, "description": sa.description,
-                                "tables": out_tables})
+            metrics_out.append({
+                "name": mm.name, "qname": f"{sa.name}.{mm.name}", "calculation": mm.calculation,
+                "bindings": mm.bindings, "unit": mm.unit, "other_names": mm.other_names,
+                "source_tables": mm.source_tables, "description": mm.description,
+                "review_state": mm.review_state, "excluded": mm.review_state == "rejected",
+                "area": sa.name,
+            })
+
+        for r in sa.relationships:
+            rels_out.append({
+                "qname": f"{sa.name}.{r.from_table}->{r.to_table}",
+                "from_table": r.from_table, "from_column": r.from_column,
+                "to_table": r.to_table, "to_column": r.to_column, "on": r.on,
+                "cardinality": r.relationship, "description": r.description,
+                "review_state": r.review_state, "excluded": r.review_state == "rejected",
+                "area": sa.name,
+            })
+
+        for i, ex in enumerate(_L.list_prompt_examples(profile_dir, sa.name)):
+            examples_out.append({
+                "n": i, "qname": f"{sa.name}#{i}", "question": ex.get("question", ""),
+                "sql": ex.get("sql", ""), "tables": ex.get("tables", []),
+                "source": ex.get("source", ""), "status": ex.get("status", ""), "area": sa.name,
+            })
+
+        out_schemas.append({"name": sa.name, "description": sa.description, "tables": out_tables})
 
     return {
         "profile": profile,
+        "organization_md": organization_md,
         "totals": {
             "schemas": len(out_schemas), "tables": total_tables, "fields": total_fields,
             "excluded_tables": total_excluded_tables, "excluded_fields": total_excluded_fields,
-            "metrics": len(metrics_out), "named_filters": 0,
+            "metrics": len(metrics_out), "entities": len(entities_out),
+            "relationships": len(rels_out), "examples": len(examples_out), "named_filters": 0,
         },
-        "schemas": out_schemas, "metrics": metrics_out, "named_filters": [],
+        "schemas": out_schemas, "metrics": metrics_out, "entities": entities_out,
+        "relationships": rels_out, "examples": examples_out, "named_filters": [],
     }
 
 
