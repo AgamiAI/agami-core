@@ -140,7 +140,7 @@ def test_resolve_units_maps_result_columns(monkeypatch, tmp_path):
     # traces the SQL: SUM(amount) inherits amount's INR; COUNT(*) is not currency
     got = _resolve_units("p", "SELECT SUM(amount) AS total_outstanding, COUNT(*) AS cnt FROM loans")
     assert got.get("total_outstanding") == "INR" and "cnt" not in got
-    assert _resolve_units("p", "SELECT amount FROM loans") == {"amount": "INR"}
+    assert _resolve_units("p", "SELECT amount FROM loans").get("amount") == "INR"
 
 
 def test_resolve_units_degrades_to_empty_without_model(monkeypatch, tmp_path):

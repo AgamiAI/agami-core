@@ -98,12 +98,13 @@ def test_resolve_result_units_traces_aggregates(tmp_path):
     from semantic_model.loader import load_organization
     _currency_model(tmp_path)
     org = load_organization(tmp_path)
-    assert RT.resolve_result_units(org, "SELECT SUM(amount) AS total FROM loans") == {"total": "INR"}
-    assert RT.resolve_result_units(org, "SELECT AVG(amount) AS a FROM loans") == {"a": "INR"}
-    assert RT.resolve_result_units(org, "SELECT amount FROM loans") == {"amount": "INR"}
+    # named results carry the unit by name (+ a positional #0 key alongside)
+    assert RT.resolve_result_units(org, "SELECT SUM(amount) AS total FROM loans")["total"] == "INR"
+    assert RT.resolve_result_units(org, "SELECT AVG(amount) AS a FROM loans")["a"] == "INR"
+    assert RT.resolve_result_units(org, "SELECT amount FROM loans")["amount"] == "INR"
     assert RT.resolve_result_units(org, "SELECT COUNT(*) AS cnt FROM loans") == {}
     assert RT.resolve_result_units(org, "SELECT SUM(amount)/COUNT(*) AS avg_ticket FROM loans") == {}
-    # unaliased aggregate → positional key (#0), since the DB invents the column name
+    # unaliased aggregate → positional key only (#0), since the DB invents the column name
     assert RT.resolve_result_units(org, "SELECT MAX(amount) FROM loans") == {"#0": "INR"}
 
 
