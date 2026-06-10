@@ -47,3 +47,14 @@ For most chat replies, **prefer natural-language phrasing over slash commands** 
 ## When the model invents a new form
 
 If you find yourself about to write `/init`, `/connect`, `/agami:connect`, `/agami connect`, or any other variation, stop. Either use the `agami-` prefix (e.g. `/agami-connect`) or use natural language. There is no third option.
+
+## Passing JSON to `sm` (`--ops-file` / `--file`) — always write it with the Write tool
+
+Every `sm` command that takes a JSON file (`curate --ops-file`, `add --file`,
+`add-example --file`, `seed-examples --file`, `format-table --units`) expects a real
+JSON file. **Create it with the Write tool — never a heredoc, a shell variable
+(`printf '%s' "$OPS"`), or `python3 -c`.** JSON quotes get mangled by shell quoting,
+and JSON `null` / `true` / `false` are not valid Python — pasting a review-items entry
+(which has `null` fields) into `python3 -c` is what produces
+`NameError: name 'null' is not defined`. The Write tool writes the bytes literally, so
+quotes and `null` survive. Keep ops minimal (the locator + action), not whole items.

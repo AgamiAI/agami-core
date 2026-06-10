@@ -134,14 +134,12 @@ Translate the parsed exclude/include commands into a curation ops array. Targets
 ]
 ```
 
-(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) Apply the whole batch atomically — the engine flips `review_state`, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
+(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state`, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
 
 ```bash
-printf '%s' "$OPS_JSON" > /tmp/agami-model-ops-$ts.json
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
-  --ops-file /tmp/agami-model-ops-$ts.json \
+  --ops-file /tmp/agami-model-ops.json \
   --signer "${reviewer_email}" --role "${reviewer_role}"
-rm -f /tmp/agami-model-ops-$ts.json
 ```
 
 `ROOT="<artifacts_dir>/<profile>"`. Stdout is JSON: `{applied, skipped, errors, validated, committed}`.

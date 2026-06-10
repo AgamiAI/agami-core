@@ -242,12 +242,23 @@ Map the parsed commands (by item `n` → its `{entity_type, area, name}` from th
 
 One call applies the whole batch atomically — it flips `review_state`/sign-off on the canonical YAMLs, **validates the model, commits to the profile git repo, appends to `curation_log.jsonl`, and reverts every change if validation fails**. You don't hand-edit YAML or run the validator yourself.
 
+**Build a MINIMAL ops array and write it with the Write tool — never via a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c`.** Those break on the JSON's quotes, and pasting raw review-items entries (which contain JSON `null`) into a shell/Python context is what produces `NameError: name 'null' is not defined`. Each op is just the locator + action — NOT the whole item:
+
+For each number `N` in the user's command, find item `#N` in the review-items JSON and emit one op using its `kind` / `area` / `name` (and `column` if present). `kind` is already curate's vocabulary (`metric` | `relationship` | `entity` | `table`):
+
+```json
+[
+  {"op": "approve", "kind": "relationship", "area": "bureau_data", "name": "loans->customers"},
+  {"op": "approve", "kind": "metric", "area": "bureau_data", "name": "total_outstanding"},
+  {"op": "reject",  "kind": "entity", "area": "bureau_data", "name": "nominee"}
+]
+```
+
+**Write** that array to `/tmp/agami-curate-ops.json` (Write tool — it writes the JSON literally, `null`/quotes and all, with no shell escaping), then:
 ```bash
-printf '%s' "$OPS_JSON" > /tmp/agami-curate-ops.json
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
   --ops-file /tmp/agami-curate-ops.json \
   --signer "${reviewer_email}" --role "${reviewer_role}"
-rm -f /tmp/agami-curate-ops.json
 ```
 
 `--signer`/`--role` come from the user's approve command (`approve N by you@x.com role=cfo`) or `~/.agami/.config` (`reviewer_email`/`reviewer_role`); they stamp `signed_off_*` on approved entries. The command prints JSON: `{applied, skipped, errors, validated, committed}`.
