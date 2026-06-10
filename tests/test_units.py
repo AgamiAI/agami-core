@@ -103,9 +103,34 @@ def test_resolve_result_units_traces_aggregates(tmp_path):
     assert RT.resolve_result_units(org, "SELECT AVG(amount) AS a FROM loans")["a"] == "INR"
     assert RT.resolve_result_units(org, "SELECT amount FROM loans")["amount"] == "INR"
     assert RT.resolve_result_units(org, "SELECT COUNT(*) AS cnt FROM loans") == {}
-    assert RT.resolve_result_units(org, "SELECT SUM(amount)/COUNT(*) AS avg_ticket FROM loans") == {}
+    # currency / count is still currency (avg ticket) — see dimensional test below
+    assert RT.resolve_result_units(org, "SELECT SUM(amount)/COUNT(*) AS avg_ticket FROM loans")["avg_ticket"] == "INR"
     # unaliased aggregate → positional key only (#0), since the DB invents the column name
     assert RT.resolve_result_units(org, "SELECT MAX(amount) FROM loans") == {"#0": "INR"}
+
+
+def test_resolve_result_units_dimensional_ratios(tmp_path):
+    # dimensional analysis: currency/count is still currency; true ratios + computed
+    # percentages are unitless (exact number, no wrong symbol) — verification-safe
+    pytest.importorskip("sqlglot")
+    import yaml
+    from semantic_model import runtime as RT
+    from semantic_model.loader import load_organization
+    _currency_model(tmp_path)
+    # add a second currency col + a percent col
+    t = tmp_path / "subject_areas" / "s" / "tables" / "loans.yaml"
+    doc = yaml.safe_load(t.read_text())
+    doc["columns"] += [{"name": "fee", "type": "decimal", "unit": "INR"},
+                       {"name": "npa_pct", "type": "decimal", "unit": "percent"}]
+    t.write_text(yaml.safe_dump(doc))
+    org = load_organization(tmp_path)
+    R = lambda s: RT.resolve_result_units(org, s)
+    assert R("SELECT SUM(amount)/COUNT(*) AS avg_ticket FROM loans")["avg_ticket"] == "INR"
+    assert R("SELECT amount*1.18 AS with_tax FROM loans")["with_tax"] == "INR"
+    assert R("SELECT SUM(amount)+SUM(fee) AS gross FROM loans")["gross"] == "INR"
+    assert R("SELECT AVG(npa_pct) AS avg_npa FROM loans")["avg_npa"] == "percent"
+    assert R("SELECT SUM(amount)/SUM(fee) AS ratio FROM loans") == {}        # currency/currency
+    assert R("SELECT SUM(npa)/SUM(total)*100 AS pct FROM loans") == {}       # computed % → exact, unlabeled
 
 
 def test_format_table_applies_units_by_position():

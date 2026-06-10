@@ -779,15 +779,44 @@ def resolve_result_units(org: Organization, sql: str) -> dict[str, str]:
     # (the star's columns keep their real names, so name-matching still covers them).
     has_star = any(isinstance(p, exp.Star) or p.find(exp.Star) is not None for p in projs)
 
+    # Unit-preserving scalar ops: an aggregate/round of a currency is still that currency.
+    _preserving = (exp.Sum, exp.Avg, exp.Min, exp.Max, exp.Round, exp.Coalesce,
+                   exp.Abs, exp.Ceil, exp.Floor)
+
+    def _unit_of(e) -> Optional[str]:
+        """Dimensional analysis: the unit a (sub)expression produces, or None when it's
+        dimensionless/ambiguous. Conservative — defaults to None so we never label a
+        value with a unit it doesn't have (a wrong symbol is worse than none on a
+        verification surface)."""
+        if e is None:
+            return None
+        if isinstance(e, (exp.Alias, exp.Paren, exp.Cast)):
+            return _unit_of(e.this)
+        if isinstance(e, exp.Column):
+            return col_units.get((e.name or "").lower())
+        if isinstance(e, exp.Count):
+            return None                                   # a count is dimensionless
+        if isinstance(e, _preserving):
+            return _unit_of(e.this)
+        if isinstance(e, exp.Div):
+            num, den = _unit_of(e.this), _unit_of(e.expression)
+            return num if (num and not den) else None      # currency/count → currency; X/X → none
+        if isinstance(e, exp.Mul):
+            return _unit_of(e.this) or _unit_of(e.expression)  # currency × scalar → currency
+        if isinstance(e, (exp.Add, exp.Sub)):
+            a, b = _unit_of(e.this), _unit_of(e.expression)
+            return a if a == b else None
+        # fallback: a single distinct column unit, only if no count/division muddies it
+        if e.find(exp.Count) is not None or e.find(exp.Div) is not None:
+            return None
+        units = {col_units[c.name.lower()] for c in e.find_all(exp.Column)
+                 if c.name and c.name.lower() in col_units}
+        return next(iter(units)) if len(units) == 1 else None
+
     def _unit_for(proj) -> Optional[str]:
         if proj.alias_or_name and proj.alias_or_name.lower() in metric_units:
             return metric_units[proj.alias_or_name.lower()]
-        # a count or a ratio is not currency, regardless of the columns inside it
-        if proj.find(exp.Count) is not None or proj.find(exp.Div) is not None:
-            return None
-        units = {col_units[c.name.lower()] for c in proj.find_all(exp.Column)
-                 if c.name and c.name.lower() in col_units}
-        return next(iter(units)) if len(units) == 1 else None
+        return _unit_of(proj)
 
     out: dict[str, str] = {}
     for i, proj in enumerate(projs):
