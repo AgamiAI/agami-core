@@ -747,7 +747,7 @@ These are templates, not rules — adjust to the schema. If a slot doesn't fit, 
 
 **When the user is replying to follow-ups**: if the user's next message is a single digit `1`–`5` or a numbered form like `1.` / `1)` / `#1`, treat it as the n-th follow-up from the previous reply. Auto-fill the question text and re-enter Phase 2 with that question. Free-form replies are a fresh question. Genuinely ambiguous replies (`yes`, `do that`) get one short clarifier inline ("which of the 5?") — never via AskUserQuestion.
 
-**Saving a correction is NOT a follow-up bullet.** When the user expresses dissatisfaction with the answer, the skill suggests it inline as a single sentence outside the numbered list, in plain language: *"If that's not the answer you wanted, say 'save this as a correction' and I'll update the examples library."* (Natural language reads better here than `/agami-save-correction` — though that slash form does work. Phrases like "save this as a correction" / "remember this" / "use this SQL next time" route to the agami-save-correction skill via its `when_to_use` matching.) The numbered list stays focused on **what to ask next**, not how to fix what we just said.
+**Saving a correction is NOT a follow-up bullet.** When the user expresses dissatisfaction with the answer, the skill suggests it inline as a single sentence outside the numbered list, in plain language: *"If the SQL's off or you want me to remember something, just tell me — e.g. 'fix the join to use customer_id' or 'note that amounts are in INR' — and I'll fix it and save it to the right place."* Handle that reply **inline via Phase 4h** (fix the SQL / add a note + route it); the user never needs to know about `/agami-save-correction` (though "save this as a correction" / "remember this" still route to that skill too). The numbered list stays focused on **what to ask next**, not how to fix what we just said.
 
 ### 4g — CSV export (`--csv` or "export this")
 
@@ -771,6 +771,20 @@ mkdir -p ~/.agami/exports/"$profile"
 CSVs open natively in Excel / Numbers / Google Sheets — when the user asks for "Excel", the CSV path is the answer. If they specifically want a `.xlsx` (formulas, multiple sheets, formatting), tell them to open the CSV in Excel and Save As — v1 doesn't ship a native `.xlsx` writer.
 
 Surface the path(s) inline. For the auto-export case, the path is already in the Phase 4d footer; the explicit-export case adds a separate confirmation line before Phase 4f.
+
+### 4h — Fix the SQL or add a note (inline correction + routing)
+
+This is the **live-query twin of the onboarding seed-validation flow** (`edit N` to fix an example's SQL / attach `notes[]`). When the user's reply to an answer is a *correction*, handle it **in this turn** — don't bounce them to `/agami-save-correction`. Two shapes:
+
+- **Fix the SQL** — "that join is wrong, use `customer_id`", "exclude cancelled rows", or a pasted corrected query. Build the corrected SQL (write it from their words if they described the fix), **re-run it via Phase 3** to confirm it executes, and re-render the answer (4c–4f).
+- **Add a note** — "TOTAL can be negative for refunds", "amounts are in INR", "always exclude test users". A durable fact; no SQL change needed.
+
+**Where it goes — route with the SAME decision tree as [`agami-save-correction`](../agami-save-correction/SKILL.md) Phase 3 (one source of truth; do NOT re-derive a routing here).** The mechanics:
+
+1. **Floor (always):** the corrected SQL for *this question* lands as a prompt example — `sm add-example "$ROOT" --area <area> --file <json>` (dedups by question, so it replaces). Exactly the onboarding seed behavior. A pure note with no SQL change skips this.
+2. **The learning on top**, routed by the tree — a column's meaning/unit/encoding/value-map → `field_metadata` (`unit` / `value_transform` / `choice_field`); a join fix → `relationship`; a whole-table fact → `table_metadata`; a reusable aggregation → `new_metric`; a per-result caveat tied to this one question → the example's `notes[]`; a cross-cutting display convention for this DB → `ORGANIZATION.md`; a personal stylistic tic → `USER_MEMORY.md`. Model edits go through `sm curate`; build the ops JSON with the **Write tool** (never a heredoc / `python3 -c`).
+
+**Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `lending`, and set `LOAN_DETAILS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
 
 ---
 
