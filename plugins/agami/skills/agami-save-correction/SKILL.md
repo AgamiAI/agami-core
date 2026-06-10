@@ -135,11 +135,15 @@ Else: does the corrected SQL define a REUSABLE AGGREGATION that didn't exist?
 Else: is the correction a DISPLAY / FORMATTING / DEFAULT-FILTER preference?
    **Classify it like everything else — don't reflexively ask. Route to the MOST
    SPECIFIC home, structured-model-first:**
-   - It's a fact about specific column(s) — "amounts are in INR → show ₹", "amount is
-     in cents", "this code maps to <label>" → **`field_metadata`**: a `caveat` (or
-     `value_transform` / `choice_field`) on that column. **This IS the org-wide home**
-     — it's in the shared model and applies wherever that column appears (no prose
-     rule to re-interpret).
+   - It's the **currency/unit** of specific column(s) — "amounts are in INR → show ₹",
+     "this is a percentage", "values are in days" → set that column's **`unit`** field
+     (the ISO currency code, or `percent`/`cents`/`days`) via `cli curate`
+     (`{op:edit, kind:table, area, name:<table>, column:<col>, field:unit, value:"INR"}`).
+     The runtime + chart renderer format it **deterministically** (`units.py`). This IS
+     the org-wide home — it's in the shared model.
+   - Another column fact — "amount is in cents" (a scale fix), "this code maps to
+     <label>" → `field_metadata`: `value_transform` (`amount/100.0`) or `choice_field`
+     on that column. Also in the shared model, org-wide.
    - It's a default filter on a table — "exclude soft-deleted", "tenancy filter" →
      the table's `default_filters` (model), via `cli curate`.
    - It's a cross-cutting presentation convention for THIS database, not tied to one

@@ -193,6 +193,12 @@ class Column(_Base):
     sensitive: bool = False
     # declarative cleaning/transform SQL (regexp_replace, TO_TIMESTAMP, …)
     value_transform: Optional[str] = None
+    # Display unit for the column's values. A currency ISO code (INR/USD/EUR/…)
+    # drives a deterministic symbol + grouping in the formatter/chart renderer;
+    # other units (cents, percent, days, ms) surface as a label. This is the
+    # structured home for the onboarding "what currency are these in?" answer —
+    # beats a prose caveat the LLM has to re-interpret on every query.
+    unit: Optional[str] = None
     denormalized_from: Optional[DenormalizedFrom] = None
     caveats: list[str] = Field(default_factory=list)
     # curation/trust — structure is trusted by default (introspected); the curator
@@ -382,6 +388,9 @@ class Metric(_Base):
     calculation: str
     # per-storage_type SQL bindings, e.g. {"PostgreSQL": "COUNT(DISTINCT ...)"}
     bindings: dict[str, str] = Field(default_factory=dict)
+    # display unit of the metric's output (e.g. a currency ISO code) so the
+    # formatter renders results deterministically (₹1,23,456 not 123456)
+    unit: Optional[str] = None
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)
     subject_areas: list[str] = Field(default_factory=list)

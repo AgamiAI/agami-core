@@ -43,6 +43,9 @@
       "datasets":      [{label, data, ...}],     // null if chart_type is null
       "table_headers": ["col1", "col2", ...],
       "table_rows":    [[v, v, ...], ...],
+      "unit":          "INR | USD | percent | … (optional) — the value column's unit;",
+      //                drives deterministic currency symbol + grouping on the y-axis
+      //                + tooltips. Take it from the column/metric `unit` in the model.
       "sql":           "string — the SQL that produced this section's data"
     }
 
@@ -415,6 +418,41 @@
     // --receipt-file flag.
     const receipt = {{RECEIPT_JSON}};
 
+    // ---- Deterministic unit/currency formatting (mirrors semantic_model/units.py) ----
+    // A section carries `unit` (an ISO currency code like INR/USD, or a label like
+    // "percent"/"days"); axis ticks + tooltips render the symbol + grouping so the
+    // value reads the same as everywhere else — no LLM re-interpretation.
+    const CURRENCY_SYMBOLS = {
+      USD:'$',EUR:'€',GBP:'£',JPY:'¥',CNY:'¥',INR:'₹',AUD:'A$',CAD:'C$',SGD:'S$',
+      HKD:'HK$',NZD:'NZ$',ZAR:'R',BRL:'R$',RUB:'₽',KRW:'₩',MXN:'MX$',TRY:'₺',
+      THB:'฿',IDR:'Rp',MYR:'RM',PHP:'₱',VND:'₫',NGN:'₦',PKR:'₨',BDT:'৳',
+    };
+    const ZERO_DECIMAL = { JPY:1, KRW:1, VND:1, IDR:1 };
+    function groupIndian(s) {
+      if (s.length <= 3) return s;
+      const head = s.slice(0, -3), tail = s.slice(-3);
+      return head.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + tail;
+    }
+    function groupWestern(s) { return s.replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+    function fmtUnit(value, unit) {
+      if (value === null || value === undefined || value === '') return '';
+      const num = Number(value);
+      if (!isFinite(num)) return String(value);
+      const code = (unit || '').trim().toUpperCase();
+      if (CURRENCY_SYMBOLS[code]) {
+        const decimals = ZERO_DECIMAL[code] ? 0 : 2;
+        const neg = num < 0, n = Math.abs(num);
+        const fixed = n.toFixed(decimals);
+        const [intPart, frac] = decimals ? fixed.split('.') : [fixed, ''];
+        const grouped = code === 'INR' ? groupIndian(intPart) : groupWestern(intPart);
+        return (neg ? '-' : '') + CURRENCY_SYMBOLS[code] + grouped + (frac ? '.' + frac : '');
+      }
+      const low = (unit || '').trim().toLowerCase();
+      if (low === 'percent' || low === '%' || low === 'pct') return num + '%';
+      if (!unit) return Number(value).toLocaleString();
+      return Number(value).toLocaleString() + ' ' + unit;
+    }
+
     // ---- Helpers ----
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899'];
     function isNumericCol(rows, idx) {
@@ -709,10 +747,21 @@
               display: datasets.length > 1 || sec.chart_type === 'pie' || sec.chart_type === 'doughnut',
               position: 'bottom',
             },
-            tooltip: { mode: 'index', intersect: false },
+            tooltip: {
+              mode: 'index', intersect: false,
+              callbacks: sec.unit ? {
+                label: (ctx) => {
+                  const lbl = ctx.dataset.label ? ctx.dataset.label + ': ' : '';
+                  return lbl + fmtUnit(ctx.parsed.y ?? ctx.parsed, sec.unit);
+                },
+              } : {},
+            },
           },
           scales: (sec.chart_type === 'pie' || sec.chart_type === 'doughnut') ? {} : {
-            y: { beginAtZero: true, grid: { color: 'rgba(127,127,127,0.15)' } },
+            y: {
+              beginAtZero: true, grid: { color: 'rgba(127,127,127,0.15)' },
+              ticks: sec.unit ? { callback: (v) => fmtUnit(v, sec.unit) } : {},
+            },
             x: { grid: { display: false } },
           },
         },

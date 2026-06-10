@@ -403,9 +403,9 @@ Parse the CSV stdout. Header row = column names. Body rows = data.
 
 The header transform is purely cosmetic — the underlying alias stays in the SQL and the `tables_used` log. Don't rename the column in the result data; only its rendered label.
 
-Format every cell per its column's `agami.type` (and `agami.unit` if present). The same formatting applies to **every** downstream surface — chat markdown table (4d), HTML `table_rows` (4e.iii), AND chart `labels` (4e.iii). Format once here in 3c; downstream phases consume the already-formatted values.
+Format every cell per its column's `type` and **`unit`** (both come from `get_table_context` — `unit` is the structured currency/unit set during onboarding's currency ask or by a correction). For a metric result column, use the **metric's** `unit`. The canonical mapping is `semantic_model/units.py` (`format_value`) — the table below mirrors it; when in doubt, match it. The same formatting applies to **every** downstream surface — chat markdown table (4d), HTML `table_rows` (4e.iii), AND chart `labels`. **Also pass the value column's `unit` into each chart section's `"unit"` field** so the chart's y-axis + tooltips format the symbol + grouping deterministically (the chart template applies it; you don't hand-format chart axes). Format once here in 3c; downstream phases consume the already-formatted values.
 
-| `agami.type` | `agami.unit` | Format |
+| `type` | `unit` | Format |
 |---|---|---|
 | `decimal` / `integer` | `usd`, `dollars` | `$148.95` (always show `$`, 2 decimals, locale grouping) |
 | `decimal` / `integer` | `eur` | `€148.95` |

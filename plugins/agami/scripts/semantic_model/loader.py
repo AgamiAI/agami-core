@@ -381,6 +381,8 @@ def _column_detail(col: Column, include: list[str]) -> dict[str, Any]:
         d["choice_field"] = col.choice_field
     if col.sensitive:
         d["sensitive"] = True
+    if col.unit:
+        d["unit"] = col.unit
     if "value_transforms" in include and col.value_transform:
         d["value_transform"] = col.value_transform
     if col.denormalized_from:
