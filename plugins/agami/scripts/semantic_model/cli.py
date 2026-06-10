@@ -18,6 +18,7 @@ Every subcommand emits JSON on stdout (so callers parse one shape) except
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 from pathlib import Path
@@ -165,6 +166,23 @@ def cmd_add_example(args) -> int:
     return 0 if (res.applied or not res.skipped) else 1
 
 
+def cmd_format_table(args) -> int:
+    """Format a result CSV into a deterministic markdown table — exact numbers, full
+    grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
+    this verbatim so verification numbers don't depend on the LLM's formatting."""
+    import csv as _csv
+    from . import units
+    text = open(args.csv_file, newline="").read() if args.csv_file else sys.stdin.read()
+    reader = list(_csv.reader(io.StringIO(text)))
+    if not reader:
+        print("")
+        return 0
+    headers, rows = reader[0], reader[1:]
+    unit_map = json.loads(args.units) if args.units else {}
+    print(units.format_table(headers, rows, unit_map))
+    return 0
+
+
 def cmd_seed_examples(args) -> int:
     """Validate candidate seed examples against the live DB and write the passing ones —
     the whole Phase-5 mechanical loop in one call (no throwaway validate-and-write script)."""
@@ -289,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add_example)
+
+    sp = sub.add_parser("format-table", help="format a result CSV into a deterministic markdown table (exact numbers)")
+    sp.add_argument("--csv-file", default=None, help="result CSV (header row + rows); omit to read stdin")
+    sp.add_argument("--units", default=None, help='JSON header->unit map, e.g. {"outstanding":"INR"}')
+    sp.set_defaults(func=cmd_format_table)
 
     sp = sub.add_parser("seed-examples", help="validate candidate seeds against the live DB + write the passing ones")
     sp.add_argument("root")

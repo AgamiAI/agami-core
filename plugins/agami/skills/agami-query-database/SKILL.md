@@ -403,7 +403,9 @@ Parse the CSV stdout. Header row = column names. Body rows = data.
 
 The header transform is purely cosmetic — the underlying alias stays in the SQL and the `tables_used` log. Don't rename the column in the result data; only its rendered label.
 
-Format every cell per its column's `type` and **`unit`** (both come from `get_table_context` — `unit` is the structured currency/unit set during onboarding's currency ask or by a correction). For a metric result column, use the **metric's** `unit`. The canonical mapping is `semantic_model/units.py` (`format_value`) — the table below mirrors it; when in doubt, match it. The same formatting applies to **every** downstream surface — chat markdown table (4d), HTML `table_rows` (4e.iii), AND chart `labels`. **Also pass the value column's `unit` into each chart section's `"unit"` field** so the chart's y-axis + tooltips format the symbol + grouping deterministically (the chart template applies it; you don't hand-format chart axes). Format once here in 3c; downstream phases consume the already-formatted values.
+Format every cell per its column's `type` and **`unit`** (both come from `get_table_context` — `unit` is the structured currency/unit set during onboarding's currency ask or by a correction). For a metric result column, use the **metric's** `unit`. The canonical mapping is `semantic_model/units.py` (`format_value`) — the table below mirrors it; when in doubt, match it. The same formatting applies to **every** downstream surface — chat markdown table (4d), HTML `table_rows` (4e.iii), AND chart `labels`. **Also pass the value column's `unit` into each chart section's `"unit"` field** so the chart's y-axis + tooltips format the symbol + grouping deterministically (the chart template applies it; you don't hand-format chart axes — and the `datasets` data stays RAW numbers).
+
+**Numbers are formatted by code, not by you.** The chat markdown table (4d) is rendered by `sm format-table` and the chart by the template — both via `units.py`, in full and exact (a verification surface; never abbreviate or round). Your job in 3c is the **non-numeric** display (header sanitization, dates → `MMM D, YYYY`, booleans → Yes/No, `choice_field` → label) and supplying each column's **`unit`**; the numeric cells are then emitted deterministically downstream. The type/unit table below is the reference `units.py` implements.
 
 | `type` | `unit` | Format |
 |---|---|---|
@@ -486,7 +488,11 @@ For multi-section: a 1–3 sentence executive summary across all sections (the s
 
 ### 4d — Markdown table (single-section reports only)
 
-Render the rows as a GitHub-flavored markdown table. Right-align numeric columns. Format numbers per Phase 3c (commas, currency, percentages, ISO dates). Wide tables (> 8 cols) → vertical layout, with a one-line note "wide table — see HTML for the full grid".
+**Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 30 rows, headers sanitized per 3c) and the header→unit map through the packaged formatter, then **embed its output verbatim**:
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" format-table --csv-file /tmp/agami-result.csv --units '{"Total Outstanding":"INR","NPA %":"percent"}'
+```
+It formats every numeric cell in full via `units.py` (currency symbol + Indian/western grouping, exact decimals preserved) and passes non-numbers through. The unit per column comes from the column's (or the metric's) `unit` in the model — same source as the chart. This is the formatter the **MCP** will call too, so the numbers a user verifies are identical no matter which host/LLM renders the answer. Wide tables (> 8 cols) → vertical layout + "wide table — see HTML for the full grid".
 
 **Cap the chat preview at 30 rows** per Phase 3c — even when the user asked for "all leads with credit rating > 700" and the result is 4,213 rows, the chat shows the first 30 and points them at the CSV + HTML report. The full set lives in the artifacts on disk. The footer line ("Showing first 30 of 4,213 rows · full set in CSV: …") is the contract that tells the user where to find everything.
 

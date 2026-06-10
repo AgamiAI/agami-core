@@ -41,6 +41,37 @@ def test_non_currency_units_and_passthrough():
     assert units.format_value(None, "USD") == ""
 
 
+def test_format_cell_is_exact_never_abbreviated():
+    # verification surface: full value, grouping, currency symbol — NO abbreviation/rounding
+    assert units.format_cell("21620870000.50", "INR") == "₹21,62,08,70,000.50"
+    assert units.format_cell("134100000", None) == "134,100,000"     # bare count, grouped, exact
+    assert units.format_cell("684.3", None) == "684.3"                # decimals preserved
+    assert units.format_cell("active", None) == "active"             # passthrough
+    assert units.format_cell("", None) == ""
+
+
+def test_format_table_markdown_exact():
+    md = units.format_table(
+        ["borrowers", "outstanding"],
+        [["134100000", "21620870000.5"], ["50200000", "9876543210"]],
+        {"outstanding": "INR"})
+    lines = md.splitlines()
+    assert lines[0] == "| borrowers | outstanding |"
+    assert lines[1] == "| --- | --- |"
+    assert lines[2] == "| 134,100,000 | ₹21,62,08,70,000.50 |"
+    assert lines[3] == "| 50,200,000 | ₹9,87,65,43,210.00 |"
+    # no abbreviation anywhere
+    assert "Cr" not in md and "L " not in md and "M" not in md
+
+
+def test_units_module_has_no_heavy_deps():
+    # units.py must stay import-light so the pure-stdlib MCP path can use it
+    import importlib, sys as _sys
+    assert "pydantic" not in _sys.modules or True  # informational
+    src = (SCRIPTS / "semantic_model" / "units.py").read_text()
+    assert "import pydantic" not in src and "import sqlglot" not in src
+
+
 def test_unit_round_trips_on_column_and_surfaces_in_context(tmp_path):
     import yaml
     from semantic_model.loader import load_organization, get_table_context

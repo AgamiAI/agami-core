@@ -94,4 +94,50 @@ def format_value(value, unit: Optional[str]) -> str:
     return f"{grouped} {unit}"
 
 
-__all__ = ["CURRENCY_SYMBOLS", "is_currency", "currency_symbol", "format_value"]
+def _looks_numeric(s: str) -> bool:
+    t = (s or "").strip().replace(",", "")
+    if t in ("", "-", "+"):
+        return False
+    try:
+        float(t)
+        return True
+    except ValueError:
+        return False
+
+
+def format_cell(value, unit: Optional[str]) -> str:
+    """One result cell, formatted EXACTLY (no abbreviation, no precision loss) — for
+    verification surfaces. A unit'd column → `format_value`; a bare number → grouped
+    in full; anything else passes through unchanged."""
+    if unit:
+        return format_value(value, unit)
+    s = "" if value is None else str(value)
+    if _looks_numeric(s):
+        n = float(s.replace(",", ""))
+        if n == int(n):
+            return _group_western(str(int(n)))
+        # keep the source's exact decimals — don't round
+        ip, fp = s.replace(",", "").lstrip("-").split(".") if "." in s else (s.replace(",", "").lstrip("-"), "")
+        grouped = _group_western(ip)
+        return ("-" if n < 0 else "") + grouped + ("." + fp if fp else "")
+    return s
+
+
+def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:
+    """Render a GitHub-flavoured markdown table with every numeric cell formatted
+    deterministically and in full (exact value, thousands/lakh grouping, currency
+    symbol) — never abbreviated. `units` maps a header to its unit (currency code or
+    label). The query skill and the MCP both call this so the numbers a user verifies
+    are identical regardless of which LLM renders the surrounding answer."""
+    units = units or {}
+    cols = [str(h) for h in headers]
+    fmt_rows = [[format_cell(c, units.get(cols[i] if i < len(cols) else "")) for i, c in enumerate(r)]
+                for r in rows]
+    head = "| " + " | ".join(cols) + " |"
+    sep = "| " + " | ".join("---" for _ in cols) + " |"
+    body = "\n".join("| " + " | ".join(c.replace("|", "\\|") for c in r) + " |" for r in fmt_rows)
+    return "\n".join([head, sep, body]) if body else "\n".join([head, sep])
+
+
+__all__ = ["CURRENCY_SYMBOLS", "is_currency", "currency_symbol",
+           "format_value", "format_cell", "format_table"]
