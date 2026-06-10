@@ -578,14 +578,15 @@ Then **AskUserQuestion**: `Open the review dashboard` (→ `/agami-review`) / `O
 ✓ <artifacts_dir>/<profile>/ — semantic model (<A> subject areas, validated)
 ✓ prompt_examples/ — <N> NL→SQL examples
 ⚠ Setup is partial — <rule1_unreviewed> Rule 1 items still need sign-off:
-   - <M> metric proposal(s) (run /agami-review)
-Until those are reviewed, agami-query-database refuses questions that depend on
-them. Run /agami-review (or "open the review dashboard"). Or /agami-model to
-browse + exclude tables/columns.
+   - <M> metric proposal(s)
+Until those are reviewed, agami-query-database refuses questions that depend on them.
 
 Five things you could already ask that don't depend on Rule 1 items:
 1.–5. <count / top-N / time-bucket / breakdown / recency — all on FK-approved tables>
-Pick a number, or run /agami-review first.
+Pick a number, or keep going:
+• /agami-review — sign off the pending metrics (+ review joins/entities) so the rest unlocks.
+• /agami-model — browse the whole model and refine it (exclude raw PII / staging tables, edit descriptions).
+• Ask questions — if an answer's off, say "save this as a correction" and I'll teach the model.
 ```
 
 **8c — fully set up:**
@@ -594,11 +595,16 @@ Pick a number, or run /agami-review first.
 ✓ prompt_examples/ — <N> NL→SQL examples
 ✓ All metrics signed off
 
-(Want to remove tables/columns agami shouldn't use? Run /agami-model.)
-
 Now that <profile> is set up, here are five things you could ask:
 1.–5. <count / top-N / trend / breakdown / narrative — grounded in the schema's distinctive tables>
 Reply with a number, or ask anything else.
+
+The model keeps improving as you use it:
+• Just ask questions — and if an answer looks off, say "save this as a correction"
+  (or paste the right SQL) and I'll teach the model so next time is right.
+• /agami-review — review and sign off metrics, joins, and entities in the trust dashboard.
+• /agami-model — browse the whole model and refine it: exclude tables/columns you
+  don't want queried (raw PII, staging/scratch), edit descriptions and caveats.
 ```
 End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
 
