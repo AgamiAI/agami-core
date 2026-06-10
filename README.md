@@ -158,6 +158,8 @@ how many orders did we ship last month?
 
 ## Install
 
+> **Platform note.** The skills are validated on **macOS and Linux**. They run shell commands in `bash`, so on **Windows** they require **[Git for Windows](https://git-scm.com/downloads/win)** (Claude Code uses Git Bash for its Bash tool when present; without it the Bash tool falls back to PowerShell, where these commands don't run). Windows is not yet validated end-to-end. *(The optional local MCP server for Claude Desktop is pure-stdlib Python and is cross-platform — see [docs/mcp-server.md](docs/mcp-server.md).)*
+
 The same plugin works across all four hosts. Pick yours:
 
 ### Claude Code CLI
