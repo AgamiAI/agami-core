@@ -33,7 +33,7 @@ Everything in here is non-secret and team-useful. The default is `~/agami-artifa
 | `<profile>/examples.yaml` | Per-profile NL→SQL few-shot library |
 | `<profile>/ORGANIZATION.md` | Per-profile domain context |
 
-**Why per-table files instead of one yaml per schema:** the two-pass retrieval in `agami-query-database` reads only `_schema.yaml` files for relevance picking (Pass 1), then lazy-loads only the picked tables' yamls (Pass 2). For a 1000-table schema, the slim `_schema.yaml` is ~100KB instead of the ~5MB the full per-schema yaml would be. Cleaner git diffs too — touching one table's metadata changes one small file, not a giant per-schema yaml.
+**Why per-table files instead of one yaml per schema:** the two-pass retrieval in `agami-query` reads only `_schema.yaml` files for relevance picking (Pass 1), then lazy-loads only the picked tables' yamls (Pass 2). For a 1000-table schema, the slim `_schema.yaml` is ~100KB instead of the ~5MB the full per-schema yaml would be. Cleaner git diffs too — touching one table's metadata changes one small file, not a giant per-schema yaml.
 
 **Convention:** to share with a team, point `artifacts_dir` at a subdirectory of a git-tracked repo. Example: `~/code/myteam/data-stack/agami/` — checked in alongside dbt models, etc.
 

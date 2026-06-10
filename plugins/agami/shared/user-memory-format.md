@@ -89,7 +89,7 @@ Three paths:
 
 2. **The `agami-save-correction` skill classifier identifies a `user_preference`.** During Phase 3 of save-correction, if the user's feedback reads like a general policy ("from now on, always …"; "I prefer …"; "never include …"), the classifier routes it to USER_MEMORY.md instead of the semantic model or examples library. The skill picks the right section, appends a bullet, shows the diff, gets approval before writing.
 
-3. **Explicit "remember this" in a query session.** The user says "remember that test users have @example.com emails". agami-query-database's Phase 4d follow-up logic catches this phrasing and offers to add it to USER_MEMORY.md.
+3. **Explicit "remember this" in a query session.** The user says "remember that test users have @example.com emails". agami-query's Phase 4d follow-up logic catches this phrasing and offers to add it to USER_MEMORY.md.
 
 ## Validation
 

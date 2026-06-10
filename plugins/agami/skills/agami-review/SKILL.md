@@ -29,7 +29,7 @@ The trust block (`confidence` ∈ confirmed/inferred/proposed, `review_state`, `
 
 ## Phase 0: Preflight
 
-Run the same plan-mode + credentials checks as `agami-query-database`:
+Run the same plan-mode + credentials checks as `agami-query`:
 - Plan-mode: this skill needs Read + Bash + Write. **If plan mode is active: refuse and end the turn. DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/review/<profile>/<ts>.html`.)"*
 - Resolve `<profile>` and `<artifacts_dir>` per the standard chain (`AGAMI_PROFILE` env → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` env → `~/.agami/.config.artifacts_dir` → `~/agami-artifacts`).
 - If `<artifacts_dir>/<profile>/org.yaml` doesn't exist, invoke `agami-connect` and stop.
@@ -121,7 +121,7 @@ You can also type commands directly:
 
 **Auto-open the file on EVERY render**, not just the first. Earlier versions of this SKILL tried "first render only" to avoid browser-tab sprawl, but in practice that produced worse UX — users kept looking at the old stale tab. Every re-render targets a NEW timestamped file (Phase 5), so opening every time gets the user the fresh state without ambiguity. Tab sprawl is the lesser cost; tell the user once in the closing chat that the previous tab can be closed if they want.
 
-Use the same multi-command fallback chain as agami-query-database Phase 4e.vi:
+Use the same multi-command fallback chain as agami-query Phase 4e.vi:
 
 ```bash
 out="$HOME/.agami/review/$profile/<ts>.html"

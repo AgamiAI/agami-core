@@ -5,7 +5,7 @@ agami ships six skills, all prefixed `agami-` to avoid colliding with Claude Cod
 | Skill | Slash command | Natural-language triggers (via `when_to_use`) |
 |---|---|---|
 | agami-connect | `/agami-connect` | "set up agami", "connect to my database", "introspect the schema", "reload the schema", "reintrospect", "add a new database" |
-| agami-query-database | `/agami-query-database` | any data question — "how many", "show me", "top N", "trend over time", etc. |
+| agami-query | `/agami-query` | any data question — "how many", "show me", "top N", "trend over time", etc. |
 | agami-review | `/agami-review` | "open the review dashboard", "review my model", "walk through the review queue" |
 | agami-model | `/agami-model` | "open the model explorer", "show me the model", "exclude a table", "remove this column" |
 | agami-save-correction | `/agami-save-correction` | "save this as a correction", "remember this", "use this SQL next time" |
@@ -42,7 +42,7 @@ For most chat replies, **prefer natural-language phrasing over slash commands** 
 | "Run `/agami-connect reintrospect`" | "Say 'reload the schema' and I'll re-introspect from your DB." |
 | "Run `/agami-save-correction`" | "Say 'save this as a correction' and I'll add it to the examples library." |
 | "Run `/agami-review`" | "Say 'open the review dashboard' to walk the queue." |
-| "Type `/agami-query-database`" | Just answer the question directly. Slash commands are unnecessary. |
+| "Type `/agami-query`" | Just answer the question directly. Slash commands are unnecessary. |
 
 ## When the model invents a new form
 

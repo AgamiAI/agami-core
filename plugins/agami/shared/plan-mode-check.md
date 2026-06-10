@@ -1,6 +1,6 @@
 # Plan-mode preflight — read this before invoking any agami skill
 
-Claude Code's **Plan mode** restricts the assistant to read-only tools — no `Edit`, no `Write`, and Bash is locked down to commands the host considers safe. Every agami skill except trivial reopen-chart flows needs at least one of those: `agami-connect` writes the credentials template (Phase 0a) and the semantic model, `agami-query-database` writes charts and runs `psql`/`mysql`/`snowsql` via Bash, `agami-save-correction` writes corrections, `agami-review` + `agami-model` edit YAMLs.
+Claude Code's **Plan mode** restricts the assistant to read-only tools — no `Edit`, no `Write`, and Bash is locked down to commands the host considers safe. Every agami skill except trivial reopen-chart flows needs at least one of those: `agami-connect` writes the credentials template (Phase 0a) and the semantic model, `agami-query` writes charts and runs `psql`/`mysql`/`snowsql` via Bash, `agami-save-correction` writes corrections, `agami-review` + `agami-model` edit YAMLs.
 
 If a skill starts in plan mode and barrels ahead, the failure happens partway through (a Bash or Write call gets blocked), the partial state is confusing, and the user has to start over. The fix: every skill detects plan mode at entry and asks the user to switch **before** doing any work.
 
@@ -53,7 +53,7 @@ Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call
 
 Then end the turn. No plan file describing what would happen — that's noise the user didn't ask for. (Historical note: `/agami-init` used to be a separate skill with its own plan-mode refusal text; it was folded into `/agami-connect` Phase 0a in 2026-05.)
 
-### `agami-query-database`
+### `agami-query`
 
 Stay-in-plan-mode → **refuse, with one exception. Do not write a plan file. Do not call ExitPlanMode.** SQL execution requires Bash; chart rendering requires Write. Both are blocked. The exception is the **reopen-last-chart intent** (Phase 2a.1) — re-displaying an existing HTML report only needs the `Read` tool plus an `open <path>` command (which most hosts allow even in plan mode for files under `$HOME`). If the user's intent is reopen-last-chart, run that flow and stop. For anything else, surface ONLY this:
 

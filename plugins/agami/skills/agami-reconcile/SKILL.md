@@ -13,7 +13,7 @@ This skill orchestrates:
 
 1. **Extract** the `(label, expected_value)` pairs from the input — a dashboard screenshot (via vision, confirmed with the user), a CSV, or a pasted list. Number parsing is always deterministic (`reconcile.py`).
 2. **Generate a matching NL question** for each label.
-3. **Run** each question through the same NL→SQL→execute pipeline as agami-query-database.
+3. **Run** each question through the same NL→SQL→execute pipeline as agami-query.
 4. **Diff** actual vs expected with a tolerance.
 5. **Present** a markdown table with per-row status; for mismatches, render the full receipt as a drill-down so the user can find the definitional disagreement.
 
@@ -23,13 +23,13 @@ Spec for the deterministic helpers: [`scripts/reconcile.py`](../../scripts/recon
 
 - **Tight loops.** This skill is a tool, not a tutorial. One question per turn, max two sentences of prose between phases.
 - **Surface mismatches loud.** A reconcile run with 9/12 matches and 3 mismatches is a SUCCESSFUL run — the mismatches are the value. Lead with what didn't match.
-- **Don't paste raw SQL in chat.** The receipt has it. Same hard rule as agami-query-database.
+- **Don't paste raw SQL in chat.** The receipt has it. Same hard rule as agami-query.
 
 ---
 
 ## Phase 0: Preflight
 
-Same checks as agami-query-database / agami-connect:
+Same checks as agami-query / agami-connect:
 
 1. **Plan-mode check** per [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash + Read + Write — refuse if locked in plan mode. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the CSV path."*
 2. **Credentials present** — read `~/.agami/credentials` for the active profile. If missing, invoke `/agami-connect` to set up first; this skill needs a working DB connection.
@@ -90,9 +90,9 @@ Use the LLM to translate `label` (+ context if present) into the most natural En
 
 The semantic model + examples library are loaded; let the LLM pick the right subject areas / entities / metrics that resolve the labeled term to a concrete query.
 
-### 2b — Run via the agami-query-database pipeline
+### 2b — Run via the agami-query pipeline
 
-Invoke the same SQL-generation + execution path agami-query-database uses (Phases 2 + 3 of that skill — see [`agami-query-database/SKILL.md`](../agami-query-database/SKILL.md)). Capture:
+Invoke the same SQL-generation + execution path agami-query uses (Phases 2 + 3 of that skill — see [`agami-query/SKILL.md`](../agami-query/SKILL.md)). Capture:
 
 - The generated SQL
 - The result (should be a single scalar, or a single row)

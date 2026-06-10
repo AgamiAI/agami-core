@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HTML report renderer for agami-query-database.
+HTML report renderer for agami-query.
 
 Reads plugins/agami/shared/chart-template.html, substitutes every placeholder
 (including the inline agami logos from shared/agami-logo-{dark,light}.svg),
@@ -8,7 +8,7 @@ and writes a self-contained HTML file containing one or more sections. Each
 section has its own chart + table + insight + SQL — but they all live in
 the same file. Stdlib only.
 
-The agami-query-database SKILL invokes this script in Phase 4e instead of
+The agami-query SKILL invokes this script in Phase 4e instead of
 doing template substitution through the LLM's Read + Write tools — that
 path costs ~30KB of token I/O per query (template + two SVG logos) and is
 the dominant slowness in chart rendering. Calling this script keeps the

@@ -29,7 +29,7 @@ Exit codes are documented in `execute_sql.py`'s docstring. The skill routes non-
 
 | Script | What it does | Requires |
 |---|---|---|
-| `render_chart.py` | Substitutes `chart-template.html` placeholders programmatically. Used by the agami-query-database SKILL to produce HTML reports (Phase 4e). | stdlib only |
+| `render_chart.py` | Substitutes `chart-template.html` placeholders programmatically. Used by the agami-query SKILL to produce HTML reports (Phase 4e). | stdlib only |
 
 ## Install dependencies (only if you want the Python driver path)
 

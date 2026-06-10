@@ -1,5 +1,5 @@
 ---
-name: agami-query-database
+name: agami-query
 description: "Answers natural-language questions about the user's database. Loads the agami semantic model (subject areas, tables, columns, relationships with join cardinality, entities, metrics) and few-shot examples from <artifacts_dir>/<profile>/, generates SQL via the examples-first traversal (pick subject area → match examples → resolve entities/metrics → compound table context), executes it locally via the user's chosen tool (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver `execute_sql.py` — which runs a fan-trap/chasm-trap pre-flight + auto-applies default_filters), returns results as a markdown table with optional CSV export, and renders Chart.js HTML charts on request. All execution is local — no data leaves the machine."
 when_to_use: "Use when the user asks 'how many', 'show me', 'top N', 'trend over time', 'compare', 'breakdown by', 'group by', 'average', or any other data question against their configured database. Also use for CSV export ('export this'), chart rendering ('make that a bar chart'), or to follow up on a previous result ('drill into the EU region')."
 argument-hint: "[question] [--csv] [--chart bar|line|pie|doughnut|scatter]"
@@ -26,7 +26,7 @@ For chart template: [`shared/chart-template.html`](../../shared/chart-template.h
 
 ## Invocation conventions
 
-**Read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) before suggesting any slash command in chat.** Agami slash commands: `/agami-connect`, `/agami-query-database`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/init`, `/connect`, `/query-database`, etc.) or colon-namespaced forms (`/agami:init`, etc.) — those don't exist. **`/agami-init` was folded into `/agami-connect` Phase 0a** — credential setup now lives there.
+**Read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) before suggesting any slash command in chat.** Agami slash commands: `/agami-connect`, `/agami-query`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/init`, `/connect`, `/query-database`, etc.) or colon-namespaced forms (`/agami:init`, etc.) — those don't exist. **`/agami-init` was folded into `/agami-connect` Phase 0a** — credential setup now lives there.
 
 For chat replies, **prefer natural language over slash commands** — it reads better and the skill's `when_to_use` matcher routes correctly:
 
@@ -47,7 +47,7 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 
 ## Phase −1: Plan-mode check
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-query-database needs Bash (SQL execution) and Write (chart HTML) — both are blocked in plan mode.
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). agami-query needs Bash (SQL execution) and Write (chart HTML) — both are blocked in plan mode.
 
 **If plan mode is active and the user picks `Stay in plan mode`:**
 

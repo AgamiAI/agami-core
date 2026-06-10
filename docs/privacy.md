@@ -50,7 +50,7 @@ You can grep the source — there is no `curl` / `requests.post` / network call 
 
 ## The one outbound interaction: GitHub-star ask
 
-After your first successful query, the `agami-query-database` skill asks once whether you want to star the repo on GitHub. This is a chat-side `AskUserQuestion` modal with three options:
+After your first successful query, the `agami-query` skill asks once whether you want to star the repo on GitHub. This is a chat-side `AskUserQuestion` modal with three options:
 
 - **Yes — open GitHub now** — runs `open https://github.com/AgamiAI/LiteBi` (or platform equivalent), which hands the URL to your OS. Your browser handles it from there.
 - **Maybe later** — closes the prompt; we never ask again.

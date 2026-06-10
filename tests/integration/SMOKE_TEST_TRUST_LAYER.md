@@ -105,7 +105,7 @@ Watch for:
 
 ---
 
-## 4. `/agami-query-database` — the receipt panel
+## 4. `/agami-query` — the receipt panel
 
 ```text
 top 5 customers by spend

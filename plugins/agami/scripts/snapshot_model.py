@@ -4,7 +4,7 @@ Snapshot the per-profile semantic model under `.snapshots/<model_version>/`.
 
 Used by agami-connect Phase 3d after the validator promotes the staging YAMLs
 to the canonical `<artifacts_dir>/<profile>/`. The snapshot is an immutable
-copy (chmod 0o444 on every file) pinned by content hash; agami-query-database
+copy (chmod 0o444 on every file) pinned by content hash; agami-query
 reads the hash off the directory name at query time so old answers reproduce
 against the exact model that produced them.
 

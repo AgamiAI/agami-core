@@ -89,7 +89,7 @@ Everything else stays `unreviewed` and surfaces in the review dashboard. On a re
 - **Rule 1** (always queue): every `metric` and every `named_filter` that's not yet approved — these have the highest blast radius (one bad metric breaks every report that uses it). Sign-off requires a `signed_off_by` email AND a `signed_off_role` (cfo / cto / data_lead / engineer / analyst / other) AND a non-empty `definition_prose`. The validator enforces all three before a metric can be approved.
 - **Rule 2** (slider): every other entry whose `confidence < threshold` (default `0.7`). Lower the threshold to trim the queue; raise it for a Meta-bar trust posture.
 
-At runtime, `agami-query-database` refuses to answer questions that depend on `unreviewed` metrics or named filters (the strict gate). Unreviewed joins / field descriptions surface as warnings in the receipt but don't block.
+At runtime, `agami-query` refuses to answer questions that depend on `unreviewed` metrics or named filters (the strict gate). Unreviewed joins / field descriptions surface as warnings in the receipt but don't block.
 
 **Hybrid review order in `/agami-connect`**: Phase 4 surfaces a Rule 1 sign-off gate *before* seed examples are generated (Phase 5). Reason: seed SQL exercises metric definitions; signing them off first means the seeds inherit approved truth instead of LLM guesses. Rule 2 polish (low-confidence joins / field descriptions) stays in Phase 7's optional collapsed panel — it self-approves as the user queries and never blocks the path to first answer.
 
@@ -107,7 +107,7 @@ Click your way through the queue, hit "Generate feedback for Claude" at the bott
 
 ### Every answer ships a receipt
 
-Every `agami-query-database` answer includes a "Provenance for this answer" panel:
+Every `agami-query` answer includes a "Provenance for this answer" panel:
 
 - The literal SQL that ran (no paraphrase)
 - Tables touched + row count per table
@@ -334,7 +334,7 @@ The skill picks the first available connection method, in this order:
 | Command | What it does |
 |---|---|
 | `/agami-connect` | **One-stop setup + introspect.** First run: detects missing credentials, runs the DB-type picker (Postgres / Supabase / Redshift / MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks / Trino / DuckDB / SQLite), writes `~/.agami/credentials.example` for you to fill in, verifies the connection method, and ends the turn. Re-invoke after filling in the file → introspects the live DB **directly into the semantic model** at `~/agami-artifacts/<profile>/` (subject areas, tables, columns, primary-key grain, foreign-key relationships with join cardinality, deep-table column groups, sensitive-column flags) — in catalog mode, or a probe-mode fallback when the catalog is locked down — then layers LLM enrichment (descriptions, entities, metrics), generates EXPLAIN-validated seed examples, and opens the examples-validation dashboard. Validator-gated; runs `git init` and snapshots under `.snapshots/<hash>/`. |
-| `/agami-query-database` | Answers a NL question. Picks examples + relationships, generates SQL, runs it, formats the result, and surfaces a SQL receipt panel (provenance + model-version pin). Refuses if any required Rule 1 entry is unreviewed. (You usually don't need to type this — natural language routes here.) |
+| `/agami-query` | Answers a NL question. Picks examples + relationships, generates SQL, runs it, formats the result, and surfaces a SQL receipt panel (provenance + model-version pin). Refuses if any required Rule 1 entry is unreviewed. (You usually don't need to type this — natural language routes here.) |
 | `/agami-review` | Opens the trust review dashboard: For Review / Approved Automatically / Manually Approved / Rejected tabs, grouped by entity type. Click-to-act buttons + inline edit textareas. Generates a chat-back-channel command block when you click "Generate feedback for Claude." |
 | `/agami-model` | Opens the model explorer — a static HTML browser of every schema / table / field / **metric / named filter** with live search across descriptions, filter chips (All / Active / Excluded / Unreviewed / Queued), and per-table + per-column **Exclude / Include** buttons. Top of the explorer surfaces every metric (expression + `definition_prose` + assumptions) and every named filter (predicate + definition) so the user can see what the model contains without reading YAML. Excluded entries are filtered out of the runtime model (joins, prompts, aggregates) but stay in the YAML for audit. |
 | `/agami-save-correction` | Records a correction and routes it to the right destination via a 5-way classifier: SQL pattern → `examples.yaml`; per-column meaning / value normalization → the column's `description` / `choice_field` in the semantic model; cross-DB display preference → `USER_MEMORY.md`; abstract business concept tied to this DB → `ORGANIZATION.md`; new reusable aggregation → `metric` in the semantic model. Surfaces the classification + destination + reasoning before writing, so you can override. The next answer that uses the correction surfaces its attribution in the receipt. |
@@ -554,7 +554,7 @@ Re-run `/agami-connect reintrospect` (or just `/agami-connect` and pick "Refresh
 
 **What happens to drift** (column type change, FK target shift):
 - The entry's `agami.review_state` flips to `stale`. Prior `signed_off_*` is preserved for audit.
-- At runtime, `agami-query-database` refuses queries depending on a `stale` entry until you re-approve via `/agami-review` — surfaces as: *"This query would have used X, but it's marked stale (schema drift). Run /agami-review to reconcile."*
+- At runtime, `agami-query` refuses queries depending on a `stale` entry until you re-approve via `/agami-review` — surfaces as: *"This query would have used X, but it's marked stale (schema drift). Run /agami-review to reconcile."*
 
 **What happens to removed tables / columns** (the lossy case):
 - They drop out of the model on the next write. Hand-edits on them (descriptions, sign-offs) are lost.
@@ -667,7 +667,7 @@ rm -rf ~/.agami                               # credentials, .config, charts, ex
 # 4. Restart Claude Code (full quit, not just close window)
 ```
 
-If the slash commands `/agami-connect`, `/agami-query-database`, etc. still appear after step 4, you have another LiteBi version cached at a different path. `find ~/.claude -type d -name "litebi*"` will show every copy.
+If the slash commands `/agami-connect`, `/agami-query`, etc. still appear after step 4, you have another LiteBi version cached at a different path. `find ~/.claude -type d -name "litebi*"` will show every copy.
 
 ## Contributing
 

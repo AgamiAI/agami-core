@@ -228,7 +228,7 @@ Then end the turn. The skill is one-shot per invocation — re-enter via the sla
 
 ## What the runtime does with `rejected` entries
 
-The trust spine has always read `agami.review_state`. The model loader in [`plugins/agami/skills/agami-query-database/SKILL.md → Phase 1c`](../agami-query-database/SKILL.md#1c--index-the-model-for-fast-access) filters entries with `review_state: rejected` out of `datasets_by_name`, `datasets_by_qname`, `fields_by_qname`, and `relationships_by_endpoints`. Rejected entries:
+The trust spine has always read `agami.review_state`. The model loader in [`plugins/agami/skills/agami-query/SKILL.md → Phase 1c`](../agami-query/SKILL.md#1c--index-the-model-for-fast-access) filters entries with `review_state: rejected` out of `datasets_by_name`, `datasets_by_qname`, `fields_by_qname`, and `relationships_by_endpoints`. Rejected entries:
 
 - **Never appear in the schema context** the SQL generator sees (Phase 2b).
 - **Are not joinable** — the join-path picker skips relationships whose endpoints reference a rejected dataset.

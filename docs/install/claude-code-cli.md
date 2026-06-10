@@ -53,7 +53,7 @@ Expected output:
 
 ```
 Installed agami v0.1.0 (from litebi)
-6 skills available: agami-connect, agami-query-database, agami-review, agami-model, agami-save-correction, agami-reconcile
+6 skills available: agami-connect, agami-query, agami-review, agami-model, agami-save-correction, agami-reconcile
 ```
 
 ## 5. Verify
