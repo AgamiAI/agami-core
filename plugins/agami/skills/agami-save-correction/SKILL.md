@@ -98,8 +98,8 @@ Compare the original SQL (from `query_log.jsonl`) to the corrected SQL. Identify
 
 | Category | What the user did (wrong) | What should have happened |
 |---|---|---|
-| Per-example commentary ("CRIF total can be negative on #12") | Captured in `examples.yaml` `notes[]` | Field description on `LOAN_DETAILS.TOTAL_DISBURSED_ALL` (`field_metadata`) |
-| Gender normalization (Male / MALE / T / Unknown → "Male") | `ORGANIZATION.md` | `agami.choice_field` on `PII.GENDER` (`field_metadata`) |
+| Per-example commentary ("order total can be negative on #12") | Captured in `examples.yaml` `notes[]` | Field description on `ORDERS.TOTAL` (`field_metadata`) |
+| Status normalization (active / ACTIVE / 1 → "Active") | `ORGANIZATION.md` | `agami.choice_field` on `CUSTOMERS.STATUS` (`field_metadata`) |
 | "Format counts with commas in outputs" | Captured in a markdown file as prose | `user_preference` in `USER_MEMORY.md` AND `TO_CHAR(…)` / aliases IN the seed example's SQL |
 
 The decision tree below corrects these failures. **Walk it top to bottom — first match wins.** Don't fall back to `org_context` as a default; it's the catch-all that produces the wrong outcome in practice.
@@ -108,8 +108,8 @@ The decision tree below corrects these failures. **Walk it top to bottom — fir
 
 ```
 Is the correction about a single column's MEANING, UNIT, ENCODING, or VALUE NORMALIZATION?
-   (e.g., "amount is in cents", "1 means active not true", "TOTAL_DISBURSED can be
-    negative for refunds", "Male/MALE/T all map to 'Male'", "STATUS='1' means active")
+   (e.g., "amount is in cents", "1 means active not true", "the order total can be
+    negative for refunds", "active/ACTIVE/1 all map to 'Active'", "STATUS='1' means active")
    → field_metadata
        → if it's specifically about value → canonical-display mapping, write to
          agami.choice_field on that field.
@@ -174,8 +174,8 @@ Else: pure SQL syntax / typo with no domain knowledge implied
 
 ### Anti-patterns the LLM keeps producing (do NOT do these)
 
-1. **Per-column rule → ORGANIZATION.md.** "`PII.GENDER` values normalize to Male" is NOT domain context — it's a column-value mapping. Route to `field_metadata` (`choice_field`).
-2. **Per-column rule → examples.yaml notes.** This skill never writes to `examples.yaml.notes[]` (that path lives in agami-connect Phase 6d). If you find yourself wanting to write "the CRIF total can be negative" as a note on example #12, route it to `field_metadata` on the actual column instead — the lesson applies to every future query, not just to one example.
+1. **Per-column rule → ORGANIZATION.md.** "`CUSTOMERS.STATUS` values normalize to Active" is NOT domain context — it's a column-value mapping. Route to `field_metadata` (`choice_field`).
+2. **Per-column rule → examples.yaml notes.** This skill never writes to `examples.yaml.notes[]` (that path lives in agami-connect Phase 6d). If you find yourself wanting to write "the order total can be negative" as a note on example #12, route it to `field_metadata` on the actual column instead — the lesson applies to every future query, not just to one example.
 3. **Dumping a column-fact into a prose file (or USER_MEMORY).** "Amounts are in INR → show ₹" is a fact about the `amount` column → a `caveat`/`value_transform` on that column (org-wide, structured, in the shared model) — NOT a USER_MEMORY line and NOT an ORGANIZATION.md prose rule. Route data-facts to the column/table; reserve the prose files for cross-cutting conventions (ORGANIZATION.md) and personal tics (USER_MEMORY). Don't reflexively ask — classify; ask only when personal-vs-org is genuinely unclear.
 4. **Display preference → prose without changing SQL.** If the correction is "always format like X," ALSO modify the seed example's SQL to demonstrate the formatting (so future answers actually apply it, not just describe it).
 
@@ -215,16 +215,16 @@ Classification: <kind>
   → reasoning: <one sentence explaining which rule of the decision tree matched>
 ```
 
-Concrete examples (taken from real corrections):
+Concrete examples:
 
 ```
 Classification: field_metadata
-  → routing to: BUREAU_DATA/LOAN_DETAILS.yaml → fields["TOTAL_DISBURSED_ALL"].description
+  → routing to: sales/ORDERS.yaml → fields["TOTAL"].description
   → reasoning: rule says "correction about a single column's meaning/encoding/sign convention" — you're teaching that this column can be negative because refunds carry a negative sign.
 
 Classification: field_metadata
-  → routing to: BUREAU_DATA/PII.yaml → fields["GENDER"].agami.choice_field
-  → reasoning: rule says "value normalization mapping (Male/MALE/T → 'Male') belongs in choice_field" — not ORGANIZATION.md.
+  → routing to: sales/CUSTOMERS.yaml → fields["STATUS"].agami.choice_field
+  → reasoning: rule says "value normalization mapping (active/ACTIVE/1 → 'Active') belongs in choice_field" — not ORGANIZATION.md.
 
 Classification: user_preference + seed-example update
   → routing to: USER_MEMORY.md (the prose preference) AND examples.yaml example #N (TO_CHAR in SQL)

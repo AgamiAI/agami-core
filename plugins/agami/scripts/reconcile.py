@@ -37,7 +37,7 @@ from typing import Any
 CURRENCY_SYMBOLS = ("$", "€", "£", "¥", "₹", "₩", "₽", "₿")
 
 # Magnitude suffixes. Indian numbering (Lakh / Crore) is included because
-# Sandeep's contacts at Asana / Intuit may have India-numbered dashboards.
+# dashboards from Indian deployments commonly use it.
 SUFFIXES: dict[str, float] = {
     "k":  1_000,
     "K":  1_000,

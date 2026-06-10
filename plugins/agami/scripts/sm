@@ -17,8 +17,8 @@
 # interpreter (user site first, then plain) and tell the user. Idempotent.
 #
 # Usage:  bash scripts/sm <cli-subcommand> [args...]
-#   e.g.  bash scripts/sm areas   ~/agami-artifacts/finbud
-#         bash scripts/sm prepare ~/agami-artifacts/finbud --area finbud --sql "SELECT 1"
+#   e.g.  bash scripts/sm areas   ~/agami-artifacts/main
+#         bash scripts/sm prepare ~/agami-artifacts/main --area sales --sql "SELECT 1"
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

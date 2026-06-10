@@ -655,7 +655,7 @@ The helper reads `shared/chart-template.html` + the two logo SVGs once, validate
 
 `--summary` is the executive summary used for multi-section reports; for single-section reports pass an empty string and the section's own insight covers it. `--title` is the user's original question.
 
-`--receipt-file` is **MANDATORY — always build and pass it.** The receipt is the answer-side half of the trust pitch; without it, the chart renders but loses provenance (no tables-touched list, no relationships-used, no model-version pin, no warning banner). Real failure mode reported in production (2026-05-13, BigQuery user): a query rendered cleanly with the chart and SQL, but no provenance panel — the user (and any auditor) couldn't tell which model version produced it or whether any unreviewed entries were touched. The receipt panel being absent reads as "the trust layer isn't actually there."
+`--receipt-file` is **MANDATORY — always build and pass it.** The receipt is the answer-side half of the trust pitch; without it the chart renders but loses provenance (no tables-touched list, no relationships-used, no model-version pin, no warning banner) — an answer no auditor can trace back to a model version. (The LLM has skipped this; don't.)
 
 The receipt construction logic is in Phase 4e.iii.5 above. If trust fields are genuinely missing on every entry the SQL touched (very old model from before the trust spine shipped), build the receipt with empty `relationships: []`, `metrics: []`, `named_filters: []`, `warnings: []` — but always pass `tables_used`, `executed_sql`, and `model_version`. The receipt panel renders gracefully on partial data; what you must NEVER do is omit `--receipt-file` entirely.
 
@@ -712,7 +712,7 @@ test -f ~/.agami/.optins
 ```
 
 - **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
-- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. The full ask + handling logic is documented in [Phase 6 below](#phase-6-post-install-github-star-ask-interrupt-the-follow-ups-not-the-answer) — but the trigger lives here, in Phase 4e.5, because if it lives only in Phase 6 (which appears textually after Phase 4f) the LLM hits Phase 4f first and the ask never fires. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/LiteBi`) before emitting** — they exist because the LLM has hallucinated both the wording and the URL in production.
+- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/LiteBi`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la ~/.agami/.optins` will show whether the file exists, and `rm ~/.agami/.optins` re-arms the prompt for the next query.
 
@@ -786,7 +786,7 @@ The correction can arrive two ways: the user **types** it, or they paste the blo
 1. **Floor (always):** the corrected SQL for *this question* lands as a prompt example — `sm add-example "$ROOT" --area <area> --file <json>` (dedups by question, so it replaces). Exactly the onboarding seed behavior. A pure note with no SQL change skips this.
 2. **The learning on top**, routed by the tree — a column's meaning/unit/encoding/value-map → `field_metadata` (`unit` / `value_transform` / `choice_field`); a join fix → `relationship`; a whole-table fact → `table_metadata`; a reusable aggregation → `new_metric`; a per-result caveat tied to this one question → the example's `notes[]`; a cross-cutting display convention for this DB → `ORGANIZATION.md`; a personal stylistic tic → `USER_MEMORY.md`. Model edits go through `sm curate`; build the ops JSON with the **Write tool** (never a heredoc / `python3 -c`).
 
-**Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `lending`, and set `LOAN_DETAILS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
+**Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `sales`, and set `ORDERS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
 
 **Positive confirmation ("This looks good").** The report also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
 
@@ -807,7 +807,7 @@ Append one line to `~/.agami/query_log.jsonl`:
   "risk": "LOW",
   "error_kind": null,
   "feedback": null,
-  "chart_path": "/Users/me/.agami/charts/finbud/20260507-141500.html",
+  "chart_path": "/Users/me/.agami/charts/main/20260507-141500.html",
   "tables_used": ["public.orders", "public.customers"],
   "retrieval_mode": "small"
 }
@@ -829,10 +829,10 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 **This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (between 4e and 4f) — the textual order of phases here is misleading because the ask must run *between* 4e and 4f, not after Phase 5. If you read straight through Phase 4f → 5 → 6 the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
 
-**HARD RULES — read before emitting the ask (added 2026-05-13 after a hallucinated-URL bug):**
+**HARD RULES — read before emitting the ask (the LLM has hallucinated both of these):**
 
-1. **The repo URL is literally `https://github.com/AgamiAI/LiteBi`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not from the marketplace name (`litebi`), not from the plugin name (`agami`), not from the `/plugin install agami@litebi` slash command. Real failure mode reported in production: the LLM saw `agami@litebi` and emitted `https://github.com/litebi/agami` (a different, wrong repo). The URL has uppercase `A`'s and a capital `B` in "LiteBi" — copy it verbatim.
-2. **Use the prompt prose VERBATIM** from the `AskUserQuestion` text below — do not paraphrase, do not "improve" the wording, do not add emojis or marketing flourish. Real failure mode: the LLM emitted "Enjoying agami so far? It's open-source and growing fast — a ⭐ on GitHub helps others find it" instead of the actual text. Paraphrasing here drifts the ask further from the discrete-decision shape it's tuned for and undermines the "non-pushy" framing.
+1. **The repo URL is literally `https://github.com/AgamiAI/LiteBi`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not the marketplace name (`litebi`), the plugin name (`agami`), or the `/plugin install agami@litebi` slash command (which has produced the wrong `github.com/litebi/agami`). Note the uppercase `A`'s and capital `B` in "LiteBi".
+2. **Use the prompt prose VERBATIM** from the `AskUserQuestion` text below — don't paraphrase, "improve" the wording, or add emojis/marketing flourish. Paraphrasing drifts the ask off the discrete-decision shape it's tuned for and undermines the non-pushy framing.
 
 A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 

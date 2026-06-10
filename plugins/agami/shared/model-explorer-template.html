@@ -16,27 +16,27 @@
 
   MANIFEST_JSON shape:
     {
-      "profile": "finbud",
+      "profile": "main",
       "totals":  { "schemas": 1, "tables": 14, "fields": 312 },
       "schemas": [
         {
-          "name": "BUREAU_DATA",
+          "name": "sales",
           "tables": [
             {
-              "name":          "NOHIT_DATA",
-              "qname":         "BUREAU_DATA.NOHIT_DATA",
-              "description":   "Applicant leads where bureau returned no hit",
+              "name":          "orders",
+              "qname":         "sales.orders",
+              "description":   "One row per order",
               "row_count":     6807724,
               "review_state":  "approved" | "rejected" | "unreviewed" | "stale",
               "excluded":      false,                   // review_state == rejected
-              "yaml_path":     "BUREAU_DATA/NOHIT_DATA.yaml",
-              "synonyms":      ["nohit", "unmatched_leads"],
+              "yaml_path":     "sales/orders.yaml",
+              "synonyms":      ["purchases", "transactions"],
               "fields": [
                 {
-                  "name":         "MOBILE",
-                  "qname":        "BUREAU_DATA.NOHIT_DATA.MOBILE",
+                  "name":         "customer_email",
+                  "qname":        "sales.orders.customer_email",
                   "type":         "string",
-                  "description":  "Mobile number",
+                  "description":  "Customer email",
                   "review_state": "approved" | "rejected" | "unreviewed" | "not_applicable",
                   "excluded":     false,
                   "confidence":   0.55
@@ -785,7 +785,7 @@
 
       // Propagate-to-similar: once a column is queued for exclude, offer to exclude
       // every other column with the SAME name in one click (the "this comment/decision
-      // applies to many" case — e.g. dropping `aadhaar` everywhere).
+      // applies to many" case — e.g. dropping `ssn` everywhere).
       if (pending[field.qname] === 'exclude') {
         const others = fieldsNamed(field.name)
           .filter(f => f.qname !== field.qname && !f.excluded && pending[f.qname] !== 'exclude');

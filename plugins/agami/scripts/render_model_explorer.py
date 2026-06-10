@@ -16,7 +16,7 @@ cost of the static HTML template.
 Usage:
 
     python3 render_model_explorer.py \\
-        --profile finbud \\
+        --profile main \\
         --artifacts-dir ~/agami-artifacts \\
         --out ~/.agami/model/20260512-101500.html
 
@@ -176,7 +176,7 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--profile", required=True,
-                   help="Profile name (e.g., 'finbud', 'main', 'staging')")
+                   help="Profile name (e.g., 'main', 'staging', 'analytics')")
     p.add_argument("--artifacts-dir", required=True,
                    help="Root artifacts directory (typically ~/agami-artifacts)")
     p.add_argument("--title",

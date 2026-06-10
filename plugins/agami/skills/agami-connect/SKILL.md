@@ -454,7 +454,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind entity --area <area> --f
 
 ### 2c — Metrics
 
-Metrics come from two sources, handled very differently. **Always prefer declared metrics** — schema-only inference is a shallow guess (it finds `AVG(score)`, a row count, an `AVG(FOIR)`; it misses the domain KPIs a lender actually tracks — DPD/delinquency buckets, disbursement, approval rate, PAR — because those aren't visible in column names).
+Metrics come from two sources, handled very differently. **Always prefer declared metrics** — schema-only inference is a shallow guess (it finds `AVG(rating)`, a row count, an `AVG(order_value)`; it misses the domain KPIs a business actually tracks — refund rate, repeat-purchase rate, cohort retention, fulfillment SLA — because those aren't visible in column names).
 
 **(A) Declared metrics — extract in FULL, no cap.** If the user attached a semantic-layer repo or a metrics file in 1.5 (`$DATA_MODEL_DOC_TEXT`), those are the org's *real* definitions — pull **every** one, don't sample to 4:
 - **LookML** `measure {}` → metric: `type` + `sql` → `bindings`, `label`/`description` → `calculation`, `label`+`view_label` → `other_names`.
@@ -486,7 +486,7 @@ From samples + the domain doc, add provider-portable cleaning where evidence sup
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveats.json
 ```
 ```json
-[{"op":"edit","kind":"table","area":"main","name":"LOAN_DETAILS","field":"caveats","value":["CRIF total can be negative on row #12."]},
+[{"op":"edit","kind":"table","area":"main","name":"orders","field":"caveats","value":["Order total can be negative on refunds."]},
  {"op":"edit","kind":"table","area":"main","name":"orders","field":"default_filters","value":["{alias}.deleted_at IS NULL"]},
  {"op":"edit","kind":"table","area":"main","name":"events","column":"ts","field":"value_transform","value":"TO_TIMESTAMP(ts)"}]
 ```

@@ -66,7 +66,7 @@ The dashboard has live search, filter chips (All / Active / Excluded /
 Unreviewed / Queued), and per-table + per-column Exclude / Include
 buttons. When you exclude a column, it offers **"exclude all N named
 <col>"** — one click drops that column across every table (PII like
-`aadhaar`/`ssn`, audit columns, etc.). Click your way through, hit
+`ssn`/`email`, audit columns, etc.). Click your way through, hit
 "Generate feedback for Claude" at the bottom, paste back here.
 
 You can also type commands directly:
@@ -96,9 +96,9 @@ End the turn. Wait for the user.
 The user replies with a block like:
 
 ```
-exclude tables: BUREAU_DATA.NOHIT_DATA, BUREAU_DATA.UNSCRUBBED_DATA
-exclude columns: BUREAU_DATA.GENERAL_INFO.PAN, BUREAU_DATA.GENERAL_INFO.AADHAAR
-include tables: BUREAU_DATA.LOAN_REPAYMENT
+exclude tables: sales.STG_LEADS, sales.STG_RAW
+exclude columns: sales.CUSTOMERS.SSN, sales.CUSTOMERS.EMAIL
+include tables: sales.PAYMENTS
 done
 ```
 
@@ -118,8 +118,8 @@ done
 ```
 
 Where `<qname-list>` is comma-separated, whitespace-tolerant:
-- Table qname: `<area>.<table>` (e.g., `bureau_data.NOHIT_DATA`)
-- Column qname: `<area>.<table>.<column>` (e.g., `bureau_data.PII.AADHAAR`)
+- Table qname: `<area>.<table>` (e.g., `sales.STG_LEADS`)
+- Column qname: `<area>.<table>.<column>` (e.g., `sales.CUSTOMERS.EMAIL`)
 
 Three optional blocks may follow, each a single JSON line (the dashboard emits whichever the user touched):
 - **`curate-ops:`** — exclude/include on metrics/entities/relationships AND field **edits** (`op:"edit"` with `field`/`value` — table/column/metric/entity descriptions, metric `calculation`/`unit`). Already a valid curate ops array; merge it verbatim with the table/column ops below and apply via one `sm curate` call.
@@ -130,7 +130,7 @@ Show the user a one-line summary of what each block changed before applying.
 
 Tolerate trailing commas, mixed-case schema/table/column names (the YAMLs typically preserve the DB's casing — pass them through verbatim).
 
-**Reject malformed targets in chat, not by silently dropping them.** If a user types `exclude tables: NOHIT_DATA` without the schema prefix, surface: *"Tables need a schema prefix — `bureau_data.NOHIT_DATA` not just `NOHIT_DATA`. Did you mean that?"* and stop.
+**Reject malformed targets in chat, not by silently dropping them.** If a user types `exclude tables: STG_LEADS` without the schema prefix, surface: *"Tables need a schema prefix — `sales.STG_LEADS` not just `STG_LEADS`. Did you mean that?"* and stop.
 
 ---
 
@@ -140,11 +140,11 @@ Translate the parsed exclude/include commands into a curation ops array, **then 
 
 ```json
 [
-  {"op": "exclude", "kind": "table", "area": "bureau_data", "name": "NOHIT_DATA"},
-  {"op": "include", "kind": "table", "area": "bureau_data", "name": "LOAN_REPAYMENT"},
-  {"op": "exclude", "kind": "table", "area": "bureau_data", "name": "PII", "column": "AADHAAR"},
-  {"op": "exclude", "kind": "metric", "area": "bureau_data", "name": "avg_score"},
-  {"op": "exclude", "kind": "relationship", "area": "bureau_data", "name": "loans->customers"}
+  {"op": "exclude", "kind": "table", "area": "sales", "name": "STG_LEADS"},
+  {"op": "include", "kind": "table", "area": "sales", "name": "PAYMENTS"},
+  {"op": "exclude", "kind": "table", "area": "sales", "name": "CUSTOMERS", "column": "EMAIL"},
+  {"op": "exclude", "kind": "metric", "area": "sales", "name": "avg_rating"},
+  {"op": "exclude", "kind": "relationship", "area": "sales", "name": "orders->customers"}
 ]
 ```
 
@@ -246,20 +246,20 @@ This is the same mechanism `/agami-review`'s Reject button uses on individual en
 ```
 You: open the model explorer
 
-[skill renders ~/.agami/model/finbud/20260512-101500.html and opens it]
+[skill renders ~/.agami/model/main/20260512-101500.html and opens it]
 
-You (in dashboard): search "pan" → toggle Exclude on every PAN/AADHAAR
+You (in dashboard): search "ssn" → toggle Exclude on every SSN/EMAIL
                     field → click Generate feedback → paste back in chat:
 
-exclude columns: BUREAU_DATA.GENERAL_INFO.PAN,
-                 BUREAU_DATA.GENERAL_INFO.AADHAAR,
-                 BUREAU_DATA.NOHIT_DATA.PAN
+exclude columns: sales.CUSTOMERS.SSN,
+                 sales.CUSTOMERS.EMAIL,
+                 sales.STG_LEADS.SSN
 done
 
 [skill applies, validator passes, commits, re-renders]
 
 agami: ✓ Applied: 3 columns excluded. Re-rendered.
-       ~/.agami/model/finbud/20260512-101830.html
+       ~/.agami/model/main/20260512-101830.html
 ```
 
 ### Removing staging tables
@@ -268,11 +268,11 @@ agami: ✓ Applied: 3 columns excluded. Re-rendered.
 You: I never want agami to use the staging tables
 
 [skill checks ORGANIZATION.md / table names for `_stg` suffix; if
- unsure, asks: "I see GENERAL_INFO_SCORE_STG — anything else? Click
+ unsure, asks: "I see CUSTOMER_SCORE_STG — anything else? Click
  Exclude on the table cards in the dashboard."]
 
 [user excludes via dashboard, pastes back]
-exclude tables: BUREAU_DATA.GENERAL_INFO_SCORE_STG
+exclude tables: sales.CUSTOMER_SCORE_STG
 done
 
 agami: ✓ Applied: 1 table excluded.

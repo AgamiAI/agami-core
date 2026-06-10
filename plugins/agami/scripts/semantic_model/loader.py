@@ -429,7 +429,7 @@ def _metrics_for(org: Organization, tables: list[str], area: Optional[str]) -> l
 
 
 def get_subject_area_bundle(org: Organization, area: str) -> dict[str, Any]:
-    """One-shot bundle for small subject areas (SunMobility/FinBud sized)."""
+    """One-shot bundle for small subject areas (a few dozen tables)."""
     sa = org.subject_area(area)
     if sa is None:
         raise KeyError(f"no subject area {area!r}")

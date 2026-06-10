@@ -248,9 +248,9 @@ For each number `N` in the user's command, find item `#N` in the review-items JS
 
 ```json
 [
-  {"op": "approve", "kind": "relationship", "area": "bureau_data", "name": "loans->customers"},
-  {"op": "approve", "kind": "metric", "area": "bureau_data", "name": "total_outstanding"},
-  {"op": "reject",  "kind": "entity", "area": "bureau_data", "name": "nominee"}
+  {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers"},
+  {"op": "approve", "kind": "metric", "area": "sales", "name": "total_revenue"},
+  {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"}
 ]
 ```
 
