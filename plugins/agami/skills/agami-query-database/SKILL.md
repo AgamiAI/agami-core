@@ -776,6 +776,8 @@ Surface the path(s) inline. For the auto-export case, the path is already in the
 
 This is the **live-query twin of the onboarding seed-validation flow** (`edit N` to fix an example's SQL / attach `notes[]`). When the user's reply to an answer is a *correction*, handle it **in this turn** — don't bounce them to `/agami-save-correction`. Two shapes:
 
+The correction can arrive two ways: the user **types** it, or they paste the block from the HTML report's **"Send feedback to Claude"** button (Phase 4e — each section has a *"✎ Fix the SQL or add a note"* editor + a footer button that packages every edit/note into a paste-ready block beginning *"Save this as a correction…"*). Either way, route it here.
+
 - **Fix the SQL** — "that join is wrong, use `customer_id`", "exclude cancelled rows", or a pasted corrected query. Build the corrected SQL (write it from their words if they described the fix), **re-run it via Phase 3** to confirm it executes, and re-render the answer (4c–4f).
 - **Add a note** — "TOTAL can be negative for refunds", "amounts are in INR", "always exclude test users". A durable fact; no SQL change needed.
 

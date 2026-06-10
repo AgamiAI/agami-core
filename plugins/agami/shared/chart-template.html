@@ -377,6 +377,25 @@
     }
     footer a { color: var(--muted); text-decoration: none; }
     footer a:hover { color: var(--fg); }
+
+    /* --- Feedback to Claude (correct the SQL / add notes → /agami-save-correction) --- */
+    details.feedback { margin: 10px 0 4px; }
+    details.feedback > summary { cursor: pointer; font-size: 13px; color: var(--accent); list-style: none; padding: 6px 0; }
+    details.feedback > summary::-webkit-details-marker { display: none; }
+    .feedback-body label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+    .feedback-body textarea { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 13px ui-monospace, monospace; }
+    .feedback-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin-top: 8px; background: var(--bg-elev); border-top: 1px solid var(--border); }
+    .feedback-bar #feedback-summary { font-size: 13px; color: var(--muted); margin-right: auto; }
+    .feedback-bar button, .modal-actions button { font-size: 13px; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer; }
+    .feedback-bar button.primary, .modal-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 50; }
+    .modal-backdrop[hidden] { display: none; }
+    .modal-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: min(680px, 92vw); }
+    .modal-card h2 { margin: 0 0 8px; font-size: 17px; }
+    .modal-card p { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+    .modal-card textarea { width: 100%; box-sizing: border-box; height: 280px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--code-bg); color: var(--fg); font: 12px ui-monospace, monospace; white-space: pre; }
+    .modal-actions { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    .modal-actions #fb-status { font-size: 12px; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -407,6 +426,26 @@
     </footer>
   </div>
 
+  <div class="feedback-bar" id="feedback-bar" hidden>
+    <span id="feedback-summary"></span>
+    <button type="button" id="btn-feedback" class="primary">Send feedback to Claude</button>
+  </div>
+
+  <div class="modal-backdrop" id="fb-modal" hidden>
+    <div class="modal-card">
+      <h2>Paste this back to Claude</h2>
+      <p>Claude routes each item — a corrected query becomes a saved example, a note about
+         a column / units / formatting goes to the model or your memory — and tells you
+         where each landed. (This calls <code>/agami-save-correction</code> for you.)</p>
+      <textarea id="fb-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" id="fb-copy" class="primary">Copy to clipboard</button>
+        <button type="button" id="fb-close">Close</button>
+        <span id="fb-status"></span>
+      </div>
+    </div>
+  </div>
+
   <script>
     // ---- Skill-substituted placeholders ----
     const reportTitle = {{REPORT_TITLE_JSON}};
@@ -417,6 +456,43 @@
     // trust-layer launch (May 18) wires the receipt up via render_chart.py's
     // --receipt-file flag.
     const receipt = {{RECEIPT_JSON}};
+
+    // ---- Feedback to Claude: per-section corrected SQL + notes, queued in the browser,
+    //      emitted as a paste-back block that routes to /agami-save-correction. ----
+    const feedback = {};  // sectionIdx -> {title, originalSql, sql|null, note|null}
+    function storeFeedback(i, sec, sqlVal, noteVal) {
+      const orig = (sec.sql || '').trim();
+      const sqlChanged = (sqlVal || '').trim() && (sqlVal || '').trim() !== orig;
+      const note = (noteVal || '').trim();
+      if (sqlChanged || note) {
+        feedback[i] = { title: sec.title || ('Section ' + (i + 1)), originalSql: sec.sql || '',
+                        sql: sqlChanged ? sqlVal.trim() : null, note: note || null };
+      } else { delete feedback[i]; }
+      refreshFeedbackBar();
+    }
+    function refreshFeedbackBar() {
+      const n = Object.keys(feedback).length;
+      const bar = document.getElementById('feedback-bar');
+      if (!bar) return;
+      bar.hidden = n === 0;
+      if (n) document.getElementById('feedback-summary').textContent =
+        n + (n === 1 ? ' section' : ' sections') + ' with a fix or note queued';
+    }
+    function buildFeedbackText() {
+      const lines = ['Save this as a correction (route via /agami-save-correction).', ''];
+      lines.push('I reviewed an agami query report' + (reportTitle ? ' for: ' + reportTitle : '')
+                 + ' and want to correct the SQL / add notes.');
+      Object.keys(feedback).map(Number).sort((a, b) => a - b).forEach(i => {
+        const f = feedback[i];
+        lines.push('', '--- ' + f.title + ' ---', 'Original SQL:', f.originalSql);
+        if (f.sql) lines.push('Corrected SQL:', f.sql);
+        if (f.note) lines.push('Note: ' + f.note);
+      });
+      lines.push('', 'For each section: save the corrected SQL as a prompt example, and route '
+                 + 'any note (a column’s unit/meaning/encoding, table formatting, a caveat) to the '
+                 + 'right home per the save-correction decision tree. Tell me where each landed.');
+      return lines.join('\n');
+    }
 
     // ---- Deterministic unit/currency formatting (mirrors semantic_model/units.py) ----
     // A section carries `unit` (an ISO currency code like INR/USD, or a label like
@@ -708,6 +784,26 @@
         sectionEl.appendChild(det);
       }
 
+      // Feedback: correct this section's SQL / add a note → /agami-save-correction
+      {
+        const fb = el('details', { class: 'feedback' });
+        fb.appendChild(el('summary', { text: '✎ Fix the SQL or add a note' }));
+        const inner = el('div', { class: 'feedback-body' });
+        inner.appendChild(el('label', { text: 'Corrected SQL — edit if this query was wrong:' }));
+        const sqlTa = el('textarea', { rows: '6' });
+        sqlTa.value = sec.sql || '';
+        inner.appendChild(sqlTa);
+        inner.appendChild(el('label', { text: 'Notes — a column’s meaning/units, table formatting, a caveat:' }));
+        const noteTa = el('textarea', { rows: '3',
+          placeholder: 'e.g. amounts are in INR; TOTAL can be negative for refunds; show dates as MMM D, YYYY' });
+        inner.appendChild(noteTa);
+        const onInput = () => storeFeedback(i, sec, sqlTa.value, noteTa.value);
+        sqlTa.addEventListener('input', onInput);
+        noteTa.addEventListener('input', onInput);
+        fb.appendChild(inner);
+        sectionEl.appendChild(fb);
+      }
+
       body.appendChild(sectionEl);
     });
 
@@ -917,6 +1013,27 @@
       det.appendChild(rb);
       document.querySelector('.wrap').appendChild(det);
     }
+
+    // ---- Feedback bar + modal wiring ----
+    document.getElementById('btn-feedback').addEventListener('click', () => {
+      document.getElementById('fb-text').value = buildFeedbackText();
+      document.getElementById('fb-modal').hidden = false;
+      document.getElementById('fb-status').textContent = '';
+    });
+    document.getElementById('fb-close').addEventListener('click', () => {
+      document.getElementById('fb-modal').hidden = true;
+    });
+    document.getElementById('fb-copy').addEventListener('click', async () => {
+      const txt = document.getElementById('fb-text').value;
+      const status = document.getElementById('fb-status');
+      try {
+        await navigator.clipboard.writeText(txt);
+        status.textContent = '✓ Copied — paste in Claude chat.';
+      } catch (e) {
+        document.getElementById('fb-text').select();
+        status.textContent = '⚠ Press ⌘/Ctrl+C to copy.';
+      }
+    });
   </script>
 </body>
 </html>
