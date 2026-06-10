@@ -2,7 +2,7 @@
 <!--
   agami report template — used by agami-query/SKILL.md.
 
-  The skill substitutes the {{...}} placeholders below and writes the result
+  The renderer substitutes the placeholders below and writes the result
   to ~/.agami/charts/<ts>.html. The output is fully self-contained: opens
   from file:// in any browser, no server, no relative-path dependencies.
 
@@ -11,15 +11,20 @@
   own chart + table + insight + SQL. All sections live in the same file
   and tell one narrative.
 
-  Per-report placeholders the skill MUST substitute every time:
-    {{REPORT_TITLE}}     — the user's original question (or a tight title)
-    {{REPORT_SUMMARY}}   — 1-3 sentence executive summary across all sections
-    {{GENERATED_AT}}     — ISO8601 UTC timestamp
-    {{SECTIONS_JSON}}    — JSON array of section objects (see schema below)
-    {{RECEIPT_JSON}}     — Trust receipt object (or `null` to skip the receipt
-                           panel entirely — see RECEIPT_JSON schema below).
-    {{AGAMI_LOGO_DARK_TEXT}}   — full SVG content of shared/agami-logo-dark.svg  (light bg)
-    {{AGAMI_LOGO_LIGHT_TEXT}}  — full SVG content of shared/agami-logo-light.svg (dark bg)
+  NOTE: placeholder names are written WITHOUT their double-brace wrappers here
+  on purpose — the renderer does a blanket string replace, so a real "{{...}}"
+  token inside this comment would get the substituted JSON (which can contain a
+  user "-->") and close this comment early, dumping raw JSON into the page.
+
+  Per-report placeholders the renderer substitutes every time (in the body below):
+    REPORT_TITLE     — the user's original question (or a tight title)
+    REPORT_SUMMARY   — 1-3 sentence executive summary across all sections
+    GENERATED_AT     — ISO8601 UTC timestamp
+    SECTIONS_JSON    — JSON array of section objects (see schema below)
+    RECEIPT_JSON     — Trust receipt object (or `null` to skip the receipt
+                       panel entirely — see RECEIPT_JSON schema below).
+    AGAMI_LOGO_DARK_TEXT   — full SVG content of shared/agami-logo-dark.svg  (light bg)
+    AGAMI_LOGO_LIGHT_TEXT  — full SVG content of shared/agami-logo-light.svg (dark bg)
 
   RECEIPT_JSON schema — single object (not array):
     {
@@ -32,7 +37,7 @@
       "named_filters":   [{"name":"active_customer","expression":"...","definition_prose":"..."}, ...],
       "warnings":        ["⚠ Used 1 unreviewed join (orders → customers, conf 0.62). Review now?", ...]
     }
-  Pass `null` for {{RECEIPT_JSON}} on legacy callers that don't yet build a receipt.
+  Pass `null` for RECEIPT_JSON on legacy callers that don't yet build a receipt.
 
   SECTIONS_JSON schema — array of these objects, one per section:
     {

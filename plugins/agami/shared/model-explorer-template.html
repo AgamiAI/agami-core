@@ -2,17 +2,23 @@
 <!--
   agami model explorer — used by the agami-model skill via render_model_explorer.py.
 
-  The renderer substitutes the {{...}} placeholders below and writes the
-  result to ~/.agami/model/<ts>.html. Self-contained: opens from file:// in
-  any browser, no server, no relative-path dependencies.
+  The renderer substitutes the placeholders below and writes the result to
+  ~/.agami/model/<ts>.html. Self-contained: opens from file:// in any browser,
+  no server, no relative-path dependencies.
 
-  Per-render placeholders (always substitute):
-    {{REPORT_TITLE}}          — "Model explorer · <profile>"
-    {{GENERATED_AT}}          — ISO8601 UTC timestamp
-    {{PROFILE}}               — profile name
-    {{MANIFEST_JSON}}         — JSON object with schemas/tables/fields (schema below)
-    {{AGAMI_LOGO_DARK_TEXT}}  — full SVG content of agami-logo-dark.svg
-    {{AGAMI_LOGO_LIGHT_TEXT}} — full SVG content of agami-logo-light.svg
+  NOTE: the placeholder names here are written WITHOUT their double-brace
+  wrappers on purpose — the renderer does a blanket string replace, and if a
+  real "{{...}}" token appeared inside this comment the substituted MANIFEST
+  JSON (which can contain a "-->" from ORGANIZATION.md's HTML comment) would
+  close this comment early and dump raw JSON into the page. Keep them bare.
+
+  Per-render placeholders (always substituted in the body below):
+    REPORT_TITLE          — "Model explorer · <profile>"
+    GENERATED_AT          — ISO8601 UTC timestamp
+    PROFILE               — profile name
+    MANIFEST_JSON         — JSON object with schemas/tables/fields (schema below)
+    AGAMI_LOGO_DARK_TEXT  — full SVG content of agami-logo-dark.svg
+    AGAMI_LOGO_LIGHT_TEXT — full SVG content of agami-logo-light.svg
 
   MANIFEST_JSON shape:
     {

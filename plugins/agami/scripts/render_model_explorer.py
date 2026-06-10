@@ -160,13 +160,19 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
     logo_dark = LOGO_DARK_PATH.read_text() if LOGO_DARK_PATH.exists() else ""
     logo_light = LOGO_LIGHT_PATH.read_text() if LOGO_LIGHT_PATH.exists() else ""
 
+    # The manifest embeds arbitrary model text (descriptions, ORGANIZATION.md, SQL).
+    # Escape `</` so a `</script>` in that text can't terminate the <script> block that
+    # holds `const manifest = …` (JS unescapes `<\/` back to `</`). The template's doc
+    # comment carries no real `{{…}}` tokens, so a `-->` in the text can't close it.
+    manifest_json = json.dumps(manifest, separators=(",", ":")).replace("</", "<\\/")
+
     out = (
         template
         .replace("{{REPORT_TITLE}}", title)
         .replace("{{PROFILE}}", profile)
         .replace("{{GENERATED_AT}}",
                  datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
-        .replace("{{MANIFEST_JSON}}", json.dumps(manifest, separators=(",", ":")))
+        .replace("{{MANIFEST_JSON}}", manifest_json)
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark)
         .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", logo_light)
     )

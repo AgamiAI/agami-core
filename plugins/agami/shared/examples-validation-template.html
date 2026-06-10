@@ -8,14 +8,16 @@
   sticky "Generate feedback for Claude" footer with a paste-ready command
   block. Three tabs: For Validation / Validated / Rejected.
 
-  Per-render placeholders:
-    {{REPORT_TITLE}}             — "Seed examples · <profile>"
-    {{GENERATED_AT}}             — ISO8601 UTC timestamp
-    {{ITEMS_JSON}}                — JSON array of example-item objects
-    {{PROFILE}}                   — the active profile name
-    {{TOTAL_ROW_COUNT}}           — (legacy placeholder, unused in the new layout)
-    {{AGAMI_LOGO_DARK_TEXT}}      — full SVG content of agami-logo-dark.svg
-    {{AGAMI_LOGO_LIGHT_TEXT}}     — full SVG content of agami-logo-light.svg
+  Per-render placeholders (names bare on purpose — a real "{{...}}" token in
+  this comment would catch the blanket replace and, if the substituted JSON
+  contained a user "-->", close the comment early and leak raw JSON to the page):
+    REPORT_TITLE             — "Seed examples · <profile>"
+    GENERATED_AT             — ISO8601 UTC timestamp
+    ITEMS_JSON                — JSON array of example-item objects
+    PROFILE                   — the active profile name
+    TOTAL_ROW_COUNT           — (legacy placeholder, unused in the new layout)
+    AGAMI_LOGO_DARK_TEXT      — full SVG content of agami-logo-dark.svg
+    AGAMI_LOGO_LIGHT_TEXT     — full SVG content of agami-logo-light.svg
 
   ITEMS_JSON schema — array of objects, one per seed example:
     {

@@ -111,13 +111,18 @@ def render(
     logo_dark_svg = LOGO_DARK_PATH.read_text()
     logo_light_svg = LOGO_LIGHT_PATH.read_text()
 
+    # Escape `</` in the JSON embeds so a `</script>` in item text (descriptions, SQL)
+    # can't terminate the <script> block (JS unescapes `<\/` → `</`).
+    def j(obj):
+        return json.dumps(obj).replace("</", "<\\/")
+
     out = (
         template
         .replace("{{REPORT_TITLE}}", title)
         .replace("{{GENERATED_AT}}",
                  datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
-        .replace("{{ITEMS_JSON}}", json.dumps(items))
-        .replace("{{SUMMARY_JSON}}", json.dumps(summary or {}))
+        .replace("{{ITEMS_JSON}}", j(items))
+        .replace("{{SUMMARY_JSON}}", j(summary or {}))
         .replace("{{THRESHOLD}}", f"{threshold:g}")
         .replace("{{MODEL_VERSION}}", model_version or "")
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark_svg)

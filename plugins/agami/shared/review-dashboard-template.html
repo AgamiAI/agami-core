@@ -2,19 +2,24 @@
 <!--
   agami review dashboard — used by the agami-review skill via render_review.py.
 
-  The skill substitutes the {{...}} placeholders below and writes the result
+  The renderer substitutes the placeholders below and writes the result
   to ~/.agami/review/<ts>.html. Self-contained: opens from file:// in any
   browser, no server, no relative-path dependencies.
 
-  Per-render placeholders (always substitute):
-    {{REPORT_TITLE}}             — "Review queue · <profile> · threshold <X>"
-    {{GENERATED_AT}}             — ISO8601 UTC timestamp
-    {{ITEMS_JSON}}                — JSON array of item objects (schema below)
-    {{SUMMARY_JSON}}              — JSON object with the per-category counts
-    {{THRESHOLD}}                 — Float string, e.g. "0.7"
-    {{MODEL_VERSION}}             — Short hash from .snapshots/ dir name
-    {{AGAMI_LOGO_DARK_TEXT}}      — full SVG content of agami-logo-dark.svg
-    {{AGAMI_LOGO_LIGHT_TEXT}}     — full SVG content of agami-logo-light.svg
+  NOTE: placeholder names are bare (no double-brace wrappers) on purpose — the
+  renderer does a blanket string replace, so a real "{{...}}" token in this
+  comment would get the substituted JSON (which can contain a user "-->") and
+  close the comment early, dumping raw JSON into the page.
+
+  Per-render placeholders (substituted in the body below):
+    REPORT_TITLE             — "Review queue · <profile> · threshold <X>"
+    GENERATED_AT             — ISO8601 UTC timestamp
+    ITEMS_JSON                — JSON array of item objects (schema below)
+    SUMMARY_JSON              — JSON object with the per-category counts
+    THRESHOLD                 — Float string, e.g. "0.7"
+    MODEL_VERSION             — Short hash from .snapshots/ dir name
+    AGAMI_LOGO_DARK_TEXT      — full SVG content of agami-logo-dark.svg
+    AGAMI_LOGO_LIGHT_TEXT     — full SVG content of agami-logo-light.svg
 
   ITEMS_JSON schema — array of objects, one per entity in the model:
     {

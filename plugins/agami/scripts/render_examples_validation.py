@@ -78,12 +78,16 @@ def render(
 
     total_rows = sum(int(it.get("row_count") or 0) for it in items)
 
+    # Escape `</` so a `</script>` in an example's question/SQL can't terminate the
+    # <script> block holding the items JSON (JS unescapes `<\/` → `</`).
+    items_json = json.dumps(items).replace("</", "<\\/")
+
     out = (
         template
         .replace("{{REPORT_TITLE}}", title)
         .replace("{{GENERATED_AT}}",
                  datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
-        .replace("{{ITEMS_JSON}}", json.dumps(items))
+        .replace("{{ITEMS_JSON}}", items_json)
         .replace("{{PROFILE}}", profile or "")
         .replace("{{TOTAL_ROW_COUNT}}", str(total_rows))
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark_svg)
