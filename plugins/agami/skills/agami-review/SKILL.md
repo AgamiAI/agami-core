@@ -62,7 +62,12 @@ tab = "rejected"  if review_state == "rejected"
       "manual"    if approved by a human signer
 ```
 
-The template renders: **For Review** → action buttons (Approve / Reject / Edit / Skip), grouped by entity type, Rule 1 (metrics) in a primary "must-do-to-ship" section + Rule 2 collapsed below; **Auto** / **Manual** → read-only with the approval phrase; **Rejected** → a "Move to For Review" button (`unreject N`).
+The template renders: **For Review** → action buttons (Approve / Reject / Edit / Skip), split into **"Needs your eyes"** (primary) and a collapsed **"Looks right (confident)"** panel with a one-click **"✓ Approve all N"**; **Auto** / **Manual** → read-only with the approval phrase; **Rejected** → a "Move to For Review" button (`unreject N`). The dashboard also supports keyboard review (`j`/`k` move, `a`/`r`/`e` act) so users fly through.
+
+**Triage annotation (steer the split — optional but recommended).** Before rendering, set a `"triage"` field on each item to control which side it lands on, so the user spends time only on what's genuinely ambiguous:
+- `"triage": "review"` → **Needs your eyes**: the metric definition is a guess, a join/entity mapping is surprising, or the signal is weak.
+- `"triage": "confident"` → **Looks right** (bulk-approvable): FK-derived joins, metrics with a clearly declared definition (from LookML/dbt/a metrics file), unambiguous entity mappings.
+Without a `triage` field the dashboard falls back to a confidence heuristic (Rule 1 / `stale` / `proposed` → needs eyes; `confirmed`/`inferred` → looks right). This is your highest-leverage move for review speed — pre-sort so the human reviews the few, not the many.
 
 **Scope filter — `review-items --scope rule1`** (used by `/agami-connect` Phase 4's upfront gate, and when this skill is invoked with a `rule1` argument): the CLI returns **only** the Rule-1 items needing sign-off (metrics + named filters in the review tab). Pass that file straight to the renderer — **don't hand-filter and don't look for a scope flag inside `render_review.py`; the renderer renders exactly the items it's given.** The rendered "(N items)" then equals the sign-off count exactly. Default (no `--scope`) returns all four tabs.
 
