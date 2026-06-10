@@ -564,25 +564,61 @@
         + 'border:1px solid var(--border);background:var(--bg);color:var(--fg);font:13px ui-monospace,monospace;';
       return ta;
     }
-    // Render an inline edit form for `item` with the given editable fields.
-    // fieldDefs: [{field, label, current, rows}]. Saving stores a curate edit per
-    // changed field under edits[item.qname].
+    // Render an inline edit form for `item`. fieldDefs: [{field, label, current, rows,
+    // type}] where type is:
+    //   'text'   (default) → single value;
+    //   'list'   → one item per line → string[] (caveats, default_filters, other_names);
+    //   'maps'   → one `table.column` per line, first is primary → entity maps_to;
+    //   'select' → dropdown over `options`.
+    // Saving stores a curate edit per CHANGED field under edits[item.qname].
     function renderEditForm(item, kind, fieldDefs) {
       const wrap = el('div', { style: 'border-top:1px dashed var(--border);margin-top:6px;' });
-      const inputs = {};
+      const getters = {};
+      const saved = edits[item.qname] && edits[item.qname].fields;
+
       fieldDefs.forEach(fd => {
-        wrap.appendChild(labelLine(fd.label));
-        const cur = (edits[item.qname] && edits[item.qname].fields[fd.field]);
-        const ta = textarea(cur !== undefined ? cur : (fd.current || ''), fd.rows);
-        inputs[fd.field] = ta;
-        wrap.appendChild(ta);
+        const hint = fd.type === 'maps' ? ' (one table.column per line; first is primary)'
+                   : fd.type === 'list' ? ' (one per line)' : '';
+        wrap.appendChild(labelLine(fd.label + hint));
+        const savedVal = saved ? saved[fd.field] : undefined;
+
+        if (fd.type === 'select') {
+          const sel = el('select', { style: 'margin:4px 18px;padding:6px 8px;border-radius:5px;'
+            + 'border:1px solid var(--border);background:var(--bg);color:var(--fg);font:13px sans-serif;' });
+          (fd.options || []).forEach(o => {
+            const opt = el('option', { value: o }); opt.textContent = o; sel.appendChild(opt);
+          });
+          sel.value = (savedVal !== undefined ? savedVal : (fd.current || (fd.options || [])[0] || ''));
+          wrap.appendChild(sel);
+          getters[fd.field] = () => ({ value: sel.value, changed: sel.value !== (fd.current || '') });
+        } else {
+          // text-ish (text / list / maps): edit as lines in a textarea
+          const toLines = (v) => Array.isArray(v) ? v.map(x => (x && x.table) ? `${x.table}.${x.column}` : x).join('\n')
+                                                  : (v || '');
+          const display = savedVal !== undefined ? toLines(savedVal) : toLines(fd.current);
+          const ta = textarea(display, fd.rows);
+          wrap.appendChild(ta);
+          getters[fd.field] = () => {
+            const raw = ta.value;
+            if (fd.type === 'list') {
+              const arr = raw.split('\n').map(s => s.trim()).filter(Boolean);
+              return { value: arr, changed: JSON.stringify(arr) !== JSON.stringify(fd.current || []) };
+            }
+            if (fd.type === 'maps') {
+              const arr = raw.split('\n').map(s => s.trim()).filter(Boolean).map((s, i) => {
+                const dot = s.lastIndexOf('.');
+                return { table: s.slice(0, dot), column: s.slice(dot + 1), primary: i === 0 };
+              });
+              return { value: arr, changed: toLines(arr) !== toLines(fd.current) };
+            }
+            return { value: raw, changed: raw !== (fd.current || '') };
+          };
+        }
       });
+
       const save = btn('Save', () => {
         const fields = {};
-        fieldDefs.forEach(fd => {
-          const v = inputs[fd.field].value;
-          if (v !== (fd.current || '')) fields[fd.field] = v;
-        });
+        fieldDefs.forEach(fd => { const g = getters[fd.field](); if (g.changed) fields[fd.field] = g.value; });
         if (Object.keys(fields).length) {
           edits[item.qname] = { kind, area: item.area, name: item.name || relName(item),
                                 column: item.column, fields };
@@ -768,8 +804,11 @@
       if (editOpen.has(field.qname)) {
         const wrap = el('div');
         wrap.appendChild(row);
+        editItem.description = field.description;
         wrap.appendChild(renderEditForm(editItem, 'table', [
           { field: 'description', label: 'Column description', current: field.description, rows: 2 },
+          { field: 'caveats', label: 'Caveats', type: 'list', current: field.caveats, rows: 2 },
+          { field: 'unit', label: 'Unit (e.g. INR, percent)', current: field.unit, rows: 1 },
         ]));
         return wrap;
       }
@@ -868,6 +907,8 @@
       body.appendChild(editToggle(table));
       if (editOpen.has(table.qname)) body.appendChild(renderEditForm(table, 'table', [
         { field: 'description', label: 'Table description', current: table.description, rows: 2 },
+        { field: 'caveats', label: 'Caveats', type: 'list', current: table.caveats, rows: 3 },
+        { field: 'default_filters', label: 'Default filters (use {alias})', type: 'list', current: table.default_filters, rows: 2 },
       ]));
 
       (table.fields || []).forEach(f => {
@@ -1052,6 +1093,7 @@
         { field: 'calculation', label: 'Calculation (prose)', current: m.calculation, rows: 2 },
         { field: 'unit', label: 'Unit (e.g. INR, percent)', current: m.unit, rows: 1 },
         { field: 'description', label: 'Description', current: m.description, rows: 2 },
+        { field: 'other_names', label: 'Also called', type: 'list', current: m.other_names, rows: 2 },
       ]));
       card.appendChild(body);
       return card;
@@ -1069,6 +1111,9 @@
       body.appendChild(eActions);
       if (editOpen.has(e.qname)) body.appendChild(renderEditForm(e, 'entity', [
         { field: 'description', label: 'Description', current: e.description, rows: 2 },
+        { field: 'maps_to', label: 'Maps to', type: 'maps', current: e.maps_to, rows: 3 },
+        { field: 'other_names', label: 'Also called', type: 'list', current: e.other_names, rows: 2 },
+        { field: 'value_pattern', label: 'Value pattern (regex)', current: e.value_pattern, rows: 1 },
       ]));
       card.appendChild(body);
       return card;
@@ -1083,7 +1128,15 @@
       const body = el('div', { class: 'table-body' });
       if (r.cardinality) { body.appendChild(labelLine('Cardinality')); body.appendChild(descBlock(r.cardinality)); }
       if (r.description) { body.appendChild(labelLine('Description')); body.appendChild(descBlock(r.description)); }
-      body.appendChild(excludeBtn('relationship', r));
+      const rActions = el('div'); rActions.appendChild(excludeBtn('relationship', r)); rActions.appendChild(editToggle(r));
+      body.appendChild(rActions);
+      if (editOpen.has(r.qname)) body.appendChild(renderEditForm(r, 'relationship', [
+        { field: 'relationship', label: 'Cardinality', type: 'select',
+          options: ['many_to_one', 'one_to_many', 'one_to_one'], current: r.cardinality },
+        { field: 'from_column', label: 'From column', current: r.from_column, rows: 1 },
+        { field: 'to_column', label: 'To column', current: r.to_column, rows: 1 },
+        { field: 'description', label: 'Description', current: r.description, rows: 2 },
+      ]));
       card.appendChild(body);
       return card;
     }

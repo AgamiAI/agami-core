@@ -199,6 +199,32 @@ def test_curate_edit_op_sets_enrichment_fields(tmp_path):
     assert t.get_column("total").value_transform == "ABS(total)"
 
 
+def test_curate_edit_op_sets_structured_fields(tmp_path):
+    # the model-explorer's structured editors emit list/object edit-ops; curate applies
+    # them (caveats list, entity maps_to, relationship cardinality)
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    # _model has an entity? no — add one + use the existing rel/columns
+    (tmp_path / "subject_areas" / "s" / "entities").mkdir(parents=True, exist_ok=True)
+    import yaml
+    (tmp_path / "subject_areas" / "s" / "entities" / "buyer.yaml").write_text(yaml.safe_dump({
+        "name": "buyer", "maps_to": [{"table": "orders", "column": "id", "primary": True}],
+        "confidence": "inferred", "review_state": "unreviewed"}))
+    res = curate.apply(tmp_path, [
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders", "column": "total",
+         "field": "caveats", "value": ["excludes refunds", "net of tax"]},
+        {"op": "edit", "kind": "entity", "area": "s", "name": "buyer",
+         "field": "maps_to", "value": [{"table": "order_items", "column": "order_id", "primary": True}]},
+        {"op": "edit", "kind": "relationship", "area": "s", "name": "order_items->orders",
+         "field": "relationship", "value": "one_to_many"}])
+    assert res.validated and len(res.applied) == 3
+    sa = load_organization(tmp_path).subject_areas[0]
+    assert sa.defined_table("orders").get_column("total").caveats == ["excludes refunds", "net of tax"]
+    assert [(m.table, m.column) for m in next(e for e in sa.entities if e.name == "buyer").maps_to] == [("order_items", "order_id")]
+    assert next(r for r in sa.relationships if r.from_table == "order_items").relationship == "one_to_many"
+
+
 def test_validate_seeds_splits_pass_fail_via_runner():
     # the packaged Phase-5 loop: each candidate SQL is wrapped to return zero rows and
     # run via the live-DB runner; passing get seed/confirmed defaults, rejects carry the error
