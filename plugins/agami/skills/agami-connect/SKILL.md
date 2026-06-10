@@ -116,10 +116,14 @@ Bind `$DB_TYPE` ∈ `postgres | mysql | snowflake | bigquery | sqlserver | oracl
 - `MySQL`/`Snowflake`/`BigQuery` → pass-through.
 - `Other` → parse the free-form input: a DSN scheme → derive `db_type`; `.db`/`.sqlite`/`.duckdb` suffix or absolute file path → SQLite or DuckDB; a named DB (`sqlserver`/`mssql`, `oracle`, `databricks`, `trino`/`presto`, `duckdb`) → that dialect. Only refuse with "not supported yet" for engines outside the supported set above (e.g. MongoDB, Cassandra, ClickHouse).
 
-### 0a.3 — Pick a profile name
-> What should I call this connection? You'll use this name to switch databases later (e.g. `AGAMI_PROFILE=production`).
+### 0a.3 — Name the database profile (the user's choice)
 
-Options (`main` Recommended, first): `main` / `production` / `staging`. Validate: lowercase letters/digits/dashes/underscores, 1–32 chars. Bind `$PROFILE_NAME`.
+Ask the user to **name** this connection — don't pick for them. The name is how they'll switch databases later (`AGAMI_PROFILE=<name>`) and it names the model folder (`<artifacts_dir>/<name>/`), so a name that means something to them — their database, product, team, or environment — beats a generic default.
+
+**AskUserQuestion**, with the **Other** free-text as the encouraged path (that's where they type their own name):
+> What should I call this database? Pick a name you'll recognize when you connect more than one — e.g. your database or product name, or an environment.
+
+Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; if it doesn't pass, show the rule and re-ask.
 
 ### 0a.4 — Write `~/.agami/credentials.example`
 
