@@ -166,17 +166,17 @@ def test_curate_edit_op_sets_enrichment_fields(tmp_path):
         {"op": "edit", "kind": "table", "area": "s", "name": "orders",
          "field": "caveats", "value": ["Excludes test orders."]},
         {"op": "edit", "kind": "table", "area": "s", "name": "orders",
-         "field": "default_filters", "value": ["{alias}.amount IS NOT NULL"]},
+         "field": "default_filters", "value": ["{alias}.deleted_at IS NOT NULL"]},
         {"op": "edit", "kind": "table", "area": "s", "name": "orders",
          "field": "description", "value": "One row per order."},
         {"op": "edit", "kind": "table", "area": "s", "name": "orders",
-         "column": "amount", "field": "value_transform", "value": "ABS(amount)"}])
+         "column": "total", "field": "value_transform", "value": "ABS(total)"}])
     assert res.validated and len(res.applied) == 4
     t = load_organization(tmp_path).subject_areas[0].defined_table("orders")
     assert t.caveats == ["Excludes test orders."]
-    assert t.default_filters == ["{alias}.amount IS NOT NULL"]
+    assert t.default_filters == ["{alias}.deleted_at IS NOT NULL"]
     assert t.description == "One row per order."
-    assert t.get_column("amount").value_transform == "ABS(amount)"
+    assert t.get_column("total").value_transform == "ABS(total)"
 
 
 def test_validate_seeds_splits_pass_fail_via_runner():
