@@ -773,21 +773,32 @@ def resolve_result_units(org: Organization, sql: str) -> dict[str, str]:
     if select is None:
         return {}
 
-    out: dict[str, str] = {}
-    for proj in select.expressions:
-        name = proj.alias_or_name
-        if not name:
-            continue
-        if name.lower() in metric_units:
-            out[name] = metric_units[name.lower()]
-            continue
+    projs = list(select.expressions)
+    # `SELECT *` expands to an unknown number of columns, so projection index no longer
+    # lines up with result-column index — disable the positional fallback in that case
+    # (the star's columns keep their real names, so name-matching still covers them).
+    has_star = any(isinstance(p, exp.Star) or p.find(exp.Star) is not None for p in projs)
+
+    def _unit_for(proj) -> Optional[str]:
+        if proj.alias_or_name and proj.alias_or_name.lower() in metric_units:
+            return metric_units[proj.alias_or_name.lower()]
         # a count or a ratio is not currency, regardless of the columns inside it
         if proj.find(exp.Count) is not None or proj.find(exp.Div) is not None:
-            continue
+            return None
         units = {col_units[c.name.lower()] for c in proj.find_all(exp.Column)
                  if c.name and c.name.lower() in col_units}
-        if len(units) == 1:
-            out[name] = next(iter(units))
+        return next(iter(units)) if len(units) == 1 else None
+
+    out: dict[str, str] = {}
+    for i, proj in enumerate(projs):
+        unit = _unit_for(proj)
+        if unit is None:
+            continue
+        name = proj.alias_or_name
+        if name:
+            out[name] = unit                 # by output name (aliased / named columns)
+        if not has_star:
+            out[f"#{i}"] = unit              # by position — covers unaliased MAX(amount) etc.
     return out
 
 

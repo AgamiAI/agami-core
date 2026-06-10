@@ -131,8 +131,14 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
     are identical regardless of which LLM renders the surrounding answer."""
     units = units or {}
     cols = [str(h) for h in headers]
-    fmt_rows = [[format_cell(c, units.get(cols[i] if i < len(cols) else "")) for i, c in enumerate(r)]
-                for r in rows]
+
+    def _unit_for(i: int) -> Optional[str]:
+        # by output name first, then by position (`#i`) — the positional key carries
+        # units for columns the DB auto-named (an unaliased MAX(amount), etc.)
+        h = cols[i] if i < len(cols) else ""
+        return units.get(h) or units.get(f"#{i}")
+
+    fmt_rows = [[format_cell(c, _unit_for(i)) for i, c in enumerate(r)] for r in rows]
     head = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body = "\n".join("| " + " | ".join(c.replace("|", "\\|") for c in r) + " |" for r in fmt_rows)

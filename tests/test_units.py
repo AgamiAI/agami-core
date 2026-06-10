@@ -103,6 +103,14 @@ def test_resolve_result_units_traces_aggregates(tmp_path):
     assert RT.resolve_result_units(org, "SELECT amount FROM loans") == {"amount": "INR"}
     assert RT.resolve_result_units(org, "SELECT COUNT(*) AS cnt FROM loans") == {}
     assert RT.resolve_result_units(org, "SELECT SUM(amount)/COUNT(*) AS avg_ticket FROM loans") == {}
+    # unaliased aggregate → positional key (#0), since the DB invents the column name
+    assert RT.resolve_result_units(org, "SELECT MAX(amount) FROM loans") == {"#0": "INR"}
+
+
+def test_format_table_applies_units_by_position():
+    # the positional fallback formats a DB-auto-named column (e.g. Postgres "max")
+    md = units.format_table(["max"], [["250000.5"]], {"#0": "INR"})
+    assert md.splitlines()[2] == "| ₹2,50,000.50 |"
 
 
 def test_unit_round_trips_on_column_and_surfaces_in_context(tmp_path):
