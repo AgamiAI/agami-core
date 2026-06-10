@@ -37,7 +37,7 @@ Same shape as `agami-review`:
 
 Resolve the curator's identity for `curation_log.jsonl` + git commits:
 1. `~/.agami/.config.reviewer_email` — read once-and-persist; see [`agami-review/SKILL.md → Phase 3a`](../agami-review/SKILL.md#3a--validate-the-command).
-2. If absent, ask once: *"What's your email? I'll save it to `~/.agami/.config.reviewer_email` so future review + model actions don't re-ask."* Validate the shape, persist. Do NOT infer from git config / env / credentials — that path produces silent inconsistency.
+2. If absent, ask once: *"What's your email? I'll save it to `~/.agami/.config.reviewer_email` so future review + model actions don't re-ask."* Validate the shape, persist. **Do NOT infer it from any source** — not git config / env / credentials, **and not the Claude Code login / session email** (the host exposes it to the model, but using it produces a silently-wrong audit trail). The sign-off identity must be typed by the user; don't even pre-fill the domain.
 
 ---
 

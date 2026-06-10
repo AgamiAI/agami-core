@@ -182,8 +182,8 @@ Per command:
 - **approve N** — N must be a valid item number in the current queue. **For Rule 1 items (metric / named_filter), the sign-off email + role are required.** Source them in this order, **stop at the first hit**:
   1. **The chat command** itself: `approve N by <email> role=<role>` — use these verbatim.
   2. **`~/.agami/.config`'s `reviewer_email` and `reviewer_role`** fields, if present.
-  3. **Otherwise, ask the user exactly once per install**: surface a single inline prompt asking for both at once (do NOT infer from `git config`, environment, or credentials — that path produces silent inconsistency). Use this exact prompt:
-     > To sign off the Rule 1 items in this batch, I need your email and role. Reply like: `ashwin@agami.ai / data_lead`
+  3. **Otherwise, ask the user exactly once per install**: surface a single inline prompt asking for both at once. **Do NOT infer the email from any source** — not `git config`, environment, credentials, **and not the Claude Code login / session email** (which the host exposes to the model as context). Inferring it produces a silently-wrong audit trail; the sign-off identity must be typed by the user. Don't even pre-fill the domain. Use this exact prompt:
+     > To sign off the Rule 1 items in this batch, I need your email and role. Reply like: `you@company.com / data_lead`
      >
      > Valid roles: `cfo`, `cto`, `data_lead`, `engineer`, `analyst`, `other`.
      >
