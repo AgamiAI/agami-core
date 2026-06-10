@@ -99,6 +99,23 @@ def test_add_writes_metrics_and_skips_invalid(tmp_path):
     assert not (tmp_path / "subject_areas" / "s" / "metrics" / "no_calc.yaml").exists()
 
 
+def test_review_items_scope_rule1_returns_only_signoff_items(tmp_path):
+    # the Phase 4 gate uses --scope rule1 so the rendered count == the sign-off count;
+    # no skill-side hand-filtering, no env var. rule1 = metrics/named-filters in review tab.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)  # has a system-approved relationship (tab=auto, not in review)
+    curate.write_items(tmp_path, "s", "metric", [
+        {"name": "Revenue", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
+         "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
+    org = load_organization(tmp_path, include_rejected=True)
+    rule1 = curate.all_items(org, scope="rule1")
+    assert rule1 and all(it["rule"] == 1 and it["tab"] == "review" for it in rule1)
+    assert any(it["entity_type"] == "metric" for it in rule1)
+    # the approved relationship is NOT in the rule1 set, and "all" is a superset
+    assert len(curate.all_items(org, scope="all")) >= len(rule1)
+
+
 def test_no_model_root_exits_3_cleanly(tmp_path):
     # an empty root has no org.yaml — the CLI returns a clean no_model signal (exit 3),
     # not a traceback, so callers fold the existence check into their first real call

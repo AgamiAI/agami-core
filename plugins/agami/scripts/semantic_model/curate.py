@@ -92,10 +92,18 @@ def _tab(obj) -> str:
     return "manual"
 
 
-def all_items(org: Organization) -> list[dict]:
+def all_items(org: Organization, *, scope: str = "all") -> list[dict]:
     """Every curatable entry (metric / relationship / entity), tab-classified, for
     the 4-tab review dashboard (For Review · Auto · Manual · Rejected). Tables and
-    columns are curated in the model explorer, not here."""
+    columns are curated in the model explorer, not here.
+
+    scope filters what's returned (the renderer renders exactly this — no skill-side
+    filtering, no env var):
+      "all"   — every entry, all tabs (the full /agami-review dashboard).
+      "rule1" — only Rule-1 items needing sign-off (metrics + named filters in the
+                review tab). The agami-connect Phase 4 gate uses this; the rendered
+                item count then equals the sign-off count exactly.
+      "rule2" — only Rule-2 items needing review (relationships + entities)."""
     items: list[dict] = []
     for sa in org.subject_areas:
         for mm in sa.metrics:
@@ -110,6 +118,12 @@ def all_items(org: Organization) -> list[dict]:
         it = {**_rel_item(getattr(rel, "from_subject_area", None), rel), "tab": _tab(rel),
               "cross_area": True}
         items.append(it)
+    if scope == "rule1":
+        items = [it for it in items if it["rule"] == 1 and it["tab"] == "review"]
+    elif scope == "rule2":
+        items = [it for it in items if it["rule"] == 2 and it["tab"] == "review"]
+    elif scope != "all":
+        raise ValueError(f"unknown scope {scope!r} (expected all|rule1|rule2)")
     # stable order: Rule 1 first, then by tab (review → auto → manual → rejected)
     order = {"review": 0, "auto": 1, "manual": 2, "rejected": 3}
     items.sort(key=lambda it: (0 if it["rule"] == 1 else 1, order.get(it["tab"], 9), it["name"]))

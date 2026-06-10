@@ -2,7 +2,7 @@
 name: agami-review
 description: "Opens the trust-layer review dashboard for the active profile's semantic model. Lists every entry needing review (Rule 1 metrics + named filters, plus Rule 2 entries below the confidence threshold) as cards with the source-signal block that produced each entry. The user replies in chat with structured commands (approve / reject / edit / threshold / done) to mark entries reviewed. Each approval writes back to the canonical YAML files in <artifacts_dir>/<profile>/ and runs the validator before promotion."
 when_to_use: "Use when the user says 'open the review dashboard', 'review my model', 'show me what needs review', '/agami-review', 'walk through the review queue', or after agami-connect's Phase 7 summary box prompts to open the dashboard. Also use when the user replies to a previously-rendered dashboard with one of the chat back-channel commands (approve N / reject N / edit N / threshold X / approve all below X / done)."
-argument-hint: "[threshold N.NN | done]"
+argument-hint: "[threshold N.NN | rule1 | done]"
 ---
 
 # agami review
@@ -35,6 +35,8 @@ Run the same plan-mode + credentials checks as `agami-query-database`:
 - If `<artifacts_dir>/<profile>/org.yaml` doesn't exist, invoke `agami-connect` and stop.
 - Probe the validator is runnable: `python3 -c 'import yaml, jsonschema'`. If not, surface the install hint and stop — we won't write YAML edits without the validator gate.
 
+**Scope:** if `$ARGUMENTS` contains `rule1` (the agami-connect Phase 4 sign-off gate invokes `/agami-review rule1`), build the items file with `review-items --scope rule1` so only the Rule-1 sign-off items render. Otherwise build with no `--scope` (all four tabs).
+
 Resolve the active threshold:
 - If `$ARGUMENTS` starts with `threshold`, parse the number and use it for this session, AND persist it to `<artifacts_dir>/<profile>/agami.config.yaml` under `review.threshold`.
 - Else read `<artifacts_dir>/<profile>/agami.config.yaml` → `review.threshold`. Default `0.7`.
@@ -47,6 +49,8 @@ The dashboard has **four tabs**: For Review · Approved Automatically · Manuall
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" > /tmp/agami-review-items-$ts.json
+# scoped (used by agami-connect's Phase 4 gate): only Rule-1 items needing sign-off
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope rule1 > /tmp/agami-review-items-$ts.json
 ```
 
 Each item carries: `n` (stable global index — the number chat commands reference), `entity_type` (`metric` | `join` | `entity`), `rule` (1 = metrics, sign-off required; 2 = joins/entities, lazy), `title`, `source_signal` (the prose `calculation` for metrics, the `from.col → to.col` join + cardinality for relationships), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state`, `signed_off_*`, and `tab`:
@@ -60,7 +64,7 @@ tab = "rejected"  if review_state == "rejected"
 
 The template renders: **For Review** → action buttons (Approve / Reject / Edit / Skip), grouped by entity type, Rule 1 (metrics) in a primary "must-do-to-ship" section + Rule 2 collapsed below; **Auto** / **Manual** → read-only with the approval phrase; **Rejected** → a "Move to For Review" button (`unreject N`).
 
-**Scope filter — `AGAMI_REVIEW_SCOPE=rule_1_only`** (used by `/agami-connect` Phase 4's upfront gate): when set, drop Rule 2 items (`rule == 2`) from the For Review tab so only metrics/sign-off-required items show. The Auto/Manual/Rejected tabs are unaffected (read-only inspection always allowed).
+**Scope filter — `review-items --scope rule1`** (used by `/agami-connect` Phase 4's upfront gate, and when this skill is invoked with a `rule1` argument): the CLI returns **only** the Rule-1 items needing sign-off (metrics + named filters in the review tab). Pass that file straight to the renderer — **don't hand-filter and don't look for a scope flag inside `render_review.py`; the renderer renders exactly the items it's given.** The rendered "(N items)" then equals the sign-off count exactly. Default (no `--scope`) returns all four tabs.
 
 **Summary counts** for the summary card: count items by `tab` and `rule` (e.g. `review` Rule 1 = metrics needing sign-off; `review` Rule 2 = inferred joins; `auto`/`manual`/`rejected` totals). Write to `--summary-file`.
 

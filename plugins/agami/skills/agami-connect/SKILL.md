@@ -496,9 +496,9 @@ Relationships, metrics, and entities carry a trust block (`confidence` ∈ confi
 - **Rule 1 (sign-off required NOW):** metrics + named filters — they drive what the seed examples *mean*. If Phase 5 fires against unreviewed metrics, the seeds exercise a guessed definition.
 - **Rule 2 (lazy, after-the-fact):** inferred/proposed relationships + field descriptions — they surface as receipt warnings on the answers that use them and self-approve as the user queries.
 
-**4a — count Rule 1:** metrics/named-filters with `review_state != approved` + any `stale`. If **0**, surface the one-liner ("No Rule 1 candidates — proceeding straight to seed generation; low-confidence joins surface as warnings later") and continue to Phase 5 — don't silently skip (users expect a review step).
+**4a — count Rule 1:** run `sm review-items "$ROOT" --scope rule1` — its length *is* the Rule-1 sign-off count (metrics + named-filters needing review, plus any `stale`). If **0**, surface the one-liner ("No Rule 1 candidates — proceeding straight to seed generation; low-confidence joins surface as warnings later") and continue to Phase 5 — don't silently skip (users expect a review step).
 
-**4b/4c — gate:** if Rule 1 count > 0, tell the user upfront, then invoke `/agami-review` scoped to Rule 1 (`AGAMI_REVIEW_SCOPE=rule_1_only`). **End the turn** and wait for their approval batch.
+**4b/4c — gate:** if Rule 1 count > 0, tell the user upfront, then invoke `/agami-review rule1` (the `rule1` argument scopes the dashboard to exactly those sign-off items — no env var). **End the turn** and wait for their approval batch.
 
 **4d — return gate:** when they're back, recount. If 0 → Phase 5. If > 0 (partial) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`).
 

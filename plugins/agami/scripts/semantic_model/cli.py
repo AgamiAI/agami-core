@@ -120,7 +120,7 @@ def cmd_review_queue(args) -> int:
 def cmd_review_items(args) -> int:
     from . import curate
     org = L.load_organization(args.root, include_rejected=True)
-    _print_json(curate.all_items(org))
+    _print_json(curate.all_items(org, scope=args.scope))
     return 0
 
 
@@ -227,8 +227,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.set_defaults(func=cmd_review_queue)
 
-    sp = sub.add_parser("review-items", help="ALL curatable entries, tab-classified (4-tab dashboard)")
+    sp = sub.add_parser("review-items", help="curatable entries, tab-classified (4-tab dashboard)")
     sp.add_argument("root")
+    sp.add_argument("--scope", default="all", choices=["all", "rule1", "rule2"],
+                    help="all (default) | rule1 (metrics/named-filters needing sign-off) | rule2")
     sp.set_defaults(func=cmd_review_items)
 
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
