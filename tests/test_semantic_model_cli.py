@@ -156,6 +156,29 @@ def test_add_examples_appends_dedups_and_skips_invalid(tmp_path):
     assert next(e for e in ex if e["question"] == "revenue")["sql"] == "SELECT SUM(amount) FROM orders"
 
 
+def test_curate_edit_op_sets_enrichment_fields(tmp_path):
+    # enrichment edits (descriptions / caveats / default_filters / value_transform) go
+    # through `sm curate` edit ops — not a hand-edited or scripted table YAML
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    res = curate.apply(tmp_path, [
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "field": "caveats", "value": ["Excludes test orders."]},
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "field": "default_filters", "value": ["{alias}.amount IS NOT NULL"]},
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "field": "description", "value": "One row per order."},
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "column": "amount", "field": "value_transform", "value": "ABS(amount)"}])
+    assert res.validated and len(res.applied) == 4
+    t = load_organization(tmp_path).subject_areas[0].defined_table("orders")
+    assert t.caveats == ["Excludes test orders."]
+    assert t.default_filters == ["{alias}.amount IS NOT NULL"]
+    assert t.description == "One row per order."
+    assert t.get_column("amount").value_transform == "ABS(amount)"
+
+
 def test_validate_seeds_splits_pass_fail_via_runner():
     # the packaged Phase-5 loop: each candidate SQL is wrapped to return zero rows and
     # run via the live-DB runner; passing get seed/confirmed defaults, rejects carry the error

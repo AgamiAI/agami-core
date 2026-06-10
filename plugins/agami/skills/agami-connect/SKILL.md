@@ -420,6 +420,11 @@ For each table fetch up to 5 sample rows for evidence (`SELECT * FROM <t> LIMIT 
 
 Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `ORGANIZATION.md`, then tables/columns/sample rows. Emit a **1-line** table `description`, and a column `description` **only if it says something the column name + type doesn't.** Empty is preferred — there's no review cost to an empty description.
 
+**Write descriptions with `sm curate` edit ops — never hand-edit the table YAML or script a loop over `tables/*.yaml`.** Build one ops array (table = `{op:edit, kind:table, area, name, field:description, value}`; column = same + `column`) and run it once; it validates the whole model + commits + reverts on failure:
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-descriptions.json
+```
+
 | Column | Bad (reject) | Good (keep) | Empty (preferred) |
 |---|---|---|---|
 | `id`, `created_at`, `email` | "Primary key" / "When created" / "Email" | (always empty — structural) | `""` |
@@ -466,7 +471,18 @@ Don't propose metrics depending on choice-field literals you didn't detect, or c
 From samples + the domain doc, add provider-portable cleaning where evidence supports it:
 - **Caveats** (`caveats[]` on table/column/entity): data-quality notes, anti-patterns ("use `tiu_date` not `tiu_time` for date filters"), dedup warnings.
 - **value_transform** on columns whose raw value needs cleaning (`regexp_replace(...)` for bracketed text, `TO_TIMESTAMP(...)` for epoch). Must parse as SQL (validator checks).
+- **default_filters** (`default_filters[]` on a table): soft-delete / tenancy filters AND-ed in at query time (use the `{alias}` placeholder, e.g. `{alias}.deleted_at IS NULL`).
 - **Currency (one ask per profile):** if numeric fields look like money (`amount`/`price`/`revenue`/…, no `_usd` suffix giving the answer), ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). Record it as a caveat on those columns (e.g. "Amounts in INR.") so charts/totals format correctly. `Mixed` → leave unannotated, one-liner.
+
+**Write all of these with `sm curate` edit ops — never hand-edit `tables/*.yaml` or script a loop over them.** One ops array, one call (validated + committed + reverted on failure):
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveats.json
+```
+```json
+[{"op":"edit","kind":"table","area":"main","name":"LOAN_DETAILS","field":"caveats","value":["CRIF total can be negative on row #12."]},
+ {"op":"edit","kind":"table","area":"main","name":"orders","field":"default_filters","value":["{alias}.deleted_at IS NULL"]},
+ {"op":"edit","kind":"table","area":"main","name":"events","column":"ts","field":"value_transform","value":"TO_TIMESTAMP(ts)"}]
+```
 
 ### 2e — Reintrospect merge
 
