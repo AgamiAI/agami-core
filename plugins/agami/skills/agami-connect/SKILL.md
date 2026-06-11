@@ -7,7 +7,7 @@ argument-hint: "[reintrospect | profile NAME]"
 
 # agami connect
 
-**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** Agami slash commands: `/agami-connect`, `/agami-query`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/init`, `/connect`, etc.) or colon forms (`/agami:connect`) — those don't exist. For chat replies, prefer natural language ("say 'reload the schema'", "say 'introspect my database'") — the `when_to_use` matcher routes correctly without an explicit slash command.
+**Before suggesting any slash command in chat, read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).** Agami slash commands: `/agami-connect`, `/agami-query`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. (`/agami-model` is also the trust-review surface — its Review tab absorbed the former `/agami-review`.) Never write the un-prefixed forms (`/init`, `/connect`, etc.) or colon forms (`/agami:connect`) — those don't exist. For chat replies, prefer natural language ("say 'reload the schema'", "say 'introspect my database'") — the `when_to_use` matcher routes correctly without an explicit slash command.
 
 You are setting up the agami **semantic model** for the user's database. Goal: by the end there is a validated semantic model at `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…` + `datasources/<connection>/storage.yaml`), a seeded examples library at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`, an `ORGANIZATION.md` the user can edit, and the user has seen one demo query execute end-to-end.
 
@@ -418,26 +418,44 @@ Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe
 
 The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
 
-### 2a — Descriptions (evidence-grounded; empty is the default)
+### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
 For each table fetch up to 5 sample rows for evidence (`SELECT * FROM <t> LIMIT 5`; Snowflake `SAMPLE` for >10M rows). **Samples are never written to disk** — context only, then discarded. Also capture MIN/MAX of each time column → record under the table's `performance_hints` so Phase 5 anchors "last 30 days" to the data's real MAX, not `NOW()`.
 
-Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `ORGANIZATION.md`, then tables/columns/sample rows. Emit a **1-line** table `description`, and a column `description` **only if it says something the column name + type doesn't.** Empty is preferred — there's no review cost to an empty description.
+Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `ORGANIZATION.md`, then tables/columns/sample rows. **Always** emit a 1-line table `description`. For **columns**, classify each into one of three — don't default everything to empty:
 
-**Write descriptions with `sm curate` edit ops — never hand-edit the table YAML or script a loop over `tables/*.yaml`.** Build one ops array (table = `{op:edit, kind:table, area, name, field:description, value}`; column = same + `column`) and run it once; it validates the whole model + commits + reverts on failure:
+| Kind | Examples | What to write |
+|---|---|---|
+| **Self-evident** | `id`, `created_at`, `email`, `name`, `gender`, `city` | `""` — the name + type already says it; a description would just restate it. |
+| **Informative** | `revenue_usd`, `status`, `margin_pct`, `utilization_pct` | one line **iff** samples/doc support a fact the name doesn't (enum values, unit, derivation, a caveat). Else `""`. |
+| **Coded / opaque-but-systematic** | `EL_REVENUE_30D`, `WEST_ORDERS_12M`, `<TIER_A_6M>`, `XX_<metric>` families | **always describe** — unreadable without the legend (see below). |
+
+**Coded-schema detection + legend expansion — the case that used to get wrongly left empty.** Feature stores, wide denormalized marts, and coded analytic extracts encode meaning in column *names* via a small recurring token vocabulary: a category prefix (e.g. `EL/HM/AP…`), a window suffix (`_30D`, `_6M`, `_12M`), a bucket (`_0_30`, `_TIER_A`), a threshold (`_LT_1K`, `_LT_10K`), a metric stem (`_REVENUE`, `_QTY`, `_RECENCY`). When the same tokens recur across many columns:
+
+1. **Decode the token legend once** — grounded in column samples + `$DATA_MODEL_DOC_TEXT` + `ORGANIZATION.md`. For any token whose meaning isn't evident, **ask the user in one batched question** rather than guessing (this is the same decode 2b needs; do it once and share it).
+2. **Expand the legend into one description per coded column — deterministically, NOT as N separate LLM guesses.** Write a small in-skill decoder (a token→phrase map + a per-table parse of `(prefix, metric, window, threshold)`) and compose each description from it, then emit them through the same `sm curate` batch. This is exact, internally consistent, and costs zero per-column LLM tokens. e.g. `EL_REVENUE_30D` → "Total revenue from the Electronics category over the last 30 days"; `WEST_ORDERS_12M` → "Number of orders in the West region over the last 12 months"; `EL_ORDERS_LT_1K_90D` → "Number of Electronics orders under 1,000 placed in the last 90 days." (Use the user's actual token vocabulary + domain, not these placeholders.)
+3. The same decoded legend also lands in `ORGANIZATION.md` `## Key terminology` (per 2b). **Decode once, write both** — the per-column descriptions (what shows in the model explorer and feeds the SQL generator's column context) AND the terminology block (the human-readable legend).
+
+Don't skip a coded column because "the legend covers it" — the legend lives in a *different file*; the per-column description is what the explorer shows and what NL→SQL reads. A wide coded table (hundreds of columns) should finish at ~100% column coverage, not ~3%.
+
+**Write descriptions with `sm curate` edit ops — never hand-edit the table YAML or script a loop over `tables/*.yaml`.** Build one ops array (table = `{op:edit, kind:table, area, name, field:description, value, source:"ai"}`; column = same + `column`) and run it once; it validates the whole model + commits + reverts on failure. **Always include `"source":"ai"` on every generated description** — this stamps `description_source: ai_unvalidated` so the description earns trust through use (agami-query surfaces it in the answer receipt for confirmation the first time a query actually uses that column, instead of forcing an upfront review of hundreds of descriptions; see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). **Skip any column that already has a description** (so a partial hand-edit or a reintrospect merge is never clobbered):
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-descriptions.json
 ```
 
 | Column | Bad (reject) | Good (keep) | Empty (preferred) |
 |---|---|---|---|
-| `id`, `created_at`, `email` | "Primary key" / "When created" / "Email" | (always empty — structural) | `""` |
+| `id`, `created_at`, `email`, `name` | "Primary key" / "When created" / "Email" | (always empty — self-evident) | `""` |
 | `customer_id` | "The customer ID" | "FK to customers.id; 1:N with orders" | `""` if nothing to add |
 | `status` | "A status code" | "lifecycle: pending → shipped → cancelled" (only if enum known) | `""` |
-| `revenue_usd` | "Revenue in USD" | "Net revenue, USD at invoice date, excludes refunds" (only if samples/doc support it) | `""` |
-| `v_1`, `tmp_col`, `x` | "A value" | (leave empty — opaque) | `""` |
+| `EL_AOV_90D` (coded) | "AOV value" | "Average order value for the Electronics category over the last 90 days" (from the decoded legend) | — **don't leave empty** |
+| `v_1`, `tmp_col`, `x` | "A value" | (leave empty — opaque, no decodable structure) | `""` |
 
-**What NOT to invent:** opaque-name meanings; business semantics not in the samples; name translations (`amt`→"amount"). Write only what tells the user something they couldn't learn from the name + type.
+**What NOT to invent:** meanings for truly opaque single columns (`v_1`, `tmp_col`, `xyz`) that have no decodable token structure and no sample signal. Business semantics not present in the samples/doc. Name translations on self-evident columns (`amt`→"amount"). Write the decodable legend; don't fabricate the rest.
+
+**For an opaque column you genuinely can't read, say so — don't leave it silently blank.** There are two kinds of empty description, and they must be distinguished:
+- **Self-evident** (`id`, `created_at`, `email`, a clear `name`) → leave the description empty AND leave `description_source` unset (`null`). The name already says it; nothing to flag.
+- **Opaque / unknown** (`xyz`, `v_1`, `tmp_col`, a code whose meaning no sample or doc reveals) → leave the description empty BUT set **`description_source: "ai_unknown"`** via a curate edit op (`{op:edit, kind:table, area, name:<table>, column:<col>, field:"description_source", value:"ai_unknown"}`). This records "agami looked and couldn't tell" — the human knows what `xyz` is, and the explorer + answer receipts surface these so they can fill it in. **Don't guess a meaning to avoid the flag; the flag is the honest answer.** (Do NOT mark a self-evident column `ai_unknown` — that's noise.)
 
 For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. Validate after each schema; on failure, surface errors and continue with the rest, then report which need attention.
 
@@ -466,7 +484,7 @@ Metrics come from two sources, handled very differently. **Always prefer declare
 - **Cube** `measures` → `sql`+`type` → `bindings`.
 - **Metrics file** (CSV/YAML/markdown KPI dictionary the user uploaded) → one metric per row/entry: name, definition → `calculation`, formula → `bindings`.
 
-Translate the declared SQL/agg to the profile's dialect for `bindings`, set `source_tables`, write **`confidence: inferred, review_state: unreviewed`** (declared = strong signal, still wants a human sign-off in `/agami-review`). If there are many (> ~8), **don't** funnel them through a 4-item picker — write them all and tell the user once: *"Added N metrics from your `<LookML/dbt/file>` — review or trim them in /agami-review."* (Offer a single "add all N / let me pick a subset" confirm if you want, but never silently drop declared metrics to fit a cap.)
+Translate the declared SQL/agg to the profile's dialect for `bindings`, set `source_tables`, write **`confidence: inferred, review_state: unreviewed`** (declared = strong signal, still wants a human sign-off on the `/agami-model` Review tab). If there are many (> ~8), **don't** funnel them through a 4-item picker — write them all and tell the user once: *"Added N metrics from your `<LookML/dbt/file>` — review or trim them in /agami-model."* (Offer a single "add all N / let me pick a subset" confirm if you want, but never silently drop declared metrics to fit a cap.)
 
 **(B) Inferred metrics — only when there's no declared source (or to supplement a thin one).** These genuinely drift, so **suggest, don't auto-add**, capped at ~4 (AskUserQuestion fits ~4 + Other) from: aggregate-shaped numeric fields (SUM/AVG), fact tables (`count_<table>`), time fields, `ORGANIZATION.md` KPI mentions. **AskUserQuestion** multi-select: "I'd suggest these reusable metrics — pick which make sense." `Other (Other field)` for "describe a metric I want"; submitting none = skip. Write `confidence: proposed`.
 
@@ -479,7 +497,7 @@ Don't propose metrics depending on choice-field literals you didn't detect, or c
 ### 2d — Caveats, value_transforms, currency
 
 From samples + the domain doc, add provider-portable cleaning where evidence supports it:
-- **Caveats** (`caveats[]` on table/column/entity): data-quality notes, anti-patterns ("use `tiu_date` not `tiu_time` for date filters"), dedup warnings.
+- **Caveats** (`caveats[]` on table/column/entity): data-quality notes, anti-patterns (e.g. "filter on the event date, not the load date"), dedup warnings.
 - **value_transform** on columns whose raw value needs cleaning (`regexp_replace(...)` for bracketed text, `TO_TIMESTAMP(...)` for epoch). Must parse as SQL (validator checks).
 - **default_filters** (`default_filters[]` on a table): soft-delete / tenancy filters AND-ed in at query time (use the `{alias}` placeholder, e.g. `{alias}.deleted_at IS NULL`).
 - **Currency (one ask per profile):** if numeric fields look like money (`amount`/`price`/`revenue`/…, no `_usd` suffix giving the answer), ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). On the answer, **set the column `unit` to the ISO code** on every detected money column — via `cli curate` edit ops (`{op:edit, kind:table, area, name:<table>, column:<col>, field:unit, value:"INR"}`), one batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → leave `unit` unset, one-liner. (Non-currency units — `cents`, `percent`, `days` — set `unit` the same way when a column's scale/unit is unambiguous.)
@@ -536,7 +554,7 @@ Seeds reference **columns, tables, metrics, and entities** — so settle those *
 
 `Open the model explorer (Recommended)` → invoke `/agami-model`, **end the turn**, wait for their exclude batch. `Nothing to exclude — continue` → proceed. (Exclusions apply via the model-explorer's curate path; the loader then drops them so seeds never reference them.)
 
-**4b — Sign off metrics + entities.** These define what seeds *mean* and *say*. Count via `sm review-items "$ROOT" --scope preseed` — its length is the sign-off count (metrics + named-filters + entities needing review; relationships excluded). If **0**, surface the one-liner ("Nothing to sign off before examples — proceeding") and continue to Phase 5. If **> 0**, tell the user upfront, then invoke `/agami-review preseed` (the `preseed` argument scopes the dashboard to exactly these — metrics + entities, not joins — no env var). **End the turn** and wait for their approval batch.
+**4b — Sign off metrics + entities.** These define what seeds *mean* and *say*. Count via `sm review-items "$ROOT" --scope preseed` — its length is the sign-off count (metrics + named-filters + entities needing review; relationships excluded). If **0**, surface the one-liner ("Nothing to sign off before examples — proceeding") and continue to Phase 5. If **> 0**, tell the user upfront, then invoke `/agami-model preseed` (the `preseed` argument opens the dashboard on its **Review** tab, where these metrics + entities sit under "Needs your eyes"). **End the turn** and wait for their approval batch.
 
 **4c — return gate:** when they're back, recount via `--scope preseed`. If 0 → Phase 5. If > 0 (partial) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`).
 
@@ -560,7 +578,23 @@ Output `{added, written, committed, rejected:[{question, error}]}`. For each `re
 
 ## Phase 6: Validate every seed example (the trust onboarding)
 
-Run every seed, build the items JSON, and render the examples-validation dashboard (per-profile subdir). The user reviews matches (green) / mismatches (red) with drill-down. This is the strongest "do these numbers match?" trust moment — surface it.
+**Run every seed with ONE packaged call — `sm seed-validate` — never a hand-rolled "run all the seeds" script.** It executes each written seed against the live DB **through `execute_sql.py`** (the same path agami-query uses), so the **fan-trap / chasm-trap pre-flight + `default_filters` always apply** — a raw-connection driver could skip that safety and let a fan-out scan the whole table. It emits the examples-validation items (`{n, question, sql, row_headers, row_preview, row_count, state}`); a seed the pre-flight refuses or that errors comes back with its `error`, not a faked result:
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-validate "$ROOT" --area <area> --profile <profile> > /tmp/agami-examples-items.json
+```
+
+(Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected, and run it in the background if it's slow.)
+
+Then render the examples-validation dashboard (per-profile subdir) from those items:
+
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/render_examples_validation.py" \
+  --items-file /tmp/agami-examples-items.json \
+  --out "$HOME/.agami/examples-validation/<profile>/<ts>.html"
+```
+
+The user reviews matches (green) / mismatches (red) with drill-down. This is the strongest "do these numbers match?" trust moment — surface it.
 
 **Then END THE TURN and WAIT — do NOT continue to Phase 7/8 in the same message.** Like the Phase 4 gate, this is a hard stop: render the dashboard, give the one-line hand-off + the chat grammar (`approve` / `reject` / `edit` / `done`), and **stop**. The user is *in* the dashboard validating; printing the post-introspect summary or the "things you could ask" closing now (before they've validated) is exactly the bug we're avoiding. Re-render after each batch they send back, and only when they reply **`done`** (or have actioned every example) do you proceed to Phase 7.
 
@@ -571,7 +605,36 @@ Open it: green = numbers match, red = mismatch (drill in to see the SQL).
 Reply: approve N · reject N · edit N · done (when you're through).
 ```
 
-**Processing the batch:** an `edit N` that fixes *that example's* SQL → update the example. When the user gives a **cross-cutting display/formatting rule** (currency, units, number formatting — applies to many examples, not one), classify it like any correction (see [`agami-save-correction`](../agami-save-correction/SKILL.md) → "DISPLAY / FORMATTING preference"): a currency/unit fact attaches to the **column** (a `caveat`/`value_transform` in the shared model — org-wide by construction); a cross-cutting presentation convention → `ORGANIZATION.md`; a personal tic → `USER_MEMORY.md`. Don't reflexively file to USER_MEMORY, and don't reflexively ask — only ask if personal-vs-org is genuinely unclear. Then bake the formatting into the affected examples' SQL.
+**Processing the batch:** the dashboard emits `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all` — apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`:
+- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), stamp it via `sm add-example` (re-write the same example with `--signer`/`--role`).
+- **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). It flags the example `status: rejected` — kept in `examples.yaml` for audit, dropped from the runtime ranker. **Do NOT hand-delete or hand-rewrite the YAML** (there's a command now); map `N` → the example's question from the items you rendered.
+- **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.
+
+When the user gives a **cross-cutting display/formatting rule** (currency, units, number formatting — applies to many examples, not one), classify it like any correction (see [`agami-save-correction`](../agami-save-correction/SKILL.md) → "DISPLAY / FORMATTING preference"): a currency/unit fact attaches to the **column** (a `caveat`/`value_transform` in the shared model — org-wide by construction); a cross-cutting presentation convention → `ORGANIZATION.md`; a personal tic → `USER_MEMORY.md`. Don't reflexively file to USER_MEMORY, and don't reflexively ask — only ask if personal-vs-org is genuinely unclear. **Display rounding is a convention, not SQL** — a "show fewer decimals" rule → `ORGANIZATION.md`, never `ROUND()` baked into the example's SQL (that corrupts the exact-number verification anchor; the system formats numbers in full via `units.py`).
+
+**`note all >>>…<<<` — the model-wide note. Apply it ONCE; the user never repeats themselves.** The dashboard has a "note for the whole model" box (separate from per-example `note N`). Its content arrives as a single **`note all >>>…<<<`** block. Treat it as one correction that applies across the board: classify it like any other (see [`agami-save-correction`](../agami-save-correction/SKILL.md)) and write it to the **right place, once** — a column `unit`/`caveat`/`value_transform` (a data fact: "amounts are in INR", "TOTAL can be negative"), a cross-cutting presentation convention → `ORGANIZATION.md`, a personal display tic → `USER_MEMORY.md`, or a filter/business rule the user wants applied → the relevant column/example. Then **re-render so every affected example reflects it**, and name where it landed in one line — *"Got it — set `<col>`'s unit to INR model-wide; it'll show on every example now."* If the user is still typing the same thing into per-example `note N` boxes, that's a smell: lift it to a single model-wide change and tell them they don't need to repeat it. (Formatting is just the common case — the rule is generic: any cross-cutting fact is stated once, written once, applied everywhere.) Note the result preview is already unit-formatted — `sm seed-validate` runs numbers through the same `units.py` as the live query path — so a money column showing a **bare** number means a missing column `unit`, not a per-example note.
+
+### 6a — A bad number is the highest-value catch: fix it COMPLETELY, and ask in PLAIN language
+
+Validation often surfaces a result that's *obviously wrong* — a bounded ratio averaging to a huge negative number, a "count" of 0, an alphabetically-sorted "trend." This almost always means a **data-quality** problem: sentinel/junk values in a column (encoded nulls / "not computed" markers stored as extreme numbers like ±1e9), a mis-typed column (a date stored as a string), or similar. This is the most valuable thing onboarding can find — handle it deliberately:
+
+1. **Diagnose the cause** with a quick probe — `MIN`/`MAX`, and a small histogram (`COUNT` per coarse bucket) so you can SEE where the junk sits (sentinels show up as a sharp spike at an absurd value, separated by a gap from the real data). Confirm what's actually wrong before proposing a fix.
+
+2. **Exclude the SENTINELS — do NOT clip to a "textbook" range.** The bug is junk values, not real-but-extreme data, and the two are easy to confuse. Don't reflexively clamp to the range you *expect*: many columns legitimately pass their "obvious" bounds — a ratio can exceed 1 when its numerator really can exceed its denominator, an age can be 0, a balance can be negative — and clipping to the expected range silently drops real (often the most important) records and biases the result. Cut **only** the implausible sentinels (the absurd spike), and **when the line between "junk" and "legitimate-but-extreme" is unclear, ask the user for the real valid range — that's the user's domain knowledge, not something to guess.**
+
+3. **Fix it at EVERY level the bad data reaches — not just the seed.** A contaminated column poisons *three* paths, and fixing one leaves the others broken:
+   - the **seed example** itself → correct its SQL;
+   - any **metric** whose `bindings` SQL touches that column → guard the binding (wrap the aggregate in a `CASE WHEN <col> BETWEEN <lo> AND <hi> THEN <col> END`, with bounds drawn from the distribution + the user's domain input — never a hard-coded "textbook" range), and update its `calculation` prose to match;
+   - **ad-hoc questions** that aggregate the column without naming the metric → add a **caveat** on the column (state the sentinel values to exclude, plus any non-obvious valid range the user confirmed) so the SQL generator guards them too.
+   Use a `caveat` for this (advisory steer), NOT a `default_filter` (that wrongly drops the whole row from every query) and NOT a `value_transform` (you can't cleanly sanitize a sentinel). Apply all of it in **one `sm curate` batch**; keep any signed-off metric `approved` and re-stamp `signed_off_at` (the user is re-vetting the corrected definition).
+
+4. **Ask ONE plain-language question — about the NUMBER, never the model's vocabulary.** A first-time user does not know what "bindings" or "caveats" are and cannot be asked to choose between them. **Never surface those words in the question.** Frame it by the wrong number and the consequence, in the user's own domain terms, and make the **complete fix the recommended default**. The skill decides *what* to edit; the user only confirms *whether* to fix (and, when the valid range is ambiguous, confirms that range). The pattern below is the *shape* — fill it with the user's actual column, value, and domain, not these placeholders:
+   > The average <column> came out as **<impossible value>**, which can't be right — some rows hold junk values (e.g. <absurd sentinel>) that look like an encoded "missing", not a real <column>. I'd leave those out. One thing to confirm: can <column> legitimately go past <expected bound> in your data? If so I'll keep those — they look like the records that matter most. Want me to fix it?
+   > • **Fix it everywhere (recommended)** — agami leaves the junk values out whenever it works with <column> (this metric and any question that uses it).
+   > • Just fix this one example — leave everything else as-is.
+   > • Leave it for now — I'll note it; you can fix it later.
+
+   On **"Fix it everywhere"** → apply the seed + metric-binding + column-caveat edits as one batch. Do **not** present a "patch the bindings vs add a caveat" choice — that's the skill's call, not the user's. (If the user is technical and asks for the detail, then show it.)
 
 ---
 
@@ -598,7 +661,7 @@ agami-connect just ran. Here's what we found:
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
 
-Then **AskUserQuestion**: `Open the review dashboard` (→ `/agami-review`) / `Open the model explorer` (→ `/agami-model`, browse + exclude tables/columns) / `Skip — I'll review later` (default) / `Adjust the threshold`. If a sibling skill isn't built yet, omit that option — don't error.
+Then **AskUserQuestion**: `Open the review queue` (→ `/agami-model review` — sign off the pending metrics/entities) / `Browse the full model` (→ `/agami-model` — explore + exclude tables/columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
 
 ---
 
@@ -606,20 +669,21 @@ Then **AskUserQuestion**: `Open the review dashboard` (→ `/agami-review`) / `O
 
 (No telemetry — agami has none; don't surface anything about it.)
 
-**8a — gate on Rule 1 status:** count metrics/named-filters with `review_state != approved`. If > 0, use the **in-progress** framing (8b); else the **fully-set-up** framing (8c). Rule 1 items block at runtime (query-database refuses questions depending on an unreviewed metric), so "set up" is misleading while they're pending.
+**8a — gate on Rule 1 status:** count metrics/named-filters with `review_state != approved`. If > 0, use the **in-progress** framing (8b); else the **fully-set-up** framing (8c). Unsigned Rule 1 metrics don't *block* queries — agami still answers — but an answer that uses one carries a "not signed off yet" **warning** on its receipt until you approve it, so reviewing them is still worth doing.
 
 **8b — in-progress:**
 ```
 ✓ <artifacts_dir>/<profile>/ — semantic model (<A> subject areas, validated)
 ✓ prompt_examples/ — <N> NL→SQL examples
-⚠ Setup is partial — <rule1_unreviewed> Rule 1 items still need sign-off:
+⚠ <rule1_unreviewed> metric proposal(s) not signed off yet:
    - <M> metric proposal(s)
-Until those are reviewed, agami-query refuses questions that depend on them.
+You can ask anything now — answers that use an unsigned metric just come with a
+"not signed off yet" note on the receipt until you approve it.
 
-Five things you could already ask that don't depend on Rule 1 items:
-1.–5. <count / top-N / time-bucket / breakdown / recency — all on FK-approved tables>
+Five things you could ask:
+1.–5. <count / top-N / time-bucket / breakdown / recency — grounded in real tables>
 Pick a number, or keep going:
-• /agami-review — sign off the pending metrics (+ review joins/entities) so the rest unlocks.
+• /agami-model review — sign off the pending metrics (+ review joins/entities) to clear the warnings.
 • /agami-model — browse the whole model and refine it (exclude raw PII / staging tables, edit descriptions).
 • Ask questions — if an answer's off, say "save this as a correction" and I'll teach the model.
 ```
@@ -637,9 +701,8 @@ Reply with a number, or ask anything else.
 The model keeps improving as you use it:
 • Just ask questions — and if an answer looks off, say "save this as a correction"
   (or paste the right SQL) and I'll teach the model so next time is right.
-• /agami-review — review and sign off metrics, joins, and entities in the trust dashboard.
-• /agami-model — browse the whole model and refine it: exclude tables/columns you
-  don't want queried (raw PII, staging/scratch), edit descriptions and caveats.
+• /agami-model — one dashboard to review & sign off metrics/joins/entities (Review tab),
+  exclude tables/columns you don't want queried, add metrics, and edit descriptions.
 ```
 End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
 

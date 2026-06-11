@@ -14,45 +14,33 @@
 
   Per-render placeholders (always substituted in the body below):
     REPORT_TITLE          — "Model explorer · <profile>"
-    GENERATED_AT          — ISO8601 UTC timestamp
+    GENERATED_AT          — human-readable generation timestamp (e.g. "10 Jun 2026, 13:57 UTC")
     PROFILE               — profile name
-    MANIFEST_JSON         — JSON object with schemas/tables/fields (schema below)
+    MANIFEST_JSON         — JSON object (schema below)
     AGAMI_LOGO_DARK_TEXT  — full SVG content of agami-logo-dark.svg
     AGAMI_LOGO_LIGHT_TEXT — full SVG content of agami-logo-light.svg
 
-  MANIFEST_JSON shape:
+  MANIFEST_JSON shape (abridged):
     {
       "profile": "main",
-      "totals":  { "schemas": 1, "tables": 14, "fields": 312 },
-      "schemas": [
-        {
-          "name": "sales",
-          "tables": [
-            {
-              "name":          "orders",
-              "qname":         "sales.orders",
-              "description":   "One row per order",
-              "row_count":     6807724,
-              "review_state":  "approved" | "rejected" | "unreviewed" | "stale",
-              "excluded":      false,                   // review_state == rejected
-              "yaml_path":     "sales/orders.yaml",
-              "synonyms":      ["purchases", "transactions"],
-              "fields": [
-                {
-                  "name":         "customer_email",
-                  "qname":        "sales.orders.customer_email",
-                  "type":         "string",
-                  "description":  "Customer email",
-                  "review_state": "approved" | "rejected" | "unreviewed" | "not_applicable",
-                  "excluded":     false,
-                  "confidence":   0.55
-                }, ...
-              ]
-            }
-          ]
-        }
-      ]
+      "storage_type": "Snowflake",
+      "organization_md": "# About this database ...",
+      "totals": { "schemas": 1, "tables": 14, "fields": 312, "metrics": 4,
+                  "entities": 3, "relationships": 9, "examples": 0, "validated": true },
+      "schemas":      [ { "name": "sales", "description": "...", "tables": [ ...table... ] } ],
+      "metrics":      [ { "name", "qname", "calculation", "bindings", "unit", "other_names",
+                          "source_tables", "description", "review_state", "excluded", "area" } ],
+      "entities":     [ { "name", "qname", "plural", "other_names", "value_pattern",
+                          "maps_to":["t.c"], "description", "review_state", "excluded", "area" } ],
+      "relationships":[ { "qname", "from_table", "from_column", "to_table", "to_column", "on",
+                          "cardinality", "description", "review_state", "excluded", "area" } ],
+      "examples":     [ { "n", "qname", "question", "sql", "tables", "source", "status", "area" } ]
     }
+    A table:
+      { "name", "qname", "description", "row_count", "review_state", "excluded",
+        "grain":[], "caveats":[], "default_filters":[], "area", "schema",
+        "fields": [ { "name", "qname", "type", "description", "review_state",
+                      "excluded", "sensitive", "unit", "caveats", "date_format", "timezone" } ] }
 -->
 <html lang="en">
 <head>
@@ -79,6 +67,8 @@
       --warn-bg: #fef3c7;
       --warn-fg: #92400e;
       --hi-bg: #fef08a;
+      --info-bg: #eff6ff;
+      --info-border: #bfdbfe;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -100,6 +90,8 @@
         --warn-bg: #422006;
         --warn-fg: #fbbf24;
         --hi-bg: #78350f;
+        --info-bg: #0c1c33;
+        --info-border: #1e3a5f;
       }
     }
     * { box-sizing: border-box; }
@@ -129,19 +121,22 @@
       font-size: 20px; font-weight: 600;
       margin: 0; flex: 1; text-align: right;
     }
-    .meta { font-size: 12px; color: var(--muted); margin-bottom: 18px; }
+    .meta { font-size: 12px; color: var(--muted); margin-bottom: 18px;
+            display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .meta code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+    .model-badge {
+      font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+      background: var(--ok-bg); color: var(--ok-fg); border: 1px solid var(--ok-border);
+    }
 
-    /* Sticky search + counts row */
+    /* Sticky toolbar: search + tabs + status filter */
     .toolbar {
       position: sticky; top: 0; z-index: 50;
-      background: var(--bg); padding: 12px 0;
+      background: var(--bg); padding: 12px 0 0;
       border-bottom: 1px solid var(--border);
       margin-bottom: 20px;
     }
-    .search-row {
-      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-    }
+    .search-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .search-input {
       flex: 1; min-width: 260px;
       font: inherit; font-size: 15px;
@@ -157,8 +152,39 @@
       font-size: 13px; color: var(--muted);
       font-variant-numeric: tabular-nums;
     }
+
+    /* Tab bar */
+    .tab-bar {
+      display: flex; gap: 2px; align-items: flex-end; flex-wrap: wrap;
+      margin-top: 12px;
+    }
+    .tab-bar button {
+      font: inherit; font-size: 13px; font-weight: 500;
+      padding: 9px 16px; cursor: pointer;
+      background: transparent; color: var(--muted);
+      border: none; border-bottom: 2px solid transparent;
+      display: flex; align-items: center; gap: 7px;
+    }
+    .tab-bar button:hover { color: var(--fg); }
+    .tab-bar button.active {
+      color: var(--accent); border-bottom-color: var(--accent);
+    }
+    .tab-bar button .tab-count {
+      font-size: 11px; font-weight: 600;
+      background: var(--code-bg); color: var(--muted);
+      padding: 1px 7px; border-radius: 999px; min-width: 18px; text-align: center;
+    }
+    .tab-bar button.active .tab-count { background: var(--accent); color: #fff; }
+    .tab-bar button.tab-queued.has-queued .tab-count { background: var(--accent); color: #fff; }
+
+    /* Status sub-filter chips */
     .filter-chips {
       display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+      margin: 12px 0 4px;
+    }
+    .filter-chips .filter-label {
+      font-size: 11px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.04em; margin-right: 4px;
     }
     .filter-chips button {
       font: inherit; font-size: 12px; font-weight: 500;
@@ -172,8 +198,8 @@
       background: var(--bg);
     }
 
-    /* Schema sections */
-    .schema-section { margin: 24px 0; }
+    /* Section / schema headers */
+    .schema-section { margin: 16px 0 24px; }
     .schema-header {
       font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
       text-transform: uppercase; color: var(--muted);
@@ -186,6 +212,16 @@
       background: var(--code-bg); padding: 1px 7px; border-radius: 999px;
     }
 
+    /* Info banner (explains a tab) */
+    .info-banner {
+      background: var(--info-bg); border: 1px solid var(--info-border);
+      border-radius: 10px; padding: 12px 16px; margin: 4px 0 18px;
+      font-size: 13px; color: var(--fg);
+    }
+    .info-banner strong { font-weight: 600; }
+    .info-banner code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
     /* Table card */
     .table-card {
       border: 1px solid var(--border); border-radius: 12px;
@@ -194,99 +230,78 @@
       overflow: hidden;
       transition: opacity 120ms ease, border-color 120ms ease;
     }
-    .table-card.excluded {
-      opacity: 0.55;
-      border-color: var(--bad-border);
-    }
-    .table-card.queued-exclude {
-      border-color: var(--bad-border);
-      background: var(--bad-bg);
-    }
-    .table-card.queued-include {
-      border-color: var(--ok-border);
-      background: var(--ok-bg);
-    }
+    .table-card.excluded { opacity: 0.55; border-color: var(--bad-border); }
+    .table-card.queued-exclude { border-color: var(--bad-border); background: var(--bad-bg); }
+    .table-card.queued-include { border-color: var(--ok-border); background: var(--ok-bg); }
+    .table-card.queued-approve { border-color: var(--ok-border); box-shadow: inset 3px 0 0 var(--ok-fg); }
+    .card-actions button.queued-approve { background: var(--ok-fg); color: white; border-color: var(--ok-fg); }
     .table-header {
       display: flex; align-items: center; gap: 12px;
-      padding: 14px 18px; cursor: pointer;
-      user-select: none;
+      padding: 14px 18px; cursor: pointer; user-select: none;
     }
-    .table-header:hover { background: var(--row-zebra); }
-    .table-toggle {
-      font-size: 10px; color: var(--muted);
-      transition: transform 120ms ease;
-    }
+    .table-header.static { cursor: default; }
+    .table-header:hover:not(.static) { background: var(--row-zebra); }
+    .table-toggle { font-size: 10px; color: var(--muted); transition: transform 120ms ease; }
     .table-toggle.collapsed { transform: rotate(-90deg); }
     .table-name {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       font-size: 15px; font-weight: 600;
     }
     .table-name .schema-prefix { color: var(--muted); font-weight: 400; }
-    .table-rows {
-      font-size: 12px; color: var(--muted);
-      font-variant-numeric: tabular-nums;
-    }
+    .table-rows { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
     .table-state-badge {
       font-size: 10px; padding: 2px 8px; border-radius: 999px;
-      letter-spacing: 0.04em; text-transform: uppercase;
-      font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600;
     }
-    .badge-excluded {
-      background: var(--bad-bg); color: var(--bad-fg);
-      border: 1px solid var(--bad-border);
-    }
-    .badge-rejected {
-      background: var(--bad-bg); color: var(--bad-fg);
-      border: 1px solid var(--bad-border);
-    }
-    .badge-unreviewed {
-      background: var(--warn-bg); color: var(--warn-fg);
-      border: 1px solid var(--warn-fg);
-    }
-    .badge-stale {
-      background: var(--warn-bg); color: var(--warn-fg);
-      border: 1px solid var(--warn-fg);
-    }
-    .table-actions {
-      margin-left: auto; display: flex; gap: 8px; align-items: center;
-    }
-    .table-actions button {
+    .badge-excluded, .badge-rejected { background: var(--bad-bg); color: var(--bad-fg); border: 1px solid var(--bad-border); }
+    .badge-unreviewed, .badge-stale { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--warn-fg); }
+    .badge-approved { background: var(--ok-bg); color: var(--ok-fg); border: 1px solid var(--ok-border); }
+    .badge-inferred { background: var(--code-bg); color: var(--muted); border: 1px solid var(--border); }
+    .table-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .table-actions button, .card-actions button {
       font: inherit; font-size: 12px; font-weight: 500;
       padding: 6px 12px; border-radius: 6px;
       cursor: pointer; background: var(--bg);
       color: var(--fg); border: 1px solid var(--border);
     }
-    .table-actions button:hover {
-      border-color: var(--accent); color: var(--accent);
-    }
-    .table-actions button.action-exclude.queued {
+    .table-actions button:hover, .card-actions button:hover { border-color: var(--accent); color: var(--accent); }
+    .table-actions button.action-exclude.queued, .card-actions button.queued-exclude {
       background: var(--bad-fg); color: white; border-color: var(--bad-fg);
     }
-    .table-actions button.action-include.queued {
+    .table-actions button.action-include.queued, .card-actions button.queued-include {
       background: var(--ok-fg); color: white; border-color: var(--ok-fg);
     }
-
-    .table-body {
-      border-top: 1px solid var(--border);
-      padding: 0;
+    .card-actions { display: flex; gap: 8px; padding: 10px 18px 14px; flex-wrap: wrap; align-items: center; }
+    .card-actions button.queued-edit { border-color: var(--accent); color: var(--accent); }
+    .card-actions .moot-note { font-size: 12px; color: var(--warn-fg); font-weight: 500; }
+    .table-state-badge.moot-badge { background: var(--code-bg); color: var(--muted); border: 1px solid var(--border); }
+    /* Prominent edit button (e.g. table details) — outlined accent so it's easy to find */
+    .card-actions button.btn-edit-prominent {
+      background: var(--bg); color: var(--accent); border: 1px solid var(--accent); font-weight: 600;
     }
+    .card-actions button.btn-edit-prominent:hover { background: var(--accent); color: #fff; }
+
+    .table-body { border-top: 1px solid var(--border); padding: 0; }
     .table-body.collapsed { display: none; }
     .table-description {
       font-size: 13px; color: var(--muted);
-      padding: 12px 18px 10px;
-      border-bottom: 1px solid var(--border);
+      padding: 12px 18px 10px; border-bottom: 1px solid var(--border);
     }
-    .table-description.empty {
-      font-style: italic; color: var(--muted); opacity: 0.6;
+    .table-description.empty { font-style: italic; color: var(--muted); opacity: 0.6; }
+    .table-chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 18px 2px; }
+    .mini-chip {
+      font-size: 11px; padding: 2px 8px; border-radius: 6px;
+      background: var(--code-bg); color: var(--muted);
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
 
-    /* Field rows */
+    /* Field rows — description now wraps (no ellipsis truncation) */
     .field-row {
       display: grid;
-      grid-template-columns: minmax(0, 1.4fr) 90px minmax(0, 2.2fr) auto;
+      grid-template-columns: minmax(0, 1.3fr) 92px minmax(0, 2.4fr) auto;
       gap: 14px;
-      padding: 9px 18px;
-      align-items: center;
+      padding: 10px 18px;
+      align-items: start;
       border-bottom: 1px solid var(--border);
       font-size: 13px;
       transition: background 120ms ease;
@@ -299,55 +314,149 @@
     .field-row.hidden { display: none; }
     .field-name {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 13px; font-weight: 500;
-      overflow: hidden; text-overflow: ellipsis;
+      font-size: 13px; font-weight: 500; word-break: break-word;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
     }
+    .pii-tag {
+      font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+      color: var(--bad-fg); background: var(--bad-bg);
+      border: 1px solid var(--bad-border); padding: 0 4px; border-radius: 3px;
+    }
+    /* AI-written-description provenance tag (advisory; not an approval action) */
+    .ai-tag {
+      font-size: 9px; font-weight: 700; letter-spacing: 0.03em; cursor: help;
+      padding: 0 5px; border-radius: 3px; margin-left: 6px; white-space: nowrap; vertical-align: middle;
+    }
+    .ai-tag.unval { color: var(--warn-fg); background: var(--warn-bg); border: 1px solid var(--warn-fg); }
+    .ai-tag.val { color: var(--ok-fg); background: var(--ok-bg); border: 1px solid var(--ok-border); }
+    .ai-tag.unknown { color: var(--accent); background: var(--info-bg); border: 1px solid var(--info-border); }
     .field-type {
       font-size: 11px; color: var(--muted);
       background: var(--code-bg); padding: 2px 8px; border-radius: 4px;
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      text-align: center;
-      width: 100%; max-width: 90px;
+      text-align: center; justify-self: start; max-width: 92px;
     }
-    .field-desc {
-      font-size: 13px; color: var(--muted);
-      overflow: hidden; text-overflow: ellipsis;
-    }
-    .field-desc.empty {
-      font-style: italic; opacity: 0.45;
-    }
-    .field-actions { display: flex; gap: 6px; }
+    .field-desc { font-size: 13px; color: var(--fg); word-break: break-word; }
+    .field-desc.empty { font-style: italic; color: var(--muted); opacity: 0.5; }
+    .field-actions { display: flex; gap: 6px; justify-content: flex-end; }
     .field-actions button {
       font: inherit; font-size: 11px;
       padding: 4px 10px; border-radius: 5px;
       cursor: pointer; background: var(--bg);
       color: var(--muted); border: 1px solid var(--border);
     }
-    .field-actions button:hover {
-      color: var(--accent); border-color: var(--accent);
-    }
-    .field-actions button.queued-exclude {
-      background: var(--bad-fg); color: white; border-color: var(--bad-fg);
-    }
-    .field-actions button.queued-include {
-      background: var(--ok-fg); color: white; border-color: var(--ok-fg);
-    }
+    .field-actions button:hover { color: var(--accent); border-color: var(--accent); }
+    .field-actions button.queued-exclude { background: var(--bad-fg); color: white; border-color: var(--bad-fg); }
+    .field-actions button.queued-include { background: var(--ok-fg); color: white; border-color: var(--ok-fg); }
+    .field-actions button.queued-edit { border-color: var(--accent); color: var(--accent); }
     .field-actions button.btn-propagate {
-      background: transparent; color: var(--accent); border: 1px dashed var(--accent);
-      white-space: nowrap;
+      background: transparent; color: var(--accent); border: 1px dashed var(--accent); white-space: nowrap;
     }
     .field-actions button.btn-propagate:hover { background: var(--ok-bg); }
+    .field-actions button.btn-pii.on { background: var(--bad-bg); color: var(--bad-fg); border-color: var(--bad-border); }
+    .field-actions button.btn-pii.on:hover { color: var(--bad-fg); border-color: var(--bad-fg); }
+    .field-actions button.btn-pii.queued { box-shadow: inset 2px 0 0 var(--accent); }
 
     /* Search highlights */
     .hl { background: var(--hi-bg); padding: 0 2px; border-radius: 2px; }
-    .table-card.hidden { display: none; }
-    .schema-section.hidden { display: none; }
+    .table-card.hidden, .schema-section.hidden { display: none; }
 
     /* Empty state */
-    .empty-state {
-      padding: 40px 20px; text-align: center;
-      color: var(--muted); font-size: 14px;
+    .empty-state { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 14px; }
+
+    /* Click-to-edit-in-place (descriptions, calculations) */
+    .inline-editable { cursor: text; border-radius: 4px; padding: 1px 5px; margin: -1px -5px; transition: background 100ms; }
+    .inline-editable:hover { background: var(--code-bg); box-shadow: inset 0 0 0 1px var(--border); }
+    .inline-editable.empty { font-style: italic; color: var(--muted); opacity: 0.6; }
+    .inline-editable .pencil { font-size: 11px; color: var(--muted); margin-left: 6px; opacity: 0; transition: opacity 100ms; }
+    .inline-editable:hover .pencil { opacity: 0.7; }
+    .inline-edit-wrap { display: block; }
+    .inline-edit-ta {
+      width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
+      padding: 6px 8px; border-radius: 6px; border: 1px solid var(--accent);
+      background: var(--bg); color: var(--fg); resize: vertical;
     }
+    .inline-edit-ta:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .inline-edit-bar { display: flex; gap: 6px; align-items: center; margin-top: 5px; }
+    .inline-edit-bar .btn-sm { margin: 0; }
+    .inline-edit-bar .hint { font-size: 11px; color: var(--muted); }
+
+    /* Inline edit + forms */
+    .edit-form { border-top: 1px dashed var(--border); margin-top: 6px; padding-bottom: 8px; }
+    .label-line {
+      color: var(--muted); font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.04em; padding: 8px 18px 0;
+    }
+    .field-hint { color: var(--muted); font-size: 12px; padding: 2px 18px 0; font-style: italic; }
+    .edit-form textarea, .edit-form input, .edit-form select, .add-form textarea, .add-form input, .add-form select {
+      width: calc(100% - 36px); margin: 4px 18px; padding: 6px 8px; border-radius: 5px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+      font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    .edit-form select, .add-form select { font-family: inherit; }
+    .btn-sm {
+      font: inherit; font-size: 11px; padding: 5px 12px; border-radius: 5px; cursor: pointer;
+      margin: 8px 18px; background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+    }
+    .btn-sm.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-sm.primary:hover { background: var(--accent-hover); }
+
+    pre.code-block {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px;
+      background: var(--code-bg); padding: 8px 18px; margin: 4px 18px 8px;
+      border-radius: 4px; white-space: pre-wrap; word-break: break-word;
+    }
+
+    /* Organization markdown rendering */
+    .org-rendered { padding: 4px 18px 14px; font-size: 14px; }
+    .org-rendered h1 { font-size: 20px; margin: 16px 0 8px; }
+    .org-rendered h2 { font-size: 16px; margin: 18px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+    .org-rendered h3 { font-size: 14px; margin: 14px 0 4px; }
+    .org-rendered p { margin: 6px 0; }
+    .org-rendered ul { margin: 6px 0; padding-left: 22px; }
+    .org-rendered li { margin: 2px 0; }
+    .org-rendered code {
+      background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px;
+    }
+    .org-rendered strong { font-weight: 600; }
+    /* Rich-text editor for ORGANIZATION.md (edit the formatted text, no Markdown symbols) */
+    .rt-toolbar { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 18px 8px; }
+    .rt-editor { min-height: 360px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-elev); margin: 0 18px; outline: none; }
+    .rt-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--info-bg); }
+    .rt-editor:empty::before { content: '(empty — add domain context so answers know what the data means)';
+      color: var(--muted); font-style: italic; }
+
+    /* Queued tab */
+    .queue-group { margin-bottom: 18px; }
+    .queue-group h3 {
+      font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+      color: var(--muted); margin: 14px 0 8px;
+    }
+    .queue-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 9px 14px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-elev); margin-bottom: 6px; font-size: 13px;
+    }
+    .queue-item .q-kind {
+      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+      padding: 2px 7px; border-radius: 4px;
+    }
+    .q-kind.exclude { background: var(--bad-bg); color: var(--bad-fg); }
+    .q-kind.include { background: var(--ok-bg); color: var(--ok-fg); }
+    .q-kind.approve { background: var(--ok-fg); color: #fff; }
+    .q-kind.edit, .q-kind.add { background: var(--info-bg); color: var(--accent); border: 1px solid var(--info-border); }
+    .queue-item .q-label { flex: 1; word-break: break-word; font-family: ui-monospace, monospace; font-size: 12.5px; }
+    .queue-item .q-undo {
+      font: inherit; font-size: 11px; padding: 3px 10px; border-radius: 5px; cursor: pointer;
+      background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+    }
+    .queue-item .q-undo:hover { color: var(--bad-fg); border-color: var(--bad-border); }
+    .validate-result { margin: 8px 0 4px; font-size: 13px; }
+    .validate-result.ok { color: var(--ok-fg); }
+    .validate-result.bad { color: var(--bad-fg); }
+    .validate-result ul { margin: 6px 0; padding-left: 20px; }
 
     /* Sticky footer */
     .sticky-footer {
@@ -357,31 +466,83 @@
       box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.05);
       display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
     }
-    .sticky-footer .pending-summary {
-      font-size: 13px; color: var(--fg);
-    }
-    .sticky-footer .pending-summary .count {
-      font-weight: 600; color: var(--accent);
-      font-variant-numeric: tabular-nums;
-    }
-    .sticky-footer .actions { margin-left: auto; display: flex; gap: 8px; }
+    .sticky-footer .pending-summary { font-size: 13px; color: var(--fg); }
+    .sticky-footer .pending-summary .count { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .sticky-footer .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
     .sticky-footer button {
       font: inherit; font-size: 14px; font-weight: 500;
       padding: 8px 16px; border-radius: 6px;
       cursor: pointer; background: var(--bg);
       color: var(--fg); border: 1px solid var(--border);
     }
-    .sticky-footer button.primary {
-      background: var(--accent); color: white; border-color: var(--accent);
+    .sticky-footer button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .sticky-footer button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sticky-footer button.primary:not(:disabled):hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .footer-validate { font-size: 12px; color: var(--muted); }
+    .footer-validate.ok { color: var(--ok-fg); }
+    .footer-validate.bad { color: var(--bad-fg); }
+    /* Sign-off identity banner (top of the Review tab) */
+    .signoff-card {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: 10px; padding: 12px 16px; margin: 0 0 18px;
     }
-    .sticky-footer button.primary:disabled {
-      opacity: 0.5; cursor: not-allowed;
+    .signoff-card .signoff-label { font-size: 13px; color: var(--fg); font-weight: 600; }
+    .signoff-card input, .signoff-card select {
+      font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg);
     }
-    .sticky-footer button.primary:not(:disabled):hover {
-      background: var(--accent-hover); border-color: var(--accent-hover);
-    }
+    .signoff-card input { width: 220px; }
+    .signoff-card input:focus, .signoff-card select:focus { outline: 2px solid var(--accent); outline-offset: -2px; border-color: var(--accent); }
+    .signoff-card input.invalid { border-color: var(--bad-border); background: var(--bad-bg); }
+    .signoff-card .signoff-hint { font-size: 12px; color: var(--muted); }
 
-    /* Generate-feedback modal */
+    /* Review sub-tab segmented control */
+    .subtab-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 16px; }
+    .subtab-bar button {
+      font: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+      padding: 7px 14px; border-radius: 8px; background: var(--bg-elev);
+      color: var(--muted); border: 1px solid var(--border);
+      display: flex; align-items: center; gap: 7px;
+    }
+    .subtab-bar button:hover { color: var(--fg); }
+    .subtab-bar button.active { color: var(--accent); border-color: var(--accent); background: var(--bg); }
+    .subtab-bar button .subtab-count {
+      font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+      background: var(--code-bg); color: var(--muted); min-width: 18px; text-align: center;
+    }
+    .subtab-bar button.active .subtab-count { background: var(--accent); color: #fff; }
+
+    /* Reliable CSS hover tooltip (native title= is flaky on file://) — element needs
+       class "tip" + a data-tip="..." attribute. */
+    .tip { position: relative; }
+    .tip:hover::after {
+      content: attr(data-tip);
+      position: absolute; left: 0; top: calc(100% + 6px); z-index: 400;
+      background: var(--fg); color: var(--bg);
+      font-size: 12px; font-weight: 400; line-height: 1.45; letter-spacing: normal; text-transform: none;
+      padding: 8px 11px; border-radius: 7px;
+      width: max-content; max-width: 300px; white-space: normal;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28); pointer-events: none;
+    }
+    /* keep the tip from clipping at the right edge of the card */
+    .conf-chip.tip:hover::after, .ai-tag.tip:hover::after { left: auto; right: 0; }
+
+    /* "Next steps → Tables" callout on the Review tab */
+    .next-steps { margin: 24px 0 4px; padding: 14px 16px; border: 1px dashed var(--accent);
+      border-radius: 10px; background: var(--info-bg); }
+    .next-steps .ns-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .next-steps .ns-body { font-size: 13px; color: var(--fg); }
+    .next-steps .ns-body code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
+    /* Confidence chips (used in the legend + on cards) */
+    .conf-chip { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; cursor: help; }
+    .conf-proposed { background: var(--warn-bg); color: var(--warn-fg); }
+    .conf-inferred { background: var(--code-bg); color: var(--muted); border: 1px solid var(--border); }
+    .conf-confirmed { background: var(--ok-bg); color: var(--ok-fg); }
+
+    /* Modal */
     .modal {
       position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
       display: flex; align-items: center; justify-content: center;
@@ -391,36 +552,26 @@
     .modal-card {
       background: var(--bg); border-radius: 12px;
       padding: 24px; max-width: 720px; width: 100%;
-      max-height: 80vh; overflow: auto;
-      border: 1px solid var(--border);
+      max-height: 80vh; overflow: auto; border: 1px solid var(--border);
     }
     .modal-card h2 { margin: 0 0 8px; font-size: 18px; }
-    .modal-card .modal-hint {
-      font-size: 13px; color: var(--muted); margin: 0 0 14px;
-    }
+    .modal-card .modal-hint { font-size: 13px; color: var(--muted); margin: 0 0 14px; }
     .modal-card textarea {
       width: 100%; min-height: 200px; box-sizing: border-box;
       font: inherit; font-size: 13px;
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       background: var(--code-bg); color: var(--fg);
-      border: 1px solid var(--border); border-radius: 6px;
-      padding: 12px; resize: vertical;
+      border: 1px solid var(--border); border-radius: 6px; padding: 12px; resize: vertical;
     }
-    .modal-card .modal-actions {
-      display: flex; gap: 8px; margin-top: 12px; align-items: center;
-    }
+    .modal-card .modal-actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
     .modal-card .modal-actions button {
       font: inherit; font-size: 14px; font-weight: 500;
       padding: 8px 14px; border-radius: 6px;
       cursor: pointer; background: var(--bg);
       color: var(--fg); border: 1px solid var(--border);
     }
-    .modal-card .modal-actions button.primary {
-      background: var(--accent); color: white; border-color: var(--accent);
-    }
-    .modal-card .modal-actions .modal-status {
-      margin-left: auto; font-size: 12px; color: var(--muted);
-    }
+    .modal-card .modal-actions button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .modal-card .modal-actions .modal-status { margin-left: auto; font-size: 12px; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -435,40 +586,39 @@
       <h1 class="dashboard-title">{{REPORT_TITLE}}</h1>
     </header>
     <div class="meta">
-      Generated <span id="generated-at">{{GENERATED_AT}}</span> · profile <code>{{PROFILE}}</code> ·
-      <span id="totals-meta"></span>
+      <span>Generated <span id="generated-at">{{GENERATED_AT}}</span></span>
+      <span>· profile <code>{{PROFILE}}</code></span>
+      <span>· <span id="totals-meta"></span></span>
+      <span class="model-badge" id="model-badge">✓ Model valid</span>
     </div>
 
     <div class="toolbar">
       <div class="search-row">
         <input class="search-input" id="search" type="search"
-          placeholder="Search tables, fields, descriptions…" autocomplete="off" />
+          placeholder="Search the current tab…" autocomplete="off" />
         <span class="search-counts" id="search-counts"></span>
       </div>
-      <div class="filter-chips" style="margin-top: 10px;">
+      <div class="tab-bar" id="tab-bar"></div>
+      <div class="filter-chips" id="filter-chips">
+        <span class="filter-label">Status</span>
         <button type="button" data-filter="all" class="active">All</button>
-        <button type="button" data-filter="active">Active (not excluded)</button>
+        <button type="button" data-filter="active">Active</button>
         <button type="button" data-filter="excluded">Excluded</button>
         <button type="button" data-filter="unreviewed">Unreviewed</button>
-        <button type="button" data-filter="queued">Queued for change</button>
       </div>
     </div>
 
-    <div id="org-context-section"></div>
-    <div id="metrics-section"></div>
-    <div id="entities-section"></div>
-    <div id="relationships-section"></div>
-    <div id="examples-section"></div>
-    <div id="named-filters-section"></div>
-    <div id="schemas"></div>
+    <div id="tab-content"></div>
   </div>
 
   <div class="sticky-footer">
     <div class="pending-summary" id="pending-summary">
-      No actions queued yet — click Exclude / Include on a table or field to start.
+      No changes queued yet — exclude / include / edit / add to start.
     </div>
+    <span class="footer-validate" id="footer-validate"></span>
     <div class="actions">
       <button type="button" id="btn-reset">Reset all</button>
+      <button type="button" id="btn-validate">Validate</button>
       <button type="button" id="btn-generate" class="primary" disabled>
         Generate feedback for Claude
       </button>
@@ -494,91 +644,303 @@
 
   <script>
     const manifest = {{MANIFEST_JSON}};
+    const STORAGE_TYPE = manifest.storage_type || '';
+    const AREAS = (manifest.schemas || []).map(s => s.name);
+    const ALL_TABLES = [];
+    (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => ALL_TABLES.push(t.name)));
 
-    // ---- Local state ----
-    // pending[qname] = "exclude" | "include" | undefined
-    //   qname is "<schema>.<table>" for tables, "<schema>.<table>.<field>" for fields
+    // ---- State ----
+    // pending[qname] = "exclude" | "include"   (tables + columns)
+    // ops[qname]     = {op, kind, area, name}  (metrics/entities/relationships)
+    // edits[qname]   = {kind, area, name, [column], fields:{field:value}}
+    // exampleEdits[qname] = {area, question, sql, source, status}
+    // newMetrics[]   = {area, name, description, calculation, binding, unit, other_names[], source_tables[]}
+    // orgEdit        = new ORGANIZATION.md text | null
     const pending = {};
-    // ops[qname] = {op, kind, area, name} — exclude/include for entities/metrics/
-    // relationships (they carry an explicit `kind` so the curate engine routes them;
-    // tables/columns stay in `pending` + the text grammar for back-compat).
     const ops = {};
-    let activeFilter = 'all';
+    const edits = {};
+    const exampleEdits = {};
+    const newMetrics = [];
+    let orgEdit = null;
+    let orgRaw = false;   // ORGANIZATION.md editor mode: false = rich text, true = raw Markdown
 
-    function opOf(qname) { return ops[qname] ? ops[qname].op : undefined; }
+    const editOpen = new Set();        // qnames whose inline edit form is expanded
+    const expandedTables = new Set();  // qnames of tables the user has expanded (persisted across renders)
+    let addMetricOpen = false;
+    let searchQ = '';
+    const _initTab = (manifest.initial_tab || 'tables');
+    let activeTab = _initTab;
+    let activeFilter = 'all';
+    let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
+    let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
+
+    // Sign-off identity (stamped on every Approve). Persisted to localStorage so it's
+    // remembered across renders; the skill reads it from the `signed-off-by:` feedback line.
+    const ROLE_OPTIONS = [
+      { value: 'cfo', label: 'CFO' }, { value: 'cto', label: 'CTO' }, { value: 'data_lead', label: 'Data Lead' },
+      { value: 'engineer', label: 'Engineer' }, { value: 'analyst', label: 'Analyst' }, { value: 'other', label: 'Other…' },
+    ];
+    let signOff = { email: '', role: 'data_lead', roleOther: '' };
+    try { const s = JSON.parse(localStorage.getItem('agami_signoff') || '{}'); if (s.email) signOff.email = s.email; if (s.role) signOff.role = s.role; if (s.roleOther) signOff.roleOther = s.roleOther; } catch (e) {}
+    function saveSignOff() { try { localStorage.setItem('agami_signoff', JSON.stringify(signOff)); } catch (e) {} }
+    function signOffRole() { return signOff.role === 'other' ? (signOff.roleOther.trim() || 'other') : signOff.role; }
+    function validEmail(s) { return /\S+@\S+\.\S+/.test(s || ''); }
+    function hasQueuedApprovals() { return Object.values(ops).some(o => o.op === 'approve'); }
+
+    // Confidence is categorical provenance, not a score — these glosses explain each chip.
+    const CONF_MEANING = {
+      confirmed: 'Confirmed: the database itself says this is true (it is a built-in key). You can trust it — no need to check.',
+      inferred:  'Inferred: agami worked this out from strong clues (matching names and values), but the database does not enforce it. Probably right — worth a quick look.',
+      proposed:  'Proposed: an AI suggestion (like a metric definition) that no one has confirmed yet. Read it carefully before you trust it.',
+    };
+
+    const TABS = [
+      { id: 'organization', label: 'Organization' },
+      { id: 'review',       label: 'Review' },
+      { id: 'areas',        label: 'Subject areas' },
+      { id: 'tables',       label: 'Tables' },
+      { id: 'metrics',      label: 'Metrics' },
+      { id: 'entities',     label: 'Entities' },
+      { id: 'joins',        label: 'Joins' },
+      { id: 'examples',     label: 'Examples' },
+      { id: 'queued',       label: 'Queued' },
+    ];
+    // Tabs that show entity cards filterable by status (search + All/Active/Excluded/Unreviewed)
+    const FILTERABLE_TABS = new Set(['tables', 'metrics', 'entities', 'joins', 'examples']);
+
+    // ---- DOM helper ----
+    function el(tag, attrs = {}, ...children) {
+      const e = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v === false || v === null || v === undefined) continue;
+        if (k === 'text') e.textContent = String(v);
+        else if (k === 'html') e.innerHTML = v;
+        else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+        else e.setAttribute(k, v);
+      }
+      for (const c of children) {
+        if (c === null || c === undefined) continue;
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      }
+      return e;
+    }
+    function escapeHtml(s) {
+      return (s || '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+    function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    function highlight(text, q) {
+      if (!q || !text) return document.createTextNode(text || '');
+      const re = new RegExp(escapeRegex(q), 'gi');
+      const parts = []; let last = 0; let m;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) parts.push(document.createTextNode(text.slice(last, m.index)));
+        parts.push(el('span', { class: 'hl', text: m[0] }));
+        last = re.lastIndex;
+        if (m.index === re.lastIndex) re.lastIndex++;
+      }
+      if (last < text.length) parts.push(document.createTextNode(text.slice(last)));
+      const span = document.createElement('span');
+      parts.forEach(p => span.appendChild(p));
+      return span;
+    }
+    function fmtCount(n) {
+      if (n == null) return '';
+      if (n < 1000) return String(n);
+      if (n < 1e6) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+      return (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + 'M';
+    }
     function relName(item) {
       return item.name || (item.from_table ? item.from_table + '->' + item.to_table
                                             : (item.qname.split('.').slice(1).join('.')));
     }
-    function toggleOp(kind, item) {
-      const q = item.qname;
-      const desired = item.excluded ? 'include' : 'exclude';
-      if (ops[q] && ops[q].op === desired) delete ops[q];
-      else ops[q] = { op: desired, kind, area: item.area, name: relName(item) };
-      renderAll();
-      updateFooter();
+
+    // ---- Reusable bits ----
+    // Provenance tag for an AI-written description. No approval action — editing a
+    // description (which a human does to fix it) flips it to "human" automatically.
+    function aiDescTag(source) {
+      if (source === 'ai_unvalidated') return el('span', { class: 'ai-tag unval tip', text: 'AI',
+        'data-tip': 'agami wrote this description and nobody has confirmed it yet. It will pop up for a quick check the first time a query actually uses this — no need to review them all up front.' });
+      if (source === 'ai_validated') return el('span', { class: 'ai-tag val tip', text: '✓ AI',
+        'data-tip': 'agami wrote this description and a person has confirmed it.' });
+      if (source === 'ai_unknown') return el('span', { class: 'ai-tag unknown tip', text: '❓ describe',
+        'data-tip': "agami couldn't tell what this column means. Describe it on the Review tab (the “Couldn't read” group) — or agami will ask the first time a query uses it." });
+      return null;  // human-written or unknown source → no tag (trusted)
     }
-    function excludeBtn(kind, item) {
-      const queued = opOf(item.qname);
-      const label = item.excluded
-        ? (queued === 'include' ? '↻ Include (queued)' : 'Include')
-        : (queued === 'exclude' ? '✗ Excluded (queued)' : 'Exclude');
-      return el('button', {
-        type: 'button', class: 'field-actions-btn ' + (queued ? 'queued-' + queued : ''),
-        style: 'font-size:11px;padding:4px 10px;border-radius:5px;cursor:pointer;'
-             + 'background:var(--bg);color:var(--muted);border:1px solid var(--border);margin:8px 18px;',
-        onclick: (ev) => { ev.stopPropagation(); toggleOp(kind, item); },
-      }, label);
-    }
-    function labelLine(text) {
-      return el('div', { class: 'label-line', text,
-        style: 'color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;padding:8px 18px 0;' });
-    }
-    function preBlock(text) {
-      return el('pre', { text,
-        style: 'font-family:ui-monospace,monospace;font-size:13px;background:var(--code-bg);'
-             + 'padding:8px 18px;margin:4px 18px 8px;border-radius:4px;white-space:pre-wrap;' });
-    }
+    function labelLine(text) { return el('div', { class: 'label-line', text }); }
+    function hintLine(text) { return el('div', { class: 'field-hint', text }); }
+    function preBlock(text) { return el('pre', { class: 'code-block', text }); }
     function descBlock(text) {
       const d = el('div', { class: 'table-description', style: 'border-bottom:none;padding-top:4px;' });
       d.appendChild(highlight(text, searchQ));
       return d;
     }
-    // ---- Inline editing ----
-    // edits[qname] = {kind, area, name, [column], fields:{field:value}} — field edits
-    //   applied via curate edit ops. exampleEdits[key] = {area, question, sql}.
-    //   orgEdit = new ORGANIZATION.md text or null.
-    const edits = {};
-    const exampleEdits = {};
-    let orgEdit = null;
-    const editOpen = new Set();   // qnames whose inline edit form is expanded
-
-    function editCount() {
-      return Object.keys(edits).length + Object.keys(exampleEdits).length + (orgEdit !== null ? 1 : 0);
+    // descBlock-styled container holding an inline-editable text field (click to edit in place)
+    function inlineBlock(o) {
+      const d = el('div', { class: 'table-description', style: 'border-bottom:none;padding-top:4px;' });
+      d.appendChild(inlineText(o));
+      return d;
     }
-    function btn(label, onclick, extra) {
-      return el('button', {
-        type: 'button', onclick,
-        style: 'font-size:11px;padding:4px 10px;border-radius:5px;cursor:pointer;margin:8px 18px;'
-             + 'background:var(--bg);color:var(--muted);border:1px solid var(--border);' + (extra || ''),
-      }, label);
+    function btnSm(label, onclick, cls) {
+      return el('button', { type: 'button', class: 'btn-sm' + (cls ? ' ' + cls : ''), onclick }, label);
     }
     function textarea(value, rows) {
       const ta = el('textarea', { rows: String(rows || 2) });
       ta.value = value || '';
-      ta.style.cssText = 'width:calc(100% - 36px);margin:4px 18px;padding:6px 8px;border-radius:5px;'
-        + 'border:1px solid var(--border);background:var(--bg);color:var(--fg);font:13px ui-monospace,monospace;';
       return ta;
     }
-    // Render an inline edit form for `item`. fieldDefs: [{field, label, current, rows,
-    // type}] where type is:
-    //   'text'   (default) → single value;
-    //   'list'   → one item per line → string[] (caveats, default_filters, other_names);
-    //   'maps'   → one `table.column` per line, first is primary → entity maps_to;
-    //   'select' → dropdown over `options`.
-    // Saving stores a curate edit per CHANGED field under edits[item.qname].
+    function stateBadge(rs, eff) {
+      if (eff) return el('span', { class: 'table-state-badge badge-excluded', text: 'excluded' });
+      if (!rs || rs === 'approved') return null;
+      const cls = rs === 'rejected' ? 'badge-rejected' : rs === 'stale' ? 'badge-stale' : 'badge-unreviewed';
+      return el('span', { class: 'table-state-badge ' + cls, text: rs });
+    }
+
+    // ---- Exclusion state (current + queued, across pending & ops) ----
+    function queuedAction(qname) {
+      if (pending[qname]) return pending[qname];
+      if (ops[qname]) return ops[qname].op;
+      return undefined;
+    }
+    function effExcluded(item) {
+      const a = queuedAction(item.qname);
+      if (a === 'exclude') return true;
+      if (a === 'include') return false;
+      return !!item.excluded;
+    }
+    // Effective review state combining the live model + any queued op.
+    function effReviewState(item) {
+      const a = queuedAction(item.qname);
+      if (a === 'approve') return 'approved';
+      if (a === 'exclude') return 'rejected';
+      if (a === 'include') return 'unreviewed';
+      return item.review_state || 'approved';
+    }
+    // Is a TABLE excluded right now (queued exclusion wins; else its model state)?
+    // Mirrors the runtime loader, which drops a join/metric/entity once its table is gone.
+    function tableEffExcluded(area, tableName) {
+      const qn = area + '.' + tableName;
+      if (pending[qn] === 'exclude') return true;
+      if (pending[qn] === 'include') return false;
+      const s = (manifest.schemas || []).find(x => x.name === area);
+      const t = s && (s.tables || []).find(x => x.name === tableName);
+      return t ? !!t.excluded : true;  // table not found → unavailable
+    }
+    function _tblOf(qcol) { const p = String(qcol).split('.'); return p.length >= 2 ? p[p.length - 2] : p[0]; }
+    // Why an entry can't be used: its underlying table(s) are excluded. The runtime
+    // (loader) enforces this — a join to an excluded table is dropped even if approved.
+    // Returns a reason string or null. Inferred from item shape (no _kind needed).
+    function mootReason(it) {
+      const area = it.area;
+      if (it.from_table) {  // relationship — moot if EITHER endpoint table is excluded
+        const ex = [];
+        if (tableEffExcluded(area, it.from_table)) ex.push(it.from_table);
+        if (tableEffExcluded(area, it.to_table)) ex.push(it.to_table);
+        if (ex.length) return ex.join(' & ') + ' excluded';
+      } else if (it.source_tables) {  // metric — needs ALL its source tables
+        const ex = (it.source_tables || []).filter(t => tableEffExcluded(area, t));
+        if (ex.length) return ex.join(', ') + ' excluded';
+      } else if (it.maps_to) {  // entity — moot only if ALL mapped tables are excluded
+        const tbls = [...new Set((it.maps_to || []).map(_tblOf))];
+        if (tbls.length && tbls.every(t => tableEffExcluded(area, t))) return 'every table it maps to is excluded';
+      }
+      return null;
+    }
+    function isApprovable(item) {
+      // metrics/entities/joins that aren't already approved/excluded, and aren't moot
+      // (approving a join to a table you excluded is pointless — the runtime drops it).
+      return effReviewState(item) !== 'approved' && !effExcluded(item) && !mootReason(item);
+    }
+    // The sign-off queue: every metric / entity / join not yet approved or rejected.
+    // The "untouched" review queue — items not yet approved/rejected AND not yet edited.
+    // Drives the Review tab badge, so taking ANY action (approve / reject / edit) shrinks it.
+    function reviewQueue() {
+      const out = [];
+      (manifest.metrics || []).forEach(m => out.push({ ...m, _kind: 'metric' }));
+      (manifest.entities || []).forEach(e => out.push({ ...e, _kind: 'entity' }));
+      (manifest.relationships || []).forEach(r => out.push({ ...r, _kind: 'relationship' }));
+      return out.filter(it => {
+        const rs = effReviewState(it);
+        return (rs === 'unreviewed' || rs === 'stale') && !edits[it.qname];
+      });
+    }
+
+    // ---- Search / filter ----
+    function matchesSearch(text, q) { return !q || (text || '').toLowerCase().includes(q); }
+    function fieldMatches(f, q) {
+      return matchesSearch(f.name, q) || matchesSearch(f.description, q)
+          || matchesSearch(f.type, q) || matchesSearch(f.qname, q);
+    }
+    function tableMatches(t, q) {
+      if (!q) return true;
+      return matchesSearch(t.name, q) || matchesSearch(t.description, q) || matchesSearch(t.qname, q)
+          || (t.fields || []).some(f => fieldMatches(f, q));
+    }
+    function passesFilter(item, kind) {
+      const eff = effExcluded(item);
+      switch (activeFilter) {
+        case 'all':      return true;
+        case 'active':   return !eff;
+        case 'excluded': return eff;
+        case 'unreviewed':
+          if (kind === 'table') {
+            return item.review_state === 'unreviewed'
+                || (item.fields || []).some(f => f.review_state === 'unreviewed');
+          }
+          return item.review_state === 'unreviewed';
+        default: return true;
+      }
+    }
+
+    // ---- Click-to-edit a single text field (description / calculation) in place ----
+    // Writes to the same `edits` store the multi-field forms use, so it queues into the
+    // feedback block identically. o: { qname, area, name, column?, kind, field, original, placeholder }.
+    function inlineText(o) {
+      const key = o.qname + '|' + o.field;
+      const fld = o.field;
+      const queued = (edits[o.qname] && edits[o.qname].fields && (fld in edits[o.qname].fields))
+        ? edits[o.qname].fields[fld] : undefined;
+      const shown = (queued !== undefined ? queued : (o.original || ''));
+      if (inlineEditKey === key) {
+        const wrap = el('div', { class: 'inline-edit-wrap' });
+        const ta = el('textarea', { id: 'active-inline-ta', rows: '2', class: 'inline-edit-ta' });
+        ta.value = shown;
+        const save = () => {
+          const v = ta.value;
+          const cur = edits[o.qname] || { kind: o.kind, area: o.area, name: o.name, column: o.column, fields: {} };
+          if ((v || '').trim() === (o.original || '').trim()) delete cur.fields[fld];
+          else cur.fields[fld] = v;
+          if (Object.keys(cur.fields).length) edits[o.qname] = cur; else delete edits[o.qname];
+          inlineEditKey = null; renderAll();
+        };
+        ta.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Escape') { ev.preventDefault(); inlineEditKey = null; renderAll(); }
+          else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
+        });
+        wrap.appendChild(ta);
+        const bar = el('div', { class: 'inline-edit-bar' });
+        bar.appendChild(btnSm('Save', save, 'primary'));
+        bar.appendChild(btnSm('Cancel', () => { inlineEditKey = null; renderAll(); }));
+        bar.appendChild(el('span', { class: 'hint', text: '⌘/Ctrl+Enter saves · Esc cancels' }));
+        wrap.appendChild(bar);
+        return wrap;
+      }
+      const isEmpty = !(shown || '').trim();
+      const d = el('span', { class: 'inline-editable' + (isEmpty ? ' empty' : ''), title: 'Click to edit',
+        onclick: (ev) => {
+          ev.stopPropagation(); inlineEditKey = key; renderAll();
+          const t = document.getElementById('active-inline-ta');
+          if (t) { t.focus(); try { t.setSelectionRange(t.value.length, t.value.length); } catch (e) {} }
+        } });
+      d.appendChild(highlight(shown || o.placeholder || '(click to add)', shown ? searchQ : ''));
+      if (queued !== undefined) d.appendChild(el('span', { class: 'mini-chip', style: 'margin-left:6px;', text: '✎ edited' }));
+      d.appendChild(el('span', { class: 'pencil', text: '✎' }));
+      return d;
+    }
+
+    // ---- Inline edit form ----
+    // fieldDefs: [{field, label, current, rows, type, options, hint}]; type ∈ text|list|maps|select
     function renderEditForm(item, kind, fieldDefs) {
-      const wrap = el('div', { style: 'border-top:1px dashed var(--border);margin-top:6px;' });
+      const wrap = el('div', { class: 'edit-form' });
       const getters = {};
       const saved = edits[item.qname] && edits[item.qname].fields;
 
@@ -586,21 +948,24 @@
         const hint = fd.type === 'maps' ? ' (one table.column per line; first is primary)'
                    : fd.type === 'list' ? ' (one per line)' : '';
         wrap.appendChild(labelLine(fd.label + hint));
+        if (fd.hint) wrap.appendChild(hintLine(fd.hint));
         const savedVal = saved ? saved[fd.field] : undefined;
 
-        if (fd.type === 'select') {
-          const sel = el('select', { style: 'margin:4px 18px;padding:6px 8px;border-radius:5px;'
-            + 'border:1px solid var(--border);background:var(--bg);color:var(--fg);font:13px sans-serif;' });
-          (fd.options || []).forEach(o => {
-            const opt = el('option', { value: o }); opt.textContent = o; sel.appendChild(opt);
-          });
+        if (fd.type === 'bool') {
+          const sel = el('select');
+          [['no', 'No'], ['yes', 'Yes']].forEach(([v, lbl]) => { const opt = el('option', { value: v }); opt.textContent = lbl; sel.appendChild(opt); });
+          const cur0 = !!fd.current;
+          sel.value = (savedVal !== undefined ? (savedVal ? 'yes' : 'no') : (cur0 ? 'yes' : 'no'));
+          wrap.appendChild(sel);
+          getters[fd.field] = () => ({ value: sel.value === 'yes', changed: (sel.value === 'yes') !== cur0 });
+        } else if (fd.type === 'select') {
+          const sel = el('select');
+          (fd.options || []).forEach(o => { const opt = el('option', { value: o }); opt.textContent = o || '(none)'; sel.appendChild(opt); });
           sel.value = (savedVal !== undefined ? savedVal : (fd.current || (fd.options || [])[0] || ''));
           wrap.appendChild(sel);
           getters[fd.field] = () => ({ value: sel.value, changed: sel.value !== (fd.current || '') });
         } else {
-          // text-ish (text / list / maps): edit as lines in a textarea
-          const toLines = (v) => Array.isArray(v) ? v.map(x => (x && x.table) ? `${x.table}.${x.column}` : x).join('\n')
-                                                  : (v || '');
+          const toLines = (v) => Array.isArray(v) ? v.map(x => (x && x.table) ? `${x.table}.${x.column}` : x).join('\n') : (v || '');
           const display = savedVal !== undefined ? toLines(savedVal) : toLines(fd.current);
           const ta = textarea(display, fd.rows);
           wrap.appendChild(ta);
@@ -622,179 +987,147 @@
         }
       });
 
-      const save = btn('Save', () => {
+      wrap.appendChild(btnSm('Save', () => {
         const fields = {};
         fieldDefs.forEach(fd => { const g = getters[fd.field](); if (g.changed) fields[fd.field] = g.value; });
         if (Object.keys(fields).length) {
-          edits[item.qname] = { kind, area: item.area, name: item.name || relName(item),
-                                column: item.column, fields };
+          edits[item.qname] = { kind, area: item.area, name: item.name || relName(item), column: item.column, fields };
         } else { delete edits[item.qname]; }
         editOpen.delete(item.qname);
-        renderAll(); updateFooter();
-      }, 'background:var(--accent);color:#fff;border-color:var(--accent);');
-      wrap.appendChild(save);
+        renderAll();
+      }, 'primary'));
+      wrap.appendChild(btnSm('Cancel', () => { editOpen.delete(item.qname); renderAll(); }));
       return wrap;
     }
-    function editToggle(item) {
+    function editToggleBtn(item, cls, idleLabel) {
       const open = editOpen.has(item.qname);
       const queued = !!edits[item.qname];
-      return btn(open ? 'Cancel' : (queued ? '✎ Edited (queued)' : 'Edit'), (ev) => {
-        ev.stopPropagation();
-        if (open) editOpen.delete(item.qname); else editOpen.add(item.qname);
-        renderAll();
-      }, queued ? 'border-color:var(--accent);color:var(--accent);' : '');
+      const label = open ? 'Cancel' : (queued ? '✎ Edited (queued)' : (idleLabel || 'Edit'));
+      return el('button', {
+        type: 'button', class: (cls || '') + (queued ? ' queued-edit' : ''),
+        onclick: (ev) => { ev.stopPropagation(); if (open) editOpen.delete(item.qname); else editOpen.add(item.qname); renderAll(); },
+      }, label);
     }
-
-    // Generic flat section: title + count + cards, search-filtered on `hay(item)`.
-    function renderFlatSection(rootId, title, items, hay, cardFn) {
-      const root = document.getElementById(rootId);
-      root.innerHTML = '';
-      const matched = (items || []).filter(it => !searchQ || hay(it).toLowerCase().includes(searchQ));
-      if (!matched.length) return;
-      const sec = el('div', { class: 'schema-section' });
-      const header = el('div', { class: 'schema-header' });
-      header.appendChild(document.createTextNode(title));
-      header.appendChild(el('span', { class: 'schema-count', text: matched.length + ' total' }));
-      sec.appendChild(header);
-      matched.forEach(it => sec.appendChild(cardFn(it)));
-      root.appendChild(sec);
+    function excludeToggleBtn(kind, item, cls) {
+      // Tables/columns "Exclude"; metrics/entities/joins "Reject" (sign-off vocab) — same op.
+      const isModelObj = (kind === 'field' || kind === 'table');
+      const verb = isModelObj ? 'Exclude' : 'Reject';
+      const past = isModelObj ? 'Excluded' : 'Rejected';
+      const eff = effExcluded(item);
+      const q = queuedAction(item.qname);
+      const exQueued = (q === 'exclude' || q === 'include') ? q : '';
+      const label = eff
+        ? (q === 'include' ? '↻ Include (queued)' : 'Include')
+        : (q === 'exclude' ? '✗ ' + past + ' (queued)' : verb);
+      return el('button', {
+        type: 'button', class: (cls || '') + (exQueued ? ' queued-' + exQueued : ''),
+        onclick: (ev) => { ev.stopPropagation(); toggleOp(kind, item); },
+      }, label);
     }
-    let searchQ = '';
-
-    // ---- Helpers ----
-    function el(tag, attrs = {}, ...children) {
-      const e = document.createElement(tag);
-      for (const [k, v] of Object.entries(attrs)) {
-        if (v === false || v === null || v === undefined) continue;
-        if (k === 'text') e.textContent = String(v);
-        else if (k === 'html') e.innerHTML = v;
-        else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
-        else e.setAttribute(k, v);
+    function toggleOp(kind, item) {
+      const q = item.qname;
+      const desired = effExcluded(item) ? 'include' : 'exclude';
+      const store = (kind === 'table' || kind === 'field') ? pending : ops;
+      if (store === pending) {
+        if (pending[q] === desired) delete pending[q]; else pending[q] = desired;
+      } else {
+        if (ops[q] && ops[q].op === desired) delete ops[q];
+        else ops[q] = { op: desired, kind, area: item.area, name: relName(item) };
       }
-      for (const c of children) {
-        if (c === null || c === undefined) continue;
-        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-      }
-      return e;
+      renderAll();
     }
-    function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-    function highlight(text, q) {
-      if (!q || !text) return document.createTextNode(text || '');
-      const re = new RegExp(escapeRegex(q), 'gi');
-      const parts = [];
-      let last = 0;
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        if (m.index > last) parts.push(document.createTextNode(text.slice(last, m.index)));
-        parts.push(el('span', { class: 'hl', text: m[0] }));
-        last = re.lastIndex;
-        if (m.index === re.lastIndex) re.lastIndex++;  // zero-width safety
-      }
-      if (last < text.length) parts.push(document.createTextNode(text.slice(last)));
-      const span = document.createElement('span');
-      parts.forEach(p => span.appendChild(p));
-      return span;
+    // Approve (sign-off) — sets review_state=approved via an `approve` curate op.
+    function toggleApprove(kind, item) {
+      const q = item.qname;
+      if (ops[q] && ops[q].op === 'approve') delete ops[q];
+      else ops[q] = { op: 'approve', kind, area: item.area, name: relName(item) };
+      renderAll();
     }
-    function fmtCount(n) {
-      if (n == null) return '';
-      if (n < 1000) return String(n);
-      if (n < 1e6) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
-      return (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + 'M';
+    function approveBtn(kind, item, cls) {
+      const q = queuedAction(item.qname);
+      const label = q === 'approve' ? '✓ Approved (queued)' : 'Approve';
+      return el('button', {
+        type: 'button', class: (cls || '') + (q === 'approve' ? ' queued-approve' : ''),
+        onclick: (ev) => { ev.stopPropagation(); toggleApprove(kind, item); },
+      }, label);
+    }
+    // Unified action row for metric / entity / join cards: Approve · Reject · Edit,
+    // adapting to the item's effective review state.
+    function flatCardActions(kind, item) {
+      const a = el('div', { class: 'card-actions' });
+      const moot = mootReason(item);
+      if (effExcluded(item)) {
+        a.appendChild(excludeToggleBtn(kind, item));   // shows "Include"
+      } else if (moot) {
+        // an underlying table is excluded → this can't be used; approving it is pointless
+        a.appendChild(el('span', { class: 'moot-note', text: '⚠ Won’t be used — ' + moot }));
+        a.appendChild(excludeToggleBtn(kind, item));    // can still Reject it outright
+      } else {
+        if (effReviewState(item) === 'approved') {
+          const who = item.signed_off_by ? ' · ' + item.signed_off_by : '';
+          a.appendChild(el('span', { class: 'mini-chip', style: 'align-self:center;color:var(--ok-fg);',
+            text: '✓ approved' + who }));
+        } else {
+          a.appendChild(approveBtn(kind, item));
+        }
+        a.appendChild(excludeToggleBtn(kind, item));    // shows "Reject"
+      }
+      a.appendChild(editToggleBtn(item));
+      return a;
     }
 
-    // ---- Determine effective excluded state (current + pending) ----
-    function effectivelyExcluded(qname, currentlyExcluded) {
-      const p = pending[qname];
-      if (p === 'exclude') return true;
-      if (p === 'include') return false;
-      return currentlyExcluded;
-    }
-
-    // ---- Match logic for search / filter ----
-    function matchesSearch(text, q) {
-      if (!q) return true;
-      return (text || '').toLowerCase().includes(q);
-    }
-    function fieldMatches(field, table, q) {
-      return matchesSearch(field.name, q)
-          || matchesSearch(field.description, q)
-          || matchesSearch(field.type, q)
-          || matchesSearch(field.qname, q);
-    }
-    function tableMatches(table, q) {
-      if (!q) return true;
-      if (matchesSearch(table.name, q)) return true;
-      if (matchesSearch(table.description, q)) return true;
-      if (matchesSearch(table.qname, q)) return true;
-      return (table.fields || []).some(f => fieldMatches(f, table, q));
-    }
-    function passesFilter(entity, kind) {
-      // kind = "table" | "field"
-      const q = pending[entity.qname];
-      const eff = effectivelyExcluded(entity.qname, entity.excluded);
-      switch (activeFilter) {
-        case 'all':      return true;
-        case 'active':   return !eff;
-        case 'excluded': return eff;
-        case 'unreviewed':
-          if (kind === 'table') {
-            return (entity.review_state === 'unreviewed') ||
-                   (entity.fields || []).some(f => f.review_state === 'unreviewed');
-          }
-          return entity.review_state === 'unreviewed';
-        case 'queued':   return !!q;
-        default:         return true;
-      }
-    }
-
-    // ---- Render ----
+    // =====================================================================
+    // TAB: Tables
+    // =====================================================================
     function renderField(field, table) {
       const q = searchQ;
-      const eff = effectivelyExcluded(field.qname, field.excluded);
+      const eff = effExcluded(field);
       const queued = pending[field.qname];
       const row = el('div', {
-        class: 'field-row'
-          + (eff ? ' excluded' : '')
-          + (queued ? ' queued-' + queued : ''),
+        class: 'field-row' + (eff ? ' excluded' : '') + (queued ? ' queued-' + queued : ''),
         'data-qname': field.qname,
       });
-      // hidden if search or filter excludes
       const showByFilter = passesFilter(field, 'field');
-      const showBySearch = !q || fieldMatches(field, table, q);
+      const showBySearch = !q || fieldMatches(field, q);
       if (!showByFilter || !showBySearch) row.classList.add('hidden');
 
       const name = el('div', { class: 'field-name' });
       name.appendChild(highlight(field.name, q));
+      if (effSensitive(field)) name.appendChild(el('span', { class: 'pii-tag', text: 'PII' }));
+      if (field.unit) name.appendChild(el('span', { class: 'mini-chip', text: field.unit }));
       row.appendChild(name);
 
       row.appendChild(el('div', { class: 'field-type', text: field.type || '' }));
 
-      const desc = el('div', { class: 'field-desc' + ((field.description || '').trim() === '' ? ' empty' : '') });
-      const d = (field.description || '').trim();
-      desc.appendChild(highlight(d || '(no description)', d ? q : ''));
+      const dtext = (field.description || '').trim();
+      const desc = el('div', { class: 'field-desc' });
+      desc.appendChild(inlineText({ qname: field.qname, area: table.area, name: table.name, column: field.name,
+        kind: 'table', field: 'description', original: field.description,
+        placeholder: field.description_source === 'ai_unknown' ? '(agami couldn’t read this — click to describe)' : '(click to add a description)' }));
+      const at = aiDescTag(field.description_source);
+      if (at && (dtext || field.description_source === 'ai_unknown')) desc.appendChild(at);
+      if ((field.caveats || []).length) {
+        desc.appendChild(el('div', { class: 'field-hint', style: 'padding-left:0;',
+          text: '⚠ ' + field.caveats.join(' · ') }));
+      }
       row.appendChild(desc);
 
       const actions = el('div', { class: 'field-actions' });
-      const wasExcluded = field.excluded;
-      const label = eff
-        ? (queued === 'include' ? '↻ Include (queued)' : 'Include')
-        : (queued === 'exclude' ? '✗ Excluded (queued)' : 'Exclude');
-      const btn = el('button', {
-        type: 'button',
-        class: queued ? 'queued-' + queued : '',
-        onclick: (ev) => {
-          ev.stopPropagation();
-          toggleEntity(field.qname, wasExcluded);
-        },
-      }, label);
-      actions.appendChild(btn);
-
-      // Propagate-to-similar: once a column is queued for exclude, offer to exclude
-      // every other column with the SAME name in one click (the "this comment/decision
-      // applies to many" case — e.g. dropping `ssn` everywhere).
+      actions.appendChild(piiToggleBtn(field, table));
+      // once a column is marked PII, offer to mark every same-named column at once
+      if (effSensitive(field)) {
+        const otherNamed = fieldsNamed(field.name).filter(f => f.qname !== field.qname && !f.sensitive);
+        if (otherNamed.length) {
+          actions.appendChild(el('button', {
+            type: 'button', class: 'btn-propagate',
+            title: 'Mark every column named "' + field.name + '" as PII across all tables',
+            onclick: (ev) => { ev.stopPropagation(); markAllNamedPII(field.name); },
+          }, '+ all ' + (otherNamed.length + 1) + ' named "' + field.name + '"'));
+        }
+      }
+      actions.appendChild(excludeToggleBtn('field', field));
       if (pending[field.qname] === 'exclude') {
-        const others = fieldsNamed(field.name)
-          .filter(f => f.qname !== field.qname && !f.excluded && pending[f.qname] !== 'exclude');
+        const others = fieldsNamed(field.name).filter(f => f.qname !== field.qname && !f.excluded && pending[f.qname] !== 'exclude');
         if (others.length) {
           actions.appendChild(el('button', {
             type: 'button', class: 'btn-propagate',
@@ -803,19 +1136,22 @@
           }, '+ exclude all ' + (others.length + 1) + ' named "' + field.name + '"'));
         }
       }
-      // Column description edit (curate edit op: kind=table, name=<table>, column=<col>)
       const editItem = { qname: field.qname, area: table.area, name: table.name, column: field.name };
-      actions.appendChild(editToggle(editItem));
+      actions.appendChild(editToggleBtn(editItem, '', '✎ more'));   // description is edited inline above
       row.appendChild(actions);
+
       if (editOpen.has(field.qname)) {
         const wrap = el('div');
         wrap.appendChild(row);
-        editItem.description = field.description;
         wrap.appendChild(renderEditForm(editItem, 'table', [
-          { field: 'description', label: 'Column description', current: field.description, rows: 2 },
-          { field: 'caveats', label: 'Caveats', type: 'list', current: field.caveats, rows: 2 },
-          { field: 'unit', label: 'Unit (e.g. INR, percent)', current: field.unit, rows: 1 },
-          { field: 'date_format', label: 'Date encoding', type: 'select', current: field.date_format,
+          { field: 'sensitive', label: 'Sensitive / PII', type: 'bool', current: field.sensitive,
+            hint: 'Mark Yes for personal or private data (name, email, phone, ID numbers). agami then never shows the raw values — it only counts or aggregates them.' },
+          { field: 'caveats', label: 'Caveats (things to watch out for)', type: 'list', current: field.caveats, rows: 2,
+            hint: 'Notes about this column that agami should remember when it writes SQL — anything odd or easy to get wrong. One per line. For example: "Empty dates are saved as 1970-01-01, so skip those" · "This number can be negative for refunds".' },
+          { field: 'unit', label: 'Unit', current: field.unit, rows: 1,
+            hint: 'What this number is measured in, so results show nicely. For example a currency like INR or USD, or "percent" or "days". Leave blank if it is just a plain number.' },
+          { field: 'date_format', label: 'Date format', type: 'select', current: field.date_format,
+            hint: 'Only needed if this date is saved as a number or text instead of a real date. Pick the format that matches your data.',
             options: ['', 'epoch_s', 'epoch_ms', 'epoch_us', 'epoch_ns', 'yyyymmdd', 'iso8601'] },
           { field: 'timezone', label: 'Timezone (e.g. UTC)', current: field.timezone, rows: 1 },
         ]));
@@ -826,280 +1162,280 @@
 
     function renderTable(table) {
       const q = searchQ;
-      const eff = effectivelyExcluded(table.qname, table.excluded);
+      const eff = effExcluded(table);
       const queued = pending[table.qname];
-      const visibleFields = (table.fields || []).filter(f => {
-        const passF = passesFilter(f, 'field');
-        const passS = !q || fieldMatches(f, table, q);
-        return passF && passS;
-      });
-
       const card = el('div', {
-        class: 'table-card'
-          + (eff ? ' excluded' : '')
-          + (queued ? ' queued-' + queued : ''),
+        class: 'table-card' + (eff ? ' excluded' : '') + (queued ? ' queued-' + queued : ''),
         'data-qname': table.qname,
       });
 
-      // Hide entire table if it fails both table-level filter and has no visible fields
+      const visibleFields = (table.fields || []).filter(f => passesFilter(f, 'field') && (!q || fieldMatches(f, q)));
       const tablePassesFilter = passesFilter(table, 'table');
-      const tableMatchesQ = tableMatches(table, q);
-      if (!tableMatchesQ || (!tablePassesFilter && visibleFields.length === 0)) {
+      if (!tableMatches(table, q) || (!tablePassesFilter && visibleFields.length === 0)) {
         card.classList.add('hidden');
       }
 
-      // Header
+      // Expand if: user expanded it, OR search active, OR queued. Persisted via expandedTables.
+      const isExpanded = expandedTables.has(table.qname) || !!q || !!queued || editOpen.has(table.qname)
+                         || (table.fields || []).some(f => editOpen.has(f.qname));
       const header = el('div', { class: 'table-header' });
-      const startCollapsed = !q && !queued && (table.fields || []).length > 0;
-      header.appendChild(el('span', {
-        class: 'table-toggle' + (startCollapsed ? ' collapsed' : ''),
-        text: '▼',
-      }));
-
+      header.appendChild(el('span', { class: 'table-toggle' + (isExpanded ? '' : ' collapsed'), text: '▼' }));
       const nameEl = el('div', { class: 'table-name' });
-      nameEl.appendChild(el('span', { class: 'schema-prefix', text: table.schema + '.' }));
+      nameEl.appendChild(el('span', { class: 'schema-prefix', text: (table.db_schema || table.area || '') + '.' }));
       nameEl.appendChild(highlight(table.name, q));
       header.appendChild(nameEl);
-
+      const nCols = (table.fields || []).length;
+      header.appendChild(el('div', { class: 'table-rows', text: nCols + ' col' + (nCols === 1 ? '' : 's') }));
       if (typeof table.row_count === 'number') {
-        header.appendChild(el('div', { class: 'table-rows',
-          text: fmtCount(table.row_count) + ' rows' }));
+        header.appendChild(el('div', { class: 'table-rows', text: fmtCount(table.row_count) + ' rows' }));
       }
-
-      // State badges
-      if (eff) {
-        header.appendChild(el('span', { class: 'table-state-badge badge-excluded', text: 'excluded' }));
-      } else if (table.review_state === 'unreviewed') {
-        header.appendChild(el('span', { class: 'table-state-badge badge-unreviewed', text: 'unreviewed' }));
-      } else if (table.review_state === 'stale') {
-        header.appendChild(el('span', { class: 'table-state-badge badge-stale', text: 'stale' }));
-      }
+      const badge = stateBadge(table.review_state, eff);
+      if (badge) header.appendChild(badge);
 
       const actions = el('div', { class: 'table-actions' });
-      const wasExcluded = table.excluded;
       const lab = eff
         ? (queued === 'include' ? '↻ Include all (queued)' : 'Include table')
         : (queued === 'exclude' ? '✗ Excluded (queued)' : 'Exclude table');
-      const cls = (eff ? 'action-include' : 'action-exclude') + (queued ? ' queued' : '');
-      const btn = el('button', {
-        type: 'button',
-        class: cls,
-        onclick: (ev) => { ev.stopPropagation(); toggleEntity(table.qname, wasExcluded); },
-      }, lab);
-      actions.appendChild(btn);
+      actions.appendChild(el('button', {
+        type: 'button', class: (eff ? 'action-include' : 'action-exclude') + (queued ? ' queued' : ''),
+        onclick: (ev) => { ev.stopPropagation(); toggleOp('table', table); },
+      }, lab));
       header.appendChild(actions);
 
-      // Click-to-toggle body
       header.addEventListener('click', () => {
-        const toggle = header.querySelector('.table-toggle');
-        const body = card.querySelector('.table-body');
-        if (!body) return;
-        const isCollapsed = body.classList.contains('collapsed');
-        if (isCollapsed) {
-          body.classList.remove('collapsed');
-          toggle.classList.remove('collapsed');
-        } else {
-          body.classList.add('collapsed');
-          toggle.classList.add('collapsed');
-        }
+        if (expandedTables.has(table.qname)) expandedTables.delete(table.qname);
+        else expandedTables.add(table.qname);
+        renderAll();
       });
-
       card.appendChild(header);
 
-      // Body
-      const body = el('div', { class: 'table-body' + (startCollapsed ? ' collapsed' : '') });
-
-      const dscText = (table.description || '').trim();
-      const dsc = el('div', { class: 'table-description' + (dscText ? '' : ' empty') });
-      dsc.appendChild(highlight(dscText || '(no table description)', dscText ? q : ''));
+      const body = el('div', { class: 'table-body' + (isExpanded ? '' : ' collapsed') });
+      const dtext = (table.description || '').trim();
+      const dsc = el('div', { class: 'table-description' });
+      dsc.appendChild(inlineText({ qname: table.qname, area: table.area, name: table.name, kind: 'table',
+        field: 'description', original: table.description, placeholder: '(click to add a table description)' }));
+      if (dtext) { const at = aiDescTag(table.description_source); if (at) dsc.appendChild(at); }
       body.appendChild(dsc);
-      body.appendChild(editToggle(table));
+
+      if ((table.grain || []).length || (table.caveats || []).length || (table.default_filters || []).length) {
+        const chips = el('div', { class: 'table-chips' });
+        (table.grain || []).forEach(g => chips.appendChild(el('span', { class: 'mini-chip', text: 'grain: ' + g })));
+        (table.default_filters || []).forEach(d => chips.appendChild(el('span', { class: 'mini-chip', text: 'filter: ' + d })));
+        body.appendChild(chips);
+        if ((table.caveats || []).length) body.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + table.caveats.join(' · ') }));
+      }
+
+      const tEdit = el('div', { class: 'card-actions' });
+      tEdit.appendChild(editToggleBtn(table, 'btn-edit-prominent', '✎ Caveats & filters'));   // description is inline above
+      body.appendChild(tEdit);
       if (editOpen.has(table.qname)) body.appendChild(renderEditForm(table, 'table', [
-        { field: 'description', label: 'Table description', current: table.description, rows: 2 },
-        { field: 'caveats', label: 'Caveats', type: 'list', current: table.caveats, rows: 3 },
-        { field: 'default_filters', label: 'Default filters (use {alias})', type: 'list', current: table.default_filters, rows: 2 },
+        { field: 'caveats', label: 'Caveats (things to watch out for)', type: 'list', current: table.caveats, rows: 3,
+          hint: 'Notes about this whole table that agami should remember when it writes SQL. One per line. For example: "There is one row per customer per month — use the latest month" · "Deleted rows are still here, so leave them out".' },
+        { field: 'default_filters', label: 'Always-on filters', type: 'list', current: table.default_filters, rows: 2,
+          hint: 'Conditions added to every query on this table automatically, so you never have to repeat them. Write one SQL condition per line and use {alias} where the table name goes. For example: "{alias}.deleted_at IS NULL" keeps only rows that are not deleted · "{alias}.is_test = false" skips test rows.' },
       ]));
 
-      (table.fields || []).forEach(f => {
-        body.appendChild(renderField(f, table));
-      });
-
+      (table.fields || []).forEach(f => body.appendChild(renderField(f, table)));
       card.appendChild(body);
       return card;
     }
 
-    function renderManifest() {
-      const root = document.getElementById('schemas');
-      root.innerHTML = '';
-      let totalTablesShown = 0, totalFieldsShown = 0;
-
+    function renderTablesTab(root) {
+      let shownTables = 0, shownFields = 0;
       (manifest.schemas || []).forEach(schema => {
         const sec = el('div', { class: 'schema-section' });
         const header = el('div', { class: 'schema-header' });
-        header.appendChild(document.createTextNode(schema.name));
-        header.appendChild(el('span', {
-          class: 'schema-count',
-          text: (schema.tables || []).length + ' tables',
-        }));
+        header.appendChild(document.createTextNode('Subject area · ' + schema.name));
+        header.appendChild(el('span', { class: 'schema-count', text: (schema.tables || []).length + ' tables' }));
         sec.appendChild(header);
-
-        let anyTableVisible = false;
+        let anyVisible = false;
         (schema.tables || []).forEach(table => {
-          // Decorate field/table with schema info for our renderer
-          table.schema = schema.name;
+          table.area = schema.name;   // subject area — qname + feedback grammar use <area>.<table>
           if (!table.qname) table.qname = schema.name + '.' + table.name;
-          (table.fields || []).forEach(f => {
-            if (!f.qname) f.qname = table.qname + '.' + f.name;
-          });
+          (table.fields || []).forEach(f => { if (!f.qname) f.qname = table.qname + '.' + f.name; });
           const card = renderTable(table);
           if (!card.classList.contains('hidden')) {
-            anyTableVisible = true;
-            totalTablesShown += 1;
-            totalFieldsShown += (table.fields || []).filter(f =>
-              passesFilter(f, 'field') && (!searchQ || fieldMatches(f, table, searchQ))
-            ).length;
+            anyVisible = true; shownTables += 1;
+            shownFields += (table.fields || []).filter(f => passesFilter(f, 'field') && (!searchQ || fieldMatches(f, searchQ))).length;
           }
           sec.appendChild(card);
         });
-
-        if (!anyTableVisible) sec.classList.add('hidden');
+        if (!anyVisible) sec.classList.add('hidden');
         root.appendChild(sec);
       });
-
-      // Empty state
-      if (totalTablesShown === 0) {
-        const empty = el('div', { class: 'empty-state',
-          text: searchQ
-            ? `Nothing matches "${searchQ}" with the current filter.`
-            : 'No entries in this filter.' });
-        root.appendChild(empty);
+      if (shownTables === 0) {
+        root.appendChild(el('div', { class: 'empty-state',
+          text: searchQ ? `Nothing matches "${searchQ}" with the current filter.` : 'No tables in this filter.' }));
       }
-
-      const counts = document.getElementById('search-counts');
-      const totals = manifest.totals || {};
-      counts.textContent = searchQ || activeFilter !== 'all'
-        ? `Showing ${totalTablesShown}/${totals.tables || 0} tables · ${totalFieldsShown} matching fields`
-        : `${totals.tables || 0} tables · ${totals.fields || 0} fields`;
+      setSearchCounts(`${shownTables} table${shownTables === 1 ? '' : 's'} · ${shownFields} field${shownFields === 1 ? '' : 's'} shown`);
     }
 
-    function renderMeta() {
-      const totals = manifest.totals || {};
-      const parts = [
-        `${totals.schemas || 0} schemas`,
-        `${totals.tables || 0} tables`,
-        `${totals.fields || 0} fields`,
-      ];
-      if (totals.metrics) parts.push(`${totals.metrics} metric${totals.metrics === 1 ? '' : 's'}`);
-      if (totals.named_filters) parts.push(`${totals.named_filters} named filter${totals.named_filters === 1 ? '' : 's'}`);
-      document.getElementById('totals-meta').textContent = parts.join(' · ');
+    // ---- propagate-to-similar ----
+    function fieldsNamed(name) {
+      const lower = (name || '').toLowerCase(); const out = [];
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => (t.fields || []).forEach(f => {
+        if ((f.name || '').toLowerCase() === lower) out.push({ qname: s.name + '.' + t.name + '.' + f.name, excluded: f.excluded, sensitive: f.sensitive });
+      })));
+      return out;
+    }
+    function excludeAllNamed(name) {
+      fieldsNamed(name).forEach(f => { if (!f.excluded) pending[f.qname] = 'exclude'; });
+      renderAll();
     }
 
-    // ---- Metrics + Named filters at the top ----
-    //
-    // Metric / named-filter entries are *model-shaping* — they aren't tables
-    // or columns, but they ARE descriptions of business meaning the curator
-    // wrote into the semantic model. Surfacing them in the explorer means
-    // the user can see what metrics + filters exist without reading YAML.
-    //
-    // For v1: render-only (no per-entry exclude action). Sign-off / approve /
-    // reject happens through /agami-review (those are Rule 1 entries).
-    function renderMetricsSection() {
-      renderFlatSection('metrics-section', 'Metrics', manifest.metrics,
-        m => `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`,
-        renderMetricCard);
+    // ---- Sensitive / PII marking (a queued field edit on `sensitive`) ----
+    function effSensitive(field) {
+      const e = edits[field.qname];
+      if (e && e.fields && ('sensitive' in e.fields)) return !!e.fields.sensitive;
+      return !!field.sensitive;
     }
-    function renderEntitiesSection() {
-      renderFlatSection('entities-section', 'Entities', manifest.entities,
-        e => `${e.name} ${e.plural} ${(e.other_names || []).join(' ')} ${(e.maps_to || []).join(' ')} ${e.description} ${e.area}`,
-        renderEntityCard);
+    function setSensitive(field, table, val) {
+      const q = field.qname; const orig = !!field.sensitive;
+      const cur = edits[q] || { kind: 'table', area: table.area, name: table.name, column: field.name, fields: {} };
+      if (val === orig) delete cur.fields.sensitive; else cur.fields.sensitive = val;
+      if (Object.keys(cur.fields).length) edits[q] = cur; else delete edits[q];
+      renderAll();
     }
-    function renderRelationshipsSection() {
-      renderFlatSection('relationships-section', 'Relationships', manifest.relationships,
-        r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area}`,
-        renderRelCard);
+    function piiToggleBtn(field, table) {
+      const eff = effSensitive(field);
+      const queued = !!(edits[field.qname] && edits[field.qname].fields && ('sensitive' in edits[field.qname].fields));
+      return el('button', {
+        type: 'button', class: 'btn-pii' + (eff ? ' on' : '') + (queued ? ' queued' : ''),
+        title: eff ? 'Marked sensitive / PII — agami never shows the raw values, only aggregates'
+                   : 'Mark this column as sensitive / PII so agami never shows its raw values',
+        onclick: (ev) => { ev.stopPropagation(); setSensitive(field, table, !eff); },
+      }, eff ? '🔒 PII' : 'Mark PII');
     }
-    function renderExamplesSection() {
-      renderFlatSection('examples-section', 'Prompt examples', manifest.examples,
-        x => `${x.question} ${x.sql} ${x.area}`,
-        renderExampleCard);
+    // Mark every column with the same name as PII in one click (email, phone, pan, …).
+    function markAllNamedPII(name) {
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => (t.fields || []).forEach(f => {
+        if ((f.name || '').toLowerCase() === (name || '').toLowerCase()) {
+          const q = s.name + '.' + t.name + '.' + f.name;
+          if (!f.sensitive) {
+            const cur = edits[q] || { kind: 'table', area: s.name, name: t.name, column: f.name, fields: {} };
+            cur.fields.sensitive = true; edits[q] = cur;
+          }
+        }
+      })));
+      renderAll();
     }
-    function renderOrgContextSection() {
-      const root = document.getElementById('org-context-section');
-      root.innerHTML = '';
-      const md = manifest.organization_md || '';
-      if (searchQ && !md.toLowerCase().includes(searchQ)) return;
-      const sec = el('div', { class: 'schema-section' });
-      const header = el('div', { class: 'schema-header' });
-      header.appendChild(document.createTextNode('Organization context'));
-      header.appendChild(el('span', { class: 'schema-count', text: 'ORGANIZATION.md' }));
-      sec.appendChild(header);
+
+    // =====================================================================
+    // TAB: Subject areas
+    // =====================================================================
+    function renderAreaCard(a) {
       const card = el('div', { class: 'table-card' });
-      card.appendChild(preBlock((orgEdit !== null ? orgEdit : md) || '(empty — add domain context so answers know what the data means)'));
-      const ORG = '__org__';
-      const queued = orgEdit !== null;
-      card.appendChild(btn(editOpen.has(ORG) ? 'Cancel' : (queued ? '✎ Edited (queued)' : 'Edit'),
-        (ev) => { ev.stopPropagation(); if (editOpen.has(ORG)) editOpen.delete(ORG); else editOpen.add(ORG); renderAll(); },
-        queued ? 'border-color:var(--accent);color:var(--accent);' : ''));
-      if (editOpen.has(ORG)) {
-        const wrap = el('div', { style: 'border-top:1px dashed var(--border);margin-top:6px;' });
-        const ta = textarea(orgEdit !== null ? orgEdit : md, 14);
-        wrap.appendChild(ta);
-        wrap.appendChild(btn('Save', () => {
-          orgEdit = ta.value; editOpen.delete(ORG); renderAll(); updateFooter();
-        }, 'background:var(--accent);color:#fff;border-color:var(--accent);'));
-        card.appendChild(wrap);
-      }
-      sec.appendChild(card);
-      root.appendChild(sec);
-    }
+      const header = el('div', { class: 'table-header static' });
+      const nameEl = el('div', { class: 'table-name' });
+      nameEl.appendChild(highlight(a.name, searchQ));
+      header.appendChild(nameEl);
+      header.appendChild(el('span', { class: 'table-rows',
+        text: `${a.table_count} table${a.table_count === 1 ? '' : 's'}` }));
+      card.appendChild(header);
 
-    function renderNamedFiltersSection() {
-      const root = document.getElementById('named-filters-section');
-      root.innerHTML = '';
-      const items = (manifest.named_filters || []).filter(nf => {
-        if (!searchQ) return true;
-        const hay = (nf.name + ' ' + nf.expression + ' ' + nf.description + ' '
-                     + nf.definition_prose).toLowerCase();
-        return hay.includes(searchQ);
+      const body = el('div', { class: 'table-body' });
+      if (a.description) { body.appendChild(labelLine('Description')); body.appendChild(descBlock(a.description)); }
+      // counts
+      const counts = [
+        `${a.table_count} table${a.table_count === 1 ? '' : 's'}`,
+        `${a.entity_count} entit${a.entity_count === 1 ? 'y' : 'ies'}`,
+        `${a.metric_count} metric${a.metric_count === 1 ? '' : 's'}`,
+        `${a.relationship_count} join${a.relationship_count === 1 ? '' : 's'}`,
+      ];
+      body.appendChild(labelLine('Contents'));
+      const cc = el('div', { class: 'table-chips' });
+      counts.forEach(c => cc.appendChild(el('span', { class: 'mini-chip', text: c })));
+      body.appendChild(cc);
+      if (a.default_time_window) { body.appendChild(labelLine('Default time window')); body.appendChild(descBlock(a.default_time_window)); }
+      if ((a.db_schemas || []).length) { body.appendChild(labelLine('Database schema' + (a.db_schemas.length === 1 ? '' : 's'))); body.appendChild(descBlock(a.db_schemas.join(', '))); }
+      // member tables (clickable → jump to Tables tab filtered by search)
+      body.appendChild(labelLine('Tables in this area'));
+      const tc = el('div', { class: 'table-chips' });
+      (a.tables || []).forEach(tn => {
+        const chip = el('span', { class: 'mini-chip', style: 'cursor:pointer;', title: 'Open in the Tables tab',
+          onclick: () => { activeTab = 'tables'; searchQ = tn.toLowerCase(); document.getElementById('search').value = tn; renderAll(); } });
+        chip.appendChild(highlight(tn, searchQ));
+        tc.appendChild(chip);
       });
-      if (!items.length) return;
+      body.appendChild(tc);
+      card.appendChild(body);
+      return card;
+    }
+    function renderAreasTab(root) {
+      const areas = manifest.subject_areas || [];
+      root.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>What is a subject area?</strong> It is a group of related tables that answer one kind of question, ' +
+        'together with their entities, metrics, and joins. agami uses <strong>one</strong> area for a small database, and ' +
+        'splits a big one into several (around 25+ tables) so no group gets too large. When you ask a question, agami first ' +
+        'picks the right area, then looks only inside it. ' +
+        (areas.length === 1 ? 'This database has a single area holding all its tables.' : '') }));
+      const matched = areas.filter(a => !searchQ
+        || (a.name + ' ' + a.description + ' ' + (a.tables || []).join(' ')).toLowerCase().includes(searchQ));
+      setSearchCounts(`${matched.length} of ${areas.length} subject area${areas.length === 1 ? '' : 's'}`);
+      if (!matched.length) { root.appendChild(el('div', { class: 'empty-state', text: 'No subject areas match the search.' })); return; }
       const sec = el('div', { class: 'schema-section' });
-      const header = el('div', { class: 'schema-header' });
-      header.appendChild(document.createTextNode('Named filters'));
-      header.appendChild(el('span', { class: 'schema-count', text: items.length + ' total' }));
-      sec.appendChild(header);
-      items.forEach(nf => sec.appendChild(renderNamedFilterCard(nf)));
+      matched.forEach(a => sec.appendChild(renderAreaCard(a)));
       root.appendChild(sec);
+
+      // cross-area joins, if any
+      const cross = manifest.cross_relationships || [];
+      const crossMatched = searchQ ? cross.filter(r => JSON.stringify(r).toLowerCase().includes(searchQ)) : cross;
+      if (crossMatched.length) {
+        const csec = el('div', { class: 'schema-section' });
+        const h = el('div', { class: 'schema-header' });
+        h.appendChild(document.createTextNode('Cross-area joins'));
+        h.appendChild(el('span', { class: 'schema-count', text: crossMatched.length + ' total' }));
+        csec.appendChild(h);
+        crossMatched.forEach(r => {
+          const card = el('div', { class: 'table-card' });
+          const join = `${r.from_subject_area}.${r.from_table} → ${r.to_subject_area}.${r.to_table}`;
+          card.appendChild(el('div', { class: 'table-header static' }, el('div', { class: 'table-name' }, join)));
+          const b = el('div', { class: 'table-body' });
+          if (r.cardinality) { b.appendChild(labelLine('Cardinality')); b.appendChild(descBlock(r.cardinality)); }
+          if (r.description) { b.appendChild(labelLine('Description')); b.appendChild(descBlock(r.description)); }
+          card.appendChild(b);
+          csec.appendChild(card);
+        });
+        root.appendChild(csec);
+      }
     }
 
-    function cardHeader(title, item) {
-      const header = el('div', { class: 'table-header' });
+    // =====================================================================
+    // TAB: Metrics / Entities / Joins / Examples (flat cards)
+    // =====================================================================
+    function flatCardHeader(title, item, eff) {
+      const header = el('div', { class: 'table-header static' });
       const nameEl = el('div', { class: 'table-name' });
       nameEl.appendChild(highlight(title, searchQ));
       header.appendChild(nameEl);
-      const rs = item && item.review_state;
-      if (rs && rs !== 'approved') {
-        const cls = rs === 'rejected' ? 'badge-rejected' : rs === 'stale' ? 'badge-stale' : 'badge-unreviewed';
-        header.appendChild(el('span', { class: 'table-state-badge ' + cls, text: rs }));
+      const rs = effReviewState(item);
+      // confidence chip — always shown for metrics/entities/joins so the score is visible
+      if ('rule' in item && item.confidence) {
+        header.appendChild(el('span', { class: 'conf-chip conf-' + item.confidence + ' tip', text: item.confidence,
+          'data-tip': CONF_MEANING[item.confidence] || ('confidence: ' + item.confidence) }));
       }
+      if (mootReason(item)) header.appendChild(el('span', { class: 'table-state-badge moot-badge', text: 'unused', title: "Won't be used — " + mootReason(item) }));
+      if (item.rule === 1 && (rs === 'unreviewed' || rs === 'stale') && !mootReason(item)) header.appendChild(el('span', { class: 'table-state-badge', style: 'background:var(--info-bg);color:var(--accent);border-color:var(--info-border);', text: 'needs sign-off' }));
+      const badge = stateBadge(rs === 'approved' ? 'approved' : rs, eff);
+      if (badge) header.appendChild(badge);
       return header;
     }
 
     function renderMetricCard(m) {
-      const card = el('div', { class: 'table-card' + (m.excluded ? ' excluded' : '') });
-      card.appendChild(cardHeader(m.name, m));
+      const eff = effExcluded(m);
+      const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(m.qname) ? ' queued-' + queuedAction(m.qname) : '') });
+      card.appendChild(flatCardHeader(m.name, m, eff));
       const body = el('div', { class: 'table-body' });
-      if (m.calculation) { body.appendChild(labelLine('Calculation')); body.appendChild(descBlock(m.calculation)); }
+      body.appendChild(labelLine('Calculation (click to edit)'));
+      body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
+        field: 'calculation', original: m.calculation, placeholder: '(click to add the calculation)' }));
       const bindings = m.bindings || {};
-      Object.keys(bindings).forEach(dialect => {
-        body.appendChild(labelLine(dialect)); body.appendChild(preBlock(bindings[dialect]));
-      });
+      Object.keys(bindings).forEach(d => { body.appendChild(labelLine(d + ' SQL')); body.appendChild(preBlock(bindings[d])); });
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
+      if ((m.source_tables || []).length) { body.appendChild(labelLine('Source tables')); body.appendChild(descBlock(m.source_tables.join(', '))); }
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
-      const mActions = el('div'); mActions.appendChild(excludeBtn('metric', m)); mActions.appendChild(editToggle(m));
-      body.appendChild(mActions);
+      body.appendChild(flatCardActions('metric', m));
       if (editOpen.has(m.qname)) body.appendChild(renderEditForm(m, 'metric', [
-        { field: 'calculation', label: 'Calculation (prose)', current: m.calculation, rows: 2 },
         { field: 'unit', label: 'Unit (e.g. INR, percent)', current: m.unit, rows: 1 },
         { field: 'description', label: 'Description', current: m.description, rows: 2 },
         { field: 'other_names', label: 'Also called', type: 'list', current: m.other_names, rows: 2 },
@@ -1109,42 +1445,44 @@
     }
 
     function renderEntityCard(e) {
-      const card = el('div', { class: 'table-card' + (e.excluded ? ' excluded' : '') });
-      card.appendChild(cardHeader(e.name + (e.plural ? ' / ' + e.plural : ''), e));
+      const eff = effExcluded(e);
+      const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(e.qname) ? ' queued-' + queuedAction(e.qname) : '') });
+      card.appendChild(flatCardHeader(e.name + (e.plural ? ' / ' + e.plural : ''), e, eff));
       const body = el('div', { class: 'table-body' });
       if ((e.maps_to || []).length) { body.appendChild(labelLine('Maps to')); body.appendChild(descBlock(e.maps_to.join(', '))); }
       if ((e.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(e.other_names.join(', '))); }
-      if (e.value_pattern) { body.appendChild(labelLine('Value pattern')); body.appendChild(preBlock(e.value_pattern)); }
-      if (e.description) { body.appendChild(labelLine('Description')); body.appendChild(descBlock(e.description)); }
-      const eActions = el('div'); eActions.appendChild(excludeBtn('entity', e)); eActions.appendChild(editToggle(e));
-      body.appendChild(eActions);
+      if (e.value_pattern) { body.appendChild(labelLine('Value pattern (regex)')); body.appendChild(preBlock(e.value_pattern)); }
+      body.appendChild(labelLine('Description (click to edit)'));
+      body.appendChild(inlineBlock({ qname: e.qname, area: e.area, name: e.name, kind: 'entity',
+        field: 'description', original: e.description, placeholder: '(click to add a description)' }));
+      body.appendChild(flatCardActions('entity', e));
       if (editOpen.has(e.qname)) body.appendChild(renderEditForm(e, 'entity', [
-        { field: 'description', label: 'Description', current: e.description, rows: 2 },
         { field: 'maps_to', label: 'Maps to', type: 'maps', current: e.maps_to, rows: 3 },
         { field: 'other_names', label: 'Also called', type: 'list', current: e.other_names, rows: 2 },
-        { field: 'value_pattern', label: 'Value pattern (regex)', current: e.value_pattern, rows: 1 },
+        { field: 'value_pattern', label: 'Value pattern (optional)', current: e.value_pattern, rows: 1,
+          hint: 'An optional pattern (a "regex") describing what this entity’s values look like, so when someone types a value agami knows it belongs here. ' +
+                'For example a PAN always looks like ^[A-Z]{5}[0-9]{4}[A-Z]$ (5 letters, 4 digits, 1 letter). Leave blank if the values don’t follow a fixed shape.' },
       ]));
       card.appendChild(body);
       return card;
     }
 
     function renderRelCard(r) {
-      const card = el('div', { class: 'table-card' + (r.excluded ? ' excluded' : '') });
-      const join = r.from_column
-        ? `${r.from_table}.${r.from_column} → ${r.to_table}.${r.to_column}`
-        : `${r.from_table} → ${r.to_table}${r.on ? ' ON ' + r.on : ''}`;
-      card.appendChild(cardHeader(join, r));
+      const eff = effExcluded(r);
+      const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(r.qname) ? ' queued-' + queuedAction(r.qname) : '') });
+      const join = r.from_column ? `${r.from_table}.${r.from_column} → ${r.to_table}.${r.to_column}`
+                                 : `${r.from_table} → ${r.to_table}${r.on ? ' ON ' + r.on : ''}`;
+      card.appendChild(flatCardHeader(join, r, eff));
       const body = el('div', { class: 'table-body' });
       if (r.cardinality) { body.appendChild(labelLine('Cardinality')); body.appendChild(descBlock(r.cardinality)); }
-      if (r.description) { body.appendChild(labelLine('Description')); body.appendChild(descBlock(r.description)); }
-      const rActions = el('div'); rActions.appendChild(excludeBtn('relationship', r)); rActions.appendChild(editToggle(r));
-      body.appendChild(rActions);
+      body.appendChild(labelLine('Description (click to edit)'));
+      body.appendChild(inlineBlock({ qname: r.qname, area: r.area, name: relName(r), kind: 'relationship',
+        field: 'description', original: r.description, placeholder: '(click to add a description)' }));
+      body.appendChild(flatCardActions('relationship', r));
       if (editOpen.has(r.qname)) body.appendChild(renderEditForm(r, 'relationship', [
-        { field: 'relationship', label: 'Cardinality', type: 'select',
-          options: ['many_to_one', 'one_to_many', 'one_to_one'], current: r.cardinality },
+        { field: 'relationship', label: 'Cardinality', type: 'select', options: ['many_to_one', 'one_to_many', 'one_to_one'], current: r.cardinality },
         { field: 'from_column', label: 'From column', current: r.from_column, rows: 1 },
         { field: 'to_column', label: 'To column', current: r.to_column, rows: 1 },
-        { field: 'description', label: 'Description', current: r.description, rows: 2 },
       ]));
       card.appendChild(body);
       return card;
@@ -1152,166 +1490,701 @@
 
     function renderExampleCard(x) {
       const card = el('div', { class: 'table-card' });
-      card.appendChild(cardHeader(x.question || '(no question)', x));
+      card.appendChild(flatCardHeader(x.question || '(no question)', x, false));
       const body = el('div', { class: 'table-body' });
       if (x.sql) { body.appendChild(labelLine('SQL')); body.appendChild(preBlock(x.sql)); }
       const meta = [x.area, x.source, x.status].filter(Boolean).join(' · ');
       if (meta) body.appendChild(descBlock(meta));
       const queued = !!exampleEdits[x.qname];
-      body.appendChild(btn(editOpen.has(x.qname) ? 'Cancel' : (queued ? '✎ Edited (queued)' : 'Edit'),
-        (ev) => { ev.stopPropagation(); if (editOpen.has(x.qname)) editOpen.delete(x.qname); else editOpen.add(x.qname); renderAll(); },
-        queued ? 'border-color:var(--accent);color:var(--accent);' : ''));
+      const a = el('div', { class: 'card-actions' });
+      a.appendChild(el('button', { type: 'button', class: queued ? 'queued-edit' : '',
+        onclick: (ev) => { ev.stopPropagation(); if (editOpen.has(x.qname)) editOpen.delete(x.qname); else editOpen.add(x.qname); renderAll(); },
+      }, editOpen.has(x.qname) ? 'Cancel' : (queued ? '✎ Edited (queued)' : 'Edit')));
+      body.appendChild(a);
       if (editOpen.has(x.qname)) {
-        const wrap = el('div', { style: 'border-top:1px dashed var(--border);margin-top:6px;' });
+        const wrap = el('div', { class: 'edit-form' });
         wrap.appendChild(labelLine('Question'));
-        const qTa = textarea((exampleEdits[x.qname] || {}).question ?? x.question, 2);
-        wrap.appendChild(qTa);
+        const qTa = textarea((exampleEdits[x.qname] || {}).question ?? x.question, 2); wrap.appendChild(qTa);
         wrap.appendChild(labelLine('SQL'));
-        const sTa = textarea((exampleEdits[x.qname] || {}).sql ?? x.sql, 4);
-        wrap.appendChild(sTa);
-        wrap.appendChild(btn('Save', () => {
-          exampleEdits[x.qname] = { area: x.area, question: qTa.value, sql: sTa.value,
-                                    source: 'correction', status: 'confirmed' };
-          editOpen.delete(x.qname); renderAll(); updateFooter();
-        }, 'background:var(--accent);color:#fff;border-color:var(--accent);'));
+        const sTa = textarea((exampleEdits[x.qname] || {}).sql ?? x.sql, 4); wrap.appendChild(sTa);
+        wrap.appendChild(btnSm('Save', () => {
+          exampleEdits[x.qname] = { area: x.area, question: qTa.value, sql: sTa.value, source: 'correction', status: 'confirmed' };
+          editOpen.delete(x.qname); renderAll();
+        }, 'primary'));
         body.appendChild(wrap);
       }
       card.appendChild(body);
       return card;
     }
 
-    function renderNamedFilterCard(nf) {
-      const card = el('div', { class: 'table-card' });
-      const header = el('div', { class: 'table-header' });
-      const nameEl = el('div', { class: 'table-name' });
-      if (nf.scope && nf.scope !== 'model') {
-        nameEl.appendChild(el('span', { class: 'schema-prefix', text: nf.scope + '.' }));
+    function renderFlatTab(root, items, kind, hay, cardFn, emptyWord) {
+      const matched = (items || []).filter(it =>
+        (!searchQ || hay(it).toLowerCase().includes(searchQ)) && passesFilter(it, kind));
+      setSearchCounts(`${matched.length} of ${(items || []).length} ${emptyWord}${(items || []).length === 1 ? '' : 's'} shown`);
+      if (!matched.length) {
+        root.appendChild(el('div', { class: 'empty-state',
+          text: (items || []).length === 0 ? `No ${emptyWord}s defined yet.` : `No ${emptyWord}s match the current search / filter.` }));
+        return;
       }
-      nameEl.appendChild(highlight(nf.name, searchQ));
-      header.appendChild(nameEl);
-      if (nf.review_state && nf.review_state !== 'approved') {
-        const cls = nf.review_state === 'rejected' ? 'badge-rejected'
-                  : nf.review_state === 'stale' ? 'badge-stale'
-                  : 'badge-unreviewed';
-        header.appendChild(el('span', { class: 'table-state-badge ' + cls, text: nf.review_state }));
-      }
-      card.appendChild(header);
-
-      const body = el('div', { class: 'table-body' });
-      if (nf.expression) {
-        body.appendChild(el('div', {
-          class: 'label-line',
-          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 18px 0;',
-          text: 'Predicate',
-        }));
-        body.appendChild(el('pre', {
-          style: 'font-family: ui-monospace, monospace; font-size: 13px; background: var(--code-bg); padding: 8px 18px; margin: 4px 18px 8px; border-radius: 4px; white-space: pre-wrap;',
-          text: nf.expression,
-        }));
-      }
-      const defProse = (nf.definition_prose || nf.description || '').trim();
-      if (defProse) {
-        body.appendChild(el('div', {
-          class: 'label-line',
-          style: 'color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 18px;',
-          text: 'Definition',
-        }));
-        const div = el('div', {
-          class: 'table-description',
-          style: 'border-bottom: none; padding-top: 4px;',
-        });
-        div.appendChild(highlight(defProse, searchQ));
-        body.appendChild(div);
-      }
-      card.appendChild(body);
-      return card;
+      const sec = el('div', { class: 'schema-section' });
+      matched.forEach(it => sec.appendChild(cardFn(it)));
+      root.appendChild(sec);
     }
 
-    // ---- Actions ----
-    function toggleEntity(qname, wasExcluded) {
-      // Three-state: undefined → opposite of current → undefined
-      const desired = wasExcluded ? 'include' : 'exclude';
-      if (pending[qname] === desired) {
-        delete pending[qname];
-      } else {
-        pending[qname] = desired;
-      }
+    // =====================================================================
+    // TAB: Review (the sign-off queue) — folds in the old /agami-review surface
+    // =====================================================================
+    function reviewCard(it) {
+      return it._kind === 'metric' ? renderMetricCard(it)
+           : it._kind === 'entity' ? renderEntityCard(it)
+           : renderRelCard(it);
+    }
+    function needsEyes(it) {
+      // Rule 1 (metrics — block runtime), low-confidence guesses, and drifted entries
+      return it.rule === 1 || it.confidence === 'proposed' || effReviewState(it) === 'stale';
+    }
+    function bulkApprove(items) {
+      items.forEach(it => { if (isApprovable(it)) ops[it.qname] = { op: 'approve', kind: it._kind, area: it.area, name: relName(it) }; });
       renderAll();
-      updateFooter();
     }
-
-    // ---- Propagate to similar: same column name across every table ----
-    function fieldsNamed(name) {
-      const lower = (name || '').toLowerCase();
+    // Sign-off identity control (email + role). Recreated on re-render; value persists
+    // via `signOff`. Typing fires only the input listener (no re-render), so focus holds.
+    function renderSignOffControl() {
+      const wrap = el('div', { class: 'signoff-card' });
+      wrap.appendChild(el('span', { class: 'signoff-label', text: 'Sign off as' }));
+      const em = el('input', { type: 'email', id: 'signoff-email', placeholder: 'you@company.com', autocomplete: 'email' });
+      em.value = signOff.email;
+      if (signOff._invalid) em.classList.add('invalid');
+      em.addEventListener('input', () => {
+        signOff.email = em.value.trim(); signOff._invalid = false; em.classList.remove('invalid'); saveSignOff();
+        const fv = document.getElementById('footer-validate');
+        if (fv && (fv.className || '').includes('bad')) { fv.textContent = ''; fv.className = 'footer-validate'; }
+      });
+      wrap.appendChild(em);
+      const sel = el('select', { id: 'signoff-role', title: 'Your role — stamped on each approval' });
+      ROLE_OPTIONS.forEach(r => { const o = el('option', { value: r.value }); o.textContent = r.label; sel.appendChild(o); });
+      sel.value = signOff.role;
+      sel.addEventListener('change', () => { signOff.role = sel.value; saveSignOff(); renderAll(); });
+      wrap.appendChild(sel);
+      if (signOff.role === 'other') {
+        const ro = el('input', { type: 'text', id: 'signoff-role-other', placeholder: 'your role' });
+        ro.value = signOff.roleOther;
+        ro.addEventListener('input', () => { signOff.roleOther = ro.value; saveSignOff(); });
+        wrap.appendChild(ro);
+      }
+      wrap.appendChild(el('span', { class: 'signoff-hint', text: 'Stamped on every Approve · saved for next time.' }));
+      return wrap;
+    }
+    function reviewAll() {
+      const out = [];
+      (manifest.metrics || []).forEach(m => out.push({ ...m, _kind: 'metric' }));
+      (manifest.entities || []).forEach(e => out.push({ ...e, _kind: 'entity' }));
+      (manifest.relationships || []).forEach(r => out.push({ ...r, _kind: 'relationship' }));
+      return out;
+    }
+    // Columns agami couldn't read (description_source === 'ai_unknown'), still without a
+    // queued description. These ARE shown upfront (rare + a human who knows the schema can
+    // fill them in) — unlike AI *guesses*, which only surface through use.
+    function describedInQueue(qname) {
+      const e = edits[qname];
+      return !!(e && e.fields && (e.fields.description || '').trim());
+    }
+    function unknownColumns() {
       const out = [];
       (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => (t.fields || []).forEach(f => {
-        if ((f.name || '').toLowerCase() === lower) {
-          out.push({ qname: s.name + '.' + t.name + '.' + f.name, excluded: f.excluded });
+        const qn = s.name + '.' + t.name + '.' + f.name;
+        if (f.description_source === 'ai_unknown' && !f.excluded && !describedInQueue(qn)) {
+          out.push({ qname: qn, area: s.name, table: t.name, col: f.name, type: f.type, db_schema: t.db_schema });
         }
       })));
       return out;
     }
-    function excludeAllNamed(name) {
-      fieldsNamed(name).forEach(f => { if (!f.excluded) pending[f.qname] = 'exclude'; });
-      renderAll();
-      updateFooter();
+    function describeCard(uc) {
+      const card = el('div', { class: 'table-card' });
+      const h = el('div', { class: 'table-header static' });
+      const nameEl = el('div', { class: 'table-name' });
+      nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
+      nameEl.appendChild(highlight(uc.col, searchQ));
+      h.appendChild(nameEl);
+      if (uc.type) h.appendChild(el('div', { class: 'field-type', text: uc.type }));
+      card.appendChild(h);
+      const body = el('div', { class: 'table-body' });
+      body.appendChild(el('div', { class: 'field-hint', style: 'padding:8px 18px 0;',
+        text: 'agami could not tell what this column means. If you know, describe it in one line — it becomes your (trusted) description.' }));
+      const ta = textarea((edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '', 2);
+      body.appendChild(ta);
+      body.appendChild(btnSm('Save description', () => {
+        const v = ta.value.trim();
+        const cur = edits[uc.qname] || { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
+        if (v) cur.fields.description = v; else delete cur.fields.description;
+        if (Object.keys(cur.fields).length) edits[uc.qname] = cur; else delete edits[uc.qname];
+        renderAll();
+      }, 'primary'));
+      card.appendChild(body);
+      return card;
+    }
+    function renderReviewTab(root) {
+      root.appendChild(renderSignOffControl());
+      root.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>What to review.</strong> The database’s own facts (tables, columns, and built-in keys) are trusted automatically, so they are not shown here. ' +
+        'What is left is the part agami worked out or suggested. It is sorted by how sure we are (hover a tag to see what it means):<br>' +
+        '• <span class="conf-chip conf-proposed tip" data-tip="' + CONF_MEANING.proposed + '">proposed</span> a guess → <strong>check these first</strong> &nbsp; ' +
+        '• <span class="conf-chip conf-inferred tip" data-tip="' + CONF_MEANING.inferred + '">inferred</span> worked out from strong clues &nbsp; ' +
+        '• <span class="conf-chip conf-confirmed tip" data-tip="' + CONF_MEANING.confirmed + '">confirmed</span> the database says so → <strong>usually fine</strong>.<br>' +
+        '<strong>Metrics matter most:</strong> agami will refuse to answer a question that uses a metric you have not approved. Entities and joins are safer — agami can use them before you approve, and just adds a small note on the answer. Approve, reject, or edit below, then click <strong>Generate feedback for Claude</strong>.' }));
+
+      const all = reviewAll().filter(it => !searchQ
+        || (relName(it) + ' ' + (it.name || '') + ' ' + (it.calculation || '') + ' ' + (it.description || '')).toLowerCase().includes(searchQ));
+      // Any action — approve, reject, OR edit — moves an item out of the untouched pile, so
+      // editing feels like progress (the "Needs your eyes" count drops) like approving does.
+      const isOpen = it => { const rs = effReviewState(it); return rs === 'unreviewed' || rs === 'stale'; };
+      const hasEdit = it => !!edits[it.qname];
+      const groups = {
+        eyes:     { label: 'Needs your eyes', bulk: true,
+                    hint: 'These are guesses or unclear — look at each one before you trust it.',
+                    items: all.filter(it => isOpen(it) && !effExcluded(it) && !hasEdit(it) && needsEyes(it)) },
+        looks:    { label: 'Looks right', bulk: true,
+                    hint: 'These look right (built-in keys or strong matches). You can approve them all at once unless one looks off.',
+                    items: all.filter(it => isOpen(it) && !effExcluded(it) && !hasEdit(it) && !needsEyes(it)) },
+        edited:   { label: 'Edited', bulk: true,
+                    hint: 'You changed these — your edits apply when you submit. Approve one too if it’s ready (a metric still needs sign-off before agami will use it).',
+                    items: all.filter(it => isOpen(it) && !effExcluded(it) && hasEdit(it)) },
+        approved: { label: 'Approved', bulk: false, hint: 'Already approved. Reject one to send it back for review.',
+                    items: all.filter(it => !effExcluded(it) && effReviewState(it) === 'approved') },
+        rejected: { label: 'Rejected', bulk: false, hint: 'Turned off — agami will not use these. Click Include to turn one back on.',
+                    items: all.filter(it => effExcluded(it)) },
+      };
+
+      // columns agami couldn't read — searchable, shown as their own group
+      const unknown = unknownColumns().filter(uc => !searchQ
+        || (uc.col + ' ' + uc.table).toLowerCase().includes(searchQ));
+
+      // sub-tab bar with counts ("Edited" and "Couldn't read" appear only when non-empty)
+      const order = ['eyes', 'looks'];
+      if (groups.edited.items.length) order.push('edited');
+      order.push('approved', 'rejected');
+      if (unknown.length) order.push('unknown');
+      if ((reviewSubTab === 'unknown' && !unknown.length) ||
+          (reviewSubTab === 'edited' && !groups.edited.items.length)) reviewSubTab = 'eyes';
+      const labels = { unknown: "Couldn't read" };
+      const counts = { unknown: unknown.length };
+      const bar = el('div', { class: 'subtab-bar' });
+      order.forEach(k => {
+        const lbl = groups[k] ? groups[k].label : labels[k];
+        const cnt = groups[k] ? groups[k].items.length : counts[k];
+        const b = el('button', { type: 'button', class: reviewSubTab === k ? 'active' : '',
+          onclick: () => { reviewSubTab = k; renderBody(); } }, lbl);
+        b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
+        bar.appendChild(b);
+      });
+      root.appendChild(bar);
+
+      // "Couldn't read" group — inline describe editors, not approve/reject
+      if (reviewSubTab === 'unknown') {
+        setSearchCounts(`${unknown.length} column${unknown.length === 1 ? '' : 's'} agami couldn't read`);
+        const sec = el('div', { class: 'schema-section' });
+        sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;',
+          text: "agami looked at these columns and couldn't tell what they mean (opaque names, no clue in the data). If you know, describe one in a line — or just leave them; agami will also ask the first time a query actually uses one." }));
+        if (!unknown.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing here — agami understood every column.' }));
+        else unknown.forEach(uc => sec.appendChild(describeCard(uc)));
+        root.appendChild(sec);
+        root.appendChild(nextStepsCallout());
+        return;
+      }
+
+      const g = groups[reviewSubTab] || groups.eyes;
+      setSearchCounts(`${g.items.length} ${g.label.toLowerCase()}`);
+
+      const sec = el('div', { class: 'schema-section' });
+      if (g.bulk) {
+        const approvable = g.items.filter(isApprovable);
+        if (approvable.length) {
+          const head = el('div', { class: 'schema-header' });
+          head.appendChild(document.createTextNode(g.label));
+          head.appendChild(el('button', { type: 'button', class: 'btn-sm primary', style: 'margin:0 0 0 auto;',
+            onclick: () => bulkApprove(g.items) }, `✓ Approve all ${approvable.length}`));
+          sec.appendChild(head);
+        }
+      }
+      if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
+      if (!g.items.length) {
+        sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing in “' + g.label + '”.' }));
+      } else {
+        g.items.forEach(it => sec.appendChild(reviewCard(it)));
+      }
+      root.appendChild(sec);
+      root.appendChild(nextStepsCallout());
+    }
+    // Signpost: the Review tab only covers the AI-proposed layer; excluding tables and
+    // fixing column details happen on the Tables tab. Make that obvious.
+    function nextStepsCallout() {
+      const c = el('div', { class: 'next-steps' });
+      c.appendChild(el('div', { class: 'ns-title', text: '✓ Reviewed the AI’s work? Two more things live on the Tables tab' }));
+      c.appendChild(el('div', { class: 'ns-body', html:
+        'This queue only covers what agami <strong>proposed</strong> — metrics, joins, entities, and columns it couldn’t read. ' +
+        'It does <em>not</em> include: <strong>excluding tables</strong> you don’t want queried (staging / scratch / temp / raw-PII tables), ' +
+        'or <strong>fixing column details</strong> (descriptions, units, PII flags). Those are on the <strong>Tables</strong> tab.' }));
+      c.appendChild(el('button', { type: 'button', class: 'btn-sm primary', style: 'margin:10px 0 0;',
+        onclick: () => { activeTab = 'tables'; const s = document.getElementById('search'); if (s) s.value = ''; searchQ = ''; renderAll(); } },
+        'Go to Tables →'));
+      return c;
     }
 
-    function pendingCounts() {
-      let excludeTables = 0, includeTables = 0, excludeColumns = 0, includeColumns = 0;
-      Object.entries(pending).forEach(([qname, action]) => {
-        const parts = qname.split('.');
-        const isField = parts.length >= 3;   // schema.table.field
-        if (action === 'exclude') {
-          if (isField) excludeColumns++; else excludeTables++;
+    // ---- Add-metric form ----
+    function renderAddMetricForm() {
+      const wrap = el('div', { class: 'table-card add-form' });
+      wrap.appendChild(el('div', { class: 'table-header static' },
+        el('div', { class: 'table-name' }, 'New metric')));
+      const body = el('div', { class: 'table-body' });
+      const inputs = {};
+      const mkInput = (label, key, ph, rows) => {
+        body.appendChild(labelLine(label));
+        const t = textarea('', rows || 1); if (ph) t.setAttribute('placeholder', ph);
+        body.appendChild(t); inputs[key] = t;
+      };
+      mkInput('Name (letters / digits / underscore)', 'name', 'e.g. repeat_purchase_rate', 1);
+      mkInput('Description', 'description', 'one line: what it measures', 2);
+      mkInput('Calculation (prose intent — required)', 'calculation', 'e.g. share of customers with >1 order', 2);
+      mkInput(`${STORAGE_TYPE || 'SQL'} binding (the SQL — required)`, 'binding', 'e.g. COUNT_IF(order_count > 1) / NULLIF(COUNT(*),0)', 2);
+      mkInput('Unit (optional, e.g. INR / percent)', 'unit', '', 1);
+      mkInput('Also called (comma-separated, optional)', 'other_names', 'e.g. repeat rate, returning-buyer rate', 1);
+      // source tables: comma-separated free text (suggest known tables in hint)
+      body.appendChild(labelLine('Source tables (comma-separated)'));
+      body.appendChild(hintLine('Known tables: ' + ALL_TABLES.slice(0, 12).join(', ') + (ALL_TABLES.length > 12 ? ' …' : '')));
+      const stTa = textarea('', 1); inputs.source_tables = stTa; body.appendChild(stTa);
+      if (AREAS.length > 1) {
+        body.appendChild(labelLine('Subject area'));
+        const sel = el('select'); AREAS.forEach(a => { const o = el('option', { value: a }); o.textContent = a; sel.appendChild(o); });
+        body.appendChild(sel); inputs.area = sel;
+      }
+      const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
+      body.appendChild(errLine);
+      body.appendChild(btnSm('Add metric', () => {
+        const name = inputs.name.value.trim();
+        const calc = inputs.calculation.value.trim();
+        const binding = inputs.binding.value.trim();
+        const problems = [];
+        if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) problems.push('Name must start with a letter and use only letters/digits/underscore.');
+        if (!calc) problems.push('Calculation (prose) is required.');
+        if (!binding) problems.push('SQL binding is required.');
+        if (manifest.metrics.some(m => m.name === name) || newMetrics.some(m => m.name === name)) problems.push('A metric with that name already exists.');
+        if (problems.length) { errLine.textContent = '⚠ ' + problems.join(' '); return; }
+        newMetrics.push({
+          area: inputs.area ? inputs.area.value : (AREAS[0] || ''),
+          name, description: inputs.description.value.trim(), calculation: calc, binding,
+          unit: inputs.unit.value.trim(),
+          other_names: inputs.other_names.value.split(',').map(s => s.trim()).filter(Boolean),
+          source_tables: stTa.value.split(',').map(s => s.trim()).filter(Boolean),
+        });
+        addMetricOpen = false; renderAll();
+      }, 'primary'));
+      body.appendChild(btnSm('Cancel', () => { addMetricOpen = false; renderAll(); }));
+      wrap.appendChild(body);
+      return wrap;
+    }
+    function renderNewMetricCard(m, idx) {
+      const card = el('div', { class: 'table-card queued-include' });
+      const h = el('div', { class: 'table-header static' });
+      h.appendChild(el('div', { class: 'table-name' }, m.name));
+      h.appendChild(el('span', { class: 'table-state-badge badge-approved', text: 'new' }));
+      card.appendChild(h);
+      const body = el('div', { class: 'table-body' });
+      if (m.calculation) { body.appendChild(labelLine('Calculation')); body.appendChild(descBlock(m.calculation)); }
+      body.appendChild(labelLine((STORAGE_TYPE || 'SQL') + ' binding')); body.appendChild(preBlock(m.binding));
+      const a = el('div', { class: 'card-actions' });
+      a.appendChild(el('button', { type: 'button', class: 'queued-exclude',
+        onclick: () => { newMetrics.splice(idx, 1); renderAll(); } }, 'Remove'));
+      body.appendChild(a);
+      card.appendChild(body);
+      return card;
+    }
+
+    // =====================================================================
+    // TAB: Organization
+    // =====================================================================
+    function renderMarkdown(md) {
+      const lines = (md || '').replace(/\r\n/g, '\n').split('\n');
+      let html = ''; let inList = false; let inComment = false; const para = [];
+      const flushPara = () => { if (para.length) { html += '<p>' + inline(para.join(' ')) + '</p>'; para.length = 0; } };
+      const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+      function inline(s) {
+        s = escapeHtml(s);
+        s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+        s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        return s;
+      }
+      for (let raw of lines) {
+        // skip HTML comments (single- or multi-line)
+        if (inComment) { if (raw.includes('-->')) { inComment = false; raw = raw.split('-->').slice(1).join('-->'); } else continue; }
+        if (raw.includes('<!--')) {
+          const before = raw.split('<!--')[0];
+          if (raw.includes('-->')) { raw = before + raw.split('-->').slice(1).join('-->'); }
+          else { raw = before; inComment = true; }
+        }
+        const line = raw.replace(/\s+$/,'');
+        if (!line.trim()) { flushPara(); closeList(); continue; }
+        let m;
+        if ((m = line.match(/^(#{1,3})\s+(.*)$/))) { flushPara(); closeList(); const lv = m[1].length; html += `<h${lv}>${inline(m[2])}</h${lv}>`; continue; }
+        if ((m = line.match(/^\s*[-*]\s+(.*)$/))) { flushPara(); if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + inline(m[1]) + '</li>'; continue; }
+        para.push(line.trim());
+      }
+      flushPara(); closeList();
+      return html || '<p style="color:var(--muted);font-style:italic;">(empty — add domain context so answers know what the data means)</p>';
+    }
+    // Inverse of renderMarkdown: serialize the rich-editor DOM back to the Markdown subset
+    // we support (## headings, - bullets, **bold**, `code`). Kept deliberately small so the
+    // round-trip is lossless for what the editor can produce.
+    function inlineMd(node) {
+      let out = '';
+      (node.childNodes || []).forEach(n => {
+        if (n.nodeType === 3) { out += n.nodeValue; return; }
+        if (n.nodeType !== 1) return;
+        const tag = n.tagName.toLowerCase();
+        if (tag === 'br') { out += '\n'; return; }
+        const inner = inlineMd(n);
+        if (tag === 'strong' || tag === 'b') out += inner.trim() ? '**' + inner + '**' : inner;
+        else if (tag === 'em' || tag === 'i') out += inner.trim() ? '*' + inner + '*' : inner;
+        else if (tag === 'code') out += inner.trim() ? '`' + inner + '`' : inner;
+        else out += inner;   // span/font/etc. — keep the text, drop the wrapper
+      });
+      return out;
+    }
+    function htmlToMarkdown(rootEl) {
+      const blocks = [];
+      (function walk(node) {
+        (node.childNodes || []).forEach(n => {
+          if (n.nodeType === 3) { const t = n.nodeValue.trim(); if (t) blocks.push(t); return; }
+          if (n.nodeType !== 1) return;
+          const tag = n.tagName.toLowerCase();
+          if (/^h[1-6]$/.test(tag)) {
+            const lv = Math.min(3, Number(tag[1]));           // clamp to ###
+            const t = inlineMd(n).trim(); if (t) blocks.push('#'.repeat(lv) + ' ' + t);
+          } else if (tag === 'ul' || tag === 'ol') {
+            const items = [];
+            n.querySelectorAll(':scope > li').forEach(li => { const t = inlineMd(li).trim(); if (t) items.push('- ' + t); });
+            if (items.length) blocks.push(items.join('\n'));
+          } else if (tag === 'p' || tag === 'div') {
+            // browsers nest blocks inside divs — recurse if so, else treat as one paragraph
+            const hasBlockKid = Array.from(n.children).some(c => /^(h[1-6]|ul|ol|p|div)$/i.test(c.tagName));
+            if (hasBlockKid) walk(n);
+            else { const t = inlineMd(n).trim(); if (t) blocks.push(t); }
+          } else if (tag !== 'br') {
+            const t = inlineMd(n).trim(); if (t) blocks.push(t);
+          }
+        });
+      })(rootEl);
+      return blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+    function renderOrganizationTab(root) {
+      const md = orgEdit !== null ? orgEdit : (manifest.organization_md || '');
+      root.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>What is this?</strong> This note tells agami about <em>your</em> business — what the company or product is, ' +
+        'what your words mean, and how your numbers are defined (for example, what counts as an "active customer"). ' +
+        'agami reads it with every question, so answers use your own words and definitions. ' +
+        'Edit it here, or in the file <code>ORGANIZATION.md</code> inside your agami folder.' }));
+      if (searchQ && !md.toLowerCase().includes(searchQ)) {
+        root.appendChild(el('div', { class: 'empty-state', text: `ORGANIZATION.md doesn't match "${searchQ}".` }));
+        setSearchCounts('');
+        return;
+      }
+      const card = el('div', { class: 'table-card' });
+      const ORG = '__org__';
+      if (editOpen.has(ORG)) {
+        const wrap = el('div', { class: 'edit-form', style: 'border-top:none;' });
+        if (orgRaw) {
+          // Power-user escape hatch: edit the raw Markdown directly.
+          wrap.appendChild(labelLine('ORGANIZATION.md (raw Markdown)'));
+          const ta = textarea(md, 22); ta.style.minHeight = '360px'; wrap.appendChild(ta);
+          const bar = el('div', { class: 'card-actions' });
+          bar.appendChild(btnSm('Save', () => { orgEdit = ta.value; editOpen.delete(ORG); renderAll(); }, 'primary'));
+          bar.appendChild(btnSm('Cancel', () => { editOpen.delete(ORG); renderAll(); }));
+          bar.appendChild(btnSm('↩ Back to rich text', () => { orgEdit = ta.value; orgRaw = false; renderAll(); }));
+          wrap.appendChild(bar);
         } else {
-          if (isField) includeColumns++; else includeTables++;
+          // Rich-text editor: edit the formatted text directly — no Markdown symbols.
+          wrap.appendChild(labelLine('Edit ORGANIZATION.md'));
+          wrap.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;',
+            text: 'Type like a normal document. Use the buttons for a section heading, bold, or a bullet list. agami saves it for you.' }));
+          const tb = el('div', { class: 'rt-toolbar' });
+          const ed = el('div', { class: 'org-rendered rt-editor', contenteditable: 'true', html: renderMarkdown(md) });
+          const cmd = (c, v) => { ed.focus(); try { document.execCommand(c, false, v || null); } catch (e) {} };
+          tb.appendChild(btnSm('Heading', () => cmd('formatBlock', 'h2')));
+          tb.appendChild(btnSm('Normal text', () => cmd('formatBlock', 'p')));
+          tb.appendChild(btnSm('B', () => cmd('bold')));
+          tb.appendChild(btnSm('• List', () => cmd('insertUnorderedList')));
+          wrap.appendChild(tb);
+          wrap.appendChild(ed);
+          const bar = el('div', { class: 'card-actions' });
+          bar.appendChild(btnSm('Save', () => { orgEdit = htmlToMarkdown(ed); editOpen.delete(ORG); renderAll(); }, 'primary'));
+          bar.appendChild(btnSm('Cancel', () => { editOpen.delete(ORG); renderAll(); }));
+          bar.appendChild(btnSm('⚙ Edit raw Markdown', () => { orgEdit = htmlToMarkdown(ed); orgRaw = true; renderAll(); }));
+          wrap.appendChild(bar);
+        }
+        card.appendChild(wrap);
+      } else {
+        card.appendChild(el('div', { class: 'org-rendered', html: renderMarkdown(md) }));
+        const a = el('div', { class: 'card-actions' });
+        a.appendChild(el('button', { type: 'button', class: orgEdit !== null ? 'queued-edit' : '',
+          onclick: () => { editOpen.add(ORG); renderAll(); } }, orgEdit !== null ? '✎ Edited (queued) — edit again' : 'Edit ORGANIZATION.md'));
+        card.appendChild(a);
+      }
+      root.appendChild(card);
+      setSearchCounts('');
+    }
+
+    // =====================================================================
+    // TAB: Queued
+    // =====================================================================
+    function queueRow(kindClass, kindLabel, label, undo) {
+      const item = el('div', { class: 'queue-item' });
+      item.appendChild(el('span', { class: 'q-kind ' + kindClass, text: kindLabel }));
+      item.appendChild(el('span', { class: 'q-label', text: label }));
+      item.appendChild(el('button', { type: 'button', class: 'q-undo', onclick: () => { undo(); renderAll(); } }, 'Undo'));
+      return item;
+    }
+    function renderQueuedTab(root) {
+      const groups = [];
+      // pending tables/columns
+      const pend = Object.entries(pending);
+      if (pend.length) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Tables & columns' }));
+        pend.forEach(([qname, action]) => {
+          const isCol = qname.split('.').length >= 3;
+          g.appendChild(queueRow(action, action, `${action} ${isCol ? 'column' : 'table'}: ${qname}`, () => delete pending[qname]));
+        });
+        groups.push(g);
+      }
+      // ops metrics/entities/rels
+      const opv = Object.entries(ops);
+      if (opv.length) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Metrics · entities · joins' }));
+        opv.forEach(([qname, o]) => g.appendChild(queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}`, () => delete ops[qname])));
+        groups.push(g);
+      }
+      // field/metric/entity/rel edits
+      const ed = Object.entries(edits);
+      if (ed.length) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Edits' }));
+        ed.forEach(([qname, e]) => {
+          const fields = Object.keys(e.fields).join(', ');
+          const tgt = e.column ? `${e.name}.${e.column}` : e.name;
+          g.appendChild(queueRow('edit', 'edit', `${e.kind} ${tgt} — ${fields}`, () => delete edits[qname]));
+        });
+        groups.push(g);
+      }
+      // example edits
+      const ex = Object.entries(exampleEdits);
+      if (ex.length) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Example edits' }));
+        ex.forEach(([qname, x]) => g.appendChild(queueRow('edit', 'edit', `example: ${(x.question || '').slice(0, 60)}`, () => delete exampleEdits[qname])));
+        groups.push(g);
+      }
+      // new metrics
+      if (newMetrics.length) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'New metrics' }));
+        newMetrics.forEach((m, i) => g.appendChild(queueRow('add', 'add', `metric: ${m.name}`, () => newMetrics.splice(i, 1))));
+        groups.push(g);
+      }
+      // org edit
+      if (orgEdit !== null) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Organization context' }));
+        g.appendChild(queueRow('edit', 'edit', 'ORGANIZATION.md edited', () => { orgEdit = null; }));
+        groups.push(g);
+      }
+
+      setSearchCounts('');
+      if (!groups.length) {
+        root.appendChild(el('div', { class: 'empty-state',
+          text: 'Nothing queued. Make changes on the other tabs, then come back here to review and validate before generating feedback.' }));
+        return;
+      }
+      root.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>Review before you submit.</strong> Everything you’ve queued is listed below. ' +
+        'Click <strong>Validate</strong> to sanity-check it locally, then <strong>Generate feedback for Claude</strong> ' +
+        'to produce the block to paste back — agami applies it and runs the authoritative validator server-side.' }));
+      const vr = el('div', { id: 'queue-validate', class: 'validate-result' });
+      root.appendChild(vr);
+      groups.forEach(g => root.appendChild(g));
+    }
+
+    // ---- Validate (local pre-flight on queued changes) ----
+    function validateQueued() {
+      const problems = [];
+      newMetrics.forEach((m, i) => {
+        const tag = `New metric "${m.name || ('#' + (i + 1))}"`;
+        if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(m.name || '')) problems.push(`${tag}: invalid name.`);
+        if (!(m.calculation || '').trim()) problems.push(`${tag}: calculation is required.`);
+        if (!(m.binding || '').trim()) problems.push(`${tag}: SQL binding is required.`);
+      });
+      Object.values(edits).forEach(e => {
+        if (e.fields.value_pattern) {
+          try { new RegExp(e.fields.value_pattern); } catch (err) { problems.push(`Edit on ${e.name}: value pattern is not a valid regex.`); }
+        }
+        if (e.kind === 'metric' && ('calculation' in e.fields) && !String(e.fields.calculation).trim()) {
+          problems.push(`Edit on metric ${e.name}: calculation can't be emptied.`);
         }
       });
-      return { excludeTables, includeTables, excludeColumns, includeColumns };
+      Object.values(exampleEdits).forEach(x => {
+        if (!(x.question || '').trim() || !(x.sql || '').trim()) problems.push(`Example "${(x.question || '').slice(0, 30)}": question and SQL are both required.`);
+      });
+      return problems;
     }
-
-    function updateFooter() {
-      const c = pendingCounts();
-      const opCount = Object.keys(ops).length;
-      const eCount = editCount();
-      const total = c.excludeTables + c.includeTables + c.excludeColumns + c.includeColumns + opCount + eCount;
-      const sum = document.getElementById('pending-summary');
-      const btn = document.getElementById('btn-generate');
-      if (total === 0) {
-        sum.textContent = 'No actions queued yet — click Exclude / Include on a table, column, metric, entity, or relationship to start.';
-        btn.disabled = true;
-      } else {
-        const parts = [];
-        if (c.excludeTables) parts.push(`${c.excludeTables} table${c.excludeTables === 1 ? '' : 's'} to exclude`);
-        if (c.includeTables) parts.push(`${c.includeTables} table${c.includeTables === 1 ? '' : 's'} to include`);
-        if (c.excludeColumns) parts.push(`${c.excludeColumns} column${c.excludeColumns === 1 ? '' : 's'} to exclude`);
-        if (c.includeColumns) parts.push(`${c.includeColumns} column${c.includeColumns === 1 ? '' : 's'} to include`);
-        if (opCount) parts.push(`${opCount} exclude/include`);
-        if (eCount) parts.push(`${eCount} edit${eCount === 1 ? '' : 's'}`);
-        sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
-        btn.disabled = false;
+    function runValidate() {
+      const problems = validateQueued();
+      const total = totalQueued();
+      const fv = document.getElementById('footer-validate');
+      if (total === 0) { fv.textContent = 'Nothing queued to validate.'; fv.className = 'footer-validate'; }
+      else if (!problems.length) { fv.textContent = `✓ ${total} change${total === 1 ? '' : 's'} pass local checks`; fv.className = 'footer-validate ok'; }
+      else { fv.textContent = `⚠ ${problems.length} issue${problems.length === 1 ? '' : 's'}`; fv.className = 'footer-validate bad'; }
+      // also paint into the queued tab if visible
+      const qv = document.getElementById('queue-validate');
+      if (qv) {
+        qv.innerHTML = '';
+        if (total === 0) { qv.className = 'validate-result'; qv.textContent = 'Nothing queued.'; return; }
+        if (!problems.length) {
+          qv.className = 'validate-result ok';
+          qv.textContent = `✓ All ${total} queued change${total === 1 ? '' : 's'} pass local checks. The model loaded clean; the full validator runs when Claude applies.`;
+        } else {
+          qv.className = 'validate-result bad';
+          qv.appendChild(document.createTextNode(`⚠ ${problems.length} issue${problems.length === 1 ? '' : 's'} to fix before submitting:`));
+          const ul = el('ul'); problems.forEach(p => ul.appendChild(el('li', { text: p }))); qv.appendChild(ul);
+        }
       }
     }
 
+    // =====================================================================
+    // Tab bar + chrome
+    // =====================================================================
+    function tabCount(id) {
+      const t = manifest.totals || {};
+      switch (id) {
+        case 'review':   return reviewQueue().length + unknownColumns().length;
+        case 'areas':    return (manifest.subject_areas || []).length;
+        case 'tables':   return t.tables || 0;
+        case 'metrics':  return (manifest.metrics || []).length + newMetrics.length;
+        case 'entities': return (manifest.entities || []).length;
+        case 'joins':    return (manifest.relationships || []).length;
+        case 'examples': return (manifest.examples || []).length;
+        case 'queued':   return totalQueued();
+        default:         return null;
+      }
+    }
+    function renderTabBar() {
+      const bar = document.getElementById('tab-bar');
+      bar.innerHTML = '';
+      TABS.forEach(t => {
+        const cnt = tabCount(t.id);
+        const b = el('button', {
+          type: 'button',
+          class: (t.id === activeTab ? 'active ' : '') + (t.id === 'queued' ? 'tab-queued' + (totalQueued() ? ' has-queued' : '') : ''),
+          onclick: () => { activeTab = t.id; document.getElementById('search').value = ''; searchQ = ''; renderAll(); },
+        }, t.label);
+        if (cnt !== null) b.appendChild(el('span', { class: 'tab-count', text: String(cnt) }));
+        bar.appendChild(b);
+      });
+      // status filter only relevant on entity tabs
+      document.getElementById('filter-chips').style.display = FILTERABLE_TABS.has(activeTab) ? 'flex' : 'none';
+      // search placeholder per tab
+      const ph = { organization: 'Search ORGANIZATION.md…', review: 'Search the review queue…',
+                   areas: 'Search subject areas…',
+                   tables: 'Search tables, fields, descriptions…',
+                   metrics: 'Search metrics…', entities: 'Search entities…', joins: 'Search joins…',
+                   examples: 'Search examples…', queued: '' }[activeTab] || 'Search…';
+      const si = document.getElementById('search');
+      si.placeholder = ph; si.style.display = (activeTab === 'queued') ? 'none' : '';
+    }
+    function setSearchCounts(text) { document.getElementById('search-counts').textContent = text || ''; }
+
+    function renderMeta() {
+      const t = manifest.totals || {};
+      const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+      const parts = [plural(t.schemas || 0, 'schema'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
+      if (t.metrics) parts.push(plural(t.metrics, 'metric'));
+      if (t.relationships) parts.push(plural(t.relationships, 'join'));
+      if (t.entities) parts.push(plural(t.entities, 'entity').replace('entitys', 'entities'));
+      document.getElementById('totals-meta').textContent = parts.join(' · ');
+      const badge = document.getElementById('model-badge');
+      if (t.validated === false) { badge.textContent = '⚠ Model has errors'; badge.style.background = 'var(--bad-bg)'; badge.style.color = 'var(--bad-fg)'; badge.style.borderColor = 'var(--bad-border)'; }
+    }
+
+    // ---- Queued totals + footer ----
+    function totalQueued() {
+      return Object.keys(pending).length + Object.keys(ops).length + Object.keys(edits).length
+           + Object.keys(exampleEdits).length + newMetrics.length + (orgEdit !== null ? 1 : 0);
+    }
+    function updateFooter() {
+      const total = totalQueued();
+      const sum = document.getElementById('pending-summary');
+      const gen = document.getElementById('btn-generate');
+      if (total === 0) {
+        sum.textContent = 'No changes queued yet — exclude / include / edit / add to start.';
+        gen.disabled = true;
+        document.getElementById('footer-validate').textContent = '';
+      } else {
+        const c = { exT: 0, inT: 0, exC: 0, inC: 0 };
+        Object.entries(pending).forEach(([q, a]) => { const col = q.split('.').length >= 3; if (a === 'exclude') col ? c.exC++ : c.exT++; else col ? c.inC++ : c.inT++; });
+        const parts = [];
+        if (c.exT) parts.push(`${c.exT} table${c.exT === 1 ? '' : 's'} excl`);
+        if (c.inT) parts.push(`${c.inT} table${c.inT === 1 ? '' : 's'} incl`);
+        if (c.exC) parts.push(`${c.exC} col${c.exC === 1 ? '' : 's'} excl`);
+        if (c.inC) parts.push(`${c.inC} col${c.inC === 1 ? '' : 's'} incl`);
+        const opVals = Object.values(ops);
+        const nApprove = opVals.filter(o => o.op === 'approve').length;
+        const nReject = opVals.filter(o => o.op === 'exclude').length;
+        const nInc = opVals.filter(o => o.op === 'include').length;
+        if (nApprove) parts.push(`${nApprove} approval${nApprove === 1 ? '' : 's'}`);
+        if (nReject) parts.push(`${nReject} rejection${nReject === 1 ? '' : 's'}`);
+        if (nInc) parts.push(`${nInc} re-include${nInc === 1 ? '' : 's'}`);
+        if (Object.keys(edits).length) parts.push(`${Object.keys(edits).length} edit${Object.keys(edits).length === 1 ? '' : 's'}`);
+        if (Object.keys(exampleEdits).length) parts.push(`${Object.keys(exampleEdits).length} example`);
+        if (newMetrics.length) parts.push(`${newMetrics.length} new metric${newMetrics.length === 1 ? '' : 's'}`);
+        if (orgEdit !== null) parts.push('org context');
+        sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
+        gen.disabled = false;
+      }
+    }
+
+    // ---- Generate feedback ----
     function generateFeedback() {
-      // Group by action / kind for compact emit
-      const buckets = { excludeT: [], includeT: [], excludeC: [], includeC: [] };
+      // Approvals must be signed — require a valid email + role before generating.
+      if (hasQueuedApprovals() && !validEmail(signOff.email)) {
+        signOff._invalid = true;
+        if (activeTab !== 'review') { activeTab = 'review'; renderAll(); }  // the field lives on the Review tab
+        const em = document.getElementById('signoff-email');
+        if (em) { em.classList.add('invalid'); em.focus(); }
+        const fv = document.getElementById('footer-validate');
+        fv.textContent = '⚠ Enter your sign-off email to approve (top of the Review tab)'; fv.className = 'footer-validate bad';
+        return;
+      }
+      const buckets = { exT: [], inT: [], exC: [], inC: [] };
       Object.entries(pending).forEach(([qname, action]) => {
         const isField = qname.split('.').length >= 3;
-        if (action === 'exclude' && isField) buckets.excludeC.push(qname);
-        else if (action === 'exclude') buckets.excludeT.push(qname);
-        else if (action === 'include' && isField) buckets.includeC.push(qname);
-        else if (action === 'include') buckets.includeT.push(qname);
+        if (action === 'exclude' && isField) buckets.exC.push(qname);
+        else if (action === 'exclude') buckets.exT.push(qname);
+        else if (action === 'include' && isField) buckets.inC.push(qname);
+        else if (action === 'include') buckets.inT.push(qname);
       });
       const lines = [];
-      if (buckets.excludeT.length) lines.push('exclude tables: ' + buckets.excludeT.sort().join(', '));
-      if (buckets.includeT.length) lines.push('include tables: ' + buckets.includeT.sort().join(', '));
-      if (buckets.excludeC.length) lines.push('exclude columns: ' + buckets.excludeC.sort().join(', '));
-      if (buckets.includeC.length) lines.push('include columns: ' + buckets.includeC.sort().join(', '));
-      // curate-ops JSON: exclude/include on metrics/entities/relationships (explicit
-      // kind) + field edits (description/calculation/unit) as `op:"edit"` ops.
-      const opList = Object.values(ops).slice();
+      if (buckets.exT.length) lines.push('exclude tables: ' + buckets.exT.sort().join(', '));
+      if (buckets.inT.length) lines.push('include tables: ' + buckets.inT.sort().join(', '));
+      if (buckets.exC.length) lines.push('exclude columns: ' + buckets.exC.sort().join(', '));
+      if (buckets.inC.length) lines.push('include columns: ' + buckets.inC.sort().join(', '));
+
+      // Stamp approve ops with a sign-off timestamp (the validator requires
+      // signed_off_at on approved entries; the skill supplies signer + role).
+      let _approveAt = null;
+      try { _approveAt = new Date().toISOString(); } catch (e) { _approveAt = null; }
+      // Drop approve ops on entries that became moot (a table they depend on is now excluded) —
+      // approving a join to an excluded table is pointless; the runtime drops it anyway.
+      const _byq = {}; reviewAll().forEach(it => { _byq[it.qname] = it; });
+      const opList = [];
+      Object.entries(ops).forEach(([qname, o]) => {
+        if (o.op === 'approve') {
+          const it = _byq[qname];
+          if (it && mootReason(it)) return;  // skip moot approval
+          opList.push(_approveAt ? { ...o, at: _approveAt } : o);
+        } else opList.push(o);
+      });
       Object.values(edits).forEach(e => {
         Object.keys(e.fields).forEach(field => {
           const op = { op: 'edit', kind: e.kind, area: e.area, name: e.name, field, value: e.fields[field] };
@@ -1319,37 +2192,39 @@
           opList.push(op);
         });
       });
-      if (opList.length) {
-        lines.push('curate-ops:');
-        lines.push(JSON.stringify(opList));
+      if (opList.length) { lines.push('curate-ops:'); lines.push(JSON.stringify(opList)); }
+
+      if (newMetrics.length) {
+        lines.push('new-metrics:');
+        lines.push(JSON.stringify(newMetrics.map(m => {
+          const out = { area: m.area, name: m.name, description: m.description, calculation: m.calculation,
+                        bindings: STORAGE_TYPE ? { [STORAGE_TYPE]: m.binding } : { SQL: m.binding },
+                        source_tables: m.source_tables, other_names: m.other_names, confidence: 'proposed' };
+          if (m.unit) out.unit = m.unit;
+          return out;
+        })));
       }
-      // edited prompt examples → add-example (one JSON line)
+
       const exList = Object.values(exampleEdits);
-      if (exList.length) {
-        lines.push('example-edits:');
-        lines.push(JSON.stringify(exList));
-      }
-      // edited ORGANIZATION.md → JSON-encoded so newlines survive on one line
-      if (orgEdit !== null) {
-        lines.push('organization-md: ' + JSON.stringify(orgEdit));
-      }
+      if (exList.length) { lines.push('example-edits:'); lines.push(JSON.stringify(exList)); }
+      if (orgEdit !== null) lines.push('organization-md: ' + JSON.stringify(orgEdit));
+      // Sign-off identity header (first line) — the skill applies approvals with this as --signer/--role.
+      if (hasQueuedApprovals() && validEmail(signOff.email)) lines.unshift(`signed-off-by: ${signOff.email} / ${signOffRole()}`);
       if (lines.length) lines.push('done');
+
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
       document.getElementById('modal').hidden = false;
       document.getElementById('modal-status').textContent = '';
     }
 
     // ---- Wire up ----
-    document.getElementById('search').addEventListener('input', (ev) => {
-      searchQ = ev.target.value.trim().toLowerCase();
-      renderAll();
-    });
-    document.querySelectorAll('.filter-chips button').forEach(btn => {
+    document.getElementById('search').addEventListener('input', (ev) => { searchQ = ev.target.value.trim().toLowerCase(); renderBody(); });
+    document.querySelectorAll('#filter-chips button').forEach(btn => {
       btn.addEventListener('click', () => {
         activeFilter = btn.getAttribute('data-filter');
-        document.querySelectorAll('.filter-chips button').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('#filter-chips button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        renderManifest();
+        renderBody();
       });
     });
     document.getElementById('btn-reset').addEventListener('click', () => {
@@ -1357,43 +2232,74 @@
       Object.keys(ops).forEach(k => delete ops[k]);
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
-      orgEdit = null;
+      newMetrics.length = 0; orgEdit = null; addMetricOpen = false;
       editOpen.clear();
       renderAll();
-      updateFooter();
+    });
+    document.getElementById('btn-validate').addEventListener('click', () => {
+      if (activeTab !== 'queued') { activeTab = 'queued'; document.getElementById('search').value = ''; searchQ = ''; renderAll(); }
+      runValidate();
     });
     document.getElementById('btn-generate').addEventListener('click', generateFeedback);
-    document.getElementById('modal-close').addEventListener('click', () => {
-      document.getElementById('modal').hidden = true;
-    });
+    document.getElementById('modal-close').addEventListener('click', () => { document.getElementById('modal').hidden = true; });
     document.getElementById('modal-copy').addEventListener('click', async () => {
       const txt = document.getElementById('modal-text').value;
       const status = document.getElementById('modal-status');
       try {
         await navigator.clipboard.writeText(txt);
-        status.textContent = '✓ Copied — paste in Claude chat.';
-        status.style.color = 'var(--ok-fg)';
+        status.textContent = '✓ Copied — paste in Claude chat.'; status.style.color = 'var(--ok-fg)';
       } catch (e) {
         document.getElementById('modal-text').select();
-        status.textContent = '⚠ Clipboard blocked — text selected; press ⌘/Ctrl+C.';
-        status.style.color = 'var(--warn-fg)';
+        status.textContent = '⚠ Clipboard blocked — text selected; press ⌘/Ctrl+C.'; status.style.color = 'var(--warn-fg)';
       }
     });
 
-    // ---- Composite renderer + first render ----
+
+    // ---- Render orchestration ----
+    function renderBody() {
+      const root = document.getElementById('tab-content');
+      root.innerHTML = '';
+      switch (activeTab) {
+        case 'organization': renderOrganizationTab(root); break;
+        case 'review': renderReviewTab(root); break;
+        case 'areas': renderAreasTab(root); break;
+        case 'tables': renderTablesTab(root); break;
+        case 'metrics':
+          if (addMetricOpen) { root.appendChild(renderAddMetricForm()); }
+          else { const a = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+                 a.appendChild(el('button', { type: 'button', onclick: () => { addMetricOpen = true; renderAll(); } }, '+ Add metric'));
+                 root.appendChild(a); }
+          newMetrics.forEach((m, i) => root.appendChild(renderNewMetricCard(m, i)));
+          renderFlatTab(root, manifest.metrics, 'metric',
+            m => `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`,
+            renderMetricCard, 'metric');
+          break;
+        case 'entities':
+          renderFlatTab(root, manifest.entities, 'entity',
+            e => `${e.name} ${e.plural} ${(e.other_names || []).join(' ')} ${(e.maps_to || []).join(' ')} ${e.description} ${e.area}`,
+            renderEntityCard, 'entity');
+          break;
+        case 'joins':
+          renderFlatTab(root, manifest.relationships, 'relationship',
+            r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area}`,
+            renderRelCard, 'join');
+          break;
+        case 'examples':
+          renderFlatTab(root, manifest.examples, 'example',
+            x => `${x.question} ${x.sql} ${x.area}`,
+            renderExampleCard, 'example');
+          break;
+        case 'queued': renderQueuedTab(root); break;
+      }
+    }
     function renderAll() {
-      renderOrgContextSection();
-      renderMetricsSection();
-      renderEntitiesSection();
-      renderRelationshipsSection();
-      renderExamplesSection();
-      renderNamedFiltersSection();
-      renderManifest();
+      renderTabBar();
+      renderBody();
+      updateFooter();
     }
 
     renderMeta();
     renderAll();
-    updateFooter();
   </script>
 </body>
 </html>

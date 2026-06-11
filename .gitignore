@@ -36,3 +36,6 @@ tests/integration/fixtures/*.db
 
 # Host-side plugin markers (created by Claude Code when a symlinked plugin is detected)
 .orphaned_at
+
+# Scratch blog drafts (authored in other sessions; not part of the plugin)
+blog/

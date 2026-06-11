@@ -36,6 +36,7 @@
       "metrics":         [{"name":"revenue","definition_prose":"...","signed_off_by":"jane@x.com",
                            "signed_off_role":"cfo","signed_off_at":"2026-03-15T10:00:00Z"}, ...],
       "named_filters":   [{"name":"active_customer","expression":"...","definition_prose":"..."}, ...],
+      "assumptions":     [{"column":"sales.orders.amount","meaning":"net revenue, USD","source":"ai_unvalidated"}, ...],
       "warnings":        ["⚠ Used 1 unreviewed join (orders → customers, conf 0.62). Review now?", ...]
     }
   Pass `null` for RECEIPT_JSON on legacy callers that don't yet build a receipt.
@@ -904,28 +905,23 @@
           const li = el('li');
           li.appendChild(el('code', { text: t.qname || '<unknown>' }));
           if (t.rows !== undefined && t.rows !== null) {
-            li.appendChild(document.createTextNode(' — ' + Number(t.rows).toLocaleString() + ' rows'));
+            // estimated_row_count is an introspection-time ESTIMATE — mark it (≈) and, when
+            // we know when the count was last checked (`rows_as_of`), say so.
+            let txt = ' — ≈' + Number(t.rows).toLocaleString() + ' rows';
+            const ao = t.rows_as_of ? String(t.rows_as_of).trim() : '';
+            if (ao) txt += ' (estimated as of ' + maybePrettifyDate(ao) + ')';
+            li.appendChild(document.createTextNode(txt));
           } else {
-            // Skill couldn't determine the row count for this table (e.g.,
-            // it appeared in a subquery / join shape where a clean COUNT
-            // wasn't available). Render the fallback so the reader doesn't
+            // No row count in the model — render the fallback so the reader doesn't
             // wonder "did agami forget about this table?"
-            const span = el('span', { class: 'receipt-meta', text: ' — rows unknown' });
-            li.appendChild(span);
+            li.appendChild(el('span', { class: 'receipt-meta', text: ' — rows unknown' }));
           }
           if (t.freshness) {
-            // The skill may pass either a raw ISO timestamp (we prettify and
-            // prefix with "introspected") or a pre-formatted human string
-            // (we pass through unchanged). Avoid the awkward
-            // "data as of introspected <ISO>" double-prefix the old template
-            // produced.
+            // Source-data freshness (a load cadence or a distinct refresh time) — separate
+            // from the row-count estimate date above.
             const f = String(t.freshness).trim();
-            let label;
-            if (ISO_TIME_RE.test(f) || ISO_DATE_RE.test(f)) {
-              label = ' · introspected ' + maybePrettifyDate(f);
-            } else {
-              label = ' · ' + f;
-            }
+            const label = (ISO_TIME_RE.test(f) || ISO_DATE_RE.test(f))
+              ? ' · data as of ' + maybePrettifyDate(f) : ' · ' + f;
             li.appendChild(document.createTextNode(label));
           }
           ul.appendChild(li);
@@ -937,6 +933,20 @@
       //   "auto-approved (FK declared in DB)"
       //   "approved by jane@example.com (cfo), Mar 15"
       //   "unreviewed (confidence 0.62)"
+      // Display a sign-off role nicely: known roles use their canonical label, acronyms
+      // upper-case (cto → CTO), free-text title-cases (data engineer → Data Engineer).
+      function prettifyRole(role) {
+        if (!role) return '';
+        const key = String(role).trim().toLowerCase();
+        const KNOWN = { cfo: 'CFO', cto: 'CTO', ceo: 'CEO', coo: 'COO', cio: 'CIO', cdo: 'CDO',
+                        data_lead: 'Data Lead', engineer: 'Engineer', analyst: 'Analyst' };
+        if (KNOWN[key]) return KNOWN[key];
+        const ACR = { cto: 'CTO', ceo: 'CEO', cfo: 'CFO', coo: 'COO', cio: 'CIO', cdo: 'CDO',
+                      vp: 'VP', pm: 'PM', bi: 'BI', hr: 'HR', it: 'IT' };
+        return key.replace(/_/g, ' ').split(/\s+/).filter(Boolean)
+          .map(w => ACR[w] || (w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
+      }
+
       function approvalPhrase(entry) {
         const state = (entry.review_state || 'unreviewed').toLowerCase();
         if (state === 'approved') {
@@ -954,7 +964,7 @@
           if (entry.signed_off_by) {
             txt += ' by ' + entry.signed_off_by;
             if (entry.signed_off_role && entry.signed_off_role !== 'system') {
-              txt += ' (' + entry.signed_off_role + ')';
+              txt += ' (' + prettifyRole(entry.signed_off_role) + ')';
             }
           }
           if (entry.signed_off_at) {
@@ -994,7 +1004,11 @@
         const ul = el('ul');
         receipt.metrics.forEach(m => {
           const li = el('li');
-          li.appendChild(el('strong', { text: m.name || '<unnamed>' }));
+          // identifier → monospace <code> (like relationships) so snake_case names read
+          // as identifiers, not bold prose where underscores look like a strikethrough.
+          li.appendChild(el('code', { text: m.name || '<unnamed>' }));
+          li.appendChild(document.createTextNode(' '));
+          li.appendChild(badge(m.review_state));   // metrics get the trust badge too, not just relationships
           if (m.definition_prose) {
             li.appendChild(document.createTextNode(' — ' + m.definition_prose));
           }
@@ -1011,13 +1025,40 @@
         const ul = el('ul');
         receipt.named_filters.forEach(nf => {
           const li = el('li');
-          li.appendChild(el('strong', { text: nf.name || '<unnamed>' }));
+          li.appendChild(el('code', { text: nf.name || '<unnamed>' }));
+          if (nf.review_state) {
+            li.appendChild(document.createTextNode(' '));
+            li.appendChild(badge(nf.review_state));
+          }
           if (nf.definition_prose) {
             li.appendChild(document.createTextNode(' — ' + nf.definition_prose));
           }
           if (nf.expression) {
             li.appendChild(el('br'));
             li.appendChild(el('code', { text: nf.expression }));
+          }
+          ul.appendChild(li);
+        });
+        rb.appendChild(ul);
+      }
+
+      // Assumptions: AI-written column meanings this answer relied on (not yet confirmed).
+      // Surfaced here so a wrong description is caught in context — no upfront review queue.
+      if (Array.isArray(receipt.assumptions) && receipt.assumptions.length) {
+        rb.appendChild(el('h4', { text: 'Assumptions agami made' }));
+        rb.appendChild(el('div', {
+          style: 'font-size:12px;color:var(--muted,#6b7280);margin:2px 0 6px;',
+          text: 'These column meanings come from agami, not from you. If one is wrong (or you can fill in a blank), tell agami in chat — or say “looks right” to lock in the guesses.' }));
+        const ul = el('ul');
+        receipt.assumptions.forEach(a => {
+          const li = el('li');
+          li.appendChild(el('code', { text: a.column }));
+          if (a.meaning) {
+            li.appendChild(document.createTextNode(' = ' + a.meaning));
+          } else {
+            // ai_unknown — agami used a column it couldn't read
+            li.appendChild(document.createTextNode(' — '));
+            li.appendChild(el('strong', { text: 'agami has no description for this column. Is it the right one?' }));
           }
           ul.appendChild(li);
         });

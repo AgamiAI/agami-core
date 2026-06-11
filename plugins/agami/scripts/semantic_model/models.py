@@ -67,6 +67,20 @@ ColumnType = Literal[
 
 Confidence = Literal["confirmed", "inferred", "proposed"]
 ReviewState = Literal["unreviewed", "approved", "rejected", "stale", "not_applicable"]
+# Provenance of a table/column `description` (NOT a sign-off gate — advisory only).
+#   None    → unknown / legacy; treated as trusted, never surfaced for confirmation
+#   human   → written or edited by a person; trusted
+#   ai_unvalidated → AI-generated, not yet confirmed in an accepted answer
+#   ai_validated   → AI-generated, confirmed by a human (via a receipt or explicitly)
+#   ai_unknown     → the AI looked at an opaque column (e.g. `xyz`, `v_1`) and could NOT
+#                    determine its meaning. Description stays empty; flagged so a human can
+#                    fill it in. The inverse of ai_unvalidated: "I don't know" vs "I guessed".
+# Descriptions earn trust through USE: agami-query surfaces an `ai_unvalidated` description in
+# the answer receipt when the query actually used that column, so the human confirms it in
+# context instead of rubber-stamping a giant list. An `ai_unknown` column used in an answer
+# is surfaced the same way ("I used `xyz` but don't know what it is — is this right?").
+# See docs/design/validated-through-use-descriptions.md.
+DescriptionSource = Literal["human", "ai_unvalidated", "ai_validated", "ai_unknown"]
 Cardinality = Literal["many_to_one", "one_to_many", "one_to_one"]
 JoinType = Literal["INNER", "LEFT", "RIGHT", "FULL", "CROSS"]
 Executable = Literal["same_engine", "split", "informational"]
@@ -186,6 +200,8 @@ class Column(_Base):
     name: str
     type: ColumnType
     description: str = ""
+    # provenance of `description` — drives "earn trust through use" (advisory, not a gate)
+    description_source: Optional[DescriptionSource] = None
     primary_key: bool = False
     foreign_key: Optional[ForeignKey] = None
     # enum semantics: maps stored value -> human meaning
@@ -213,7 +229,7 @@ class Column(_Base):
     caveats: list[str] = Field(default_factory=list)
     # curation/trust — structure is trusted by default (introspected); the curator
     # sets review_state='rejected' via /agami-model to exclude a column from the
-    # runtime, or signs off enriched detail via /agami-review.
+    # runtime, or signs off enriched detail via /agami-model.
     confidence: Confidence = "confirmed"
     review_state: ReviewState = "approved"
     signed_off_by: Optional[str] = None
@@ -241,6 +257,10 @@ class IndexHint(_Base):
 
 class PerformanceHints(_Base):
     estimated_row_count: Optional[int] = None
+    # ISO-8601 UTC timestamp of when `estimated_row_count` was last measured (introspection
+    # time). Lets the trust receipt show "≈N rows (estimated as of <date>)" so a reader knows
+    # the count is a point-in-time estimate, not a live COUNT(*).
+    estimated_row_count_at: Optional[str] = None
     recommended_filters: list[str] = Field(default_factory=list)
     indexes: list[IndexHint] = Field(default_factory=list)
 
@@ -258,6 +278,8 @@ class Table(_Base):
     # composite-key-aware primary key; the source of truth for grain.
     grain: list[str] = Field(default_factory=list)
     description: str = ""  # ONE line — what is this table
+    # provenance of `description` — drives "earn trust through use" (advisory, not a gate)
+    description_source: Optional[DescriptionSource] = None
 
     default_filters: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)

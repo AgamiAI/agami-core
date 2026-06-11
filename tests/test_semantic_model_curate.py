@@ -120,11 +120,11 @@ def test_approve_metric_records_signoff(tmp_path):
     _write_model(tmp_path)
     res = curate.apply(tmp_path, [{"op": "approve", "kind": "metric", "area": "sales",
                                    "name": "order_count", "at": "2026-06-09T00:00:00Z"}],
-                       signer="ashwin@agami.ai", role="cto")
+                       signer="reviewer@example.com", role="cto")
     assert res.validated
     org = loader.load_organization(tmp_path)
     mm = org.subject_areas[0].metrics[0]
-    assert mm.review_state == "approved" and mm.signed_off_by == "ashwin@agami.ai"
+    assert mm.review_state == "approved" and mm.signed_off_by == "reviewer@example.com"
     # no longer in the Rule 1 queue
     assert curate.review_queue(org)["counts"]["rule_1"] == 0
 
@@ -133,10 +133,10 @@ def test_approve_relationship(tmp_path):
     _write_model(tmp_path)
     res = curate.apply(tmp_path, [{"op": "approve", "kind": "relationship", "area": "sales",
                                    "name": "orders->customers", "at": "2026-06-09T00:00:00Z"}],
-                       signer="ashwin@agami.ai", role="cto")
+                       signer="reviewer@example.com", role="cto")
     assert res.validated
     rel = loader.load_organization(tmp_path).subject_areas[0].relationships[0]
-    assert rel.review_state == "approved" and rel.signed_off_by == "ashwin@agami.ai"
+    assert rel.review_state == "approved" and rel.signed_off_by == "reviewer@example.com"
 
 
 def test_edit_relationship_on_clause(tmp_path):

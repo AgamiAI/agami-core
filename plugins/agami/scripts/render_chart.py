@@ -127,7 +127,7 @@ def _validate_receipt(receipt: dict) -> None:
     callers that don't have one pass None / omit --receipt-file."""
     if not isinstance(receipt, dict):
         raise ValueError("receipt must be a JSON object")
-    for arr_key in ("tables_used", "relationships", "metrics", "named_filters", "warnings"):
+    for arr_key in ("tables_used", "relationships", "metrics", "named_filters", "assumptions", "warnings"):
         if arr_key in receipt and not isinstance(receipt[arr_key], list):
             raise ValueError(f"receipt.{arr_key} must be a list")
     if "model_version" in receipt and not isinstance(receipt["model_version"], (str, type(None))):

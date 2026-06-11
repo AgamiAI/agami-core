@@ -49,7 +49,7 @@ def _example_validated() -> dict:
             ["Carol Chen", "148.95"],
             ["Dave Davis", "93.96"],
         ],
-        "validated_by": "ashwin@agami.ai",
+        "validated_by": "reviewer@example.com",
         "validated_at": "2026-05-10T14:30:00Z",
         "error": None,
     }
@@ -107,7 +107,7 @@ def test_render_includes_question_and_sql_payloads():
 
 def test_render_validated_state_carries_signoff():
     html = render(title="x", profile="p", items=[_example_validated()])
-    assert "ashwin@agami.ai" in html
+    assert "reviewer@example.com" in html
     assert '"state": "validated"' in html
 
 

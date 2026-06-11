@@ -10,6 +10,10 @@ identical wherever the model is exercised. Subcommands:
     areas     <root>                      — list subject areas
     examples  <root> --area A --query Q   — rank prompt examples for a query
     preflight <root> --sql SQL            — fan-trap / chasm-trap pre-flight check
+    seed-validate <root> --area A --profile P — run every written seed via execute_sql
+                                            (safety pass on) → examples-validation items
+    remove-example <root> --area A --question Q — reject example(s) by question
+                                            (status: rejected — kept for audit, off runtime)
 
 Every subcommand emits JSON on stdout (so callers parse one shape) except
 `validate`, which prints a human report and sets the exit code (0 ok, 1 errors).
@@ -34,7 +38,17 @@ def _print_json(obj) -> None:
 
 
 def cmd_validate(args) -> int:
-    org = L.load_organization(args.root)
+    # Validate the model AS AUTHORED, including curator-excluded entries
+    # (include_rejected=True) — matching the curate engine's own pre-write check.
+    # Excluding a table flips its tables/<T>.yaml to review_state: rejected but
+    # intentionally leaves the subject_area.yaml `tables:` ref in place (the loader
+    # tolerates the dangling ref at runtime, dropping both). Loading with the default
+    # include_rejected=False here would drop the rejected table from org_tables while
+    # its ref remains, so _check_table_refs_resolve would false-flag every intentional
+    # exclusion as orphan_table_ref — even though curate passed and the runtime is fine.
+    # A GENUINE orphan (a ref to a never-defined table) still fails, since no YAML
+    # exists for it even with rejected included.
+    org = L.load_organization(args.root, include_rejected=True)
     res = V.validate(org)
     print(V.format_result(res))
     return 0 if res.ok else 1
@@ -177,6 +191,18 @@ def cmd_add_example(args) -> int:
     return 0 if (res.applied or not res.skipped) else 1
 
 
+def cmd_remove_example(args) -> int:
+    """Reject prompt example(s) by question — `status: rejected`, kept in examples.yaml for
+    audit but dropped from the runtime ranker. The packaged path for the dashboard's
+    `reject N`, so a skill never hand-rewrites examples.yaml to drop an example."""
+    from . import curate
+    res = curate.remove_examples(args.root, args.area, args.question,
+                                 signer=args.signer, role=args.role)
+    _print_json({"rejected": res.applied, "skipped": res.skipped,
+                 "validated": res.validated, "committed": res.committed})
+    return 0 if (res.applied or not res.skipped) else 1
+
+
 def cmd_format_table(args) -> int:
     """Format a result CSV into a deterministic markdown table — exact numbers, full
     grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
@@ -208,6 +234,78 @@ def cmd_seed_examples(args) -> int:
     res = curate.add_examples(args.root, args.area, passing) if passing else curate.ApplyResult()
     _print_json({"added": res.applied, "written": res.validated,
                  "committed": res.committed, "rejected": rejected})
+    return 0
+
+
+def cmd_seed_validate(args) -> int:
+    """Phase-6 trust onboarding: run every written seed against the live DB and emit the
+    examples-validation items. Each seed runs THROUGH execute_sql.py (the agami-query path)
+    so the fan/chasm pre-flight + default_filters always apply — a raw driver could skip
+    that and let a fan-out scan the whole table. A refused/errored seed is surfaced with
+    its `error`, not faked. Replaces ad-hoc 'run all the seeds' scripts."""
+    import os
+    import subprocess
+    import csv as _csv
+    from . import units
+
+    seeds = L.list_prompt_examples(args.root, args.area)
+    exe = sys.executable
+    script = str(Path(__file__).resolve().parent.parent / "execute_sql.py")
+    # the safety pass inside execute_sql.py finds the model via AGAMI_ARTIFACTS_DIR —
+    # point it at the profile dir's parent so the right model loads (fan/chasm + filters).
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(Path(args.root).resolve().parent)}
+    cap = max(0, args.preview)
+    # Load the model once so result numbers are formatted by the SAME units.py the query
+    # path uses (currency symbol + grouping). The validation preview must MATCH the real
+    # answer — a column with unit: INR shows ₹ here too, not a bare number. If the model
+    # can't load, fall back to raw cells (no regression).
+    try:
+        fmt_org = L.load_organization(args.root)
+    except Exception:
+        fmt_org = None
+    items: list[dict] = []
+    for i, ex in enumerate(seeds, 1):
+        sql = (ex.get("sql") or "").strip()
+        item: dict = {"n": i, "question": ex.get("question", ""), "sql": sql,
+                      "state": "unreviewed", "row_headers": [], "row_preview": [], "row_count": 0}
+        if not sql:
+            item["error"] = "seed has no SQL"
+            items.append(item)
+            continue
+        proc = subprocess.run(
+            [exe, script, "--profile", args.profile, "--area", args.area, "--sql", sql],
+            capture_output=True, text=True, env=env,
+        )
+        if proc.returncode != 0:
+            # SQL error, or a fan/chasm pre-flight refusal — surface it; never fake a result.
+            item["error"] = (proc.stderr or "").strip()[:600] or f"execute_sql exit {proc.returncode}"
+        else:
+            rows = list(_csv.reader(io.StringIO(proc.stdout)))
+            if rows:
+                headers = rows[0]
+                data = rows[1:]
+                # trace each output column → unit through the seed's SQL, then format every
+                # cell exactly like the query path (units.format_table): a unit'd column gets
+                # its symbol/grouping, a bare number gets grouping; non-numbers pass through.
+                unit_map = {}
+                if fmt_org is not None:
+                    try:
+                        unit_map = RT.resolve_result_units(fmt_org, sql)
+                    except Exception:
+                        unit_map = {}
+                if data:
+                    # match a column's unit by name OR positional key (#ci) — like
+                    # units.format_table — so a dialect that re-cases result headers (e.g.
+                    # Snowflake returns TOTAL_OUTSTANDING for alias `total_outstanding`)
+                    # still resolves the unit and shows the currency symbol.
+                    data = [[units.format_cell(c, unit_map.get(h) or unit_map.get(f"#{ci}"))
+                             for ci, (h, c) in enumerate(zip(headers, row))]
+                            for row in data]
+                item["row_headers"] = headers
+                item["row_count"] = len(data)
+                item["row_preview"] = data[:cap]
+        items.append(item)
+    _print_json(items)
     return 0
 
 
@@ -323,6 +421,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add_example)
 
+    sp = sub.add_parser("remove-example", help="reject prompt example(s) by question (status: rejected — kept for audit, dropped from the runtime ranker)")
+    sp.add_argument("root")
+    sp.add_argument("--area", required=True)
+    sp.add_argument("--question", required=True, action="append",
+                    help="exact question text of an example to reject (repeatable for several)")
+    sp.add_argument("--signer", default=None, help="who rejected it (recorded in the curation log)")
+    sp.add_argument("--role", default=None)
+    sp.set_defaults(func=cmd_remove_example)
+
     sp = sub.add_parser("format-table", help="format a result CSV into a deterministic markdown table (exact numbers)")
     sp.add_argument("--csv-file", default=None, help="result CSV (header row + rows); omit to read stdin")
     sp.add_argument("--units", default=None, help='JSON header->unit map, e.g. {"outstanding":"INR"}')
@@ -334,6 +441,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", required=True, help="credentials profile (for the live-DB validation)")
     sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metric]}")
     sp.set_defaults(func=cmd_seed_examples)
+
+    sp = sub.add_parser("seed-validate", help="run every written seed against the live DB (through execute_sql's safety pass) + emit examples-validation items")
+    sp.add_argument("root")
+    sp.add_argument("--area", required=True)
+    sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
+    sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
+    sp.set_defaults(func=cmd_seed_validate)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)

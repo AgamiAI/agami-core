@@ -290,7 +290,10 @@ def _build_table(
     est = _try(runner, dialect.sql_row_estimate(schema, table)) if dialect.sql_row_estimate(schema, table) else None
     if est and est and est[0].get("estimated_rows") not in (None, ""):
         try:
-            perf = PerformanceHints(estimated_row_count=int(float(est[0]["estimated_rows"])))
+            perf = PerformanceHints(
+                estimated_row_count=int(float(est[0]["estimated_rows"])),
+                estimated_row_count_at=_NOW,  # so the receipt can show "estimated as of <date>"
+            )
         except (ValueError, TypeError):
             perf = None
 

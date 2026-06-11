@@ -278,3 +278,142 @@ def test_sm_wrapper_resolves_and_runs(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert "OK" in proc.stdout or "error" not in proc.stdout.lower()
+
+
+def test_validate_tolerates_excluded_table_but_flags_genuine_orphan(tmp_path):
+    """Regression: excluding a table flips its tables/<T>.yaml to review_state:
+    rejected but intentionally leaves the subject_area.yaml `tables:` ref in place.
+    `cmd_validate` loads with include_rejected=True (matching curate), so an
+    intentional exclusion does NOT false-flag as orphan_table_ref — while a ref to a
+    table that was never defined still fails."""
+    from semantic_model import curate
+    _model(tmp_path)
+    # exclude a table; its subject_area.yaml ref stays in place
+    res = curate.apply(tmp_path, [{"op": "exclude", "kind": "table", "area": "s", "name": "order_items"}])
+    assert res.validated, "curate's own pre-write validation should pass on an exclusion"
+    rc, out = _run(["validate", str(tmp_path)])
+    assert rc == 0, f"validate should tolerate the excluded table's dangling ref, got:\n{out}"
+    assert "orphan_table_ref" not in out
+
+    # a GENUINE orphan — a ref to a table that was never defined — must still fail
+    sa = tmp_path / "subject_areas" / "s" / "subject_area.yaml"
+    doc = yaml.safe_load(sa.read_text())
+    doc["tables"].append({"storage_connection": "c", "schema": "public", "table": "never_defined"})
+    sa.write_text(yaml.safe_dump(doc))
+    rc2, out2 = _run(["validate", str(tmp_path)])
+    assert rc2 == 1 and "orphan_table_ref" in out2
+
+
+def test_seed_validate_runs_through_safety_and_shapes_items(tmp_path, monkeypatch):
+    """`sm seed-validate` runs each written seed and emits examples-validation items.
+    The guarantees we lock: (1) every seed is executed via execute_sql.py WITH `--area`
+    and AGAMI_ARTIFACTS_DIR set — so the fan/chasm pre-flight + default_filters always
+    run (a raw driver could skip them); (2) results shape into {n, question, sql,
+    row_headers, row_preview, row_count, state}; (3) a failing seed surfaces its `error`
+    instead of faking a result. The live-DB call is mocked so the test needs no DB."""
+    import subprocess
+    from semantic_model import curate
+    _model(tmp_path)
+    curate.add_examples(tmp_path, "s", [
+        {"question": "how many orders?", "sql": "SELECT COUNT(*) AS n FROM orders"},
+        {"question": "broken seed", "sql": "SELECT * FROM does_not_exist"},
+    ])
+
+    calls = []
+
+    def fake_run(cmd, capture_output, text, env):
+        calls.append((cmd, env))
+        sql = cmd[cmd.index("--sql") + 1]
+
+        class R:
+            pass
+        r = R()
+        if "does_not_exist" in sql:
+            r.returncode, r.stdout, r.stderr = 1, "", "relation does_not_exist does not exist"
+        else:
+            r.returncode, r.stdout, r.stderr = 0, "n\n42\n", ""
+        return r
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc, out = _run(["seed-validate", str(tmp_path), "--area", "s", "--profile", "p"])
+    assert rc == 0
+    items = json.loads(out)
+    assert len(items) == 2
+
+    ok, bad = items[0], items[1]
+    assert ok["n"] == 1 and ok["question"] == "how many orders?"
+    assert ok["state"] == "unreviewed"
+    assert ok["row_headers"] == ["n"] and ok["row_preview"] == [["42"]] and ok["row_count"] == 1
+    assert "error" not in ok
+    assert bad["error"] and bad["row_count"] == 0 and bad["row_preview"] == []
+
+    # (1) safety: EVERY seed ran with --area + AGAMI_ARTIFACTS_DIR so execute_sql's
+    # fan/chasm pre-flight + default_filters apply — never bypassed.
+    assert len(calls) == 2
+    for cmd, env in calls:
+        assert "--area" in cmd and cmd[cmd.index("--area") + 1] == "s"
+        assert "--no-safety" not in cmd
+        assert env.get("AGAMI_ARTIFACTS_DIR") == str(tmp_path.resolve().parent)
+
+
+def test_seed_validate_formats_numbers_with_model_units(tmp_path, monkeypatch):
+    """The validation preview must show numbers formatted by the SAME units.py the query
+    path uses — a column with a currency unit shows its symbol + grouping here too, not a
+    bare number (the gap that made users re-type 'format as currency' on every example)."""
+    import subprocess
+    from semantic_model import curate, runtime as RT
+    _model(tmp_path)
+    curate.add_examples(tmp_path, "s", [{"question": "total billed?", "sql": "SELECT SUM(total) AS total FROM orders"}])
+
+    def fake_run(cmd, capture_output, text, env):
+        class R:
+            pass
+        r = R()
+        # UPPERCASE header — mimics Snowflake re-casing the `total` alias to TOTAL. The
+        # unit must still attach via the positional key, like the live query path does.
+        r.returncode, r.stdout, r.stderr = 0, "TOTAL\n1234567\n", ""
+        return r
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # resolve_result_units (exercised elsewhere) keys off the SQL alias as written (lowercase)
+    # AND a positional `#i` — exactly what it returns in practice. The header here is
+    # UPPERCASE, so only the positional `#0` matches: this pins the fallback that was missing.
+    monkeypatch.setattr(RT, "resolve_result_units", lambda org, sql: {"total": "USD", "#0": "USD"})
+
+    rc, out = _run(["seed-validate", str(tmp_path), "--area", "s", "--profile", "p"])
+    assert rc == 0
+    item = json.loads(out)[0]
+    assert item["row_preview"] == [["$1,234,567.00"]], item["row_preview"]  # not the bare "1234567"
+
+
+def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
+    """`remove-example` rejects by question: the example stays in examples.yaml flagged
+    `status: rejected` (audit) but is dropped from the default runtime ranker view — the
+    same keep-for-audit/exclude-from-runtime contract as a rejected table/column/metric,
+    instead of a skill hand-deleting the YAML."""
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    curate.add_examples(tmp_path, "s", [
+        {"question": "how many orders?", "sql": "SELECT COUNT(*) FROM orders"},
+        {"question": "total billed?", "sql": "SELECT SUM(total) FROM orders"},
+    ])
+
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "s",
+                    "--question", "total billed?", "--signer", "x@y.com", "--role", "cto"])
+    assert rc == 0
+    res = json.loads(out)
+    assert len(res["rejected"]) == 1 and res["validated"]  # (committed is False in the non-git test fixture)
+
+    # runtime view: the rejected example no longer anchors the ranker
+    runtime = list_prompt_examples(tmp_path, "s")
+    assert [e["question"] for e in runtime] == ["how many orders?"]
+
+    # audit view: it's still there, flagged rejected
+    audit = list_prompt_examples(tmp_path, "s", include_rejected=True)
+    rej = [e for e in audit if e["question"] == "total billed?"]
+    assert len(rej) == 1 and rej[0]["status"] == "rejected"
+
+    # a question that doesn't exist is reported (skipped), not silently swallowed
+    rc2, out2 = _run(["remove-example", str(tmp_path), "--area", "s", "--question", "no such q?"])
+    assert rc2 == 1 and json.loads(out2)["skipped"]

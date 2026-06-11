@@ -26,7 +26,7 @@ For chart template: [`shared/chart-template.html`](../../shared/chart-template.h
 
 ## Invocation conventions
 
-**Read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) before suggesting any slash command in chat.** Agami slash commands: `/agami-connect`, `/agami-query`, `/agami-review`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. Never write the un-prefixed forms (`/init`, `/connect`, `/query-database`, etc.) or colon-namespaced forms (`/agami:init`, etc.) — those don't exist. **`/agami-init` was folded into `/agami-connect` Phase 0a** — credential setup now lives there.
+**Read [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) before suggesting any slash command in chat.** Agami slash commands: `/agami-connect`, `/agami-query`, `/agami-model`, `/agami-save-correction`, `/agami-reconcile`. (`/agami-model`'s Review tab absorbed the former `/agami-review`.) Never write the un-prefixed forms (`/init`, `/connect`, `/query-database`, etc.) or colon-namespaced forms (`/agami:init`, etc.) — those don't exist. **`/agami-init` was folded into `/agami-connect` Phase 0a** — credential setup now lives there.
 
 For chat replies, **prefer natural language over slash commands** — it reads better and the skill's `when_to_use` matcher routes correctly:
 
@@ -97,7 +97,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --area A --tables t1 t2   #
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" examples "$ROOT" --area A --query "…"     # examples-first ranking
 ```
 
-The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-review` / `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-review to reconcile."*
+The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-model to reconcile."*
 
 ### 1c — what the model gives you
 
@@ -223,6 +223,8 @@ For a single profile, follow the **examples-first canonical loop** — the subje
 
 1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **Never SELECT a `sensitive` column's raw values** — aggregate or omit. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
 2. **Schema context** — the `get_table_context` output for the chosen tables (columns + types + caveats + value_transforms), the area's relationships (rendered as `from.col → to.col [cardinality]`), and the area's metrics (`<name>: <binding> -- <calculation>` + synonyms). `default_filters` need not be enumerated — `execute_sql` auto-applies them (step below) — but DO honor any caveats.
+
+   **Unreviewed metrics are USED, not refused.** When the question names a metric whose `review_state ≠ approved`, still use its binding and answer — do NOT block or refuse on it. The trust layer surfaces it as a **warning on the receipt** (Phase 4e.iii.5: *"Used metric `X` which has not been signed off"*), not a hard gate. The loader already drops only `rejected` metrics; an `unreviewed`/`proposed` one is yours to use, with the warning carrying the honesty. (Same for unreviewed joins/entities and `stale` entries — warn, never refuse.)
 3. **Organization context** — `ORGANIZATION.md` (step 1d.2), heading `## Organization context`. Binding domain context.
 4. **User memory** — `USER_MEMORY.md` (step 1d.1), heading `## User memory (preferences and policies)`.
 5. **Few-shot examples** — the ranked matches from step 2.
@@ -365,8 +367,11 @@ The Bash result (CSV stdout, stderr, exit code) is for the skill to parse, not f
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" prepare "$ROOT" --area <area> --sql-file /tmp/agami-q.sql
 ```
 
-It returns JSON: `{action, risk, sql, rewritten, applied_filters, units, reason}`. (`units` is the `{output_column: unit}` map traced through the final SQL — keep it for the table render in 4d.)
-- `action: "refuse"` (a fan/chasm trap that would change result shape) → **don't execute.** Read `suggestion`, regenerate the SQL accordingly (window function, or pre-aggregate in a CTE), and re-prepare.
+It returns JSON: `{action, risk, sql, rewritten, applied_filters, units, reason}` (on a refuse it instead returns `{action, risk, reason, suggestion, sql}` with exit 1). (`units` is the `{output_column: unit}` map traced through the final SQL — keep it for the table render in 4d.)
+- `action: "refuse"` (a fan/chasm trap that would change result shape) → **don't execute, and don't silently guess.** Read `reason` + `suggestion`, then branch on whether a faithful rebuild is unambiguous:
+  - **Single faithful rebuild** — there's one restructuring that preserves exactly what the user asked for (typically a chasm trap: pre-aggregate each measure in its own CTE, then outer-join; or move the aggregate into a window function to keep raw rows). Regenerate the SQL per `suggestion`, re-prepare, and **note in the receipt** that the query was restructured to avoid a `<risk>`. The user gets the right number *with* provenance — not a silent swap.
+  - **Ambiguous rebuild** — the fan-out join is also filtering or grouping, so the candidate rewrites return *different numbers* (e.g. "loans with ≥1 payment since January" vs a payment-weighted total). Do **not** pick one. Surface the ambiguity to the user as a short "Did you mean…?" with 2–3 concrete interpretations, one plain-language sentence each (no SQL). Generate SQL for the interpretation they choose, then re-prepare.
+  - If you can't form a faithful rebuild, or `prepare` still refuses after restructuring: stop and tell the user plainly what the conflict is (the `reason`, in one sentence). Don't loop.
 - `action: "auto_rewrite"` → a fan/chasm trap was auto-corrected; use the returned `sql` (note `rewritten: true` + `reason` in the receipt).
 - `action: "allow"` → use the returned `sql` (it already has `applied_filters` AND-ed in; surface them in the receipt).
 
@@ -604,6 +609,9 @@ Build the receipt as a single JSON object. Schema (see [`shared/chart-template.h
      "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum>",
      "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
   ],
+  "assumptions": [
+    {"column": "<schema>.<table>.<column>", "meaning": "<the AI-written description>", "source": "ai_unvalidated"}
+  ],
   "warnings": ["<one-liner per unreviewed entry that the answer used>"]
 }
 ```
@@ -615,12 +623,16 @@ How to populate each field:
   model_version=$(ls -t "$artifacts_dir/$profile/.snapshots/" 2>/dev/null | head -n1)
   ```
   If `.snapshots/` doesn't exist or is empty (legacy v1.2 model that pre-dates trust-layer), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."* **Do not look for `model_version` inside `index.yaml`** — it's not stored there; the snapshot directory is the source of truth.
-- **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the count returned by the EXPLAIN or post-execution counter (skip if uncertain).
+- **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the **table's size** — pass the table's `performance_hints.estimated_row_count` from the model (the *same* value Phase 3 reads for the scan-risk check, e.g. `12000000`). This is "how big is this dataset," not the query's result-row count. Also pass **`rows_as_of`** = the table's `performance_hints.estimated_row_count_at` (when that estimate was last measured at introspection) — the receipt renders "≈N rows (estimated as of <date>)" so the reader knows it's a point-in-time estimate, not a live count. Only pass `null` for `rows` if the table genuinely has no `estimated_row_count` in the model — don't default to `null` out of caution when the model has it.
   **`freshness`** — pass the **raw ISO timestamp** from `agami.introspect_meta.introspected_at` (e.g., `"2026-05-10T11:57:13Z"`). The chart template prettifies it to `"introspected May 10, 2026, 11:57 AM"` automatically. Don't prefix with "introspected" yourself or you'll double-prefix. If the upstream load cadence is known (e.g., daily ETL at 2am UTC), pass a pre-formatted string instead — e.g., `"2026-05-10T02:00:00Z (daily 2am UTC ETL)"` — and the template passes it through unchanged. Pass `null` when freshness is unknowable.
 - **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the model (from `get_table_context`). **Pull EVERY trust field** carried on the relationship: `relationship` (cardinality), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state` (enum), `signed_off_by`, `signed_off_role`, `signed_off_at`, plus `on:` if it's a CAST/compound join. The template's `approvalPhrase` reads all of them to render "confirmed (FK declared)" vs "approved by jane@x.com (cfo), Mar 15" vs "proposed (inferred join — confirm)". For composite or multi-hop joins, list each edge. Also surface any **auto-rewrite** the pre-flight applied (fan/chasm) and the **default_filters** that were applied (from execute_sql's stderr notes).
 - **`metrics`** — every model metric whose `bindings` SQL matches a fragment in the generated SQL. **Pull EVERY trust field:** `calculation` (prose intent), `confidence`, `review_state`, `signed_off_by`, `signed_off_role`, `signed_off_at`, `source`. If a metric is genuinely unreviewed, that's fine — the receipt shows "proposed" honestly. Don't half-populate (it renders a meaningless "unreviewed (?)").
 - **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING. **Pull EVERY trust field** from the filter's entry: `expression`, `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships and metrics.
-- **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning naming the entry and its confidence. Examples: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`, `"Used metric `revenue` which has not been signed off."`. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-review to walk these items, or say 'open the review dashboard'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely — no need for an action line if everything is approved.
+- **`assumptions`** — the AI-derived column meanings this answer **leaned on**, so a wrong/unknown one is caught in context instead of via an upfront review of hundreds of descriptions (see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). For each column the SQL used in a **load-bearing** way — SELECT / WHERE / GROUP BY / ORDER BY / a metric binding, **not** pure join plumbing — look it up in `get_table_context` and surface two cases:
+  - `description_source == "ai_unvalidated"` (a guess) AND `description` non-empty → `{column, meaning: <description>, source: "ai_unvalidated"}`.
+  - `description_source == "ai_unknown"` (agami couldn't read it) → `{column, meaning: null, source: "ai_unknown"}` — agami used a column it doesn't understand; flag it loudly.
+  Columns with `description_source` of `human`, `ai_validated`, or `null` are NOT surfaced. **Cap at 3**, ranked by load-bearing-ness (filter/group-by > select > order-by) and putting `ai_unknown` first (an unknown the query relied on is the riskiest). Pass `[]` when none qualify. Advisory — never blocks or warns; it's a "here's what I assumed / didn't know" so the user can correct, confirm, or describe.
+- **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning naming the entry and its confidence. Examples: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`, `"Used metric `revenue` which has not been signed off."`. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-model review to walk these items, or say 'open the review queue'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely — no need for an action line if everything is approved. (Assumptions are NOT warnings — keep them separate.)
 
 Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
 
@@ -702,6 +714,28 @@ After writing the file and triggering `open`:
 If you genuinely detect that you're running in Claude Desktop (which has a working preview pane via path clicks), you may format the path as ``Open `~/.agami/charts/<profile>/<ts>.html` `` (backticks, not a link) — Desktop users get the click-to-preview experience naturally.
 
 For hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
+
+**Assumption nudge (only when `assumptions` is non-empty).** If the receipt's `assumptions[]` has entries, add ONE short line right after the answer (before the follow-ups) so a wrong/unknown meaning is caught in context. Phrase by `source`:
+- `ai_unvalidated` (a guess) → *"read `net_margin` as '(revenue − cost) ÷ revenue'"*.
+- `ai_unknown` (no description) → *"used `xyz`, which I don't have a description for — is that the right column?"* (lead with these; they're riskier).
+
+e.g.:
+```
+ℹ This answer used xyz, which I don't have a description for — is that the right column? It also read net_margin as "(revenue − cost) ÷ revenue". Tell me if anything's off (or what xyz means); say "looks right" to confirm the rest.
+```
+Keep it to the columns in `assumptions[]` (≤3), one clause each, plain English. Skip the line entirely when `assumptions` is empty. Soft nudge, never a blocking question.
+
+#### 4e.viii — assumption confirm / correct loop
+
+When the user responds to that nudge:
+
+- **Confirms** ("looks right", "yes", "confirmed") → mark those descriptions validated so they never resurface. Build one curate ops array — one `edit` per confirmed column setting `description_source` to `ai_validated` — write it to `/tmp/agami-confirm-desc.json` (Write tool), and apply:
+  ```bash
+  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-confirm-desc.json
+  ```
+  Each op: `{"op":"edit","kind":"table","area":"<area>","name":"<table>","column":"<col>","field":"description_source","value":"ai_validated"}`. Ack in one line: *"✓ Locked in — won't ask about those again."*
+- **Corrects one, or describes an unknown** ("net_margin is actually …", "xyz means customer lifetime value") → route to **agami-save-correction**: it writes the column `description` (which flips `description_source` to `human` automatically via the curate edit) AND saves the (question, SQL) example. This is the path for both a wrong `ai_unvalidated` guess and a filled-in `ai_unknown` blank — either way the column now has a trusted, human description. Don't hand-edit here — let save-correction classify + write.
+- **Ignores it / asks something else** → do nothing. An `ai_unvalidated` stays a guess; an `ai_unknown` stays unknown. Either may resurface if a later query uses that column in a load-bearing way. Never auto-confirm on silence — that's the rubber-stamp we're avoiding. (Note: you can't "confirm" an `ai_unknown` — there's nothing to confirm; it needs a description, so only a correction clears it.)
 
 ### 4e.5 — GitHub-star ask (one-time, gates Phase 4f)
 

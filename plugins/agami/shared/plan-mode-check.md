@@ -1,6 +1,6 @@
 # Plan-mode preflight — read this before invoking any agami skill
 
-Claude Code's **Plan mode** restricts the assistant to read-only tools — no `Edit`, no `Write`, and Bash is locked down to commands the host considers safe. Every agami skill except trivial reopen-chart flows needs at least one of those: `agami-connect` writes the credentials template (Phase 0a) and the semantic model, `agami-query` writes charts and runs `psql`/`mysql`/`snowsql` via Bash, `agami-save-correction` writes corrections, `agami-review` + `agami-model` edit YAMLs.
+Claude Code's **Plan mode** restricts the assistant to read-only tools — no `Edit`, no `Write`, and Bash is locked down to commands the host considers safe. Every agami skill except trivial reopen-chart flows needs at least one of those: `agami-connect` writes the credentials template (Phase 0a) and the semantic model, `agami-query` writes charts and runs `psql`/`mysql`/`snowsql` via Bash, `agami-save-correction` writes corrections, `agami-model` edits YAMLs (curation + trust sign-off).
 
 If a skill starts in plan mode and barrels ahead, the failure happens partway through (a Bash or Write call gets blocked), the partial state is confusing, and the user has to start over. The fix: every skill detects plan mode at entry and asks the user to switch **before** doing any work.
 
@@ -65,11 +65,11 @@ Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call
 
 > I can't save corrections in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. The correction won't persist otherwise.
 
-### `agami-review`
+### `agami-model`
 
-Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Approving / rejecting items writes back to YAML files. Surface ONLY this:
+Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Excluding / editing / approving / rejecting entries writes back to YAML files. Surface ONLY this:
 
-> I can't apply review edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect the dashboard HTML if it was rendered in a prior session — open `~/.agami/review/<profile>/<ts>.html` directly.)
+> I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/model/<profile>/<ts>.html`.)
 
 ### `agami-reconcile`
 

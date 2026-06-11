@@ -235,7 +235,7 @@ Full spec: `[plugins/agami/shared/user-memory-format.md](../plugins/agami/shared
 }
 ```
 
-Written by `agami-connect` Phase 0a on first run; updated by `agami-review` / `agami-model` the first time the curator approves a Rule 1 item (the `reviewer_email` + `reviewer_role` get persisted so future sessions don't re-ask).
+Written by `agami-connect` Phase 0a on first run; updated by `agami-model` (its Review tab) the first time the curator approves a Rule 1 item (the `reviewer_email` + `reviewer_role` get persisted so future sessions don't re-ask).
 
 ### `~/.agami/.optins`
 

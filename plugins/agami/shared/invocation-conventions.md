@@ -1,13 +1,12 @@
 # Invocation conventions — read this BEFORE telling the user to invoke a skill
 
-agami ships six skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
+agami ships five skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
 
 | Skill | Slash command | Natural-language triggers (via `when_to_use`) |
 |---|---|---|
 | agami-connect | `/agami-connect` | "set up agami", "connect to my database", "introspect the schema", "reload the schema", "reintrospect", "add a new database" |
 | agami-query | `/agami-query` | any data question — "how many", "show me", "top N", "trend over time", etc. |
-| agami-review | `/agami-review` | "open the review dashboard", "review my model", "walk through the review queue" |
-| agami-model | `/agami-model` | "open the model explorer", "show me the model", "exclude a table", "remove this column" |
+| agami-model | `/agami-model` | "open the model explorer", "show me the model", "exclude a table", "remove this column" — AND review/sign-off: "open the review dashboard", "review my model", "sign off the metrics", "approve N", "walk the review queue" (its Review tab absorbed the former `/agami-review`) |
 | agami-save-correction | `/agami-save-correction` | "save this as a correction", "remember this", "use this SQL next time" |
 | agami-reconcile | `/agami-reconcile` | "reconcile against my dashboard", "verify these numbers against agami" |
 
@@ -28,6 +27,7 @@ The model often reaches for slash patterns it's seen on other plugins. None of t
 - `/agami:connect`, `/agami:query-database`, etc. — colon-namespaced forms **do not exist**.
 - `/init`, `/connect`, `/query-database`, etc. — bare forms without the `agami-` prefix. **`/init` collides with Claude Code's built-in `/init`** (which generates a CLAUDE.md), so we explicitly avoid it. The others are too generic and collide with other plugins.
 - `/agami-init` — **deprecated and removed.** Its flow now lives at `/agami-connect` Phase 0a. If you see references in older docs, ignore them.
+- `/agami-review` — **removed.** Its trust-review dashboard was folded into `/agami-model` (the Review tab). Use `/agami-model` (or `/agami-model review` to open straight on the sign-off queue). Ignore older references.
 - `agami init`, `agami connect` (no slash, no @) — **do not exist** as commands.
 - `@agami:init`, `@agami:connect` — colon-namespaced @-forms **do not exist**.
 
@@ -41,7 +41,7 @@ For most chat replies, **prefer natural-language phrasing over slash commands** 
 |---|---|
 | "Run `/agami-connect reintrospect`" | "Say 'reload the schema' and I'll re-introspect from your DB." |
 | "Run `/agami-save-correction`" | "Say 'save this as a correction' and I'll add it to the examples library." |
-| "Run `/agami-review`" | "Say 'open the review dashboard' to walk the queue." |
+| "Run `/agami-review`" (removed) | "Say 'open the review dashboard' to walk the sign-off queue." (routes to `/agami-model`'s Review tab) |
 | "Type `/agami-query`" | Just answer the question directly. Slash commands are unnecessary. |
 
 ## When the model invents a new form

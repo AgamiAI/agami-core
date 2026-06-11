@@ -55,6 +55,8 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     from semantic_model import loader as _L
 
     org = _L.load_organization(profile_dir, include_rejected=True)
+    storage_type = (org.storage_connections[0].storage_type
+                    if getattr(org, "storage_connections", None) else "")
     out_schemas: list[dict] = []
     total_tables = total_fields = total_excluded_tables = total_excluded_fields = 0
     # flat top-level lists (each entry tagged with its `area`) — mirrors the existing
@@ -63,6 +65,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     entities_out: list[dict] = []
     rels_out: list[dict] = []
     examples_out: list[dict] = []
+    areas_out: list[dict] = []
 
     org_md_path = profile_dir / "ORGANIZATION.md"
     organization_md = org_md_path.read_text(encoding="utf-8") if org_md_path.exists() else ""
@@ -89,19 +92,22 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     total_excluded_fields += 1
                 fields_out.append({
                     "name": c.name, "qname": f"{qname}.{c.name}", "type": c.type,
-                    "description": c.description, "review_state": c.review_state,
+                    "description": c.description, "description_source": c.description_source,
+                    "review_state": c.review_state,
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
                     "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
                     "date_format": c.date_format, "timezone": c.timezone,
                 })
             out_tables.append({
                 "name": t.name, "qname": qname, "description": t.description,
+                "description_source": t.description_source,
                 "row_count": (t.performance_hints.estimated_row_count
                               if t.performance_hints else None),
                 "review_state": t.review_state, "origin": "", "excluded": t_excluded,
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
                 "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
-                "synonyms": [], "area": sa.name, "fields": fields_out,
+                "synonyms": [], "area": sa.name, "db_schema": t.schema_name or "",
+                "fields": fields_out,
             })
 
         for e in sa.entities:
@@ -110,7 +116,9 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "other_names": e.other_names, "value_pattern": e.value_pattern,
                 "maps_to": [f"{m.table}.{m.column}" for m in e.maps_to],
                 "description": e.description, "review_state": e.review_state,
-                "excluded": e.review_state == "rejected", "area": sa.name,
+                "confidence": e.confidence, "excluded": e.review_state == "rejected",
+                "signed_off_by": e.signed_off_by, "signed_off_role": e.signed_off_role,
+                "rule": 2, "area": sa.name,
             })
 
         for mm in sa.metrics:
@@ -118,8 +126,10 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "name": mm.name, "qname": f"{sa.name}.{mm.name}", "calculation": mm.calculation,
                 "bindings": mm.bindings, "unit": mm.unit, "other_names": mm.other_names,
                 "source_tables": mm.source_tables, "description": mm.description,
-                "review_state": mm.review_state, "excluded": mm.review_state == "rejected",
-                "area": sa.name,
+                "review_state": mm.review_state, "confidence": mm.confidence,
+                "excluded": mm.review_state == "rejected",
+                "signed_off_by": mm.signed_off_by, "signed_off_role": mm.signed_off_role,
+                "rule": 1, "area": sa.name,
             })
 
         for r in sa.relationships:
@@ -128,8 +138,10 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "from_table": r.from_table, "from_column": r.from_column,
                 "to_table": r.to_table, "to_column": r.to_column, "on": r.on,
                 "cardinality": r.relationship, "description": r.description,
-                "review_state": r.review_state, "excluded": r.review_state == "rejected",
-                "area": sa.name,
+                "review_state": r.review_state, "confidence": r.confidence,
+                "excluded": r.review_state == "rejected",
+                "signed_off_by": r.signed_off_by, "signed_off_role": r.signed_off_role,
+                "rule": 2, "area": sa.name,
             })
 
         for i, ex in enumerate(_L.list_prompt_examples(profile_dir, sa.name)):
@@ -141,16 +153,49 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
 
         out_schemas.append({"name": sa.name, "description": sa.description, "tables": out_tables})
 
+        # subject-area metadata for the Subject Areas tab (a subject area is the
+        # model's primary unit — the engine proposes one for small DBs, several for large)
+        db_schemas = sorted({t.schema_name for t in sa.tables_defined if t.schema_name})
+        areas_out.append({
+            "name": sa.name,
+            "description": sa.description,
+            "default_time_window": sa.default_time_window,
+            "db_schemas": db_schemas,
+            "tables": [t.name for t in sa.tables_defined],
+            "table_count": len(sa.tables_defined),
+            "entity_count": len(sa.entities),
+            "metric_count": len(sa.metrics),
+            "relationship_count": len(sa.relationships),
+        })
+
+    # org-level cross-area joins (edges between two subject areas)
+    cross_out: list[dict] = []
+    for r in getattr(org, "cross_subject_area_relationships", []) or []:
+        cross_out.append({
+            "from_subject_area": getattr(r, "from_subject_area", ""),
+            "to_subject_area": getattr(r, "to_subject_area", ""),
+            "from_table": r.from_table, "from_column": r.from_column,
+            "to_table": r.to_table, "to_column": r.to_column, "on": r.on,
+            "cardinality": r.relationship, "description": r.description,
+        })
+
     return {
         "profile": profile,
         "organization_md": organization_md,
+        "storage_type": storage_type,
         "totals": {
-            "schemas": len(out_schemas), "tables": total_tables, "fields": total_fields,
+            "schemas": len(out_schemas), "subject_areas": len(areas_out),
+            "tables": total_tables, "fields": total_fields,
             "excluded_tables": total_excluded_tables, "excluded_fields": total_excluded_fields,
             "metrics": len(metrics_out), "entities": len(entities_out),
             "relationships": len(rels_out), "examples": len(examples_out), "named_filters": 0,
+            "cross_relationships": len(cross_out),
+            # the model was validated on write (the loader only succeeds on a valid tree),
+            # so a successful render implies a structurally-valid model.
+            "validated": True,
         },
-        "schemas": out_schemas, "metrics": metrics_out, "entities": entities_out,
+        "schemas": out_schemas, "subject_areas": areas_out, "cross_relationships": cross_out,
+        "metrics": metrics_out, "entities": entities_out,
         "relationships": rels_out, "examples": examples_out, "named_filters": [],
     }
 
@@ -166,12 +211,16 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
     # comment carries no real `{{…}}` tokens, so a `-->` in the text can't close it.
     manifest_json = json.dumps(manifest, separators=(",", ":")).replace("</", "<\\/")
 
+    # Human-readable generation timestamp (e.g. "10 Jun 2026, 13:57 UTC") — the
+    # explorer shows this verbatim, so format it here rather than re-parsing ISO in JS.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    generated_at = now.strftime("%-d %b %Y, %H:%M UTC")
+
     out = (
         template
         .replace("{{REPORT_TITLE}}", title)
         .replace("{{PROFILE}}", profile)
-        .replace("{{GENERATED_AT}}",
-                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
+        .replace("{{GENERATED_AT}}", generated_at)
         .replace("{{MANIFEST_JSON}}", manifest_json)
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark)
         .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", logo_light)
@@ -191,6 +240,11 @@ def main() -> int:
                    help="Output HTML path")
     p.add_argument("--manifest-out",
                    help="Optional: also dump the raw manifest JSON to this path")
+    p.add_argument("--initial-tab", default="auto",
+                   choices=["auto", "organization", "areas", "tables", "metrics", "entities",
+                            "joins", "examples", "review", "queued"],
+                   help="Tab the dashboard opens on. 'auto' (default) opens on Review when "
+                        "anything needs sign-off, else Tables; 'review' forces the sign-off queue.")
     args = p.parse_args()
 
     artifacts_dir = Path(os.path.expanduser(args.artifacts_dir)).resolve()
@@ -200,6 +254,20 @@ def main() -> int:
         return 1
 
     manifest = build_manifest(profile_dir, args.profile)
+    # 'auto' default: lead with the sign-off queue when there's pending review work
+    # (unreviewed metrics/entities/joins, or columns agami couldn't read), else Tables.
+    initial = args.initial_tab
+    if initial == "auto":
+        pending = 0
+        for arr in (manifest["metrics"], manifest["entities"], manifest["relationships"]):
+            pending += sum(1 for x in arr
+                           if x.get("review_state") in ("unreviewed", "stale") and not x.get("excluded"))
+        for sc in manifest["schemas"]:
+            for t in sc.get("tables", []):
+                pending += sum(1 for f in t.get("fields", [])
+                               if f.get("description_source") == "ai_unknown" and not f.get("excluded"))
+        initial = "review" if pending > 0 else "tables"
+    manifest["initial_tab"] = initial
     if not manifest["schemas"]:
         sys.stderr.write(
             f"agami: no schemas found in {profile_dir}. Run /agami-connect first.\n"
@@ -217,9 +285,14 @@ def main() -> int:
         mpath.write_text(json.dumps(manifest, indent=2))
 
     t = manifest["totals"]
+
+    def _plural(n: int, word: str) -> str:
+        return f"{n} {word}{'' if n == 1 else 's'}"
+
     print(
         f"Wrote {out_path} "
-        f"({t['schemas']} schemas · {t['tables']} tables · {t['fields']} fields; "
+        f"({_plural(t['schemas'], 'schema')} · {_plural(t['tables'], 'table')} · "
+        f"{_plural(t['fields'], 'field')}; "
         f"{t['excluded_tables']} tables + {t['excluded_fields']} columns currently excluded)"
     )
     return 0

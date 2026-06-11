@@ -72,29 +72,21 @@ Watch for the new behavior:
 
 ---
 
-## 3. `/agami-review` — the dashboard
+## 3. `/agami-model review` — the sign-off queue
 
 ```text
-/agami-review
+/agami-model review
 ```
 
-Watch for:
+(The former `/agami-review` is now the **Review** tab of the model dashboard.) Watch for:
 
-- **HTML dashboard rendered** at `~/.agami/review/<ts>.html`. Open it.
-- The summary card matches the Phase 5.5 numbers.
-- Each item has: number, title, confidence pill, review-state badge, source-signal block (✓/✗ list), inferred fragment, YAML path, reply hint.
-- **Try the chat back-channel:**
-  ```
-  approve 1
-  ```
-  Skill responds: `✓ Applied: approved 1 (#1). N items remain. Re-rendering.` and renders a new dashboard.
+- **HTML dashboard rendered** at `~/.agami/model/<profile>/<ts>.html`, opened on the **Review** tab. Open it.
+- The Review tab splits into **Needs your eyes** (Rule 1 metrics, low-confidence, stale) and **Looks right (confident)**, each with an "Approve all N" button.
+- Each card has: title, confidence + review-state badges, the source signal (metric `calculation` / join cardinality / entity mapping), and Approve / Reject / Edit buttons.
+- **Approve via the dashboard → "Generate feedback for Claude":** click Approve on a metric, generate the feedback block, paste it back. It contains `curate-ops:` with `{"op":"approve","kind":"metric",...,"at":"<UTC ISO>"}`.
+  Skill resolves the curator email + role (Phase 0), applies via `sm curate --signer --role`, responds `✓ Applied: approved 1 …`, and re-renders.
   Verify the entry's YAML now shows `review_state: approved` with `signed_off_by` populated.
-- **Try a Rule 1-style refusal** by approving without `by/role` on a metric (this fixture doesn't have auto-proposed metrics; skip if so).
-- **Try threshold change:**
-  ```
-  threshold 0.5
-  ```
-  Fewer items show. Verify `agami.config.yaml` was written: `cat ~/agami-artifacts/default/agami.config.yaml`.
+- **Try a reject** on an entity → its YAML shows `review_state: rejected`; it drops out of the runtime model.
 - **Try done:**
   ```
   done

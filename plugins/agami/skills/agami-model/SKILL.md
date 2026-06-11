@@ -1,22 +1,25 @@
 ---
 name: agami-model
-description: "Opens the model-explorer dashboard for the active profile's semantic model. Lets the user browse every subject area, table, and field with live search, and queue Exclude / Include actions on tables and columns they don't want the runtime to use. Each action flips the entry's `review_state` to `rejected` (exclude) or `unreviewed` (include) via the curation engine, gated by the validator and committed to the profile's git repo."
-when_to_use: "Use when the user says 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'take out the X table', 'I don't want PII columns', '/agami-model', or after agami-connect's Phase 7 trust-layer summary prompts the user to inspect the model. Also use when the user replies to a previously-rendered model-explorer artifact with one of the chat back-channel commands (exclude tables: ... / include columns: ... / done)."
-argument-hint: "(no args — opens the explorer for the active profile)"
+description: "The single dashboard for the active profile's semantic model — browse, curate, AND sign off the trust layer in one surface. Browse every subject area, table, field, metric, entity, and join with live search; edit descriptions/metrics/entities/joins; exclude tables/columns you don't want queried; add new metrics; edit ORGANIZATION.md. Its **Review tab** is the trust-layer sign-off queue: approve / reject the AI-proposed metrics (Rule 1 — a query using an unsigned metric still answers but carries a warning until it's approved), entities, and inferred joins (Rule 2 — lazy, usable while unreviewed). Every action is queued, submitted back to Claude as one feedback block, applied via the curation engine, and gated by the validator before it touches the YAML. (This skill absorbed the former `/agami-review`.)"
+when_to_use: "Use for BOTH model curation and trust review. Curation: 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'I don't want PII columns', 'add a metric', 'edit ORGANIZATION.md', '/agami-model'. Review / sign-off: 'open the review dashboard', 'review my model', 'what needs review', 'sign off the metrics', 'approve the metrics', 'walk the review queue', '/agami-review' (now folded in here) — or after agami-connect's Phase 4 sign-off gate or Phase 7 summary prompts to review or inspect the model. Also use when the user replies to a previously-rendered dashboard with a back-channel block (exclude tables: … / curate-ops: … / new-metrics: … / done)."
+argument-hint: "[review | preseed | rule1] — open on the sign-off queue; no arg opens the explorer on Tables"
 ---
 
 # agami model
 
-You are running the model-explorer surface. Goal: let the user see every dataset and field in the live semantic model, search for things by name or description, and **remove tables or columns they don't want the runtime to use** — without re-introspecting.
+You are running the unified **model + trust** surface — one dashboard to browse the live semantic model, curate it (exclude / edit / add), AND sign off the trust layer (approve / reject metrics, entities, joins). It replaces the separate model-explorer and review-dashboard surfaces.
 
 This skill orchestrates:
 
-1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `~/.agami/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**.
-2. **Open + wait** — auto-open the file, end the turn, wait for the user to come back with exclude / include commands from the dashboard's "Generate feedback for Claude" button.
-3. **Apply** — for each batch of commands, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state, runs the validator, reverts via git on failure, appends to `curation_log.jsonl`, and commits to the profile's git repo.
+1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `~/.agami/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**. The dashboard has tabs: **Organization · Review · Subject areas · Tables · Metrics · Entities · Joins · Examples · Queued**. The **Review** tab is the sign-off queue (the old `/agami-review`); pass `--initial-tab review` to open on it.
+2. **Open + wait** — auto-open the file, end the turn, wait for the user to come back with a "Generate feedback for Claude" block (exclude/include, approve/reject, edits, new metrics, org edit).
+3. **Apply** — for each batch, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state / stamps sign-off, runs the validator, reverts via git on failure, appends to `curation_log.jsonl`, and commits.
 4. **Re-render** — render to a new timestamped file and re-open. Wait for the next batch.
 
-Trust-spine semantics: "exclude" flips `review_state` to `rejected`. The model loader drops `rejected` tables, columns, and relationships entirely (it loads with `include_rejected=False` for the runtime) — they never appear in prompts, never get joined to, never get aggregated. "Include" flips back to `unreviewed`; the user can re-approve via `/agami-review` if they want a sign-off badge.
+Trust-spine semantics — three actions on the same `review_state` field:
+- **Exclude / Reject** → `rejected`. The loader drops rejected tables, columns, metrics, entities, and relationships entirely (`include_rejected=False` at runtime) — never in prompts, never joined, never aggregated. ("Exclude" is the verb for tables/columns; "Reject" for metrics/entities/joins — same op.)
+- **Include** → back to `unreviewed`.
+- **Approve** → `approved` + a sign-off stamp (`signed_off_by`/`_at`/`_role`). **Rule 1** (metrics) — a query that uses an unsigned metric still answers but carries a "not signed off" **warning** on its receipt until it's approved; **Rule 2** (entities, inferred joins) is usable while unreviewed and self-approves through use. Only `rejected` entries are dropped from the runtime entirely. Approving requires the curator's email + role (Phase 0) — the validator rejects an approved entry with no sign-off stamp.
 
 ## Conversation style
 
@@ -28,16 +31,23 @@ Trust-spine semantics: "exclude" flips `review_state` to `rejected`. The model l
 
 ## Phase 0: Preflight
 
-Same shape as `agami-review`:
-
-- **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered model-explorer artifact at `~/.agami/model/<profile>/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
+- **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/model/<profile>/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
 - **If `<artifacts_dir>/<profile>/org.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
 - **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
 
-Resolve the curator's identity for `curation_log.jsonl` + git commits:
-1. `~/.agami/.config.reviewer_email` — read once-and-persist; see [`agami-review/SKILL.md → Phase 3a`](../agami-review/SKILL.md#3a--validate-the-command).
-2. If absent, ask once: *"What's your email? I'll save it to `~/.agami/.config.reviewer_email` so future review + model actions don't re-ask."* Validate the shape, persist. **Do NOT infer it from any source** — not git config / env / credentials, **and not the Claude Code login / session email** (the host exposes it to the model, but using it produces a silently-wrong audit trail). The sign-off identity must be typed by the user; don't even pre-fill the domain.
+**Scope / initial tab.** Look at `$ARGUMENTS`:
+- `review`, `preseed`, or `rule1` → the user wants the sign-off queue: render with `--initial-tab review` so the dashboard opens on the Review tab. (`preseed`/`rule1` come from `/agami-connect`'s Phase 4 gate — the Review tab already groups Rule 1 metrics under "Needs your eyes", so no separate scope filter is needed; the user signs those off there.)
+- otherwise → no `--initial-tab` (opens on Tables).
+
+**Resolve the curator's identity** (needed to stamp sign-off on Approve ops, and for `curation_log.jsonl` + git commits). The **primary path is the dashboard's footer** — the user types their email + picks a role there, and it rides back on the `signed-off-by:` feedback line (Phase 2). So you usually don't ask at all. Only if a batch arrives with approvals but **no** `signed-off-by:` line, fall back to `~/.agami/.config` (`reviewer_email`/`reviewer_role`); and only if those are absent too, ask once — both at once:
+> To sign off entries I need your email and role. Reply like: `you@company.com / data_lead`
+>
+> Roles: `CFO`, `CTO`, `Data Lead`, `Engineer`, `Analyst`, or type your own.
+>
+> I'll save these to `~/.agami/.config` so I don't ask again.
+
+Parse on `/`, trim, validate email against `\S+@\S+\.\S+`; accept any non-empty role string (≤ 40 chars). Re-prompt only on a bad email. **Persist** by merging `reviewer_email`/`reviewer_role` into `~/.agami/.config` (preserve existing keys), then `chmod 600 ~/.agami/.config`. **Do NOT infer the email from any source** — not git config / env / credentials, **and not the Claude Code login / session email** (the host exposes it, but using it produces a silently-wrong audit trail). The sign-off identity must be typed by the user; don't even pre-fill the domain. Exclude/edit-only sessions don't need the role — only resolve it lazily when an Approve is in the batch.
 
 ---
 
@@ -51,33 +61,36 @@ out="$HOME/.agami/model/$profile/$ts.html"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
+  ${initial_tab:+--initial-tab "$initial_tab"} \
   --out "$out"
 ```
 
-`$AGAMI_PLUGIN_ROOT` resolves the same way as in agami-review (the plugin dir under `~/.claude/plugins/cache/<marketplace>/agami/`). If the env var isn't set, fall back to the conventional install paths described in [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).
+Set `initial_tab=review` when `$ARGUMENTS` was `review`/`preseed`/`rule1` (Phase 0) to force the sign-off queue. **Leave it empty for a plain `/agami-model`** — the renderer then uses its **smart `auto` default**: it opens on **Review** when anything needs sign-off (unreviewed metrics/entities/joins, or columns agami couldn't read), and on **Tables** when the model is all clean (so the user never lands on an empty Review tab). `$AGAMI_PLUGIN_ROOT` is the plugin dir under `~/.claude/plugins/cache/<marketplace>/agami/`. If the env var isn't set, fall back to the conventional install paths described in [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).
 
 **Surface in chat (single block, no padding):**
 
 ```
-Model explorer rendered — <N> schemas · <M> tables · <K> fields.
+Model dashboard rendered — <N> schema(s) · <M> tables · <K> fields · <R> to review.
 ~/.agami/model/<profile>/<ts>.html
 
-The dashboard has live search, filter chips (All / Active / Excluded /
-Unreviewed / Queued), and per-table + per-column Exclude / Include
-buttons. When you exclude a column, it offers **"exclude all N named
-<col>"** — one click drops that column across every table (PII like
-`ssn`/`email`, audit columns, etc.). Click your way through, hit
-"Generate feedback for Claude" at the bottom, paste back here.
+Tabs: Organization · Review · Subject areas · Tables · Metrics · Entities ·
+Joins · Examples · Queued. Live search + status filters per tab.
+• Review tab — the sign-off queue: Approve / Reject the metrics (must be
+  signed off before queries use them), entities, and inferred joins, with a
+  one-click "Approve all" for the confident ones.
+• Tables/Metrics/… — browse + edit; Exclude tables/columns you don't want
+  queried (a column offers "exclude all N named <col>" to drop it everywhere);
+  add metrics; edit ORGANIZATION.md.
+Click through, hit "Generate feedback for Claude" at the bottom, paste back here.
 
 You can also type commands directly:
   exclude tables:  <area>.<table>, <area>.<table>
-  include tables:  <area>.<table>
   exclude columns: <area>.<table>.<column>, <area>.<table>.<column>
-  include columns: <area>.<table>.<column>
+  curate-ops: [{"op":"approve","kind":"metric","area":"...","name":"...","at":"<UTC ISO>"}, ...]
   done
 ```
 
-**Auto-open with the same multi-command fallback chain as agami-review:**
+**Auto-open with the standard multi-command fallback chain:**
 
 ```bash
 ( command -v open    >/dev/null 2>&1 && open "$out" ) || \
@@ -105,14 +118,17 @@ done
 Grammar:
 
 ```
+signed-off-by: you@company.com / data_lead
 exclude tables:  <qname-list>
 include tables:  <qname-list>
 exclude columns: <qname-list>
 include columns: <qname-list>
 curate-ops:
-[{"op":"exclude","kind":"metric","area":"...","name":"..."}, {"op":"edit","kind":"table","area":"...","name":"orders","column":"amount","field":"description","value":"..."}, ...]
+[{"op":"approve","kind":"metric","area":"...","name":"...","at":"<UTC ISO>"}, {"op":"exclude","kind":"metric","area":"...","name":"..."}, {"op":"edit","kind":"table","area":"...","name":"orders","column":"amount","field":"description","value":"..."}, ...]
 example-edits:
 [{"area":"sales","question":"...","sql":"...","source":"correction","status":"confirmed"}]
+new-metrics:
+[{"area":"sales","name":"repeat_rate","description":"...","calculation":"...","bindings":{"Snowflake":"..."},"source_tables":["orders"],"other_names":["repeat purchase rate"],"unit":"percent","confidence":"proposed"}]
 organization-md: "<full new ORGANIZATION.md text, JSON-encoded>"
 done
 ```
@@ -121,9 +137,11 @@ Where `<qname-list>` is comma-separated, whitespace-tolerant:
 - Table qname: `<area>.<table>` (e.g., `sales.STG_LEADS`)
 - Column qname: `<area>.<table>.<column>` (e.g., `sales.CUSTOMERS.EMAIL`)
 
-Three optional blocks may follow, each a single JSON line (the dashboard emits whichever the user touched):
-- **`curate-ops:`** — exclude/include on metrics/entities/relationships AND field **edits** (`op:"edit"` with `field`/`value` — table/column/metric/entity descriptions, metric `calculation`/`unit`). Already a valid curate ops array; merge it verbatim with the table/column ops below and apply via one `sm curate` call.
+A header line + four optional blocks may follow (the dashboard emits whichever applies):
+- **`signed-off-by: <email> / <role>`** (header, present only when the batch has approvals) — the curator's sign-off identity, entered at the top of the dashboard's Review tab. **Use it for `--signer`/`--role`** when applying, and **persist** `reviewer_email`/`reviewer_role` into `~/.agami/.config` (preserve other keys; `chmod 600`) so future sessions don't re-ask. If a batch contains approvals but this line is **absent**, fall back to `~/.agami/.config` (`reviewer_email`/`reviewer_role`), then to the Phase 0 ask. Validate the email against `\S+@\S+\.\S+`; the role is a short free-text string (the picker offers CFO / CTO / Data Lead / Engineer / Analyst, but "Other" lets the user type their own — accept any non-empty value ≤ 40 chars; don't reject a custom role).
+- **`curate-ops:`** — the unified ops array. Holds **approve / reject(exclude) / include** on metrics/entities/relationships AND field **edits** (`op:"edit"` with `field`/`value`). Already a valid curate ops array; merge it verbatim with the table/column ops below and apply via one `sm curate` call. **`approve` ops carry an `at` timestamp** (the dashboard stamps it) and require the curator's `--signer`/`--role` from the `signed-off-by:` line — the validator rejects an approved entry with no sign-off stamp. **Rule 1 guard:** before applying an `approve` on a metric, confirm its `calculation` is non-empty (the dashboard always has one for user-authored metrics; for an introspected metric with an empty calculation, ask the user to fill it via an `edit` first).
 - **`example-edits:`** — edited prompt examples `[{area, question, sql, source, status}]`. Group by `area` and apply each group with `sm add-example "$ROOT" --area <area> --file <json>` (it dedups by `question`, so an edit replaces the prior example). Write the per-area JSON with the **Write tool**.
+- **`new-metrics:`** — metrics the user authored in the dashboard's "Add metric" form `[{area, name, description, calculation, bindings, source_tables, other_names, unit?, confidence}]`. Group by `area` and create each group with `sm add "$ROOT" --kind metric --area <area> --file <json>` (validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, reverts the batch on failure). Write the per-area JSON with the **Write tool** — it's already in the `sm add` shape, so pass it through verbatim. A user-authored metric is `confidence: proposed` and still needs sign-off (approve it on the Review tab).
 - **`organization-md:`** — a JSON-encoded string of the full new `ORGANIZATION.md`. JSON-decode it and **Write** it to `<artifacts_dir>/<profile>/ORGANIZATION.md` (overwrite; free-form Markdown, no validator).
 
 Show the user a one-line summary of what each block changed before applying.
@@ -136,19 +154,19 @@ Tolerate trailing commas, mixed-case schema/table/column names (the YAMLs typica
 
 ## Phase 3: Apply via the curation engine
 
-Translate the parsed exclude/include commands into a curation ops array, **then merge in the `curate-ops:` JSON array** (metric/entity/relationship actions) verbatim. Table targets are `<area>.<table>`, column targets `<area>.<table>.<column>`. `exclude` → `op: exclude` (the engine treats it as reject), `include` → `op: include`:
+Translate the parsed table/column exclude/include commands into curation ops, **then merge in the `curate-ops:` JSON array verbatim** (it already holds the approve / reject / include / edit ops for metrics, entities, and joins). Table targets are `<area>.<table>`, column targets `<area>.<table>.<column>`. `exclude` → `op: exclude` (engine treats it as reject), `include` → `op: include`, `approve` → `op: approve` (+ `at`):
 
 ```json
 [
   {"op": "exclude", "kind": "table", "area": "sales", "name": "STG_LEADS"},
-  {"op": "include", "kind": "table", "area": "sales", "name": "PAYMENTS"},
   {"op": "exclude", "kind": "table", "area": "sales", "name": "CUSTOMERS", "column": "EMAIL"},
-  {"op": "exclude", "kind": "metric", "area": "sales", "name": "avg_rating"},
-  {"op": "exclude", "kind": "relationship", "area": "sales", "name": "orders->customers"}
+  {"op": "approve", "kind": "metric", "area": "sales", "name": "total_revenue", "at": "2026-06-10T17:51:41Z"},
+  {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"},
+  {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"}
 ]
 ```
 
-(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state`, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
+(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
@@ -156,10 +174,10 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
 
-`ROOT="<artifacts_dir>/<profile>"`. Stdout is JSON: `{applied, skipped, errors, validated, committed}`.
+`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`.
 
 **Success** (`validated: true`):
-- Ack: *"✓ Applied: <X> tables excluded, <Y> columns excluded, <Z> re-included. Re-rendering…"*
+- Ack with the counts that apply, e.g. *"✓ Applied: approved 4, rejected 1, 2 columns excluded, 1 edit. Re-rendering…"*
 - List any `skipped[]` (bad target / not found) on their own lines.
 - Continue to Phase 4 (re-render).
 
@@ -232,10 +250,10 @@ The trust spine has always read `agami.review_state`. The model loader in [`plug
 
 - **Never appear in the schema context** the SQL generator sees (Phase 2b).
 - **Are not joinable** — the join-path picker skips relationships whose endpoints reference a rejected dataset.
-- **Don't trigger the strict gate** — a rejected metric or named filter is excluded from runtime; queries that would have referenced them get a "metric not found" path-not-an-error.
+- **Dropped from the runtime** — a *rejected* metric or named filter is excluded entirely; a query that would have referenced one gets a "metric not found" path, not an error. (An *unreviewed* metric is different — it's still used, just with a receipt warning.)
 - **Stay in the YAML** for audit. The user can `include` them later without re-introspect.
 
-This is the same mechanism `/agami-review`'s Reject button uses on individual entries. `/agami-model` is the bulk-and-search interface for the same operation, with tables-as-units instead of metric-by-metric.
+Reject (on the Review tab or any metric/entity/join card) and Exclude (on tables/columns) are the same `rejected` operation — this dashboard is the one surface for both the bulk tables-as-units curation and the per-entry sign-off.
 
 ---
 

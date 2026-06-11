@@ -317,6 +317,17 @@
       font-size: 12px; color: var(--muted);
     }
     footer.page-footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+
+    /* One note for the whole model — say a cross-cutting rule once, not per example. */
+    .global-note-panel { margin: 4px 0 20px; padding: 12px 14px; border: 1px solid var(--border);
+      border-radius: 10px; background: var(--bg-elev); }
+    .global-note-panel .gn-label { font-size: 13px; margin-bottom: 6px; }
+    .global-note-panel textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
+      padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg); color: var(--fg); resize: vertical; }
+    .global-note-panel textarea:focus { outline: 2px solid var(--accent); }
+    .global-note-panel .gn-hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+    .global-note-panel code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -345,11 +356,20 @@
       <strong>Validate</strong> — this example is correct; trust it as a few-shot anchor. Writes <code>state: validated</code>.<br/>
       <strong>Reject</strong> — this example is wrong; don't use it. Writes <code>state: rejected</code> (stays in YAML for audit but excluded from runtime).<br/>
       <strong>Edit</strong> — rewrite the SQL inline; the new query re-runs against your DB on the next round.<br/>
-      <strong>Add note</strong> — leave a comment (formatting hint, context, business rule) without changing the SQL. Goes to <code>USER_MEMORY.md</code> or the example's notes depending on what you wrote.<br/>
+      <strong>Add note</strong> — a comment about <em>this one example</em> (context specific to it), without changing its SQL. <strong>For anything cross-cutting</strong> — a unit, a filter, a business rule, a display convention — use the <strong>"note for the whole model"</strong> box at the top instead: say it once and it applies to every example, so you never retype the same note.<br/>
       <strong>+ Add example</strong> (bottom bar) — write a new question + SQL pair from scratch. It gets appended to <code>examples.yaml</code> with <code>source: manual</code>.
     </div>
 
     <div class="tab-bar" id="tab-bar"></div>
+
+    <!-- One note for the whole model — so a cross-cutting rule is said ONCE, not retyped per example. -->
+    <div class="global-note-panel">
+      <div class="gn-label">📝 A note for the whole model — <strong>say it once; it applies to every example</strong></div>
+      <textarea id="global-note" rows="2"
+        placeholder="Anything cross-cutting — a unit, a filter, a business rule, a display convention.&#10;e.g. amounts are in INR · always exclude test accounts · status 'X' means cancelled"></textarea>
+      <div class="gn-hint">Claude files this in the right place in the model (a column unit/caveat, <code>ORGANIZATION.md</code>, or your prefs) — you don't repeat it per example.</div>
+    </div>
+
     <div id="items"></div>
 
     <footer class="page-footer">
@@ -938,21 +958,21 @@
       renderItems();
       updateFooter();
     }
-    function clearAction(item) {
-      delete pendingActions[item.n];
-      renderItems();
-      updateFooter();
-    }
 
     function actionCounts() {
       const c = { validate: 0, reject: 0, edit: 0, note: 0 };
       Object.values(pendingActions).forEach(a => { c[a.action] = (c[a.action] || 0) + 1; });
       return c;
     }
+    function globalNote() {
+      const el = document.getElementById('global-note');
+      return el ? (el.value || '').trim() : '';
+    }
     function updateFooter() {
       const c = actionCounts();
       const newCount = newExamples.length;
-      const total = c.validate + c.reject + c.edit + c.note + newCount;
+      const hasGlobal = globalNote() ? 1 : 0;
+      const total = c.validate + c.reject + c.edit + c.note + newCount + hasGlobal;
       const sum = document.getElementById('pending-summary');
       const btn = document.getElementById('btn-generate');
       if (total === 0) {
@@ -965,6 +985,7 @@
         if (c.edit)     parts.push(`${c.edit} edit`);
         if (c.note)     parts.push(`${c.note} note`);
         if (newCount)   parts.push(`${newCount} new example${newCount === 1 ? '' : 's'}`);
+        if (hasGlobal)  parts.push('1 model-wide note');
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
         btn.disabled = false;
       }
@@ -1013,6 +1034,14 @@
         lines.push(sql);
         lines.push(`<<<`);
       });
+      // One model-wide note (said once, not per example) — Claude classifies it and writes
+      // it to the right place in the model (column unit/caveat, ORGANIZATION.md, or prefs).
+      const gn = globalNote();
+      if (gn) {
+        lines.push(`note all >>>`);
+        lines.push(gn);
+        lines.push(`<<<`);
+      }
       if (lines.length) lines.push('done');
 
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
@@ -1020,9 +1049,16 @@
     }
 
     document.getElementById('btn-generate').addEventListener('click', generateFeedback);
+    // Typing a model-wide note should enable "Generate" on its own (no per-card action needed).
+    (function () {
+      const gn = document.getElementById('global-note');
+      if (gn) gn.addEventListener('input', updateFooter);
+    })();
     document.getElementById('btn-reset').addEventListener('click', () => {
       Object.keys(pendingActions).forEach(k => delete pendingActions[k]);
       newExamples.splice(0, newExamples.length);
+      const gn = document.getElementById('global-note');
+      if (gn) gn.value = '';
       renderItems();
       updateFooter();
     });
@@ -1032,6 +1068,8 @@
     function resetQueueAfterCopy() {
       Object.keys(pendingActions).forEach(k => delete pendingActions[k]);
       newExamples.splice(0, newExamples.length);
+      const gn = document.getElementById('global-note');
+      if (gn) gn.value = '';
       renderItems();
       updateFooter();
       setTimeout(() => { document.getElementById('modal').hidden = true; }, 700);

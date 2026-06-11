@@ -70,7 +70,7 @@ def load_organization(root: str | Path, *, include_rejected: bool = False) -> Or
 
     By default, entries the curator excluded (`review_state: rejected`) are dropped
     so the runtime never sees them. Pass `include_rejected=True` for the curation
-    tools (agami-model / agami-review), which must show excluded entries to toggle them.
+    tools (agami-model), which must show excluded entries to toggle them.
     """
     root = Path(root)
     org_path = root / "org.yaml"
@@ -449,15 +449,23 @@ def get_subject_area_bundle(org: Organization, area: str) -> dict[str, Any]:
     return bundle
 
 
-def list_prompt_examples(root: str | Path, area: str) -> list[dict[str, Any]]:
-    """Load scope-tagged examples for a subject area (prompt_examples/<area>/examples.yaml)."""
+def list_prompt_examples(root: str | Path, area: str,
+                         *, include_rejected: bool = False) -> list[dict[str, Any]]:
+    """Load scope-tagged examples for a subject area (prompt_examples/<area>/examples.yaml).
+
+    Examples the curator rejected (`status: rejected`) are dropped by default so the
+    runtime ranker never anchors on them — mirroring how `load_organization` drops
+    `review_state: rejected` model entries. Pass `include_rejected=True` for the curation
+    view (re-render, dedup, audit), where a rejected example must still be visible.
+    """
     f = Path(root) / "prompt_examples" / area / "examples.yaml"
     if not f.exists():
         return []
     doc = _read_yaml(f) or {}
-    if isinstance(doc, list):
-        return doc
-    return doc.get("examples", [])
+    items = doc if isinstance(doc, list) else doc.get("examples", [])
+    if include_rejected:
+        return items
+    return [e for e in items if (e or {}).get("status") != "rejected"]
 
 
 __all__ = [

@@ -7,7 +7,7 @@ Two read views + one write path, all over the on-disk model tree:
   review_queue(org)   -> the trust-review items: entries needing sign-off
                          (review_state != approved) or low confidence
                          (proposed / inferred), partitioned Rule 1 (metrics) vs
-                         Rule 2 (relationships / entities). Feeds /agami-review.
+                         Rule 2 (relationships / entities). Feeds the Review tab of /agami-model.
   model_tree(org)     -> the browsable area→table→column tree with each node's
                          review_state. Feeds /agami-model (the explorer).
   apply(root, ops)    -> flip review_state (exclude/include/approve/reject), record
@@ -99,7 +99,7 @@ def all_items(org: Organization, *, scope: str = "all") -> list[dict]:
 
     scope filters what's returned (the renderer renders exactly this — no skill-side
     filtering, no env var):
-      "all"   — every entry, all tabs (the full /agami-review dashboard).
+      "all"   — every entry, all tabs (the full /agami-model Review tab).
       "rule1" — only Rule-1 items needing sign-off (metrics + named filters in the
                 review tab). The agami-connect Phase 4 gate uses this; the rendered
                 item count then equals the sign-off count exactly.
@@ -149,7 +149,7 @@ def _trust(obj) -> dict:
 
 
 def _metric_item(area: Optional[str], mm) -> dict:
-    # Fields match BOTH render_review.py's vocabulary (entity_type) AND the dashboard
+    # Fields match the review-items vocabulary (entity_type) AND the dashboard
     # ITEMS_JSON contract (rule_1, signals, extra_lines, …) so the card renders the
     # calculation and the feedback generator emits `by <email> role=` for sign-off.
     binding_lines = [{"label": d, "text": sql} for d, sql in (mm.bindings or {}).items()]
@@ -353,6 +353,17 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role) -> N
         if not fld:
             raise ValueError("edit op needs field")
         doc[fld] = val
+        # Description provenance (advisory; see DescriptionSource in models.py).
+        # An edit that sets `description` also stamps `description_source`:
+        #   source:"ai" → ai_unvalidated (agami-connect generation)
+        #   otherwise   → human (a person edited it, so it's trusted)
+        #   empty value → clear it. A direct edit of `description_source` itself
+        #   (e.g. confirm → "ai_validated") falls through the generic `doc[fld]=val`.
+        if fld == "description":
+            doc["description_source"] = (
+                None if not (val or "").strip()
+                else ("ai_unvalidated" if op.get("source") == "ai" else "human")
+            )
         return
     if new_state:
         doc["review_state"] = new_state
@@ -412,8 +423,13 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     backups: list[tuple[Path, Optional[str]]] = []  # (path, prior text or None if new)
 
     for item in items:
+        # Strip grouping/locator metadata that callers (e.g. the model-dashboard
+        # "Add metric" form) attach but that isn't a model field. `area` is already
+        # passed as the `area` arg; `qname` is a UI locator. Without this, a dashboard
+        # new-metric fails with `extra_forbidden` on `area`.
+        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
         try:
-            obj = Model(**item)  # structural validation (required fields, enums, …)
+            obj = Model(**clean)  # structural validation (required fields, enums, …)
         except Exception as e:
             res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
             continue
@@ -462,7 +478,9 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     from .loader import list_prompt_examples
     root = Path(root)
     res = ApplyResult()
-    existing = list(list_prompt_examples(root, area))
+    # include rejected so re-adding a previously-rejected question replaces (un-rejects) it
+    # rather than duplicating.
+    existing = list(list_prompt_examples(root, area, include_rejected=True))
     by_q = {e.get("question"): i for i, e in enumerate(existing) if e.get("question")}
     for ex in examples:
         q, sql = (ex or {}).get("question"), (ex or {}).get("sql")
@@ -485,6 +503,39 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     _append_curation_log(root, [{"op": "add", "kind": "example", "area": area,
                                  "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
     res.committed = _git_commit(root, f"examples: +{len(res.applied)} in {area}")
+    return res
+
+
+def remove_examples(root: str | Path, area: str, questions: list[str],
+                    *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
+    """Reject prompt examples by `question` — set `status: rejected` so the runtime ranker
+    drops them (`list_prompt_examples` filters rejected by default), while they STAY in
+    examples.yaml for audit, exactly like a rejected table/column/metric. The packaged path
+    so skills never hand-rewrite that YAML to drop an example. `questions` is matched on the
+    trimmed question text (the dedup key). Who rejected it is recorded in the curation log."""
+    from .loader import list_prompt_examples
+    root = Path(root)
+    res = ApplyResult()
+    existing = list(list_prompt_examples(root, area, include_rejected=True))
+    wanted = {(q or "").strip() for q in (questions or []) if (q or "").strip()}
+    if not wanted:
+        return res
+    present = {(e.get("question") or "").strip() for e in existing}
+    for e in existing:
+        q = (e or {}).get("question", "")
+        if q.strip() in wanted and e.get("status") != "rejected":
+            e["status"] = "rejected"
+            res.applied.append(f"example (rejected) {area}/{q[:50]}")
+    for missing in sorted(wanted - present):
+        res.skipped.append({"item": missing, "reason": "no example with that question"})
+    if not res.applied:
+        return res
+    path = root / "prompt_examples" / area / "examples.yaml"
+    _dump(path, existing)  # bare list — kept in the file (rejected, for audit)
+    res.validated = True
+    _append_curation_log(root, [{"op": "reject", "kind": "example", "area": area,
+                                 "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
+    res.committed = _git_commit(root, f"examples: rejected {len(res.applied)} in {area}")
     return res
 
 
