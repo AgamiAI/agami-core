@@ -33,6 +33,7 @@
       "entities":     [ { "name", "qname", "plural", "other_names", "value_pattern",
                           "maps_to":["t.c"], "description", "review_state", "excluded", "area" } ],
       "relationships":[ { "qname", "from_table", "from_column", "to_table", "to_column", "on",
+                          "from_schema", "to_schema", "cross_schema",
                           "cardinality", "description", "review_state", "excluded", "area" } ],
       "examples":     [ { "n", "qname", "question", "sql", "tables", "source", "status", "area" } ]
     }
@@ -275,6 +276,7 @@
     .card-actions button.queued-edit { border-color: var(--accent); color: var(--accent); }
     .card-actions .moot-note { font-size: 12px; color: var(--warn-fg); font-weight: 500; }
     .table-state-badge.moot-badge { background: var(--code-bg); color: var(--muted); border: 1px solid var(--border); }
+    .table-state-badge.xschema-badge { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--warn-fg); cursor: help; }
     /* Prominent edit button (e.g. table details) — outlined accent so it's easy to find */
     .card-actions button.btn-edit-prominent {
       background: var(--bg); color: var(--accent); border: 1px solid var(--accent); font-weight: 600;
@@ -400,6 +402,16 @@
     }
     .btn-sm.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     .btn-sm.primary:hover { background: var(--accent-hover); }
+    /* Prominent "Add metric" buttons (the open trigger + the form submit) — easy to spot.
+       Selector outscopes the generic `.card-actions button` rule (else it gets overridden). */
+    .card-actions button.add-metric-open, .card-actions button.add-metric-go,
+    .add-metric-open, .add-metric-go {
+      font: inherit; font-size: 14px; font-weight: 600; padding: 10px 22px; margin: 8px 18px;
+      background: var(--accent); color: #fff; border: 1px solid var(--accent);
+      border-radius: 7px; cursor: pointer;
+    }
+    .card-actions button.add-metric-open:hover, .card-actions button.add-metric-go:hover,
+    .add-metric-open:hover, .add-metric-go:hover { background: var(--accent-hover); color: #fff; border-color: var(--accent-hover); }
 
     pre.code-block {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px;
@@ -427,6 +439,21 @@
     .rt-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--info-bg); }
     .rt-editor:empty::before { content: '(empty — add domain context so answers know what the data means)';
       color: var(--muted); font-style: italic; }
+
+    /* Per-kind sub-headers inside a Review sub-tab (Metrics / Joins / Entities) */
+    .kind-subhead {
+      display: flex; align-items: center; gap: 8px;
+      margin: 20px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+    }
+    .kind-subhead:first-child { margin-top: 4px; }
+    .kind-subhead-label {
+      font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--fg);
+    }
+    .kind-count {
+      font-size: 11px; color: var(--muted); background: var(--code-bg);
+      border-radius: 999px; padding: 1px 8px; font-variant-numeric: tabular-nums;
+    }
 
     /* Queued tab */
     .queue-group { margin-bottom: 18px; }
@@ -647,7 +674,12 @@
     const STORAGE_TYPE = manifest.storage_type || '';
     const AREAS = (manifest.schemas || []).map(s => s.name);
     const ALL_TABLES = [];
-    (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => ALL_TABLES.push(t.name)));
+    const TABLE_AREA = {};   // table name -> its subject area, so a new metric's area can be inferred
+    (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => { ALL_TABLES.push(t.name); TABLE_AREA[t.name] = s.name; }));
+    // Tables named in a SQL binding (qualified like `orders.amount`) — for inferring source tables + area.
+    function tablesInSql(sql) {
+      return ALL_TABLES.filter(t => new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(sql || ''));
+    }
 
     // ---- State ----
     // pending[qname] = "exclude" | "include"   (tables + columns)
@@ -832,9 +864,13 @@
     function mootReason(it) {
       const area = it.area;
       if (it.from_table) {  // relationship — moot if EITHER endpoint table is excluded
+        // A cross-area join's endpoints live in DIFFERENT areas — check each in its own
+        // (else the to-table looks "missing" in the from-area and the join is wrongly moot).
+        const fromArea = it.from_subject_area || area;
+        const toArea = it.to_subject_area || area;
         const ex = [];
-        if (tableEffExcluded(area, it.from_table)) ex.push(it.from_table);
-        if (tableEffExcluded(area, it.to_table)) ex.push(it.to_table);
+        if (tableEffExcluded(fromArea, it.from_table)) ex.push(it.from_table);
+        if (tableEffExcluded(toArea, it.to_table)) ex.push(it.to_table);
         if (ex.length) return ex.join(' & ') + ' excluded';
       } else if (it.source_tables) {  // metric — needs ALL its source tables
         const ex = (it.source_tables || []).filter(t => tableEffExcluded(area, t));
@@ -1414,6 +1450,12 @@
         header.appendChild(el('span', { class: 'conf-chip conf-' + item.confidence + ' tip', text: item.confidence,
           'data-tip': CONF_MEANING[item.confidence] || ('confidence: ' + item.confidence) }));
       }
+      // A join that spans two schemas — flag it; it's an architectural claim worth a glance.
+      if (item.cross_schema) {
+        header.appendChild(el('span', { class: 'table-state-badge xschema-badge', text: 'cross-schema',
+          title: 'Joins across schemas: ' + (item.from_schema || '?') + ' → ' + (item.to_schema || '?')
+                 + ' — confirm this link belongs in your model' }));
+      }
       if (mootReason(item)) header.appendChild(el('span', { class: 'table-state-badge moot-badge', text: 'unused', title: "Won't be used — " + mootReason(item) }));
       if (item.rule === 1 && (rs === 'unreviewed' || rs === 'stale') && !mootReason(item)) header.appendChild(el('span', { class: 'table-state-badge', style: 'background:var(--info-bg);color:var(--accent);border-color:var(--info-border);', text: 'needs sign-off' }));
       const badge = stateBadge(rs === 'approved' ? 'approved' : rs, eff);
@@ -1426,7 +1468,7 @@
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(m.qname) ? ' queued-' + queuedAction(m.qname) : '') });
       card.appendChild(flatCardHeader(m.name, m, eff));
       const body = el('div', { class: 'table-body' });
-      body.appendChild(labelLine('Calculation (click to edit)'));
+      body.appendChild(labelLine('What it measures (click to edit)'));
       body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
         field: 'calculation', original: m.calculation, placeholder: '(click to add the calculation)' }));
       const bindings = m.bindings || {};
@@ -1470,8 +1512,11 @@
     function renderRelCard(r) {
       const eff = effExcluded(r);
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(r.qname) ? ' queued-' + queuedAction(r.qname) : '') });
-      const join = r.from_column ? `${r.from_table}.${r.from_column} → ${r.to_table}.${r.to_column}`
-                                 : `${r.from_table} → ${r.to_table}${r.on ? ' ON ' + r.on : ''}`;
+      // Schema-qualify each side when the join crosses schemas, so the label itself shows it.
+      const fq = r.cross_schema && r.from_schema ? r.from_schema + '.' : '';
+      const tq = r.cross_schema && r.to_schema ? r.to_schema + '.' : '';
+      const join = r.from_column ? `${fq}${r.from_table}.${r.from_column} → ${tq}${r.to_table}.${r.to_column}`
+                                 : `${fq}${r.from_table} → ${tq}${r.to_table}${r.on ? ' ON ' + r.on : ''}`;
       card.appendChild(flatCardHeader(join, r, eff));
       const body = el('div', { class: 'table-body' });
       if (r.cardinality) { body.appendChild(labelLine('Cardinality')); body.appendChild(descBlock(r.cardinality)); }
@@ -1531,6 +1576,34 @@
       root.appendChild(sec);
     }
 
+    // The Joins tab: one tab, but split into "In-schema joins" and "Cross-schema joins"
+    // sections so the cross-schema (cross-area) edges read distinctly. Split only when
+    // cross-schema joins exist — a single-schema DB just renders one flat list as before.
+    function renderJoinsTab(root) {
+      const all = [...(manifest.relationships || []), ...(manifest.cross_relationships || [])];
+      const hay = r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area || ''} ${r.from_schema || ''} ${r.to_schema || ''}`;
+      const matched = all.filter(it => (!searchQ || hay(it).toLowerCase().includes(searchQ)) && passesFilter(it, 'relationship'));
+      setSearchCounts(`${matched.length} of ${all.length} join${all.length === 1 ? '' : 's'} shown`);
+      if (!matched.length) {
+        root.appendChild(el('div', { class: 'empty-state',
+          text: all.length === 0 ? 'No joins defined yet.' : 'No joins match the current search / filter.' }));
+        return;
+      }
+      const sec = el('div', { class: 'schema-section' });
+      const inSchema = matched.filter(r => !r.cross_schema);
+      const crossSchema = matched.filter(r => r.cross_schema);
+      if (crossSchema.length) {
+        [['In-schema joins', inSchema], ['Cross-schema joins', crossSchema]].forEach(([label, items]) => {
+          if (!items.length) return;
+          sec.appendChild(kindSubhead(label, items, false));
+          items.forEach(r => sec.appendChild(renderRelCard(r)));
+        });
+      } else {
+        matched.forEach(r => sec.appendChild(renderRelCard(r)));
+      }
+      root.appendChild(sec);
+    }
+
     // =====================================================================
     // TAB: Review (the sign-off queue) — folds in the old /agami-review surface
     // =====================================================================
@@ -1538,6 +1611,44 @@
       return it._kind === 'metric' ? renderMetricCard(it)
            : it._kind === 'entity' ? renderEntityCard(it)
            : renderRelCard(it);
+    }
+    // Render a sub-tab's cards grouped with a sub-header each, instead of one long
+    // undifferentiated list. Cross-schema joins get their own group (separate from regular
+    // intra-schema joins) — they're the architectural edges most worth a focused look.
+    // A list with only one group renders flat (no header).
+    const REVIEW_GROUPS = [
+      { label: 'Metrics',            match: it => it._kind === 'metric' },
+      { label: 'Joins',              match: it => it._kind === 'relationship' && !it.cross_schema },
+      { label: 'Cross-schema joins', match: it => it._kind === 'relationship' && it.cross_schema },
+      { label: 'Entities',           match: it => it._kind === 'entity' },
+    ];
+    function kindSubhead(label, items, bulk) {
+      const h = el('div', { class: 'kind-subhead' });
+      h.appendChild(el('span', { class: 'kind-subhead-label', text: label }));
+      h.appendChild(el('span', { class: 'kind-count', text: String(items.length) }));
+      if (bulk) {
+        const approvable = items.filter(isApprovable);
+        if (approvable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm',
+          style: 'margin-left:auto;', onclick: () => bulkApprove(items) }, `✓ Approve ${approvable.length}`));
+      }
+      return h;
+    }
+    function appendGroupedCards(sec, items, bulk) {
+      const used = new Set();
+      const groups = [];
+      REVIEW_GROUPS.forEach(gd => {
+        const gi = items.filter(it => gd.match(it));
+        gi.forEach(it => used.add(it));
+        if (gi.length) groups.push({ label: gd.label, items: gi });
+      });
+      const other = items.filter(it => !used.has(it));
+      if (other.length) groups.push({ label: 'Other', items: other });
+      // ALWAYS show the kind header — even for a single group — so "Cross-schema joins"
+      // stays labelled when it's the only pile left, instead of looking like plain joins.
+      groups.forEach(g => {
+        sec.appendChild(kindSubhead(g.label, g.items, bulk));
+        g.items.forEach(it => sec.appendChild(reviewCard(it)));
+      });
     }
     function needsEyes(it) {
       // Rule 1 (metrics — block runtime), low-confidence guesses, and drifted entries
@@ -1580,6 +1691,9 @@
       (manifest.metrics || []).forEach(m => out.push({ ...m, _kind: 'metric' }));
       (manifest.entities || []).forEach(e => out.push({ ...e, _kind: 'entity' }));
       (manifest.relationships || []).forEach(r => out.push({ ...r, _kind: 'relationship' }));
+      // cross-area (cross-schema / cross-datasource) joins are reviewable too — they're the
+      // architectural edges most worth a human glance, so they belong in the queue.
+      (manifest.cross_relationships || []).forEach(r => out.push({ ...r, _kind: 'relationship' }));
       return out;
     }
     // Columns agami couldn't read (description_source === 'ai_unknown'), still without a
@@ -1688,7 +1802,7 @@
         if (!unknown.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing here — agami understood every column.' }));
         else unknown.forEach(uc => sec.appendChild(describeCard(uc)));
         root.appendChild(sec);
-        root.appendChild(nextStepsCallout());
+        root.appendChild(nextStepsCallout({ looksCount: groups.looks.items.filter(isApprovable).length }));
         return;
       }
 
@@ -1696,33 +1810,42 @@
       setSearchCounts(`${g.items.length} ${g.label.toLowerCase()}`);
 
       const sec = el('div', { class: 'schema-section' });
-      if (g.bulk) {
-        const approvable = g.items.filter(isApprovable);
-        if (approvable.length) {
-          const head = el('div', { class: 'schema-header' });
-          head.appendChild(document.createTextNode(g.label));
-          head.appendChild(el('button', { type: 'button', class: 'btn-sm primary', style: 'margin:0 0 0 auto;',
-            onclick: () => bulkApprove(g.items) }, `✓ Approve all ${approvable.length}`));
-          sec.appendChild(head);
-        }
-      }
+      // No blanket "Approve all" — each kind sub-header carries its own scoped "✓ Approve N",
+      // so approving metrics can't silently approve the joins too (that was the footgun).
       if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
       if (!g.items.length) {
         sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing in “' + g.label + '”.' }));
       } else {
-        g.items.forEach(it => sec.appendChild(reviewCard(it)));
+        appendGroupedCards(sec, g.items, g.bulk);
       }
       root.appendChild(sec);
-      root.appendChild(nextStepsCallout());
+      root.appendChild(nextStepsCallout({ looksCount: groups.looks.items.filter(isApprovable).length }));
     }
-    // Signpost: the Review tab only covers the AI-proposed layer; excluding tables and
-    // fixing column details happen on the Tables tab. Make that obvious.
-    function nextStepsCallout() {
+    // Signpost: a short "next steps" panel. Two things the untouched-review pile doesn't
+    // surface on its own — (1) eyeball the high-confidence "Looks right" pile and approve it
+    // in one click, and (2) excluding tables + fixing column details, which live on the
+    // Tables tab. Shown at the bottom of every Review sub-tab.
+    function nextStepsCallout(opts) {
+      opts = opts || {};
+      // Only nudge toward "Looks right" when there are confident items AND we're not already on it.
+      const showLooks = opts.looksCount > 0 && reviewSubTab !== 'looks';
       const c = el('div', { class: 'next-steps' });
-      c.appendChild(el('div', { class: 'ns-title', text: '✓ Reviewed the AI’s work? Two more things live on the Tables tab' }));
+      c.appendChild(el('div', { class: 'ns-title', text: 'Next steps' }));
+
+      if (showLooks) {
+        c.appendChild(el('div', { class: 'ns-body', style: 'margin-bottom:8px;', html:
+          '<strong>1. Eyeball what agami is confident of.</strong> The <strong>Looks right</strong> pile (' + opts.looksCount + ') ' +
+          'is built-in keys and strong name/type matches — usually fine. Skim it and approve them all in one click, ' +
+          'so only genuine guesses are left for you to weigh.' }));
+        c.appendChild(el('button', { type: 'button', class: 'btn-sm primary', style: 'margin:0 0 14px;',
+          onclick: () => { reviewSubTab = 'looks'; renderBody(); } },
+          'Review “Looks right” (' + opts.looksCount + ') →'));
+      }
+
       c.appendChild(el('div', { class: 'ns-body', html:
-        'This queue only covers what agami <strong>proposed</strong> — metrics, joins, entities, and columns it couldn’t read. ' +
-        'It does <em>not</em> include: <strong>excluding tables</strong> you don’t want queried (staging / scratch / temp / raw-PII tables), ' +
+        '<strong>' + (showLooks ? '2. ' : '') + 'Finish on the Tables tab.</strong> This queue only covers what agami ' +
+        '<strong>proposed</strong> — metrics, joins, entities, and columns it couldn’t read. It does <em>not</em> include ' +
+        '<strong>excluding tables</strong> you don’t want queried (staging / scratch / temp / raw-PII tables), ' +
         'or <strong>fixing column details</strong> (descriptions, units, PII flags). Those are on the <strong>Tables</strong> tab.' }));
       c.appendChild(el('button', { type: 'button', class: 'btn-sm primary', style: 'margin:10px 0 0;',
         onclick: () => { activeTab = 'tables'; const s = document.getElementById('search'); if (s) s.value = ''; searchQ = ''; renderAll(); } },
@@ -1737,48 +1860,57 @@
         el('div', { class: 'table-name' }, 'New metric')));
       const body = el('div', { class: 'table-body' });
       const inputs = {};
-      const mkInput = (label, key, ph, rows) => {
+      // label → (optional hint) → input, so a hint always sits with the field above the box
+      // it explains (never floating between two fields, which reads ambiguously).
+      const mkInput = (label, key, ph, rows, hint) => {
         body.appendChild(labelLine(label));
+        if (hint) body.appendChild(hintLine(hint));
         const t = textarea('', rows || 1); if (ph) t.setAttribute('placeholder', ph);
         body.appendChild(t); inputs[key] = t;
       };
-      mkInput('Name (letters / digits / underscore)', 'name', 'e.g. repeat_purchase_rate', 1);
-      mkInput('Description', 'description', 'one line: what it measures', 2);
-      mkInput('Calculation (prose intent — required)', 'calculation', 'e.g. share of customers with >1 order', 2);
-      mkInput(`${STORAGE_TYPE || 'SQL'} binding (the SQL — required)`, 'binding', 'e.g. COUNT_IF(order_count > 1) / NULLIF(COUNT(*),0)', 2);
-      mkInput('Unit (optional, e.g. INR / percent)', 'unit', '', 1);
-      mkInput('Also called (comma-separated, optional)', 'other_names', 'e.g. repeat rate, returning-buyer rate', 1);
-      // source tables: comma-separated free text (suggest known tables in hint)
-      body.appendChild(labelLine('Source tables (comma-separated)'));
-      body.appendChild(hintLine('Known tables: ' + ALL_TABLES.slice(0, 12).join(', ') + (ALL_TABLES.length > 12 ? ' …' : '')));
+      mkInput('Short name (letters, digits, underscores)', 'name', 'e.g. repeat_purchase_rate', 1);
+      mkInput('What does it measure?', 'calculation', 'e.g. the share of customers who ordered more than once', 2);
+      mkInput(`The SQL that computes it (${STORAGE_TYPE || 'SQL'})`, 'binding',
+              'e.g. SUM(orders.amount)   ·   COUNT(DISTINCT users.id)', 2,
+              'Just the calculation — an aggregate expression, NOT a full SELECT (no FROM/WHERE). Write the table with the column (orders.amount) and agami fills in the rest.');
+      mkInput('Unit (optional)', 'unit', 'e.g. INR, USD, percent', 1);
+      mkInput('Also called (optional, comma-separated)', 'other_names', 'e.g. repeat rate, returning-buyer rate', 1);
+      // Source tables: OPTIONAL — inferred from the SQL above when the columns are qualified.
+      body.appendChild(labelLine('Tables it uses (optional)'));
+      body.appendChild(hintLine('Leave blank if your SQL names them (e.g. orders.amount) — agami detects them. Otherwise list them, comma-separated.'));
       const stTa = textarea('', 1); inputs.source_tables = stTa; body.appendChild(stTa);
-      if (AREAS.length > 1) {
-        body.appendChild(labelLine('Subject area'));
-        const sel = el('select'); AREAS.forEach(a => { const o = el('option', { value: a }); o.textContent = a; sel.appendChild(o); });
-        body.appendChild(sel); inputs.area = sel;
-      }
       const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
       body.appendChild(errLine);
-      body.appendChild(btnSm('Add metric', () => {
+      const actions = el('div', { class: 'card-actions' });
+      const addBtn = el('button', { type: 'button', class: 'btn-sm primary add-metric-go', onclick: () => {
         const name = inputs.name.value.trim();
         const calc = inputs.calculation.value.trim();
         const binding = inputs.binding.value.trim();
+        // source tables: typed, else inferred from the SQL binding
+        let srcTables = stTa.value.split(',').map(s => s.trim()).filter(Boolean);
+        if (!srcTables.length) srcTables = tablesInSql(binding);
+        // subject area: inferred from the tables it uses (no need to ask) — fall back to the
+        // only area, or the first if it genuinely can't be determined.
+        const inferredArea = srcTables.map(t => TABLE_AREA[t]).find(Boolean);
+        const area = inferredArea || (AREAS.length === 1 ? AREAS[0] : (AREAS[0] || ''));
         const problems = [];
-        if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) problems.push('Name must start with a letter and use only letters/digits/underscore.');
-        if (!calc) problems.push('Calculation (prose) is required.');
-        if (!binding) problems.push('SQL binding is required.');
+        if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) problems.push('Name must start with a letter and use only letters/digits/underscores.');
+        if (!calc) problems.push('Say what it measures.');
+        if (!binding) problems.push('Add the SQL that computes it.');
         if (manifest.metrics.some(m => m.name === name) || newMetrics.some(m => m.name === name)) problems.push('A metric with that name already exists.');
+        if (AREAS.length > 1 && !inferredArea && !srcTables.length) problems.push('Add a table it uses (or qualify your SQL like orders.amount) so agami knows where it belongs.');
         if (problems.length) { errLine.textContent = '⚠ ' + problems.join(' '); return; }
         newMetrics.push({
-          area: inputs.area ? inputs.area.value : (AREAS[0] || ''),
-          name, description: inputs.description.value.trim(), calculation: calc, binding,
+          area, name, description: calc, calculation: calc, binding,
           unit: inputs.unit.value.trim(),
           other_names: inputs.other_names.value.split(',').map(s => s.trim()).filter(Boolean),
-          source_tables: stTa.value.split(',').map(s => s.trim()).filter(Boolean),
+          source_tables: srcTables,
         });
         addMetricOpen = false; renderAll();
-      }, 'primary'));
-      body.appendChild(btnSm('Cancel', () => { addMetricOpen = false; renderAll(); }));
+      } }, '✓ Add metric');
+      actions.appendChild(addBtn);
+      actions.appendChild(btnSm('Cancel', () => { addMetricOpen = false; renderAll(); }));
+      body.appendChild(actions);
       wrap.appendChild(body);
       return wrap;
     }
@@ -1789,8 +1921,11 @@
       h.appendChild(el('span', { class: 'table-state-badge badge-approved', text: 'new' }));
       card.appendChild(h);
       const body = el('div', { class: 'table-body' });
-      if (m.calculation) { body.appendChild(labelLine('Calculation')); body.appendChild(descBlock(m.calculation)); }
-      body.appendChild(labelLine((STORAGE_TYPE || 'SQL') + ' binding')); body.appendChild(preBlock(m.binding));
+      if (m.calculation) { body.appendChild(labelLine('What it measures')); body.appendChild(descBlock(m.calculation)); }
+      body.appendChild(labelLine('The SQL')); body.appendChild(preBlock(m.binding));
+      // show the inferred placement so the user can confirm/correct (remove + redo)
+      const place = m.area + (m.source_tables && m.source_tables.length ? ' · uses ' + m.source_tables.join(', ') : '');
+      body.appendChild(hintLine('Will be added to: ' + place));
       const a = el('div', { class: 'card-actions' });
       a.appendChild(el('button', { type: 'button', class: 'queued-exclude',
         onclick: () => { newMetrics.splice(idx, 1); renderAll(); } }, 'Remove'));
@@ -1944,34 +2079,43 @@
     }
     function renderQueuedTab(root) {
       const groups = [];
-      // pending tables/columns
+      // Build a titled queue-group from a list of rows (skips empties), so each kind gets
+      // its own section instead of one long mixed list.
+      const qGroup = (title, rows) => {
+        if (!rows.length) return;
+        const g = el('div', { class: 'queue-group' });
+        g.appendChild(el('h3', { text: title }));
+        rows.forEach(r => g.appendChild(r));
+        groups.push(g);
+      };
+
+      // pending exclusions — split tables vs columns
       const pend = Object.entries(pending);
-      if (pend.length) {
-        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Tables & columns' }));
-        pend.forEach(([qname, action]) => {
-          const isCol = qname.split('.').length >= 3;
-          g.appendChild(queueRow(action, action, `${action} ${isCol ? 'column' : 'table'}: ${qname}`, () => delete pending[qname]));
-        });
-        groups.push(g);
-      }
-      // ops metrics/entities/rels
+      const isCol = (qname) => qname.split('.').length >= 3;
+      qGroup('Tables', pend.filter(([q]) => !isCol(q)).map(([q, a]) =>
+        queueRow(a, a, `${a} table: ${q}`, () => delete pending[q])));
+      qGroup('Columns', pend.filter(([q]) => isCol(q)).map(([q, a]) =>
+        queueRow(a, a, `${a} column: ${q}`, () => delete pending[q])));
+
+      // approve/reject ops — split metrics / joins / entities
       const opv = Object.entries(ops);
-      if (opv.length) {
-        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Metrics · entities · joins' }));
-        opv.forEach(([qname, o]) => g.appendChild(queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}`, () => delete ops[qname])));
-        groups.push(g);
-      }
-      // field/metric/entity/rel edits
+      const opRow = ([q, o]) => queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}`, () => delete ops[q]);
+      [['metric', 'Metrics'], ['relationship', 'Joins'], ['entity', 'Entities']].forEach(([kind, label]) =>
+        qGroup(label, opv.filter(([, o]) => o.kind === kind).map(opRow)));
+      qGroup('Other', opv.filter(([, o]) => !['metric', 'relationship', 'entity'].includes(o.kind)).map(opRow));
+
+      // edits — split table / column / metric / join / entity
       const ed = Object.entries(edits);
-      if (ed.length) {
-        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Edits' }));
-        ed.forEach(([qname, e]) => {
-          const fields = Object.keys(e.fields).join(', ');
-          const tgt = e.column ? `${e.name}.${e.column}` : e.name;
-          g.appendChild(queueRow('edit', 'edit', `${e.kind} ${tgt} — ${fields}`, () => delete edits[qname]));
-        });
-        groups.push(g);
-      }
+      const edRow = ([q, e]) => {
+        const fields = Object.keys(e.fields).join(', ');
+        const tgt = e.column ? `${e.name}.${e.column}` : e.name;
+        return queueRow('edit', 'edit', `${tgt} — ${fields}`, () => delete edits[q]);
+      };
+      qGroup('Table edits', ed.filter(([, e]) => e.kind === 'table' && !e.column).map(edRow));
+      qGroup('Column edits', ed.filter(([, e]) => e.kind === 'table' && e.column).map(edRow));
+      qGroup('Metric edits', ed.filter(([, e]) => e.kind === 'metric').map(edRow));
+      qGroup('Join edits', ed.filter(([, e]) => e.kind === 'relationship').map(edRow));
+      qGroup('Entity edits', ed.filter(([, e]) => e.kind === 'entity').map(edRow));
       // example edits
       const ex = Object.entries(exampleEdits);
       if (ex.length) {
@@ -2063,7 +2207,7 @@
         case 'tables':   return t.tables || 0;
         case 'metrics':  return (manifest.metrics || []).length + newMetrics.length;
         case 'entities': return (manifest.entities || []).length;
-        case 'joins':    return (manifest.relationships || []).length;
+        case 'joins':    return (manifest.relationships || []).length + (manifest.cross_relationships || []).length;
         case 'examples': return (manifest.examples || []).length;
         case 'queued':   return totalQueued();
         default:         return null;
@@ -2267,7 +2411,7 @@
         case 'metrics':
           if (addMetricOpen) { root.appendChild(renderAddMetricForm()); }
           else { const a = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
-                 a.appendChild(el('button', { type: 'button', onclick: () => { addMetricOpen = true; renderAll(); } }, '+ Add metric'));
+                 a.appendChild(el('button', { type: 'button', class: 'add-metric-open', onclick: () => { addMetricOpen = true; renderAll(); } }, '+ Add a metric'));
                  root.appendChild(a); }
           newMetrics.forEach((m, i) => root.appendChild(renderNewMetricCard(m, i)));
           renderFlatTab(root, manifest.metrics, 'metric',
@@ -2280,9 +2424,7 @@
             renderEntityCard, 'entity');
           break;
         case 'joins':
-          renderFlatTab(root, manifest.relationships, 'relationship',
-            r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area}`,
-            renderRelCard, 'join');
+          renderJoinsTab(root);  // one tab, split into In-schema + Cross-schema sections
           break;
         case 'examples':
           renderFlatTab(root, manifest.examples, 'example',

@@ -22,6 +22,7 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
 - **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Use `(Recommended)` only when there's a genuine recommendation. For fact-of-environment questions ("which database type?", "which schemas?"), don't mark any option Recommended — the user picks what they have.
+- **Every multiSelect needs an explicit "none / continue" option** — `AskUserQuestion` cannot be submitted with zero boxes checked, so any multiSelect where "pick nothing" is a valid answer MUST offer a selectable "Nothing — continue" (or "Keep everything") option. Never phrase the prompt as "leave all unchecked" — that's unsubmittable and traps the user.
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 
 ## Progress tracking — set up a todo list at the very start
@@ -77,9 +78,9 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `~/.agami/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
 2. **Credentials check (binding).** Read `~/.agami/credentials`; look for `[<profile>]`.
-   - File present with the section → apply the chmod check (refuse if world-readable), continue.
-   - File missing **but `~/.agami/credentials.example` exists** → the user filled in the template; **run 0a.10 to promote it** (don't re-run 0a.4 — that would overwrite their edits).
-   - Neither present → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."*
+   - The `[<profile>]` section is present → apply the chmod check (refuse if world-readable), continue.
+   - The `[<profile>]` section is **absent** (whether or not the file exists) **but `~/.agami/credentials.example` exists** → the user filled in the template; **run 0a.10 to promote it** (don't re-run 0a.4 — that would overwrite their edits). This is the *second-profile* path too: the file exists with other profiles but not this one — 0a.10's helper appends deterministically.
+   - Neither the section nor the template present → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."*
 3. **Resolve connection fields** from the `[<profile>]` section. Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
 4. **Tool detection.** Read cached tool paths from `~/.agami/.config`; if absent, run detection per Phase 0a.
 5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → `~/.agami/.config.artifacts_dir` → `$HOME/agami-artifacts`. The model lives in `<artifacts_dir>/<profile>/`. Create lazily (`mkdir -p … && chmod 755 …`).
@@ -123,7 +124,7 @@ Ask the user to **name** this connection — don't pick for them. The name is ho
 **AskUserQuestion**, with the **Other** free-text as the encouraged path (that's where they type their own name):
 > What should I call this database? Pick a name you'll recognize when you connect more than one — e.g. your database or product name, or an environment.
 
-Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; if it doesn't pass, show the rule and re-ask.
+Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; **and not already a `[section]` in `~/.agami/credentials`** (a profile name is a unique key — reusing one would clash). If it fails either rule, show the reason and re-ask. (The 0a.10 promote helper enforces the uniqueness backstop too — it returns `COLLISION` rather than overwrite — but catch it here so the user isn't surprised later.)
 
 ### 0a.4 — Write `~/.agami/credentials.example`
 
@@ -311,19 +312,20 @@ step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
 **End the turn.** Do NOT continue to Phase 1.
 
 ### 0a.10 — On re-entry: promote the filled-in template, then continue
-The user filled in `~/.agami/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it for them** — no manual save, no `chmod` step, no helper script. One command: the `mv` consumes the template (we don't keep `.example` around); the `grep` guard refuses to promote a still-unedited template:
+The user filled in `~/.agami/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
 
 ```bash
-if [ ! -f ~/.agami/credentials ] && [ -f ~/.agami/credentials.example ]; then
-  if grep -qE 'your-(username|password|host|server|workspace|coordinator|database|token)|dapiXXX|/absolute/path/to|user:pass@host' ~/.agami/credentials.example; then
-    echo "PLACEHOLDERS_REMAIN"
-  else
-    mv ~/.agami/credentials.example ~/.agami/credentials && chmod 600 ~/.agami/credentials && echo "SECURED"
-  fi
-fi
+python3 "$AGAMI_PLUGIN_ROOT/scripts/promote_credentials.py"
 ```
-- `PLACEHOLDERS_REMAIN` → tell the user which fields still hold template values and **stop** (never introspect against a template).
-- `SECURED` → `~/.agami/credentials` now exists (chmod 600, `.example` consumed). Preflight step 2 passes.
+
+Read the first token of stdout and act:
+- `SECURED <profile>` → credentials created from the template (chmod 600, `.example` consumed). Continue.
+- `APPENDED <profile>` → the new profile was appended to an existing credentials file (other profiles untouched, chmod 600). Continue.
+- `COLLISION <profile>` → a profile by that name **already exists**; nothing was changed. Tell the user *"You already have a profile named `<profile>` — pick a different name for this database,"* go back to **0a.3** to rename (then re-write the template in 0a.4 under the new name), and **stop**. Never overwrite or duplicate an existing profile.
+- `PLACEHOLDERS_REMAIN <fields>` → the template still holds template values; tell the user which fields to fill and **stop** (never introspect against a template).
+- `NOTHING` → no `credentials.example` to promote (already promoted, or never written) — fall back to the preflight decision.
+
+(`$AGAMI_PLUGIN_ROOT` is the plugin root; `promote_credentials.py` is stdlib-only and needs no special interpreter.)
 
 **Run `setup_pgauth.py --all`** before the first native-CLI query (writes `.pgpass` / `.mysql.cnf` so passwords never hit the command line). Idempotent. Then continue to Phase 1.
 
@@ -348,13 +350,22 @@ Surface a one-liner with per-step estimates and **narrate per-table progress** s
 
 ### 1.1 — Existing-model check
 
-If `<artifacts_dir>/<profile>/org.yaml` exists and `$ARGUMENTS != reintrospect`: the profile is already onboarded. Offer (AskUserQuestion): re-introspect (refresh structure, preserve enrichment) / open the model explorer / cancel. The engine **auto-backs-up any legacy OSI** (`index.yaml` + per-schema `_schema.yaml`) it finds at the profile root into `.osi_backup/` before writing — so a first run over an old OSI profile is safe and reversible; surface a one-liner when that happens.
+If `<artifacts_dir>/<profile>/org.yaml` exists and `$ARGUMENTS != reintrospect`: the profile is already onboarded. Offer (AskUserQuestion, no `(Recommended)` — these are equal-weight choices), capped at 4:
+- **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path).
+- **Open model explorer** — browse + curate the existing model and review/sign off the trust layer (`/agami-model`).
+- **Onboard another database** — set up a **different** database (a different connection) under a **new** profile, leaving `<profile>` untouched. On this choice, **start a fresh onboarding for a new profile**: jump to the profile-naming step (Phase 0a's naming question) → have the user name the new profile (must differ from `<profile>` and any existing `[section]` in `~/.agami/credentials`) and pick its DB type → write that profile's `credentials.example` → run the full flow for it. Never reuse or overwrite the current profile's credentials or model.
+- **Cancel** — do nothing; the model is ready to query.
+
+**Same DB, another *schema*? That's the Re-introspect path, not "Onboard another database."** If the user wants to add a schema that lives in the **same database** they already onboarded (e.g. they did `public`, now they want `billing` too), choose **Re-introspect** and **expand the schema selection** in Phase 1.3 to include both the old and the new schemas. The engine scans them together in one pass, so any relationship between the original and the new schema is detected as a first-class **cross-schema** join (Case 1) and surfaced for review. Picking "Onboard another database" instead would split the two schemas into separate models and demote any link between them to manual cross-profile glue (Phase 2b federation) — wrong for one DB. If you're unsure which the user means, ask: *"Is `billing` in the same database connection as `<profile>`, or a different server/database?"* — same connection → Re-introspect + expand schemas; different → new profile.
+
+The engine **auto-backs-up any legacy OSI** (`index.yaml` + per-schema `_schema.yaml`) it finds at the profile root into `.osi_backup/` before writing — so a first run over an old OSI profile is safe and reversible; surface a one-liner when that happens.
 
 ### 1.2 — Scope: schemas, and the no-catalog case
 
 Run `cli areas`/probe is not needed yet — schema discovery happens inside the engine. But **decide scope first**:
 
 - **Catalog reachable (common):** after the engine lists schemas, it introspects all of them. If the DB has many schemas (Snowflake with 50+), narrow first — ask the user which schemas matter (multi-select), then pass them as the engine's table allowlist scope. Pre-check `public` (Postgres) / `PUBLIC` (Snowflake) / the credentials' `database` (MySQL).
+  - **Supabase is handled automatically** — the engine detects it by signature and drops its system schemas (`auth`, `storage`, `vault`, `realtime`, `extensions`, …) so only the user's app schemas (e.g. `public`) are modeled (it surfaces a note saying which it skipped). **Don't hand-build a `--tables` allowlist for Supabase** to dodge the system tables — that's already done, and a manual allowlist is fragile (shell word-splitting, missed tables). Only allowlist when the user genuinely wants a subset of their *own* tables.
 - **Catalog denied (locked-down role):** if a quick probe shows the catalog isn't readable, the engine **cannot enumerate tables** — ask the user for the table list:
   > Your role can read the data but not the catalog, so I can't list tables automatically. Paste the tables to model (e.g. `sales.orders, sales.customers`) — I'll describe each from the data itself.
 
@@ -363,6 +374,12 @@ Run `cli areas`/probe is not needed yet — schema discovery happens inside the 
 ### 1.3 — Schema picker (multi-select)
 
 For non-SQLite/DuckDB with multiple schemas, **AskUserQuestion** multi-select: "Which schemas should I introspect?" One option per schema + `All schemas` + `Just <default> for now`. Record `selected_schemas`; the engine scopes to these.
+
+**On re-introspect / an existing model — pre-check the schemas already modeled, and make "add" vs "replace" explicit.** Read the schemas already in `<profile>`'s model (the distinct `schema` of its existing tables) and **pre-check those** in the picker, labelled `<schema> (already in your model)`. Tell the user plainly:
+
+> The engine re-scans exactly the schemas you check here and rebuilds the structure from them. To **add** a schema, leave the existing ones checked and tick the new one — relationships between them get found in the same pass. **Unchecking a schema removes its tables from the model** (its hand-edits are preserved only if you keep it checked).
+
+This is the union-rescan that makes Case 2 work: adding `billing` to a model that already has `public` must scan `public` ∪ `billing` together — scanning only `billing` would build the new schema's internal joins but **miss every join back to `public`** (a cross-schema edge needs both endpoints in one introspection pass). Never silently re-scan just the delta.
 
 ### 1.4 — Organization context (MANDATORY — ALWAYS ASK)
 
@@ -438,7 +455,11 @@ Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), th
 
 Don't skip a coded column because "the legend covers it" — the legend lives in a *different file*; the per-column description is what the explorer shows and what NL→SQL reads. A wide coded table (hundreds of columns) should finish at ~100% column coverage, not ~3%.
 
-**Write descriptions with `sm curate` edit ops — never hand-edit the table YAML or script a loop over `tables/*.yaml`.** Build one ops array (table = `{op:edit, kind:table, area, name, field:description, value, source:"ai"}`; column = same + `column`) and run it once; it validates the whole model + commits + reverts on failure. **Always include `"source":"ai"` on every generated description** — this stamps `description_source: ai_unvalidated` so the description earns trust through use (agami-query surfaces it in the answer receipt for confirmation the first time a query actually uses that column, instead of forcing an upfront review of hundreds of descriptions; see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). **Skip any column that already has a description** (so a partial hand-edit or a reintrospect merge is never clobbered):
+**Write descriptions with `sm curate` edit ops — never hand-edit the table YAML, and never write a throwaway generator script to build the ops.** Build one ops array and run it once; it validates the whole model + commits + reverts on failure. **The op does NOT need `area`** — curate resolves which area owns a table/column by name, so you do **not** maintain a `table → area` map (that map is exactly what used to push the LLM into writing an `enrich_gen.py`; it's gone). Shapes:
+- table: `{op:edit, kind:table, name:"<table>", field:"description", value:"<text>", source:"ai"}`
+- column: same + `column:"<col>"`
+
+Pass `area` **only** to disambiguate a bare name that exists in two schemas (curate skips an ambiguous op with a clear "pass an explicit area" reason rather than editing the wrong one). **Always include `"source":"ai"` on every generated description** — this stamps `description_source: ai_unvalidated` so the description earns trust through use (agami-query surfaces it in the answer receipt for confirmation the first time a query actually uses that column, instead of forcing an upfront review of hundreds of descriptions; see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). **Skip any column that already has a description** (so a partial hand-edit or a reintrospect merge is never clobbered):
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-descriptions.json
 ```
@@ -500,7 +521,7 @@ From samples + the domain doc, add provider-portable cleaning where evidence sup
 - **Caveats** (`caveats[]` on table/column/entity): data-quality notes, anti-patterns (e.g. "filter on the event date, not the load date"), dedup warnings.
 - **value_transform** on columns whose raw value needs cleaning (`regexp_replace(...)` for bracketed text, `TO_TIMESTAMP(...)` for epoch). Must parse as SQL (validator checks).
 - **default_filters** (`default_filters[]` on a table): soft-delete / tenancy filters AND-ed in at query time (use the `{alias}` placeholder, e.g. `{alias}.deleted_at IS NULL`).
-- **Currency (one ask per profile):** if numeric fields look like money (`amount`/`price`/`revenue`/…, no `_usd` suffix giving the answer), ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). On the answer, **set the column `unit` to the ISO code** on every detected money column — via `cli curate` edit ops (`{op:edit, kind:table, area, name:<table>, column:<col>, field:unit, value:"INR"}`), one batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → leave `unit` unset, one-liner. (Non-currency units — `cents`, `percent`, `days` — set `unit` the same way when a column's scale/unit is unambiguous.)
+- **Currency (one ask per profile):** **find the money columns with `sm suggest-units "$ROOT"` — don't hand-roll a name regex** (a bare `count` pattern matches inside `discount` and silently drops `discount_amount`; the command's matcher is word-boundary-correct and tested). It returns `{money_columns: [{area, table, column, type}]}` (numeric columns named like money — amount/price/revenue/discount/… — minus rate/count/id/score, and skipping any that already have a `unit`). Glance at the list; if a `_usd`/`_inr`-suffixed column makes the currency obvious, set it directly. Otherwise ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). On the answer, **set the column `unit` to the ISO code** on every returned column — via `cli curate` edit ops (`{op:edit, kind:table, area, name:<table>, column:<col>, field:unit, value:"INR"}`), one batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → leave `unit` unset, one-liner. (Non-currency units — `cents`, `percent`, `days` — set `unit` the same way when a column's scale/unit is unambiguous.)
 - **Date encodings (auto-sniffed — no question):** introspection already sets `date_format` (`epoch_s`/`ms`/`us`/`ns`, `yyyymmdd`, `iso8601`) + `timezone` on date-named columns whose sample values fit the shape, so epoch integers render as human dates (UTC) deterministically. You don't ask. **Do** glance at the result: if a time column was missed or mis-scaled (e.g. an epoch_ms tagged epoch_s), fix it with a `field:date_format`/`field:timezone` edit op in the same batch; mention any epoch columns found in the Phase 7 summary.
 
 **Write all of these with `sm curate` edit ops — never hand-edit `tables/*.yaml` or script a loop over them.** One ops array, one call (validated + committed + reverted on failure):
@@ -549,14 +570,21 @@ I split <N> tables into <A> subject areas:
 
 Seeds reference **columns, tables, metrics, and entities** — so settle those *before* generating examples (a seed that uses a column you'd later exclude breaks at query time, and a seed built on an unreviewed metric bakes in a guessed definition). **Relationships are NOT gated here** — they stay lazy: FK joins are already auto-approved by the engine (the DB declared them), and inferred joins self-approve as you query / surface as receipt warnings. So you're not asked to rubber-stamp database-declared foreign keys.
 
-**4a — Exclude columns/tables you don't want queried.** Offer the model explorer so the user drops PII / scratch / internal-only tables and columns before seeds reference them. **AskUserQuestion:**
-> Before I generate example queries, want to exclude any tables or columns from the model? (PII, scratch/temp tables, internal-only fields — anything you don't want answers built on.)
+**4a — Exclude columns/tables you don't want queried.** Two parts:
 
-`Open the model explorer (Recommended)` → invoke `/agami-model`, **end the turn**, wait for their exclude batch. `Nothing to exclude — continue` → proceed. (Exclusions apply via the model-explorer's curate path; the loader then drops them so seeds never reference them.)
+**(i) Proactively surface what introspection flagged `sensitive`** — group the flagged columns by table/kind and offer the riskiest as a **multiSelect** quick-exclude, secrets first (a plaintext password / access-code column → *"strongly recommend dropping"*). **Cap at the 3 riskiest groups** — never try to enumerate every sensitive column, the modal only holds 4 options.
+
+**(ii) ALWAYS include "Open the model explorer" as an option** — it's the real bulk-exclude surface (per-table/column Exclude toggles + Mark-PII), and there are almost always more exclusions than fit in a modal. If the user picks it **or answers Other** ("there are a bunch more I want to exclude"), **do NOT parse a free-text list of tables** — invoke `/agami-model`, **end the turn**, and wait for their exclude batch.
+
+`AskUserQuestion` shape: each detected group is a checkbox (e.g. `users.access_code_plain + _hash — plaintext/hashed login secrets, recommend dropping`), plus **Open the model explorer (to exclude more)** and **Nothing to exclude — continue**. Apply the checked groups via the model-explorer curate path; route the explorer/Other choice to `/agami-model`. The loader then drops every exclusion so seeds never reference them.
+
+> **MANDATORY: include the explicit "Nothing to exclude — continue" option, and NEVER tell the user to "leave all unchecked."** `AskUserQuestion` cannot be submitted with zero boxes checked — so "keep everything" must be a *selectable* option, not an implied empty state. A modal whose only escape is "leave it blank" traps a user who doesn't want any of the listed exclusions (they can't submit). Phrase the prompt as "check any to drop, or pick *Nothing to exclude — continue*" — do **not** write "leave all unchecked to keep everything."
 
 **4b — Sign off metrics + entities.** These define what seeds *mean* and *say*. Count via `sm review-items "$ROOT" --scope preseed` — its length is the sign-off count (metrics + named-filters + entities needing review; relationships excluded). If **0**, surface the one-liner ("Nothing to sign off before examples — proceeding") and continue to Phase 5. If **> 0**, tell the user upfront, then invoke `/agami-model preseed` (the `preseed` argument opens the dashboard on its **Review** tab, where these metrics + entities sit under "Needs your eyes"). **End the turn** and wait for their approval batch.
 
-**4c — return gate:** when they're back, recount via `--scope preseed`. If 0 → Phase 5. If > 0 (partial) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`).
+> **4b is NOT a choice — it OPENS the explorer.** When the count is > 0, you **open `/agami-model preseed` and end the turn**. Do **NOT** present an `AskUserQuestion` offering "continue to examples now" vs "open explorer" here, and do **NOT** mark continuing as Recommended. The explorer-first review is the designed path; a high count (dozens of items across many schema-areas) is a reason to open it, not to skip it (the user bulk-approves the *Looks right* pile and eyeballs the cross-schema joins there). The "continue anyway" option exists **only** at the 4c return gate — i.e. **after** the user has already been in the explorer at least once. Never surface the 4c choice before 4b has opened the explorer.
+
+**4c — return gate:** when they're back (they have now opened the explorer at least once), recount via `--scope preseed`. If 0 → Phase 5. If > 0 (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered.
 
 On `reintrospect` with no new exclusions and nothing unreviewed, skip silently.
 
@@ -564,9 +592,16 @@ On `reintrospect` with no new exclusions and nothing unreviewed, skip silently.
 
 ## Phase 5: Seed prompt examples
 
-**Surface a progress warning first** (second-longest phase): "Generating 10–12 NL→SQL seeds and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud). I'll narrate per-example progress."
+**Surface a progress warning first** (second-longest phase): "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud / a multi-schema DB). I'll narrate per-example progress."
 
-**5a — generate** (your job — the LLM step) 10–12 candidate examples grounded in the model: a count, a top-N, a time-bucketed trend, a breakdown, a recency filter, plus domain-specific ones from entities/metrics. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset. Tag each with its `tables`, `columns`, and `metric`. Write the candidates as a JSON array to `/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metric`.
+**5a — generate** (your job — the LLM step) candidate examples grounded in the model. Aim for **coverage and a good spread**, not a fixed count:
+
+- **Shapes:** a count, a top-N, a time-bucketed trend, a breakdown, a recency filter. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset.
+- **Spread:** across the whole set, touch each major table/family, exercise **every approved metric at least once**, use the key **entities** by their real names/synonyms, and cover **representative joins** — intra-area *and* cross-schema.
+- **Cross-schema seeds — the highest-value few-shots, include them deliberately.** Read the model's `cross_subject_area_relationships` (the cross-schema / cross-area joins). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
+- **Count scales with the model:** a single-schema DB is fine at ~10–12; a multi-schema one wants ~2–3 per subject area **plus** the 2–4 cross-schema seeds — don't undersample a 5-schema DB at a flat 12.
+
+Tag each with its `tables` (list **all** tables it touches — both schemas for a cross-area one), `columns`, and `metric`. **Store a cross-area seed under its primary/driving table's area** (tagged with both schemas' tables, so the ranker can surface it from either side). Write the candidates as a JSON array to `/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metric`.
 
 **5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error:
 ```bash
@@ -705,6 +740,38 @@ The model keeps improving as you use it:
   exclude tables/columns you don't want queried, add metrics, and edit descriptions.
 ```
 End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
+
+---
+
+## Phase 8.5: Cross-profile link offer (ONLY when ≥2 profiles now exist)
+
+**Gate:** run this **only** when, after this onboarding, the user has **two or more** onboarded profiles (count distinct onboarded profiles — `<artifacts_dir>/*/org.yaml`, or `[section]`s in `~/.agami/credentials`). Skip entirely for the first/only profile, and skip on a plain `reintrospect` of a single-profile setup. This is the **cross-datasource** case — different databases, joined at query time via federation (Phase 2b.federation in agami-query), declared in `~/.agami/cross_profile_relationships.yaml`. Unlike cross-*schema* joins (same DB, auto-detected — Case 1), cross-*profile* links are **never** auto-detected at introspection: each profile is a separate connection, so there's nothing to confirm by overlap.
+
+**Ask (opt-in, AskUserQuestion):**
+> You now have <N> databases connected (`<profileA>`, `<profileB>`, …). Want me to look for likely links between them — so you can ask questions that span both (e.g. join `<profileA>`'s data to `<profileB>`'s)?
+
+Options (no `(Recommended)` — it's the user's call): `Yes — look for links` / `Not now` (default).
+
+**On "Not now":** one line — *"No problem. Say 'link my databases' anytime, or hand-edit `~/.agami/cross_profile_relationships.yaml`."* End.
+
+**On "Yes":**
+1. **Propose candidates by name+type** — compare the just-onboarded profile's columns against the other profile(s)' columns (read each model's tables/columns; no DB access needed). A candidate is a column pair with the **same or obviously-equivalent name** (`dept_id` ↔ `department_id`, `customer_id` ↔ `cust_id`) **and a compatible type**, where one side is a key/grain column. Rank by name closeness.
+2. **Be honest about confidence.** Say plainly: *"These are name/type guesses — I can't sample-join across two separate databases to confirm them, so they're lower-confidence than the joins inside one DB. They'll prove out the first time a federated query uses them."* Never present them as confirmed.
+3. **Confirm each, never auto-write.** Show the candidates (`<profileA>.<schema>.<table>.<col>  →  <profileB>.<schema>.<table>.<col>`) and let the user pick which to keep (multi-select) or skip all.
+4. **Write the confirmed ones** to `~/.agami/cross_profile_relationships.yaml` in the format [agami-query expects](../agami-query/SKILL.md) — **merge**, never clobber an existing file (load it, append new entries, dedup by the `from_profile/from_dataset/to_profile/to_dataset` tuple), `chmod 600`:
+   ```yaml
+   version: "0.1.1"
+   relationships:
+     - name: <profileA>_<tableA>_to_<profileB>_<tableB>
+       from_profile: <profileA>
+       from_dataset: <schema>.<table>
+       from_columns: [<col>]
+       to_profile: <profileB>
+       to_dataset: <schema>.<table>
+       to_columns: [<col>]
+       description: <one line — what the link means, in the user's terms>
+   ```
+5. **Confirm where it landed** — *"Saved <K> cross-database link(s) to `~/.agami/cross_profile_relationships.yaml`. A question that spans both DBs will now use them (federated via DuckDB). I'll flag low confidence on the first answer that does."* Don't block; this is additive.
 
 ---
 

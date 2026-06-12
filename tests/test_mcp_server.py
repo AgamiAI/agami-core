@@ -31,10 +31,12 @@ sys.path.insert(0, str(SCRIPTS))
 
 from mcp_server import (  # noqa: E402
     _classify_exit,
+    _resolve_receipt,
     _resolve_units,
     check_read_only,
     resolve_artifacts_dir,
     resolve_profile,
+    tool_save_correction,
 )
 
 
@@ -197,6 +199,11 @@ def test_initialize_and_tools_list():
     init = by_id[1]["result"]
     assert init["protocolVersion"] == "2025-06-18"  # echoes client's version
     assert init["serverInfo"]["name"] == "agami"
+    # The lean playbook signposts the trust flow so a Desktop client surfaces it (soft layer;
+    # the hard guarantees are enforced in code). Don't let these silently drop out.
+    instr = init["instructions"].lower()
+    for token in ("examples-first", "receipt", "review_state", "save_correction", "confirmed"):
+        assert token in instr, token
 
     tools = {t["name"] for t in by_id[2]["result"]["tools"]}
     assert tools == {
@@ -206,6 +213,8 @@ def test_initialize_and_tools_list():
         # semantic-model traversal tools
         "list_subject_areas", "get_subject_area_bundle", "get_table_context",
         "identify_entity", "pre_flight_check",
+        # write-back: corrections land through the same engine as the skill
+        "save_correction",
     }
 
 
@@ -227,3 +236,137 @@ def test_unknown_method_returns_error():
     ])
     by_id = {m.get("id"): m for m in out}
     assert by_id[9]["error"]["code"] == -32601
+
+
+# ---------------------------------------------------------------------------
+# Trust receipt + corrections through the MCP — the SAME engine the skill uses,
+# so the query→receipt→correct loop is identical in Claude Desktop and Claude Code.
+# ---------------------------------------------------------------------------
+
+
+def _write_rich_model(tmp_path):
+    """A model with an UNREVIEWED metric + an UNREVIEWED join — the trust signals the
+    receipt must surface. Returns (artifacts_dir, profile, root)."""
+    import subprocess
+    yaml = __import__("yaml")
+    p = tmp_path / "p"
+    (p / "datasources" / "c").mkdir(parents=True)
+    (p / "subject_areas" / "s" / "tables").mkdir(parents=True)
+    (p / "subject_areas" / "s" / "metrics").mkdir(parents=True)
+    (p / "org.yaml").write_text(yaml.safe_dump({
+        "organization": "p", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/s"]}))
+    (p / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    (p / "subject_areas" / "s" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "s", "tables": [{"storage_connection": "c", "schema": "public", "table": "orders"},
+                                {"storage_connection": "c", "schema": "public", "table": "customers"}]}))
+    (p / "subject_areas" / "s" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"], "description": "o",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "customer_id", "type": "integer"},
+                    {"name": "amount", "type": "decimal", "description": "net revenue",
+                     "description_source": "ai_unvalidated"}]}))
+    (p / "subject_areas" / "s" / "tables" / "customers.yaml").write_text(yaml.safe_dump({
+        "name": "customers", "schema": "public", "storage_connection": "c", "grain": ["id"], "description": "c",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True}]}))
+    (p / "subject_areas" / "s" / "metrics" / "revenue.yaml").write_text(yaml.safe_dump({
+        "name": "revenue", "calculation": "sum of order amount", "bindings": {"PostgreSQL": "SUM(amount)"},
+        "source_tables": ["orders"], "confidence": "proposed", "review_state": "unreviewed"}))
+    (p / "subject_areas" / "s" / "relationships.yaml").write_text(yaml.safe_dump({
+        "relationships": [{"from_table": "orders", "from_column": "customer_id",
+                           "to_table": "customers", "to_column": "id", "from_schema": "public",
+                           "to_schema": "public", "relationship": "many_to_one",
+                           "confidence": "inferred", "review_state": "unreviewed"}]}))
+    subprocess.run(["git", "-C", str(p), "init", "-q"])
+    subprocess.run(["git", "-C", str(p), "add", "-A"])
+    subprocess.run(["git", "-C", str(p), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "init"])
+    return tmp_path, "p", p
+
+
+SQL = "SELECT c.id, SUM(amount) AS total FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.id"
+
+
+def test_mcp_receipt_surfaces_unapproved_metric_and_join(monkeypatch, tmp_path):
+    import pytest
+    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
+    art, profile, _ = _write_rich_model(tmp_path)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    r = _resolve_receipt(profile, SQL)
+    assert r is not None
+    # the unapproved metric is surfaced WITH its review_state (drives the approve/change banner)
+    rev = next(m for m in r["metrics"] if m["name"] == "revenue")
+    assert rev["review_state"] == "unreviewed"
+    # the unreviewed join is warned about; the ai-written column is flagged as an assumption
+    assert any("unreviewed join" in w for w in r["warnings"])
+    assert any(a["column"].endswith("orders.amount") for a in r["assumptions"])
+
+
+def test_mcp_receipt_equals_shared_assembler(monkeypatch, tmp_path):
+    """Golden parity: the MCP receipt IS the shared assembler's output — no divergent
+    second implementation. (model_version is the only MCP-added field.)"""
+    import pytest
+    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
+    art, profile, root = _write_rich_model(tmp_path)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    from semantic_model import loader as L, runtime as RT
+    shared = RT.assemble_receipt(L.load_organization(root), SQL)
+    mcp = _resolve_receipt(profile, SQL)
+    for key in ("tables_used", "relationships", "metrics", "assumptions", "warnings"):
+        assert mcp[key] == shared[key], key
+
+
+def test_mcp_save_correction_approves_through_engine(monkeypatch, tmp_path):
+    import pytest
+    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
+    art, profile, root = _write_rich_model(tmp_path)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    out = json.loads(tool_save_correction({
+        "datasource": profile,
+        "ops": [{"op": "approve", "kind": "metric", "area": "s", "name": "revenue",
+                 "at": "2026-06-12T00:00:00Z"}],
+        "confirmed": True,
+        "signer": "reviewer@example.com", "role": "cfo",
+    }))
+    assert out["ops"][0]["validated"] and out["ops"][0]["applied"]
+    # the metric is now approved on disk — corrections land through the curate engine
+    from semantic_model import loader as L
+    org = L.load_organization(root)
+    met = next(m for sa in org.subject_areas for m in sa.metrics if m.name == "revenue")
+    assert met.review_state == "approved" and met.signed_off_by == "reviewer@example.com"
+
+
+def test_mcp_save_correction_gates_unconfirmed_model_edits(monkeypatch, tmp_path):
+    """Enforced (not advisory): ops WITHOUT confirmed:true must NOT mutate the model."""
+    import pytest
+    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
+    art, profile, root = _write_rich_model(tmp_path)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    out = json.loads(tool_save_correction({
+        "datasource": profile,
+        "ops": [{"op": "approve", "kind": "metric", "area": "s", "name": "revenue"}],
+        # no confirmed
+    }))
+    assert out.get("requires_confirmation") is True and out["pending_ops"]
+    assert "ops" not in out  # nothing applied
+    # the metric is UNTOUCHED on disk
+    from semantic_model import loader as L
+    org = L.load_organization(root)
+    met = next(m for sa in org.subject_areas for m in sa.metrics if m.name == "revenue")
+    assert met.review_state == "unreviewed" and met.signed_off_by is None
+
+
+def test_mcp_save_correction_example_is_not_gated(monkeypatch, tmp_path):
+    """The safe floor: saving a corrected example needs no confirmation."""
+    import pytest
+    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
+    art, profile, _ = _write_rich_model(tmp_path)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    out = json.loads(tool_save_correction({
+        "datasource": profile,
+        "example": {"area": "s", "question": "total orders?", "sql": "SELECT COUNT(*) FROM orders"},
+    }))
+    assert out.get("example") and out["example"]["validated"]
+    assert "requires_confirmation" not in out

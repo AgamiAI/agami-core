@@ -243,6 +243,31 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
         return {}
 
 
+def _model_version(profile: str) -> str | None:
+    """The model-version pin = the newest snapshot dir name (a content hash), same as
+    the skill reads. None if there's no .snapshots/ (legacy model)."""
+    try:
+        snaps = resolve_artifacts_dir() / profile / ".snapshots"
+        dirs = sorted((p for p in snaps.iterdir() if p.is_dir()),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+        return dirs[0].name if dirs else None
+    except Exception:
+        return None
+
+
+def _resolve_receipt(profile: str, sql: str) -> dict | None:
+    """The FULL trust receipt (tables / relationships / metrics+review_state / assumptions
+    / warnings) for this query — the SAME assembler the skill uses, so the 'what did this
+    touch / what's unapproved' panel is identical in Claude Code and Claude Desktop.
+    Returns None only if the model deps aren't importable (execute_sql stays usable)."""
+    try:
+        org = _load_org(profile)
+        from semantic_model import runtime as RT
+        return RT.assemble_receipt(org, sql, model_version=_model_version(profile))
+    except Exception:
+        return None
+
+
 def tool_list_datasources(_args: dict[str, Any]) -> str:
     """Local analog of Ask Agami `list_organizations`: enumerate local profiles."""
     creds = _credentials_sections()
@@ -470,6 +495,11 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
         "markdown": markdown,  # exact, full numbers (currency symbol + grouping) — render as-is
         "sql": sql,
         "execution_ms": execution_ms,
+        # Trust receipt — provenance + anything unapproved this answer used. Same assembler
+        # the agami-query skill renders, so Desktop gets the same trust panel. Clients should
+        # surface receipt.warnings and any receipt.metrics whose review_state != "approved"
+        # (offer to approve/correct via the save_correction tool).
+        "receipt": _resolve_receipt(profile, sql),
     }
 
     # Append to the personal query log (same file the skills use), best-effort.
@@ -505,6 +535,95 @@ def tool_log_feedback(args: dict[str, Any]) -> str:
     if not ok:
         return json.dumps({"error": {"kind": "other", "remediation": f"Could not write {FEEDBACK_LOG}."}})
     return json.dumps({"ok": True, "rating": rating_value, "logged_to": str(FEEDBACK_LOG)})
+
+
+def _op_summary(op: dict[str, Any]) -> str:
+    """One-line human preview of a curate op, for the confirmation gate."""
+    parts: list[str] = [str(op.get("op", "?")), str(op.get("kind", ""))]
+    if op.get("area"):
+        parts.append(f"in {op['area']}")
+    name = op.get("name")
+    if not name and op.get("items"):
+        name = "+".join(str(i.get("name", "?")) for i in op["items"])
+    if name:
+        parts.append(str(name))
+    if op.get("column"):
+        parts.append(f"· column {op['column']}")
+    if op.get("field"):
+        parts.append(f"· set {op['field']}")
+    return " ".join(p for p in parts if p)
+
+
+def tool_save_correction(args: dict[str, Any]) -> str:
+    """Local analog of the agami-save-correction skill: apply a correction through the
+    SAME validated, git-committed engine (`curate`), so a fix made in Claude Desktop lands
+    exactly like one made in Claude Code. The CLIENT does the routing (which note becomes a
+    caveat / unit / new metric / relationship edit — same decision tree as the skill); this
+    tool APPLIES the resulting ops + saves the corrected example.
+
+    **Shared-model edits are gated — ENFORCED, not advisory.** Any `ops` (which mutate the
+    shared model) apply ONLY when `confirmed: true`. Without it the tool does NOT write — it
+    returns `requires_confirmation` + a preview, so the client must show the user the exact
+    change and get an explicit OK, then re-call with `confirmed: true`. Saving a corrected
+    `example` is the safe floor (only shapes this question's few-shot) and is NOT gated.
+
+    args:
+      datasource: profile (optional; defaults to active)
+      ops:        curate ops, each {op, kind, area, name, [column], [field, value]} for
+                  approve/reject/edit/exclude/include, or {op:"add", kind, area, items:[...]}
+                  to add a metric/entity.
+      confirmed:  bool — REQUIRED to apply `ops` (the user's explicit OK to edit the model).
+      example:    optional corrected NL->SQL to save as a prompt example —
+                  {area, question, sql, [tables], [columns], [metric], [source], [status]}.
+      signer/role: stamped on approvals (a user approving here IS their sign-off).
+    """
+    profile = resolve_profile(args.get("datasource"))
+    root = resolve_artifacts_dir() / profile
+    if not (root / "org.yaml").exists():
+        return json.dumps({"error": {"kind": "other",
+                           "remediation": f"No model at {root}. Run the agami-connect skill first."}})
+    try:
+        from semantic_model import curate
+    except Exception as e:
+        return json.dumps({"error": {"kind": "other", "remediation": f"Model deps unavailable: {e}"}})
+
+    signer, role = args.get("signer"), args.get("role")
+    confirmed = bool(args.get("confirmed"))
+    out: dict[str, Any] = {"profile": profile}
+
+    ops = args.get("ops") or []
+    if ops and not confirmed:
+        # Enforced gate: never mutate the shared model without an explicit confirm.
+        preview = [_op_summary(o) for o in ops]
+        out["requires_confirmation"] = True
+        out["pending_ops"] = preview
+        out["message"] = (
+            "These edits change your shared semantic model and were NOT applied: "
+            + "; ".join(preview) + ". Show the user exactly what will change, get their OK, then "
+            "call save_correction again with the same `ops` and `confirmed: true`. "
+            "(A corrected `example` saves without confirmation — it only affects this question.)")
+    elif ops:
+        results = []
+        # {op:"add"} routes to write_items (add a metric/entity); the rest through apply().
+        for ao in [o for o in ops if o.get("op") == "add"]:
+            results.append(curate.write_items(root, ao.get("area"), ao.get("kind"),
+                                              ao.get("items") or [], signer=signer, role=role).as_dict())
+        plain = [o for o in ops if o.get("op") != "add"]
+        if plain:
+            results.append(curate.apply(root, plain, signer=signer, role=role).as_dict())
+        out["ops"] = results
+
+    ex = args.get("example")
+    if isinstance(ex, dict) and ex.get("area") and ex.get("question") and ex.get("sql"):
+        area = {k: v for k, v in ex.items() if k != "area"}
+        out["example"] = curate.add_examples(root, ex["area"], [area],
+                                              signer=signer, role=role).as_dict()
+
+    if not any(k in out for k in ("ops", "example", "requires_confirmation")):
+        return json.dumps({"error": {"kind": "other",
+                           "remediation": "Pass `ops` (curate ops) and/or a complete `example` "
+                                          "(area+question+sql)."}})
+    return json.dumps(out, indent=2, default=str)
 
 
 def _now_iso() -> str:
@@ -686,6 +805,44 @@ TOOLS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "save_correction": {
+        "handler": tool_save_correction,
+        "description": (
+            "Apply a correction to the local semantic model AND/OR save a corrected NL→SQL "
+            "example, through the same validated, git-committed engine the agami-save-correction "
+            "skill uses — so a fix made in Claude Desktop lands identically to one in Claude Code. "
+            "Use after execute_sql when the answer was wrong or used something unapproved (see "
+            "receipt.metrics with review_state != 'approved', or receipt.warnings). YOU decide the "
+            "routing (a column's unit/meaning → an edit op; a reusable aggregation → add a metric; "
+            "an approval → an approve op); this tool applies it. Approving here IS the user's sign-off."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource": {"type": "string", "description": "Profile name; defaults to the active profile."},
+                "ops": {
+                    "type": "array",
+                    "description": "Curate ops. Each: {op, kind, area, name, [column], [field], [value]} "
+                                   "for approve/reject/edit/exclude/include; or {op:'add', kind:'metric'|'entity', "
+                                   "area, items:[...]} to add one. Applied ONLY with confirmed:true.",
+                    "items": {"type": "object"},
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Set true ONLY after showing the user the exact model change and "
+                                   "getting their OK. Required to apply `ops`; ignored for `example`.",
+                },
+                "example": {
+                    "type": "object",
+                    "description": "Optional corrected NL→SQL to save as a prompt example: "
+                                   "{area, question, sql, [tables], [columns], [metric], [source], [status]}.",
+                },
+                "signer": {"type": "string", "description": "Email stamped on approvals (the user's sign-off)."},
+                "role": {"type": "string", "description": "Signer role (e.g. cfo, data_lead)."},
+            },
+            "additionalProperties": False,
+        },
+    },
     "list_subject_areas": {
         "handler": tool_list_subject_areas,
         "description": (
@@ -809,9 +966,17 @@ def _handle_initialize(req_id: Any, params: dict[str, Any]) -> None:
         "instructions": (
             "agami local datasource agent. The NL→SQL intelligence runs on your side; these "
             "tools provide the local semantic model + curated examples and execute SQL locally. "
-            "Discover datasources with list_datasources, fetch the model + examples for the one "
-            "the question touches, generate SQL using metric `calculation` fields verbatim, then "
-            "execute_sql. All execution is local; nothing leaves the machine."
+            "All execution is local; nothing leaves the machine.\n"
+            "Flow: (1) list_datasources, then fetch the model + examples for the datasource the "
+            "question touches. (2) Examples-first — call get_prompt_examples and mirror the closest "
+            "match before composing new SQL; use metric `calculation`/`bindings` verbatim. "
+            "(3) execute_sql (safety + default_filters run inside it). (4) Read the returned "
+            "`receipt`: SHOW the user `receipt.warnings` and any `receipt.metrics` whose "
+            "review_state != 'approved' — these are joins/metrics they haven't signed off; never "
+            "hide them. Don't refuse on an unreviewed metric — answer and warn. (5) If the answer "
+            "was wrong or the user approves an item, call save_correction. Model edits (its `ops`) "
+            "apply only with confirmed:true — preview the exact change, get the user's OK, then "
+            "re-call confirmed. Saving a corrected example needs no confirmation."
         ),
     })
 

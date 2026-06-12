@@ -40,11 +40,33 @@ WEAK_PII_RE = re.compile(r"(\bname\b|first_?name|last_?name|full_?name|surname)"
 # Back-compat alias (some callers import SENSITIVE_RE).
 SENSITIVE_RE = STRONG_PII_RE
 
-# loan-type / segment prefixes commonly seen as column-group roots
-_KNOWN_PREFIXES = {"al", "pl", "gl", "hl", "lap", "las", "bl", "tw", "cc", "total"}
-
 # sizing thresholds mirror validator.SIZING_WARN
 SINGLE_AREA_MAX = 24
+
+
+# Numeric columns whose NAME indicates a monetary value, so curation can offer a currency
+# `unit` without callers hand-rolling (and mis-rolling) a regex. Tokens match on word
+# boundaries (`_` or string edges), so a bare `count` never matches inside `discount`:
+# `discount_amount` / `member_discount` ARE money; `order_count` / `discount_rate` are not.
+_MONEY_RE = re.compile(
+    r"(^|_)(amount|amt|price|cost|fee|revenue|sales|salary|wage|income|payment|"
+    r"charge|balance|deposit|withdrawal|refund|discount|subtotal|total|spend|spent|"
+    r"budget|invoice|mrr|arr|gmv|ltv|aov|paid|due|owed|credit|debit)s?(_|$)",
+    re.IGNORECASE,
+)
+# Tokens that flip a money-ish name back to NON-money (it's a rate / count / id / score / …).
+_MONEY_NEGATIVE_RE = re.compile(
+    r"(^|_)(rate|pct|percent|percentage|ratio|count|cnt|qty|quantity|num|number|id|"
+    r"flag|year|age|day|month|score|rank|code|status)s?(_|$)",
+    re.IGNORECASE,
+)
+
+
+def detect_money_column(column_name: str) -> bool:
+    """A column whose name looks monetary (amount/price/revenue/discount/…) and is NOT a
+    rate/count/id/score — so `discount_amount` is money while `discount_rate` and
+    `order_count` are not. Name-only; the caller restricts this to numeric columns."""
+    return bool(_MONEY_RE.search(column_name)) and not _MONEY_NEGATIVE_RE.search(column_name)
 
 
 def detect_sensitive(table_name: str, column_name: str) -> bool:
@@ -68,9 +90,7 @@ def derive_column_groups(columns: list[Column]) -> dict[str, list[str]]:
             groups["identity"].append(name)
             continue
         token = name.split("_")[0].lower()
-        if token in _KNOWN_PREFIXES:
-            groups[token].append(name)
-        elif name.upper().startswith("TOTAL"):
+        if name.upper().startswith("TOTAL"):
             groups["totals"].append(name)
         else:
             groups[token].append(name)
@@ -169,13 +189,26 @@ def make_table_ref(conn: str, table: Table) -> TableRef:
     )
 
 
+def _area_key(schema: str) -> str:
+    """A filesystem-safe area name from a schema name."""
+    return re.sub(r"[^a-z0-9_]+", "_", schema.lower()).strip("_") or "misc"
+
+
+def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
+    """Is this relationship internal to an area? Match endpoints by (schema, table) when the
+    relationship carries schemas — so a join from billing.products and one from crm.products
+    don't both match an area just because the bare name `products` is present. Schemaless
+    relationships (SQLite / legacy) fall back to bare-name membership."""
+    def here(table: str, schema) -> bool:
+        return (schema, table) in keys if schema is not None else table in bare
+    return (here(r.from_table.split(".")[-1], r.from_schema)
+            and here(r.to_table.split(".")[-1], r.to_schema))
+
+
 def make_area(name: str, tables: list[Table], rels: list[Relationship], conn: str) -> SubjectArea:
     table_names = {t.name for t in tables}
-    area_rels = [
-        r for r in rels
-        if r.from_table.split(".")[-1] in table_names
-        and r.to_table.split(".")[-1] in table_names
-    ]
+    keys = {(t.schema_name, t.name) for t in tables}
+    area_rels = [r for r in rels if _rel_in_area(r, keys, table_names)]
     return SubjectArea(
         name=name,
         description=f"Auto-proposed subject area covering: {', '.join(sorted(table_names))}.",
@@ -188,14 +221,31 @@ def make_area(name: str, tables: list[Table], rels: list[Relationship], conn: st
 def propose_subject_areas(
     tables: list[Table], rels: list[Relationship], conn: str, profile: str
 ) -> tuple[list[SubjectArea], list[str]]:
-    """Return (areas, notes). <=SINGLE_AREA_MAX tables -> one area; else cluster
-    by prefix-family with one owning area per table."""
+    """Return (areas, notes).
+
+    A DB spanning **2+ schemas** is split **one area per schema** — the schemas are the
+    natural domains, and (critically) this keeps same-named tables in different schemas
+    (e.g. `billing.products` vs `crm.products`) in separate area dirs so neither is lost to
+    a bare-name write collision. A single-schema DB keeps the old behavior: one area when
+    small, else prefix-family clustering.
+    """
     notes: list[str] = []
+    schemas = sorted({t.schema_name for t in tables if t.schema_name})
+    if len(schemas) >= 2:
+        by_area: dict[str, list[Table]] = defaultdict(list)
+        for t in tables:
+            by_area[_area_key(t.schema_name) if t.schema_name else profile.lower()].append(t)
+        areas = [make_area(a, members, rels, conn) for a, members in sorted(by_area.items())]
+        notes.append(
+            f"{len(tables)} tables across {len(schemas)} schemas -> {len(areas)} subject areas "
+            "(one per schema); cross-schema joins become cross_subject_area_relationships."
+        )
+        return areas, notes
     if len(tables) <= SINGLE_AREA_MAX:
         notes.append(f"{len(tables)} tables -> single subject area {profile.lower()!r}")
         return [make_area(profile.lower(), tables, rels, conn)], notes
     mapping = cluster_by_family([t.name for t in tables])
-    by_area: dict[str, list[Table]] = defaultdict(list)
+    by_area = defaultdict(list)
     for t in tables:
         by_area[mapping[t.name]].append(t)
     areas = [make_area(a, members, rels, conn) for a, members in sorted(by_area.items())]
@@ -209,17 +259,22 @@ def propose_subject_areas(
 def extract_cross_area_relationships(
     areas: list[SubjectArea], rels: list[Relationship]
 ) -> list[CrossSubjectAreaRelationship]:
-    area_of: dict[str, str] = {}
+    # Key by (schema, name) so two same-named tables in different schemas resolve to their
+    # own area; keep a bare-name fallback for schemaless rels / tables.
+    area_of: dict[tuple, str] = {}
+    bare_of: dict[str, str] = {}
     for sa in areas:
         for t in sa.tables_defined:
-            area_of[t.name] = sa.name
+            area_of[(t.schema_name, t.name)] = sa.name
+            bare_of.setdefault(t.name, sa.name)
     intra_ids = {id(r) for sa in areas for r in sa.relationships}
     out: list[CrossSubjectAreaRelationship] = []
     for r in rels:
         if id(r) in intra_ids:
             continue
-        fa = area_of.get(r.from_table.split(".")[-1])
-        ta = area_of.get(r.to_table.split(".")[-1])
+        ft, tt = r.from_table.split(".")[-1], r.to_table.split(".")[-1]
+        fa = area_of.get((r.from_schema, ft)) or bare_of.get(ft)
+        ta = area_of.get((r.to_schema, tt)) or bare_of.get(tt)
         if fa and ta and fa != ta:
             data = r.model_dump(exclude_none=True, by_alias=True)
             data.update(from_subject_area=fa, to_subject_area=ta, executable="same_engine")
@@ -308,7 +363,8 @@ def write_tree(
 
 
 __all__ = [
-    "SENSITIVE_RE", "detect_sensitive", "derive_column_groups", "maybe_column_groups",
+    "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
+    "derive_column_groups", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
     "write_tree", "WriteReport",

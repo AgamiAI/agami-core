@@ -36,6 +36,24 @@ from typing import Any, Callable, Optional
 # Introspection-run timestamp for system sign-offs on auto-approved structure.
 _NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+# At/above this row count a full scan is slow enough that the query path warns + suggests
+# narrowing. For such tables we record the date/time columns as `recommended_filters` (the
+# natural "narrow by date" answer) so the warning fires only when a query lacks one.
+_LARGE_TABLE_ROWS = 1_000_000
+# ...but only when there's a clear handful of date columns. A wide mart with a dozen+ date
+# columns (e.g. per-category open/close dates) has no single obvious scan key, so leave it
+# empty for the real partition/index pass rather than listing noise.
+_MAX_DATE_FILTER_COLS = 6
+# Above this row count we SKIP the COUNT(DISTINCT) grain-uniqueness probe. With no catalog
+# PK, that probe full-scans the table once PER id-ish candidate column to find a unique one.
+# On a 40M-row / 40GB fact table with a dozen *_id candidates and a composite (or absent)
+# grain, that's a dozen fruitless full scans — tens of minutes of pure waste — to arrive at
+# the empty grain that is the CORRECT answer for such a table anyway (its real grain is
+# composite, which a single-column probe can't discover). A catalog PK is always honored
+# regardless of size; this guard only governs the scan-heavy fallback. Tuned to clear all
+# ordinary dimension/operational tables while catching the giant fact tables.
+_GRAIN_PROBE_MAX_ROWS = 5_000_000
+
 from . import build
 from . import dialects as D
 from .models import (
@@ -227,6 +245,34 @@ def _try(runner: Runner, sql: str) -> Optional[list[dict]]:
         return None
 
 
+# Supabase (hosted Postgres) ships system schemas the user almost never wants modeled — and
+# some hold secrets (vault, pgsodium). We detect Supabase by its signature schemas and drop
+# the whole system set, so onboarding models only the user's app tables (e.g. public).
+_SUPABASE_SYS_SCHEMAS = frozenset({
+    "auth", "storage", "vault", "realtime", "_realtime", "extensions",
+    "graphql", "graphql_public", "pgsodium", "pgsodium_masks", "pgbouncer",
+    "supabase_functions", "supabase_migrations", "net", "cron", "pgtle",
+    "_analytics", "_supavisor", "supabase_admin",
+})
+# Require several signature schemas together — a plain-Postgres DB with a lone `auth` or
+# `storage` schema of its own is NOT Supabase and must not be filtered.
+_SUPABASE_SIGNATURE = ("auth", "storage", "extensions", "realtime", "vault")
+
+
+def _filter_supabase_system_schemas(schemas: list[str], report: IntrospectReport) -> list[str]:
+    low = {s.lower() for s in schemas}
+    if sum(sig in low for sig in _SUPABASE_SIGNATURE) < 3:
+        return schemas  # not Supabase — leave every schema as-is
+    kept = [s for s in schemas if s.lower() not in _SUPABASE_SYS_SCHEMAS]
+    skipped = [s for s in schemas if s.lower() in _SUPABASE_SYS_SCHEMAS]
+    if skipped:
+        report.notes.append(
+            "Supabase detected — skipped its system schemas (kept your app schemas): "
+            + ", ".join(sorted(skipped)) + ". Pass an explicit --tables allowlist to include any."
+        )
+    return kept
+
+
 def _discover_tables(
     dialect: D.Dialect, runner: Runner, allowlist: Optional[list[str]], report: IntrospectReport
 ) -> list[tuple[Optional[str], str]]:
@@ -245,7 +291,8 @@ def _discover_tables(
     schemas = _try(runner, dialect.sql_schemas())
     if schemas is not None:
         report.mode_per_capability["tables"] = "catalog"
-        report.schemas = [r["schema_name"] for r in schemas]
+        report.schemas = _filter_supabase_system_schemas(
+            [r["schema_name"] for r in schemas], report)
         pairs: list[tuple[Optional[str], str]] = []
         for s in report.schemas:
             trows = _try(runner, dialect.sql_tables(s)) or []
@@ -269,9 +316,20 @@ def _build_table(
     cols, mode = _columns(dialect, runner, schema, table)
     report.mode_per_capability.setdefault("columns", mode)
 
-    # grain: catalog PKs, else uniqueness probe
-    grain, gmode = _grain(dialect, runner, schema, table, cols)
+    # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
+    # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
+    est_rows = _estimate_rows(dialect, runner, schema, table)
+
+    # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
+    grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows)
     report.mode_per_capability.setdefault("grain", gmode)
+    if gmode == "probe_skipped_large":
+        report.notes.append(
+            f"{table}: skipped grain probe (~{est_rows:,} rows > "
+            f"{_GRAIN_PROBE_MAX_ROWS:,}) — left grain empty rather than full-scanning "
+            f"each id column. A composite/absent grain is expected for a fact table this "
+            f"size; set it by hand if you know the key."
+        )
     pk_set = set(grain)
     for c in cols:
         c.primary_key = c.name in pk_set
@@ -287,15 +345,20 @@ def _build_table(
         report.deep_tables.append(table)
 
     perf = None
-    est = _try(runner, dialect.sql_row_estimate(schema, table)) if dialect.sql_row_estimate(schema, table) else None
-    if est and est and est[0].get("estimated_rows") not in (None, ""):
-        try:
-            perf = PerformanceHints(
-                estimated_row_count=int(float(est[0]["estimated_rows"])),
-                estimated_row_count_at=_NOW,  # so the receipt can show "estimated as of <date>"
-            )
-        except (ValueError, TypeError):
-            perf = None
+    if est_rows is not None:
+        perf = PerformanceHints(
+            estimated_row_count=est_rows,
+            estimated_row_count_at=_NOW,  # so the receipt can show "estimated as of <date>"
+        )
+
+    # On a large table, seed `recommended_filters` with the date/time columns — the natural
+    # way to narrow a scan. The query path's scan-risk warning then fires only when a query
+    # lacks a filter on one of these (and can name the column). Real index / partition /
+    # clustering keys are layered in per-dialect separately.
+    if perf and (perf.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
+        date_cols = [c.name for c in cols if c.type in ("date", "timestamp", "time")]
+        if 1 <= len(date_cols) <= _MAX_DATE_FILTER_COLS:
+            perf.recommended_filters = date_cols
 
     return Table(
         name=table,
@@ -347,12 +410,36 @@ def _probe_columns(
     return cols
 
 
+def _estimate_rows(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
+) -> Optional[int]:
+    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan.
+    None when the dialect has no estimate query or the stat is missing/unparseable."""
+    q = dialect.sql_row_estimate(schema, table)
+    if not q:
+        return None
+    est = _try(runner, q)
+    if not est or est[0].get("estimated_rows") in (None, ""):
+        return None
+    try:
+        return int(float(est[0]["estimated_rows"]))
+    except (ValueError, TypeError):
+        return None
+
+
 def _grain(
-    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column]
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
+    *, est_rows: Optional[int] = None,
 ) -> tuple[list[str], str]:
     pks = _try(runner, dialect.sql_primary_keys(schema, table))
     if pks:
         return [r["column_name"] for r in pks], "catalog"
+    # Size guard: the probe below COUNT(DISTINCT)-scans the table once per candidate. On a
+    # huge fact table with no catalog PK that's tens of minutes of scans yielding nothing —
+    # so skip it above the threshold and report an empty grain (the correct answer here; the
+    # real grain is composite, beyond a single-column probe). See _GRAIN_PROBE_MAX_ROWS.
+    if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
+        return [], "probe_skipped_large"
     # probe: a single id-ish column that is unique + non-null
     candidates = [c.name for c in cols if c.name.lower() == "id" or c.name.lower().endswith("_id")]
     candidates = candidates or [c.name for c in cols[:3]]
@@ -393,6 +480,10 @@ def _build_relationships(
                 catalog_ok = True
                 catalog_fks.extend(rows)
 
+    tables_by_name: dict[str, list[Table]] = {}
+    for t in tables:
+        tables_by_name.setdefault(t.name, []).append(t)
+
     rels: list[Relationship] = []
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
@@ -400,20 +491,31 @@ def _build_relationships(
             ft, fc, tt, tc = fk.get("from_table"), fk.get("from_column"), fk.get("to_table"), fk.get("to_column")
             if not (ft and fc and tt and tc):
                 continue
+            # Schema each endpoint lives in: the dialect's FK query supplies it on schema-ful
+            # DBs (Postgres/MySQL); otherwise resolve it from the table list (same-schema first).
+            from_schema = fk.get("from_schema") or _schema_of(ft, tables_by_name)
+            to_schema = fk.get("to_schema") or _schema_of(tt, tables_by_name, prefer=from_schema, report=report)
+            cross = bool(from_schema and to_schema and from_schema != to_schema)
             card = build.infer_cardinality(ft, tt, [fc], [tc], grain_by_table)
             # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap
             confidence = "confirmed" if dialect.fk_enforced else "inferred"
             # enforced-FK joins are trustworthy structure -> auto-approve with a system
             # sign-off (don't flood the review queue); unenforced/probed ones need a glance.
-            kw: dict = {}
-            if dialect.fk_enforced:
-                kw = {"review_state": "approved", "signed_off_by": "agami_introspect",
-                      "signed_off_role": "system", "signed_off_at": _NOW}
+            # EXCEPTION: a join that spans two schemas is an architectural claim — the model now
+            # reaches across namespaces — so surface it for review even when the FK is enforced.
+            desc = ""
+            if dialect.fk_enforced and not cross:
+                kw: dict = {"review_state": "approved", "signed_off_by": "agami_introspect",
+                            "signed_off_role": "system", "signed_off_at": _NOW}
             else:
                 kw = {"review_state": "unreviewed"}
+            if cross:
+                desc = f"crosses schemas: {from_schema} → {to_schema} (declared FK) — confirm it belongs in this model"
+                report.notes.append(f"cross-schema relationship: {from_schema}.{ft} → {to_schema}.{tt} (declared FK)")
             rels.append(Relationship(
                 from_table=ft, from_column=fc, to_table=tt, to_column=tc,
-                relationship=card, join_type="LEFT", confidence=confidence, **kw,
+                from_schema=from_schema, to_schema=to_schema,
+                relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
             ))
         return rels
 
@@ -423,12 +525,51 @@ def _build_relationships(
     return rels
 
 
+def _schema_of(
+    name: str, tables_by_name: dict[str, list[Table]],
+    prefer: Optional[str] = None, report: Optional[IntrospectReport] = None,
+) -> Optional[str]:
+    """The schema a bare table name lives in. When the name exists in several schemas,
+    prefer `prefer` (the other endpoint's schema) so a same-schema FK resolves correctly;
+    otherwise pick deterministically and note the ambiguity for the user to disambiguate."""
+    schemas = sorted({t.schema_name for t in tables_by_name.get(name, []) if t.schema_name})
+    if len(schemas) == 1:
+        return schemas[0]
+    if len(schemas) > 1:
+        if prefer and prefer in schemas:
+            return prefer
+        if report is not None:
+            report.notes.append(
+                f"ambiguous table name {name!r} across schemas {schemas} — picked {schemas[0]}; "
+                "edit the relationship if it should point elsewhere")
+        return schemas[0]
+    return None
+
+
+def _pick_target(cands: list[Table], prefer: Optional[str]) -> Optional[Table]:
+    """Choose the actual target Table for a probed join, preferring the from-table's own
+    schema so a `users` in two schemas doesn't bind to the wrong one (the old bare-name dict
+    silently kept whichever was inserted last)."""
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    for t in cands:
+        if t.schema_name == prefer:
+            return t
+    return sorted(cands, key=lambda t: (t.schema_name or ""))[0]
+
+
 def _probe_relationships(
     dialect: D.Dialect, runner: Runner, tables: list[Table],
     grain_by_table: dict[str, set[str]], report: IntrospectReport,
 ) -> list[Relationship]:
-    by_name = {t.name: t for t in tables}
-    # candidate target keys: single-column grains
+    tables_by_name: dict[str, list[Table]] = {}
+    for t in tables:
+        tables_by_name.setdefault(t.name, []).append(t)
+    # candidate target keys: single-column grains. (grain_by_table is bare-name-keyed, so its
+    # key column is best-effort under a cross-schema name clash — the actual target Table is
+    # resolved schema-aware below, which is what the overlap probe + schema stamp depend on.)
     targets = {name: next(iter(g)) for name, g in grain_by_table.items() if len(g) == 1}
     rels: list[Relationship] = []
     for t in tables:
@@ -443,14 +584,25 @@ def _probe_relationships(
                     continue
                 tn = tgt_name.lower()
                 if stem and (stem in tn or tn in stem or tn.rstrip("s") == stem.rstrip("s")):
-                    if _overlaps(dialect, runner, t, c.name, by_name[tgt_name], tgt_col):
+                    tgt = _pick_target(tables_by_name.get(tgt_name, []), prefer=t.schema_name)
+                    if tgt is None:
+                        continue
+                    if _overlaps(dialect, runner, t, c.name, tgt, tgt_col):
+                        cross = bool(t.schema_name and tgt.schema_name and t.schema_name != tgt.schema_name)
+                        desc = "inferred by name+type match + value-overlap probe"
+                        if cross:
+                            desc += f"; crosses schemas {t.schema_name} → {tgt.schema_name}"
+                            report.notes.append(
+                                f"cross-schema relationship: {t.schema_name}.{t.name} → "
+                                f"{tgt.schema_name}.{tgt_name} (inferred)")
                         rels.append(Relationship(
                             from_table=t.name, from_column=c.name,
                             to_table=tgt_name, to_column=tgt_col,
+                            from_schema=t.schema_name, to_schema=tgt.schema_name,
                             relationship=build.infer_cardinality(
                                 t.name, tgt_name, [c.name], [tgt_col], grain_by_table),
                             join_type="LEFT", confidence="proposed", review_state="unreviewed",
-                            description="inferred by name+type match + value-overlap probe",
+                            description=desc,
                         ))
                         break
     return rels

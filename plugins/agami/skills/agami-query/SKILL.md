@@ -15,7 +15,7 @@ This skill orchestrates:
 2. **Generate SQL** — examples-first traversal: pick the subject area → match curated examples → (cold start) resolve entities/metrics + identify opaque literals → compound `get_table_context` → produce one SQL statement → safety checks.
 3. **Execute** — run via the chosen tool; the Python tier runs the fan/chasm pre-flight + applies default_filters; auto-retry on classified errors; risk-assess large-table queries.
 4. **Present** — markdown table; CSV via `--csv` or "export this"; Chart.js HTML via `--chart` or "make that a chart".
-5. **Log + post-install GitHub-star ask** — write `~/.agami/query_log.jsonl` and ask the user (once, after first successful query) to star us on GitHub.
+5. **Log + post-install GitHub-star ask** — write `~/.agami/query_log.jsonl` and ask the user (once, after first successful query) to star us on GitHub; once they answer, point them to `/agami-serve` (wire the model into Claude Desktop — the experience their business users get).
 
 For the model format: [`scripts/semantic_model/__init__.py`](../../scripts/semantic_model/__init__.py) (layout) + `scripts/semantic_model/models.py`.
 For SQL safety: [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md).
@@ -326,10 +326,12 @@ Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
 
 For each dataset touched by the SQL, look up its `agami.performance_hints`:
 
-- `estimated_row_count > 1_000_000` AND no WHERE clause matches a `recommended_filters[].column`:
-  → **HIGH risk**. Surface a banner before executing: "This query scans `<dataset>` (~<row_count>) without a date filter. Estimated time: <est>. Add a date range, or proceed anyway?" AskUserQuestion: `Add a filter` / `Proceed anyway` / `Cancel`.
-- `100k–1M` rows with no recommended filter → **MEDIUM**. Note in response footer; proceed.
-- Otherwise → **LOW**. Proceed silently.
+`recommended_filters` is a **list of column names** (introspection seeds it with a large table's date/time columns — the columns worth filtering on to avoid a full scan). Check whether the generated SQL's WHERE filters on **any** of them.
+
+- `estimated_row_count > 1_000_000` AND the WHERE filters on **none** of the table's `recommended_filters`:
+  → **HIGH risk**. Surface a banner before executing — **name a suggested column** when one exists: "This query scans `<dataset>` (~<row_count>) with no filter on `<recommended_filters[0]>`. Estimated time: <est>. Narrow it — e.g. a date range on `<recommended_filters[0]>` — or proceed anyway?" AskUserQuestion: `Add a filter` / `Proceed anyway` / `Cancel`. If `recommended_filters` is **empty** (no known good filter for this table), use the generic "…without a filter. Add one, or proceed?" wording.
+- `100k–1M` rows with no filter on a `recommended_filters` column → **MEDIUM**. Note in response footer; proceed.
+- A query that **does** filter on a `recommended_filters` column → treat as narrowed: drop a risk tier (don't HIGH-warn just because the table is big). Otherwise → **LOW**. Proceed silently.
 
 **Time estimate (announced BEFORE Phase 3 execution).** Long-running queries kill the user's confidence — they don't know if the skill is hung or actually working. Before running any non-LOW query, surface a one-liner with the rough wall-clock estimate so they can wait without anxiety:
 
@@ -565,9 +567,16 @@ For each section, build an object:
   "datasets":      [{"label": "<header>", "data": [<numeric values>]}],
   "table_headers": ["<col1>", "<col2>", ...],
   "table_rows":    [[<v>, <v>, ...], ...],
-  "sql":           "<SQL that produced this section's data, NOT HTML-escaped — the template handles it>"
+  "sql":           "<the EXACT, COMPLETE SQL that produced this section's data — verbatim>"
 }
 ```
+
+**`sql` is the exact, complete, runnable query — never a paraphrase.** Paste the *verbatim* SQL string you executed for this section (the text you passed to `sm prepare` / the executor — keep each section's query around for this). It must be:
+- **Complete** — every CTE, column, JOIN, WHERE, GROUP BY. The receipt exists so a data engineer can re-run it and defend the number; a partial query defeats that.
+- **Literal SQL, not prose** — no `...`/`…`, no `-- net revenue = (line_total - gst) - ...`, no "ON paid book lines". If you find yourself writing English where SQL goes, you're summarizing — stop and paste the real query.
+- **Never empty when the section has data.** Every section that ran a query has its query. A section with no `sql` only makes sense for a hand-built/derived table with no underlying SQL — and that is rare; double-check before omitting.
+
+Do NOT HTML-escape it — the template handles escaping. Do NOT shorten it to save tokens; the renderer reads it from a file, so length is free.
 
 When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). The template skips the chart card cleanly.
 
@@ -600,8 +609,9 @@ Build the receipt as a single JSON object. Schema (see [`shared/chart-template.h
      "signed_off_at": "<ISO>"}
   ],
   "metrics": [
-    {"name": "<metric>", "definition_prose": "<plain English>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum>",
+    {"name": "<metric>", "area": "<subject area>", "definition_prose": "<plain English>",
+     "expression": "<the SQL fragment / binding>",
+     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum | ad_hoc>",
      "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
   ],
   "named_filters": [
@@ -626,13 +636,15 @@ How to populate each field:
 - **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the **table's size** — pass the table's `performance_hints.estimated_row_count` from the model (the *same* value Phase 3 reads for the scan-risk check, e.g. `12000000`). This is "how big is this dataset," not the query's result-row count. Also pass **`rows_as_of`** = the table's `performance_hints.estimated_row_count_at` (when that estimate was last measured at introspection) — the receipt renders "≈N rows (estimated as of <date>)" so the reader knows it's a point-in-time estimate, not a live count. Only pass `null` for `rows` if the table genuinely has no `estimated_row_count` in the model — don't default to `null` out of caution when the model has it.
   **`freshness`** — pass the **raw ISO timestamp** from `agami.introspect_meta.introspected_at` (e.g., `"2026-05-10T11:57:13Z"`). The chart template prettifies it to `"introspected May 10, 2026, 11:57 AM"` automatically. Don't prefix with "introspected" yourself or you'll double-prefix. If the upstream load cadence is known (e.g., daily ETL at 2am UTC), pass a pre-formatted string instead — e.g., `"2026-05-10T02:00:00Z (daily 2am UTC ETL)"` — and the template passes it through unchanged. Pass `null` when freshness is unknowable.
 - **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the model (from `get_table_context`). **Pull EVERY trust field** carried on the relationship: `relationship` (cardinality), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state` (enum), `signed_off_by`, `signed_off_role`, `signed_off_at`, plus `on:` if it's a CAST/compound join. The template's `approvalPhrase` reads all of them to render "confirmed (FK declared)" vs "approved by jane@x.com (cfo), Mar 15" vs "proposed (inferred join — confirm)". For composite or multi-hop joins, list each edge. Also surface any **auto-rewrite** the pre-flight applied (fan/chasm) and the **default_filters** that were applied (from execute_sql's stderr notes).
-- **`metrics`** — every model metric whose `bindings` SQL matches a fragment in the generated SQL. **Pull EVERY trust field:** `calculation` (prose intent), `confidence`, `review_state`, `signed_off_by`, `signed_off_role`, `signed_off_at`, `source`. If a metric is genuinely unreviewed, that's fine — the receipt shows "proposed" honestly. Don't half-populate (it renders a meaningless "unreviewed (?)").
+- **`metrics`** — TWO kinds of entry, both go here:
+  1. **Model metrics** whose `bindings` SQL matches a fragment in the generated SQL. **Pull EVERY trust field:** `calculation` → `definition_prose`, `confidence`, `review_state`, `signed_off_by`, `signed_off_role`, `signed_off_at`, `source`/`origin`, and the metric's `area`. If a metric is genuinely unreviewed, that's fine — the receipt shows it honestly. Don't half-populate (it renders a meaningless "unreviewed (?)").
+  2. **On-the-fly metrics you calculated for this answer** — any non-trivial aggregation/ratio you composed that ISN'T an approved model metric (e.g. you wrote `(SUM(net_revenue) - SUM(cogs)) / SUM(net_revenue)` for "gross margin" because no `gross_margin` metric exists). Emit one entry per such calc with `review_state: "unreviewed"`, **`origin: "ad_hoc"`**, a snake_case `name` (your suggested metric name), the `area` it belongs to, `definition_prose` (the calculation in plain English), and `expression` (the SQL fragment). This is what feeds the **top-of-report "metrics you haven't approved" banner**, where the user can Approve it (→ saved as a real model metric, signed off) or Change the definition — both routed back to you as feedback. **Don't flag trivial primitives** (a bare `COUNT(*)`, `SUM(amount)` with no logic) as ad-hoc metrics — only genuine, reusable definitions. When in doubt, include it; an over-flag is a one-click dismiss, a miss means an unapproved number ships silently.
 - **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING. **Pull EVERY trust field** from the filter's entry: `expression`, `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships and metrics.
 - **`assumptions`** — the AI-derived column meanings this answer **leaned on**, so a wrong/unknown one is caught in context instead of via an upfront review of hundreds of descriptions (see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). For each column the SQL used in a **load-bearing** way — SELECT / WHERE / GROUP BY / ORDER BY / a metric binding, **not** pure join plumbing — look it up in `get_table_context` and surface two cases:
   - `description_source == "ai_unvalidated"` (a guess) AND `description` non-empty → `{column, meaning: <description>, source: "ai_unvalidated"}`.
   - `description_source == "ai_unknown"` (agami couldn't read it) → `{column, meaning: null, source: "ai_unknown"}` — agami used a column it doesn't understand; flag it loudly.
   Columns with `description_source` of `human`, `ai_validated`, or `null` are NOT surfaced. **Cap at 3**, ranked by load-bearing-ness (filter/group-by > select > order-by) and putting `ai_unknown` first (an unknown the query relied on is the riskiest). Pass `[]` when none qualify. Advisory — never blocks or warns; it's a "here's what I assumed / didn't know" so the user can correct, confirm, or describe.
-- **`warnings`** — for every entry above whose `review_state ≠ approved`, push a one-line warning naming the entry and its confidence. Examples: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`, `"Used metric `revenue` which has not been signed off."`. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-model review to walk these items, or say 'open the review queue'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely — no need for an action line if everything is approved. (Assumptions are NOT warnings — keep them separate.)
+- **`warnings`** — for every **non-metric** entry above whose `review_state ≠ approved` (joins, rewrites, applied filters), push a one-line warning naming the entry and its confidence. Example: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`. **Do NOT add a warning line for unreviewed/ad-hoc metrics** — they get their own actionable **"metrics you haven't approved" banner** (from `receipt.metrics`) with Approve / Change controls, so a warning line would just duplicate it. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-model review to walk these items, or say 'open the review queue'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely. (Assumptions and metric-approvals are NOT warnings — keep them separate.)
 
 Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
 
@@ -820,7 +832,11 @@ The correction can arrive two ways: the user **types** it, or they paste the blo
 1. **Floor (always):** the corrected SQL for *this question* lands as a prompt example — `sm add-example "$ROOT" --area <area> --file <json>` (dedups by question, so it replaces). Exactly the onboarding seed behavior. A pure note with no SQL change skips this.
 2. **The learning on top**, routed by the tree — a column's meaning/unit/encoding/value-map → `field_metadata` (`unit` / `value_transform` / `choice_field`); a join fix → `relationship`; a whole-table fact → `table_metadata`; a reusable aggregation → `new_metric`; a per-result caveat tied to this one question → the example's `notes[]`; a cross-cutting display convention for this DB → `ORGANIZATION.md`; a personal stylistic tic → `USER_MEMORY.md`. Model edits go through `sm curate`; build the ops JSON with the **Write tool** (never a heredoc / `python3 -c`).
 
-**Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `sales`, and set `ORDERS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
+**A shared-model edit needs the user's nod — an example save doesn't.** Saving the corrected SQL as an *example* (the floor) is automatic; it only shapes this question's few-shot. But a **shared-model edit** (a `caveat` / `unit` / `value_transform`, a relationship fix, a description, a new metric) changes how **every** future query reads that column or join — so **state the exact change and get a quick OK before writing it**, e.g. *"I'd add a caveat to `sales.discount_amount`: 'cart-level discount, not pushed to line items — allocate across lines.' Add it?"* This is the same gate `agami-save-correction` enforces ("show a diff before any model mutation") — handling it inline here does **not** drop it.
+
+**This applies doubly when YOU discovered the issue, not the user.** If mid-analysis you find a model-level subtlety (a column that needs a caveat, a metric that's mis-defined), your interpretation can be wrong — so **propose** the edit, never auto-apply it to the shared model, and **never stamp the user's sign-off on their behalf.** Sign-off is the user's explicit act (the Review tab, or saying "approve") — a correction doesn't grant it. Fixing *your own* answer for the current turn is always fine; persisting a change to the shared model is what needs the nod.
+
+**Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `sales`, and (with your OK) set `ORDERS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
 
 **Positive confirmation ("This looks good").** The report also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
 
@@ -884,9 +900,15 @@ Sequence:
    - `Maybe later` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/LiteBi if you change your mind." (No `(Recommended)` marker — we'd genuinely prefer "Yes" if the user found it useful, but no marker on any of the three options keeps the ask non-pushy.)
    - `Already starred — thank you!` — surface "🙏 thanks for the early support" and write `.optins`.
 3. **Wait for the user to answer the modal.** That's the end of this turn. Do NOT emit the 5 follow-up bullets yet.
-4. Next turn: process the decision (write `~/.agami/.optins`). Then show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.
+4. Next turn: process the decision (write `~/.agami/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below). After it, show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.
 
-If `~/.agami/.optins` already exists, skip the ask entirely and emit the 5 follow-ups in the same turn as the answer (Phase 4f as today).
+**The `/agami-serve` pointer (one-time, right after the star answer).** Plain prose — NOT an `AskUserQuestion`, NOT one of the numbered follow-ups. Surface it once, here, regardless of which of the three star responses they gave:
+
+> One more thing worth trying: **`/agami-serve`** wires this same model into the **Claude Desktop app** as a local MCP server — so you can ask these questions in plain English from Desktop, no Claude Code needed. It's the local mirror of the hosted "Ask Agami" connector, so it's the exact experience your business users would get. Run `/agami-serve` whenever you want to set it up.
+
+Keep it to ~2 sentences; don't oversell, don't repeat it in the follow-up bullets. Because it lives in the same turn that writes `.optins`, it fires exactly once — every later query takes the `.optins`-exists path below and skips both the star ask and this pointer.
+
+If `~/.agami/.optins` already exists, skip the ask **and the `/agami-serve` pointer** entirely, and emit the 5 follow-ups in the same turn as the answer (Phase 4f as today).
 
 `~/.agami/.optins` shape (chmod 600):
 
