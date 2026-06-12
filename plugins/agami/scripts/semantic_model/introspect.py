@@ -44,6 +44,15 @@ _LARGE_TABLE_ROWS = 1_000_000
 # columns (e.g. per-category open/close dates) has no single obvious scan key, so leave it
 # empty for the real partition/index pass rather than listing noise.
 _MAX_DATE_FILTER_COLS = 6
+# Above this row count we SKIP the COUNT(DISTINCT) grain-uniqueness probe. With no catalog
+# PK, that probe full-scans the table once PER id-ish candidate column to find a unique one.
+# On a 40M-row / 40GB fact table with a dozen *_id candidates and a composite (or absent)
+# grain, that's a dozen fruitless full scans — tens of minutes of pure waste — to arrive at
+# the empty grain that is the CORRECT answer for such a table anyway (its real grain is
+# composite, which a single-column probe can't discover). A catalog PK is always honored
+# regardless of size; this guard only governs the scan-heavy fallback. Tuned to clear all
+# ordinary dimension/operational tables while catching the giant fact tables.
+_GRAIN_PROBE_MAX_ROWS = 5_000_000
 
 from . import build
 from . import dialects as D
@@ -307,9 +316,20 @@ def _build_table(
     cols, mode = _columns(dialect, runner, schema, table)
     report.mode_per_capability.setdefault("columns", mode)
 
-    # grain: catalog PKs, else uniqueness probe
-    grain, gmode = _grain(dialect, runner, schema, table, cols)
+    # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
+    # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
+    est_rows = _estimate_rows(dialect, runner, schema, table)
+
+    # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
+    grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows)
     report.mode_per_capability.setdefault("grain", gmode)
+    if gmode == "probe_skipped_large":
+        report.notes.append(
+            f"{table}: skipped grain probe (~{est_rows:,} rows > "
+            f"{_GRAIN_PROBE_MAX_ROWS:,}) — left grain empty rather than full-scanning "
+            f"each id column. A composite/absent grain is expected for a fact table this "
+            f"size; set it by hand if you know the key."
+        )
     pk_set = set(grain)
     for c in cols:
         c.primary_key = c.name in pk_set
@@ -325,15 +345,11 @@ def _build_table(
         report.deep_tables.append(table)
 
     perf = None
-    est = _try(runner, dialect.sql_row_estimate(schema, table)) if dialect.sql_row_estimate(schema, table) else None
-    if est and est and est[0].get("estimated_rows") not in (None, ""):
-        try:
-            perf = PerformanceHints(
-                estimated_row_count=int(float(est[0]["estimated_rows"])),
-                estimated_row_count_at=_NOW,  # so the receipt can show "estimated as of <date>"
-            )
-        except (ValueError, TypeError):
-            perf = None
+    if est_rows is not None:
+        perf = PerformanceHints(
+            estimated_row_count=est_rows,
+            estimated_row_count_at=_NOW,  # so the receipt can show "estimated as of <date>"
+        )
 
     # On a large table, seed `recommended_filters` with the date/time columns — the natural
     # way to narrow a scan. The query path's scan-risk warning then fires only when a query
@@ -394,12 +410,36 @@ def _probe_columns(
     return cols
 
 
+def _estimate_rows(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
+) -> Optional[int]:
+    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan.
+    None when the dialect has no estimate query or the stat is missing/unparseable."""
+    q = dialect.sql_row_estimate(schema, table)
+    if not q:
+        return None
+    est = _try(runner, q)
+    if not est or est[0].get("estimated_rows") in (None, ""):
+        return None
+    try:
+        return int(float(est[0]["estimated_rows"]))
+    except (ValueError, TypeError):
+        return None
+
+
 def _grain(
-    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column]
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
+    *, est_rows: Optional[int] = None,
 ) -> tuple[list[str], str]:
     pks = _try(runner, dialect.sql_primary_keys(schema, table))
     if pks:
         return [r["column_name"] for r in pks], "catalog"
+    # Size guard: the probe below COUNT(DISTINCT)-scans the table once per candidate. On a
+    # huge fact table with no catalog PK that's tens of minutes of scans yielding nothing —
+    # so skip it above the threshold and report an empty grain (the correct answer here; the
+    # real grain is composite, beyond a single-column probe). See _GRAIN_PROBE_MAX_ROWS.
+    if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
+        return [], "probe_skipped_large"
     # probe: a single id-ish column that is unique + non-null
     candidates = [c.name for c in cols if c.name.lower() == "id" or c.name.lower().endswith("_id")]
     candidates = candidates or [c.name for c in cols[:3]]

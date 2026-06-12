@@ -318,6 +318,66 @@ def test_wide_mart_skips_noisy_date_columns(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Grain-probe size guard: a giant fact table with no catalog PK must NOT be
+# COUNT(DISTINCT)-full-scanned once per id column to guess a grain it doesn't have.
+# ---------------------------------------------------------------------------
+
+
+def _no_pk_runner(table, est_rows, *, seen):
+    """Catalog-mode runner for ONE table with no PK/FK; `est_rows` row estimate.
+    Records every SQL it sees in `seen` so a test can assert the probe ran or not."""
+    cols = [
+        {"column_name": "event_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "1", "numeric_scale": ""},
+        {"column_name": "asset_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
+        {"column_name": "ts", "data_type": "timestamp", "is_nullable": "YES", "ordinal_position": "3", "numeric_scale": ""},
+    ]
+
+    def run(sql):
+        s = " ".join(sql.split())
+        seen.append(s)
+        if "information_schema.schemata" in s:
+            return [{"schema_name": "public"}]
+        if "information_schema.tables" in s and "table_type" in s:
+            return [{"schema_name": "public", "table_name": table, "table_type": "BASE TABLE"}]
+        if "information_schema.columns" in s:
+            return cols
+        if "PRIMARY KEY" in s:
+            return []  # no catalog PK → without the guard this would fall into the scan probe
+        if "FOREIGN KEY" in s:
+            return []
+        if "reltuples" in s:
+            return [{"estimated_rows": str(est_rows)}]
+        if "COUNT(DISTINCT" in s:           # the expensive uniqueness probe — unique id
+            return [{"total": "1000", "distinct_count": "1000", "null_count": "0"}]
+        return []
+
+    return run
+
+
+def test_giant_table_skips_grain_probe(tmp_path):
+    seen: list[str] = []
+    run = _no_pk_runner("sm_asset_mgmt", 40_000_000, seen=seen)  # 40M rows, no PK
+    org, rep = I.introspect("ops", "postgres", runner=run, artifacts_dir=tmp_path, dry_run=True)
+    fact = org.subject_areas[0].defined_table("sm_asset_mgmt")
+    assert fact.grain == []                                   # left empty, not guessed
+    assert rep.mode_per_capability["grain"] == "probe_skipped_large"
+    assert not any("COUNT(DISTINCT" in s for s in seen)       # the full scans never ran
+    assert any("skipped grain probe" in n for n in rep.notes)  # and the skip is surfaced
+    # the catalog row estimate is still recorded (it's a cheap stat, fetched once)
+    assert fact.performance_hints.estimated_row_count == 40_000_000
+
+
+def test_small_table_without_pk_still_probes_grain(tmp_path):
+    seen: list[str] = []
+    run = _no_pk_runner("dim_small", 1000, seen=seen)  # well under the guard
+    org, rep = I.introspect("ops", "postgres", runner=run, artifacts_dir=tmp_path, dry_run=True)
+    fact = org.subject_areas[0].defined_table("dim_small")
+    assert fact.grain == ["event_id"]                        # probe found the unique id
+    assert rep.mode_per_capability["grain"] == "probe"
+    assert any("COUNT(DISTINCT" in s for s in seen)          # the guard did NOT over-trigger
+
+
+# ---------------------------------------------------------------------------
 # Supabase: drop system schemas (auth/storage/vault/…), keep the app schemas
 # ---------------------------------------------------------------------------
 
