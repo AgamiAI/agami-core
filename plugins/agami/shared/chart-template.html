@@ -33,8 +33,11 @@
       "tables_used":     [{"qname":"public.orders", "rows":5000, "freshness":"2026-05-09T23:00:00Z (nightly batch)"}, ...],
       "relationships":   [{"name":"orders_to_customers","from_to":"orders → customers",
                            "confidence":0.62,"review_state":"unreviewed","origin":"introspect_heuristic"}, ...],
-      "metrics":         [{"name":"revenue","definition_prose":"...","signed_off_by":"jane@x.com",
-                           "signed_off_role":"cfo","signed_off_at":"2026-03-15T10:00:00Z"}, ...],
+      "metrics":         [{"name":"revenue","area":"sales","definition_prose":"...","review_state":"approved",
+                           "signed_off_by":"jane@x.com","signed_off_role":"cfo","signed_off_at":"2026-03-15T10:00:00Z"},
+                          // on-the-fly calc the user hasn't approved → drives the top approve/change banner:
+                          {"name":"gross_margin","area":"sales","definition_prose":"(net_revenue - cogs) / net_revenue",
+                           "expression":"(SUM(nr)-SUM(cogs))/NULLIF(SUM(nr),0)","review_state":"unreviewed","origin":"ad_hoc"}, ...],
       "named_filters":   [{"name":"active_customer","expression":"...","definition_prose":"..."}, ...],
       "assumptions":     [{"column":"sales.orders.amount","meaning":"net revenue, USD","source":"ai_unvalidated"}, ...],
       "warnings":        ["⚠ Used 1 unreviewed join (orders → customers, conf 0.62). Review now?", ...]
@@ -260,6 +263,38 @@
         border-color: #b45309;
       }
     }
+    /* --- Unapproved-metric banner (on-the-fly metrics the user hasn't signed off) --- */
+    .metric-approval-banner {
+      margin: 16px 0 20px; padding: 14px 16px;
+      background: #fef3c7; color: #78350f; border: 1px solid #f59e0b; border-radius: 8px;
+      font-size: 14px; line-height: 1.5;
+    }
+    @media (prefers-color-scheme: dark) {
+      .metric-approval-banner { background: #422006; color: #fbbf24; border-color: #b45309; }
+    }
+    .metric-approval-banner h3 { margin: 0 0 4px; font-size: 14px; font-weight: 700; }
+    .map-intro { margin: 0 0 8px; }
+    .map-item { padding: 10px 0 4px; border-top: 1px solid rgba(245,158,11,0.45); }
+    .map-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .map-name { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 700; }
+    .map-def { font-size: 13px; margin: 4px 0 8px; opacity: 0.95; }
+    .map-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .map-actions button, .map-edit button, .map-send button {
+      font-size: 12px; padding: 5px 12px; border-radius: 6px;
+      border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer;
+    }
+    .map-actions button.queued-approve { background: #166534; color: #fff; border-color: #166534; }
+    .map-actions button.queued-change  { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .map-edit { margin: 8px 0 4px; }
+    .map-edit textarea {
+      width: 100%; box-sizing: border-box; min-height: 60px; padding: 8px;
+      border: 1px solid #f59e0b; border-radius: 6px; background: var(--bg); color: var(--fg);
+      font: 13px ui-monospace, monospace;
+    }
+    .map-edit .map-edit-bar { display: flex; gap: 8px; margin-top: 6px; }
+    .map-status { font-size: 12px; margin-top: 6px; min-height: 1em; font-weight: 600; }
+    .map-send { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(245,158,11,0.45); }
+    .map-send button { font-size: 13px; padding: 7px 14px; border-color: #92400e; }
     details.trust-receipt { margin: 24px 0 16px; }
     details.trust-receipt > summary {
       cursor: pointer;
@@ -340,7 +375,7 @@
       margin: 0;
       background: var(--code-bg);
       padding: 14px 16px;
-      padding-right: 80px;  /* leave room for the Copy button */
+      padding-right: 150px;  /* leave room for the Copy + Edit buttons */
       border-radius: 8px;
       overflow-x: auto;
       white-space: pre;
@@ -372,6 +407,36 @@
     .sql-copy:active {
       transform: translateY(1px);
     }
+    /* --- Inline SQL edit (mirrors the model explorer's edit-in-place + Save) --- */
+    .sql-toolbar { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; z-index: 1; }
+    .sql-btn {
+      padding: 4px 10px; background: var(--card); color: var(--muted);
+      border: 1px solid var(--border, rgba(255,255,255,0.12)); border-radius: 6px;
+      font-family: inherit; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+      cursor: pointer; transition: color 120ms ease, border-color 120ms ease;
+    }
+    .sql-btn:hover { color: var(--fg); border-color: var(--accent, #4dabf7); }
+    .sql-edit-area {
+      width: 100%; box-sizing: border-box; margin-top: 12px; min-height: 160px;
+      padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--code-bg); color: var(--fg);
+      font: 13px/1.55 ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+      white-space: pre; overflow-x: auto; resize: vertical;
+    }
+    .sql-edit-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .sql-edit-bar button {
+      font-size: 13px; padding: 7px 14px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+    }
+    .sql-edit-bar button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .sql-edit-status { font-size: 12px; color: var(--muted); }
+    .sql-missing { font-size: 13px; color: var(--muted); margin: 0; }
+    .sql-note-label { display: block; font-size: 12px; color: var(--muted); margin: 16px 0 4px; }
+    .sql-note-area {
+      width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--bg); color: var(--fg); font: 13px ui-monospace, monospace;
+    }
+    .sql-queued-tag { display: block; font-size: 12px; color: var(--accent); margin-top: 10px; min-height: 1em; }
     footer {
       margin-top: 32px;
       padding-top: 16px;
@@ -385,12 +450,7 @@
     footer a { color: var(--muted); text-decoration: none; }
     footer a:hover { color: var(--fg); }
 
-    /* --- Feedback to Claude (correct the SQL / add notes → /agami-save-correction) --- */
-    details.feedback { margin: 10px 0 4px; }
-    details.feedback > summary { cursor: pointer; font-size: 13px; color: var(--accent); list-style: none; padding: 6px 0; }
-    details.feedback > summary::-webkit-details-marker { display: none; }
-    .feedback-body label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
-    .feedback-body textarea { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 13px ui-monospace, monospace; }
+    /* --- Feedback to Claude: the sticky bottom bar + paste-back modal --- */
     .feedback-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin-top: 8px; background: var(--bg-elev); border-top: 1px solid var(--border); }
     .feedback-bar #feedback-summary { font-size: 13px; color: var(--muted); margin-right: auto; }
     .feedback-bar button, .modal-actions button { font-size: 13px; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer; }
@@ -469,6 +529,14 @@
     // ---- Feedback to Claude: per-section corrected SQL + notes, queued in the browser,
     //      emitted as a paste-back block that routes to /agami-save-correction. ----
     const feedback = {};  // sectionIdx -> {title, originalSql, sql|null, note|null}
+    // Metric approve/change decisions made in the top banner, queued for the same paste-back.
+    const metricFeedback = {};  // metricName -> {name, area, definition, action:'approve'|'change', newDefinition|null}
+    // A metric the answer used but the user hasn't signed off — either unreviewed in the model
+    // or calculated on the fly (origin "ad_hoc"). approved/rejected don't need the banner.
+    function metricNeedsApproval(m) {
+      const rs = (m && m.review_state || 'unreviewed').toLowerCase();
+      return rs !== 'approved' && rs !== 'rejected';
+    }
     function storeFeedback(i, sec, sqlVal, noteVal) {
       const orig = (sec.sql || '').trim();
       const sqlChanged = (sqlVal || '').trim() && (sqlVal || '').trim() !== orig;
@@ -481,12 +549,20 @@
     }
     function refreshFeedbackBar() {
       const n = Object.keys(feedback).length;
+      const mn = Object.keys(metricFeedback).length;
       const bar = document.getElementById('feedback-bar');
       if (!bar) return;
-      document.getElementById('feedback-summary').textContent = n
-        ? n + (n === 1 ? ' section' : ' sections') + ' with a fix or note queued'
-        : 'Was this answer right?';
-      document.getElementById('btn-feedback').disabled = n === 0;
+      const parts = [];
+      if (n) parts.push(n + (n === 1 ? ' section' : ' sections') + ' with a fix or note');
+      if (mn) parts.push(mn + ' metric ' + (mn === 1 ? 'decision' : 'decisions'));
+      document.getElementById('feedback-summary').textContent =
+        parts.length ? parts.join(' + ') + ' queued' : 'Was this answer right?';
+      document.getElementById('btn-feedback').disabled = (n + mn) === 0;
+    }
+    function openFeedbackModal() {
+      document.getElementById('fb-text').value = buildFeedbackText();
+      document.getElementById('fb-modal').hidden = false;
+      document.getElementById('fb-status').textContent = '';
     }
     function buildPositiveText() {
       const lines = ['This agami answer looked correct — the query was right.', ''];
@@ -513,6 +589,29 @@
       lines.push('', 'For each section: save the corrected SQL as a prompt example, and route '
                  + 'any note (a column’s unit/meaning/encoding, table formatting, a caveat) to the '
                  + 'right home per the save-correction decision tree. Tell me where each landed.');
+
+      // Metric approve/change decisions from the top banner.
+      const mk = Object.keys(metricFeedback);
+      if (mk.length) {
+        lines.push('', '=== Metric approvals / changes (I made these choices in the report) ===');
+        mk.forEach(name => {
+          const mf = metricFeedback[name];
+          const where = mf.area ? ' (subject area: ' + mf.area + ')' : '';
+          if (mf.action === 'approve') {
+            lines.push('', 'APPROVE metric "' + name + '"' + where,
+                       'Definition: ' + (mf.definition || '(see report)'));
+          } else {
+            lines.push('', 'CHANGE metric "' + name + '"' + where,
+                       'Old definition: ' + (mf.definition || '(see report)'),
+                       'New definition: ' + (mf.newDefinition || ''));
+          }
+        });
+        lines.push('',
+          'For each metric: if it is an on-the-fly calculation not yet in the model, add it as a new '
+          + 'metric; if it already exists, apply the approve/change. Follow the agami-query Phase 4h gate — '
+          + 'show me the exact model write (name, subject area, binding/SQL) and get my OK, then approve it '
+          + 'with MY sign-off (clicking Approve here IS my sign-off). Tell me where each landed.');
+      }
       return lines.join('\n');
     }
 
@@ -648,6 +747,100 @@
       document.getElementById('toc').hidden = false;
     }
 
+    // ---- Unapproved-metric banner (top of report) ----
+    // Every metric this answer used that the user hasn't signed off — whether it's an
+    // unreviewed model metric or one agami calculated on the fly. Each gets Approve / Change
+    // controls; the choice queues into the same paste-back that goes back to Claude.
+    if (receipt && Array.isArray(receipt.metrics)) {
+      const unapproved = receipt.metrics.filter(metricNeedsApproval);
+      if (unapproved.length) {
+        const wrap = document.querySelector('.wrap');
+        const body0 = document.getElementById('report-body');
+        const banner = el('div', { class: 'metric-approval-banner' });
+        const n = unapproved.length;
+        banner.appendChild(el('h3', { text:
+          '⚠ This answer used ' + n + ' metric' + (n === 1 ? '' : 's') + ' you haven’t approved' }));
+        banner.appendChild(el('p', { class: 'map-intro', html:
+          'agami calculated ' + (n === 1 ? 'it' : 'these') + ' for this answer — ' +
+          (n === 1 ? 'it isn’t' : 'they aren’t') + ' a signed-off part of your model yet. ' +
+          '<strong>Approve</strong> to lock the definition into the model so future answers reuse it, ' +
+          'or <strong>Change</strong> if the definition is off. Your choice goes back to Claude to apply.' }));
+
+        unapproved.forEach((m, mi) => {
+          const name = m.name || ('metric_' + (mi + 1));
+          const def = m.definition_prose || m.expression || '';
+          const item = el('div', { class: 'map-item' });
+
+          const head = el('div', { class: 'map-head' });
+          head.appendChild(el('code', { class: 'map-name', text: name }));
+          const rs = (m.review_state || 'unreviewed').toLowerCase();
+          head.appendChild(el('span', { class: 'conf-badge ' + rs, text: m.review_state || 'unreviewed' }));
+          if (m.origin === 'ad_hoc') head.appendChild(el('span', { class: 'conf-badge unreviewed', text: 'calculated on the fly' }));
+          item.appendChild(head);
+
+          if (def) item.appendChild(el('div', { class: 'map-def', text: def }));
+
+          const status = el('div', { class: 'map-status', text: '' });
+          const approveBtn = el('button', { type: 'button', text: '✓ Approve' });
+          const changeBtn = el('button', { type: 'button', text: '✎ Change…' });
+          const actions = el('div', { class: 'map-actions' }, approveBtn, changeBtn);
+
+          // Change editor (hidden until "Change…")
+          const ta = el('textarea', {});
+          ta.value = def;
+          const saveBtn = el('button', { type: 'button', text: 'Save change' });
+          const cancelBtn = el('button', { type: 'button', text: 'Cancel' });
+          const edit = el('div', { class: 'map-edit' }, ta, el('div', { class: 'map-edit-bar' }, saveBtn, cancelBtn));
+          edit.style.display = 'none';
+
+          function refreshState() {
+            const mf = metricFeedback[name];
+            approveBtn.classList.toggle('queued-approve', !!mf && mf.action === 'approve');
+            changeBtn.classList.toggle('queued-change', !!mf && mf.action === 'change');
+            status.textContent = !mf ? ''
+              : mf.action === 'approve' ? '✓ Queued to approve — send it below'
+              : '✎ Change queued — send it below';
+          }
+          approveBtn.addEventListener('click', () => {
+            if (metricFeedback[name] && metricFeedback[name].action === 'approve') {
+              delete metricFeedback[name];                 // toggle off
+            } else {
+              metricFeedback[name] = { name: name, area: m.area || null, definition: def, action: 'approve', newDefinition: null };
+            }
+            edit.style.display = 'none';
+            refreshState(); refreshFeedbackBar();
+          });
+          changeBtn.addEventListener('click', () => {
+            edit.style.display = edit.style.display === 'none' ? 'block' : 'none';
+            if (edit.style.display === 'block') ta.focus();
+          });
+          cancelBtn.addEventListener('click', () => { edit.style.display = 'none'; });
+          saveBtn.addEventListener('click', () => {
+            const v = (ta.value || '').trim();
+            if (v && v !== def) {
+              metricFeedback[name] = { name: name, area: m.area || null, definition: def, action: 'change', newDefinition: v };
+            } else {
+              delete metricFeedback[name];   // no real change → unqueue
+            }
+            edit.style.display = 'none';
+            refreshState(); refreshFeedbackBar();
+          });
+
+          item.appendChild(actions);
+          item.appendChild(edit);
+          item.appendChild(status);
+          banner.appendChild(item);
+        });
+
+        const send = el('div', { class: 'map-send' });
+        send.appendChild(el('button', { type: 'button', text: 'Send my metric decisions to Claude →',
+          onclick: openFeedbackModal }));
+        banner.appendChild(send);
+
+        wrap.insertBefore(banner, body0);
+      }
+    }
+
     // ---- Trust warning banner (top of report, only if there are warnings) ----
     if (receipt && Array.isArray(receipt.warnings) && receipt.warnings.length > 0) {
       const wrap = document.querySelector('.wrap');
@@ -771,59 +964,108 @@
         sectionEl.appendChild(tableCard);
       }
 
-      // SQL — collapsible <details> with a Copy button + multi-line <pre>
-      if (sec.sql) {
-        const det = el('details', { class: 'sql card' });
-        det.appendChild(el('summary', { text: 'SQL' }));
-
-        // Copy button — copies the raw SQL to clipboard, briefly shows "Copied"
-        const wrap = el('div', { class: 'sql-wrap' });
-        const btn = el('button', { class: 'sql-copy', text: 'Copy' });
-        btn.type = 'button';
-        btn.addEventListener('click', () => {
-          const sql = sec.sql || '';
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(sql).then(
-              () => { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); },
-              () => { btn.textContent = 'Copy failed'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); }
-            );
-          } else {
-            // Fallback for older browsers — select-text in the <pre>
-            const range = document.createRange();
-            range.selectNodeContents(pre);
-            const sel = window.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
-            try { document.execCommand('copy'); btn.textContent = 'Copied!'; }
-            catch (e) { btn.textContent = 'Select all + ⌘C'; }
-            setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-          }
-        });
-        wrap.appendChild(btn);
-        const pre = el('pre', { text: sec.sql });
-        wrap.appendChild(pre);
-        det.appendChild(wrap);
-        sectionEl.appendChild(det);
-      }
-
-      // Feedback: correct this section's SQL / add a note → /agami-save-correction
+      // SQL card — shows the exact executed SQL, with edit-in-place + Save and a notes
+      // field (mirrors the model explorer). Editing the SQL or adding a note queues a fix
+      // into the bottom feedback bar (the paste-back to Claude → /agami-save-correction).
       {
-        const fb = el('details', { class: 'feedback' });
-        fb.appendChild(el('summary', { text: '✎ Fix the SQL or add a note' }));
-        const inner = el('div', { class: 'feedback-body' });
-        inner.appendChild(el('label', { text: 'Corrected SQL — edit if this query was wrong:' }));
-        const sqlTa = el('textarea', { rows: '6' });
-        sqlTa.value = sec.sql || '';
-        inner.appendChild(sqlTa);
-        inner.appendChild(el('label', { text: 'Notes — a column’s meaning/units, table formatting, a caveat:' }));
-        const noteTa = el('textarea', { rows: '3',
-          placeholder: 'e.g. amounts are in INR; TOTAL can be negative for refunds; show dates as MMM D, YYYY' });
+        const det = el('details', { class: 'sql card' });
+        const summary = el('summary', { text: 'SQL' });
+        det.appendChild(summary);
+        const inner = el('div', {});
+
+        // The notes field + queued tag are shared by the SQL editor below, so declare first.
+        const queuedTag = el('span', { class: 'sql-queued-tag', text: '' });
+        const noteTa = el('textarea', { class: 'sql-note-area', rows: '3',
+          placeholder: 'e.g. amounts are in INR; cart_discount is order-level — allocate per line; show dates as MMM D, YYYY' });
+        // Holds the in-progress (un-queued) SQL edit so re-opening the editor keeps it.
+        let draftSql = sec.sql || '';
+
+        function markQueued() {
+          const q = !!feedback[i];
+          queuedTag.textContent = q
+            ? '✓ Queued — copy the block from the bar at the bottom to send it to Claude'
+            : '';
+          summary.textContent = q ? 'SQL — edit queued' : 'SQL';
+        }
+        noteTa.addEventListener('input', () => {
+          storeFeedback(i, sec, (feedback[i] && feedback[i].sql) || draftSql, noteTa.value);
+          markQueued();
+        });
+
+        if (sec.sql) {
+          const wrap = el('div', { class: 'sql-wrap' });
+          const pre = el('pre', { text: sec.sql });
+
+          // Read-mode toolbar: Copy + Edit (top-right).
+          const copyBtn = el('button', { class: 'sql-btn', text: 'Copy', type: 'button' });
+          const editBtn = el('button', { class: 'sql-btn', text: '✎ Edit', type: 'button' });
+          const toolbar = el('div', { class: 'sql-toolbar' }, copyBtn, editBtn);
+
+          // Edit-mode: textarea + Save / Cancel (hidden until Edit).
+          const ta = el('textarea', { class: 'sql-edit-area' });
+          ta.value = draftSql;
+          const saveBtn = el('button', { class: 'primary', text: 'Save', type: 'button' });
+          const cancelBtn = el('button', { text: 'Cancel', type: 'button' });
+          const status = el('span', { class: 'sql-edit-status', text: '' });
+          const editBar = el('div', { class: 'sql-edit-bar' }, saveBtn, cancelBtn, status);
+          ta.style.display = 'none';
+          editBar.style.display = 'none';
+
+          copyBtn.addEventListener('click', () => {
+            const sql = sec.sql || '';
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(sql).then(
+                () => { copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); },
+                () => { copyBtn.textContent = 'Copy failed'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); }
+              );
+            } else {
+              const range = document.createRange();
+              range.selectNodeContents(pre);
+              const sel = window.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+              try { document.execCommand('copy'); copyBtn.textContent = 'Copied!'; }
+              catch (e) { copyBtn.textContent = 'Select all + ⌘C'; }
+              setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+            }
+          });
+          editBtn.addEventListener('click', () => {
+            ta.value = (feedback[i] && feedback[i].sql) || draftSql;
+            pre.style.display = 'none'; toolbar.style.display = 'none';
+            ta.style.display = 'block'; editBar.style.display = 'flex';
+            status.textContent = ''; ta.focus();
+          });
+          cancelBtn.addEventListener('click', () => {
+            pre.style.display = ''; toolbar.style.display = 'flex';
+            ta.style.display = 'none'; editBar.style.display = 'none';
+          });
+          saveBtn.addEventListener('click', () => {
+            draftSql = ta.value;
+            storeFeedback(i, sec, draftSql, noteTa.value);
+            // reflect the edit in the read view so the card shows what will be sent
+            pre.textContent = draftSql.trim() || sec.sql;
+            pre.style.display = ''; toolbar.style.display = 'flex';
+            ta.style.display = 'none'; editBar.style.display = 'none';
+            markQueued();
+          });
+
+          wrap.appendChild(toolbar);
+          wrap.appendChild(pre);
+          wrap.appendChild(ta);
+          wrap.appendChild(editBar);
+          inner.appendChild(wrap);
+        } else {
+          // No SQL captured — don't show an empty editor; let the user flag it via a note.
+          inner.appendChild(el('p', { class: 'sql-missing',
+            text: 'No SQL was captured for this section. If this section should have a query, add a note below.' }));
+        }
+
+        inner.appendChild(el('label', { class: 'sql-note-label',
+          text: 'Notes for Claude — a column’s meaning/units, formatting, a caveat:' }));
         inner.appendChild(noteTa);
-        const onInput = () => storeFeedback(i, sec, sqlTa.value, noteTa.value);
-        sqlTa.addEventListener('input', onInput);
-        noteTa.addEventListener('input', onInput);
-        fb.appendChild(inner);
-        sectionEl.appendChild(fb);
+        inner.appendChild(queuedTag);
+        det.appendChild(inner);
+        sectionEl.appendChild(det);
       }
 
       body.appendChild(sectionEl);
@@ -1077,11 +1319,7 @@
     }
 
     // ---- Feedback bar + modal wiring ----
-    document.getElementById('btn-feedback').addEventListener('click', () => {
-      document.getElementById('fb-text').value = buildFeedbackText();
-      document.getElementById('fb-modal').hidden = false;
-      document.getElementById('fb-status').textContent = '';
-    });
+    document.getElementById('btn-feedback').addEventListener('click', openFeedbackModal);
     document.getElementById('btn-looks-good').addEventListener('click', () => {
       document.getElementById('fb-text').value = buildPositiveText();
       document.getElementById('fb-modal').hidden = false;

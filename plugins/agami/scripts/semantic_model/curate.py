@@ -291,15 +291,55 @@ def _op_label(op: dict) -> str:
     return f"{op.get('op')} {op.get('kind')} {op.get('area','')}/{t}".strip()
 
 
+def _resolve_area(root: Path, op: dict) -> str:
+    """Which subject area owns this op's target, resolved by NAME when `area` is omitted — so
+    callers (enrichment, save-correction) don't hand-maintain a table->area map. table/metric/
+    entity resolve by file existence; relationship by matching endpoints. A name that lives in
+    two areas (e.g. a table present in two schemas) is ambiguous -> raise, asking for `area`."""
+    kind, name = op.get("kind"), op.get("name")
+    sa_root = root / "subject_areas"
+    if not sa_root.is_dir():
+        raise FileNotFoundError("model has no subject_areas/ directory")
+    areas = sorted(p.name for p in sa_root.iterdir() if p.is_dir())
+    hits: list[str] = []
+    for area in areas:
+        d = sa_root / area
+        found = False
+        if kind == "table":
+            found = (d / "tables" / f"{name}.yaml").exists()
+        elif kind == "entity":
+            found = (d / "entities" / f"{_slug(name)}.yaml").exists()
+        elif kind == "metric":
+            found = (d / "metrics" / f"{_slug(name)}.yaml").exists()
+        elif kind == "relationship":
+            relf = d / "relationships.yaml"
+            if relf.exists():
+                frm, _, to = (name or "").partition("->")
+                doc = _load(relf) or {}
+                rels = doc.get("relationships", doc if isinstance(doc, list) else [])
+                found = any(r.get("from_table") == frm and r.get("to_table") == to for r in rels)
+        if found:
+            hits.append(area)
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise FileNotFoundError(
+            f"no {kind} named {name!r} in any subject area (looked in: {', '.join(areas) or 'none'})")
+    raise ValueError(
+        f"{kind} {name!r} exists in multiple areas {hits} — pass an explicit 'area' to "
+        "disambiguate (a same-named table can live in two schemas).")
+
+
 def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
     action = op.get("op")
     if action not in _VALID_OPS:
         raise ValueError(f"unknown op {action!r}")
     kind = op.get("kind")
-    area = op.get("area")
     name = op.get("name")
     if not kind or not name:
         raise ValueError("op needs kind + name")
+    # `area` is optional — resolve it from the model by name when the caller omits it.
+    area = op.get("area") or _resolve_area(root, op)
 
     new_state = {"approve": "approved", "include": "unreviewed",
                  "reject": "rejected", "exclude": "rejected"}.get(action)
@@ -310,56 +350,74 @@ def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
         if op.get("column"):
             _set_column_field(doc, op["column"], op, new_state, signer, role)
         else:
-            _set_trust(doc, op, new_state, signer, role)
+            _set_trust(doc, op, new_state, signer, role, desc_source=True)  # table desc has provenance
         _dump(path, doc)
         return path
 
     if kind == "entity":
-        path = _area_dir(root, area) / "entities" / f"{name}.yaml"
+        # entities/metrics are stored under the SLUGGED name (write_items uses _slug), so resolve
+        # the same way — a multi-word name ("total event sales") must find total_event_sales.yaml,
+        # not a literal "total event sales.yaml". _slug is idempotent, so an already-slugged name
+        # still resolves. (Tables keep their literal name — they're written verbatim, not slugged.)
+        path = _area_dir(root, area) / "entities" / f"{_slug(name)}.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"no entity named {name!r} in area {area!r}")
         doc = _load(path)
         _set_trust(doc, op, new_state, signer, role)
         _dump(path, doc)
         return path
 
     if kind == "metric":
-        path = _area_dir(root, area) / "metrics" / f"{name}.yaml"
+        path = _area_dir(root, area) / "metrics" / f"{_slug(name)}.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"no metric named {name!r} in area {area!r}")
         doc = _load(path)
         _set_trust(doc, op, new_state, signer, role)
         _dump(path, doc)
         return path
 
     if kind == "relationship":
-        path = _area_dir(root, area) / "relationships.yaml"
-        doc = _load(path) or {}
-        rels = doc.get("relationships", doc if isinstance(doc, list) else [])
         frm, _, to = name.partition("->")
-        hit = None
-        for r in rels:
-            if r.get("from_table") == frm and r.get("to_table") == to:
-                hit = r
-                break
-        if hit is None:
-            raise ValueError(f"relationship {name} not found in {path}")
-        _set_trust(hit, op, new_state, signer, role)
-        _dump(path, {"relationships": rels})
-        return path
+        path = _area_dir(root, area) / "relationships.yaml"
+        if path.exists():
+            doc = _load(path) or {}
+            rels = doc.get("relationships", doc if isinstance(doc, list) else [])
+            hit = next((r for r in rels if r.get("from_table") == frm and r.get("to_table") == to), None)
+            if hit is not None:
+                _set_trust(hit, op, new_state, signer, role)
+                _dump(path, {"relationships": rels})
+                return path
+        # Cross-area (cross-schema / cross-datasource) join — it lives at the org level, not
+        # in an area's relationships.yaml. Fall back to org.yaml's cross_subject_area_relationships.
+        orgp = root / "org.yaml"
+        odoc = _load(orgp) or {}
+        crels = odoc.get("cross_subject_area_relationships", [])
+        chit = next((r for r in crels if r.get("from_table") == frm and r.get("to_table") == to), None)
+        if chit is None:
+            raise ValueError(f"relationship {name} not found in {path} or org cross-area relationships")
+        _set_trust(chit, op, new_state, signer, role)
+        _dump(orgp, odoc)
+        return orgp
 
     raise ValueError(f"unknown kind {kind!r}")
 
 
-def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role) -> None:
+def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
+               *, desc_source: bool = False) -> None:
     if op.get("op") == "edit":
         fld, val = op.get("field"), op.get("value")
         if not fld:
             raise ValueError("edit op needs field")
         doc[fld] = val
-        # Description provenance (advisory; see DescriptionSource in models.py).
-        # An edit that sets `description` also stamps `description_source`:
+        # Description provenance (advisory; see DescriptionSource in models.py). ONLY tables
+        # and columns carry `description_source`; relationships / metrics / entities have a
+        # `description` but no source field, so stamping it there would fail `extra=forbid`.
+        # An edit that sets a table/column `description` also stamps `description_source`:
         #   source:"ai" → ai_unvalidated (agami-connect generation)
         #   otherwise   → human (a person edited it, so it's trusted)
         #   empty value → clear it. A direct edit of `description_source` itself
         #   (e.g. confirm → "ai_validated") falls through the generic `doc[fld]=val`.
-        if fld == "description":
+        if fld == "description" and desc_source:
             doc["description_source"] = (
                 None if not (val or "").strip()
                 else ("ai_unvalidated" if op.get("source") == "ai" else "human")
@@ -381,7 +439,7 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role) -> N
 def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signer, role) -> None:
     for c in table_doc.get("columns", []):
         if c.get("name") == col_name:
-            _set_trust(c, op, new_state, signer, role)
+            _set_trust(c, op, new_state, signer, role, desc_source=True)  # column desc has provenance
             return
     raise ValueError(f"column {col_name} not found")
 

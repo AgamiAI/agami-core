@@ -458,6 +458,12 @@ class Relationship(_Base):
     to_table: str
     from_column: Optional[str] = None
     to_column: Optional[str] = None
+    # Schema (namespace) each endpoint lives in. Stamped at introspection so a join that
+    # spans two schemas of the same DB is visible AS cross-schema, and so two schemas that
+    # each have a same-named table don't get silently conflated. None for schema-less DBs
+    # (SQLite) or models written before schema-qualified relationships shipped.
+    from_schema: Optional[str] = None
+    to_schema: Optional[str] = None
     # SQL-expression escape hatch (CAST, compound, function-based joins).
     on: Optional[str] = None
     join_type: JoinType = "LEFT"
@@ -497,6 +503,12 @@ class Relationship(_Base):
                 "(from_column + to_column) OR (on:)"
             )
         return self
+
+    @property
+    def cross_schema(self) -> bool:
+        """True when this edge joins two different schemas (both endpoints stamped).
+        These are architectural claims worth a human glance — the Review tab badges them."""
+        return bool(self.from_schema and self.to_schema and self.from_schema != self.to_schema)
 
 
 class CrossSubjectAreaRelationship(Relationship):
@@ -544,7 +556,7 @@ class Organization(_Base):
     cross_subject_area_relationships: list[CrossSubjectAreaRelationship] = Field(
         default_factory=list
     )
-    # cross-cutting unification targets (MeridianDemo customer_health pattern)
+    # cross-cutting entities/metrics that unify multiple subject areas
     cross_subject_area_entities: list[Entity] = Field(default_factory=list)
     cross_subject_area_metrics: list[Metric] = Field(default_factory=list)
 

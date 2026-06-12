@@ -269,3 +269,244 @@ def test_sniff_date_detects_epoch_yyyymmdd_iso_and_rejects_ids():
     # native timestamp: no re-encoding; tz only when the sample carries an offset
     assert I._sniff_date("updated_at", "timestamp", ["2024-01-01 10:00:00+05:30"]) == (None, "offset-aware")
     assert I._sniff_date("updated_at", "timestamp", ["2024-01-01 10:00:00"]) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Large-table scan hints: recommended_filters seeded from date columns
+# ---------------------------------------------------------------------------
+
+
+def _large_runner(sql):
+    """Two large tables: `events` (one clear date column) and `wide_mart` (7 date columns)."""
+    s = " ".join(sql.split())
+    if "information_schema.schemata" in s:
+        return [{"schema_name": "public"}]
+    if "information_schema.tables" in s and "table_type" in s:
+        return [{"schema_name": "public", "table_name": "events", "table_type": "BASE TABLE"},
+                {"schema_name": "public", "table_name": "wide_mart", "table_type": "BASE TABLE"}]
+    if "information_schema.columns" in s:
+        if "'events'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "created_at", "data_type": "timestamp", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
+                    {"column_name": "label", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "3", "numeric_scale": ""}]
+        cols = [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""}]
+        for i in range(7):  # 7 date columns → too many to be a clear scan key
+            cols.append({"column_name": f"d{i}_date", "data_type": "date", "is_nullable": "YES", "ordinal_position": str(i + 2), "numeric_scale": ""})
+        return cols
+    if "PRIMARY KEY" in s:
+        return [{"column_name": "id"}]
+    if "FOREIGN KEY" in s:
+        return []
+    if "reltuples" in s:
+        return [{"estimated_rows": "5000000"}]   # 5M → large
+    return []
+
+
+def test_large_table_recommends_its_date_columns(tmp_path):
+    org, _ = I.introspect("shop", "postgres", runner=_large_runner, artifacts_dir=tmp_path, dry_run=True)
+    events = org.subject_areas[0].defined_table("events")
+    assert events.performance_hints.estimated_row_count == 5_000_000
+    # a clear single date column → the narrow-by-date hint, so the scan warning can name it
+    assert events.performance_hints.recommended_filters == ["created_at"]
+
+
+def test_wide_mart_skips_noisy_date_columns(tmp_path):
+    org, _ = I.introspect("shop", "postgres", runner=_large_runner, artifacts_dir=tmp_path, dry_run=True)
+    wide = org.subject_areas[0].defined_table("wide_mart")
+    # 7 date columns is too many to be a clear scan key — left empty for the index/partition pass
+    assert wide.performance_hints.recommended_filters == []
+
+
+# ---------------------------------------------------------------------------
+# Supabase: drop system schemas (auth/storage/vault/…), keep the app schemas
+# ---------------------------------------------------------------------------
+
+
+def test_supabase_system_schemas_are_dropped():
+    rep = I.IntrospectReport(profile="p", db_type="postgres", out_dir=None, dry_run=True)
+    schemas = ["auth", "storage", "vault", "realtime", "extensions", "public", "analytics"]
+    kept = I._filter_supabase_system_schemas(schemas, rep)
+    assert kept == ["public", "analytics"]                       # only the user's app schemas
+    assert any("Supabase detected" in n for n in rep.notes)      # and it's surfaced, not silent
+
+
+def test_plain_postgres_auth_schema_is_not_filtered():
+    # A plain Postgres DB with its OWN `auth` schema (no other Supabase signature) is left alone —
+    # the filter only triggers on the full Supabase signature, so it never eats real app schemas.
+    rep = I.IntrospectReport(profile="p", db_type="postgres", out_dir=None, dry_run=True)
+    assert I._filter_supabase_system_schemas(["public", "auth"], rep) == ["public", "auth"]
+    assert rep.notes == []
+
+
+# ---------------------------------------------------------------------------
+# Money-column detection (word boundaries — `count` must not match `discount`)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_money_column_handles_word_boundaries():
+    money = ["amount", "price", "total_revenue", "discount_amount", "member_discount",
+             "tax_amount", "account_balance", "salary", "refund_amt", "subtotal"]
+    not_money = ["order_count", "discount_rate", "total_count", "num_payments",
+                 "credit_score", "customer_id", "created_at", "status", "quantity"]
+    for c in money:
+        assert build.detect_money_column(c), f"{c} should be money"
+    for c in not_money:
+        assert not build.detect_money_column(c), f"{c} should NOT be money"
+
+
+# ---------------------------------------------------------------------------
+# Cross-schema relationships (Case 1): schema is stamped on every edge, declared
+# cross-schema FKs are surfaced for review (not auto-approved), and the inferred
+# probe binds to the same-schema target instead of a same-named decoy in another schema.
+# ---------------------------------------------------------------------------
+
+
+def _xschema_fk_runner(sql):
+    """Two schemas; a FK declared in `sales` that REFERENCES `billing` (cross-schema)."""
+    s = " ".join(sql.split())
+    if "information_schema.schemata" in s:
+        return [{"schema_name": "sales"}, {"schema_name": "billing"}]
+    if "information_schema.tables" in s and "table_type" in s:
+        if "'sales'" in s:
+            return [{"schema_name": "sales", "table_name": "invoices", "table_type": "BASE TABLE"}]
+        return [{"schema_name": "billing", "table_name": "customers", "table_type": "BASE TABLE"}]
+    if "information_schema.columns" in s:
+        if "'invoices'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+    if "PRIMARY KEY" in s:
+        return [{"column_name": "id"}]
+    if "FOREIGN KEY" in s:
+        if "'sales'" in s:
+            return [{"from_table": "invoices", "from_column": "customer_id", "from_schema": "sales",
+                     "to_table": "customers", "to_column": "id", "to_schema": "billing"}]
+        return []
+    if "reltuples" in s:
+        return [{"estimated_rows": "1000"}]
+    return []
+
+
+def test_cross_schema_fk_is_flagged_and_not_auto_approved(tmp_path):
+    org, rep = I.introspect("shop", "postgres", runner=_xschema_fk_runner,
+                            artifacts_dir=tmp_path, dry_run=True)
+    # two schemas -> two areas; the join spans them, so it's a cross-AREA relationship.
+    assert {sa.name for sa in org.subject_areas} == {"sales", "billing"}
+    assert not [r for sa in org.subject_areas for r in sa.relationships]  # none intra-area
+    cross = org.cross_subject_area_relationships
+    assert len(cross) == 1, cross
+    r = cross[0]
+    assert (r.from_table, r.to_table) == ("invoices", "customers")
+    assert r.from_schema == "sales" and r.to_schema == "billing" and r.cross_schema is True
+    assert (r.from_subject_area, r.to_subject_area) == ("sales", "billing")
+    # enforced Postgres FK, but it spans schemas -> surfaced for review, NOT auto-signed-off
+    assert r.review_state == "unreviewed" and r.signed_off_by is None
+    assert any("cross-schema" in n for n in rep.notes), rep.notes
+
+
+def _collision_probe_runner(sql):
+    """`customers` exists in BOTH s1 and s2. `s1.orders.customer_id` must bind to
+    s1.customers (same schema), not the s2 decoy. Empty FK catalog -> probe path."""
+    s = " ".join(sql.split())
+    if "information_schema.schemata" in s:
+        return [{"schema_name": "s1"}, {"schema_name": "s2"}]
+    if "information_schema.tables" in s and "table_type" in s:
+        if "'s1'" in s:
+            return [{"schema_name": "s1", "table_name": "orders", "table_type": "BASE TABLE"},
+                    {"schema_name": "s1", "table_name": "customers", "table_type": "BASE TABLE"}]
+        return [{"schema_name": "s2", "table_name": "customers", "table_type": "BASE TABLE"}]
+    if "information_schema.columns" in s:
+        if "'orders'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+    if "PRIMARY KEY" in s:
+        return [{"column_name": "id"}]
+    if "FOREIGN KEY" in s:
+        return []                      # no catalog FKs -> force the probe
+    if "matched" in s:                 # _overlaps EXISTS probe -> overlap confirmed
+        return [{"matched": "2"}]
+    if "reltuples" in s:
+        return [{"estimated_rows": "1000"}]
+    return []
+
+
+def test_probe_binds_same_schema_target_on_name_collision(tmp_path):
+    org, _ = I.introspect("shop", "postgres", runner=_collision_probe_runner,
+                          artifacts_dir=tmp_path, dry_run=True)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    match = [r for r in rels if r.from_table == "orders" and r.to_table == "customers"]
+    assert len(match) == 1, rels
+    r = match[0]
+    # the fix: resolve the target schema-aware (same schema first), not the last bare-name write
+    assert r.from_schema == "s1" and r.to_schema == "s1"
+    assert r.cross_schema is False
+
+
+def test_relationship_cross_schema_property():
+    same = m.Relationship(from_table="a", to_table="b", from_column="b_id", to_column="id",
+                          from_schema="x", to_schema="x", relationship="many_to_one")
+    assert same.cross_schema is False
+    diff = m.Relationship(from_table="a", to_table="b", from_column="b_id", to_column="id",
+                          from_schema="x", to_schema="y", relationship="many_to_one")
+    assert diff.cross_schema is True
+    # schema-less (SQLite / legacy) -> never flagged
+    none = m.Relationship(from_table="a", to_table="b", from_column="b_id", to_column="id",
+                          relationship="many_to_one")
+    assert none.cross_schema is False
+
+
+def _collision_schemas_runner(sql):
+    """billing + crm both contain a `products` table — the bare-name collision that used to
+    drop billing.products on write. Plus billing.invoices.product_id (probe join)."""
+    s = " ".join(sql.split())
+    if "information_schema.schemata" in s:
+        return [{"schema_name": "billing"}, {"schema_name": "crm"}]
+    if "information_schema.tables" in s and "table_type" in s:
+        if "'billing'" in s:
+            return [{"schema_name": "billing", "table_name": "products", "table_type": "BASE TABLE"},
+                    {"schema_name": "billing", "table_name": "invoices", "table_type": "BASE TABLE"}]
+        return [{"schema_name": "crm", "table_name": "products", "table_type": "BASE TABLE"},
+                {"schema_name": "crm", "table_name": "accounts", "table_type": "BASE TABLE"}]
+    if "information_schema.columns" in s:
+        if "'invoices'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "product_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                {"column_name": "name", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+    if "PRIMARY KEY" in s:
+        return [{"column_name": "id"}]
+    if "FOREIGN KEY" in s:
+        return []
+    if "matched" in s:
+        return [{"matched": "2"}]
+    if "reltuples" in s:
+        return [{"estimated_rows": "100"}]
+    return []
+
+
+def test_same_named_tables_in_two_schemas_both_survive(tmp_path):
+    """Regression: `billing.products` and `crm.products` must BOTH be modeled (the old engine
+    keyed tables by bare name and dropped one on write). One area per schema keeps them apart."""
+    org, rep = I.introspect("meridian", "postgres", runner=_collision_schemas_runner,
+                            artifacts_dir=tmp_path, dry_run=False)
+    # one area per schema, not per-table fragmentation
+    assert {sa.name for sa in org.subject_areas} == {"billing", "crm"}
+    # all 4 tables survive — neither products dropped
+    tabs = {(t.schema_name, t.name) for sa in org.subject_areas for t in sa.tables_defined}
+    assert tabs == {("billing", "products"), ("billing", "invoices"),
+                    ("crm", "products"), ("crm", "accounts")}
+    # both products.yaml files exist on disk (the collision used to overwrite one)
+    root = tmp_path / "meridian"
+    assert (root / "subject_areas" / "billing" / "tables" / "products.yaml").exists()
+    assert (root / "subject_areas" / "crm" / "tables" / "products.yaml").exists()
+    # reload from disk -> still 4 tables (write+read round-trips without loss)
+    from semantic_model import loader as L
+    reloaded = L.load_organization(root)
+    assert sum(len(sa.tables_defined) for sa in reloaded.subject_areas) == 4
+    # the probed join binds within billing (same-schema), not across to crm.products
+    bil = next(sa for sa in reloaded.subject_areas if sa.name == "billing")
+    inv_join = [r for r in bil.relationships if r.from_table == "invoices"]
+    assert inv_join and inv_join[0].to_table == "products" and inv_join[0].cross_schema is False

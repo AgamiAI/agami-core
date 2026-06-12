@@ -34,6 +34,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import _interp  # noqa: F401 — re-exec under agami's configured interpreter if PyYAML is missing
+
 import yaml
 
 
@@ -137,6 +139,8 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "qname": f"{sa.name}.{r.from_table}->{r.to_table}",
                 "from_table": r.from_table, "from_column": r.from_column,
                 "to_table": r.to_table, "to_column": r.to_column, "on": r.on,
+                "from_schema": r.from_schema, "to_schema": r.to_schema,
+                "cross_schema": r.cross_schema,
                 "cardinality": r.relationship, "description": r.description,
                 "review_state": r.review_state, "confidence": r.confidence,
                 "excluded": r.review_state == "rejected",
@@ -171,12 +175,23 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     # org-level cross-area joins (edges between two subject areas)
     cross_out: list[dict] = []
     for r in getattr(org, "cross_subject_area_relationships", []) or []:
+        fa = getattr(r, "from_subject_area", "")
+        ta = getattr(r, "to_subject_area", "")
         cross_out.append({
-            "from_subject_area": getattr(r, "from_subject_area", ""),
-            "to_subject_area": getattr(r, "to_subject_area", ""),
+            "qname": f"{fa}.{r.from_table}->{ta}.{r.to_table}",
+            "from_subject_area": fa, "to_subject_area": ta,
             "from_table": r.from_table, "from_column": r.from_column,
             "to_table": r.to_table, "to_column": r.to_column, "on": r.on,
+            "from_schema": r.from_schema, "to_schema": r.to_schema,
+            "cross_schema": r.cross_schema,
             "cardinality": r.relationship, "description": r.description,
+            "review_state": r.review_state, "confidence": r.confidence,
+            "excluded": r.review_state == "rejected",
+            "signed_off_by": r.signed_off_by, "signed_off_role": r.signed_off_role,
+            # rendered as a reviewable join (Joins tab + Review queue), like intra-area joins;
+            # `area` (the from-side) is what a curate op targets — the org-level fallback in
+            # curate resolves it to cross_subject_area_relationships.
+            "rule": 2, "cross_area": True, "area": fa,
         })
 
     return {

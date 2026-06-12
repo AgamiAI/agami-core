@@ -523,6 +523,165 @@ def build_receipt(
     return receipt
 
 
+def _model_table_index(org: Organization) -> dict[str, tuple]:
+    """bare table name -> (Table, area_name). First occurrence wins (a cross-schema
+    name clash is rare and the relationships now carry schema to disambiguate)."""
+    idx: dict[str, tuple] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            idx.setdefault(t.name, (t, sa.name))
+    return idx
+
+
+def _norm_sql(s: Optional[str]) -> str:
+    return " ".join((s or "").split()).lower()
+
+
+def assemble_receipt(
+    org: Organization,
+    sql: str,
+    *,
+    model_version: Optional[str] = None,
+    applied_filters: Optional[list[str]] = None,
+    pre_flight: Optional[PreFlightResult] = None,
+    freshness: Optional[str] = None,
+) -> dict[str, Any]:
+    """The FULL trust receipt for a query, assembled from the model + the SQL.
+
+    This is the single source of truth shared by the agami-query skill and the MCP
+    server, so the SAME "what did this answer touch / what hasn't been approved" panel
+    surfaces in Claude Code and in Claude Desktop. Output matches the RECEIPT_JSON schema
+    the chart template renders (tables_used, relationships, metrics, named_filters,
+    assumptions, warnings, model_version).
+
+    Deterministic, no LLM: tables come from the FROM/JOIN scope; a relationship is
+    "used" when both endpoints are in scope; a metric is "used" when its binding SQL
+    appears in the query; assumptions are the load-bearing columns whose description is
+    AI-written/unknown. Unreviewed metrics surface in `metrics` (review_state) for the
+    approve/change banner — NOT duplicated as a warning. Callers may append ad-hoc
+    (LLM-discovered) metrics to `metrics` after the fact.
+    """
+    receipt: dict[str, Any] = {
+        "sql": sql, "model_version": model_version,
+        "tables_used": [], "relationships": [], "metrics": [],
+        "named_filters": [], "assumptions": [], "warnings": [],
+    }
+    if not _HAVE_SQLGLOT:
+        return receipt
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        tree = None
+    if tree is None:
+        return receipt
+
+    scope = _tables_in_scope(tree)            # alias/name -> bare table name
+    used = set(scope.values())
+    tidx = _model_table_index(org)
+
+    for bare in sorted(used):
+        info = tidx.get(bare)
+        if not info:
+            continue
+        t, _area = info
+        ph = t.performance_hints
+        receipt["tables_used"].append({
+            "qname": f"{t.schema_name}.{t.name}" if t.schema_name else t.name,
+            "rows": (ph.estimated_row_count if ph else None),
+            "rows_as_of": (ph.estimated_row_count_at if ph else None),
+            "freshness": freshness,
+        })
+
+    warnings: list[str] = []
+    for sa in org.subject_areas:
+        for r in sa.relationships:
+            if r.from_table in used and r.to_table in used:
+                fq = (r.from_schema + ".") if (r.cross_schema and r.from_schema) else ""
+                tq = (r.to_schema + ".") if (r.cross_schema and r.to_schema) else ""
+                label = f"{fq}{r.from_table} → {tq}{r.to_table}"
+                receipt["relationships"].append({
+                    "name": f"{r.from_table}_to_{r.to_table}",
+                    "from_to": label,
+                    "cardinality": r.relationship,
+                    "confidence": r.confidence,
+                    "review_state": r.review_state,
+                    "origin": "fk" if r.confidence == "confirmed" else "introspect_heuristic",
+                    "signed_off_by": r.signed_off_by,
+                    "signed_off_role": r.signed_off_role,
+                    "signed_off_at": r.signed_off_at,
+                    "cross_schema": r.cross_schema,
+                    "on": r.on,
+                })
+                if r.review_state != "approved":
+                    warnings.append(f"Used an unreviewed join ({label}).")
+
+    nsql = _norm_sql(sql)
+    for sa in org.subject_areas:
+        for met in sa.metrics:
+            binding = next((b for b in (met.bindings or {}).values()
+                            if b and _norm_sql(b) in nsql), "")
+            if not binding:
+                continue
+            receipt["metrics"].append({
+                "name": met.name, "area": sa.name,
+                "definition_prose": met.calculation, "expression": binding,
+                "confidence": met.confidence, "review_state": met.review_state,
+                "origin": getattr(met, "source", None),
+                "signed_off_by": met.signed_off_by,
+                "signed_off_role": met.signed_off_role,
+                "signed_off_at": met.signed_off_at,
+            })
+            # metrics get their own approve/change banner — no duplicate warning line.
+
+    # assumptions: the load-bearing columns the answer leaned on whose description is
+    # AI-written (ai_unvalidated) or unknown (ai_unknown). ai_unknown first, cap 3.
+    def _tables_defining(cname: str) -> list[str]:
+        out = []
+        for b in used:
+            info = tidx.get(b)
+            if info and any(c.name == cname for c in info[0].columns):
+                out.append(b)
+        return out
+
+    ref_cols: set[tuple] = set()
+    for col in tree.find_all(exp.Column):
+        if not col.name:
+            continue
+        if col.table:                                   # qualified -> resolve via alias scope
+            ref_cols.add((scope.get(col.table, col.table), col.name))
+        else:                                           # unqualified -> attribute only if unambiguous
+            cands = _tables_defining(col.name)
+            if len(cands) == 1:
+                ref_cols.add((cands[0], col.name))
+    unknown: list[dict] = []
+    unval: list[dict] = []
+    for bare, cname in ref_cols:
+        info = tidx.get(bare)
+        if not info:
+            continue
+        t, _ = info
+        mc = next((c for c in t.columns if c.name == cname), None)
+        if not mc:
+            continue
+        q = f"{t.schema_name + '.' if t.schema_name else ''}{t.name}.{cname}"
+        if mc.description_source == "ai_unknown":
+            unknown.append({"column": q, "meaning": None, "source": "ai_unknown"})
+        elif mc.description_source == "ai_unvalidated" and (mc.description or "").strip():
+            unval.append({"column": q, "meaning": mc.description, "source": "ai_unvalidated"})
+    receipt["assumptions"] = (unknown + unval)[:3]
+
+    if warnings:
+        warnings.append("Review these unreviewed joins in the agami model explorer "
+                        "(/agami-model, or say 'open the review queue').")
+    receipt["warnings"] = warnings
+    if applied_filters:
+        receipt["default_filters_applied"] = applied_filters
+    if pre_flight and pre_flight.risk:
+        receipt["pre_flight"] = {"risk": pre_flight.risk, "action": pre_flight.action,
+                                 "reason": pre_flight.reason}
+    return receipt
+
+
 # ---------------------------------------------------------------------------
 # SQL helpers (sqlglot)
 # ---------------------------------------------------------------------------
@@ -852,4 +1011,5 @@ __all__ = [
     "pre_flight_check",
     "apply_default_filters",
     "build_receipt",
+    "assemble_receipt",
 ]

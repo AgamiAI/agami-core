@@ -13,6 +13,7 @@ Canonical catalog result columns the engine expects:
                                    ordinal_position, numeric_scale (nullable)
     primary_keys(s,t)-> rows with: column_name            (ordered by key position)
     foreign_keys(s)  -> rows with: from_table, from_column, to_table, to_column
+                                   (+ optional from_schema, to_schema — schema-ful dialects)
     row_estimate(s,t)-> rows with: estimated_rows         (or None to skip)
 
 Three catalog families:
@@ -171,9 +172,14 @@ class Dialect:
         )
 
     def sql_foreign_keys(self, schema: str) -> str:
+        # Also returns from_schema / to_schema so introspect can flag cross-schema joins and
+        # resolve a target unambiguously when two schemas share a table name. ccu.table_schema
+        # is the REFERENCED (to) table's schema; it may differ from the constraint's schema.
         return (
             "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
-            "ccu.table_name AS to_table, ccu.column_name AS to_column "
+            "kcu.table_schema AS from_schema, "
+            "ccu.table_name AS to_table, ccu.column_name AS to_column, "
+            "ccu.table_schema AS to_schema "
             "FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu "
             "ON tc.constraint_name = kcu.constraint_name "
@@ -237,10 +243,12 @@ class MySQL(Dialect):
         return "`" + name.replace("`", "``") + "`"
 
     def sql_foreign_keys(self, schema: str) -> str:
-        # MySQL exposes the target directly on key_column_usage.
+        # MySQL exposes the target (incl. its schema) directly on key_column_usage.
         return (
             "SELECT table_name AS from_table, column_name AS from_column, "
-            "referenced_table_name AS to_table, referenced_column_name AS to_column "
+            "table_schema AS from_schema, "
+            "referenced_table_name AS to_table, referenced_column_name AS to_column, "
+            "referenced_table_schema AS to_schema "
             "FROM information_schema.key_column_usage "
             f"WHERE table_schema = {self.quote_lit(schema)} "
             "AND referenced_table_name IS NOT NULL"

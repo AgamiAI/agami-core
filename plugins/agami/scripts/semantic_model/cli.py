@@ -203,6 +203,24 @@ def cmd_remove_example(args) -> int:
     return 0 if (res.applied or not res.skipped) else 1
 
 
+def cmd_suggest_units(args) -> int:
+    """List the numeric **money** columns (so a currency `unit` can be stamped) using the
+    tested name matcher — never a hand-rolled regex that mis-handles `count` inside
+    `discount`. Skips columns that already carry a `unit`. Emits
+    {money_columns: [{area, table, column, type}]} for the caller to confirm + apply."""
+    from . import build as B
+    org = L.load_organization(args.root)
+    numeric = {"integer", "decimal", "float"}
+    money = []
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for c in t.columns:
+                if not c.unit and c.type in numeric and B.detect_money_column(c.name):
+                    money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type})
+    _print_json({"money_columns": money})
+    return 0
+
+
 def cmd_format_table(args) -> int:
     """Format a result CSV into a deterministic markdown table — exact numbers, full
     grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
@@ -429,6 +447,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None, help="who rejected it (recorded in the curation log)")
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example)
+
+    sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_suggest_units)
 
     sp = sub.add_parser("format-table", help="format a result CSV into a deterministic markdown table (exact numbers)")
     sp.add_argument("--csv-file", default=None, help="result CSV (header row + rows); omit to read stdin")

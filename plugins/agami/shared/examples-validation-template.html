@@ -274,16 +274,21 @@
     }
     .pending-summary { font-size: 14px; color: var(--fg); flex: 1; }
     .pending-summary .count { font-weight: 600; }
-    .sticky-footer button {
+    /* Footer + modal buttons share one style — so the paste-back / add-example modals match
+       the footer and the query-page / model-explorer surfaces (which the modal lacked before,
+       leaving its buttons as unstyled native controls). */
+    .sticky-footer button, .modal-actions button {
       font: inherit; font-size: 14px; font-weight: 500;
       padding: 8px 16px; border-radius: 6px; cursor: pointer;
       border: 1px solid var(--border); background: var(--bg); color: var(--fg);
     }
-    .sticky-footer button.primary {
+    .sticky-footer button:hover:not(.primary):not(:disabled),
+    .modal-actions button:hover:not(.primary) { border-color: var(--accent); color: var(--accent); }
+    .sticky-footer button.primary, .modal-actions button.primary {
       background: var(--accent); color: white; border-color: var(--accent);
     }
-    .sticky-footer button.primary:hover { background: var(--accent-hover); }
-    .sticky-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sticky-footer button.primary:hover, .modal-actions button.primary:hover { background: var(--accent-hover); }
+    .sticky-footer button:disabled, .modal-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 
     /* Modal */
     .modal-backdrop {

@@ -417,3 +417,16 @@ def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
     # a question that doesn't exist is reported (skipped), not silently swallowed
     rc2, out2 = _run(["remove-example", str(tmp_path), "--area", "s", "--question", "no such q?"])
     assert rc2 == 1 and json.loads(out2)["skipped"]
+
+
+def test_suggest_units_finds_money_columns(tmp_path):
+    """`sm suggest-units` returns the numeric money columns via the tested matcher — so the
+    skill never hand-rolls a regex that drops `discount_amount` by matching `count`."""
+    _model(tmp_path)
+    rc, out = _run(["suggest-units", str(tmp_path)])
+    assert rc == 0
+    cols = json.loads(out)["money_columns"]
+    names = {(c["table"], c["column"]) for c in cols}
+    assert ("orders", "total") in names            # numeric + money-named
+    assert ("order_items", "qty") not in names      # a count, not money
+    assert all(c["column"] != "id" for c in cols)   # ids excluded
