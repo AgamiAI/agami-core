@@ -61,6 +61,38 @@ def test_draft_states_facts_not_invented_semantics(tmp_path):
     assert "MRR" in md  # only as the example placeholder in the comment
 
 
+def test_key_terminology_seeded_from_glossary_and_enums(tmp_path):
+    # the section is no longer a bare prompt: curated glossary terms + auto-derived enum
+    # legends from choice_field columns both render.
+    from semantic_model.loader import load_organization
+    from semantic_model import org_draft, curate
+    _model(tmp_path)
+    p = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    doc = yaml.safe_load(p.read_text())
+    doc["columns"].append({"name": "status", "type": "string",
+                           "choice_field": {"P": "pending", "S": "shipped"}})
+    p.write_text(yaml.safe_dump(doc))
+    res = curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit", "bp": "battery pack"})
+    assert res.validated and res.applied
+    md = org_draft.draft_organization_md(load_organization(tmp_path))
+    assert "**TIU** — Telematics Interface Unit" in md
+    assert "**bp** — battery pack" in md
+    assert "orders.status" in md and "`P` = pending" in md   # auto enum legend
+    assert "only you can fill this in" not in md             # bare placeholder is gone
+
+
+def test_set_key_terminology_merges_then_replaces(tmp_path):
+    from semantic_model.loader import load_organization
+    from semantic_model import curate
+    _model(tmp_path)
+    assert curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit"}).validated
+    curate.set_key_terminology(tmp_path, {"ESV": "Energy Storage Vehicle"})            # merge (default)
+    assert load_organization(tmp_path).key_terminology == {
+        "TIU": "Telematics Interface Unit", "ESV": "Energy Storage Vehicle"}
+    curate.set_key_terminology(tmp_path, {"SoC": "State of Charge"}, merge=False)      # replace
+    assert load_organization(tmp_path).key_terminology == {"SoC": "State of Charge"}
+
+
 def test_explorer_falls_back_to_draft_when_org_md_blank(tmp_path):
     from render_model_explorer import build_manifest
     _model(tmp_path)

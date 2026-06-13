@@ -102,9 +102,61 @@ def draft_organization_md(org: "Organization") -> str:
             lines.append(f"- **{qname}** — {unit}")
         lines.append("")
 
+    _key_terminology(lines, org, areas)
+    return "\n".join(lines)
+
+
+# How much of an enum column's value→meaning map to inline before truncating, and how
+# many such columns to auto-seed — enough to be useful, capped so a code-heavy schema
+# doesn't bury the curated glossary in machine-readable enum dumps.
+_MAX_ENUM_VALUES = 10
+_MAX_ENUM_COLS = 25
+
+
+def _key_terminology(lines: list[str], org: "Organization", areas: list) -> None:
+    """Seed `## Key terminology` from structured evidence so it's never a bare prompt:
+    the curated glossary (`org.key_terminology` — decoded abbreviations enrichment wrote)
+    first, then auto-derived enum legends from `choice_field` columns. Falls back to the
+    user-prompt placeholder only when there's genuinely nothing structured to show."""
+    glossary = {str(k).strip(): str(v).strip()
+                for k, v in (getattr(org, "key_terminology", {}) or {}).items()
+                if str(k).strip() and str(v).strip()}
+
+    enum_lines: list[str] = []
+    for sa in areas:
+        for t in sa.tables_defined:
+            if t.review_state == "rejected":
+                continue
+            for c in t.columns:
+                cf = getattr(c, "choice_field", None)
+                if not cf or getattr(c, "review_state", "approved") == "rejected":
+                    continue
+                items = list(cf.items())
+                shown = "; ".join(f"`{k}` = {v}" for k, v in items[:_MAX_ENUM_VALUES])
+                if len(items) > _MAX_ENUM_VALUES:
+                    shown += "; …"
+                enum_lines.append(f"- **{t.name}.{c.name}** — {shown}")
+                if len(enum_lines) >= _MAX_ENUM_COLS:
+                    break
+            if len(enum_lines) >= _MAX_ENUM_COLS:
+                break
+        if len(enum_lines) >= _MAX_ENUM_COLS:
+            break
+
     lines.append("## Key terminology")
     lines.append("")
-    lines.append("<!-- Domain vocabulary the skill should know — only you can fill this in.")
-    lines.append('     e.g. "MRR" = monthly recurring revenue; "active user" = signed in within 30 days. -->')
+    if not glossary and not enum_lines:
+        lines.append("<!-- Domain vocabulary the skill should know — only you can fill this in.")
+        lines.append('     e.g. "MRR" = monthly recurring revenue; "active user" = signed in within 30 days. -->')
+        lines.append("")
+        return
+
+    lines.append("<!-- Auto-seeded from decoded codes + enum columns. Add domain terms only you know "
+                 '(e.g. "MRR" = monthly recurring revenue). -->')
+    for term, definition in glossary.items():
+        lines.append(f"- **{term}** — {definition}")
+    if glossary and enum_lines:
+        lines.append("")
+        lines.append("Coded value legends:")
+    lines.extend(enum_lines)
     lines.append("")
-    return "\n".join(lines)

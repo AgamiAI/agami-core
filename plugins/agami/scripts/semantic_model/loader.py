@@ -112,6 +112,7 @@ def load_organization(root: str | Path, *, include_rejected: bool = False) -> Or
         cross_subject_area_relationships=_load_cross_rels(root, org_doc),
         cross_subject_area_entities=_load_cross_entities(root, org_doc),
         cross_subject_area_metrics=_load_cross_metrics(root, org_doc),
+        key_terminology=org_doc.get("key_terminology", {}) or {},
     )
     return org
 

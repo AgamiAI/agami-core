@@ -303,6 +303,49 @@ def _dump(path: Path, obj: Any) -> None:
                     encoding="utf-8")
 
 
+def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) -> "ApplyResult":
+    """Write the org-level domain glossary (term -> definition) onto org.yaml's
+    `key_terminology`. Validated + git-committed like every other write; the prior
+    org.yaml is restored on validation failure (no git dependency for the revert).
+
+    `merge=True` (default) layers `terms` over the existing glossary — so an
+    enrichment pass adds without clobbering a human's edits; `merge=False` replaces.
+    Empty terms/definitions are dropped."""
+    root = Path(root)
+    res = ApplyResult()
+    orgp = root / "org.yaml"
+    if not orgp.exists():
+        res.errors.append(f"no org.yaml at {orgp}")
+        return res
+    prior = orgp.read_text(encoding="utf-8")
+    odoc = _load(orgp) or {}
+    existing = odoc.get("key_terminology") or {}
+    if not isinstance(existing, dict):
+        existing = {}
+    incoming = {str(k).strip(): str(v).strip()
+                for k, v in (terms or {}).items() if str(k).strip() and str(v).strip()}
+    merged = {**existing, **incoming} if merge else incoming
+    if merged:
+        odoc["key_terminology"] = merged
+    else:
+        odoc.pop("key_terminology", None)
+    _dump(orgp, odoc)
+    try:
+        vres = V.validate(load_organization(root, include_rejected=True))
+        res.validated = vres.ok
+        if not vres.ok:
+            res.errors = vres.errors
+            orgp.write_text(prior, encoding="utf-8")    # revert, git-independent
+            return res
+    except Exception as e:
+        res.errors.append(f"validation failed to run: {e}")
+        orgp.write_text(prior, encoding="utf-8")
+        return res
+    res.applied = [f"key_terminology: {len(merged)} term(s)"]
+    res.committed = _git_commit(root, f"terminology: {len(merged)} term(s)")
+    return res
+
+
 _VALID_OPS = {"approve", "reject", "exclude", "include", "edit"}
 # exclude == reject; include == set unreviewed + clear sign-off (model-explorer verbs)
 
@@ -730,4 +773,5 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
 
 
 __all__ = ["review_queue", "all_items", "model_tree", "column_coverage", "apply",
-           "write_items", "add_examples", "validate_seeds", "ApplyResult"]
+           "write_items", "add_examples", "validate_seeds", "set_key_terminology",
+           "ApplyResult"]

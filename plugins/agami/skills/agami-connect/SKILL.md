@@ -451,7 +451,11 @@ Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), th
 
 1. **Decode the token legend once** — grounded in column samples + `$DATA_MODEL_DOC_TEXT` + `ORGANIZATION.md`. For any token whose meaning isn't evident, **ask the user in one batched question** rather than guessing (this is the same decode 2b needs; do it once and share it).
 2. **Expand the legend into one description per coded column — deterministically, NOT as N separate LLM guesses.** Write a small in-skill decoder (a token→phrase map + a per-table parse of `(prefix, metric, window, threshold)`) and compose each description from it, then emit them through the same `sm curate` batch. This is exact, internally consistent, and costs zero per-column LLM tokens. e.g. `EL_REVENUE_30D` → "Total revenue from the Electronics category over the last 30 days"; `WEST_ORDERS_12M` → "Number of orders in the West region over the last 12 months"; `EL_ORDERS_LT_1K_90D` → "Number of Electronics orders under 1,000 placed in the last 90 days." (Use the user's actual token vocabulary + domain, not these placeholders.)
-3. The same decoded legend also lands in `ORGANIZATION.md` `## Key terminology` (per 2b). **Decode once, write both** — the per-column descriptions (what shows in the model explorer and feeds the SQL generator's column context) AND the terminology block (the human-readable legend).
+3. The same decoded legend also lands in the **structured glossary** `key_terminology` (term → definition) — abbreviations and codes a reader needs (e.g. `TIU` → "Telematics Interface Unit", `SoC` → "State of Charge", `bp` → "battery pack", a master-type code → its meaning). **Decode once, write both** — the per-column descriptions (what shows in the explorer + feeds the SQL generator's column context) AND the glossary. Write it with the packaged command (a JSON object `{term: definition, …}`); it merges over any existing terms, validates, and commits:
+   ```bash
+   bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file /tmp/agami-terminology.json
+   ```
+   The glossary is rendered into `ORGANIZATION.md`'s `## Key terminology` by `org-draft` (which **also** auto-seeds enum legends from `choice_field` columns) — so it survives a regeneration and is never a bare placeholder. **Do NOT skip this on a code-dense schema** (abbreviations, master-coded values): an empty Key terminology on a DB full of codes is a real miss.
 
 Don't skip a coded column because "the legend covers it" — the legend lives in a *different file*; the per-column description is what the explorer shows and what NL→SQL reads. A wide coded table (hundreds of columns) should finish at ~100% column coverage, not ~3%.
 
@@ -479,6 +483,13 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-descri
 - **Opaque / unknown** (`xyz`, `v_1`, `tmp_col`, a code whose meaning no sample or doc reveals) → leave the description empty BUT set **`description_source: "ai_unknown"`** via a curate edit op (`{op:edit, kind:table, area, name:<table>, column:<col>, field:"description_source", value:"ai_unknown"}`). This records "agami looked and couldn't tell" — the human knows what `xyz` is, and the explorer + answer receipts surface these so they can fill it in. **Don't guess a meaning to avoid the flag; the flag is the honest answer.** (Do NOT mark a self-evident column `ai_unknown` — that's noise.)
 
 For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. Validate after each schema; on failure, surface errors and continue with the rest, then report which need attention.
+
+**Regroup wide tables into SEMANTIC column groups (do this right after describing their columns).** A deep table (≥30 cols) gets `column_groups` from the engine, but those are a deterministic **name-prefix** split — buckets like `is`, `last`, `latest`, `created`, `bp` — not concepts. They exist only so the explorer can collapse a wide table; they're a fallback, not the goal. Having just described every column, **you** are positioned to cluster them by *meaning* into a handful of named groups that read like mini subject-areas — e.g. `identity`, `location`, `lifecycle_timestamps`, `telemetry`, `swap_details`, `alerts`, `flags`. Keep it to ~5–10 groups; **every column must land in exactly one** (the validator rejects orphans on a deep table). Apply via one curate edit op per wide table:
+```json
+{"op":"edit","kind":"table","name":"<wide_table>","field":"column_groups",
+ "value":{"identity":["..."],"location":["..."],"lifecycle_timestamps":["..."],"telemetry":["..."]}}
+```
+Send these in the same `sm curate` batch as the descriptions (or a follow-up batch). Only worth doing on genuinely wide tables — narrow tables have no `column_groups` and need none.
 
 **Column-pass completeness gate (MANDATORY — do not skip the column pass).** After enriching, run:
 ```bash

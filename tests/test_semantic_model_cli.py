@@ -543,6 +543,34 @@ def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
     assert rc2 == 1 and json.loads(out2)["skipped"]
 
 
+def test_set_terminology_writes_glossary_to_org_yaml(tmp_path):
+    # the packaged path for the decoded-abbreviation legend: writes org.yaml key_terminology,
+    # validates, merges over existing terms (so a re-run doesn't clobber a human's edits).
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    terms = tmp_path / "terms.json"
+    terms.write_text(json.dumps({"TIU": "Telematics Interface Unit", "SoC": "State of Charge"}))
+    rc, out = _run(["set-terminology", str(tmp_path), "--file", str(terms)])
+    d = json.loads(out)
+    assert rc == 0 and d["validated"] and d["applied"]
+    assert load_organization(tmp_path).key_terminology == {
+        "TIU": "Telematics Interface Unit", "SoC": "State of Charge"}
+
+
+def test_curate_edit_sets_semantic_column_groups(tmp_path):
+    # the column-group refinement write path: enrichment overwrites the engine's prefix
+    # buckets with named semantic groups via a normal curate edit op.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "table", "area": "s", "name": "orders",
+                                   "field": "column_groups",
+                                   "value": {"identity": ["id"], "lifecycle": ["deleted_at"], "money": ["total"]}}])
+    assert res.validated and res.applied
+    t = load_organization(tmp_path).subject_areas[0].defined_table("orders")
+    assert t.column_groups == {"identity": ["id"], "lifecycle": ["deleted_at"], "money": ["total"]}
+
+
 def test_suggest_units_finds_money_columns(tmp_path):
     """`sm suggest-units` returns the numeric money columns via the tested matcher — so the
     skill never hand-rolls a regex that drops `discount_amount` by matching `count`."""

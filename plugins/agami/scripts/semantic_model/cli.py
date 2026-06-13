@@ -168,6 +168,21 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+def cmd_set_terminology(args) -> int:
+    """Write the org-level domain glossary (term -> definition) onto org.yaml's
+    `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
+    default (layers over a human's edits); --replace overwrites. Validated + committed."""
+    from . import curate
+    with open(args.file) as fh:
+        terms = json.load(fh)
+    if isinstance(terms, dict) and "key_terminology" in terms:
+        terms = terms["key_terminology"]
+    res = curate.set_key_terminology(args.root, terms, merge=not args.replace)
+    _print_json({"applied": res.applied, "validated": res.validated,
+                 "committed": res.committed, "errors": res.errors})
+    return 0 if res.validated else 1
+
+
 def cmd_curate(args) -> int:
     from . import curate
     with open(args.ops_file) as fh:
@@ -494,6 +509,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_coverage)
+
+    sp = sub.add_parser("set-terminology", help="write the org domain glossary (term→definition) onto org.yaml key_terminology")
+    sp.add_argument("root")
+    sp.add_argument("--file", required=True, help="JSON object {term: definition, ...} (or {key_terminology: {...}})")
+    sp.add_argument("--replace", action="store_true", help="replace the glossary instead of merging over it")
+    sp.set_defaults(func=cmd_set_terminology)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
     sp.add_argument("root")
