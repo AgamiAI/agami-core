@@ -90,8 +90,9 @@ def draft_organization_md(org: "Organization") -> str:
     if n_entities:
         defined.append(f"{n_entities} entit" + ("y" if n_entities == 1 else "ies"))
     if defined:
-        lines.append(f"{' and '.join(defined)} are defined — browse them, with every table "
-                     f"and column, in the model explorer.")
+        # factual count only — the UI pointer ("browse the explorer") lives in the header
+        # comment, so this line stays useful to the LLM after comments are stripped.
+        lines.append(f"{' and '.join(defined)} are defined in the model.")
         lines.append("")
 
     # Conventions: summarise the DISTINCT units in play (e.g. "INR"), not per-column rows.

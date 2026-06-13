@@ -302,6 +302,21 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
+def _distill_for_llm(text: str | None) -> str:
+    """Strip the human-only scaffolding from a context doc (ORGANIZATION.md / USER_MEMORY.md)
+    before it goes into the model's prompt. These files serve two readers: a human editing
+    them (who wants the `<!-- edit freely … -->` prompts) and the LLM reading them as query
+    context (for whom those prompts are noise — or worse, a "this was auto-generated" aside it
+    might distrust). The skill strips comments on its read path; the MCP must match, or Claude
+    Desktop sees the raw scaffolding on every query. Drops HTML comments + collapses the blank
+    lines they leave behind."""
+    if not text:
+        return ""
+    out = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     """Local analog of Ask Agami `get_datasource_schema`, backed by the semantic model.
 
@@ -361,11 +376,11 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         result["tables"] = contexts
 
     parts = [json.dumps(result, indent=2, default=str)]
-    org_md = _read_text(artifacts / profile / "ORGANIZATION.md")
-    if org_md and org_md.strip():
+    org_md = _distill_for_llm(_read_text(artifacts / profile / "ORGANIZATION.md"))
+    if org_md:
         parts.append(f"\n## ORGANIZATION.md (domain context)\n{org_md}")
-    user_mem = _read_text(artifacts / "USER_MEMORY.md")
-    if user_mem and user_mem.strip():
+    user_mem = _distill_for_llm(_read_text(artifacts / "USER_MEMORY.md"))
+    if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
     return "\n".join(parts)
 
