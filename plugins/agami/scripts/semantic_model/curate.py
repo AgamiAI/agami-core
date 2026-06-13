@@ -138,6 +138,68 @@ def all_items(org: Organization, *, scope: str = "all") -> list[dict]:
     return items
 
 
+_MIN_GATE_COLS = 2  # below this a table is too small to confidently call "skipped"
+
+
+def column_coverage(org: Organization) -> dict:
+    """Per-table column-description coverage — the enrichment-completeness check.
+
+    The signal is **table-level**, which keeps it conflict-free with the skill's
+    deliberate "leave self-evident columns (`id`, `created_at`) blank" rule. Per
+    *column*, a blank description is ambiguous (correctly-self-evident vs. skipped);
+    per *table*, it isn't. A real enrichment pass over any non-trivial table produces
+    at least one described or `ai_unknown` column (every table has data/coded/FK
+    columns worth a line). A table enrichment **never ran on** has ZERO — that's the
+    failure mode where the model got table descriptions but no column pass.
+
+    A table is `unenriched` when `described == 0 AND ai_unknown == 0` and it has at
+    least `_MIN_GATE_COLS` columns. `ok` is true when no kept table is unenriched.
+    Rejected tables/columns are excluded. `coverage_pct` (described / columns) is
+    informational — self-evident blanks legitimately hold it below 100%, so it is
+    surfaced for the eye, not gated on."""
+    tables: list[dict] = []
+    tot = {"columns": 0, "described": 0, "ai_unknown": 0, "blank": 0}
+    unenriched: list[str] = []
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if getattr(t, "review_state", "approved") == "rejected":
+                continue
+            described = ai_unknown = blank = 0
+            for c in t.columns:
+                if getattr(c, "review_state", "approved") == "rejected":
+                    continue
+                src = getattr(c, "description_source", None)
+                desc = (getattr(c, "description", "") or "").strip()
+                if desc:
+                    described += 1
+                elif src == "ai_unknown":
+                    ai_unknown += 1
+                else:                                  # blank + no source: self-evident OR skipped
+                    blank += 1
+            n = described + ai_unknown + blank
+            enriched = (described + ai_unknown) > 0
+            tables.append({
+                "area": sa.name, "table": t.name, "columns": n,
+                "described": described, "ai_unknown": ai_unknown, "blank": blank,
+                "coverage_pct": round(100 * described / n) if n else 100,
+                "enriched": enriched,
+            })
+            if not enriched and n >= _MIN_GATE_COLS:
+                unenriched.append(t.name)
+            tot["columns"] += n
+            tot["described"] += described
+            tot["ai_unknown"] += ai_unknown
+            tot["blank"] += blank
+    tables.sort(key=lambda x: (x["enriched"], x["table"]))   # unenriched tables first
+    tot["coverage_pct"] = round(100 * tot["described"] / tot["columns"]) if tot["columns"] else 100
+    return {
+        "tables": tables,
+        "totals": tot,
+        "unenriched_tables": unenriched,
+        "ok": not unenriched,
+    }
+
+
 def _trust(obj) -> dict:
     return {
         "confidence": getattr(obj, "confidence", None),
@@ -667,5 +729,5 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
         pass
 
 
-__all__ = ["review_queue", "all_items", "model_tree", "apply", "write_items",
-           "add_examples", "validate_seeds", "ApplyResult"]
+__all__ = ["review_queue", "all_items", "model_tree", "column_coverage", "apply",
+           "write_items", "add_examples", "validate_seeds", "ApplyResult"]

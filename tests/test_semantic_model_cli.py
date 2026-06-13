@@ -257,6 +257,7 @@ def test_seed_examples_refuses_until_preseed_reviewed(tmp_path):
     from semantic_model import curate
     from semantic_model.loader import list_prompt_examples
     _model(tmp_path)
+    _describe_all_columns(tmp_path)   # clear the coverage gate so this isolates the preseed gate
     curate.write_items(tmp_path, "s", "metric", [
         {"name": "rev", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
          "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
@@ -273,6 +274,7 @@ def test_seed_examples_after_review_bypasses_gate(tmp_path, monkeypatch):
     from semantic_model import curate, introspect
     from semantic_model.loader import list_prompt_examples
     _model(tmp_path)
+    _describe_all_columns(tmp_path)   # coverage gate satisfied; isolates the preseed bypass
     curate.write_items(tmp_path, "s", "metric", [
         {"name": "rev", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
          "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
@@ -290,6 +292,75 @@ def test_seed_examples_runs_clean_when_no_preseed_pending(tmp_path, monkeypatch)
     from semantic_model import introspect
     from semantic_model.loader import list_prompt_examples
     _model(tmp_path)
+    _describe_all_columns(tmp_path)   # coverage gate satisfied
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path))])
+    d = json.loads(out)
+    assert rc == 0 and "refused" not in d
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "s")] == ["how many orders?"]
+
+
+def _describe_all_columns(tmp_path, *, area="s"):
+    """Mark every column described (the state a finished enrichment leaves)."""
+    from semantic_model import curate
+    ops = []
+    for tbl, cols in (("orders", ["id", "deleted_at", "total"]),
+                      ("order_items", ["id", "order_id", "qty"])):
+        for c in cols:
+            ops.append({"op": "edit", "kind": "table", "area": area, "name": tbl,
+                        "column": c, "field": "description", "value": f"the {c}"})
+    return curate.apply(tmp_path, ops)
+
+
+def test_coverage_flags_tables_enrichment_skipped(tmp_path):
+    # the enrichment-completeness check: a freshly-introspected model has 0 column
+    # descriptions, so every table reads as "enrichment never ran" → ok:false.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    cov = curate.column_coverage(load_organization(tmp_path, include_rejected=True))
+    assert cov["ok"] is False
+    assert set(cov["unenriched_tables"]) == {"orders", "order_items"}
+    assert cov["totals"]["described"] == 0
+
+
+def test_coverage_ok_when_each_table_has_some_descriptions(tmp_path):
+    # ok flips true once each table has >=1 described/ai_unknown column — self-evident
+    # columns (id, order_id) legitimately stay blank and do NOT hold the gate.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    curate.apply(tmp_path, [
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders", "column": "total",
+         "field": "description", "value": "order total"},
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders", "column": "deleted_at",
+         "field": "description_source", "value": "ai_unknown"},
+        {"op": "edit", "kind": "table", "area": "s", "name": "order_items", "column": "qty",
+         "field": "description", "value": "quantity ordered"}])
+    cov = curate.column_coverage(load_organization(tmp_path, include_rejected=True))
+    assert cov["ok"] is True and cov["unenriched_tables"] == []
+    assert cov["totals"]["described"] == 2 and cov["totals"]["ai_unknown"] == 1
+
+
+def test_seed_examples_refuses_when_columns_unenriched(tmp_path):
+    # the gate at the chokepoint: seeds won't generate on a model with naked columns,
+    # and this gate is NOT bypassable by --after-review (unlike the preseed gate).
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path)), "--after-review"])
+    d = json.loads(out)
+    assert rc == 2 and d["refused"] == "columns_unenriched" and d["table_count"] == 2
+    assert list_prompt_examples(tmp_path, "s") == []   # nothing written
+
+
+def test_seed_examples_passes_when_columns_described(tmp_path, monkeypatch):
+    # once columns are described AND nothing is pending review, the chokepoint is clear.
+    from semantic_model import introspect
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    _describe_all_columns(tmp_path)
     monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
     rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
                     "--file", str(_seeds_file(tmp_path))])

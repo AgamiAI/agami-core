@@ -480,6 +480,12 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-descri
 
 For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. Validate after each schema; on failure, surface errors and continue with the rest, then report which need attention.
 
+**Column-pass completeness gate (MANDATORY — do not skip the column pass).** After enriching, run:
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" coverage "$ROOT"
+```
+`ok: false` with `unenriched_tables` lists tables that got a **table** description but **no column descriptions at all** — i.e. you enriched the table layer and skipped the columns. That is not done: go back and run the column pass on those tables (describe each meaningful column from sampled values; mark genuinely-opaque ones `ai_unknown`; self-evident `id`/timestamps may stay blank). A wide coded table must finish near 100% described, not 0%. This is also enforced downstream — `seed-examples` **refuses** (`refused: "columns_unenriched"`) while any table is unenriched, so you cannot reach the trust dashboard on naked columns. Don't proceed to 2b until `coverage` returns `ok: true`.
+
 ### 2b — Entities (the semantic vocabulary)
 
 Propose `entities[]` per subject area — the names users actually say. For each, fill `name`, `plural`, `other_names` (synonyms), `maps_to` (table+column, one `primary: true`), and — for opaque-identifier columns — a `value_pattern` regex (e.g. a VIN `^[A-Z0-9]{17}$`, a `BP`-prefixed serial) so the runtime can recognize literals. Ground these in column names + samples + the domain doc; don't invent entities the schema doesn't support. Because these are LLM-proposed, write them **`confidence: inferred, review_state: unreviewed`** so they surface in the Phase 4 pre-seed review (seeds reference entity vocabulary).
@@ -610,7 +616,9 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-examples "$ROOT" --area <area> --profi
 ```
 Output `{added, written, committed, rejected:[{question, error}]}`. For each `rejected`, optionally regenerate once and re-run with just those; don't block the flow on a few drops. Corrections later append via `/agami-save-correction` (same `add-example` path).
 
-> **The command enforces Phase 4 for you.** If preseed metrics/entities are still unreviewed, `seed-examples` **refuses** — it returns `{refused: "preseed_review_pending", pending_count, message}` and writes nothing. That is the signal you skipped the explorer-first review: **go back to Phase 4b**, open `/agami-model preseed`, and end the turn. Do NOT pass `--after-review` to force past a fresh refusal — that flag is **only** for the Phase-4c return path, where the user has already been in the explorer and explicitly chose to continue with some items still unreviewed.
+> **The command enforces Phases 2 and 4 for you.** It runs two gates before writing anything:
+> - `{refused: "columns_unenriched", unenriched_tables}` → a table got no column descriptions at all (you skipped the Phase-2 column pass). Go back, run the column pass on those tables, re-run. **NOT bypassable** — naked columns degrade every answer.
+> - `{refused: "preseed_review_pending", pending_count}` → metrics/entities the seeds depend on are still unreviewed (you skipped the explorer-first review). **Go back to Phase 4b**, open `/agami-model preseed`, end the turn. Bypass only via `--after-review`, and **only** on the Phase-4c return path (the user has already been in the explorer and chose to continue with some items unreviewed). Never pass `--after-review` to force past a *fresh* refusal.
 
 ---
 
@@ -688,6 +696,7 @@ Scan the model; count by `confidence`/`review_state`/type:
 agami-connect just ran. Here's what we found:
 
   ✓  <N> tables, <M> columns across <A> subject areas   (structure)
+  ✓  <C>% of columns described                           (from `sm coverage` — never 0%)
   ✓  <K> relationships with join cardinality              (<E> confirmed from declared FKs)
   ⚠  <R1> inferred/probed relationships                   (review — confirm the join)
   ⚠  <R2> proposed metrics                                (sign-off — Rule 1)

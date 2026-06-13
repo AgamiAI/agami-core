@@ -158,6 +158,16 @@ def cmd_model_tree(args) -> int:
     return 0
 
 
+def cmd_coverage(args) -> int:
+    """Per-table column-description coverage + the enrichment-completeness verdict.
+    The skill runs this at the end of Phase 2 (and reports it in the Phase 7 summary):
+    `ok: false` with untouched columns means enrichment skipped the column pass."""
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    _print_json(curate.column_coverage(org))
+    return 0
+
+
 def cmd_curate(args) -> int:
     from . import curate
     with open(args.ops_file) as fh:
@@ -264,15 +274,48 @@ def _preseed_gate(org) -> Optional[dict]:
     }
 
 
+def _coverage_gate(org) -> Optional[dict]:
+    """Enrichment-completeness gate: refuse to seed (or finish) a model that has tables
+    whose columns enrichment never described at all (0 described + 0 ai_unknown). Naked
+    columns degrade the explorer AND every NL→SQL answer (column descriptions are the
+    generator's context). Table-level so it never collides with the deliberate
+    self-evident-blank rule. NOT bypassable: the fix is to run the column pass."""
+    from . import curate
+    cov = curate.column_coverage(org)
+    if cov["ok"]:
+        return None
+    tbls = cov["unenriched_tables"]
+    return {
+        "refused": "columns_unenriched",
+        "table_count": len(tbls),
+        "unenriched_tables": tbls,
+        "coverage_pct": cov["totals"]["coverage_pct"],
+        "message": (
+            f"{len(tbls)} table(s) have NO column descriptions at all — enrichment wrote the "
+            f"table descriptions but skipped the column pass. Run Phase 2's column pass: "
+            f"describe each meaningful column from sampled values, mark genuinely-opaque ones "
+            f"description_source=ai_unknown (self-evident id/timestamps may stay blank), then "
+            f"re-run. Column descriptions are what the explorer shows and what NL→SQL reads. "
+            f"Tables: {', '.join(tbls[:10])}" + ("…" if len(tbls) > 10 else "")
+        ),
+    }
+
+
 def cmd_seed_examples(args) -> int:
     """Validate candidate seed examples against the live DB and write the passing ones —
     the whole Phase-5 mechanical loop in one call (no throwaway validate-and-write script)."""
     from . import curate
     from .introspect import make_execute_sql_runner
-    # Phase-4 gate: refuse to seed on top of unreviewed metrics/entities unless the caller
-    # explicitly acks post-review. Forces the explorer-first review the skill describes.
+    org = L.load_organization(args.root, include_rejected=True)
+    # Gate 1 — enrichment completeness (NOT bypassable): every kept column must be described
+    # or explicitly ai_unknown. Catches a model that enriched tables but skipped columns.
+    block = _coverage_gate(org)
+    if block is not None:
+        _print_json(block)
+        return 2
+    # Gate 2 — preseed review (Phase 4): no seeding on unreviewed metrics/entities. Bypassable
+    # only via the Phase-4c --after-review path, after the user has been in the explorer.
     if not getattr(args, "after_review", False):
-        org = L.load_organization(args.root, include_rejected=True)
         block = _preseed_gate(org)
         if block is not None:
             _print_json(block)
@@ -447,6 +490,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_model_tree)
+
+    sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_coverage)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
     sp.add_argument("root")
