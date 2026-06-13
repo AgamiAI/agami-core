@@ -47,14 +47,18 @@ def _strip_comments(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
-def derived_context(org: "Organization") -> str:
+def derived_context(org: "Organization", *, with_curated_glossary: bool = True) -> str:
     """The model-DERIVED factual context: shape + subject areas + conventions + glossary.
 
     Computed fresh from the structured model every time and NOT persisted into ORGANIZATION.md
     — so there are no fragile markers for a human to clobber, and the glossary always reaches
     the LLM (it no longer depends on a file having been re-rendered). The glossary comes from
     the structured `key_terminology` field + `choice_field` enum legends. Never a re-listing
-    of the model — counts + bounded summaries only, usable even at thousands of tables."""
+    of the model — counts + bounded summaries only, usable even at thousands of tables.
+
+    `with_curated_glossary=False` omits the curated `key_terminology` terms (the enum legends
+    still render) — the explorer uses this so it can present the curated glossary as an
+    EDITABLE panel instead, while the rest of this block stays read-only."""
     areas = list(org.subject_areas)
     n_tables = sum(len(sa.tables_defined) for sa in areas)
     n_metrics = sum(len(sa.metrics) for sa in areas) + len(org.cross_subject_area_metrics)
@@ -94,7 +98,7 @@ def derived_context(org: "Organization") -> str:
         lines.append(f"- Units / currency in use: {', '.join(units)}.")
         lines.append("")
 
-    _key_terminology(lines, org, areas)   # appends "### Key terminology" + glossary, or nothing
+    _key_terminology(lines, org, areas, include_curated=with_curated_glossary)
     return "\n".join(lines).strip()
 
 
@@ -141,14 +145,15 @@ _MAX_ENUM_VALUES = 10
 _MAX_ENUM_COLS = 25
 
 
-def _key_terminology(lines: list[str], org: "Organization", areas: list) -> None:
-    """Seed `## Key terminology` from structured evidence so it's never a bare prompt:
-    the curated glossary (`org.key_terminology` — decoded abbreviations enrichment wrote)
-    first, then auto-derived enum legends from `choice_field` columns. Falls back to the
-    user-prompt placeholder only when there's genuinely nothing structured to show."""
+def _key_terminology(lines: list[str], org: "Organization", areas: list,
+                     include_curated: bool = True) -> None:
+    """Append the glossary: the curated `key_terminology` terms (only when `include_curated`)
+    plus auto-derived enum legends from `choice_field` columns. Omitted entirely when there's
+    nothing to show. The explorer passes include_curated=False — it edits the curated terms in
+    a dedicated panel, leaving only the derived enum legends here as read-only."""
     glossary = {str(k).strip(): str(v).strip()
                 for k, v in (getattr(org, "key_terminology", {}) or {}).items()
-                if str(k).strip() and str(v).strip()}
+                if str(k).strip() and str(v).strip()} if include_curated else {}
 
     enum_lines: list[str] = []
     for sa in areas:
@@ -176,12 +181,16 @@ def _key_terminology(lines: list[str], org: "Organization", areas: list) -> None
     if not glossary and not enum_lines:
         return
 
-    lines.append("### Key terminology")
-    lines.append("")
-    for term, definition in glossary.items():
-        lines.append(f"- **{term}** — {definition}")
-    if glossary and enum_lines:
+    if glossary:
+        lines.append("### Key terminology")
         lines.append("")
-        lines.append("Coded value legends:")
+        for term, definition in glossary.items():
+            lines.append(f"- **{term}** — {definition}")
+        if enum_lines:
+            lines.append("")
+            lines.append("Coded value legends:")
+    elif enum_lines:
+        lines.append("### Coded value legends")
+        lines.append("")
     lines.extend(enum_lines)
     lines.append("")

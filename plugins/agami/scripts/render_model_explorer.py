@@ -79,7 +79,10 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     # glossary) is a SEPARATE read-only field, computed fresh — see `derived_context`.
     if not _re.sub(r"<!--.*?-->", "", organization_md, flags=_re.DOTALL).strip():
         organization_md = _OD.starter_organization_md(org)
-    derived_context_md = _OD.derived_context(org)
+    # Read-only derived block WITHOUT the curated glossary — that's rendered as an editable
+    # panel (the curated key_terminology is a first-class structured field users add/correct).
+    derived_context_md = _OD.derived_context(org, with_curated_glossary=False)
+    key_terminology = dict(getattr(org, "key_terminology", {}) or {})
 
     for sa in org.subject_areas:
         out_tables: list[dict] = []
@@ -210,6 +213,9 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
         "organization_md": organization_md,
         # model-derived domain summary (read-only in the UI; not part of the editable file)
         "derived_context_md": derived_context_md,
+        # the curated glossary (term → definition) — EDITABLE in the explorer, written back
+        # via `cli set-terminology`. Separate from the read-only derived block above.
+        "key_terminology": key_terminology,
         "storage_type": storage_type,
         "totals": {
             "schemas": len(out_schemas), "subject_areas": len(areas_out),

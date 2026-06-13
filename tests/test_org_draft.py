@@ -59,6 +59,35 @@ def test_derived_context_is_pure_summary(tmp_path):
     assert "one row per order" not in d and "1,234,567" not in d   # tables not dumped
 
 
+def test_derived_context_can_exclude_curated_glossary(tmp_path):
+    # the explorer renders the curated glossary as an EDITABLE panel, so it asks derived_context
+    # to omit those terms — but the derived ENUM legends (from choice_field) still show read-only.
+    from semantic_model.loader import load_organization
+    from semantic_model import org_draft, curate
+    _model(tmp_path)
+    p = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    d = yaml.safe_load(p.read_text())
+    d["columns"].append({"name": "status", "type": "string", "choice_field": {"P": "pending"}})
+    p.write_text(yaml.safe_dump(d))
+    curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit"})
+    org = load_organization(tmp_path)
+    full = org_draft.derived_context(org)                                   # LLM: curated + enum
+    explorer = org_draft.derived_context(org, with_curated_glossary=False)  # read-only: enum only
+    assert "TIU" in full and "Telematics Interface Unit" in full
+    assert "TIU" not in explorer                                            # curated glossary excluded
+    assert "orders.status" in explorer and "pending" in explorer           # enum legend still shown
+
+
+def test_explorer_exposes_glossary_as_editable_field(tmp_path):
+    from render_model_explorer import build_manifest
+    from semantic_model import curate
+    _model(tmp_path)
+    curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit"})
+    m = build_manifest(tmp_path, "acme")
+    assert m["key_terminology"] == {"TIU": "Telematics Interface Unit"}     # editable structured field
+    assert "TIU" not in m["derived_context_md"]                            # not duplicated in the read-only block
+
+
 def test_compose_keeps_human_narrative_and_derived_facts_separate(tmp_path):
     from semantic_model.loader import load_organization
     from semantic_model import org_draft

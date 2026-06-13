@@ -130,6 +130,7 @@ example-edits:
 new-metrics:
 [{"area":"sales","name":"repeat_rate","description":"...","calculation":"...","bindings":{"Snowflake":"..."},"source_tables":["orders"],"other_names":["repeat purchase rate"],"unit":"percent","confidence":"proposed"}]
 organization-md: "<full new ORGANIZATION.md text, JSON-encoded>"
+key-terminology: {"TIU": "Telematics Interface Unit", "gold tier": "lifetime spend > $10k"}
 done
 ```
 
@@ -142,7 +143,12 @@ A header line + four optional blocks may follow (the dashboard emits whichever a
 - **`curate-ops:`** — the unified ops array. Holds **approve / reject(exclude) / include** on metrics/entities/relationships AND field **edits** (`op:"edit"` with `field`/`value`). Already a valid curate ops array; merge it verbatim with the table/column ops below and apply via one `sm curate` call. **`approve` ops carry an `at` timestamp** (the dashboard stamps it) and require the curator's `--signer`/`--role` from the `signed-off-by:` line — the validator rejects an approved entry with no sign-off stamp. **Rule 1 guard:** before applying an `approve` on a metric, confirm its `calculation` is non-empty (the dashboard always has one for user-authored metrics; for an introspected metric with an empty calculation, ask the user to fill it via an `edit` first).
 - **`example-edits:`** — edited prompt examples `[{area, question, sql, source, status}]`. Group by `area` and apply each group with `sm add-example "$ROOT" --area <area> --file <json>` (it dedups by `question`, so an edit replaces the prior example). Write the per-area JSON with the **Write tool**.
 - **`new-metrics:`** — metrics the user authored in the dashboard's "Add metric" form `[{area, name, description, calculation, bindings, source_tables, other_names, unit?, confidence}]`. Group by `area` and create each group with `sm add "$ROOT" --kind metric --area <area> --file <json>` (validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, reverts the batch on failure). Write the per-area JSON with the **Write tool** — it's already in the `sm add` shape, so pass it through verbatim. A user-authored metric is `confidence: proposed` and still needs sign-off (approve it on the Review tab).
-- **`organization-md:`** — a JSON-encoded string of the full new `ORGANIZATION.md`. JSON-decode it and **Write** it to `<artifacts_dir>/<profile>/ORGANIZATION.md` (overwrite; free-form Markdown, no validator).
+- **`organization-md:`** — a JSON-encoded string of the full new `ORGANIZATION.md`. JSON-decode it and **Write** it to `<artifacts_dir>/<profile>/ORGANIZATION.md` (overwrite; free-form Markdown, no validator). This is the human **narrative only** — it never carries the glossary or model facts.
+- **`key-terminology:`** — a JSON object `{term: definition, …}`: the curated domain glossary the user edited in the Organization tab. It's the **complete** intended glossary (adds, edits, and removals already applied), so write it to a temp file and apply with **`--replace`** (it's validated + committed, reverts on failure):
+  ```bash
+  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file /tmp/agami-terminology.json --replace
+  ```
+  Write the JSON with the **Write tool**. This lands in the structured `key_terminology` field (not ORGANIZATION.md) and surfaces in the derived domain context automatically.
 
 Show the user a one-line summary of what each block changed before applying.
 

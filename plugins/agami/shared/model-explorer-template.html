@@ -705,6 +705,7 @@
     const newMetrics = [];
     let orgEdit = null;
     let orgRaw = false;   // ORGANIZATION.md editor mode: false = rich text, true = raw Markdown
+    let termEdits = null; // edited curated glossary {term: def} | null — written back via set-terminology
 
     const editOpen = new Set();        // qnames whose inline edit form is expanded
     const expandedTables = new Set();  // qnames of tables the user has expanded (persisted across renders)
@@ -2131,7 +2132,52 @@
         dcard.appendChild(el('div', { class: 'org-rendered', html: renderMarkdown(derived) }));
         root.appendChild(dcard);
       }
+
+      // Editable glossary (curated key_terminology) — a structured field, so it gets a
+      // structured editor (add / correct / remove a term), NOT free text. Changes queue and
+      // are written back via `set-terminology`. The derived facts above stay read-only.
+      root.appendChild(renderGlossaryEditor());
       setSearchCounts('');
+    }
+
+    function curTerms() { return termEdits !== null ? termEdits : (manifest.key_terminology || {}); }
+    function mutateTerms(fn) {
+      const t = Object.assign({}, curTerms());
+      fn(t);
+      termEdits = t;
+      renderAll();
+    }
+    function renderGlossaryEditor() {
+      const card = el('div', { class: 'table-card' });
+      card.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>Glossary' + (termEdits !== null ? ' (edited — queued)' : '') + '.</strong> ' +
+        'Terms agami should know for this database — e.g. <em>TIU</em> = "Telematics Interface Unit". ' +
+        'Add or correct them here; changes apply when you paste the block back into Claude.' }));
+      const terms = curTerms();
+      const keys = Object.keys(terms).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      if (!keys.length) {
+        card.appendChild(el('div', { class: 'field-hint', style: 'padding:6px 2px;', text: 'No terms yet — add one below.' }));
+      }
+      keys.forEach(term => {
+        const row = el('div', { class: 'field-row' });
+        const name = el('div', { class: 'field-name' }); name.appendChild(el('strong', { text: term }));
+        row.appendChild(name);
+        const def = el('input', { type: 'text', value: terms[term], class: 'org-term-input',
+          style: 'flex:1;min-width:0;', onchange: (ev) => mutateTerms(t => { t[term] = ev.target.value; }) });
+        row.appendChild(def);
+        row.appendChild(btnSm('Remove', () => mutateTerms(t => { delete t[term]; })));
+        card.appendChild(row);
+      });
+      const addRow = el('div', { class: 'field-row', style: 'gap:6px;' });
+      const ti = el('input', { type: 'text', placeholder: 'term (e.g. TIU)', class: 'org-term-input', style: 'width:160px;' });
+      const di = el('input', { type: 'text', placeholder: 'definition', class: 'org-term-input', style: 'flex:1;min-width:0;' });
+      addRow.appendChild(ti); addRow.appendChild(di);
+      addRow.appendChild(btnSm('Add term', () => {
+        const k = ti.value.trim(), v = di.value.trim();
+        if (k && v) mutateTerms(t => { t[k] = v; });
+      }, 'primary'));
+      card.appendChild(addRow);
+      return card;
     }
 
     // =====================================================================
@@ -2200,6 +2246,12 @@
       if (orgEdit !== null) {
         const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Organization context' }));
         g.appendChild(queueRow('edit', 'edit', 'ORGANIZATION.md edited', () => { orgEdit = null; }));
+        groups.push(g);
+      }
+      // glossary edit
+      if (termEdits !== null) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Glossary' }));
+        g.appendChild(queueRow('edit', 'edit', `key terminology (${Object.keys(termEdits).length} term(s))`, () => { termEdits = null; }));
         groups.push(g);
       }
 
@@ -2321,7 +2373,8 @@
     // ---- Queued totals + footer ----
     function totalQueued() {
       return Object.keys(pending).length + Object.keys(ops).length + Object.keys(edits).length
-           + Object.keys(exampleEdits).length + newMetrics.length + (orgEdit !== null ? 1 : 0);
+           + Object.keys(exampleEdits).length + newMetrics.length + (orgEdit !== null ? 1 : 0)
+           + (termEdits !== null ? 1 : 0);
     }
     function updateFooter() {
       const total = totalQueued();
@@ -2350,6 +2403,7 @@
         if (Object.keys(exampleEdits).length) parts.push(`${Object.keys(exampleEdits).length} example`);
         if (newMetrics.length) parts.push(`${newMetrics.length} new metric${newMetrics.length === 1 ? '' : 's'}`);
         if (orgEdit !== null) parts.push('org context');
+        if (termEdits !== null) parts.push('glossary');
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
         gen.disabled = false;
       }
@@ -2419,6 +2473,7 @@
       const exList = Object.values(exampleEdits);
       if (exList.length) { lines.push('example-edits:'); lines.push(JSON.stringify(exList)); }
       if (orgEdit !== null) lines.push('organization-md: ' + JSON.stringify(orgEdit));
+      if (termEdits !== null) lines.push('key-terminology: ' + JSON.stringify(termEdits));
       // Sign-off identity header (first line) — the skill applies approvals with this as --signer/--role.
       if (hasQueuedApprovals() && validEmail(signOff.email)) lines.unshift(`signed-off-by: ${signOff.email} / ${signOffRole()}`);
       if (lines.length) lines.push('done');
@@ -2443,7 +2498,7 @@
       Object.keys(ops).forEach(k => delete ops[k]);
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
-      newMetrics.length = 0; orgEdit = null; addMetricOpen = false;
+      newMetrics.length = 0; orgEdit = null; termEdits = null; addMetricOpen = false;
       editOpen.clear();
       renderAll();
     });
