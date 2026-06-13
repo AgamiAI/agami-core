@@ -44,24 +44,34 @@ def _model(root):
         "other_names": ["client"], "confidence": "inferred", "review_state": "unreviewed"}))
 
 
-def test_draft_is_a_summary_not_a_full_listing(tmp_path):
+def test_derived_context_is_pure_summary(tmp_path):
     from semantic_model.loader import load_organization
     from semantic_model import org_draft
     _model(tmp_path)
-    md = org_draft.draft_organization_md(load_organization(tmp_path))
-    # SUMMARY shape: org + counts + subject areas + conventions + glossary prompt
-    assert "# About this database" in md
-    assert "acme" in md and "1 table across 1 subject area" in md
-    assert "## Subject areas" in md and "sales" in md and "orders & customers" in md
-    assert "1 metric and 1 entity are defined" in md and "model explorer" in md
-    assert "INR" in md                      # conventions summary (distinct units)
-    assert "## Key terminology" in md
-    # it must NOT rehash the structured model
-    assert "## What the data contains" not in md
-    assert "## Metrics" not in md and "## Entities" not in md
-    assert "total_revenue" not in md        # metric is counted, not enumerated
-    assert "one row per order" not in md     # per-table description not dumped
-    assert "1,234,567" not in md             # per-table row count not dumped
+    d = org_draft.derived_context(load_organization(tmp_path))
+    # SUMMARY shape: counts + subject areas + conventions + glossary — NOT a model dump
+    assert "**acme** — 1 table across 1 subject area" in d
+    assert "### Subject areas" in d and "sales" in d and "orders & customers" in d
+    assert "1 metric and 1 entity are defined" in d
+    assert "### Conventions" in d and "INR" in d
+    assert "<!--" not in d                  # no human-only comment scaffolding in derived facts
+    assert "total_revenue" not in d         # metric counted, not enumerated
+    assert "one row per order" not in d and "1,234,567" not in d   # tables not dumped
+
+
+def test_compose_keeps_human_narrative_and_derived_facts_separate(tmp_path):
+    from semantic_model.loader import load_organization
+    from semantic_model import org_draft
+    _model(tmp_path)
+    human = "# About this database\n\nWe are a lending startup. MRR = monthly recurring revenue.\n"
+    md = org_draft.compose_context(human, load_organization(tmp_path))
+    # the human's words are preserved verbatim...
+    assert "We are a lending startup." in md and "MRR = monthly recurring revenue." in md
+    # ...and the derived facts sit under their OWN heading, never mixed into the prose
+    assert "## Model summary (auto-generated from your schema)" in md
+    assert "### Subject areas" in md and "INR" in md
+    # empty human → derived only; empty model-less call → empty
+    assert "Model summary" in org_draft.compose_context("", load_organization(tmp_path))
 
 
 def test_key_terminology_seeded_from_glossary_and_enums(tmp_path):
@@ -96,17 +106,21 @@ def test_set_key_terminology_merges_then_replaces(tmp_path):
     assert load_organization(tmp_path).key_terminology == {"SoC": "State of Charge"}
 
 
-def test_explorer_falls_back_to_draft_when_org_md_blank(tmp_path):
+def test_explorer_org_md_is_human_only_derived_is_a_separate_field(tmp_path):
     from render_model_explorer import build_manifest
     _model(tmp_path)
-    # no ORGANIZATION.md at all
+    # no ORGANIZATION.md → editable field is the human STARTER (prompt only, NO facts)...
     m = build_manifest(tmp_path, "acme")
-    assert "About this database" in m["organization_md"] and "Subject areas" in m["organization_md"]
-    # a comments-only file is still "blank" → draft
+    assert "About this database" in m["organization_md"]
+    assert "Subject areas" not in m["organization_md"]      # facts never in the editable file
+    # ...and the model-derived facts live in their own read-only field
+    assert "Subject areas" in m["derived_context_md"] and "sales" in m["derived_context_md"]
+    # a comments-only file is still "blank" → starter; facts stay separate
     (tmp_path / "ORGANIZATION.md").write_text("<!-- nothing here yet -->\n")
     m2 = build_manifest(tmp_path, "acme")
-    assert "Subject areas" in m2["organization_md"]
-    # a real file is left as-is
+    assert "About this database" in m2["organization_md"] and "Subject areas" in m2["derived_context_md"]
+    # a real human file is left as-is in the editable field; facts still separate
     (tmp_path / "ORGANIZATION.md").write_text("# About\nWe are a lending startup.")
     m3 = build_manifest(tmp_path, "acme")
     assert m3["organization_md"] == "# About\nWe are a lending startup."
+    assert "Subject areas" in m3["derived_context_md"]

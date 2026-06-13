@@ -81,10 +81,24 @@ def cmd_areas(args) -> int:
 
 
 def cmd_org_draft(args) -> int:
-    # factual ORGANIZATION.md draft from the model, so it's never blank
+    # A human-narrative STARTER for ORGANIZATION.md (skip path) — a prompt only, no model
+    # facts. Those are derived at read time (see `org-context`), so they never get baked into
+    # the editable prose file where a human could clobber them.
     from . import org_draft
     org = L.load_organization(args.root, include_rejected=False)
-    sys.stdout.write(org_draft.draft_organization_md(org))
+    sys.stdout.write(org_draft.starter_organization_md(org))
+    return 0
+
+
+def cmd_org_context(args) -> int:
+    # The full domain context for the LLM: the human's ORGANIZATION.md narrative (comments
+    # stripped) + the model-derived summary (subject areas, conventions, decoded glossary),
+    # assembled fresh. This is what the query path injects as `## Organization context`.
+    from . import org_draft
+    org = L.load_organization(args.root, include_rejected=False)
+    org_md = Path(args.root) / "ORGANIZATION.md"
+    human = org_md.read_text(encoding="utf-8") if org_md.exists() else ""
+    sys.stdout.write(org_draft.compose_context(human, org))
     return 0
 
 
@@ -469,9 +483,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.set_defaults(func=cmd_areas)
 
-    sp = sub.add_parser("org-draft", help="print a factual ORGANIZATION.md draft from the model")
+    sp = sub.add_parser("org-draft", help="print a human-narrative STARTER for ORGANIZATION.md (prompt only, no facts)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_org_draft)
+
+    sp = sub.add_parser("org-context", help="print the full domain context (human narrative + model-derived summary + glossary) for the LLM")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_org_context)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
     sp.add_argument("root")

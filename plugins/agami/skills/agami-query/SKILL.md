@@ -121,15 +121,15 @@ Read `<artifacts_dir>/USER_MEMORY.md` (if present). Strip HTML comments (`<!--..
 
 This file holds free-form **user preferences across every database** (default filters, display preferences). Inject it into the SQL-generation prompt in Phase 2b under a labeled `## User memory (preferences and policies)` section — the LLM uses it as steering context.
 
-### 1d.2 — load ORGANIZATION.md
+### 1d.2 — load domain context
 
-Read `<artifacts_dir>/<profile>/ORGANIZATION.md` (if present). Strip HTML comments. If missing or empty, treat as empty — never error. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+Run `cli org-context "$ROOT"` — it returns the **full** domain context for this database in one block: the human's ORGANIZATION.md narrative (HTML comments stripped) **plus** the model-derived summary that the file does NOT contain — subject areas, conventions, and the **decoded glossary** (`key_terminology` + enum legends), assembled fresh from the structured model. Don't `Read` ORGANIZATION.md by hand: the file holds only the human narrative; the glossary and summary live in the model, and this command is the one that combines them. If there's no model, treat as empty — never error. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
 
-This file holds **domain context for this specific database** (terminology, key metrics, what the data represents). Inject into the SQL-generation prompt in Phase 2b under `## Organization context`, **before** the `## User memory` section — domain knowledge precedes display preferences in the LLM's reading order.
+Inject the result into the SQL-generation prompt in Phase 2b under `## Organization context`, **before** the `## User memory` section — domain knowledge precedes display preferences in the LLM's reading order.
 
 Order in Phase 2b prompt:
 1. Schema context (tables / columns / relationships / metrics from the semantic model)
-2. `## Organization context` ← from ORGANIZATION.md
+2. `## Organization context` ← from `cli org-context` (narrative + derived summary + glossary)
 3. `## User memory (preferences and policies)` ← from USER_MEMORY.md
 4. Few-shot examples
 5. The user's question

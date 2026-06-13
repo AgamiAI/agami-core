@@ -71,12 +71,15 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
 
     org_md_path = profile_dir / "ORGANIZATION.md"
     organization_md = org_md_path.read_text(encoding="utf-8") if org_md_path.exists() else ""
-    # never blank: if the file is missing/empty (ignoring HTML comments), fall back to a
-    # factual draft generated from the model itself.
+    from semantic_model import org_draft as _OD
     import re as _re
+    # `organization_md` is the human's narrative ONLY — this is what the edit box writes back,
+    # so model facts must never be folded in here (or saving would persist them). If blank,
+    # offer the starter prompt. The model-derived summary (subject areas, conventions, decoded
+    # glossary) is a SEPARATE read-only field, computed fresh — see `derived_context`.
     if not _re.sub(r"<!--.*?-->", "", organization_md, flags=_re.DOTALL).strip():
-        from semantic_model import org_draft as _OD
-        organization_md = _OD.draft_organization_md(org)
+        organization_md = _OD.starter_organization_md(org)
+    derived_context_md = _OD.derived_context(org)
 
     for sa in org.subject_areas:
         out_tables: list[dict] = []
@@ -205,6 +208,8 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     return {
         "profile": profile,
         "organization_md": organization_md,
+        # model-derived domain summary (read-only in the UI; not part of the editable file)
+        "derived_context_md": derived_context_md,
         "storage_type": storage_type,
         "totals": {
             "schemas": len(out_schemas), "subject_areas": len(areas_out),

@@ -376,9 +376,15 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         result["tables"] = contexts
 
     parts = [json.dumps(result, indent=2, default=str)]
-    org_md = _distill_for_llm(_read_text(artifacts / profile / "ORGANIZATION.md"))
-    if org_md:
-        parts.append(f"\n## ORGANIZATION.md (domain context)\n{org_md}")
+    # Domain context = the human's ORGANIZATION.md narrative + the model-DERIVED summary
+    # (subject areas, conventions, decoded glossary) assembled fresh from the structured
+    # model. The glossary thus always reaches the LLM — it no longer depends on a file
+    # having been re-rendered, and the human's prose is never mixed with auto content.
+    from semantic_model import org_draft as _OD
+    org_md_raw = _read_text(artifacts / profile / "ORGANIZATION.md") or ""
+    domain_context = _OD.compose_context(org_md_raw, org)
+    if domain_context:
+        parts.append(f"\n## Domain context\n{domain_context}")
     user_mem = _distill_for_llm(_read_text(artifacts / "USER_MEMORY.md"))
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")

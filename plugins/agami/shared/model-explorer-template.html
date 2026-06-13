@@ -2118,6 +2118,19 @@
         card.appendChild(a);
       }
       root.appendChild(card);
+
+      // Read-only model-derived summary — SEPARATE from the editable narrative above, so the
+      // auto facts (subject areas, conventions, decoded glossary) can never be edited into the
+      // file. It recomputes from the model; nothing here to clobber.
+      const derived = (manifest.derived_context_md || '').trim();
+      if (derived && (!searchQ || derived.toLowerCase().includes(searchQ))) {
+        const dcard = el('div', { class: 'table-card' });
+        dcard.appendChild(el('div', { class: 'info-banner', html:
+          '<strong>From your schema (read-only).</strong> agami derives this — subject areas, conventions, and decoded terminology. ' +
+          'It updates as your model changes; edit the model, not this.' }));
+        dcard.appendChild(el('div', { class: 'org-rendered', html: renderMarkdown(derived) }));
+        root.appendChild(dcard);
+      }
       setSearchCounts('');
     }
 

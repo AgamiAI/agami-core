@@ -388,7 +388,7 @@ This runs on **every** invocation. The user's yes/skip is theirs; the skill neve
 **AskUserQuestion:**
 > Want to give me a one-paragraph description of what this database is about? It improves NL→SQL accuracy a lot. Examples: what the company/product is, what "MRR" or "active user" means in your terms.
 
-`Yes — I'll type it now (Other field)` → write to `<artifacts_dir>/<profile>/ORGANIZATION.md` under `# About this database` + the commented default template. `Skip — I'll auto-fill it from my data (Recommended)` → **don't write the bare template** — leave ORGANIZATION.md absent for now; Phase 2f auto-drafts it from the enriched model so it's never blank. `chmod 600` whatever you write. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
+`Yes — I'll type it now (Other field)` → write their words to `<artifacts_dir>/<profile>/ORGANIZATION.md` under `# About this database`. **Their narrative ONLY** — do NOT append model facts (subject areas, metrics, glossary). Those are *derived from the model at read time* (the query path assembles them via `cli org-context`), so they never get baked into the editable prose file where a human could clobber them. `Skip — I'll auto-fill it from my data (Recommended)` → leave ORGANIZATION.md absent for now; Phase 2f writes a short human-narrative starter. `chmod 600` whatever you write. See [`shared/organization-context-format.md`](../../shared/organization-context-format.md).
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 
@@ -556,16 +556,18 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveat
 
 On `reintrospect`, the engine rewrites the structural skeleton. **Preserve hand-edits**: descriptions, entities, metrics, caveats, value_transforms, and trust sign-offs (`confidence`/`review_state`/`signed_off_*`) carry over for tables/columns that still exist. Only structure the DB unambiguously reports (table list, columns, types, PK, FK) is refreshed. Mark entries `stale` only when their underlying column/table changed.
 
-### 2f — Auto-draft ORGANIZATION.md if the user didn't write one
+### 2f — Write a human-narrative starter if the user didn't write one
 
-ORGANIZATION.md must never be blank. **Generate it ONLY on the skip path** — when it's **missing or empty** (the user gave no org context of their own: skipped 1.4, or only HTML comments remain). If the user **did** provide context (wrote a paragraph in 1.4 → prose beyond comments), leave it untouched — never overwrite their words with an auto-summary.
+ORGANIZATION.md is the human's narrative ONLY — it does **not** hold model facts. The factual summary (subject areas, conventions, the decoded glossary) is **derived from the structured model at read time** (`cli org-context` assembles it for the query path; the explorer shows it as a read-only field). So there is nothing to "auto-draft into the file" and nothing for a human to accidentally overwrite — the two homes stay separate by construction.
+
+**Only on the skip path** (ORGANIZATION.md missing/empty, the user gave no narrative), write a short starter prompt so there's an obvious place to add context later:
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" org-draft "$ROOT" > "$ROOT/ORGANIZATION.md"
 chmod 600 "$ROOT/ORGANIZATION.md"
 ```
 
-`org-draft` writes a concise **summary**, NOT a re-listing of the model: org name + counts (N tables across M areas), the subject areas (bounded — names + table counts, never the table list), cross-cutting conventions (currency/units), and the domain glossary (`key_terminology` + enum legends). It does **not** enumerate every table, metric, or entity — those already live in the structured model and would be unusable at scale (a DB with thousands of tables would dump a thousand lines). It invents no business semantics. Mention in the Phase 7 summary that ORGANIZATION.md was auto-summarised and is theirs to edit.
+`org-draft` emits a tiny human-narrative **starter** (a prompt comment, no facts). If the user **did** write a narrative in 1.4, leave it untouched. The glossary you wrote via `set-terminology` (2b) needs no re-render here — it lives in `key_terminology` and is surfaced automatically by `org-context`. Mention in the Phase 7 summary that the domain glossary + summary are auto-derived and the narrative is theirs to edit.
 
 ---
 

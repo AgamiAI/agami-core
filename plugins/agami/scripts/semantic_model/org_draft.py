@@ -1,15 +1,23 @@
-"""Deterministic, evidence-grounded ORGANIZATION.md draft from the semantic model.
+"""Org context for the LLM + the explorer — separated into two homes that never collide.
 
-So ORGANIZATION.md is never blank: agami-connect persists this on the "skip" path
-(after enrichment), and the model explorer falls back to it when the file is empty.
+The architecture deliberately keeps the human's words and the auto-derived facts apart:
 
-It states only what the model factually CONTAINS — tables, metrics, entities, units —
-never invented business semantics. Domain vocabulary (what "MRR" means, who the users
-are) only a human knows, so that stays a prompt under `## Key terminology`.
+* **ORGANIZATION.md** is the human's narrative ONLY (what the company/product is, who the
+  users are). agami never writes facts into it, so there is nothing for a human to
+  accidentally overwrite or delete. `starter_organization_md()` is the blank-path prompt.
+* **The factual context** — shape, subject areas, conventions, and the decoded glossary — is
+  `derived_context()`, computed FRESH from the structured model at read time. The glossary
+  lives in the structured `key_terminology` field, not inline prose, so it always reaches the
+  LLM regardless of what's in (or missing from) ORGANIZATION.md.
+
+`compose_context(human_md, org)` assembles the two for a reader (MCP / query skill / explorer):
+the human's narrative, then the derived summary under its own heading. Never a re-listing of
+the model — counts and bounded summaries only, so it stays usable at thousands of tables.
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -32,50 +40,37 @@ def _short(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def draft_organization_md(org: "Organization") -> str:
-    """A concise SUMMARY of the organization — NOT a re-listing of the model.
+def _strip_comments(text: str) -> str:
+    """Drop HTML comments + collapse the blank lines they leave — the human-only scaffolding
+    the LLM shouldn't read."""
+    out = re.sub(r"<!--.*?-->", "", text or "", flags=re.DOTALL)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
 
-    The semantic model already holds every table, column, metric, and entity as
-    structured data (browsable in the explorer); duplicating that here would be both
-    redundant and unusable at scale (a DB with thousands of tables would produce a
-    thousand-line file). So this states the *shape* (counts + subject areas), the
-    cross-cutting *conventions* (currency/units), and the things the model can't
-    express in prose (domain glossary), then leaves the narrative to the human.
 
-    Generated only on the skip path — when the user gave no org context of their own."""
+def derived_context(org: "Organization") -> str:
+    """The model-DERIVED factual context: shape + subject areas + conventions + glossary.
+
+    Computed fresh from the structured model every time and NOT persisted into ORGANIZATION.md
+    — so there are no fragile markers for a human to clobber, and the glossary always reaches
+    the LLM (it no longer depends on a file having been re-rendered). The glossary comes from
+    the structured `key_terminology` field + `choice_field` enum legends. Never a re-listing
+    of the model — counts + bounded summaries only, usable even at thousands of tables."""
     areas = list(org.subject_areas)
-    lines: list[str] = [
-        "# About this database",
-        "",
-        "<!-- Auto-generated SUMMARY (only because no org context was provided). The full",
-        "     tables, columns, metrics, and entities live in the semantic model — browse them",
-        "     in the model explorer. Edit freely: what the company/product is, who the users",
-        "     are, and the domain vocabulary + KPI definitions only you know. -->",
-        "",
-    ]
-
     n_tables = sum(len(sa.tables_defined) for sa in areas)
     n_metrics = sum(len(sa.metrics) for sa in areas) + len(org.cross_subject_area_metrics)
     n_entities = sum(len(sa.entities) for sa in areas) + len(org.cross_subject_area_entities)
 
-    summary = (f"**{org.organization}** — {_plural(n_tables, 'table')} across "
-               f"{_plural(len(areas), 'subject area')}.")
-    lines.append(summary)
-    if (org.description or "").strip():
-        lines.append("")
-        lines.append(_short(org.description, 400))
-    lines.append("")
-
-    # Subject areas — the right summary granularity (few, even when tables run to the
-    # thousands): name + table count + a SHORT description. Bounded, never the table list.
+    lines: list[str] = [
+        f"**{org.organization}** — {_plural(n_tables, 'table')} across {_plural(len(areas), 'subject area')}.",
+        "",
+    ]
     if areas:
-        lines.append("## Subject areas")
+        lines.append("### Subject areas")
         lines.append("")
         for sa in areas[:_MAX_AREAS_LISTED]:
             live = [t for t in sa.tables_defined if t.review_state != "rejected"]
             row = f"- **{sa.name}** [{_plural(len(live), 'table')}]"
             desc = _short(sa.description, _AREA_DESC_CHARS)
-            # skip the engine's auto "covering: <every table>" filler — it's the dump we're avoiding
             if desc and not desc.lower().startswith("auto-proposed subject area covering"):
                 row += f" — {desc}"
             lines.append(row)
@@ -83,28 +78,60 @@ def draft_organization_md(org: "Organization") -> str:
             lines.append(f"- …and {len(areas) - _MAX_AREAS_LISTED} more subject areas")
         lines.append("")
 
-    # Counts, not lists — point at the model for the detail.
     defined = []
     if n_metrics:
         defined.append(_plural(n_metrics, "metric"))
     if n_entities:
         defined.append(f"{n_entities} entit" + ("y" if n_entities == 1 else "ies"))
     if defined:
-        # factual count only — the UI pointer ("browse the explorer") lives in the header
-        # comment, so this line stays useful to the LLM after comments are stripped.
         lines.append(f"{' and '.join(defined)} are defined in the model.")
         lines.append("")
 
-    # Conventions: summarise the DISTINCT units in play (e.g. "INR"), not per-column rows.
     units = sorted({c.unit for sa in areas for t in sa.tables_defined for c in t.columns if c.unit})
     if units:
-        lines.append("## Conventions")
+        lines.append("### Conventions")
         lines.append("")
         lines.append(f"- Units / currency in use: {', '.join(units)}.")
         lines.append("")
 
-    _key_terminology(lines, org, areas)
-    return "\n".join(lines)
+    _key_terminology(lines, org, areas)   # appends "### Key terminology" + glossary, or nothing
+    return "\n".join(lines).strip()
+
+
+def compose_context(human_md: str, org: "Organization") -> str:
+    """Read-time assembly of the full org context: the human's narrative (HTML comments
+    stripped) followed by the model-derived summary under its OWN heading. The two parts stay
+    SEPARATE — the human's prose is never mixed with auto content, so nothing can be
+    accidentally overwritten. Either part may be empty. Used by the MCP, the query skill, and
+    the explorer's Organization view."""
+    human = _strip_comments(human_md)
+    derived = derived_context(org)
+    parts: list[str] = []
+    if human:
+        parts.append(human)
+    if derived:
+        parts.append("## Model summary (auto-generated from your schema)\n\n" + derived)
+    return "\n\n".join(parts).strip()
+
+
+def starter_organization_md(org: "Organization") -> str:
+    """A tiny human-narrative STARTER for the skip path — a prompt ONLY, no model facts (those
+    are derived at read time). Purely the human's to fill; nothing here to clobber. `org` is
+    accepted for signature parity with draft_organization_md but unused."""
+    return "\n".join([
+        "# About this database",
+        "",
+        "<!-- Describe what only you know: what the company/product is, who the users are,",
+        "     and what your key terms mean. agami already knows your schema — this is for the",
+        "     human context it can't infer. Leaving this as-is is fine; agami still works. -->",
+        "",
+    ])
+
+
+def draft_organization_md(org: "Organization") -> str:
+    """Back-compat: the model-derived context as a standalone document (no human prose).
+    Prefer compose_context()/derived_context() in new code."""
+    return compose_context("", org)
 
 
 # How much of an enum column's value→meaning map to inline before truncating, and how
@@ -144,16 +171,13 @@ def _key_terminology(lines: list[str], org: "Organization", areas: list) -> None
         if len(enum_lines) >= _MAX_ENUM_COLS:
             break
 
-    lines.append("## Key terminology")
-    lines.append("")
+    # Derived context, not a human prompt: if there's nothing structured to show, omit the
+    # section entirely (the "add terms you know" nudge lives in the human starter file).
     if not glossary and not enum_lines:
-        lines.append("<!-- Domain vocabulary the skill should know — only you can fill this in.")
-        lines.append('     e.g. "MRR" = monthly recurring revenue; "active user" = signed in within 30 days. -->')
-        lines.append("")
         return
 
-    lines.append("<!-- Auto-seeded from decoded codes + enum columns. Add domain terms only you know "
-                 '(e.g. "MRR" = monthly recurring revenue). -->')
+    lines.append("### Key terminology")
+    lines.append("")
     for term, definition in glossary.items():
         lines.append(f"- **{term}** — {definition}")
     if glossary and enum_lines:
