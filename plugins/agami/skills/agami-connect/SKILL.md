@@ -558,14 +558,14 @@ On `reintrospect`, the engine rewrites the structural skeleton. **Preserve hand-
 
 ### 2f — Auto-draft ORGANIZATION.md if the user didn't write one
 
-ORGANIZATION.md must never be blank. If it's **missing or empty** (the user skipped 1.4, or only HTML comments remain), generate a factual draft from the now-enriched model and write it:
+ORGANIZATION.md must never be blank. **Generate it ONLY on the skip path** — when it's **missing or empty** (the user gave no org context of their own: skipped 1.4, or only HTML comments remain). If the user **did** provide context (wrote a paragraph in 1.4 → prose beyond comments), leave it untouched — never overwrite their words with an auto-summary.
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" org-draft "$ROOT" > "$ROOT/ORGANIZATION.md"
 chmod 600 "$ROOT/ORGANIZATION.md"
 ```
 
-`org-draft` is deterministic — it states only what the model *contains* (tables + descriptions + row counts, metrics, entities, units/currency) and leaves a `## Key terminology` prompt for the domain vocabulary only the user knows. It invents no business semantics. If the user **did** write context in 1.4 (the file has prose beyond comments), leave it untouched. Mention in the Phase 7 summary that ORGANIZATION.md was auto-drafted and is theirs to edit (in the model explorer or directly).
+`org-draft` writes a concise **summary**, NOT a re-listing of the model: org name + counts (N tables across M areas), the subject areas (bounded — names + table counts, never the table list), cross-cutting conventions (currency/units), and the domain glossary (`key_terminology` + enum legends). It does **not** enumerate every table, metric, or entity — those already live in the structured model and would be unusable at scale (a DB with thousands of tables would dump a thousand lines). It invents no business semantics. Mention in the Phase 7 summary that ORGANIZATION.md was auto-summarised and is theirs to edit.
 
 ---
 

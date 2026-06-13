@@ -20,86 +20,86 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}" + ("" if n == 1 else "s")
 
 
+# Cap the subject-area summary — a model can have many areas (and tables can run to the
+# thousands); list a bounded sample and count the rest rather than dumping everything. The
+# full tables/metrics/entities live in the structured model, browsable in the explorer.
+_MAX_AREAS_LISTED = 30
+_AREA_DESC_CHARS = 110
+
+
+def _short(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def draft_organization_md(org: "Organization") -> str:
+    """A concise SUMMARY of the organization — NOT a re-listing of the model.
+
+    The semantic model already holds every table, column, metric, and entity as
+    structured data (browsable in the explorer); duplicating that here would be both
+    redundant and unusable at scale (a DB with thousands of tables would produce a
+    thousand-line file). So this states the *shape* (counts + subject areas), the
+    cross-cutting *conventions* (currency/units), and the things the model can't
+    express in prose (domain glossary), then leaves the narrative to the human.
+
+    Generated only on the skip path — when the user gave no org context of their own."""
     areas = list(org.subject_areas)
     lines: list[str] = [
         "# About this database",
         "",
-        "<!-- Auto-generated from your schema — a factual summary of what this database",
-        "     contains. Edit freely: add what the company / product is, who the users",
+        "<!-- Auto-generated SUMMARY (only because no org context was provided). The full",
+        "     tables, columns, metrics, and entities live in the semantic model — browse them",
+        "     in the model explorer. Edit freely: what the company/product is, who the users",
         "     are, and the domain vocabulary + KPI definitions only you know. -->",
         "",
     ]
 
     n_tables = sum(len(sa.tables_defined) for sa in areas)
-    area_bits = ", ".join(
-        f"{sa.name} ({_plural(len(sa.tables_defined), 'table')})" for sa in areas
-    )
-    summary = f"**{org.organization}** has {_plural(n_tables, 'table')} across {_plural(len(areas), 'subject area')}"
-    lines.append(summary + (f": {area_bits}." if area_bits else "."))
+    n_metrics = sum(len(sa.metrics) for sa in areas) + len(org.cross_subject_area_metrics)
+    n_entities = sum(len(sa.entities) for sa in areas) + len(org.cross_subject_area_entities)
+
+    summary = (f"**{org.organization}** — {_plural(n_tables, 'table')} across "
+               f"{_plural(len(areas), 'subject area')}.")
+    lines.append(summary)
+    if (org.description or "").strip():
+        lines.append("")
+        lines.append(_short(org.description, 400))
     lines.append("")
 
-    # What the data contains — tables per area (factual: name + description + row count)
-    lines.append("## What the data contains")
-    lines.append("")
-    for sa in areas:
-        live = [t for t in sa.tables_defined if t.review_state != "rejected"]
-        if not live:
-            continue
-        hdr = f"### {sa.name}"
-        if sa.description:
-            hdr += f" — {sa.description}"
-        lines.append(hdr)
-        for t in live:
-            row = f"- **{t.name}**"
-            if t.description:
-                row += f" — {t.description}"
-            rc = t.performance_hints.estimated_row_count if t.performance_hints else None
-            if rc:
-                row += f"  [~{rc:,} rows]"
+    # Subject areas — the right summary granularity (few, even when tables run to the
+    # thousands): name + table count + a SHORT description. Bounded, never the table list.
+    if areas:
+        lines.append("## Subject areas")
+        lines.append("")
+        for sa in areas[:_MAX_AREAS_LISTED]:
+            live = [t for t in sa.tables_defined if t.review_state != "rejected"]
+            row = f"- **{sa.name}** [{_plural(len(live), 'table')}]"
+            desc = _short(sa.description, _AREA_DESC_CHARS)
+            # skip the engine's auto "covering: <every table>" filler — it's the dump we're avoiding
+            if desc and not desc.lower().startswith("auto-proposed subject area covering"):
+                row += f" — {desc}"
             lines.append(row)
+        if len(areas) > _MAX_AREAS_LISTED:
+            lines.append(f"- …and {len(areas) - _MAX_AREAS_LISTED} more subject areas")
         lines.append("")
 
-    metrics = [m for sa in areas for m in sa.metrics if m.review_state != "rejected"]
-    if metrics:
-        lines.append("## Metrics")
-        lines.append("")
-        for m in metrics:
-            row = f"- **{m.name}**"
-            if m.calculation:
-                row += f" — {m.calculation}"
-            if m.unit:
-                row += f" [{m.unit}]"
-            if m.other_names:
-                row += f" (also called: {', '.join(m.other_names)})"
-            lines.append(row)
+    # Counts, not lists — point at the model for the detail.
+    defined = []
+    if n_metrics:
+        defined.append(_plural(n_metrics, "metric"))
+    if n_entities:
+        defined.append(f"{n_entities} entit" + ("y" if n_entities == 1 else "ies"))
+    if defined:
+        lines.append(f"{' and '.join(defined)} are defined — browse them, with every table "
+                     f"and column, in the model explorer.")
         lines.append("")
 
-    entities = [e for sa in areas for e in sa.entities if e.review_state != "rejected"]
-    if entities:
-        lines.append("## Entities")
+    # Conventions: summarise the DISTINCT units in play (e.g. "INR"), not per-column rows.
+    units = sorted({c.unit for sa in areas for t in sa.tables_defined for c in t.columns if c.unit})
+    if units:
+        lines.append("## Conventions")
         lines.append("")
-        for e in entities:
-            maps = ", ".join(f"{m.table}.{m.column}" for m in e.maps_to)
-            row = f"- **{e.name}**"
-            if e.plural and e.plural != e.name:
-                row += f" ({e.plural})"
-            if maps:
-                row += f" — identified by {maps}"
-            if e.other_names:
-                row += f"; also called: {', '.join(e.other_names)}"
-            lines.append(row)
-        lines.append("")
-
-    unit_cols = [
-        (f"{t.name}.{c.name}", c.unit)
-        for sa in areas for t in sa.tables_defined for c in t.columns if c.unit
-    ]
-    if unit_cols:
-        lines.append("## Units & currency")
-        lines.append("")
-        for qname, unit in unit_cols:
-            lines.append(f"- **{qname}** — {unit}")
+        lines.append(f"- Units / currency in use: {', '.join(units)}.")
         lines.append("")
 
     _key_terminology(lines, org, areas)

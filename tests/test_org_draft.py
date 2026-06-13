@@ -44,21 +44,24 @@ def _model(root):
         "other_names": ["client"], "confidence": "inferred", "review_state": "unreviewed"}))
 
 
-def test_draft_states_facts_not_invented_semantics(tmp_path):
+def test_draft_is_a_summary_not_a_full_listing(tmp_path):
     from semantic_model.loader import load_organization
     from semantic_model import org_draft
     _model(tmp_path)
     md = org_draft.draft_organization_md(load_organization(tmp_path))
-    # factual content from the model
+    # SUMMARY shape: org + counts + subject areas + conventions + glossary prompt
     assert "# About this database" in md
-    assert "acme" in md and "sales" in md
-    assert "orders" in md and "one row per order" in md and "1,234,567 rows" in md
-    assert "total_revenue" in md and "sum of order amounts" in md
-    assert "customer" in md and "orders.id" in md
-    assert "orders.amount" in md and "INR" in md
-    # the human-only part stays a prompt, not invented
+    assert "acme" in md and "1 table across 1 subject area" in md
+    assert "## Subject areas" in md and "sales" in md and "orders & customers" in md
+    assert "1 metric and 1 entity are defined" in md and "model explorer" in md
+    assert "INR" in md                      # conventions summary (distinct units)
     assert "## Key terminology" in md
-    assert "MRR" in md  # only as the example placeholder in the comment
+    # it must NOT rehash the structured model
+    assert "## What the data contains" not in md
+    assert "## Metrics" not in md and "## Entities" not in md
+    assert "total_revenue" not in md        # metric is counted, not enumerated
+    assert "one row per order" not in md     # per-table description not dumped
+    assert "1,234,567" not in md             # per-table row count not dumped
 
 
 def test_key_terminology_seeded_from_glossary_and_enums(tmp_path):
@@ -98,11 +101,11 @@ def test_explorer_falls_back_to_draft_when_org_md_blank(tmp_path):
     _model(tmp_path)
     # no ORGANIZATION.md at all
     m = build_manifest(tmp_path, "acme")
-    assert "total_revenue" in m["organization_md"]
+    assert "About this database" in m["organization_md"] and "Subject areas" in m["organization_md"]
     # a comments-only file is still "blank" → draft
     (tmp_path / "ORGANIZATION.md").write_text("<!-- nothing here yet -->\n")
     m2 = build_manifest(tmp_path, "acme")
-    assert "What the data contains" in m2["organization_md"]
+    assert "Subject areas" in m2["organization_md"]
     # a real file is left as-is
     (tmp_path / "ORGANIZATION.md").write_text("# About\nWe are a lending startup.")
     m3 = build_manifest(tmp_path, "acme")
