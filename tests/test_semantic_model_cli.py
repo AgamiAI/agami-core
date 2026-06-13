@@ -245,6 +245,59 @@ def test_validate_seeds_splits_pass_fail_via_runner():
     assert {r["question"] for r in rejected} == {"bad", "no sql"}
 
 
+def _seeds_file(tmp_path):
+    f = tmp_path / "seeds.json"
+    f.write_text(json.dumps([{"question": "how many orders?", "sql": "SELECT 1 FROM orders"}]))
+    return f
+
+
+def test_seed_examples_refuses_until_preseed_reviewed(tmp_path):
+    # Phase-4 gate in code: with an unreviewed metric the seeds would reference, seed-examples
+    # REFUSES (exit 2) and writes nothing — the model can't skip the explorer-first review.
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    curate.write_items(tmp_path, "s", "metric", [
+        {"name": "rev", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
+         "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path))])
+    d = json.loads(out)
+    assert rc == 2 and d["refused"] == "preseed_review_pending" and d["pending_count"] == 1
+    assert list_prompt_examples(tmp_path, "s") == []   # nothing written
+
+
+def test_seed_examples_after_review_bypasses_gate(tmp_path, monkeypatch):
+    # --after-review is the Phase-4c bypass: the user has been in the explorer and chose to
+    # proceed with items still unreviewed. The seed then validates + writes normally.
+    from semantic_model import curate, introspect
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    curate.write_items(tmp_path, "s", "metric", [
+        {"name": "rev", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
+         "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path)), "--after-review"])
+    d = json.loads(out)
+    assert rc == 0 and "refused" not in d and d["written"]
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "s")] == ["how many orders?"]
+
+
+def test_seed_examples_runs_clean_when_no_preseed_pending(tmp_path, monkeypatch):
+    # the common path: nothing unreviewed (base model has only a system-approved FK) → the
+    # gate is transparent, no --after-review needed.
+    from semantic_model import introspect
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path))])
+    d = json.loads(out)
+    assert rc == 0 and "refused" not in d
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "s")] == ["how many orders?"]
+
+
 def test_no_model_root_exits_3_cleanly(tmp_path):
     # an empty root has no org.yaml — the CLI returns a clean no_model signal (exit 3),
     # not a traceback, so callers fold the existence check into their first real call

@@ -26,6 +26,7 @@ import io
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import loader as L
 from . import runtime as RT
@@ -238,11 +239,44 @@ def cmd_format_table(args) -> int:
     return 0
 
 
+def _preseed_gate(org) -> Optional[dict]:
+    """Phase-4 enforcement, in code rather than prose: return a refusal payload when
+    seeds must NOT be generated yet — i.e. metrics/entities the seeds would reference
+    are still unreviewed. Generating few-shots on top of a guessed metric definition
+    bakes that guess in. Returns None when nothing is pending (count 0). The skill's
+    Phase-4c "continue anyway" path bypasses this with --after-review (the only place
+    that's sanctioned, AFTER the user has been in the explorer)."""
+    from . import curate
+    pending = curate.all_items(org, scope="preseed")
+    if not pending:
+        return None
+    return {
+        "refused": "preseed_review_pending",
+        "pending_count": len(pending),
+        "pending": [{"name": it["name"], "entity_type": it["entity_type"]} for it in pending],
+        "message": (
+            f"{len(pending)} metric(s)/entity(ies) still need review — generating seeds "
+            f"now would bake guessed definitions into your few-shots. Open /agami-model "
+            f"preseed, sign off (or reject) them, then re-run. If you have already reviewed "
+            f"in the explorer and accept proceeding with items still unreviewed, re-run with "
+            f"--after-review."
+        ),
+    }
+
+
 def cmd_seed_examples(args) -> int:
     """Validate candidate seed examples against the live DB and write the passing ones —
     the whole Phase-5 mechanical loop in one call (no throwaway validate-and-write script)."""
     from . import curate
     from .introspect import make_execute_sql_runner
+    # Phase-4 gate: refuse to seed on top of unreviewed metrics/entities unless the caller
+    # explicitly acks post-review. Forces the explorer-first review the skill describes.
+    if not getattr(args, "after_review", False):
+        org = L.load_organization(args.root, include_rejected=True)
+        block = _preseed_gate(org)
+        if block is not None:
+            _print_json(block)
+            return 2
     with open(args.file) as fh:
         cands = json.load(fh)
     if isinstance(cands, dict):
@@ -462,6 +496,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--area", required=True)
     sp.add_argument("--profile", required=True, help="credentials profile (for the live-DB validation)")
     sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metric]}")
+    sp.add_argument("--after-review", action="store_true",
+                    help="bypass the preseed-review gate (Phase 4c only — the user has already "
+                         "been in the explorer and chose to proceed with items still unreviewed)")
     sp.set_defaults(func=cmd_seed_examples)
 
     sp = sub.add_parser("seed-validate", help="run every written seed against the live DB (through execute_sql's safety pass) + emit examples-validation items")

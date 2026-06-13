@@ -585,7 +585,7 @@ Seeds reference **columns, tables, metrics, and entities** — so settle those *
 
 > **4b is NOT a choice — it OPENS the explorer.** When the count is > 0, you **open `/agami-model preseed` and end the turn**. Do **NOT** present an `AskUserQuestion` offering "continue to examples now" vs "open explorer" here, and do **NOT** mark continuing as Recommended. The explorer-first review is the designed path; a high count (dozens of items across many schema-areas) is a reason to open it, not to skip it (the user bulk-approves the *Looks right* pile and eyeballs the cross-schema joins there). The "continue anyway" option exists **only** at the 4c return gate — i.e. **after** the user has already been in the explorer at least once. Never surface the 4c choice before 4b has opened the explorer.
 
-**4c — return gate:** when they're back (they have now opened the explorer at least once), recount via `--scope preseed`. If 0 → Phase 5. If > 0 (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered.
+**4c — return gate:** when they're back (they have now opened the explorer at least once), recount via `--scope preseed`. If 0 → Phase 5 (the seed command runs clean). If > 0 (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (to bypass the preseed-review refusal, which is otherwise the engine telling you Phase 4 hasn't happened).
 
 On `reintrospect` with no new exclusions and nothing unreviewed, skip silently.
 
@@ -609,6 +609,8 @@ Tag each with its `tables` (list **all** tables it touches — both schemas for 
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-examples "$ROOT" --area <area> --profile <profile> --file /tmp/agami-seeds.json
 ```
 Output `{added, written, committed, rejected:[{question, error}]}`. For each `rejected`, optionally regenerate once and re-run with just those; don't block the flow on a few drops. Corrections later append via `/agami-save-correction` (same `add-example` path).
+
+> **The command enforces Phase 4 for you.** If preseed metrics/entities are still unreviewed, `seed-examples` **refuses** — it returns `{refused: "preseed_review_pending", pending_count, message}` and writes nothing. That is the signal you skipped the explorer-first review: **go back to Phase 4b**, open `/agami-model preseed`, and end the turn. Do NOT pass `--after-review` to force past a fresh refusal — that flag is **only** for the Phase-4c return path, where the user has already been in the explorer and explicitly chose to continue with some items still unreviewed.
 
 ---
 
