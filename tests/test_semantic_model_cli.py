@@ -543,6 +543,51 @@ def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
     assert rc2 == 1 and json.loads(out2)["skipped"]
 
 
+def test_apply_reverts_writes_without_git_on_validation_failure(tmp_path):
+    # apply()'s revert must NOT depend on a git repo (the artifacts dir usually isn't one).
+    # A batch whose later op makes the model invalid rolls back the earlier valid write too.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)  # not a git repo
+    before = load_organization(tmp_path).subject_areas[0].defined_table("orders").description
+    res = curate.apply(tmp_path, [
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "field": "description", "value": "CHANGED"},                     # valid, writes
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "column": "total", "field": "type", "value": "not_a_type"},      # makes the model unloadable
+    ])
+    assert not res.validated and res.applied == []
+    after = load_organization(tmp_path).subject_areas[0].defined_table("orders").description
+    assert after == before == "o"   # the first write was rolled back despite no git
+
+
+def test_column_groups_edit_reconciles_stale_expose(tmp_path):
+    # regrouping a table renames its column_groups; any TableRef.expose_column_groups that
+    # named the OLD groups must be reconciled, else the model fails validation.
+    import yaml as y
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    tp = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    td = y.safe_load(tp.read_text())
+    td["column_groups"] = {"old_a": ["id"], "old_b": ["deleted_at", "total"]}
+    tp.write_text(y.safe_dump(td))
+    sap = tmp_path / "subject_areas" / "s" / "subject_area.yaml"
+    sad = y.safe_load(sap.read_text())
+    for tr in sad["tables"]:
+        if tr["table"] == "orders":
+            tr["expose_column_groups"] = ["old_a", "old_b"]
+    sap.write_text(y.safe_dump(sad))
+
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "table", "area": "s", "name": "orders",
+                                   "field": "column_groups",
+                                   "value": {"identity": ["id"], "rest": ["deleted_at", "total"]}}])
+    assert res.validated and res.applied
+    tr = next(t for t in y.safe_load(sap.read_text())["tables"] if t["table"] == "orders")
+    assert not tr.get("expose_column_groups")   # stale exposes reconciled away (new set covers all)
+    assert set(load_organization(tmp_path).subject_areas[0].defined_table("orders").column_groups) == {"identity", "rest"}
+
+
 def test_set_terminology_writes_glossary_to_org_yaml(tmp_path):
     # the packaged path for the decoded-abbreviation legend: writes org.yaml key_terminology,
     # validates, merges over existing terms (so a re-run doesn't clobber a human's edits).

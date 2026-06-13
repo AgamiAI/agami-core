@@ -86,6 +86,10 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
             if t_excluded:
                 total_excluded_tables += 1
             qname = f"{sa.name}.{t.name}"
+            # column → its semantic group (for the wide-table grouped view); a column may
+            # appear in at most one group, so invert the table's column_groups once.
+            col_group = {cn: gname for gname, members in (t.column_groups or {}).items()
+                         for cn in members}
             fields_out: list[dict] = []
             for c in t.columns:
                 total_fields += 1
@@ -99,6 +103,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
                     "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
                     "date_format": c.date_format, "timezone": c.timezone,
+                    "group": col_group.get(c.name, ""),
                 })
             out_tables.append({
                 "name": t.name, "qname": qname, "description": t.description,
@@ -109,6 +114,9 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
                 "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
                 "synonyms": [], "area": sa.name, "db_schema": t.schema_name or "",
+                # ordered group names for the wide-table grouped field view (empty on
+                # narrow tables — the UI then just lists fields flat)
+                "column_groups": list((t.column_groups or {}).keys()),
                 "fields": fields_out,
             })
 

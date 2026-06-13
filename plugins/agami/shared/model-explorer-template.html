@@ -314,6 +314,16 @@
     .field-row.queued-exclude { background: var(--bad-bg); }
     .field-row.queued-include { background: var(--ok-bg); }
     .field-row.hidden { display: none; }
+    .col-group.hidden { display: none; }
+    .col-group-header {
+      display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+      padding: 5px 10px; background: var(--row-zebra); border-top: 1px solid var(--border);
+      font-weight: 600; font-size: 0.82em; letter-spacing: 0.02em;
+    }
+    .col-group-header:hover { filter: brightness(0.97); }
+    .col-group-caret { width: 0.9em; opacity: 0.6; }
+    .col-group-name { text-transform: capitalize; }
+    .col-group-count { margin-left: auto; opacity: 0.55; font-weight: 400; }
     .field-name {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       font-size: 13px; font-weight: 500; word-break: break-word;
@@ -698,6 +708,8 @@
 
     const editOpen = new Set();        // qnames whose inline edit form is expanded
     const expandedTables = new Set();  // qnames of tables the user has expanded (persisted across renders)
+    const colGroupOpen = new Set();    // group ids the user explicitly OPENED (overrides the wide-table default)
+    const colGroupClosed = new Set();  // group ids the user explicitly CLOSED
     let addMetricOpen = false;
     let searchQ = '';
     const _initTab = (manifest.initial_tab || 'tables');
@@ -1196,6 +1208,48 @@
       return row;
     }
 
+    // Wide tables (≥30 cols) carry semantic `column_groups`; render their fields under
+    // collapsible group headers so a 128-column table reads like mini subject-areas instead
+    // of one endless list. Narrow tables (no groups) fall through to a flat field list.
+    function renderFieldsGrouped(body, table) {
+      const groups = table.column_groups || [];
+      const fields = table.fields || [];
+      if (!groups.length) { fields.forEach(f => body.appendChild(renderField(f, table))); return; }
+      const wide = fields.length > 40;            // default-collapse only genuinely wide tables
+      const byGroup = {}; const ungrouped = [];
+      fields.forEach(f => {
+        if (f.group && groups.indexOf(f.group) >= 0) (byGroup[f.group] = byGroup[f.group] || []).push(f);
+        else ungrouped.push(f);
+      });
+      const order = groups.slice();
+      if (ungrouped.length) order.push('');       // '' = the catch-all "other" bucket
+      order.forEach(g => {
+        const gf = g === '' ? ungrouped : (byGroup[g] || []);
+        if (!gf.length) return;
+        const gid = table.qname + '::' + (g || '(other)');
+        const rows = gf.map(f => renderField(f, table));
+        const visible = rows.filter(r => !r.classList.contains('hidden')).length;
+        const open = searchQ ? true                                  // search forces every group open
+          : colGroupClosed.has(gid) ? false
+          : colGroupOpen.has(gid) ? true
+          : !wide;                                                   // default: open unless wide
+        const wrap = el('div', { class: 'col-group' + (visible ? '' : ' hidden') });
+        const head = el('div', { class: 'col-group-header' });
+        head.appendChild(el('span', { class: 'col-group-caret', text: open ? '▾' : '▸' }));
+        head.appendChild(el('span', { class: 'col-group-name', text: (g || 'other').replace(/_/g, ' ') }));
+        const countTxt = searchQ && visible !== gf.length ? (visible + '/' + gf.length) : String(gf.length);
+        head.appendChild(el('span', { class: 'col-group-count', text: countTxt + ' fields' }));
+        head.addEventListener('click', () => {
+          if (open) { colGroupClosed.add(gid); colGroupOpen.delete(gid); }
+          else { colGroupOpen.add(gid); colGroupClosed.delete(gid); }
+          renderAll();
+        });
+        wrap.appendChild(head);
+        if (open) rows.forEach(r => wrap.appendChild(r));
+        body.appendChild(wrap);
+      });
+    }
+
     function renderTable(table) {
       const q = searchQ;
       const eff = effExcluded(table);
@@ -1271,7 +1325,7 @@
           hint: 'Conditions added to every query on this table automatically, so you never have to repeat them. Write one SQL condition per line and use {alias} where the table name goes. For example: "{alias}.deleted_at IS NULL" keeps only rows that are not deleted · "{alias}.is_test = false" skips test rows.' },
       ]));
 
-      (table.fields || []).forEach(f => body.appendChild(renderField(f, table)));
+      renderFieldsGrouped(body, table);
       card.appendChild(body);
       return card;
     }

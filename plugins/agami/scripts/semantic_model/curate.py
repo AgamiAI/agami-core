@@ -303,6 +303,14 @@ def _dump(path: Path, obj: Any) -> None:
                     encoding="utf-8")
 
 
+def _snapshot(backups: "dict[Path, Optional[str]]", path: Path) -> None:
+    """Record a file's prior content before the first write to it (None if new), so the
+    batch can be rolled back without git — apply()'s revert used to depend on a git repo
+    that the artifacts dir often isn't, which silently left half-applied models on disk."""
+    if path not in backups:
+        backups[path] = path.read_text(encoding="utf-8") if path.exists() else None
+
+
 def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) -> "ApplyResult":
     """Write the org-level domain glossary (term -> definition) onto org.yaml's
     `key_terminology`. Validated + git-committed like every other write; the prior
@@ -356,13 +364,12 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
     revert on validation failure. Each op: {op, kind, area, name, [column], [field, value]}."""
     root = Path(root)
     res = ApplyResult()
-    touched: set[Path] = set()
+    backups: dict[Path, Optional[str]] = {}  # path -> prior text (None if newly created)
 
     for op in ops:
         try:
-            path = _apply_one(root, op, signer, role)
+            path = _apply_one(root, op, signer, role, backups)
             if path is not None:
-                touched.add(path)
                 res.applied.append(_op_label(op))
         except Exception as e:
             res.skipped.append({"op": _op_label(op), "reason": str(e)})
@@ -374,12 +381,12 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
         res.validated = vres.ok
         if not vres.ok:
             res.errors = vres.errors
-            _git_revert(root, touched)
+            _restore(list(backups.items()))   # git-independent revert
             res.applied = []  # nothing stuck
             return res
     except Exception as e:
         res.errors.append(f"validation failed to run: {e}")
-        _git_revert(root, touched)
+        _restore(list(backups.items()))
         res.applied = []
         return res
 
@@ -435,7 +442,10 @@ def _resolve_area(root: Path, op: dict) -> str:
         "disambiguate (a same-named table can live in two schemas).")
 
 
-def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
+def _apply_one(root: Path, op: dict, signer, role,
+               backups: "Optional[dict[Path, Optional[str]]]" = None) -> Optional[Path]:
+    if backups is None:
+        backups = {}
     action = op.get("op")
     if action not in _VALID_OPS:
         raise ValueError(f"unknown op {action!r}")
@@ -451,12 +461,17 @@ def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
+        _snapshot(backups, path)
         doc = _load(path)
         if op.get("column"):
             _set_column_field(doc, op["column"], op, new_state, signer, role)
         else:
             _set_trust(doc, op, new_state, signer, role, desc_source=True)  # table desc has provenance
         _dump(path, doc)
+        # A column_groups edit renames the groups a TableRef may expose — reconcile so we
+        # don't orphan `expose_column_groups` (which would fail validation).
+        if op.get("op") == "edit" and op.get("field") == "column_groups" and not op.get("column"):
+            _reconcile_expose_groups(root, area, name, doc.get("column_groups") or {}, backups)
         return path
 
     if kind == "entity":
@@ -467,6 +482,7 @@ def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
         path = _area_dir(root, area) / "entities" / f"{_slug(name)}.yaml"
         if not path.exists():
             raise FileNotFoundError(f"no entity named {name!r} in area {area!r}")
+        _snapshot(backups, path)
         doc = _load(path)
         _set_trust(doc, op, new_state, signer, role)
         _dump(path, doc)
@@ -476,6 +492,7 @@ def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
         path = _area_dir(root, area) / "metrics" / f"{_slug(name)}.yaml"
         if not path.exists():
             raise FileNotFoundError(f"no metric named {name!r} in area {area!r}")
+        _snapshot(backups, path)
         doc = _load(path)
         _set_trust(doc, op, new_state, signer, role)
         _dump(path, doc)
@@ -489,12 +506,14 @@ def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
             rels = doc.get("relationships", doc if isinstance(doc, list) else [])
             hit = next((r for r in rels if r.get("from_table") == frm and r.get("to_table") == to), None)
             if hit is not None:
+                _snapshot(backups, path)
                 _set_trust(hit, op, new_state, signer, role)
                 _dump(path, {"relationships": rels})
                 return path
         # Cross-area (cross-schema / cross-datasource) join — it lives at the org level, not
         # in an area's relationships.yaml. Fall back to org.yaml's cross_subject_area_relationships.
         orgp = root / "org.yaml"
+        _snapshot(backups, orgp)
         odoc = _load(orgp) or {}
         crels = odoc.get("cross_subject_area_relationships", [])
         chit = next((r for r in crels if r.get("from_table") == frm and r.get("to_table") == to), None)
@@ -505,6 +524,36 @@ def _apply_one(root: Path, op: dict, signer, role) -> Optional[Path]:
         return orgp
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+def _reconcile_expose_groups(root: Path, area: str, table: str,
+                             new_groups: dict, backups: "dict[Path, Optional[str]]") -> None:
+    """After a table's `column_groups` are rewritten, fix any `TableRef.expose_column_groups`
+    in subject_area.yaml that referenced the OLD group names: keep only names that still exist,
+    and drop the field entirely when it would cover every group (or nothing) — i.e. "expose all".
+    Without this, a regroup orphans the exposes and the model fails validation."""
+    sap = _area_dir(root, area) / "subject_area.yaml"
+    if not sap.exists():
+        return
+    sa = _load(sap) or {}
+    valid = set(new_groups.keys())
+    changed = False
+    for tr in sa.get("tables", []) or []:
+        if tr.get("table") != table:
+            continue
+        exp = tr.get("expose_column_groups")
+        if not exp:
+            continue
+        kept = [g for g in exp if g in valid]
+        if not kept or set(kept) == valid:      # exposes everything (or nothing valid left)
+            tr.pop("expose_column_groups", None)
+            changed = True
+        elif kept != exp:
+            tr["expose_column_groups"] = kept
+            changed = True
+    if changed:
+        _snapshot(backups, sap)
+        _dump(sap, sa)
 
 
 def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
@@ -750,16 +799,6 @@ def _git_commit(root: Path, msg: str) -> bool:
         return r.returncode == 0
     except Exception:
         return False
-
-
-def _git_revert(root: Path, paths: set[Path]) -> None:
-    if not (root / ".git").exists():
-        return
-    for p in paths:
-        try:
-            _git(root, "checkout", "--", str(p))
-        except Exception:
-            pass
 
 
 def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
