@@ -23,12 +23,12 @@ If the preference is database-specific (e.g. "in this finance DB, always join or
 
 ## What does NOT go in here
 
-- **Connection details** → `~/.agami/credentials`
+- **Connection details** → `<artifacts_dir>/local/credentials`
 - **Schema knowledge** (table descriptions, FK relationships, column types, choice fields, metrics) → the semantic model under `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…`)
 - **Domain vocabulary specific to one database** ("MRR means…", "gold tier means…") → `<artifacts_dir>/<profile>/ORGANIZATION.md`
 - **Specific question→SQL examples** → `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml` (few-shot library)
-- **Connection-method choice / reviewer identity** → `~/.agami/.config`
-- **Email opt-in state** → `~/.agami/.optins`
+- **Connection-method choice / reviewer identity** → `<artifacts_dir>/local/.config`
+- **Email opt-in state** → `<artifacts_dir>/local/.optins`
 
 `agami-save-correction/SKILL.md` classifies each correction and routes the knowledge to the right file. A `user_preference` correction lands here. An `org_context` correction lands in ORGANIZATION.md. Other kinds land in the per-schema yamls (per the table in save-correction).
 

@@ -10,7 +10,7 @@ agami ships five skills, all prefixed `agami-` to avoid colliding with Claude Co
 | agami-save-correction | `/agami-save-correction` | "save this as a correction", "remember this", "use this SQL next time" |
 | agami-reconcile | `/agami-reconcile` | "reconcile against my dashboard", "verify these numbers against agami" |
 
-**`/agami-init` no longer exists** — its credential-setup flow was folded into `/agami-connect` Phase 0a. Users who haven't run setup before invoke `/agami-connect`; the skill detects missing credentials and runs the DB-type picker + writes `~/.agami/credentials.example` inline before introspecting.
+**`/agami-init` no longer exists** — its credential-setup flow was folded into `/agami-connect` Phase 0a. Users who haven't run setup before invoke `/agami-connect`; the skill detects missing credentials and runs the DB-type picker + writes `<artifacts_dir>/local/credentials.example` inline before introspecting.
 
 ## What works
 

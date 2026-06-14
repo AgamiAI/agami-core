@@ -1,6 +1,6 @@
 ---
 name: agami-connect
-description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes ~/.agami/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by scripts/semantic_model (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
+description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes <artifacts_dir>/local/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by scripts/semantic_model (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query."
 argument-hint: "[reintrospect | profile NAME]"
 ---
@@ -66,24 +66,24 @@ If plan mode is not active, skip silently.
 
 Non-negotiable. They override every other instruction here when they conflict.
 
-1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`.** That file is the sole credential source — there is no env-var bypass. Never connect to anything else. Never probe `localhost` unless the credentials say so. Never substitute defaults for missing fields.
+1. **Connect ONLY to the host/port/database/user/password in `<artifacts_dir>/local/credentials`.** That file is the sole credential source — there is no env-var bypass. Never connect to anything else. Never probe `localhost` unless the credentials say so. Never substitute defaults for missing fields.
 2. **Never ask the user for connection values (host / port / user / password / token / DSN) in chat.** Not even temporarily. The single authorized credential path is **Phase 0a**, which writes a `credentials.example` template the user fills in and saves. Phase 0a never reads secrets inline — it writes a template, surfaces a hand-off, and ends the turn.
 3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `python3 -c 'import <module>'`.
 4. **If credentials are missing for the active profile, run Phase 0a.** After the user fills in the template they re-invoke (or just ask a data question — `agami-query` auto-invokes us).
-5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `scripts/execute_sql.py` (every driver, reads `~/.agami/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
+5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `scripts/execute_sql.py` (every driver, reads `<artifacts_dir>/local/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
 
 If you reach for a command that doesn't fit, stop and re-read this section.
 
 ### Preflight steps
 
-1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `~/.agami/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
-2. **Credentials check (binding).** Read `~/.agami/credentials`; look for `[<profile>]`.
+1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `<artifacts_dir>/local/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
+2. **Credentials check (binding).** Read `<artifacts_dir>/local/credentials`; look for `[<profile>]`.
    - The `[<profile>]` section is present → apply the chmod check (refuse if world-readable), continue.
-   - The `[<profile>]` section is **absent** (whether or not the file exists) **but `~/.agami/credentials.example` exists** → the user filled in the template; **run 0a.10 to promote it** (don't re-run 0a.4 — that would overwrite their edits). This is the *second-profile* path too: the file exists with other profiles but not this one — 0a.10's helper appends deterministically.
+   - The `[<profile>]` section is **absent** (whether or not the file exists) **but `<artifacts_dir>/local/credentials.example` exists** → the user filled in the template; **run 0a.10 to promote it** (don't re-run 0a.4 — that would overwrite their edits). This is the *second-profile* path too: the file exists with other profiles but not this one — 0a.10's helper appends deterministically.
    - Neither the section nor the template present → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."*
 3. **Resolve connection fields** from the `[<profile>]` section. Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
-4. **Tool detection.** Read cached tool paths from `~/.agami/.config`; if absent, run detection per Phase 0a.
-5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → `~/.agami/.config.artifacts_dir` → `$HOME/agami-artifacts`. The model lives in `<artifacts_dir>/<profile>/`. Create lazily (`mkdir -p … && chmod 755 …`).
+4. **Tool detection.** Read cached tool paths from `<artifacts_dir>/local/.config`; if absent, run detection per Phase 0a.
+5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → the one-line pointer at `~/.config/agami/path` → `$HOME/agami-artifacts` (per [`shared/file-layout.md`](../../shared/file-layout.md)). The model lives in `<artifacts_dir>/<profile>/`; secrets + config in `<artifacts_dir>/local/`. Create lazily (`mkdir -p … && chmod 755 …`).
 6. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
 7. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
 
@@ -91,11 +91,16 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 ## Phase 0a: First-time credential bootstrap
 
-**Runs only when preflight step 2 failed (credentials missing).** If `~/.agami/credentials` already has the `[<profile>]` section, **skip Phase 0a entirely.**
+**Runs only when preflight step 2 failed (credentials missing).** If `<artifacts_dir>/local/credentials` already has the `[<profile>]` section, **skip Phase 0a entirely.**
 
-### 0a.1 — Set up `~/.agami/`
+### 0a.1 — Set up `<artifacts_dir>/local/`
 ```bash
-mkdir -p ~/.agami && chmod 700 ~/.agami
+mkdir -p "<artifacts_dir>/local" && chmod 700 "<artifacts_dir>/local"
+```
+If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`:
+```bash
+mkdir -p ~/.config/agami && printf '%s\n' "<artifacts_dir>" > ~/.config/agami/path
+grep -qxF 'local/' "<artifacts_dir>/.gitignore" 2>/dev/null || printf 'local/\n' >> "<artifacts_dir>/.gitignore"
 ```
 
 ### 0a.2 — Ask the database type
@@ -124,17 +129,17 @@ Ask the user to **name** this connection — don't pick for them. The name is ho
 **AskUserQuestion**, with the **Other** free-text as the encouraged path (that's where they type their own name):
 > What should I call this database? Pick a name you'll recognize when you connect more than one — e.g. your database or product name, or an environment.
 
-Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; **and not already a `[section]` in `~/.agami/credentials`** (a profile name is a unique key — reusing one would clash). If it fails either rule, show the reason and re-ask. (The 0a.10 promote helper enforces the uniqueness backstop too — it returns `COLLISION` rather than overwrite — but catch it here so the user isn't surprised later.)
+Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; **and not already a `[section]` in `<artifacts_dir>/local/credentials`** (a profile name is a unique key — reusing one would clash). If it fails either rule, show the reason and re-ask. (The 0a.10 promote helper enforces the uniqueness backstop too — it returns `COLLISION` rather than overwrite — but catch it here so the user isn't surprised later.)
 
-### 0a.4 — Write `~/.agami/credentials.example`
+### 0a.4 — Write `<artifacts_dir>/local/credentials.example`
 
 Use the **Write tool**. Shared header first, then the `$DB_TYPE` body with `[$PROFILE_NAME]` as the section.
 
 **Header:**
 ```ini
-# ~/.agami/credentials.example
+# <artifacts_dir>/local/credentials.example
 # Fill in your values below, then come back and say "introspect my database".
-# agami moves this file to ~/.agami/credentials and chmod-600s it for you — no
+# agami moves this file to <artifacts_dir>/local/credentials and chmod-600s it for you — no
 # manual save or chmod needed. (Don't rename it yourself.)
 # Format reference: plugins/agami/shared/credentials-format.md
 # Switch profiles with AGAMI_PROFILE=<name>.
@@ -203,7 +208,7 @@ For BigQuery / Databricks / any key-or-token file: remind the user to `chmod 600
 
 ### 0a.5 — Resolve the agami interpreter + detect tools
 
-**First resolve the ONE Python agami uses for everything** — the model *and* DB connections. Call it `$PY`. This matters: **introspection always runs `scripts/execute_sql.py` under this interpreter** (via `sm`/`sys.executable`), on *every* tier — even when `psql` is installed. So the DB driver must live in `$PY`. The `sm` wrapper and the engine both read this interpreter from `~/.agami/.config`, so resolving it once here removes all interpreter guessing — **no environment variables, the user sets nothing.**
+**First resolve the ONE Python agami uses for everything** — the model *and* DB connections. Call it `$PY`. This matters: **introspection always runs `scripts/execute_sql.py` under this interpreter** (via `sm`/`sys.executable`), on *every* tier — even when `psql` is installed. So the DB driver must live in `$PY`. The `sm` wrapper and the engine both read this interpreter from `<artifacts_dir>/local/.config`, so resolving it once here removes all interpreter guessing — **no environment variables, the user sets nothing.**
 
 **Discover it automatically — prefer an interpreter that already has the DB driver** (so a user whose driver lives in a venv / framework / Homebrew Python is used as-is, with zero install). Probe a bounded candidate list for the `$DB_TYPE` driver + the model deps; first full match wins:
 
@@ -267,7 +272,7 @@ On **Yes**: `"$PY" -m pip install --user -r "$AGAMI_PLUGIN_ROOT/scripts/semantic
 
 Detect the OS once so the options are platform-native — `uname -s` (`Darwin` = macOS, `Linux` = Linux) or treat `$OS == Windows_NT` / a `MINGW*`/`MSYS*` uname as Windows. Then **AskUserQuestion** with the two defaults for that OS as named options (Recommended first). The auto-provided **Other** lets the user type any absolute path — so this both gives sensible options *and* allows a full custom path:
 
-> Where should agami save your semantic model, examples, and preferences? This is the **parent** for ALL profiles — each lands in `<artifacts_dir>/<profile>/`. It's non-secret (no credentials) — point it inside a git repo to share the tuned model with your team. Credentials stay in `~/.agami/` regardless.
+> Where should agami save your semantic model, examples, and preferences? This is the **parent** for ALL profiles — each lands in `<artifacts_dir>/<profile>/`. It's non-secret (no credentials) — point it inside a git repo to share the tuned model with your team. Credentials stay in `<artifacts_dir>/local/` regardless.
 
 | OS | Option 1 — Recommended | Option 2 |
 |---|---|---|
@@ -275,9 +280,9 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
 | Linux | `~/agami-artifacts` | `~/Documents/agami-artifacts` |
 | Windows | `%USERPROFILE%\agami-artifacts` | `%USERPROFILE%\Documents\agami-artifacts` |
 
-(For Other, suggest a team repo path as the example, e.g. `~/code/acme-data/agami`.) Expand `~` / `%USERPROFILE%` to an absolute path. Validate: absolute, not inside `~/.agami/`, parent creatable. Store the **resolved absolute path** in `.config.artifacts_dir`.
+(For Other, suggest a team repo path as the example, e.g. `~/code/acme-data/agami`.) Expand `~` / `%USERPROFILE%` to an absolute path. Validate: absolute, not inside `<artifacts_dir>/local/`, parent creatable. Store the **resolved absolute path** in `.config.artifacts_dir`.
 
-### 0a.7 — Write `~/.agami/.config`
+### 0a.7 — Write `<artifacts_dir>/local/.config`
 ```json
 {
   "schema_version": 1,
@@ -288,20 +293,20 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
   "detected_at": "<ISO8601 UTC from `date -u +%Y-%m-%dT%H:%M:%SZ`>"
 }
 ```
-`python3` MUST be the `$PY` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 ~/.agami/.config`.
+`python3` MUST be the `$PY` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 <artifacts_dir>/local/.config`.
 
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
-Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `~/.agami/USER_MEMORY.md` if present.
+Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
 
 ### 0a.9 — Hand-off + END THE TURN
 ```
-✓ ~/.agami/ ready (chmod 700)
-✓ Credentials template → ~/.agami/credentials.example
+✓ <artifacts_dir>/local/ ready (chmod 700)
+✓ Credentials template → <artifacts_dir>/local/credentials.example
 ✓ Tool detected: <tool> (<tier>)
 ✓ Artifacts dir: <resolved path>
 
 Next:
-1. Open ~/.agami/credentials.example and fill in your real connection details
+1. Open <artifacts_dir>/local/credentials.example and fill in your real connection details
    (keep the filename as-is — don't rename it).
 2. Come back and say "introspect my database" — I'll secure the file and run the
    full introspect → enrich → seed flow.
@@ -312,7 +317,7 @@ step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
 **End the turn.** Do NOT continue to Phase 1.
 
 ### 0a.10 — On re-entry: promote the filled-in template, then continue
-The user filled in `~/.agami/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
+The user filled in `<artifacts_dir>/local/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/promote_credentials.py"
@@ -353,7 +358,7 @@ Surface a one-liner with per-step estimates and **narrate per-table progress** s
 If `<artifacts_dir>/<profile>/org.yaml` exists and `$ARGUMENTS != reintrospect`: the profile is already onboarded. Offer (AskUserQuestion, no `(Recommended)` — these are equal-weight choices), capped at 4:
 - **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path).
 - **Open model explorer** — browse + curate the existing model and review/sign off the trust layer (`/agami-model`).
-- **Onboard another database** — set up a **different** database (a different connection) under a **new** profile, leaving `<profile>` untouched. On this choice, **start a fresh onboarding for a new profile**: jump to the profile-naming step (Phase 0a's naming question) → have the user name the new profile (must differ from `<profile>` and any existing `[section]` in `~/.agami/credentials`) and pick its DB type → write that profile's `credentials.example` → run the full flow for it. Never reuse or overwrite the current profile's credentials or model.
+- **Onboard another database** — set up a **different** database (a different connection) under a **new** profile, leaving `<profile>` untouched. On this choice, **start a fresh onboarding for a new profile**: jump to the profile-naming step (Phase 0a's naming question) → have the user name the new profile (must differ from `<profile>` and any existing `[section]` in `<artifacts_dir>/local/credentials`) and pick its DB type → write that profile's `credentials.example` → run the full flow for it. Never reuse or overwrite the current profile's credentials or model.
 - **Cancel** — do nothing; the model is ready to query.
 
 **Same DB, another *schema*? That's the Re-introspect path, not "Onboard another database."** If the user wants to add a schema that lives in the **same database** they already onboarded (e.g. they did `public`, now they want `billing` too), choose **Re-introspect** and **expand the schema selection** in Phase 1.3 to include both the old and the new schemas. The engine scans them together in one pass, so any relationship between the original and the new schema is detected as a first-class **cross-schema** join (Case 1) and surfaced for review. Picking "Onboard another database" instead would split the two schemas into separate models and demote any link between them to manual cross-profile glue (Phase 2b federation) — wrong for one DB. If you're unsure which the user means, ask: *"Is `billing` in the same database connection as `<profile>`, or a different server/database?"* — same connection → Re-introspect + expand schemas; different → new profile.
@@ -660,7 +665,7 @@ The user reviews matches (green) / mismatches (red) with drill-down. This is the
 
 Hand-off line (then end the turn):
 ```
-Examples validated against your live DB → ~/.agami/examples-validation/<profile>/<ts>.html
+Examples validated against your live DB → <artifacts_dir>/local/examples-validation/<profile>/<ts>.html
 Open it: green = numbers match, red = mismatch (drill in to see the SQL).
 Reply: approve N · reject N · edit N · done (when you're through).
 ```
@@ -771,20 +776,20 @@ End the turn. Picking a number routes the question into query-database. Keep eac
 
 ## Phase 8.5: Cross-profile link offer (ONLY when ≥2 profiles now exist)
 
-**Gate:** run this **only** when, after this onboarding, the user has **two or more** onboarded profiles (count distinct onboarded profiles — `<artifacts_dir>/*/org.yaml`, or `[section]`s in `~/.agami/credentials`). Skip entirely for the first/only profile, and skip on a plain `reintrospect` of a single-profile setup. This is the **cross-datasource** case — different databases, joined at query time via federation (Phase 2b.federation in agami-query), declared in `~/.agami/cross_profile_relationships.yaml`. Unlike cross-*schema* joins (same DB, auto-detected — Case 1), cross-*profile* links are **never** auto-detected at introspection: each profile is a separate connection, so there's nothing to confirm by overlap.
+**Gate:** run this **only** when, after this onboarding, the user has **two or more** onboarded profiles (count distinct onboarded profiles — `<artifacts_dir>/*/org.yaml`, or `[section]`s in `<artifacts_dir>/local/credentials`). Skip entirely for the first/only profile, and skip on a plain `reintrospect` of a single-profile setup. This is the **cross-datasource** case — different databases, joined at query time via federation (Phase 2b.federation in agami-query), declared in `<artifacts_dir>/local/cross_profile_relationships.yaml`. Unlike cross-*schema* joins (same DB, auto-detected — Case 1), cross-*profile* links are **never** auto-detected at introspection: each profile is a separate connection, so there's nothing to confirm by overlap.
 
 **Ask (opt-in, AskUserQuestion):**
 > You now have <N> databases connected (`<profileA>`, `<profileB>`, …). Want me to look for likely links between them — so you can ask questions that span both (e.g. join `<profileA>`'s data to `<profileB>`'s)?
 
 Options (no `(Recommended)` — it's the user's call): `Yes — look for links` / `Not now` (default).
 
-**On "Not now":** one line — *"No problem. Say 'link my databases' anytime, or hand-edit `~/.agami/cross_profile_relationships.yaml`."* End.
+**On "Not now":** one line — *"No problem. Say 'link my databases' anytime, or hand-edit `<artifacts_dir>/local/cross_profile_relationships.yaml`."* End.
 
 **On "Yes":**
 1. **Propose candidates by name+type** — compare the just-onboarded profile's columns against the other profile(s)' columns (read each model's tables/columns; no DB access needed). A candidate is a column pair with the **same or obviously-equivalent name** (`dept_id` ↔ `department_id`, `customer_id` ↔ `cust_id`) **and a compatible type**, where one side is a key/grain column. Rank by name closeness.
 2. **Be honest about confidence.** Say plainly: *"These are name/type guesses — I can't sample-join across two separate databases to confirm them, so they're lower-confidence than the joins inside one DB. They'll prove out the first time a federated query uses them."* Never present them as confirmed.
 3. **Confirm each, never auto-write.** Show the candidates (`<profileA>.<schema>.<table>.<col>  →  <profileB>.<schema>.<table>.<col>`) and let the user pick which to keep (multi-select) or skip all.
-4. **Write the confirmed ones** to `~/.agami/cross_profile_relationships.yaml` in the format [agami-query expects](../agami-query/SKILL.md) — **merge**, never clobber an existing file (load it, append new entries, dedup by the `from_profile/from_dataset/to_profile/to_dataset` tuple), `chmod 600`:
+4. **Write the confirmed ones** to `<artifacts_dir>/local/cross_profile_relationships.yaml` in the format [agami-query expects](../agami-query/SKILL.md) — **merge**, never clobber an existing file (load it, append new entries, dedup by the `from_profile/from_dataset/to_profile/to_dataset` tuple), `chmod 600`:
    ```yaml
    version: "0.1.1"
    relationships:
@@ -797,7 +802,7 @@ Options (no `(Recommended)` — it's the user's call): `Yes — look for links` 
        to_columns: [<col>]
        description: <one line — what the link means, in the user's terms>
    ```
-5. **Confirm where it landed** — *"Saved <K> cross-database link(s) to `~/.agami/cross_profile_relationships.yaml`. A question that spans both DBs will now use them (federated via DuckDB). I'll flag low confidence on the first answer that does."* Don't block; this is additive.
+5. **Confirm where it landed** — *"Saved <K> cross-database link(s) to `<artifacts_dir>/local/cross_profile_relationships.yaml`. A question that spans both DBs will now use them (federated via DuckDB). I'll flag low confidence on the first answer that does."* Don't block; this is additive.
 
 ---
 
@@ -806,11 +811,11 @@ Options (no `(Recommended)` — it's the user's call): `Yes — look for links` 
 | Symptom | Action |
 |---|---|
 | Credentials chmod wrong | Refuse, offer to `chmod 600` |
-| Cached connection tool no longer works | Re-detect, update `~/.agami/.config` |
+| Cached connection tool no longer works | Re-detect, update `<artifacts_dir>/local/.config` |
 | Catalog denied (no `information_schema`/PRAGMA/dict access) | Engine falls back to probe mode; if even table enumeration is denied, ask for the table allowlist (Phase 1.2) |
 | Introspection SQL fails | Route through `db_error_classifier.md`; surface the one-line remediation |
 | **Validator fails** | **Model is NOT persisted. Show errors verbatim, fix, re-validate.** |
-| EXPLAIN fails for a seed | Auto-fix once → else move to `~/.agami/.rejected/`. Don't block. |
+| EXPLAIN fails for a seed | Auto-fix once → else move to `<artifacts_dir>/local/.rejected/`. Don't block. |
 | Reintrospect would lose hand-edits | Phase 2e — preserve descriptions, entities, metrics, caveats, sign-offs |
 | Legacy (v1) model at the profile root | Engine backs it up to `.legacy_backup/` before writing; surface a one-liner |
 | Unsupported engine (MongoDB, Cassandra, …) | "Not supported yet — supported: Postgres/Redshift/Supabase, MySQL, Snowflake, BigQuery, SQL Server, Oracle, Databricks, Trino, DuckDB, SQLite." |

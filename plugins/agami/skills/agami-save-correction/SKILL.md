@@ -39,15 +39,15 @@ If plan mode is not active, skip this phase silently and go to Phase 1.
 
 ### 1a — resolve the active profile and artifacts_dir
 
-Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback).
+Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `<artifacts_dir>/local/.config` → literal string `"default"` (legacy fallback).
 
-Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / model / ORGANIZATION.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
+Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `<artifacts_dir>/local/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / model / ORGANIZATION.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
 
-For v1.0 / v1.1 fallback paths (`~/.agami/<profile>.yaml`, `~/.agami/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
+For v1.0 / v1.1 fallback paths (`<artifacts_dir>/local/<profile>.yaml`, `<artifacts_dir>/local/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
 
 ### 1b — find the most recent query
 
-Read the last entry in `~/.agami/query_log.jsonl`. Need `question` and `sql`.
+Read the last entry in `<artifacts_dir>/local/query_log.jsonl`. Need `question` and `sql`.
 
 If the log is empty: "I don't have a recent query to attach this correction to. Ask the question first, then save the correction." Stop.
 
@@ -60,7 +60,7 @@ Determine what the user gave:
 
 ### 1d — EXPLAIN-validate the corrected SQL
 
-Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `~/.agami/.config`. Same validate-then-save contract as `agami-connect/SKILL.md` Phase 5b:
+Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `<artifacts_dir>/local/.config`. Same validate-then-save contract as `agami-connect/SKILL.md` Phase 5b:
 
 - EXPLAIN succeeds → continue.
 - EXPLAIN fails → route through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Surface the one-line remediation. Do **not** save anything. Ask the user to fix the SQL and try again.

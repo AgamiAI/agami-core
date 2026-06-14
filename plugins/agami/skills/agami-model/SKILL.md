@@ -11,7 +11,7 @@ You are running the unified **model + trust** surface — one dashboard to brows
 
 This skill orchestrates:
 
-1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `~/.agami/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**. The dashboard has tabs: **Organization · Review · Subject areas · Tables · Metrics · Entities · Joins · Examples · Queued**. The **Review** tab is the sign-off queue (the old `/agami-review`); pass `--initial-tab review` to open on it.
+1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `<artifacts_dir>/local/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**. The dashboard has tabs: **Organization · Review · Subject areas · Tables · Metrics · Entities · Joins · Examples · Queued**. The **Review** tab is the sign-off queue (the old `/agami-review`); pass `--initial-tab review` to open on it.
 2. **Open + wait** — auto-open the file, end the turn, wait for the user to come back with a "Generate feedback for Claude" block (exclude/include, approve/reject, edits, new metrics, org edit).
 3. **Apply** — for each batch, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state / stamps sign-off, runs the validator, reverts via git on failure, appends to `curation_log.jsonl`, and commits.
 4. **Re-render** — render to a new timestamped file and re-open. Wait for the next batch.
@@ -31,8 +31,8 @@ Trust-spine semantics — three actions on the same `review_state` field:
 
 ## Phase 0: Preflight
 
-- **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/model/<profile>/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
-- **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `~/.agami/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
+- **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `<artifacts_dir>/local/model/<profile>/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
+- **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
 - **If `<artifacts_dir>/<profile>/org.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
 - **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
 
@@ -40,14 +40,14 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - `review`, `preseed`, or `rule1` → the user wants the sign-off queue: render with `--initial-tab review` so the dashboard opens on the Review tab. (`preseed`/`rule1` come from `/agami-connect`'s Phase 4 gate — the Review tab already groups Rule 1 metrics under "Needs your eyes", so no separate scope filter is needed; the user signs those off there.)
 - otherwise → no `--initial-tab` (opens on Tables).
 
-**Resolve the curator's identity** (needed to stamp sign-off on Approve ops, and for `curation_log.jsonl` + git commits). The **primary path is the dashboard's footer** — the user types their email + picks a role there, and it rides back on the `signed-off-by:` feedback line (Phase 2). So you usually don't ask at all. Only if a batch arrives with approvals but **no** `signed-off-by:` line, fall back to `~/.agami/.config` (`reviewer_email`/`reviewer_role`); and only if those are absent too, ask once — both at once:
+**Resolve the curator's identity** (needed to stamp sign-off on Approve ops, and for `curation_log.jsonl` + git commits). The **primary path is the dashboard's footer** — the user types their email + picks a role there, and it rides back on the `signed-off-by:` feedback line (Phase 2). So you usually don't ask at all. Only if a batch arrives with approvals but **no** `signed-off-by:` line, fall back to `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`); and only if those are absent too, ask once — both at once:
 > To sign off entries I need your email and role. Reply like: `you@company.com / data_lead`
 >
 > Roles: `CFO`, `CTO`, `Data Lead`, `Engineer`, `Analyst`, or type your own.
 >
-> I'll save these to `~/.agami/.config` so I don't ask again.
+> I'll save these to `<artifacts_dir>/local/.config` so I don't ask again.
 
-Parse on `/`, trim, validate email against `\S+@\S+\.\S+`; accept any non-empty role string (≤ 40 chars). Re-prompt only on a bad email. **Persist** by merging `reviewer_email`/`reviewer_role` into `~/.agami/.config` (preserve existing keys), then `chmod 600 ~/.agami/.config`. **Do NOT infer the email from any source** — not git config / env / credentials, **and not the Claude Code login / session email** (the host exposes it, but using it produces a silently-wrong audit trail). The sign-off identity must be typed by the user; don't even pre-fill the domain. Exclude/edit-only sessions don't need the role — only resolve it lazily when an Approve is in the batch.
+Parse on `/`, trim, validate email against `\S+@\S+\.\S+`; accept any non-empty role string (≤ 40 chars). Re-prompt only on a bad email. **Persist** by merging `reviewer_email`/`reviewer_role` into `<artifacts_dir>/local/.config` (preserve existing keys), then `chmod 600 <artifacts_dir>/local/.config`. **Do NOT infer the email from any source** — not git config / env / credentials, **and not the Claude Code login / session email** (the host exposes it, but using it produces a silently-wrong audit trail). The sign-off identity must be typed by the user; don't even pre-fill the domain. Exclude/edit-only sessions don't need the role — only resolve it lazily when an Approve is in the batch.
 
 ---
 
@@ -56,7 +56,7 @@ Parse on `/`, trim, validate email against `\S+@\S+\.\S+`; accept any non-empty 
 ```bash
 ts=$(date -u +%Y%m%d-%H%M%S)
 # Per-profile subdir so multi-profile users can tell renders apart.
-mkdir -p ~/.agami/model/"$profile"
+mkdir -p <artifacts_dir>/local/model/"$profile"
 out="$HOME/.agami/model/$profile/$ts.html"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
   --profile "$profile" \
@@ -71,7 +71,7 @@ Set `initial_tab=review` when `$ARGUMENTS` was `review`/`preseed`/`rule1` (Phase
 
 ```
 Model dashboard rendered — <N> schema(s) · <M> tables · <K> fields · <R> to review.
-~/.agami/model/<profile>/<ts>.html
+<artifacts_dir>/local/model/<profile>/<ts>.html
 
 Tabs: Organization · Review · Subject areas · Tables · Metrics · Entities ·
 Joins · Examples · Queued. Live search + status filters per tab.
@@ -139,7 +139,7 @@ Where `<qname-list>` is comma-separated, whitespace-tolerant:
 - Column qname: `<area>.<table>.<column>` (e.g., `sales.CUSTOMERS.EMAIL`)
 
 A header line + four optional blocks may follow (the dashboard emits whichever applies):
-- **`signed-off-by: <email> / <role>`** (header, present only when the batch has approvals) — the curator's sign-off identity, entered at the top of the dashboard's Review tab. **Use it for `--signer`/`--role`** when applying, and **persist** `reviewer_email`/`reviewer_role` into `~/.agami/.config` (preserve other keys; `chmod 600`) so future sessions don't re-ask. If a batch contains approvals but this line is **absent**, fall back to `~/.agami/.config` (`reviewer_email`/`reviewer_role`), then to the Phase 0 ask. Validate the email against `\S+@\S+\.\S+`; the role is a short free-text string (the picker offers CFO / CTO / Data Lead / Engineer / Analyst, but "Other" lets the user type their own — accept any non-empty value ≤ 40 chars; don't reject a custom role).
+- **`signed-off-by: <email> / <role>`** (header, present only when the batch has approvals) — the curator's sign-off identity, entered at the top of the dashboard's Review tab. **Use it for `--signer`/`--role`** when applying, and **persist** `reviewer_email`/`reviewer_role` into `<artifacts_dir>/local/.config` (preserve other keys; `chmod 600`) so future sessions don't re-ask. If a batch contains approvals but this line is **absent**, fall back to `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`), then to the Phase 0 ask. Validate the email against `\S+@\S+\.\S+`; the role is a short free-text string (the picker offers CFO / CTO / Data Lead / Engineer / Analyst, but "Other" lets the user type their own — accept any non-empty value ≤ 40 chars; don't reject a custom role).
 - **`curate-ops:`** — the unified ops array. Holds **approve / reject(exclude) / include** on metrics/entities/relationships AND field **edits** (`op:"edit"` with `field`/`value`). Already a valid curate ops array; merge it verbatim with the table/column ops below and apply via one `sm curate` call. **`approve` ops carry an `at` timestamp** (the dashboard stamps it) and require the curator's `--signer`/`--role` from the `signed-off-by:` line — the validator rejects an approved entry with no sign-off stamp. **Rule 1 guard:** before applying an `approve` on a metric, confirm its `calculation` is non-empty (the dashboard always has one for user-authored metrics; for an introspected metric with an empty calculation, ask the user to fill it via an `edit` first).
 - **`example-edits:`** — edited prompt examples `[{area, question, sql, source, status}]`. Group by `area` and apply each group with `sm add-example "$ROOT" --area <area> --file <json>` (it dedups by `question`, so an edit replaces the prior example). Write the per-area JSON with the **Write tool**.
 - **`new-metrics:`** — metrics the user authored in the dashboard's "Add metric" form `[{area, name, description, calculation, bindings, source_tables, other_names, unit?, confidence}]`. Group by `area` and create each group with `sm add "$ROOT" --kind metric --area <area> --file <json>` (validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, reverts the batch on failure). Write the per-area JSON with the **Write tool** — it's already in the `sm add` shape, so pass it through verbatim. A user-authored metric is `confidence: proposed` and still needs sign-off (approve it on the Review tab).
@@ -211,7 +211,7 @@ Auto-open the new path. Surface the new file path in the chat ack:
 
 ```
 ✓ Applied: 2 tables excluded, 2 columns excluded. Re-rendered.
-~/.agami/model/<profile>/<new-ts>.html
+<artifacts_dir>/local/model/<profile>/<new-ts>.html
 (Previous tab is stale and can be closed.)
 ```
 
@@ -270,7 +270,7 @@ Reject (on the Review tab or any metric/entity/join card) and Exclude (on tables
 ```
 You: open the model explorer
 
-[skill renders ~/.agami/model/main/20260512-101500.html and opens it]
+[skill renders <artifacts_dir>/local/model/main/20260512-101500.html and opens it]
 
 You (in dashboard): search "ssn" → toggle Exclude on every SSN/EMAIL
                     field → click Generate feedback → paste back in chat:
@@ -283,7 +283,7 @@ done
 [skill applies, validator passes, commits, re-renders]
 
 agami: ✓ Applied: 3 columns excluded. Re-rendered.
-       ~/.agami/model/main/20260512-101830.html
+       <artifacts_dir>/local/model/main/20260512-101830.html
 ```
 
 ### Removing staging tables
