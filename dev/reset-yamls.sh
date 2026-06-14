@@ -28,12 +28,12 @@
 #
 # Usage:
 #   dev/reset-yamls.sh                                       # default profile, soft reset
-#   dev/reset-yamls.sh finbud                                # specific profile, soft reset
-#   dev/reset-yamls.sh finbud --hard                         # also drop ORGANIZATION.md + .git/ + logs
-#   dev/reset-yamls.sh finbud --clean-renders                # also drop <artifacts_dir>/local/<kind>/finbud/* (this profile only)
-#   dev/reset-yamls.sh finbud --clean-renders-all            # wipe legacy flat-layout files + every profile
-#   dev/reset-yamls.sh finbud --hard --clean-renders         # full per-profile wipe
-#   dev/reset-yamls.sh finbud --dry-run                      # show what would be deleted, do nothing
+#   dev/reset-yamls.sh acme                                # specific profile, soft reset
+#   dev/reset-yamls.sh acme --hard                         # also drop ORGANIZATION.md + .git/ + logs
+#   dev/reset-yamls.sh acme --clean-renders                # also drop <artifacts_dir>/local/<kind>/acme/* (this profile only)
+#   dev/reset-yamls.sh acme --clean-renders-all            # wipe legacy flat-layout files + every profile
+#   dev/reset-yamls.sh acme --hard --clean-renders         # full per-profile wipe
+#   dev/reset-yamls.sh acme --dry-run                      # show what would be deleted, do nothing
 #
 # Env:
 #   AGAMI_ARTIFACTS_DIR (default: $HOME/agami-artifacts)
