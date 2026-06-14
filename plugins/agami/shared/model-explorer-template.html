@@ -723,9 +723,7 @@
     const colGroupClosed = new Set();  // group ids the user explicitly CLOSED
     let addMetricOpen = false;
     let searchQ = '';
-    let _initTab = (manifest.initial_tab || 'tables');
-    if (!TABS.some(t => t.id === _initTab)) _initTab = 'tables';  // ignore retired tabs (e.g. 'areas')
-    let activeTab = _initTab;
+    let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
     let activeFilter = 'all';
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
@@ -760,6 +758,7 @@
       { id: 'examples',     label: 'Examples' },
       { id: 'queued',       label: 'Queued' },
     ];
+    if (!TABS.some(t => t.id === activeTab)) activeTab = 'tables';  // ignore a retired initial tab (e.g. 'areas')
     // Tabs that show entity cards filterable by status (search + All/Active/Excluded/Unreviewed)
     const FILTERABLE_TABS = new Set(['tables', 'metrics', 'entities', 'joins', 'examples']);
 
