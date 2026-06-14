@@ -631,23 +631,26 @@ I split <N> tables into <A> subject areas:
 
 Seeds reference **columns, tables, metrics, and entities** — so settle those *before* generating examples (a seed that uses a column you'd later exclude breaks at query time, and a seed built on an unreviewed metric bakes in a guessed definition). **Relationships are NOT gated here** — they stay lazy: FK joins are already auto-approved by the engine (the DB declared them), and inferred joins self-approve as you query / surface as receipt warnings. So you're not asked to rubber-stamp database-declared foreign keys.
 
-**4a — Exclude columns/tables you don't want queried.** Two parts:
+**4a — The curate gate: open the explorer whenever there's anything to curate.** Compute two deterministic counts (both turn-boundary-safe, so this is identical on a fresh run or a resume):
 
-**(i) Proactively surface what introspection flagged `sensitive`** — group the flagged columns by table/kind and offer the riskiest as a **multiSelect** quick-exclude, secrets first (a plaintext password / access-code column → *"strongly recommend dropping"*). **Cap at the 3 riskiest groups** — never try to enumerate every sensitive column, the modal only holds 4 options.
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" sensitive "$ROOT"               # → .count  (columns flagged PII)
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed   # length = sign-off count
+```
+- **PII count** — columns introspection (or a curator) flagged `sensitive` **that are still queryable** (already-excluded columns, and any column under an excluded table, are not counted — so once the user excludes the flagged columns this drops to 0 and the gate stops re-opening).
+- **Sign-off count** — metrics + named-filters + entities needing review (relationships are NOT gated — they stay lazy: FK joins are engine-approved, inferred joins self-approve as you query).
 
-**(ii) ALWAYS include "Open the model explorer" as an option** — it's the real bulk-exclude surface (per-table/column Exclude toggles + Mark-PII), and there are almost always more exclusions than fit in a modal. If the user picks it **or answers Other** ("there are a bunch more I want to exclude"), **do NOT parse a free-text list of tables** — invoke `/agami-model`, **end the turn**, and wait for their exclude batch.
+**If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface: per-column **Exclude** toggles + **Mark-PII** on the flagged columns, and the **Review** tab where metrics/entities sit under "Needs your eyes." Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns (customer names, GPS) and 5 metrics to sign off — opening the model explorer so you can exclude/mark those and review. Send the feedback block back when you're done."* — then **stop and wait** for their batch.
 
-`AskUserQuestion` shape: each detected group is a checkbox (e.g. `users.access_code_plain + _hash — plaintext/hashed login secrets, recommend dropping`), plus **Open the model explorer (to exclude more)** and **Nothing to exclude — continue**. Apply the checked groups via the model-explorer curate path; route the explorer/Other choice to `/agami-model`. The loader then drops every exclusion so seeds never reference them.
+**Do NOT** present an inline `AskUserQuestion` to quick-exclude a few columns, and do NOT offer "continue now vs open explorer" here. The explorer **is** the exclude-and-review surface; a 4-option modal holds a fraction of what a real DB needs dropped, and splitting PII exclusion across a modal + the explorer is exactly the fragmented flow we're removing. (This replaces the old inline PII multiSelect — PII now routes through the explorer like every other exclusion.)
 
-> **MANDATORY: include the explicit "Nothing to exclude — continue" option, and NEVER tell the user to "leave all unchecked."** `AskUserQuestion` cannot be submitted with zero boxes checked — so "keep everything" must be a *selectable* option, not an implied empty state. A modal whose only escape is "leave it blank" traps a user who doesn't want any of the listed exclusions (they can't submit). Phrase the prompt as "check any to drop, or pick *Nothing to exclude — continue*" — do **not** write "leave all unchecked to keep everything."
+**If BOTH counts are 0 → surface "Nothing to curate before examples — proceeding"** and continue to Phase 5.
 
-**4b — Sign off metrics + entities.** These define what seeds *mean* and *say*. Count via `sm review-items "$ROOT" --scope preseed` — its length is the sign-off count (metrics + named-filters + entities needing review; relationships excluded). If **0**, surface the one-liner ("Nothing to sign off before examples — proceeding") and continue to Phase 5. If **> 0**, tell the user upfront, then invoke `/agami-model preseed` (the `preseed` argument opens the dashboard on its **Review** tab, where these metrics + entities sit under "Needs your eyes"). **End the turn** and wait for their approval batch.
+> **This gate OPENS the explorer; it is not a choice.** When either count is > 0 you open `/agami-model preseed` and end the turn. A high count is a reason to open it, not to skip it (bulk-approve the *Looks right* pile, eyeball PII + the cross-schema joins there). The "continue anyway" option exists **only** at the 4b return gate — after the user has been in the explorer at least once.
 
-> **4b is NOT a choice — it OPENS the explorer.** When the count is > 0, you **open `/agami-model preseed` and end the turn**. Do **NOT** present an `AskUserQuestion` offering "continue to examples now" vs "open explorer" here, and do **NOT** mark continuing as Recommended. The explorer-first review is the designed path; a high count (dozens of items across many schema-areas) is a reason to open it, not to skip it (the user bulk-approves the *Looks right* pile and eyeballs the cross-schema joins there). The "continue anyway" option exists **only** at the 4c return gate — i.e. **after** the user has already been in the explorer at least once. Never surface the 4c choice before 4b has opened the explorer.
+**4b — return gate:** when they're back, **recount the sign-offs** (`--scope preseed`). If **0** → Phase 5 (the seed command runs clean). If **> 0** (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **PII left un-excluded does NOT block seeds** — keeping a sensitive column queryable is the user's call; only unreviewed *sign-offs* gate the seeds.
 
-**4c — return gate:** when they're back (they have now opened the explorer at least once), recount via `--scope preseed`. If 0 → Phase 5 (the seed command runs clean). If > 0 (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (to bypass the preseed-review refusal, which is otherwise the engine telling you Phase 4 hasn't happened).
-
-On `reintrospect` with no new exclusions and nothing unreviewed, skip silently.
+On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip silently.
 
 ---
 
@@ -672,7 +675,7 @@ Output `{added, written, committed, rejected:[{question, error}]}`. For each `re
 
 > **The command enforces Phases 2 and 4 for you.** It runs two gates before writing anything:
 > - `{refused: "columns_unenriched", unenriched_tables}` → a table got no column descriptions at all (you skipped the Phase-2 column pass). Go back, run the column pass on those tables, re-run. **NOT bypassable** — naked columns degrade every answer.
-> - `{refused: "preseed_review_pending", pending_count}` → metrics/entities the seeds depend on are still unreviewed (you skipped the explorer-first review). **Go back to Phase 4b**, open `/agami-model preseed`, end the turn. Bypass only via `--after-review`, and **only** on the Phase-4c return path (the user has already been in the explorer and chose to continue with some items unreviewed). Never pass `--after-review` to force past a *fresh* refusal.
+> - `{refused: "preseed_review_pending", pending_count}` → metrics/entities the seeds depend on are still unreviewed (you skipped the explorer-first review). **Go back to Phase 4a**, open `/agami-model preseed`, end the turn. Bypass only via `--after-review`, and **only** on the Phase-4b return path (the user has already been in the explorer and chose to continue with some items unreviewed). Never pass `--after-review` to force past a *fresh* refusal.
 
 ---
 
