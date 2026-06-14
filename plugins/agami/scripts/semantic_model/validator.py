@@ -141,6 +141,7 @@ def validate(org: Organization) -> ValidationResult:
 
     _check_cross_area_entity_collisions(org, res)
     _check_metric_backend_neutrality(org, res)
+    _check_derived_metrics(org, res)
 
     return res
 
@@ -483,6 +484,40 @@ def _check_metric_backend_neutrality(org: Organization, res: ValidationResult) -
                 f"metric {met.name!r} has SQL bindings but no prose calculation "
                 "(backend-neutrality violation)",
             )
+
+
+def _check_derived_metrics(org: Organization, res: ValidationResult) -> None:
+    """Scorecard #1: a derived metric (one composing others via {base} placeholders)
+    must resolve — no cycles, no unknown bases, no illegal second-order nesting. A
+    base over a disjoint grain is a warning (inline composition may be wrong; full
+    grain attribution is #4)."""
+    from . import derived as D
+
+    idx = D.metric_index(org)
+    all_metrics = list(org.cross_subject_area_metrics)
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if not D.is_derived(met):
+            continue
+        for stype in (met.bindings or {}):
+            try:
+                D.expand_binding(met, stype, idx)
+            except D.DerivedError as e:
+                res.error("derived_metric", str(e))
+        # grain sanity: a base sharing no source_table with this metric may be a
+        # cross-grain ratio that inline composition can't get right (deferred to #4).
+        for stype in (met.bindings or {}):
+            for ref in D.binding_refs(met.bindings.get(stype)):
+                base = idx.get(ref)
+                if (base and met.source_tables and base.source_tables
+                        and not (set(met.source_tables) & set(base.source_tables))):
+                    res.warn(
+                        "derived_metric_grain",
+                        f"metric {met.name!r} composes {ref!r} but they share no source "
+                        "table — verify they're at the same grain (cross-grain composition "
+                        "needs the grain-attributed planner, #4)",
+                    )
 
 
 # ---------------------------------------------------------------------------

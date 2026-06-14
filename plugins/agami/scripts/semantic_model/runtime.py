@@ -168,6 +168,8 @@ def resolve_entities(
 def resolve_metrics(
     query: str, org: Organization, *, area: Optional[str] = None, top_k: int = 5
 ) -> list[dict[str, Any]]:
+    from . import derived as _D
+
     q = query.lower()
     ranked: list[tuple[float, dict[str, Any]]] = []
     metrics: list[tuple[Optional[str], Metric]] = []
@@ -178,10 +180,20 @@ def resolve_metrics(
             metrics.append((sa.name, mm))
     for mm in org.cross_subject_area_metrics:
         metrics.append((None, mm))
+    idx = _D.metric_index(org)
     for area_name, mm in metrics:
         names = [mm.name] + list(mm.other_names)
         score = max((_term_score(q, n) for n in names if n), default=0.0)
         if score > 0:
+            # A derived metric surfaces its COMPOSED SQL (base placeholders resolved) so
+            # the generator gets ready-to-run SQL and the single-source-of-truth holds.
+            # Fall back to the raw binding if expansion fails (validator gates the model).
+            bindings = mm.bindings
+            if _D.is_derived(mm):
+                try:
+                    bindings = _D.expanded_bindings(mm, idx)
+                except _D.DerivedError:
+                    bindings = mm.bindings
             ranked.append(
                 (
                     score,
@@ -190,7 +202,7 @@ def resolve_metrics(
                         "subject_area": area_name,
                         "score": round(score, 3),
                         "calculation": mm.calculation,
-                        "bindings": mm.bindings,
+                        "bindings": bindings,
                         "confidence": mm.confidence,
                     },
                 )
