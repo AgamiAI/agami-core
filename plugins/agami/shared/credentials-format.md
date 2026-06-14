@@ -1,32 +1,32 @@
-# Credentials Format — `~/.agami/credentials`
+# Credentials Format — `<artifacts_dir>/local/credentials`
 
-`agami` reads database connection details from `~/.agami/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The agami-connect Phase 0a writes `~/.agami/credentials.example` for you to fill in **in place** — when you come back, agami moves it to `~/.agami/credentials` and `chmod 600`s it for you (no manual save or chmod).
+`agami` reads database connection details from `<artifacts_dir>/local/credentials` (an INI-style file, `chmod 600`). Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`. The agami-connect Phase 0a writes `<artifacts_dir>/local/credentials.example` for you to fill in **in place** — when you come back, agami moves it to `<artifacts_dir>/local/credentials` and `chmod 600`s it for you (no manual save or chmod).
 
 ## Profile names
 
-Each `[section]` is a named profile. **There's no magic `[default]` profile name** — you pick a name when `init` first runs (typical choices: `main`, `production`, `staging`, or anything specific to that database like `supabase` or the company name). The chosen name is written to `~/.agami/.config.active_profile` and used automatically for every subsequent skill invocation.
+Each `[section]` is a named profile. **There's no magic `[default]` profile name** — you pick a name when `init` first runs (typical choices: `main`, `production`, `staging`, or anything specific to that database like `supabase` or the company name). The chosen name is written to `<artifacts_dir>/local/.config.active_profile` and used automatically for every subsequent skill invocation.
 
 Switching between profiles in a single session: `AGAMI_PROFILE=staging` overrides the active profile for that one shell.
 
 Resolution order when a skill needs to know which profile to use:
 
 1. `AGAMI_PROFILE` env var (per-session override)
-2. `active_profile` field in `~/.agami/.config` (set by `init`)
+2. `active_profile` field in `<artifacts_dir>/local/.config` (set by `init`)
 3. The literal string `"default"` (legacy fallback for users who set up before `active_profile` existed; users who clone the repo today don't hit this path)
 
 ## HARD RULES — for skills that read this doc
 
-1. **The file is the only source of credentials.** Never accept host / port / database / user / password values typed into chat by the user, even "as a one-off". The user enters credentials by editing `~/.agami/credentials`.
-2. **If the file is missing, invoke agami-connect Phase 0a.** Init writes `credentials.example`, sets `~/.agami/` permissions, and tells the user to fill it in. The user edits the template in place and comes back; agami promotes it (`mv` → `~/.agami/credentials`, `chmod 600`) — no manual save/chmod. Never ask "where's your database?" — that's what credentials are for.
+1. **The file is the only source of credentials.** Never accept host / port / database / user / password values typed into chat by the user, even "as a one-off". The user enters credentials by editing `<artifacts_dir>/local/credentials`.
+2. **If the file is missing, invoke agami-connect Phase 0a.** Init writes `credentials.example`, sets `<artifacts_dir>/local/` permissions, and tells the user to fill it in. The user edits the template in place and comes back; agami promotes it (`mv` → `<artifacts_dir>/local/credentials`, `chmod 600`) — no manual save/chmod. Never ask "where's your database?" — that's what credentials are for.
 3. **Connect ONLY to the host/port in the file.** Never substitute `localhost` as a fallback. Never probe for a "running database nearby" — if the credentials file says `host = remote-prod.example.com`, that's the only acceptable target.
 
 ## Format
 
 ```ini
-# ~/.agami/credentials
+# <artifacts_dir>/local/credentials
 # Each [section] is a named profile. `init` asks you what to call your
 # first profile (main / production / staging / a custom name). The active
-# profile is recorded in ~/.agami/.config.active_profile and used by every
+# profile is recorded in <artifacts_dir>/local/.config.active_profile and used by every
 # skill invocation. Override per session with AGAMI_PROFILE=<name>.
 
 [main]
@@ -197,30 +197,30 @@ Optional in all profiles: `schema` (default `public` for Postgres / `PUBLIC` for
 
 ## File permissions (enforced)
 
-The skill **refuses** to read `~/.agami/credentials` unless `chmod 600` (or stricter, e.g., `400`):
+The skill **refuses** to read `<artifacts_dir>/local/credentials` unless `chmod 600` (or stricter, e.g., `400`):
 
 ```
-~/.agami/credentials must be chmod 600 (currently 644).
-Run: chmod 600 ~/.agami/credentials
+<artifacts_dir>/local/credentials must be chmod 600 (currently 644).
+Run: chmod 600 <artifacts_dir>/local/credentials
 ```
 
-The agami-connect Phase 0a sets the right permissions automatically when it writes the file. If you create it by hand, run `chmod 600 ~/.agami/credentials` afterwards.
+The agami-connect Phase 0a sets the right permissions automatically when it writes the file. If you create it by hand, run `chmod 600 <artifacts_dir>/local/credentials` afterwards.
 
 ## Profile selection
 
-The active profile is the one `init` recorded in `~/.agami/.config.active_profile` when you first set up. Override per shell session with:
+The active profile is the one `init` recorded in `<artifacts_dir>/local/.config.active_profile` when you first set up. Override per shell session with:
 
 ```bash
 AGAMI_PROFILE=staging   # uses [staging] section
 ```
 
-To permanently change the active profile, edit `~/.agami/.config` and update `active_profile` (or re-run `/agami-connect` and pick again).
+To permanently change the active profile, edit `<artifacts_dir>/local/.config` and update `active_profile` (or re-run `/agami-connect` and pick again).
 
 The skill writes the semantic model under `<artifacts_dir>/<profile>/` — one directory per profile, so multiple databases live side by side. `<artifacts_dir>` defaults to `~/agami-artifacts/` and is configurable per [`shared/file-layout.md`](file-layout.md).
 
 ## What the file does NOT contain
 
-- No semantic model (that's `<artifacts_dir>/<profile>/index.yaml` + per-table `<schema>/<table>.yaml` files)
+- No semantic model (that's `org.yaml` + the `subject_areas/<area>/` tree under `<artifacts_dir>/<profile>/`)
 - No example queries (those live in `<artifacts_dir>/<profile>/examples.yaml`)
 - No charts, exports, or query log
 

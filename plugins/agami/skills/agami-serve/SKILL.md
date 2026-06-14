@@ -1,6 +1,6 @@
 ---
 name: agami-serve
-description: "Wires the local agami MCP server (mcp_server.py) into the Claude Desktop app in one step, so you can ask your database questions from Claude Desktop — not just inside Claude Code. Auto-detects the right Python interpreter (the one with your DB driver), copies the two self-contained server files to a stable ~/.agami/serve/ so the config survives plugin updates, and safely merges the entry into claude_desktop_config.json (backup + atomic write, preserving every other key). The local server is the mirror of the hosted Agami connector — same tools, local backend — so this is also how a developer feels the exact experience their business end-users would get."
+description: "Wires the local agami MCP server (mcp_server.py) into the Claude Desktop app in one step, so you can ask your database questions from Claude Desktop — not just inside Claude Code. Auto-detects the right Python interpreter (the one with your DB driver), copies the two self-contained server files to a stable <artifacts_dir>/local/serve/ so the config survives plugin updates, and safely merges the entry into claude_desktop_config.json (backup + atomic write, preserving every other key). The local server is the mirror of the hosted Agami connector — same tools, local backend — so this is also how a developer feels the exact experience their business end-users would get."
 when_to_use: "Use when the user says 'set up agami for Claude Desktop', 'use agami in the Claude app', 'hook up the MCP server', 'let me test what my end users would see', '/agami-serve', or otherwise wants agami available outside Claude Code. Requires agami-connect to have run first (needs credentials + a semantic model). NOT needed to use agami inside Claude Code — the skills already work there."
 ---
 
@@ -32,8 +32,8 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 
 ## Phase 0: Preflight
 
-1. **Credentials present** — `~/.agami/credentials` must exist for the active profile. If missing, invoke `/agami-connect` first; the server needs a connection to execute against.
-2. **Model present** — `<artifacts_dir>/<profile>/index.yaml` must exist (so the server has a semantic model to serve). If not, invoke `/agami-connect`.
+1. **Credentials present** — `<artifacts_dir>/local/credentials` must exist for the active profile. If missing, invoke `/agami-connect` first; the server needs a connection to execute against.
+2. **Model present** — `<artifacts_dir>/<profile>/org.yaml` must exist (so the server has a semantic model to serve). If not, invoke `/agami-connect`.
 3. **Profile** — default to the active profile. If `$ARGUMENTS` names a profile, pass it through as `--profile <name>`.
 
 ## Phase 1: Run the setup helper
@@ -50,7 +50,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py"
 
 Pass `--profile <name>` if the user named one. (For a developer iterating on the
 server from a checkout, `--in-place` points the config at the checkout instead of
-copying to `~/.agami/serve` — mention this only if they ask.)
+copying to `<artifacts_dir>/local/serve` — mention this only if they ask.)
 
 ## Phase 2: Handle the two human cases
 

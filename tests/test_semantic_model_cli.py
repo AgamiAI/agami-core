@@ -245,6 +245,130 @@ def test_validate_seeds_splits_pass_fail_via_runner():
     assert {r["question"] for r in rejected} == {"bad", "no sql"}
 
 
+def _seeds_file(tmp_path):
+    f = tmp_path / "seeds.json"
+    f.write_text(json.dumps([{"question": "how many orders?", "sql": "SELECT 1 FROM orders"}]))
+    return f
+
+
+def test_seed_examples_refuses_until_preseed_reviewed(tmp_path):
+    # Phase-4 gate in code: with an unreviewed metric the seeds would reference, seed-examples
+    # REFUSES (exit 2) and writes nothing — the model can't skip the explorer-first review.
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    _describe_all_columns(tmp_path)   # clear the coverage gate so this isolates the preseed gate
+    curate.write_items(tmp_path, "s", "metric", [
+        {"name": "rev", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
+         "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path))])
+    d = json.loads(out)
+    assert rc == 2 and d["refused"] == "preseed_review_pending" and d["pending_count"] == 1
+    assert list_prompt_examples(tmp_path, "s") == []   # nothing written
+
+
+def test_seed_examples_after_review_bypasses_gate(tmp_path, monkeypatch):
+    # --after-review is the Phase-4c bypass: the user has been in the explorer and chose to
+    # proceed with items still unreviewed. The seed then validates + writes normally.
+    from semantic_model import curate, introspect
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    _describe_all_columns(tmp_path)   # coverage gate satisfied; isolates the preseed bypass
+    curate.write_items(tmp_path, "s", "metric", [
+        {"name": "rev", "calculation": "sum", "bindings": {"PostgreSQL": "SUM(orders.total)"},
+         "source_tables": ["orders"], "confidence": "inferred", "review_state": "unreviewed"}])
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path)), "--after-review"])
+    d = json.loads(out)
+    assert rc == 0 and "refused" not in d and d["written"]
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "s")] == ["how many orders?"]
+
+
+def test_seed_examples_runs_clean_when_no_preseed_pending(tmp_path, monkeypatch):
+    # the common path: nothing unreviewed (base model has only a system-approved FK) → the
+    # gate is transparent, no --after-review needed.
+    from semantic_model import introspect
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    _describe_all_columns(tmp_path)   # coverage gate satisfied
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path))])
+    d = json.loads(out)
+    assert rc == 0 and "refused" not in d
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "s")] == ["how many orders?"]
+
+
+def _describe_all_columns(tmp_path, *, area="s"):
+    """Mark every column described (the state a finished enrichment leaves)."""
+    from semantic_model import curate
+    ops = []
+    for tbl, cols in (("orders", ["id", "deleted_at", "total"]),
+                      ("order_items", ["id", "order_id", "qty"])):
+        for c in cols:
+            ops.append({"op": "edit", "kind": "table", "area": area, "name": tbl,
+                        "column": c, "field": "description", "value": f"the {c}"})
+    return curate.apply(tmp_path, ops)
+
+
+def test_coverage_flags_tables_enrichment_skipped(tmp_path):
+    # the enrichment-completeness check: a freshly-introspected model has 0 column
+    # descriptions, so every table reads as "enrichment never ran" → ok:false.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    cov = curate.column_coverage(load_organization(tmp_path, include_rejected=True))
+    assert cov["ok"] is False
+    assert set(cov["unenriched_tables"]) == {"orders", "order_items"}
+    assert cov["totals"]["described"] == 0
+
+
+def test_coverage_ok_when_each_table_has_some_descriptions(tmp_path):
+    # ok flips true once each table has >=1 described/ai_unknown column — self-evident
+    # columns (id, order_id) legitimately stay blank and do NOT hold the gate.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    curate.apply(tmp_path, [
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders", "column": "total",
+         "field": "description", "value": "order total"},
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders", "column": "deleted_at",
+         "field": "description_source", "value": "ai_unknown"},
+        {"op": "edit", "kind": "table", "area": "s", "name": "order_items", "column": "qty",
+         "field": "description", "value": "quantity ordered"}])
+    cov = curate.column_coverage(load_organization(tmp_path, include_rejected=True))
+    assert cov["ok"] is True and cov["unenriched_tables"] == []
+    assert cov["totals"]["described"] == 2 and cov["totals"]["ai_unknown"] == 1
+
+
+def test_seed_examples_refuses_when_columns_unenriched(tmp_path):
+    # the gate at the chokepoint: seeds won't generate on a model with naked columns,
+    # and this gate is NOT bypassable by --after-review (unlike the preseed gate).
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path)), "--after-review"])
+    d = json.loads(out)
+    assert rc == 2 and d["refused"] == "columns_unenriched" and d["table_count"] == 2
+    assert list_prompt_examples(tmp_path, "s") == []   # nothing written
+
+
+def test_seed_examples_passes_when_columns_described(tmp_path, monkeypatch):
+    # once columns are described AND nothing is pending review, the chokepoint is clear.
+    from semantic_model import introspect
+    from semantic_model.loader import list_prompt_examples
+    _model(tmp_path)
+    _describe_all_columns(tmp_path)
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
+    rc, out = _run(["seed-examples", str(tmp_path), "--area", "s", "--profile", "p",
+                    "--file", str(_seeds_file(tmp_path))])
+    d = json.loads(out)
+    assert rc == 0 and "refused" not in d
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "s")] == ["how many orders?"]
+
+
 def test_no_model_root_exits_3_cleanly(tmp_path):
     # an empty root has no org.yaml — the CLI returns a clean no_model signal (exit 3),
     # not a traceback, so callers fold the existence check into their first real call
@@ -417,6 +541,79 @@ def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
     # a question that doesn't exist is reported (skipped), not silently swallowed
     rc2, out2 = _run(["remove-example", str(tmp_path), "--area", "s", "--question", "no such q?"])
     assert rc2 == 1 and json.loads(out2)["skipped"]
+
+
+def test_apply_reverts_writes_without_git_on_validation_failure(tmp_path):
+    # apply()'s revert must NOT depend on a git repo (the artifacts dir usually isn't one).
+    # A batch whose later op makes the model invalid rolls back the earlier valid write too.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)  # not a git repo
+    before = load_organization(tmp_path).subject_areas[0].defined_table("orders").description
+    res = curate.apply(tmp_path, [
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "field": "description", "value": "CHANGED"},                     # valid, writes
+        {"op": "edit", "kind": "table", "area": "s", "name": "orders",
+         "column": "total", "field": "type", "value": "not_a_type"},      # makes the model unloadable
+    ])
+    assert not res.validated and res.applied == []
+    after = load_organization(tmp_path).subject_areas[0].defined_table("orders").description
+    assert after == before == "o"   # the first write was rolled back despite no git
+
+
+def test_column_groups_edit_reconciles_stale_expose(tmp_path):
+    # regrouping a table renames its column_groups; any TableRef.expose_column_groups that
+    # named the OLD groups must be reconciled, else the model fails validation.
+    import yaml as y
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    tp = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    td = y.safe_load(tp.read_text())
+    td["column_groups"] = {"old_a": ["id"], "old_b": ["deleted_at", "total"]}
+    tp.write_text(y.safe_dump(td))
+    sap = tmp_path / "subject_areas" / "s" / "subject_area.yaml"
+    sad = y.safe_load(sap.read_text())
+    for tr in sad["tables"]:
+        if tr["table"] == "orders":
+            tr["expose_column_groups"] = ["old_a", "old_b"]
+    sap.write_text(y.safe_dump(sad))
+
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "table", "area": "s", "name": "orders",
+                                   "field": "column_groups",
+                                   "value": {"identity": ["id"], "rest": ["deleted_at", "total"]}}])
+    assert res.validated and res.applied
+    tr = next(t for t in y.safe_load(sap.read_text())["tables"] if t["table"] == "orders")
+    assert not tr.get("expose_column_groups")   # stale exposes reconciled away (new set covers all)
+    assert set(load_organization(tmp_path).subject_areas[0].defined_table("orders").column_groups) == {"identity", "rest"}
+
+
+def test_set_terminology_writes_glossary_to_org_yaml(tmp_path):
+    # the packaged path for the decoded-abbreviation legend: writes org.yaml key_terminology,
+    # validates, merges over existing terms (so a re-run doesn't clobber a human's edits).
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    terms = tmp_path / "terms.json"
+    terms.write_text(json.dumps({"MRR": "monthly recurring revenue", "ARR": "annual recurring revenue"}))
+    rc, out = _run(["set-terminology", str(tmp_path), "--file", str(terms)])
+    d = json.loads(out)
+    assert rc == 0 and d["validated"] and d["applied"]
+    assert load_organization(tmp_path).key_terminology == {
+        "MRR": "monthly recurring revenue", "ARR": "annual recurring revenue"}
+
+
+def test_curate_edit_sets_semantic_column_groups(tmp_path):
+    # the column-group refinement write path: enrichment overwrites the engine's prefix
+    # buckets with named semantic groups via a normal curate edit op.
+    from semantic_model import curate
+    from semantic_model.loader import load_organization
+    _model(tmp_path)
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "table", "area": "s", "name": "orders",
+                                   "field": "column_groups",
+                                   "value": {"identity": ["id"], "lifecycle": ["deleted_at"], "money": ["total"]}}])
+    assert res.validated and res.applied
+    t = load_organization(tmp_path).subject_areas[0].defined_table("orders")
+    assert t.column_groups == {"identity": ["id"], "lifecycle": ["deleted_at"], "money": ["total"]}
 
 
 def test_suggest_units_finds_money_columns(tmp_path):

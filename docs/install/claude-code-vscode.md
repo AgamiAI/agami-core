@@ -39,17 +39,17 @@ Try a skill in the Claude pane chat input:
 /agami-connect
 ```
 
-If you haven't set up credentials yet, the skill walks you through the DB-type picker and writes `~/.agami/credentials.example` for you to fill in. (No separate `/agami-init` — its setup flow was folded into `/agami-connect` Phase 0a.)
+If you haven't set up credentials yet, the skill walks you through the DB-type picker and writes `<artifacts_dir>/local/credentials.example` for you to fill in. (No separate `/agami-init` — its setup flow was folded into `/agami-connect` Phase 0a.)
 
 ## 5. Set up credentials
 
-Same as the CLI: edit `~/.agami/credentials.example`, save as `~/.agami/credentials`, `chmod 600`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials).
+Same as the CLI: edit `<artifacts_dir>/local/credentials.example`, save as `<artifacts_dir>/local/credentials`, `chmod 600`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials).
 
 The terminal-side `chmod` works identically — the skill's `init` flow walks you through it via Bash inside the Claude pane.
 
 ## VS Code-specific notes
 
-- **Working directory**: Claude Code uses the open VS Code workspace root as the working directory. `~/.agami/` is in your home, not the workspace, so it's safe across projects.
+- **Working directory**: Claude Code uses the open VS Code workspace root as the working directory. `<artifacts_dir>/local/` is in your home, not the workspace, so it's safe across projects.
 - **Terminal access**: the Claude pane has its own Bash session; running `@agami` doesn't open a separate terminal.
 - **Inline chart artifacts**: when you ask for a chart, the rendered HTML path appears in the response. Open it via VS Code's "Open File…" or click the path if your terminal supports clickable file paths.
 

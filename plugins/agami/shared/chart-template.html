@@ -3,7 +3,7 @@
   agami report template — used by agami-query/SKILL.md.
 
   The renderer substitutes the placeholders below and writes the result
-  to ~/.agami/charts/<ts>.html. The output is fully self-contained: opens
+  to <artifacts_dir>/local/charts/<ts>.html. The output is fully self-contained: opens
   from file:// in any browser, no server, no relative-path dependencies.
 
   ONE HTML file = ONE coherent report. Broad questions decompose into
@@ -29,10 +29,10 @@
 
   RECEIPT_JSON schema — single object (not array):
     {
-      "model_version":   "string — short content hash from agami.config / index.yaml",
+      "model_version":   "string — short content hash of the model snapshot (.snapshots/<hash>/)",
       "tables_used":     [{"qname":"public.orders", "rows":5000, "freshness":"2026-05-09T23:00:00Z (nightly batch)"}, ...],
       "relationships":   [{"name":"orders_to_customers","from_to":"orders → customers",
-                           "confidence":0.62,"review_state":"unreviewed","origin":"introspect_heuristic"}, ...],
+                           "confidence":"inferred","review_state":"unreviewed","origin":"introspect_heuristic"}, ...],
       "metrics":         [{"name":"revenue","area":"sales","definition_prose":"...","review_state":"approved",
                            "signed_off_by":"jane@x.com","signed_off_role":"cfo","signed_off_at":"2026-03-15T10:00:00Z"},
                           // on-the-fly calc the user hasn't approved → drives the top approve/change banner:
@@ -1174,7 +1174,7 @@
       // Build a readable approval phrase like:
       //   "auto-approved (FK declared in DB)"
       //   "approved by jane@example.com (cfo), Mar 15"
-      //   "unreviewed (confidence 0.62)"
+      //   "unreviewed (confidence inferred)"
       // Display a sign-off role nicely: known roles use their canonical label, acronyms
       // upper-case (cto → CTO), free-text title-cases (data engineer → Data Engineer).
       function prettifyRole(role) {

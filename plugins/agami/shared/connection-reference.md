@@ -6,14 +6,14 @@ How `agami` connects to your database. Used by the `connect`, `query-database`, 
 
 These are non-negotiable. Skills that read this document must follow them under every circumstance.
 
-1. **Connect ONLY to the host/port/database/user/password in `~/.agami/credentials`** — the sole credential source; there is no env-var bypass. Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
-2. **Never ask the user for connection details in chat.** Credentials live in `~/.agami/credentials` only. If the file is missing, invoke agami-connect Phase 0a (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
-3. **Never scan or guess.** Tool detection is `which <tool>` and `python3 -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `~/.agami/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
+1. **Connect ONLY to the host/port/database/user/password in `<artifacts_dir>/local/credentials`** — the sole credential source; there is no env-var bypass. Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
+2. **Never ask the user for connection details in chat.** Credentials live in `<artifacts_dir>/local/credentials` only. If the file is missing, invoke agami-connect Phase 0a (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
+3. **Never scan or guess.** Tool detection is `which <tool>` and `python3 -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
-   - For postgres: `PGPASSFILE=$HOME/.agami/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
-   - For mysql: `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
-   These auth files are chmod 600 in `~/.agami/`. The visible Bash command contains NO password — psql / mysql read the password from the auth file silently. **Patterns that are FORBIDDEN**: `export PGPASSWORD='<literal>'`, `export MYSQL_PWD='<literal>'`, `psql -W <password>`, `mysql -p<password>`, or anything else where the password appears in the command, env assignment, or stdin.
+   - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
+   - For mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
+   These auth files are chmod 600 in `<artifacts_dir>/local/`. The visible Bash command contains NO password — psql / mysql read the password from the auth file silently. **Patterns that are FORBIDDEN**: `export PGPASSWORD='<literal>'`, `export MYSQL_PWD='<literal>'`, `psql -W <password>`, `mysql -p<password>`, or anything else where the password appears in the command, env assignment, or stdin.
 
 ## Contents
 - Connection methods (psql / mysql / snowsql / sqlite3 → DuckDB → Python driver)
@@ -35,9 +35,9 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 
 | tier | EXACT invocation |
 |---|---|
-| `cli` postgres | `PGPASSFILE="$HOME/.agami/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
-| `cli` mysql | `mysql --defaults-file="$HOME/.agami/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
-| `cli` snowflake | `snowsql --config "$HOME/.agami/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
+| `cli` postgres | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
+| `cli` mysql | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
+| `cli` snowflake | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
 | `python` bigquery | `AGAMI_PROFILE="<profile>" "$PY" "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` (BigQuery is Python-only — there's no native CLI tier today) |
 | `cli` sqlite | `sqlite3 -csv "<path>" 'SELECT 1'` |
 | `duckdb` | `duckdb -init "$init_file" -c 'SELECT 1' --csv` |
@@ -51,7 +51,7 @@ python3 execute_sql.py [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE
 
 - **Output is RFC-4180 CSV on stdout, always.** No `--format` flag exists; don't pass one.
 - **Either** `--sql 'SELECT 1'` (string) **or** `--sql-file /tmp/q.sql` (path). Positional SQL is rejected.
-- `--profile` overrides `AGAMI_PROFILE`. If neither is set, defaults to `active_profile` from `~/.agami/.config`.
+- `--profile` overrides `AGAMI_PROFILE`. If neither is set, defaults to `active_profile` from `<artifacts_dir>/local/.config`.
 - Exit codes: `0` (success), `2` (config/usage), `3` (connect error), `4` (execution error), `5` (driver missing).
 
 For Snowflake-specific liveness checks where `SELECT CURRENT_VERSION()` reads better than `SELECT 1`, just substitute the SQL — same flag shape. **Never** add flags not listed above.
@@ -72,11 +72,11 @@ The order, from most-preferred to least-preferred:
 
 `agami` runs entirely on your machine. There is no hosted server.
 
-> **Internal note on `.config`.** The chosen method is recorded in `~/.agami/.config.tier` for compatibility with shipped installs — values are `cli` / `duckdb` / `python`. The field name stays as `tier`; user-facing prose calls these "the native CLI", "DuckDB", and "the Python driver".
+> **Internal note on `.config`.** The chosen method is recorded in `<artifacts_dir>/local/.config.tier` for compatibility with shipped installs — values are `cli` / `duckdb` / `python`. The field name stays as `tier`; user-facing prose calls these "the native CLI", "DuckDB", and "the Python driver".
 
 ### How agami picks a connection method
 
-Detection runs **once**, in agami-connect Phase 0a's Phase 3. The result (chosen method + absolute paths of every detected tool) is persisted in `~/.agami/.config`. Every subsequent skill invocation reads the cached paths — they do NOT re-probe.
+Detection runs **once**, in agami-connect Phase 0a's Phase 3. The result (chosen method + absolute paths of every detected tool) is persisted in `<artifacts_dir>/local/.config`. Every subsequent skill invocation reads the cached paths — they do NOT re-probe.
 
 Init's selection pseudocode:
 
@@ -119,7 +119,7 @@ offer_install()  # AskUserQuestion — never install silently
 
 DuckDB's `postgres_scanner` extension can also scan Redshift over the wire (since Redshift is Postgres-protocol-compatible). DuckDB cannot scan Snowflake natively in v1.1.
 
-Other skills look up the cached method (`.config.tier`) and `tool_paths.<tool>` from `~/.agami/.config` and use them directly. They do not re-run `which`. If the cached path no longer exists on disk (`! -x "$path"`), they offer to re-detect — they do NOT silently scan or fall back to localhost.
+Other skills look up the cached method (`.config.tier`) and `tool_paths.<tool>` from `<artifacts_dir>/local/.config` and use them directly. They do not re-run `which`. If the cached path no longer exists on disk (`! -x "$path"`), they offer to re-detect — they do NOT silently scan or fall back to localhost.
 
 ### When no tool is available
 
@@ -194,10 +194,10 @@ CSV output: append `-csv` or wrap in `COPY (<query>) TO '/dev/stdout' (FORMAT CS
 
 Used when neither the native CLI nor DuckDB is available, but Python with the right driver is. The agami skill ships a runtime helper for this.
 
-**Always invoke it with `$PY` — the interpreter recorded in `~/.agami/.config` — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; **read it from there — the user never sets an environment variable**:
+**Always invoke it with `$PY` — the interpreter recorded in `<artifacts_dir>/local/.config` — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; **read it from there — the user never sets an environment variable**:
 
 ```bash
-PY="$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path("~/.agami/.config").expanduser().read_text()).get("tool_paths",{}).get("python3") or "")' 2>/dev/null)"
+PY="$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path("<artifacts_dir>/local/.config").expanduser().read_text()).get("tool_paths",{}).get("python3") or "")' 2>/dev/null)"
 PY="${PY:-$(command -v python3 || command -v python)}"
 ```
 
@@ -207,7 +207,7 @@ PY="${PY:-$(command -v python3 || command -v python)}"
 "$PY" plugins/agami/scripts/execute_sql.py --profile <profile> --sql-file /tmp/agami-query.sql
 ```
 
-`execute_sql.py` reads `~/.agami/credentials` itself, opens a connection via `psycopg2` / `pymysql` / `sqlite3` based on the profile's `type` field, runs the SQL, emits RFC 4180 CSV on stdout. Exit codes communicate the failure category (config, driver missing, connect error, execution error). See [`plugins/agami/scripts/README.md`](../scripts/README.md) for full usage.
+`execute_sql.py` reads `<artifacts_dir>/local/credentials` itself, opens a connection via `psycopg2` / `pymysql` / `sqlite3` based on the profile's `type` field, runs the SQL, emits RFC 4180 CSV on stdout. Exit codes communicate the failure category (config, driver missing, connect error, execution error). See [`plugins/agami/scripts/README.md`](../scripts/README.md) for full usage.
 
 Skills should always use `--sql-file` for non-trivial SQL. The `--sql` flag is fine for short statements; `--sql-file` avoids any shell-quoting issues for SQL containing single quotes, backticks, `$`, or backslashes.
 
@@ -236,23 +236,23 @@ Supported end-to-end: Postgres + Redshift + MySQL + Snowflake + SQLite + **BigQu
 
 ```bash
 # Ensure the auth file exists for the active profile (idempotent, fast).
-# Generates ~/.agami/.pgpass from credentials. Bash command line contains
+# Generates <artifacts_dir>/local/.pgpass from credentials. Bash command line contains
 # NO password.
 python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
 
 # Execute a query and return CSV. PGPASSFILE points at the auth file;
 # psql reads the password silently. The bash command itself is password-free.
-PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
   psql -h "$host" -p "$port" -U "$user" -d "$database" -c "$SQL" --csv
 
 # Execute from a file
-PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
   psql -h "$host" -p "$port" -U "$user" -d "$database" -f query.sql --csv
 ```
 
 **Security / SSL**:
-- **Never** pass the password on the command line, in `export PGPASSWORD='...'`, or via `-W <password>`. Always use `PGPASSFILE` pointing at `~/.agami/.pgpass` (chmod 600, generated by `scripts/setup_pgauth.py`). The visible Bash command must be password-free.
-- Set `PGSSLMODE` from the credentials profile's `sslmode` field. Cloud Postgres providers (Supabase, Neon, RDS in many configs) **require** SSL — set `sslmode = require` in `~/.agami/credentials` or use a DSN with `?sslmode=require` and the parser will pick it up. Default is `prefer` which works for both SSL-required and non-SSL servers.
+- **Never** pass the password on the command line, in `export PGPASSWORD='...'`, or via `-W <password>`. Always use `PGPASSFILE` pointing at `<artifacts_dir>/local/.pgpass` (chmod 600, generated by `scripts/setup_pgauth.py`). The visible Bash command must be password-free.
+- Set `PGSSLMODE` from the credentials profile's `sslmode` field. Cloud Postgres providers (Supabase, Neon, RDS in many configs) **require** SSL — set `sslmode = require` in `<artifacts_dir>/local/credentials` or use a DSN with `?sslmode=require` and the parser will pick it up. Default is `prefer` which works for both SSL-required and non-SSL servers.
 
 **Supabase pooler**: the SQLAlchemy-style DSN that Supabase shows (`postgresql+asyncpg://...`) is accepted as-is in the `url = ...` credentials field — see [`credentials-format.md → Supabase`](credentials-format.md). The `+asyncpg` driver suffix is stripped before connecting.
 
@@ -268,7 +268,7 @@ Redshift speaks the PostgreSQL wire protocol, so **psql works as-is**. The only 
 
 ```bash
 # Same invocation as postgres, just with the Redshift host/port and sslmode=require.
-PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="require" \
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="require" \
   psql -h "$host" -p 5439 -U "$user" -d "$database" -c "$SQL" --csv
 ```
 
@@ -280,14 +280,14 @@ Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI 
 
 #### Native CLI — `snowsql`
 
-`scripts/setup_pgauth.py` writes a `~/.agami/.snowsql.cnf` config file with a `[connections.<profile>]` block per Snowflake profile in your credentials. The skill invokes snowsql with `--config` pointing at it:
+`scripts/setup_pgauth.py` writes a `<artifacts_dir>/local/.snowsql.cnf` config file with a `[connections.<profile>]` block per Snowflake profile in your credentials. The skill invokes snowsql with `--config` pointing at it:
 
 ```bash
 # Ensure the snowsql config exists (idempotent).
 python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
 
 # Run a query — snowsql reads the password from the config silently.
-snowsql --config "$HOME/.agami/.snowsql.cnf" -c "$PROFILE" \
+snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "$PROFILE" \
         -q "$SQL" -o output_format=csv -o header=true -o friendly=false -o timing=false
 ```
 
@@ -362,25 +362,25 @@ These are sufficient for SELECT-only workloads, which is all agami issues.
 
 ```bash
 # Ensure the auth file exists for the active profile (idempotent, fast).
-# Generates ~/.agami/.mysql.cnf with [client_<profile>] sections. Bash
+# Generates <artifacts_dir>/local/.mysql.cnf with [client_<profile>] sections. Bash
 # command line contains NO password.
 python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
 
 # Execute a query — mysql reads creds from the auth file via --defaults-file
 # + --defaults-group-suffix=_<profile>. Visible bash command is password-free.
-mysql --defaults-file="$HOME/.agami/.mysql.cnf" \
+mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" \
       --defaults-group-suffix="_$PROFILE" \
       -h "$host" -P "$port" "$database" \
       -e "$SQL" --batch --raw
 
 # CSV-like output
-mysql --defaults-file="$HOME/.agami/.mysql.cnf" \
+mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" \
       --defaults-group-suffix="_$PROFILE" \
       -h "$host" -P "$port" "$database" \
       -e "$SQL" --batch --raw | tr '\t' ','
 ```
 
-**Security**: Never use `-p<password>`, `--password=...`, or `export MYSQL_PWD='...'` — all of those leak the password into Bash command-line / process listings / chat transcripts. Always use `--defaults-file=$HOME/.agami/.mysql.cnf` (chmod 600, generated by `scripts/setup_pgauth.py`).
+**Security**: Never use `-p<password>`, `--password=...`, or `export MYSQL_PWD='...'` — all of those leak the password into Bash command-line / process listings / chat transcripts. Always use `--defaults-file=<artifacts_dir>/local/.mysql.cnf` (chmod 600, generated by `scripts/setup_pgauth.py`).
 
 ### SQLite
 ```bash
@@ -401,7 +401,7 @@ When CLI tools are not available, use the bundled runtime helper:
 "$PY" "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql-file /tmp/agami-query.sql
 ```
 
-`execute_sql.py` reads `~/.agami/credentials` itself (with chmod check) and connects via `psycopg2` / `pymysql` / `sqlite3`. The visible Bash command contains no credentials. SQL is passed via `--sql-file` (preferred for non-trivial queries) so single quotes, backticks, `$`, and `\` in the SQL don't get mangled by the shell.
+`execute_sql.py` reads `<artifacts_dir>/local/credentials` itself (with chmod check) and connects via `psycopg2` / `pymysql` / `sqlite3`. The visible Bash command contains no credentials. SQL is passed via `--sql-file` (preferred for non-trivial queries) so single quotes, backticks, `$`, and `\` in the SQL don't get mangled by the shell.
 
 The legacy inline `python3 -c '...'` pattern (with `export PGPASSWORD=...` / `export MYSQL_PWD=...` ahead of it) is **forbidden** — it puts the password in the visible Bash command line. Use `execute_sql.py` instead.
 
@@ -411,17 +411,17 @@ The DuckDB scanner approach currently has a similar weakness for cloud-credentia
 
 ## Reading Credentials
 
-Credentials live in `~/.agami/credentials` (an INI-style file, `chmod 600`) — the only source. Format spec: [`credentials-format.md`](credentials-format.md).
+Credentials live in `<artifacts_dir>/local/credentials` (an INI-style file, `chmod 600`) — the only source. Format spec: [`credentials-format.md`](credentials-format.md).
 
 ### Reading the file
 
 ```bash
 # Refuse to read if too permissive
-perms=$(stat -c '%a' ~/.agami/credentials 2>/dev/null || stat -f '%A' ~/.agami/credentials)
+perms=$(stat -c '%a' <artifacts_dir>/local/credentials 2>/dev/null || stat -f '%A' <artifacts_dir>/local/credentials)
 case "$perms" in
   600|400) ;;
   *)
-    echo "~/.agami/credentials must be chmod 600 (currently $perms). Run: chmod 600 ~/.agami/credentials" >&2
+    echo "<artifacts_dir>/local/credentials must be chmod 600 (currently $perms). Run: chmod 600 <artifacts_dir>/local/credentials" >&2
     exit 1
     ;;
 esac
@@ -433,7 +433,7 @@ profile="${AGAMI_PROFILE:-main}"
 
 (A profile may set `url = <DSN>` instead of per-field values — that DSN is parsed
 the same way. There is no `AGAMI_DATABASE_URL` env-var override: credentials come
-only from `~/.agami/credentials`, so the one path stays auditable and chmod-gated.)
+only from `<artifacts_dir>/local/credentials`, so the one path stays auditable and chmod-gated.)
 
 ---
 
@@ -452,11 +452,11 @@ When introspecting databases, exclude system schemas:
 ## Security Rules
 
 - **NEVER** put passwords in any visible Bash command — not in `export PGPASSWORD='...'`, not in `mysql -p<password>`, not in stdin heredocs that interpolate the password. Hosts render Bash tool calls in their UI; the password leaks into the chat. Use the auth files generated by `scripts/setup_pgauth.py`:
-  - psql: `PGPASSFILE=$HOME/.agami/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
-  - mysql: `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
+  - psql: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
+  - mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
   - Python driver: `"$PY" scripts/execute_sql.py --sql-file ...` (reads creds internally; never echoes them)
 - Use `--csv` or `--batch` output modes (not interactive) for predictable parsing
-- **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `~/.agami/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.
+- **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `<artifacts_dir>/local/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.
 - **NEVER** generate DDL or DML statements (`DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, etc.)
 - Sanitize user input before including in SQL queries
-- `~/.agami/credentials` must be `chmod 600`. The agami-connect Phase 0a enforces this; refuse to read otherwise.
+- `<artifacts_dir>/local/credentials` must be `chmod 600`. The agami-connect Phase 0a enforces this; refuse to read otherwise.

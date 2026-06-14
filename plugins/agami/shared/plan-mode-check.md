@@ -47,7 +47,7 @@ Plan mode CAN proceed for read-only flows. Each SKILL declares what's possible:
 
 ### `agami-connect`
 
-Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Both the credential-bootstrap (Phase 0a — writes `~/.agami/credentials.example` + `.config`) and introspection (Bash for `psql -c`, etc., plus writes to the per-schema yaml files) need Write + Bash access. Surface ONLY this:
+Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Both the credential-bootstrap (Phase 0a — writes `<artifacts_dir>/local/credentials.example` + `.config`) and introspection (Bash for `psql -c`, etc., plus writes to the per-schema yaml files) need Write + Bash access. Surface ONLY this:
 
 > I can't set up agami in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me. agami-connect needs to write the credentials template (first run) and the semantic model YAMLs.
 
@@ -69,7 +69,7 @@ Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Excluding / editing / approving / rejecting entries writes back to YAML files. Surface ONLY this:
 
-> I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `~/.agami/model/<profile>/<ts>.html`.)
+> I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `<artifacts_dir>/local/model/<profile>/<ts>.html`.)
 
 ### `agami-reconcile`
 
@@ -85,7 +85,7 @@ If neither signal 1 nor signal 2 confirms plan mode is active, **skip this phase
 
 If the skill is past Phase −1 and a Bash or Write call fails with a plan-mode block:
 
-1. Surface: "Looks like plan mode kicked in. Switch via Shift+Tab and re-invoke me — I'll pick up where I left off (the last successful step is recorded in `~/.agami/.config.last_phase` if you want to inspect)."
+1. Surface: "Looks like plan mode kicked in. Switch via Shift+Tab and re-invoke me — I'll pick up where I left off (the last successful step is recorded in `<artifacts_dir>/local/.config.last_phase` if you want to inspect)."
 2. Do NOT retry. The state is cleanly suspended; another retry won't help.
 
 This shouldn't happen often (mode-switching mid-conversation is rare), but the recovery path is documented so you don't paper over the failure.

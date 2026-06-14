@@ -2,7 +2,7 @@
 DSN parsing tests for plugins/agami/scripts/execute_sql.py.
 
 Exercises the URL forms agami accepts as the `url = ...` field inside
-`~/.agami/credentials`. The provider-specific forms (Supabase pooler, Neon,
+`<artifacts_dir>/local/credentials`. The provider-specific forms (Supabase pooler, Neon,
 etc.) are the load-bearing cases — those shapes appear in real users'
 connection panels and we copy-paste them.
 

@@ -13,7 +13,7 @@ removes:
   2. **The install-path gotcha.** A marketplace-installed plugin lives in a
      version-pinned cache dir that moves on every update. We copy the server
      files (`mcp_server.py` + `execute_sql.py` + the `semantic_model/` package)
-     to a STABLE `~/.agami/serve/` so the Desktop config never needs to change
+     to a STABLE `<artifacts_dir>/local/serve/` so the Desktop config never needs to change
      again — and keeps working even if the plugin is later uninstalled.
   3. **The merge gotcha.** `mcpServers` is a top-level key; a stray comma breaks
      the whole file. We back up, merge (preserving every other key), write
@@ -27,7 +27,7 @@ Usage:
     python3 setup_desktop_mcp.py --python /abs/python3   # force an interpreter
     python3 setup_desktop_mcp.py --config /path/to/config.json  # override target file
 
-Stdlib only. Reads nothing secret beyond ~/.agami/credentials (to learn the
+Stdlib only. Reads nothing secret beyond the credentials file (to learn the
 active profile's db type → which driver to require). Writes only the stable
 serve dir + the desktop config (with a timestamped backup).
 """
@@ -44,14 +44,19 @@ import sys
 import time
 from pathlib import Path
 
-AGAMI_HOME = Path.home() / ".agami"
+_sys = sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agami_paths  # noqa: E402
+
+# Never bootstrap() at import (tests import this module); main() does it.
+AGAMI_HOME = agami_paths.local_dir()
 CREDENTIALS_PATH = AGAMI_HOME / "credentials"
 CONFIG_PATH = AGAMI_HOME / ".config"
 STABLE_SERVE_DIR = AGAMI_HOME / "serve"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Files the server needs at runtime (both are self-contained stdlib modules).
-SERVE_FILES = ("mcp_server.py", "execute_sql.py")
+SERVE_FILES = ("mcp_server.py", "execute_sql.py", "agami_paths.py")
 
 # db_type → the Python module that must be importable to execute against it.
 DB_DRIVER_MODULE = {
@@ -93,7 +98,7 @@ def resolve_profile(explicit: str | None) -> str:
 
 
 def db_type_for_profile(profile: str) -> str | None:
-    """Read the profile's db type from ~/.agami/credentials (best-effort)."""
+    """Read the profile's db type from the credentials file (best-effort)."""
     if not CREDENTIALS_PATH.exists():
         return None
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
@@ -171,7 +176,7 @@ def desktop_config_path(override: str | None) -> Path:
 def stage_serve_files(scripts_dir: Path, in_place: bool) -> Path:
     """Return the directory the server will run from.
 
-    Default: copy the server files to a stable ~/.agami/serve/ so the Desktop
+    Default: copy the server files to a stable <artifacts_dir>/local/serve/ so the Desktop
     config is update-proof. --in-place: run straight from scripts_dir.
 
     Besides the two entry scripts, we also copy the `semantic_model/` package so
@@ -262,13 +267,19 @@ def merge_into_config(cfg_path: Path, server_name: str, entry: dict, dry_run: bo
 
 
 def main() -> int:
+    global AGAMI_HOME, CREDENTIALS_PATH, CONFIG_PATH, STABLE_SERVE_DIR
+    agami_paths.bootstrap()
+    AGAMI_HOME = agami_paths.local_dir()
+    CREDENTIALS_PATH = AGAMI_HOME / "credentials"
+    CONFIG_PATH = AGAMI_HOME / ".config"
+    STABLE_SERVE_DIR = AGAMI_HOME / "serve"
     p = argparse.ArgumentParser(description="Wire `agami serve` into the Claude Desktop app.")
     p.add_argument("--profile", default=None, help="agami profile to serve (default: active profile).")
     p.add_argument("--server-name", default="agami", help="Name of the MCP server entry (default: agami).")
     p.add_argument("--python", default=None, help="Force a specific python interpreter (absolute path).")
     p.add_argument("--scripts-dir", default=None, help="Where mcp_server.py lives (default: this script's dir).")
     p.add_argument("--config", default=None, help="Override the desktop config path (for testing / other clients).")
-    p.add_argument("--in-place", action="store_true", help="Point at the scripts dir directly instead of copying to ~/.agami/serve.")
+    p.add_argument("--in-place", action="store_true", help="Point at the scripts dir directly instead of copying to <artifacts_dir>/local/serve.")
     p.add_argument("--dry-run", action="store_true", help="Print the plan; write nothing.")
     args = p.parse_args()
 

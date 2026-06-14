@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<!--
+  agami · prune view  (standalone — NOT the model explorer)
+
+  Rendered BEFORE introspection by scripts/render_prune.py. It shows only the
+  cheap discover-pass result — every table and its columns, no descriptions /
+  metrics / grain / relationships (none of that is computed yet). The user
+  unchecks tables they don't need (and optionally individual columns), clicks
+  "Generate for Claude", and pastes the block back. agami then runs the full,
+  expensive introspection on only the kept set.
+
+  Shares the model-explorer's visual language (theme tokens, header/logo,
+  table-card + field-row structure, sticky footer) but is a separate, much
+  smaller file so the stateful explorer is never at risk from a pre-introspect
+  change. Renderer fills: {{REPORT_TITLE}} {{PROFILE}} {{DB_TYPE}}
+  {{GENERATED_AT}} {{MANIFEST_JSON}} {{AGAMI_LOGO_DARK_TEXT}} {{AGAMI_LOGO_LIGHT_TEXT}}.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} — agami</title>
+  <style>
+    :root {
+      --bg: #ffffff; --bg-elev: #fafafa; --fg: #1a1a1a; --muted: #6b7280;
+      --border: #e5e7eb; --accent: #2563eb; --accent-hover: #1d4ed8;
+      --row-zebra: rgba(0, 0, 0, 0.025); --code-bg: rgba(0, 0, 0, 0.04);
+      --ok-bg: #dcfce7; --ok-fg: #166534; --ok-border: #86efac;
+      --bad-bg: #fee2e2; --bad-fg: #991b1b; --bad-border: #fca5a5;
+      --info-bg: #eff6ff; --info-border: #bfdbfe;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a; --bg-elev: #131c2f; --fg: #f1f5f9; --muted: #94a3b8;
+        --border: #1e293b; --accent: #60a5fa; --accent-hover: #93c5fd;
+        --row-zebra: rgba(255, 255, 255, 0.03); --code-bg: rgba(255, 255, 255, 0.04);
+        --ok-bg: #052e16; --ok-fg: #86efac; --ok-border: #14532d;
+        --bad-bg: #450a0a; --bad-fg: #fca5a5; --bad-border: #7f1d1d;
+        --info-bg: #0c1c33; --info-border: #1e3a5f;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px 32px 110px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--fg); line-height: 1.5;
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+
+    header.dashboard-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 24px; margin-bottom: 12px;
+    }
+    .logo a { display: inline-block; line-height: 0; text-decoration: none; }
+    .logo svg { display: block; height: 26px; width: auto; }
+    .logo-light-mode { display: inline-block; }
+    .logo-dark-mode { display: none; }
+    @media (prefers-color-scheme: dark) {
+      .logo-light-mode { display: none; }
+      .logo-dark-mode { display: inline-block; }
+    }
+    h1.dashboard-title { font-size: 20px; font-weight: 600; margin: 0; flex: 1; text-align: right; }
+    .meta { font-size: 12px; color: var(--muted); margin-bottom: 18px;
+            display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .meta code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+    .model-badge {
+      font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+      background: var(--info-bg); color: var(--accent); border: 1px solid var(--info-border);
+    }
+
+    .info-banner {
+      background: var(--info-bg); border: 1px solid var(--info-border); border-radius: 10px;
+      padding: 12px 16px; margin-bottom: 18px; font-size: 13px; color: var(--fg);
+    }
+    .info-banner strong { font-weight: 600; }
+
+    /* Sticky toolbar */
+    .toolbar {
+      position: sticky; top: 0; z-index: 50; background: var(--bg);
+      padding: 12px 0; border-bottom: 1px solid var(--border); margin-bottom: 20px;
+    }
+    .search-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .search-input {
+      flex: 1; min-width: 260px; font: inherit; font-size: 15px; padding: 10px 14px;
+      border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); color: var(--fg);
+    }
+    .search-input:focus { outline: 2px solid var(--accent); outline-offset: -2px; border-color: var(--accent); }
+    .tool-btn {
+      font: inherit; font-size: 13px; font-weight: 500; padding: 8px 14px; border-radius: 8px;
+      cursor: pointer; background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+    }
+    .tool-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .search-counts { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+    /* Schema section */
+    .schema-section { margin-bottom: 26px; }
+    .schema-section-head {
+      display: flex; align-items: center; gap: 10px; margin: 6px 0 12px;
+      font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .schema-section-head .schema-bulk { margin-left: auto; display: flex; gap: 8px;
+      text-transform: none; letter-spacing: 0; }
+    .schema-section-head .schema-bulk button {
+      font: inherit; font-size: 12px; padding: 4px 11px; border-radius: 6px; cursor: pointer;
+      background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    }
+    .schema-section-head .schema-bulk button:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Table card */
+    .table-card {
+      border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev);
+      margin-bottom: 14px; overflow: hidden; transition: opacity 120ms ease, border-color 120ms ease;
+    }
+    .table-card.excluded { opacity: 0.55; border-color: var(--bad-border); }
+    .table-header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; cursor: pointer; user-select: none; }
+    .table-header:hover { background: var(--row-zebra); }
+    .table-toggle { font-size: 10px; color: var(--muted); transition: transform 120ms ease; }
+    .table-toggle.collapsed { transform: rotate(-90deg); }
+    .table-name { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 15px; font-weight: 600; }
+    .table-name .schema-prefix { color: var(--muted); font-weight: 400; }
+    .table-rows { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .table-state-badge {
+      font-size: 10px; padding: 2px 8px; border-radius: 999px; letter-spacing: 0.04em;
+      text-transform: uppercase; font-weight: 600;
+    }
+    .badge-excluded { background: var(--bad-bg); color: var(--bad-fg); border: 1px solid var(--bad-border); }
+    .table-spacer { margin-left: auto; }
+
+    .table-body { border-top: 1px solid var(--border); padding: 0; }
+    .table-body.collapsed { display: none; }
+    .field-row {
+      display: grid; grid-template-columns: auto minmax(0, 1.6fr) minmax(0, 1fr);
+      gap: 14px; padding: 9px 18px; align-items: center;
+      border-bottom: 1px solid var(--border); font-size: 13px; transition: background 120ms ease;
+    }
+    .field-row:last-child { border-bottom: none; }
+    .field-row:hover { background: var(--row-zebra); }
+    .field-row.excluded { opacity: 0.5; }
+    .field-name { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px; font-weight: 500; word-break: break-word; }
+    .field-row.excluded .field-name { text-decoration: line-through; }
+    .field-type { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px; color: var(--muted); }
+
+    input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; flex: none; }
+
+    .empty { color: var(--muted); padding: 48px; text-align: center; }
+
+    /* Sticky footer */
+    .sticky-footer {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 60;
+      display: flex; align-items: center; gap: 16px; padding: 14px 32px;
+      background: var(--bg); border-top: 1px solid var(--border);
+    }
+    .sticky-footer .summary { font-size: 13px; color: var(--fg); }
+    .sticky-footer .summary .count { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .sticky-footer .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .sticky-footer button {
+      font: inherit; font-size: 13px; font-weight: 500; padding: 9px 16px; border-radius: 8px;
+      cursor: pointer; background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+    }
+    .sticky-footer button:hover { border-color: var(--accent); color: var(--accent); }
+    .sticky-footer button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .sticky-footer button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+    .sticky-footer button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Modal */
+    .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex;
+      align-items: center; justify-content: center; z-index: 80; }
+    .modal[hidden] { display: none; }
+    .modal-card { width: min(680px, 92vw); background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: 14px; padding: 22px; }
+    .modal-card h2 { margin: 0 0 8px; font-size: 16px; }
+    .modal-card p { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+    textarea { width: 100%; height: 240px; background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; resize: vertical; }
+    .modal-actions { display: flex; gap: 10px; margin-top: 12px; align-items: center; }
+    .modal-actions button {
+      font: inherit; font-size: 13px; font-weight: 500; padding: 9px 16px; border-radius: 8px;
+      cursor: pointer; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    }
+    .modal-actions button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .modal-status { color: var(--ok-fg); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="dashboard-header">
+      <div class="logo">
+        <a href="https://agami.ai" target="_blank" rel="noopener">
+          <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+          <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+        </a>
+      </div>
+      <h1 class="dashboard-title">{{REPORT_TITLE}}</h1>
+    </header>
+    <div class="meta">
+      <span>Discovered <span id="generated-at">{{GENERATED_AT}}</span></span>
+      <span>· profile <code>{{PROFILE}}</code></span>
+      <span>· {{DB_TYPE}}</span>
+      <span class="model-badge" id="totals-badge"></span>
+    </div>
+
+    <div class="info-banner">
+      This is the quick first pass — just the <strong>tables and columns</strong> found in your database
+      (no descriptions or relationships yet). <strong>Uncheck any table you don't need modeled</strong>
+      (staging, backups, dated snapshots, scratch). You can also expand a table and
+      <strong>uncheck individual columns</strong> that aren't relevant. Then click
+      <strong>Generate for Claude</strong> and paste the block back — agami runs the full introspection
+      (grain, relationships, descriptions) on <strong>only the kept tables</strong>.
+    </div>
+
+    <div class="toolbar">
+      <div class="search-row">
+        <input class="search-input" id="search" type="search"
+          placeholder="Filter tables and columns…" autocomplete="off" />
+        <button type="button" class="tool-btn" id="expand-all">Expand all</button>
+        <button type="button" class="tool-btn" id="collapse-all">Collapse all</button>
+        <button type="button" class="tool-btn" id="reset">Reset</button>
+        <span class="search-counts" id="search-counts"></span>
+      </div>
+    </div>
+
+    <main id="main"></main>
+  </div>
+
+  <div class="sticky-footer">
+    <div class="summary" id="summary"></div>
+    <div class="actions">
+      <button type="button" id="generate" class="primary">Generate for Claude</button>
+    </div>
+  </div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Paste this back to Claude</h2>
+      <p>Copy the whole block and paste it into your Claude session. agami will introspect only the kept tables.</p>
+      <textarea id="modal-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" id="copy" class="primary">Copy to clipboard</button>
+        <button type="button" id="close">Close</button>
+        <span class="modal-status" id="copy-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+    const MANIFEST = {{MANIFEST_JSON}};
+
+    // A table/column is KEPT by default; we only track exclusions + which tables are expanded.
+    const excludedTables = new Set();   // "schema.table"
+    const excludedCols = new Set();     // "schema.table.column"
+    const expanded = new Set();         // "schema.table"
+    let searchTerm = "";
+
+    const el = (tag, attrs, kids) => {
+      const n = document.createElement(tag);
+      if (attrs) for (const k in attrs) {
+        if (k === "class") n.className = attrs[k];
+        else if (k === "text") n.textContent = attrs[k];
+        else if (k === "html") n.innerHTML = attrs[k];
+        else n.setAttribute(k, attrs[k]);
+      }
+      (kids || []).forEach(c => c && n.appendChild(c));
+      return n;
+    };
+
+    const tableQ = t => t.schema ? t.schema + "." + t.table : t.table;
+    const colQ = (t, c) => tableQ(t) + "." + c.name;
+
+    const matches = (t) => {
+      if (!searchTerm) return true;
+      const q = searchTerm.toLowerCase();
+      if (tableQ(t).toLowerCase().includes(q)) return true;
+      return (t.columns || []).some(c => c.name.toLowerCase().includes(q));
+    };
+
+    function renderFieldRow(t, c) {
+      const q = colQ(t, c);
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = !excludedCols.has(q);
+      const row = el("div", { class: "field-row" + (excludedCols.has(q) ? " excluded" : "") }, [
+        cb,
+        el("span", { class: "field-name", text: c.name }),
+        el("span", { class: "field-type", text: c.type || "" }),
+      ]);
+      cb.addEventListener("change", () => {
+        if (cb.checked) excludedCols.delete(q); else excludedCols.add(q);
+        row.classList.toggle("excluded", !cb.checked);
+        updateSummary();
+      });
+      return row;
+    }
+
+    function renderTableCard(t) {
+      const q = tableQ(t);
+      const isOpen = expanded.has(q);
+      const card = el("div", { class: "table-card" + (excludedTables.has(q) ? " excluded" : "") });
+
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = !excludedTables.has(q);
+      cb.addEventListener("click", e => e.stopPropagation());
+      cb.addEventListener("change", () => {
+        if (cb.checked) excludedTables.delete(q); else excludedTables.add(q);
+        card.classList.toggle("excluded", !cb.checked);
+        badge.style.display = cb.checked ? "none" : "";
+        updateSummary();
+      });
+
+      const toggle = el("span", { class: "table-toggle" + (isOpen ? "" : " collapsed"), text: "▾" });
+      const nameHtml = (t.schema ? '<span class="schema-prefix">' + t.schema + '.</span>' : "") + t.table;
+      const badge = el("span", { class: "table-state-badge badge-excluded", text: "excluded" });
+      badge.style.display = excludedTables.has(q) ? "" : "none";
+
+      const header = el("div", { class: "table-header" }, [
+        cb, toggle,
+        el("span", { class: "table-name", html: nameHtml }),
+        el("span", { class: "table-rows", text: (t.columns || []).length + " columns" }),
+        el("span", { class: "table-spacer" }),
+        badge,
+      ]);
+
+      const body = el("div", { class: "table-body" + (isOpen ? "" : " collapsed") });
+      (t.columns || []).forEach(c => body.appendChild(renderFieldRow(t, c)));
+
+      header.addEventListener("click", () => {
+        const open = !expanded.has(q);
+        if (open) expanded.add(q); else expanded.delete(q);
+        toggle.classList.toggle("collapsed", !open);
+        body.classList.toggle("collapsed", !open);
+      });
+      card.appendChild(header);
+      card.appendChild(body);
+      return card;
+    }
+
+    function renderAll() {
+      const main = document.getElementById("main");
+      main.innerHTML = "";
+      let shown = 0;
+      (MANIFEST.schemas || []).forEach(sc => {
+        const tables = (sc.tables || []).filter(matches);
+        if (!tables.length) return;
+        shown += tables.length;
+
+        const keepBtn = el("button", { type: "button", text: "Keep all" });
+        const dropBtn = el("button", { type: "button", text: "Drop all" });
+        keepBtn.addEventListener("click", () => { (sc.tables || []).forEach(t => excludedTables.delete(tableQ(t))); renderAll(); });
+        dropBtn.addEventListener("click", () => { (sc.tables || []).forEach(t => excludedTables.add(tableQ(t))); renderAll(); });
+        const label = (sc.name || "(default schema)") + " · " + (sc.tables || []).length + " tables";
+        const head = el("div", { class: "schema-section-head" }, [
+          el("span", { text: label }),
+          el("span", { class: "schema-bulk" }, [keepBtn, dropBtn]),
+        ]);
+
+        const section = el("div", { class: "schema-section" }, [head]);
+        tables.forEach(t => section.appendChild(renderTableCard(t)));
+        main.appendChild(section);
+      });
+      if (!shown) main.appendChild(el("div", { class: "empty", text: "No tables match your filter." }));
+      document.getElementById("search-counts").textContent =
+        searchTerm ? shown + " matching" : "";
+      updateSummary();
+    }
+
+    function counts() {
+      let total = 0, keptT = 0, exC = 0;
+      (MANIFEST.schemas || []).forEach(sc => (sc.tables || []).forEach(t => {
+        total++;
+        if (!excludedTables.has(tableQ(t))) {
+          keptT++;
+          exC += (t.columns || []).filter(c => excludedCols.has(colQ(t, c))).length;
+        }
+      }));
+      return { total, keptT, exC };
+    }
+
+    function updateSummary() {
+      const { total, keptT, exC } = counts();
+      const colNote = exC ? ` · <span class="count">${exC}</span> column${exC === 1 ? "" : "s"} excluded` : "";
+      document.getElementById("summary").innerHTML =
+        `Keeping <span class="count">${keptT}</span> of ${total} tables${colNote}`;
+      document.getElementById("generate").disabled = keptT === 0;
+    }
+
+    function buildFeedback() {
+      const keep = [], dropCols = [];
+      (MANIFEST.schemas || []).forEach(sc => (sc.tables || []).forEach(t => {
+        const q = tableQ(t);
+        if (excludedTables.has(q)) return;
+        keep.push(q);
+        (t.columns || []).forEach(c => { if (excludedCols.has(colQ(t, c))) dropCols.push(colQ(t, c)); });
+      }));
+      const total = counts().total;
+      const lines = [];
+      lines.push("AGAMI PRUNE — paste this whole block back to Claude to start introspection");
+      lines.push("profile: " + MANIFEST.profile);
+      lines.push("");
+      lines.push(`keep tables: ${keep.length} of ${total}`);
+      keep.sort().forEach(q => lines.push(q));
+      if (dropCols.length) {
+        lines.push("");
+        lines.push(`exclude columns: ${dropCols.length}`);
+        dropCols.sort().forEach(q => lines.push(q));
+      }
+      lines.push("");
+      lines.push("done");
+      return lines.join("\n") + "\n";
+    }
+
+    // Wiring
+    document.getElementById("search").addEventListener("input", e => { searchTerm = e.target.value; renderAll(); });
+    document.getElementById("expand-all").addEventListener("click", () => {
+      (MANIFEST.schemas || []).forEach(sc => (sc.tables || []).forEach(t => expanded.add(tableQ(t)))); renderAll();
+    });
+    document.getElementById("collapse-all").addEventListener("click", () => { expanded.clear(); renderAll(); });
+    document.getElementById("reset").addEventListener("click", () => {
+      excludedTables.clear(); excludedCols.clear(); renderAll();
+    });
+    document.getElementById("generate").addEventListener("click", () => {
+      document.getElementById("modal-text").value = buildFeedback();
+      document.getElementById("modal").hidden = false;
+    });
+    document.getElementById("close").addEventListener("click", () => { document.getElementById("modal").hidden = true; });
+    document.getElementById("copy").addEventListener("click", () => {
+      const ta = document.getElementById("modal-text");
+      ta.select();
+      const done = () => { document.getElementById("copy-status").textContent = "Copied ✓"; };
+      try {
+        navigator.clipboard.writeText(ta.value).then(done, () => { document.execCommand("copy"); done(); });
+      } catch (e) { try { document.execCommand("copy"); done(); } catch (_) {} }
+    });
+
+    const tot = MANIFEST.totals || { tables: 0, columns: 0 };
+    document.getElementById("totals-badge").textContent = tot.tables + " tables · " + tot.columns + " columns";
+    renderAll();
+  </script>
+</body>
+</html>

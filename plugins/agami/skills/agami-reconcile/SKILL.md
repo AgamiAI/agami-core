@@ -32,7 +32,7 @@ Spec for the deterministic helpers: [`scripts/reconcile.py`](../../scripts/recon
 Same checks as agami-query / agami-connect:
 
 1. **Plan-mode check** per [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash + Read + Write — refuse if locked in plan mode. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the CSV path."*
-2. **Credentials present** — read `~/.agami/credentials` for the active profile. If missing, invoke `/agami-connect` to set up first; this skill needs a working DB connection.
+2. **Credentials present** — read `<artifacts_dir>/local/credentials` for the active profile. If missing, invoke `/agami-connect` to set up first; this skill needs a working DB connection.
 3. **Model present** — `<artifacts_dir>/<profile>/org.yaml` must exist. If not, invoke `/agami-connect`. This skill needs an introspected model to generate questions against.
 4. **Input — accept any of three shapes; the user needn't know which.** Detect what they gave:
    - **A screenshot / image** of a dashboard (Metabase, Power BI, Tableau, Looker, a spreadsheet) — the common case. Go to Phase 1's **vision branch**.
@@ -127,7 +127,7 @@ Per row:
   "delta_pct":    <signed fraction or null>,
   "match":        true | false,
   "status":       "match" | "mismatch" | "error",
-  "report_path":  "~/.agami/charts/<profile>/<ts>.html",  // the full chart report for this query
+  "report_path":  "<artifacts_dir>/local/charts/<profile>/<ts>.html",  // the full chart report for this query
   "error":        "<message if status=error, else null>"
 }
 ```
@@ -153,8 +153,8 @@ Render the mismatches as a markdown table BEFORE the matches:
 
 | Label | Expected | Got | Δ | Drill-down |
 |---|---:|---:|---:|---|
-| Q3 2025 Revenue          | $4,200,000 | $3,890,000 | -7.4% | ~/.agami/charts/&lt;profile&gt;/...html |
-| Active customers (Apr)   | 12,450     | 11,920     | -4.3% | ~/.agami/charts/&lt;profile&gt;/...html |
+| Q3 2025 Revenue          | $4,200,000 | $3,890,000 | -7.4% | <artifacts_dir>/local/charts/&lt;profile&gt;/...html |
+| Active customers (Apr)   | 12,450     | 11,920     | -4.3% | <artifacts_dir>/local/charts/&lt;profile&gt;/...html |
 ```
 
 Cell formatting:

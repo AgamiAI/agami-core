@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Materialize provider-native auth files from ~/.agami/credentials so the
+Materialize provider-native auth files from <artifacts_dir>/local/credentials so the
 agami skill can run psql / mysql WITHOUT ever putting the password on the
 command line.
 
@@ -10,15 +10,15 @@ Code extension, Cursor extension) render Bash tool calls in their UI, so
 the password leaks into the chat transcript. The fix is provider-native
 auth files that psql / mysql read automatically:
 
-    ~/.agami/.pgpass         (chmod 600) — postgres "host:port:db:user:password"
-    ~/.agami/.mysql.cnf      (chmod 600) — mysql "[client_<profile>]\\npassword=..."
+    <artifacts_dir>/local/.pgpass         (chmod 600) — postgres "host:port:db:user:password"
+    <artifacts_dir>/local/.mysql.cnf      (chmod 600) — mysql "[client_<profile>]\\npassword=..."
 
 Skills then run:
-    PGPASSFILE=~/.agami/.pgpass psql -h ... -p ... -U ... -d ... -c "$SQL" --csv
-    mysql --defaults-file=~/.agami/.mysql.cnf --defaults-group-suffix=_<profile> ...
+    PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h ... -p ... -U ... -d ... -c "$SQL" --csv
+    mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> ...
 
 The visible Bash command contains NO password. The auth files are chmod 600,
-same protection as `~/.agami/credentials` itself.
+same protection as `<artifacts_dir>/local/credentials` itself.
 
 Usage:
     # Materialize for the active profile (init invokes it like this):
@@ -51,14 +51,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from execute_sql import _parse_dsn  # reuse DSN parsing logic  # noqa: E402
+import agami_paths  # noqa: E402
 
-AGAMI_HOME = Path.home() / ".agami"
+# NOTE: never bootstrap() at import — this module is imported by build_duckdb_attach and
+# tests. The one-shot legacy migration runs only from main() (and the other entry points).
+AGAMI_HOME = agami_paths.local_dir()  # <artifacts_dir>/local — materialized auth files live here
 CREDENTIALS_PATH = AGAMI_HOME / "credentials"
 CONFIG_PATH = AGAMI_HOME / ".config"
 PGPASS_PATH = AGAMI_HOME / ".pgpass"
 MYSQL_CNF_PATH = AGAMI_HOME / ".mysql.cnf"
 # Snowflake's official CLI (snowsql) reads from ~/.snowsql/config — agami
-# writes its own copy in ~/.agami/ so the password file stays alongside the
+# writes its own copy in <artifacts_dir>/local/ so the password file stays alongside the
 # other agami creds with chmod 600. The skill invokes snowsql with
 # `--config <path>` to point at this file.
 SNOWSQL_CONFIG_PATH = AGAMI_HOME / ".snowsql.cnf"
@@ -72,7 +75,7 @@ def _load_section(profile: str) -> dict[str, str]:
     """
     if not CREDENTIALS_PATH.exists():
         sys.stderr.write(
-            "~/.agami/credentials is missing. Run the agami init skill to set it up.\n"
+            "<artifacts_dir>/local/credentials is missing. Run the agami init skill to set it up.\n"
         )
         sys.exit(2)
 
@@ -83,7 +86,7 @@ def _load_section(profile: str) -> dict[str, str]:
     cfg.read(CREDENTIALS_PATH)
     if profile not in cfg:
         sys.stderr.write(
-            f"Profile [{profile}] not found in ~/.agami/credentials. "
+            f"Profile [{profile}] not found in <artifacts_dir>/local/credentials. "
             f"Sections present: {cfg.sections()}\n"
         )
         sys.exit(2)
@@ -135,7 +138,7 @@ def _build_pgpass_line(creds: dict[str, str]) -> str:
 
 
 def _write_pgpass(profile_lines: dict[str, str]) -> None:
-    """Write ~/.agami/.pgpass with one line per postgres profile.
+    """Write <artifacts_dir>/local/.pgpass with one line per postgres profile.
 
     profile_lines maps profile name → pgpass-format line. The profile name
     is written as a comment above each line for traceability.
@@ -245,10 +248,10 @@ def materialize(profiles: list[str]) -> int:
     """Read credentials for the given profiles; write the right auth files.
 
     Per-type routing:
-      postgres / redshift → ~/.agami/.pgpass entry (Redshift speaks Postgres
+      postgres / redshift → <artifacts_dir>/local/.pgpass entry (Redshift speaks Postgres
         wire protocol; psql/.pgpass work as-is, port 5439 vs 5432)
-      mysql → ~/.agami/.mysql.cnf section
-      snowflake → ~/.agami/.snowsql.cnf [connections.<profile>] section
+      mysql → <artifacts_dir>/local/.mysql.cnf section
+      snowflake → <artifacts_dir>/local/.snowsql.cnf [connections.<profile>] section
       sqlite → no auth file (file path is in credentials directly)
     """
     pg_lines: dict[str, str] = {}
@@ -281,10 +284,18 @@ def materialize(profiles: list[str]) -> int:
 
 
 def main() -> int:
+    global AGAMI_HOME, CREDENTIALS_PATH, CONFIG_PATH, PGPASS_PATH, MYSQL_CNF_PATH, SNOWSQL_CONFIG_PATH
+    agami_paths.bootstrap()
+    AGAMI_HOME = agami_paths.local_dir()
+    CREDENTIALS_PATH = AGAMI_HOME / "credentials"
+    CONFIG_PATH = AGAMI_HOME / ".config"
+    PGPASS_PATH = AGAMI_HOME / ".pgpass"
+    MYSQL_CNF_PATH = AGAMI_HOME / ".mysql.cnf"
+    SNOWSQL_CONFIG_PATH = AGAMI_HOME / ".snowsql.cnf"
     p = argparse.ArgumentParser(
         description=(
             "Materialize provider-native auth files (.pgpass / .mysql.cnf) from "
-            "~/.agami/credentials so psql / mysql can run without exposing passwords "
+            "the credentials file so psql / mysql can run without exposing passwords "
             "on the Bash command line."
         )
     )
@@ -295,7 +306,7 @@ def main() -> int:
 
     if args.all:
         if not CREDENTIALS_PATH.exists():
-            sys.stderr.write("~/.agami/credentials is missing.\n")
+            sys.stderr.write("<artifacts_dir>/local/credentials is missing.\n")
             return 2
         cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
         cfg.read(CREDENTIALS_PATH)

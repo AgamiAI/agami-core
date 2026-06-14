@@ -559,6 +559,12 @@ class Organization(_Base):
     # cross-cutting entities/metrics that unify multiple subject areas
     cross_subject_area_entities: list[Entity] = Field(default_factory=list)
     cross_subject_area_metrics: list[Metric] = Field(default_factory=list)
+    # domain glossary: term -> one-line definition (e.g. "MRR": "monthly recurring revenue").
+    # Enrichment fills this from decoded abbreviations + choice-field legends; org_draft
+    # renders it into ORGANIZATION.md's "Key terminology", and it feeds NL→SQL as context.
+    # The structured home means it survives an ORGANIZATION.md regeneration (a prose section
+    # the LLM has to remember to write does not).
+    key_terminology: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("fiscal_year_start_month")
     @classmethod

@@ -83,6 +83,18 @@ def test_catalog_mode_builds_valid_model(tmp_path):
     assert rel.confidence == "confirmed"  # postgres FKs are enforced
 
 
+def test_exclude_columns_marks_them_rejected(tmp_path):
+    # The prune step dropped customers.email — full introspect should mark it excluded.
+    org, _ = I.introspect("shop", "postgres", runner=_catalog_runner,
+                          artifacts_dir=tmp_path, dry_run=True,
+                          exclude_columns=["public.customers.email"])
+    assert V.validate(org).ok
+    customers = org.subject_areas[0].defined_table("customers")
+    assert customers.get_column("email").review_state == "rejected"
+    # a column NOT in the exclude list is untouched
+    assert customers.get_column("id").review_state != "rejected"
+
+
 def test_catalog_mode_grain_from_pk(tmp_path):
     org, _ = I.introspect("shop", "postgres", runner=_catalog_runner,
                           artifacts_dir=tmp_path, dry_run=True)
@@ -222,15 +234,15 @@ def test_introspect_writes_canonical_tree_and_loads_back(tmp_path):
     assert {t.name for sa in reloaded.subject_areas for t in sa.tables_defined} == {"customers", "orders"}
 
 
-def test_legacy_osi_backed_up_on_reonboard(tmp_path):
-    # simulate an existing OSI profile at the root
+def test_legacy_model_backed_up_on_reonboard(tmp_path):
+    # simulate an existing legacy (v1) profile at the root
     root = tmp_path / "shop"
     (root / "PUBLIC").mkdir(parents=True)
     (root / "index.yaml").write_text("profile: shop\n")
     (root / "PUBLIC" / "_schema.yaml").write_text("schema: PUBLIC\n")
     I.introspect("shop", "postgres", runner=_catalog_runner, artifacts_dir=tmp_path, dry_run=False)
-    assert (root / ".osi_backup" / "index.yaml").exists()
-    assert (root / ".osi_backup" / "PUBLIC" / "_schema.yaml").exists()
+    assert (root / ".legacy_backup" / "index.yaml").exists()
+    assert (root / ".legacy_backup" / "PUBLIC" / "_schema.yaml").exists()
     assert (root / "org.yaml").exists()  # new model written at root
 
 
@@ -550,7 +562,7 @@ def _collision_schemas_runner(sql):
 def test_same_named_tables_in_two_schemas_both_survive(tmp_path):
     """Regression: `billing.products` and `crm.products` must BOTH be modeled (the old engine
     keyed tables by bare name and dropped one on write). One area per schema keeps them apart."""
-    org, rep = I.introspect("meridian", "postgres", runner=_collision_schemas_runner,
+    org, rep = I.introspect("shop", "postgres", runner=_collision_schemas_runner,
                             artifacts_dir=tmp_path, dry_run=False)
     # one area per schema, not per-table fragmentation
     assert {sa.name for sa in org.subject_areas} == {"billing", "crm"}
@@ -559,7 +571,7 @@ def test_same_named_tables_in_two_schemas_both_survive(tmp_path):
     assert tabs == {("billing", "products"), ("billing", "invoices"),
                     ("crm", "products"), ("crm", "accounts")}
     # both products.yaml files exist on disk (the collision used to overwrite one)
-    root = tmp_path / "meridian"
+    root = tmp_path / "shop"
     assert (root / "subject_areas" / "billing" / "tables" / "products.yaml").exists()
     assert (root / "subject_areas" / "crm" / "tables" / "products.yaml").exists()
     # reload from disk -> still 4 tables (write+read round-trips without loss)

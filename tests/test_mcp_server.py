@@ -31,6 +31,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from mcp_server import (  # noqa: E402
     _classify_exit,
+    _distill_for_llm,
     _resolve_receipt,
     _resolve_units,
     check_read_only,
@@ -38,6 +39,25 @@ from mcp_server import (  # noqa: E402
     resolve_profile,
     tool_save_correction,
 )
+
+
+def test_distill_strips_human_scaffolding_for_llm_context():
+    # ORGANIZATION.md is injected into the model's prompt; the human-only HTML comment
+    # scaffolding ("auto-generated", "edit freely") is noise the LLM shouldn't see — the
+    # MCP path must strip it to match the query skill's read path.
+    raw = (
+        "# About this database\n\n"
+        "<!-- Auto-generated SUMMARY (only because no org context was provided).\n"
+        "     Edit freely: what the company is. -->\n\n"
+        "**acme** — 8 tables across 1 subject area.\n\n"
+        "## Key terminology\n- **MRR** — monthly recurring revenue\n"
+    )
+    out = _distill_for_llm(raw)
+    assert "<!--" not in out and "Auto-generated" not in out and "Edit freely" not in out
+    assert "**acme** — 8 tables across 1 subject area." in out
+    assert "**MRR** — monthly recurring revenue" in out
+    assert "\n\n\n" not in out          # collapsed the blank lines the comment left behind
+    assert _distill_for_llm(None) == "" and _distill_for_llm("") == ""
 
 
 # --- Read-only guard --------------------------------------------------------

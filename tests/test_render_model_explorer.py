@@ -5,7 +5,7 @@ top-level groups, tables → tables, columns → fields), with include_rejected=
 so excluded entries show (toggleable in the UI). These tests build a small model
 on disk and assert the manifest + render output.
 
-(The OSI-era apply_model_exclusions.py tests were retired — the model explorer now
+(The legacy apply_model_exclusions.py tests were retired — the model explorer now
 applies exclude/include via semantic_model.curate; see test_semantic_model_curate.py.)
 """
 

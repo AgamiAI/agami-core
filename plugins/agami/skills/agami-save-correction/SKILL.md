@@ -39,15 +39,15 @@ If plan mode is not active, skip this phase silently and go to Phase 1.
 
 ### 1a — resolve the active profile and artifacts_dir
 
-Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback).
+Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `<artifacts_dir>/local/.config` → literal string `"default"` (legacy fallback).
 
-Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / OSI / ORGANIZATION.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
+Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `<artifacts_dir>/local/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / model / ORGANIZATION.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
 
-For v1.0 / v1.1 fallback paths (`~/.agami/<profile>.yaml`, `~/.agami/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
+For v1.0 / v1.1 fallback paths (`<artifacts_dir>/local/<profile>.yaml`, `<artifacts_dir>/local/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
 
 ### 1b — find the most recent query
 
-Read the last entry in `~/.agami/query_log.jsonl`. Need `question` and `sql`.
+Read the last entry in `<artifacts_dir>/local/query_log.jsonl`. Need `question` and `sql`.
 
 If the log is empty: "I don't have a recent query to attach this correction to. Ask the question first, then save the correction." Stop.
 
@@ -60,7 +60,7 @@ Determine what the user gave:
 
 ### 1d — EXPLAIN-validate the corrected SQL
 
-Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `~/.agami/.config`. Same validate-then-save contract as `agami-connect/SKILL.md` Phase 5b:
+Run `EXPLAIN <sql>` (or `EXPLAIN QUERY PLAN <sql>` for SQLite) via the cached database tool from `<artifacts_dir>/local/.config`. Same validate-then-save contract as `agami-connect/SKILL.md` Phase 5b:
 
 - EXPLAIN succeeds → continue.
 - EXPLAIN fails → route through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Surface the one-line remediation. Do **not** save anything. Ask the user to fix the SQL and try again.
@@ -146,9 +146,9 @@ Else: is the correction a DISPLAY / FORMATTING / DEFAULT-FILTER preference?
      on that column. Also in the shared model, org-wide.
    - It's a default filter on a table — "exclude soft-deleted", "tenancy filter" →
      the table's `default_filters` (model), via `cli curate`.
-   - It's a cross-cutting presentation convention for THIS database, not tied to one
-     column — "present money with lakh/crore grouping" → `org_context` →
-     `ORGANIZATION.md` (`## Display & formatting conventions`).
+   - It's a cross-cutting presentation convention not tied to one column — "present
+     money with lakh/crore grouping" → `user_preference` → `USER_MEMORY.md` (it's a
+     presentation rule, not domain meaning; ORGANIZATION.md is narrative-only now).
    - It's a personal stylistic tic that would hold on ANY database — "I like top-10
      not top-5", "my date format" → `user_preference` → `USER_MEMORY.md`.
    Only when you genuinely can't tell personal vs org-wide → **AskUserQuestion** (the
@@ -161,11 +161,12 @@ Else: is the correction about a BUSINESS TERM specific to this database's domain
    (e.g., "gold tier means lifetime spend > $10k" — used as a category in many
     queries; "MRR" — the abstract concept; "we don't track refunds, those live
     in Stripe" — what the data fundamentally doesn't include)
-   → org_context (writes to ORGANIZATION.md)
-       → org_context is for ABSTRACT business concepts that aren't tied to one
-         specific column. A correction tied to a specific column belongs in
-         field_metadata, NOT here. Re-check the first rule of the tree before
-         landing here.
+   → org_context. A term → `cli set-terminology` (the structured `key_terminology`
+     glossary). A higher-level narrative ("we don't track refunds…", "who the users
+     are") → an ORGANIZATION.md prose line. See the `org_context` edit section for both.
+       → org_context is for ABSTRACT business concepts not tied to one specific
+         column. A correction tied to a specific column belongs in field_metadata,
+         NOT here. Re-check the first rule of the tree before landing here.
 
 Else: pure SQL syntax / typo with no domain knowledge implied
    (e.g., "missed the GROUP BY", "`customer_idx` is a typo of `customer_id`")
@@ -253,7 +254,7 @@ Model edits go through the curation engine (`semantic_model.cli curate "$ROOT" -
 | `field_metadata` | `cli curate` `edit` op(s) on the column (kind: table, + `column`) |
 | `table_metadata` | `cli curate` `edit` op(s) on the table |
 | `new_metric` | Write a new `subject_areas/<area>/metrics/<name>.yaml`, then `cli validate "$ROOT"` |
-| `org_context` | append to `ORGANIZATION.md` (no validator) |
+| `org_context` | a term → `cli set-terminology` (structured `key_terminology`, validated); a narrative line → append to `ORGANIZATION.md` (no validator) |
 | `user_preference` | append to `USER_MEMORY.md` (no validator) |
 
 #### `relationship` edit
@@ -296,7 +297,7 @@ Reference columns plainly (`<table>.<column>`). Strip user-specific WHERE filter
 
 #### `user_preference` edit
 
-A `user_preference` correction does NOT touch the OSI semantic model. It lands in `<artifacts_dir>/USER_MEMORY.md` (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)) — the **global** preferences file that applies across every database. Steps:
+A `user_preference` correction does NOT touch the semantic model. It lands in `<artifacts_dir>/USER_MEMORY.md` (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)) — the **global** preferences file that applies across every database. Steps:
 
 1. **Read** `<artifacts_dir>/USER_MEMORY.md` (it exists — `init` seeds it).
 2. **Pick the right section** (`Default filters`, `Naming and synonyms`, `Display preferences`, or `Avoid`) based on the policy's nature. Add a new section if none of the four fits — keep this rare.
@@ -308,29 +309,22 @@ The user's bullet should be self-contained — anyone reading USER_MEMORY.md sho
 
 #### `org_context` edit
 
-An `org_context` correction lands in `<artifacts_dir>/<profile>/ORGANIZATION.md` — the **per-database** domain context file (per [`shared/organization-context-format.md`](../../shared/organization-context-format.md)). It does NOT touch the OSI semantic model.
+`org_context` splits by **what kind of fact it is** — each goes to its proper home (per [`shared/organization-context-format.md`](../../shared/organization-context-format.md)). The two homes are deliberately separate; never write one kind into the other.
 
-Steps:
+- **A term's meaning** (the common case) — "gold tier" = lifetime spend > $10k, "MRR" = monthly recurring revenue, or an acronym → its expansion. This goes to the **structured glossary**, NOT a prose file — `set-terminology` merges it onto `key_terminology` (validated, committed), and it then surfaces in the derived domain context on every query automatically (no file to re-render, nothing for a human to clobber):
+  ```bash
+  printf '{"gold tier": "lifetime spend > $10k"}' > /tmp/agami-term.json
+  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file /tmp/agami-term.json
+  ```
+  The key is the term; the value is a **self-contained** definition (understandable without the original conversation). It merges by default — existing terms are never lost. **Never** hand-append `- "term" = definition` lines to ORGANIZATION.md; that's the old prose home and is wrong now.
+- **A higher-level narrative** — what the data represents, who the users are, what's *not* in this database. Append a sentence/paragraph to `<artifacts_dir>/<profile>/ORGANIZATION.md` under `# About this database` (create it with the starter if missing — `cli org-draft "$ROOT" > "$ROOT/ORGANIZATION.md"`). This file is the human narrative **only** — no `term = definition` lines, no model facts.
+- **A cross-cutting display/formatting convention** (a currency symbol or number grouping everyone querying this DB should see) is a *presentation* preference, not domain meaning: route it to `user_preference` → `USER_MEMORY.md`, or — when it's really a fact about one column (units/currency) — to that column's `caveat`/`value_transform`. Do **not** invent an ORGANIZATION.md "conventions" heading; the file is narrative-only.
 
-1. **Read** `<artifacts_dir>/<profile>/ORGANIZATION.md` (create with the default template if missing — `init`/`connect` normally seed it, but this is a safe fallback).
-2. **Pick the right section.** Most domain-context entries land under `## Key terminology` as `- "<term>" = <definition>` bullets. If the user is describing what the data represents at a higher level, append a paragraph under `# About this database` instead. If they're describing *what's not in this database*, append under `## What we DON'T track here`. **For an org-wide display/formatting rule** (currency symbol, units, number formatting that everyone querying this DB should get), append under `## Display & formatting conventions` (create the section if absent). Add a new section only if none fit.
-3. **Append the new bullet (or paragraph)** in plain English, preserving the user's wording.
-4. **Show the user the diff** (Phase 4b) before writing.
-5. **No validation** — ORGANIZATION.md is free-form. The semantic model is unchanged.
-
-The user's bullet should be self-contained — anyone reading ORGANIZATION.md should understand the term without seeing the original conversation. Example output:
-
-```markdown
-## Key terminology
-
-- "MRR" = monthly recurring revenue, computed as SUM(price) WHERE plan='subscription'
-- "active user" = signed in within the last 30 days
-- "gold tier" = lifetime spend > $10k                  ← appended by save-correction
-```
+**Show the user the diff** (Phase 4b) before writing. `set-terminology` is validated (reverts on failure); ORGANIZATION.md prose is free-form (no validation).
 
 #### `mixed` edit
 
-Apply each individual edit as above. Show the user the combined diff in 4b before validating. If the mix includes a `user_preference` or `org_context`, those parts skip the validator (USER_MEMORY.md / ORGANIZATION.md aren't validated); the OSI-model parts still go through the validator.
+Apply each individual edit as above. Show the user the combined diff in 4b before validating. If the mix includes a `user_preference` or `org_context`, those parts skip the validator (USER_MEMORY.md / ORGANIZATION.md aren't validated); the semantic-model parts still go through the validator.
 
 ### 4b — show the diff to the user, get approval
 

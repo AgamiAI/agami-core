@@ -1,8 +1,7 @@
 """Loader for the agami semantic-model-v2 on-disk layout.
 
-On-disk tree (design doc's "Storage layout on disk"), rooted at a v2 profile dir.
-For LiteBI this lives at ``<artifacts_dir>/<profile>/.semantic_v2/`` so the legacy
-per-table OSI model stays untouched side-by-side:
+On-disk tree (design doc's "Storage layout on disk"), rooted at the profile dir
+``<artifacts_dir>/<profile>/``:
 
     <root>/
       org.yaml                                 # org desc + storage_connections + subject_areas refs
@@ -112,6 +111,7 @@ def load_organization(root: str | Path, *, include_rejected: bool = False) -> Or
         cross_subject_area_relationships=_load_cross_rels(root, org_doc),
         cross_subject_area_entities=_load_cross_entities(root, org_doc),
         cross_subject_area_metrics=_load_cross_metrics(root, org_doc),
+        key_terminology=org_doc.get("key_terminology", {}) or {},
     )
     return org
 

@@ -132,7 +132,7 @@ def test_stage_in_place_returns_scripts_dir(tmp_path):
 
 
 def test_stage_copies_self_contained_files(tmp_path, monkeypatch):
-    # Redirect the stable serve dir into tmp so we don't touch the real ~/.agami.
+    # Redirect the stable serve dir into tmp so we don't touch the real artifacts dir.
     stable = tmp_path / "serve"
     monkeypatch.setattr(sd, "STABLE_SERVE_DIR", stable)
     # real scripts dir has mcp_server.py + execute_sql.py

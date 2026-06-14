@@ -5,7 +5,7 @@ The script generates a temp DuckDB init file that ATTACHes one or more
 agami profiles for cross-database SQL via DuckDB's postgres_scanner +
 mysql_scanner. The init file must:
 
-- Land in ~/.agami/.duckdb_init_*.sql (chmod 600)
+- Land in <artifacts_dir>/local/.duckdb_init_*.sql (chmod 600)
 - Single-quote-escape passwords correctly
 - Refuse Snowflake federation (snowflake_scanner not in stable DuckDB)
 - Refuse a single-profile call (federation needs ≥ 2)
@@ -27,20 +27,19 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
 @pytest.fixture
 def tmp_agami_home(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    agami = home / ".agami"
-    agami.mkdir(mode=0o700)
-    monkeypatch.setenv("HOME", str(home))
+    art = tmp_path / "artifacts"
+    local = art / "local"
+    local.mkdir(parents=True, mode=0o700)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
     monkeypatch.delenv("AGAMI_PROFILE", raising=False)
 
-    # Re-import so all module-level paths pick up the patched HOME.
+    # Re-import so all module-level paths re-resolve to <art>/local.
     import importlib
     import setup_pgauth
     importlib.reload(setup_pgauth)
     import build_duckdb_attach
     importlib.reload(build_duckdb_attach)
-    return build_duckdb_attach, agami
+    return build_duckdb_attach, local
 
 
 def _write_credentials(agami: Path, contents: str) -> None:

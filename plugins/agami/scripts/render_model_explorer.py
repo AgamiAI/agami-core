@@ -18,7 +18,7 @@ Usage:
     python3 render_model_explorer.py \\
         --profile main \\
         --artifacts-dir ~/agami-artifacts \\
-        --out ~/.agami/model/20260512-101500.html
+        --out <artifacts_dir>/local/model/20260512-101500.html
 
 The HTML's MANIFEST_JSON schema is documented at the top of
 shared/model-explorer-template.html.
@@ -71,12 +71,18 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
 
     org_md_path = profile_dir / "ORGANIZATION.md"
     organization_md = org_md_path.read_text(encoding="utf-8") if org_md_path.exists() else ""
-    # never blank: if the file is missing/empty (ignoring HTML comments), fall back to a
-    # factual draft generated from the model itself.
+    from semantic_model import org_draft as _OD
     import re as _re
+    # `organization_md` is the human's narrative ONLY — this is what the edit box writes back,
+    # so model facts must never be folded in here (or saving would persist them). If blank,
+    # offer the starter prompt. The model-derived summary (subject areas, conventions, decoded
+    # glossary) is a SEPARATE read-only field, computed fresh — see `derived_context`.
     if not _re.sub(r"<!--.*?-->", "", organization_md, flags=_re.DOTALL).strip():
-        from semantic_model import org_draft as _OD
-        organization_md = _OD.draft_organization_md(org)
+        organization_md = _OD.starter_organization_md(org)
+    # Read-only derived block WITHOUT the curated glossary — that's rendered as an editable
+    # panel (the curated key_terminology is a first-class structured field users add/correct).
+    derived_context_md = _OD.derived_context(org, with_curated_glossary=False)
+    key_terminology = dict(getattr(org, "key_terminology", {}) or {})
 
     for sa in org.subject_areas:
         out_tables: list[dict] = []
@@ -86,6 +92,10 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
             if t_excluded:
                 total_excluded_tables += 1
             qname = f"{sa.name}.{t.name}"
+            # column → its semantic group (for the wide-table grouped view); a column may
+            # appear in at most one group, so invert the table's column_groups once.
+            col_group = {cn: gname for gname, members in (t.column_groups or {}).items()
+                         for cn in members}
             fields_out: list[dict] = []
             for c in t.columns:
                 total_fields += 1
@@ -99,6 +109,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
                     "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
                     "date_format": c.date_format, "timezone": c.timezone,
+                    "group": col_group.get(c.name, ""),
                 })
             out_tables.append({
                 "name": t.name, "qname": qname, "description": t.description,
@@ -109,6 +120,9 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
                 "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
                 "synonyms": [], "area": sa.name, "db_schema": t.schema_name or "",
+                # ordered group names for the wide-table grouped field view (empty on
+                # narrow tables — the UI then just lists fields flat)
+                "column_groups": list((t.column_groups or {}).keys()),
                 "fields": fields_out,
             })
 
@@ -197,6 +211,11 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     return {
         "profile": profile,
         "organization_md": organization_md,
+        # model-derived domain summary (read-only in the UI; not part of the editable file)
+        "derived_context_md": derived_context_md,
+        # the curated glossary (term → definition) — EDITABLE in the explorer, written back
+        # via `cli set-terminology`. Separate from the read-only derived block above.
+        "key_terminology": key_terminology,
         "storage_type": storage_type,
         "totals": {
             "schemas": len(out_schemas), "subject_areas": len(areas_out),
@@ -256,7 +275,7 @@ def main() -> int:
     p.add_argument("--manifest-out",
                    help="Optional: also dump the raw manifest JSON to this path")
     p.add_argument("--initial-tab", default="auto",
-                   choices=["auto", "organization", "areas", "tables", "metrics", "entities",
+                   choices=["auto", "organization", "tables", "metrics", "entities",
                             "joins", "examples", "review", "queued"],
                    help="Tab the dashboard opens on. 'auto' (default) opens on Review when "
                         "anything needs sign-off, else Tables; 'review' forces the sign-off queue.")

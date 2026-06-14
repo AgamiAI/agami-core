@@ -2,11 +2,11 @@
 """
 Tier 3 — Python execution helper.
 
-Reads ~/.agami/credentials (INI), opens a connection to the configured
+Reads <artifacts_dir>/local/credentials (INI), opens a connection to the configured
 database via the appropriate Python driver, runs ONE SQL statement, and
 writes the result as RFC 4180 CSV to stdout. Stdlib + driver-only.
 
-The agami skill calls this when it detects tier=python in ~/.agami/.config
+The agami skill calls this when it detects tier=python in <artifacts_dir>/local/.config
 (meaning native CLI tools are unavailable but the relevant Python driver
 is importable). Connect-side and query-database both shell out to:
 
@@ -15,7 +15,7 @@ is importable). Connect-side and query-database both shell out to:
 The --sql-file form is preferred over --sql so SQL containing quotes,
 backticks, or `$` doesn't get mangled by the shell.
 
-Connects ONLY to the host/port in ~/.agami/credentials (the sole credential
+Connects ONLY to the host/port in <artifacts_dir>/local/credentials (the sole credential
 source — no env-var bypass). Never substitutes localhost. Never asks for
 credentials. Hard exits with a clear message if credentials are missing.
 
@@ -46,9 +46,14 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agami_paths  # noqa: E402
 
-CREDENTIALS_PATH = Path.home() / ".agami" / "credentials"
-CONFIG_PATH = Path.home() / ".agami" / ".config"
+# Credentials + config now live under <artifacts_dir>/local/ (the consolidated,
+# gitignored replacement for ~/.agami). The path is stable regardless of migration
+# timing — bootstrap() just moves the files into it. See agami_paths.
+CREDENTIALS_PATH = agami_paths.credentials_path()
+CONFIG_PATH = agami_paths.config_path()
 ALLOWED_PERMS = (0o600, 0o400)
 
 
@@ -57,7 +62,7 @@ def _resolve_default_profile() -> str:
 
     Resolution order:
       1. AGAMI_PROFILE env var
-      2. active_profile field in ~/.agami/.config
+      2. active_profile field in <artifacts_dir>/local/.config
       3. The literal string "default" (legacy fallback)
     """
     env = os.environ.get("AGAMI_PROFILE")
@@ -81,7 +86,7 @@ def _err(msg: str, *, code: int = 2) -> int:
 
 
 def _load_credentials(profile: str) -> dict[str, str]:
-    """Resolve credentials from ~/.agami/credentials (the ONLY source).
+    """Resolve credentials from <artifacts_dir>/local/credentials (the ONLY source).
 
     Within the selected profile:
       - If `url = ...` is set, parse it as a DSN (overrides per-field values)
@@ -92,7 +97,7 @@ def _load_credentials(profile: str) -> dict[str, str]:
     """
     if not CREDENTIALS_PATH.exists():
         sys.stderr.write(
-            "~/.agami/credentials is missing. Run the agami `init` skill to set it up.\n"
+            "<artifacts_dir>/local/credentials is missing. Run the agami `init` skill to set it up.\n"
             "Never type credentials into chat — they belong in the file.\n"
         )
         sys.exit(2)
@@ -104,8 +109,8 @@ def _load_credentials(profile: str) -> dict[str, str]:
         mode = stat.S_IMODE(CREDENTIALS_PATH.stat().st_mode)
         if mode not in ALLOWED_PERMS:
             sys.stderr.write(
-                f"~/.agami/credentials must be chmod 600 (currently {oct(mode)[2:]})\n"
-                f"Run: chmod 600 ~/.agami/credentials\n"
+                f"<artifacts_dir>/local/credentials must be chmod 600 (currently {oct(mode)[2:]})\n"
+                f"Run: chmod 600 <artifacts_dir>/local/credentials\n"
             )
             sys.exit(2)
 
@@ -118,7 +123,7 @@ def _load_credentials(profile: str) -> dict[str, str]:
     cfg.read(CREDENTIALS_PATH)
     if profile not in cfg:
         sys.stderr.write(
-            f"Profile [{profile}] not found in ~/.agami/credentials. "
+            f"Profile [{profile}] not found in <artifacts_dir>/local/credentials. "
             f"Sections present: {cfg.sections()}\n"
         )
         sys.exit(2)
@@ -275,7 +280,7 @@ def _require(creds: dict[str, str], *fields: str) -> None:
     if missing:
         sys.stderr.write(
             f"Credentials profile is missing required fields: {missing}. "
-            f"Edit ~/.agami/credentials and add them.\n"
+            f"Edit <artifacts_dir>/local/credentials and add them.\n"
         )
         sys.exit(2)
 
@@ -354,7 +359,7 @@ def _execute_snowflake(creds: dict[str, str], sql: str) -> int:
     if not (creds.get("password") or creds.get("authenticator")):
         return _err(
             "Snowflake profile is missing 'password' or 'authenticator'. "
-            "Add one to ~/.agami/credentials.",
+            "Add one to <artifacts_dir>/local/credentials.",
             code=2,
         )
     conn_kwargs: dict[str, Any] = {
@@ -692,6 +697,12 @@ def _model_safety(sql: str, profile: str, area: str | None):
 
 
 def main() -> int:
+    # One-shot migration of a legacy <artifacts_dir>/local into <artifacts_dir>/local/, then re-resolve
+    # the paths (the migration can set the artifacts-dir pointer to a custom location).
+    global CREDENTIALS_PATH, CONFIG_PATH
+    agami_paths.bootstrap()
+    CREDENTIALS_PATH = agami_paths.credentials_path()
+    CONFIG_PATH = agami_paths.config_path()
     p = argparse.ArgumentParser(
         description="Tier-3 Python SQL executor for agami. Reads credentials, runs SQL, emits CSV.",
     )

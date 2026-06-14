@@ -2,7 +2,7 @@
 
 A renderer run as `python3 render_model_explorer.py …` inherits whatever `python3` is on
 PATH — which often lacks PyYAML / the model deps, while agami's *configured* interpreter
-(`~/.agami/.config` → `tool_paths.python3`, the same one the `sm` wrapper resolves) has them.
+(`<artifacts_dir>/local/.config` → `tool_paths.python3`, the same one the `sm` wrapper resolves) has them.
 Importing this module checks for the deps and, if they're missing, re-execs the current
 script under the configured interpreter — so the caller never has to remember to use `$PY`.
 
@@ -22,10 +22,30 @@ def _configured_interpreter() -> str:
     if env:
         return env
     try:
-        cfg = json.loads(pathlib.Path("~/.agami/.config").expanduser().read_text())
+        cfg = json.loads(_config_path().read_text())
         return (cfg.get("tool_paths") or {}).get("python3") or ""
     except Exception:
         return ""
+
+
+def _config_path() -> pathlib.Path:
+    """`.config` now lives at <artifacts_dir>/local/.config. Resolve the artifacts dir
+    (AGAMI_ARTIFACTS_DIR → ~/.config/agami/path pointer → default), with a legacy
+    ~/.agami/.config fallback for the transition (this runs before migration may have)."""
+    art = os.environ.get("AGAMI_ARTIFACTS_DIR")
+    if not art:
+        ptr = pathlib.Path("~/.config/agami/path").expanduser()
+        try:
+            if ptr.exists():
+                art = ptr.read_text().strip()
+        except OSError:
+            pass
+    art = art or str(pathlib.Path("~/agami-artifacts").expanduser())
+    new = pathlib.Path(os.path.expanduser(art)) / "local" / ".config"
+    if new.exists():
+        return new
+    legacy = pathlib.Path("~/.agami/.config").expanduser()
+    return legacy if legacy.exists() else new
 
 
 def ensure_deps(canary: str = "yaml") -> None:

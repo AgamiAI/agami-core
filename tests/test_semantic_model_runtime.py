@@ -80,15 +80,15 @@ def test_aggregating_many_side_is_allowed():
 
 
 def test_examples_high_confidence_short_circuit():
-    exs = [{"question": "top 5 inspectors this month"}, {"question": "average soc by zone"}]
-    matches = rt.get_prompt_examples("average SOC by zone", exs)
-    assert matches[0].example["question"] == "average soc by zone"
+    exs = [{"question": "top 5 sellers this month"}, {"question": "average price by region"}]
+    matches = rt.get_prompt_examples("average PRICE by region", exs)
+    assert matches[0].example["question"] == "average price by region"
     assert rt.is_high_confidence(matches)
 
 
 def test_examples_low_confidence():
     exs = [{"question": "something totally unrelated about widgets"}]
-    matches = rt.get_prompt_examples("how many battery packs were swapped", exs)
+    matches = rt.get_prompt_examples("how many orders were placed", exs)
     assert not rt.is_high_confidence(matches)
 
 
@@ -96,23 +96,23 @@ def test_examples_low_confidence():
 
 
 def _entity_org():
-    bp = m.Entity(name="Battery Pack", value_pattern=r"^(BP|INSMOM)\w+$",
-                  maps_to=[m.EntityMapping(table="assets", column="bp_serial", primary=True)])
-    cust = m.Entity(name="Customer ID", value_pattern=r"^INSMOM\w+$",
-                    maps_to=[m.EntityMapping(table="cust", column="cid", primary=True)])
-    return m.Organization(organization="Sun",
-                          subject_areas=[m.SubjectArea(name="b", entities=[bp, cust])])
+    o1 = m.Entity(name="Order", value_pattern=r"^(ORD|SH)\w+$",
+                  maps_to=[m.EntityMapping(table="orders", column="order_no", primary=True)])
+    o2 = m.Entity(name="Shipment", value_pattern=r"^SH\w+$",
+                  maps_to=[m.EntityMapping(table="shipments", column="ship_no", primary=True)])
+    return m.Organization(organization="Acme",
+                          subject_areas=[m.SubjectArea(name="b", entities=[o1, o2])])
 
 
 def test_identify_entity_resolved():
     org = _entity_org()
-    res = rt.identify_entity("INSMOMAH2304", org, probe=lambda t, c, v: t == "assets")
-    assert res.status == "resolved" and res.candidates[0]["entity"] == "Battery Pack"
+    res = rt.identify_entity("SHAH2304", org, probe=lambda t, c, v: t == "orders")
+    assert res.status == "resolved" and res.candidates[0]["entity"] == "Order"
 
 
 def test_identify_entity_overlap_clarify():
     org = _entity_org()
-    res = rt.identify_entity("INSMOMAH2304", org, probe=lambda t, c, v: True)
+    res = rt.identify_entity("SHAH2304", org, probe=lambda t, c, v: True)
     assert res.status == "clarify" and len(res.candidates) == 2 and res.question_template
 
 

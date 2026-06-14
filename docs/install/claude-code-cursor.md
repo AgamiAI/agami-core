@@ -37,11 +37,11 @@ Try a skill in the Claude pane chat input:
 /agami-connect
 ```
 
-If you haven't set up credentials yet, the skill walks you through the DB-type picker and writes `~/.agami/credentials.example` for you to fill in. (No separate `/agami-init` — its setup flow was folded into `/agami-connect` Phase 0a.)
+If you haven't set up credentials yet, the skill walks you through the DB-type picker and writes `<artifacts_dir>/local/credentials.example` for you to fill in. (No separate `/agami-init` — its setup flow was folded into `/agami-connect` Phase 0a.)
 
 ## 5. Set up credentials
 
-Same as the CLI / VS Code: edit `~/.agami/credentials.example`, save as `~/.agami/credentials`, `chmod 600`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials).
+Same as the CLI / VS Code: edit `<artifacts_dir>/local/credentials.example`, save as `<artifacts_dir>/local/credentials`, `chmod 600`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials).
 
 ## Cursor-specific notes
 

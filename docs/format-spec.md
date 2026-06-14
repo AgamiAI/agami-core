@@ -2,19 +2,19 @@
 
 agami's state splits across two directories. See `[plugins/agami/shared/file-layout.md](../plugins/agami/shared/file-layout.md)` for the full design rationale; this page is the per-file format reference.
 
-## `~/.agami/` — secrets + per-user state — **NEVER commit**
+## `<artifacts_dir>/local/` — secrets + per-user state — **NEVER commit**
 
 
 | File                                             | Format                                                                                          | Owner                                             |
 | ------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `~/.agami/credentials`                           | INI (chmod 600)                                                                                 | User-edited                                       |
-| `~/.agami/.pgpass`, `.mysql.cnf`, `.snowsql.cnf` | Provider-native auth files (chmod 600)                                                          | Skill-written by `setup_pgauth.py`                |
-| `~/.agami/.config`                               | JSON (chmod 600) — `active_profile`, `artifacts_dir`, `tool_paths`, `reviewer_email`, `reviewer_role` | Skill-managed                                     |
-| `~/.agami/.optins`                               | JSON (chmod 600) — GitHub-star ask response                                                     | Skill-managed                                     |
-| `~/.agami/.duckdb_init_<id>.sql`                 | SQL (chmod 600, ephemeral)                                                                      | `build_duckdb_attach.py`, deleted after the query |
-| `~/.agami/query_log.jsonl`                       | JSONL append-only                                                                               | Skill-written, never sent, personal record        |
-| `~/.agami/charts/<ts>.html`                      | Chart.js HTML                                                                                   | Skill-written                                     |
-| `~/.agami/exports/<ts>.csv`                      | RFC 4180 CSV                                                                                    | Skill-written                                     |
+| `<artifacts_dir>/local/credentials`                           | INI (chmod 600)                                                                                 | User-edited                                       |
+| `<artifacts_dir>/local/.pgpass`, `.mysql.cnf`, `.snowsql.cnf` | Provider-native auth files (chmod 600)                                                          | Skill-written by `setup_pgauth.py`                |
+| `<artifacts_dir>/local/.config`                  | JSON (chmod 600) — `active_profile`, `tool_paths`, `reviewer_email`, `reviewer_role` (artifacts-dir location is the `~/.config/agami/path` pointer) | Skill-managed                  |
+| `<artifacts_dir>/local/.optins`                               | JSON (chmod 600) — GitHub-star ask response                                                     | Skill-managed                                     |
+| `<artifacts_dir>/local/.duckdb_init_<id>.sql`                 | SQL (chmod 600, ephemeral)                                                                      | `build_duckdb_attach.py`, deleted after the query |
+| `<artifacts_dir>/local/query_log.jsonl`                       | JSONL append-only                                                                               | Skill-written, never sent, personal record        |
+| `<artifacts_dir>/local/charts/<ts>.html`                      | Chart.js HTML                                                                                   | Skill-written                                     |
+| `<artifacts_dir>/local/exports/<ts>.csv`                      | RFC 4180 CSV                                                                                    | Skill-written                                     |
 
 
 ## `<artifacts_dir>/` — sharable, can be committed (default `~/agami-artifacts/`)
@@ -30,20 +30,20 @@ agami's state splits across two directories. See `[plugins/agami/shared/file-lay
 | `<artifacts_dir>/<profile>/subject_areas/<area>/{entities,metrics}/<name>.yaml`, `relationships.yaml` | Entities, metrics, and the intra-area FK graph (join cardinality + trust block)             | Skill-written, user-editable                                                     |
 | `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml` | NL→SQL few-shot library (scope-tagged)                                                                                        | Skill-written (seeds) + append-only via `agami-save-correction`                  |
 | `<artifacts_dir>/<profile>/ORGANIZATION.md`       | Free-form Markdown — per-database domain context                                                                                                              | Seeded by `agami-connect`, edited by user or appended by `agami-save-correction` |
-| `~/.agami/cross_profile_relationships.yaml`       | Agami-bespoke YAML — declared JOIN paths across profiles for federation. **Lives in `~/.agami/` because it spans profiles** and isn't tied to one team's repo | User-edited (optional)                                                           |
+| `<artifacts_dir>/local/cross_profile_relationships.yaml`       | Agami-bespoke YAML — declared JOIN paths across profiles for federation. **Lives in `<artifacts_dir>/local/` because it spans profiles** and isn't tied to one team's repo | User-edited (optional)                                                           |
 
 
 `USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives in the artifacts dir, and persists across Claude Code hosts (CLI / VS Code extension / Cursor extension) the same way the rest of `<artifacts_dir>/` does.
 
 `USER_MEMORY.md` covers **user preferences that apply across every database** (default time windows, display preferences, exclude rules). The per-database `**ORGANIZATION.md`** at `<artifacts_dir>/<profile>/ORGANIZATION.md` covers **domain knowledge for that specific database** (terminology, key metrics, what the data represents). See `[plugins/agami/shared/organization-context-format.md](../plugins/agami/shared/organization-context-format.md)`.
 
-`<profile>` matches the section name in `~/.agami/credentials` (default: `default`). One *directory* per profile under `<artifacts_dir>/`. The `agami-connect` skill auto-migrates v1.0 (single-file) and v1.1 (under `~/.agami/`) installs on first run after upgrade.
+`<profile>` matches the section name in `<artifacts_dir>/local/credentials` (default: `default`). One *directory* per profile under `<artifacts_dir>/`. The `agami-connect` skill auto-migrates v1.0 (single-file) and v1.1 (under `<artifacts_dir>/local/`) installs on first run after upgrade.
 
 ## Why the split
 
 Three concrete wins (full design in `[shared/file-layout.md](../plugins/agami/shared/file-layout.md)`):
 
-1. **Zero credential-leak risk on commit.** `~/.agami/` is gitignored by default; `<artifacts_dir>/` is the only place anything goes when teams share.
+1. **Zero credential-leak risk on commit.** `<artifacts_dir>/local/` is gitignored by default; `<artifacts_dir>/` is the only place anything goes when teams share.
 2. **Team workflows just work.** `cd ~/code/myteam/data && git add agami/` commits everyone's tuned semantic model, examples, ORGANIZATION.md, and USER_MEMORY.md preferences.
 3. **Power users override per-environment.** Set `AGAMI_ARTIFACTS_DIR=/path/to/staging-models` for an experimental session.
 
@@ -101,7 +101,7 @@ cross_subject_area_relationships: []
 # datasources/shop_postgres/storage.yaml
 name: shop_postgres
 storage_type: PostgreSQL
-storage_config: { profile: shop, credentials_ref: "~/.agami/credentials" }
+storage_config: { profile: shop, credentials_ref: "<artifacts_dir>/local/credentials" }
 ```
 ```yaml
 # subject_areas/sales/subject_area.yaml
@@ -209,7 +209,7 @@ examples:
 
 ## 4. User memory (free-form Markdown)
 
-`~/.agami/USER_MEMORY.md` holds free-form preferences and policies that don't belong in the semantic model — default filters, domain vocabulary, display preferences, hard avoids. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
+`<artifacts_dir>/USER_MEMORY.md` (committable top-level, **not** under `local/` — it's cross-DB preferences worth sharing, not a secret) holds free-form preferences and policies that don't belong in the semantic model — default filters, domain vocabulary, display preferences, hard avoids. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
 
 Seeded by `agami-connect` Phase 0a on first run with section hints (HTML comments). User edits by hand, OR the `agami-save-correction` skill appends a bullet when it classifies a correction as `user_preference` ("from now on, always exclude test users where email matches @example.com").
 
@@ -217,7 +217,7 @@ Full spec: `[plugins/agami/shared/user-memory-format.md](../plugins/agami/shared
 
 ## 5. Internal state files
 
-### `~/.agami/.config`
+### `<artifacts_dir>/local/.config`
 
 ```json
 {
@@ -237,7 +237,9 @@ Full spec: `[plugins/agami/shared/user-memory-format.md](../plugins/agami/shared
 
 Written by `agami-connect` Phase 0a on first run; updated by `agami-model` (its Review tab) the first time the curator approves a Rule 1 item (the `reviewer_email` + `reviewer_role` get persisted so future sessions don't re-ask).
 
-### `~/.agami/.optins`
+> **Note on `artifacts_dir`:** this field is recorded for reference (and read as a fallback signal that onboarding has already chosen a folder), but it is **not** the authoritative locator — `.config` lives *inside* `<artifacts_dir>/local/`, so it can't bootstrap its own location. The source of truth for finding `<artifacts_dir>` is, in order: `AGAMI_ARTIFACTS_DIR` → the `~/.config/agami/path` pointer → the default `~/agami-artifacts`.
+
+### `<artifacts_dir>/local/.optins`
 
 ```json
 {
@@ -250,7 +252,7 @@ Written by `agami-connect` Phase 0a on first run; updated by `agami-model` (its 
 
 `github_star_response` is one of `yes_opened` (user clicked through to GitHub), `maybe_later`, or `already_starred`. Existence of the file is the never-re-prompt gate — we ask exactly once, after the user's first successful query.
 
-### `~/.agami/query_log.jsonl`
+### `<artifacts_dir>/local/query_log.jsonl`
 
 ```jsonl
 {"ts":"2026-05-07T15:14:00Z","question":"how many orders shipped in May","sql":"SELECT ...","row_count":4,"execution_ms":250,"tier":"cli","risk":"LOW","error_kind":null,"feedback":"good","chart_path":"/Users/me/.agami/charts/20260507-141500.html"}
@@ -279,10 +281,10 @@ Fields per line:
 
 ---
 
-## 6. Chart artifacts (`~/.agami/charts/<ts>.html`)
+## 6. Chart artifacts (`<artifacts_dir>/local/charts/<ts>.html`)
 
 Self-contained Chart.js v4 HTML, rendered from `[plugins/agami/shared/chart-template.html](../plugins/agami/shared/chart-template.html)` with placeholders substituted (`{{TITLE}}`, `{{CHART_TYPE}}`, `{{LABELS}}`, `{{DATASETS}}`, `{{GENERATED_AT}}`, `{{SQL}}`). Open in any browser.
 
-## 7. CSV exports (`~/.agami/exports/<ts>.csv`)
+## 7. CSV exports (`<artifacts_dir>/local/exports/<ts>.csv`)
 
 Standard RFC 4180 CSV. UTF-8, no BOM.

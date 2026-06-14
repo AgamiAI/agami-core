@@ -48,7 +48,7 @@ Use semver:
 
 Pre-launch (before public availability), even breaking changes are minor bumps — the implicit promise is that you've told all your alpha users they need to reinstall. Post-launch, semver-strict: a major bump is the contract that says "this will break your config".
 
-**The most common mistake** is renaming a skill (e.g., `init` → `agami-init`) or changing a file path (e.g., `~/.agami/<profile>/index.yaml` → `<artifacts_dir>/<profile>/index.yaml`) without bumping. Users installed at the old version see neither rename. Always bump on those changes.
+**The most common mistake** is renaming a skill (e.g., `init` → `agami-init`) or changing a file path (e.g., `<artifacts_dir>/local/<profile>/` → `<artifacts_dir>/<profile>/`) without bumping. Users installed at the old version see neither rename. Always bump on those changes.
 
 ### What "user-visible behavior" means
 

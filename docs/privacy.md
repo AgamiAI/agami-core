@@ -1,6 +1,6 @@
 # Privacy
 
-The short version: **your data never leaves your machine.** `agami` is a Claude Code skill that runs locally — credentials, schema, query results, and corrections all live in `~/.agami/` and `~/agami-artifacts/` on your laptop. There is no agami server in the loop, no telemetry, no opt-in, no opt-out. The runtime is silent.
+The short version: **your data never leaves your machine.** `agami` is a Claude Code skill that runs locally — credentials, schema, query results, and corrections all live in `<artifacts_dir>/local/` and `~/agami-artifacts/` on your laptop. There is no agami server in the loop, no telemetry, no opt-in, no opt-out. The runtime is silent.
 
 This page documents what stays on your machine, what we'd never send anywhere even hypothetically, and how the one outbound interaction (the post-install GitHub-star ask) works.
 
@@ -10,18 +10,18 @@ This page documents what stays on your machine, what we'd never send anywhere ev
 
 Every byte agami reads or writes stays on your machine:
 
-- **Credentials** (`~/.agami/credentials`) — chmod 600
-- **Auth files** (`~/.agami/.pgpass`, `.mysql.cnf`, `.snowsql.cnf`) — chmod 600, written by `setup_pgauth.py`
-- **Config** (`~/.agami/.config`) — `active_profile`, `artifacts_dir`, `tool_paths`, `reviewer_email`, `reviewer_role`
-- **Semantic model** (`<artifacts_dir>/<profile>/index.yaml` + `<schema>/<table>.yaml` files; default `<artifacts_dir>` is `~/agami-artifacts/`)
+- **Credentials** (`<artifacts_dir>/local/credentials`) — chmod 600
+- **Auth files** (`<artifacts_dir>/local/.pgpass`, `.mysql.cnf`, `.snowsql.cnf`) — chmod 600, written by `setup_pgauth.py`
+- **Config** (`<artifacts_dir>/local/.config`) — `active_profile`, `tool_paths`, `reviewer_email`, `reviewer_role` (the artifacts-dir location lives in the `~/.config/agami/path` pointer)
+- **Semantic model** (`org.yaml` + the `subject_areas/<area>/` tree under `<artifacts_dir>/<profile>/`; default `<artifacts_dir>` is `~/agami-artifacts/`)
 - **Examples library** (`<artifacts_dir>/<profile>/examples.yaml`)
 - **Organization context** (`<artifacts_dir>/<profile>/ORGANIZATION.md`) — your description of what the database represents, domain terminology
 - **User memory** (`<artifacts_dir>/USER_MEMORY.md`) — your cross-database preferences
 - **Query results** (everything Claude shows you)
-- **Query log** (`~/.agami/query_log.jsonl`) — your personal record of every query you ran
-- **Charts** (`~/.agami/charts/<profile>/<ts>.html`)
-- **CSV exports** (`~/.agami/exports/<profile>/<ts>.csv`)
-- **Review + model-explorer + examples-validation dashboards** (`~/.agami/{review,model,examples-validation}/<profile>/<ts>.html`)
+- **Query log** (`<artifacts_dir>/local/query_log.jsonl`) — your personal record of every query you ran
+- **Charts** (`<artifacts_dir>/local/charts/<profile>/<ts>.html`)
+- **CSV exports** (`<artifacts_dir>/local/exports/<profile>/<ts>.csv`)
+- **Review + model-explorer + examples-validation dashboards** (`<artifacts_dir>/local/{review,model,examples-validation}/<profile>/<ts>.html`)
 - **Snapshots** (`<artifacts_dir>/<profile>/.snapshots/<hash>/`) — immutable copies of past model versions for reproducibility
 - **Curation log** (`<artifacts_dir>/<profile>/curation_log.jsonl`) — append-only audit trail of review actions
 - **Corrections** (`<artifacts_dir>/<profile>/corrections.jsonl`) — append-only history of saved corrections
@@ -38,11 +38,11 @@ There is no outbound network call from the skill code, period. To be explicit, t
 - Schema content (table names, column names, descriptions, sample data)
 - Result rows or any subset thereof
 - Database hostnames, IPs, ports, credentials
-- File paths beyond `~/.agami/` and `<artifacts_dir>/`
+- File paths beyond `<artifacts_dir>/local/` and `<artifacts_dir>/`
 - Email addresses, names, IPs, MAC addresses, machine IDs, hardware fingerprints
 - Stack traces, log lines, error messages
 - Working directory contents, environment variables, git history
-- Anything from `~/.agami/credentials`, the artifacts dir, charts, exports, or the query log
+- Anything from `<artifacts_dir>/local/credentials`, the artifacts dir, charts, exports, or the query log
 
 You can grep the source — there is no `curl` / `requests.post` / network call in any skill or script code path. A test (`tests/test_privacy_no_network.py`) enforces this: any script that introduces a network-egress primitive fails the build.
 
@@ -56,7 +56,7 @@ After your first successful query, the `agami-query` skill asks once whether you
 - **Maybe later** — closes the prompt; we never ask again.
 - **Already starred — thank you!** — closes the prompt; we never ask again.
 
-Nothing about your response leaves your machine. agami has no signal-collection on the GitHub side — we don't observe whether you actually star, and a star is public information anyway. The decision is recorded in `~/.agami/.optins` so the ask doesn't repeat. To re-prompt: `rm ~/.agami/.optins` and ask any agami skill a question.
+Nothing about your response leaves your machine. agami has no signal-collection on the GitHub side — we don't observe whether you actually star, and a star is public information anyway. The decision is recorded in `<artifacts_dir>/local/.optins` so the ask doesn't repeat. To re-prompt: `rm <artifacts_dir>/local/.optins` and ask any agami skill a question.
 
 That's the entire outbound surface: opening one well-known URL in your browser when you click "Yes." No background network calls, no opt-in telemetry, no analytics events.
 

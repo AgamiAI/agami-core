@@ -44,7 +44,7 @@ def _receipt_clean() -> dict:
         ],
         "relationships": [
             {"name": "orders_to_customers", "from_to": "orders → customers",
-             "confidence": 1.0, "review_state": "approved", "origin": "fk"},
+             "confidence": "confirmed", "review_state": "approved", "origin": "fk"},
         ],
         "metrics": [
             {"name": "total_spend", "definition_prose": "Sum of completed-order amounts in USD.",
@@ -62,9 +62,9 @@ def _receipt_with_warning() -> dict:
         "tables_used": [{"qname": "public.orders", "rows": 1000}],
         "relationships": [
             {"name": "orders_to_customers", "from_to": "orders → customers",
-             "confidence": 0.62, "review_state": "unreviewed", "origin": "introspect_heuristic"},
+             "confidence": "inferred", "review_state": "unreviewed", "origin": "introspect_heuristic"},
         ],
-        "warnings": ["Used 1 unreviewed join (orders → customers, conf 0.62). Review now?"],
+        "warnings": ["Used 1 unreviewed join (orders → customers, conf inferred). Review now?"],
     }
 
 

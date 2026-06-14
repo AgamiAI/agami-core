@@ -26,6 +26,7 @@ import io
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import loader as L
 from . import runtime as RT
@@ -80,10 +81,24 @@ def cmd_areas(args) -> int:
 
 
 def cmd_org_draft(args) -> int:
-    # factual ORGANIZATION.md draft from the model, so it's never blank
+    # A human-narrative STARTER for ORGANIZATION.md (skip path) — a prompt only, no model
+    # facts. Those are derived at read time (see `org-context`), so they never get baked into
+    # the editable prose file where a human could clobber them.
     from . import org_draft
     org = L.load_organization(args.root, include_rejected=False)
-    sys.stdout.write(org_draft.draft_organization_md(org))
+    sys.stdout.write(org_draft.starter_organization_md(org))
+    return 0
+
+
+def cmd_org_context(args) -> int:
+    # The full domain context for the LLM: the human's ORGANIZATION.md narrative (comments
+    # stripped) + the model-derived summary (subject areas, conventions, decoded glossary),
+    # assembled fresh. This is what the query path injects as `## Organization context`.
+    from . import org_draft
+    org = L.load_organization(args.root, include_rejected=False)
+    org_md = Path(args.root) / "ORGANIZATION.md"
+    human = org_md.read_text(encoding="utf-8") if org_md.exists() else ""
+    sys.stdout.write(org_draft.compose_context(human, org))
     return 0
 
 
@@ -155,6 +170,31 @@ def cmd_model_tree(args) -> int:
     org = L.load_organization(args.root, include_rejected=True)
     _print_json(curate.model_tree(org))
     return 0
+
+
+def cmd_coverage(args) -> int:
+    """Per-table column-description coverage + the enrichment-completeness verdict.
+    The skill runs this at the end of Phase 2 (and reports it in the Phase 7 summary):
+    `ok: false` with untouched columns means enrichment skipped the column pass."""
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    _print_json(curate.column_coverage(org))
+    return 0
+
+
+def cmd_set_terminology(args) -> int:
+    """Write the org-level domain glossary (term -> definition) onto org.yaml's
+    `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
+    default (layers over a human's edits); --replace overwrites. Validated + committed."""
+    from . import curate
+    with open(args.file) as fh:
+        terms = json.load(fh)
+    if isinstance(terms, dict) and "key_terminology" in terms:
+        terms = terms["key_terminology"]
+    res = curate.set_key_terminology(args.root, terms, merge=not args.replace)
+    _print_json({"applied": res.applied, "validated": res.validated,
+                 "committed": res.committed, "errors": res.errors})
+    return 0 if res.validated else 1
 
 
 def cmd_curate(args) -> int:
@@ -238,11 +278,77 @@ def cmd_format_table(args) -> int:
     return 0
 
 
+def _preseed_gate(org) -> Optional[dict]:
+    """Phase-4 enforcement, in code rather than prose: return a refusal payload when
+    seeds must NOT be generated yet — i.e. metrics/entities the seeds would reference
+    are still unreviewed. Generating few-shots on top of a guessed metric definition
+    bakes that guess in. Returns None when nothing is pending (count 0). The skill's
+    Phase-4c "continue anyway" path bypasses this with --after-review (the only place
+    that's sanctioned, AFTER the user has been in the explorer)."""
+    from . import curate
+    pending = curate.all_items(org, scope="preseed")
+    if not pending:
+        return None
+    return {
+        "refused": "preseed_review_pending",
+        "pending_count": len(pending),
+        "pending": [{"name": it["name"], "entity_type": it["entity_type"]} for it in pending],
+        "message": (
+            f"{len(pending)} metric(s)/entity(ies) still need review — generating seeds "
+            f"now would bake guessed definitions into your few-shots. Open /agami-model "
+            f"preseed, sign off (or reject) them, then re-run. If you have already reviewed "
+            f"in the explorer and accept proceeding with items still unreviewed, re-run with "
+            f"--after-review."
+        ),
+    }
+
+
+def _coverage_gate(org) -> Optional[dict]:
+    """Enrichment-completeness gate: refuse to seed (or finish) a model that has tables
+    whose columns enrichment never described at all (0 described + 0 ai_unknown). Naked
+    columns degrade the explorer AND every NL→SQL answer (column descriptions are the
+    generator's context). Table-level so it never collides with the deliberate
+    self-evident-blank rule. NOT bypassable: the fix is to run the column pass."""
+    from . import curate
+    cov = curate.column_coverage(org)
+    if cov["ok"]:
+        return None
+    tbls = cov["unenriched_tables"]
+    return {
+        "refused": "columns_unenriched",
+        "table_count": len(tbls),
+        "unenriched_tables": tbls,
+        "coverage_pct": cov["totals"]["coverage_pct"],
+        "message": (
+            f"{len(tbls)} table(s) have NO column descriptions at all — enrichment wrote the "
+            f"table descriptions but skipped the column pass. Run Phase 2's column pass: "
+            f"describe each meaningful column from sampled values, mark genuinely-opaque ones "
+            f"description_source=ai_unknown (self-evident id/timestamps may stay blank), then "
+            f"re-run. Column descriptions are what the explorer shows and what NL→SQL reads. "
+            f"Tables: {', '.join(tbls[:10])}" + ("…" if len(tbls) > 10 else "")
+        ),
+    }
+
+
 def cmd_seed_examples(args) -> int:
     """Validate candidate seed examples against the live DB and write the passing ones —
     the whole Phase-5 mechanical loop in one call (no throwaway validate-and-write script)."""
     from . import curate
     from .introspect import make_execute_sql_runner
+    org = L.load_organization(args.root, include_rejected=True)
+    # Gate 1 — enrichment completeness (NOT bypassable): every kept column must be described
+    # or explicitly ai_unknown. Catches a model that enriched tables but skipped columns.
+    block = _coverage_gate(org)
+    if block is not None:
+        _print_json(block)
+        return 2
+    # Gate 2 — preseed review (Phase 4): no seeding on unreviewed metrics/entities. Bypassable
+    # only via the Phase-4c --after-review path, after the user has been in the explorer.
+    if not getattr(args, "after_review", False):
+        block = _preseed_gate(org)
+        if block is not None:
+            _print_json(block)
+            return 2
     with open(args.file) as fh:
         cands = json.load(fh)
     if isinstance(cands, dict):
@@ -339,6 +445,7 @@ def cmd_introspect(args) -> int:
         artifacts_dir=args.artifacts,
         out_dir=args.out,
         tables=args.tables,
+        exclude_columns=args.exclude_columns,
         dry_run=args.dry_run,
         bigquery_region=args.bigquery_region,
     )
@@ -346,6 +453,50 @@ def cmd_introspect(args) -> int:
     print(report.render())
     print(V.format_result(res))
     return 0 if res.ok else 1
+
+
+def cmd_discover(args) -> int:
+    """First pass: cheap discovery (tables + columns only) → inventory JSON +
+    a prune HTML page. The user prunes, then `introspect --tables <kept>` runs
+    the full build on only the kept tables. No grain/FK/row-count probes here."""
+    from . import introspect as INTRO
+
+    runner = INTRO.make_execute_sql_runner(args.profile)
+    inventory = INTRO.discover_inventory(
+        args.profile,
+        args.db_type,
+        runner=runner,
+        tables=args.tables,
+        schemas=args.schemas,
+        bigquery_region=args.bigquery_region,
+    )
+
+    artifacts = Path(args.artifacts).expanduser()
+    inv_path = (Path(args.inventory_out).expanduser() if args.inventory_out
+                else artifacts / args.profile / ".introspect" / "inventory.json")
+    inv_path.parent.mkdir(parents=True, exist_ok=True)
+    inv_path.write_text(json.dumps(inventory, indent=2, default=str), encoding="utf-8")
+
+    # Render the standalone prune page (import the sibling top-level script).
+    scripts_dir = str(Path(__file__).resolve().parent.parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import render_prune  # noqa: E402
+
+    manifest = render_prune.build_manifest(inventory)
+    out_path = Path(args.out).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_prune.render(manifest), encoding="utf-8")
+
+    _print_json({
+        "profile": args.profile,
+        "table_count": inventory["table_count"],
+        "column_mode": inventory["column_mode"],
+        "schemas": inventory["schemas"],
+        "inventory_path": str(inv_path),
+        "prune_html": str(out_path),
+    })
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -377,9 +528,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.set_defaults(func=cmd_areas)
 
-    sp = sub.add_parser("org-draft", help="print a factual ORGANIZATION.md draft from the model")
+    sp = sub.add_parser("org-draft", help="print a human-narrative STARTER for ORGANIZATION.md (prompt only, no facts)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_org_draft)
+
+    sp = sub.add_parser("org-context", help="print the full domain context (human narrative + model-derived summary + glossary) for the LLM")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_org_context)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
     sp.add_argument("root")
@@ -413,6 +568,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_model_tree)
+
+    sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_coverage)
+
+    sp = sub.add_parser("set-terminology", help="write the org domain glossary (term→definition) onto org.yaml key_terminology")
+    sp.add_argument("root")
+    sp.add_argument("--file", required=True, help="JSON object {term: definition, ...} (or {key_terminology: {...}})")
+    sp.add_argument("--replace", action="store_true", help="replace the glossary instead of merging over it")
+    sp.set_defaults(func=cmd_set_terminology)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
     sp.add_argument("root")
@@ -462,6 +627,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--area", required=True)
     sp.add_argument("--profile", required=True, help="credentials profile (for the live-DB validation)")
     sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metric]}")
+    sp.add_argument("--after-review", action="store_true",
+                    help="bypass the preseed-review gate (Phase 4c only — the user has already "
+                         "been in the explorer and chose to proceed with items still unreviewed)")
     sp.set_defaults(func=cmd_seed_examples)
 
     sp = sub.add_parser("seed-validate", help="run every written seed against the live DB (through execute_sql's safety pass) + emit examples-validation items")
@@ -479,10 +647,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--artifacts", required=True, help="artifacts_dir (output: <artifacts>/<profile>/)")
     sp.add_argument("--out", default=None, help="override output dir")
     sp.add_argument("--tables", nargs="*", default=None,
-                    help="explicit schema.table allowlist for the no-catalog (probe-only) case")
+                    help="schema.table allowlist — the prune step's kept set (also the "
+                         "no-catalog/probe-only case)")
+    sp.add_argument("--exclude-columns", nargs="*", default=None, dest="exclude_columns",
+                    help="schema.table.column list to mark excluded (the prune step's dropped columns)")
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
     sp.add_argument("--dry-run", action="store_true")
     sp.set_defaults(func=cmd_introspect)
+
+    sp = sub.add_parser("discover",
+                        help="cheap first pass: list tables + columns and render the prune page "
+                             "(no grain/FK/row-count probes) — prune, then introspect the kept set")
+    sp.add_argument("--profile", required=True)
+    sp.add_argument("--db-type", required=True, dest="db_type",
+                    help="postgres|mysql|snowflake|bigquery|redshift|sqlite|sqlserver|"
+                         "databricks|trino|oracle|duckdb|supabase")
+    sp.add_argument("--artifacts", required=True, help="artifacts_dir (inventory: <artifacts>/<profile>/.introspect/)")
+    sp.add_argument("--out", required=True, help="output HTML path for the prune page")
+    sp.add_argument("--inventory-out", default=None, dest="inventory_out",
+                    help="override inventory JSON path (default <artifacts>/<profile>/.introspect/inventory.json)")
+    sp.add_argument("--tables", nargs="*", default=None,
+                    help="optional schema.table allowlist to scope discovery (probe-only case)")
+    sp.add_argument("--schemas", nargs="*", default=None,
+                    help="restrict discovery to these schemas (the user's schema pick)")
+    sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
+    sp.set_defaults(func=cmd_discover)
 
     return p
 

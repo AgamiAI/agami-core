@@ -1,82 +1,60 @@
-# `ORGANIZATION.md` — per-database domain context
+# `ORGANIZATION.md` — per-database human narrative
 
-Free-form Markdown describing **what this database is about**: the company / product, what the data represents, who the users are, what the domain vocabulary means. The skill loads it into every SQL-generation prompt as steering context, ahead of `USER_MEMORY.md`.
+Free-form Markdown describing **what this database is about** in the human's own words: the company / product, what the data represents, who the users are. One file per profile at `<artifacts_dir>/<profile>/ORGANIZATION.md` — context is database-specific.
 
-Lives at `<artifacts_dir>/<profile>/ORGANIZATION.md`. One file per profile — context is database-specific (a fintech database has different vocabulary than an ITSM database).
+**It holds the human narrative ONLY.** The factual summary — subject areas, conventions, and the decoded domain **glossary** — is NOT stored here. That's derived from the structured model at read time and combined with the narrative when a reader needs the full context. The two homes stay separate so:
 
-Local-only. Never sent in telemetry. The skill reads it on each query, but neither the file nor any extracted snippet leaves the machine.
+- a human editing their prose can never accidentally overwrite or delete the auto facts, and
+- the glossary always reaches the LLM, even if the narrative file is empty or hand-mangled.
+
+Local-only. Never sent in telemetry.
+
+## The two parts of "domain context"
+
+| Part | Where it lives | Who owns it |
+|---|---|---|
+| **Narrative** — what the company/product is, who the users are | `ORGANIZATION.md` (this file) | the human (free prose) |
+| **Glossary** — term → meaning (e.g. `MRR` → "monthly recurring revenue") | `key_terminology` field on `org.yaml` (structured) | written by enrichment / `set-terminology`; surfaced read-only |
+| **Summary** — shape, subject areas, conventions (units/currency) | derived from the model each time | computed, never stored |
+
+`cli org-context "$ROOT"` assembles all three for a reader: the narrative (HTML comments stripped) + a `## Model summary (auto-generated from your schema)` block with the subject areas, conventions, and glossary. The model explorer shows the narrative as an **editable** field and the derived summary as a **read-only** field beneath it.
 
 ## Why it's separate from `USER_MEMORY.md`
 
-| File | Lives where | Scope | Examples |
-|---|---|---|---|
-| `<artifacts_dir>/USER_MEMORY.md` | Profile-agnostic (one global file) | **User preferences** that apply across every database | "default time window: last 30 days", "exclude test users with email matching @example.com", "show currency as EUR" |
-| `<artifacts_dir>/<profile>/ORGANIZATION.md` | Per-profile (one per database) | **Domain knowledge** about this specific database | "MRR = monthly recurring revenue", "active user = signed in within 30 days", "fiscal year starts October" |
+| File | Scope | Examples |
+|---|---|---|
+| `<artifacts_dir>/USER_MEMORY.md` | **User preferences**, across every database | "default window: last 30 days", "show currency as EUR" |
+| `<artifacts_dir>/<profile>/ORGANIZATION.md` | **Domain narrative** for this database | "We swap EV batteries at stations; a 'member' has an active plan." |
 
-The skill loads both on every query. `ORGANIZATION.md` answers *what does this data mean*, `USER_MEMORY.md` answers *how should I display / filter results*.
-
-**Note on display/formatting rules.** Most aren't free-text at all: a currency/unit fact ("amounts are in INR → show ₹") attaches to the **column** in the semantic model (a `caveat`/`value_transform`) — org-wide by construction, since the model is shared. `ORGANIZATION.md` `## Display & formatting conventions` is only for genuinely *cross-cutting* presentation rules not tied to one column (e.g. "present money with lakh/crore grouping"). A purely personal tic ("I like top-10") goes in `USER_MEMORY.md`. agami classifies these like any correction — it asks about scope only when personal-vs-org is genuinely unclear.
+`ORGANIZATION.md` answers *what does this data mean*; `USER_MEMORY.md` answers *how should I display / filter results*.
 
 ## Format
 
-It's just Markdown. No required schema. Free prose, optional headings.
-
-### Default template (written by `init` at first connect)
+Just Markdown. No required schema — free prose under `# About this database`. On the skip path the skill writes a tiny starter (a prompt comment, nothing else):
 
 ```markdown
 # About this database
 
-(Write one paragraph describing what this company / product / system is about,
-what the data represents, who the users are. The skill loads this on every
-query as domain context.)
-
-## Key terminology
-
-(Domain vocabulary the skill should know. Examples below — replace with yours.)
-
-- "MRR" = monthly recurring revenue, computed as SUM(price) WHERE plan='subscription'
-- "active user" = signed in within the last 30 days
-- "fiscal year" starts in October
-
-## Display & formatting conventions
-
-(Org-wide rules for how this database's results should be presented — everyone
-querying it gets these. Added when you save a formatting rule and choose "org-wide".)
-
-- Monetary amounts are in INR — show with a ₹ symbol and Indian comma grouping.
-- Format large counts with thousands separators.
-
-## Who's in this data
-
-(Customers / users / operators / suppliers — whatever roles matter.)
-
-## What we DON'T track here
-
-(Helps the skill avoid wild guesses about tables that don't exist.)
+<!-- Describe what only you know: what the company/product is, who the users are,
+     and what your key terms mean. agami already knows your schema — this is for the
+     human context it can't infer. Leaving this as-is is fine; agami still works. -->
 ```
 
-The user is expected to replace the parenthetical guidance with real prose. The template is intentionally minimal; the skill works fine with just a paragraph under `# About this database`.
+The user replaces the comment with real prose, or leaves it — agami works either way, because the summary + glossary come from the model regardless.
+
+## Where each kind of fact goes
+
+- **Narrative / "what we are"** → `ORGANIZATION.md` (this file).
+- **A term's meaning** ("gold tier = lifetime spend > $10k", an acronym → its expansion) → the structured `key_terminology` field via `cli set-terminology`. It then renders into the derived summary automatically — no file edit needed.
+- **A display/formatting convention** tied to a column (currency/unit) → the column's `caveat`/`value_transform` in the model. A genuinely cross-cutting presentation rule → `USER_MEMORY.md`.
 
 ## When the skill loads it
 
-- **`query-database`** — Phase 1d.2 reads `<artifacts_dir>/<profile>/ORGANIZATION.md`, strips HTML comments, injects under `## Organization context` in the SQL-generation prompt (ahead of `## User memory (preferences and policies)` from `USER_MEMORY.md`).
-- **`connect`** — Phase C (description generation) loads ORGANIZATION.md as a domain prior so the auto-generated table / column descriptions reflect the user's terminology.
-- **`save-correction`** — `org_context` correction kind appends to ORGANIZATION.md.
+- **`query-database`** — Phase 1d.2 runs `cli org-context`, injecting the combined narrative + derived summary under `## Organization context`, ahead of `## User memory`.
+- **`connect`** — enrichment uses the narrative (if any) as a domain prior for descriptions; writes the glossary to `key_terminology`; writes the starter on the skip path.
 
-If the file is missing or empty, the skill treats it as no-context and proceeds. Never errors.
-
-## How `save-correction` extends it
-
-When the user says something like "gold tier means lifetime spend > $10k" or "we use 'churn' to mean a customer who hasn't placed an order in 90 days", the agami-save-correction skill classifies that as `org_context` and appends a one-line entry under the `## Key terminology` heading (creating the heading if missing). The next query picks it up.
-
-The `user_preference` correction kind still routes to `USER_MEMORY.md` — those go where they always went.
+If there's no narrative and no model, the context is empty — never an error.
 
 ## Privacy
 
-`ORGANIZATION.md` is local-only:
-
-- **Never sent anywhere.** agami has no outbound network call from skill code — see [`docs/privacy.md`](../../../docs/privacy.md).
-- **Never read by anything other than the agami skills running locally.**
-- The agami-connect Phase 0a enforces `chmod 600` on creation.
-
-If the user shares `<artifacts_dir>/<profile>/` with a teammate (e.g. via dotfiles), the file goes with the model — that's a deliberate user action.
+Local-only: never sent anywhere, read only by the agami skills running locally, `chmod 600` on creation. If the user shares `<artifacts_dir>/<profile>/` with a teammate, the file goes with the model — a deliberate user action.

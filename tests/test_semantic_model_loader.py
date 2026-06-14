@@ -18,34 +18,34 @@ from semantic_model import models as m  # noqa: E402
 
 def _wide_org():
     cols = [m.Column(name="id", type="integer", primary_key=True),
-            m.Column(name="soc", type="decimal", description="state of charge"),
-            m.Column(name="zone_name", type="string"),
+            m.Column(name="score", type="decimal", description="performance score"),
+            m.Column(name="region", type="string"),
             m.Column(name="alert", type="string")]
-    t = m.Table(name="wide", schema="powerbi", storage_connection="c", grain=["id"],
+    t = m.Table(name="wide", schema="analytics", storage_connection="c", grain=["id"],
                 description="wide snapshot", columns=cols,
-                column_groups={"telemetry": ["id", "soc"], "location": ["zone_name"],
-                               "alerts": ["alert"]},
-                default_filters=["{alias}.report_date = (SELECT MAX(report_date) FROM powerbi.wide)",
+                column_groups={"metrics": ["id", "score"], "location": ["region"],
+                               "notes": ["alert"]},
+                default_filters=["{alias}.report_date = (SELECT MAX(report_date) FROM analytics.wide)",
                                  "{alias}.tenant_id = :tenant_id"])
-    sa = m.SubjectArea(name="battery_state",
-                       tables=[m.TableRef(storage_connection="c", schema="powerbi", table="wide",
-                                          expose_column_groups=["telemetry", "location"])],
+    sa = m.SubjectArea(name="snapshots",
+                       tables=[m.TableRef(storage_connection="c", schema="analytics", table="wide",
+                                          expose_column_groups=["metrics", "location"])],
                        tables_defined=[t])
-    return m.Organization(organization="Sun",
+    return m.Organization(organization="Acme",
                           storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")],
                           subject_areas=[sa])
 
 
 def test_collect_default_filters_param_substitution():
     org = _wide_org()
-    fs = L.collect_default_filters(org, ["wide"], area="battery_state", params={"tenant_id": "42"})
+    fs = L.collect_default_filters(org, ["wide"], area="snapshots", params={"tenant_id": "42"})
     assert any("MAX(report_date)" in f for f in fs)
     assert any("tenant_id = 42" in f for f in fs)
 
 
 def test_collect_default_filters_dedup():
     org = _wide_org()
-    fs = L.collect_default_filters(org, ["wide", "wide"], area="battery_state")
+    fs = L.collect_default_filters(org, ["wide", "wide"], area="snapshots")
     # same table twice -> filters not duplicated
     assert len(fs) == len(set(fs))
 
@@ -53,30 +53,30 @@ def test_collect_default_filters_dedup():
 def test_get_table_index_honors_expose_groups():
     org = _wide_org()
     t = org.subject_areas[0].defined_table("wide")
-    idx = L.get_table_index(t, ["telemetry", "location"])
+    idx = L.get_table_index(t, ["metrics", "location"])
     names = {c["name"] for c in idx["columns"]}
-    assert names == {"id", "soc", "zone_name"}
+    assert names == {"id", "score", "region"}
     assert idx["column_count_total"] == 4 and idx["column_count_visible"] == 3
 
 
 def test_get_table_context_scopes_columns_by_area():
     org = _wide_org()
-    ctx = L.get_table_context(org, ["wide"], area="battery_state")
+    ctx = L.get_table_context(org, ["wide"], area="snapshots")
     cols = {c["name"] for c in ctx["tables"]["wide"]["columns"]}
-    assert "alert" not in cols  # alerts group not exposed in this area
+    assert "alert" not in cols  # notes group not exposed in this area
 
 
 def test_get_table_context_specific_columns():
     org = _wide_org()
-    ctx = L.get_table_context(org, ["wide"], area="battery_state", columns=["soc"])
+    ctx = L.get_table_context(org, ["wide"], area="snapshots", columns=["score"])
     cols = [c["name"] for c in ctx["tables"]["wide"]["columns"]]
-    assert cols == ["soc"]
+    assert cols == ["score"]
 
 
 def test_get_subject_area_bundle():
     org = _wide_org()
-    bundle = L.get_subject_area_bundle(org, "battery_state")
-    assert bundle["subject_area"]["name"] == "battery_state"
+    bundle = L.get_subject_area_bundle(org, "snapshots")
+    assert bundle["subject_area"]["name"] == "snapshots"
     assert "wide" in bundle["tables"]
 
 

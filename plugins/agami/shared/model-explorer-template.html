@@ -3,7 +3,7 @@
   agami model explorer — used by the agami-model skill via render_model_explorer.py.
 
   The renderer substitutes the placeholders below and writes the result to
-  ~/.agami/model/<ts>.html. Self-contained: opens from file:// in any browser,
+  <artifacts_dir>/local/model/<ts>.html. Self-contained: opens from file:// in any browser,
   no server, no relative-path dependencies.
 
   NOTE: the placeholder names here are written WITHOUT their double-brace
@@ -314,6 +314,26 @@
     .field-row.queued-exclude { background: var(--bad-bg); }
     .field-row.queued-include { background: var(--ok-bg); }
     .field-row.hidden { display: none; }
+    .col-group.hidden { display: none; }
+    .col-group-header {
+      display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+      padding: 5px 10px; background: var(--row-zebra); border-top: 1px solid var(--border);
+      font-weight: 600; font-size: 0.82em; letter-spacing: 0.02em;
+    }
+    .col-group-header:hover { filter: brightness(0.97); }
+    .col-group-caret { width: 0.9em; opacity: 0.6; }
+    .col-group-name { text-transform: capitalize; }
+    .col-group-count { margin-left: auto; opacity: 0.55; font-weight: 400; }
+    .glossary-row { display: flex; align-items: center; gap: 12px; padding: 8px 18px;
+      border-bottom: 1px solid var(--border); font-size: 13px; }
+    .glossary-row:hover { background: var(--row-zebra); }
+    .glossary-term { flex: 0 0 150px; font-weight: 600; word-break: break-word; }
+    .org-term-input { flex: 1 1 auto; min-width: 0; padding: 6px 9px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--code-bg); color: var(--fg); font: inherit; font-size: 13px;
+      box-sizing: border-box; }
+    .org-term-input::placeholder { color: var(--muted); }
+    .org-term-input.term-key { flex: 0 0 170px; }
+    .glossary-add { display: flex; align-items: center; gap: 8px; padding: 12px 18px; }
     .field-name {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       font-size: 13px; font-weight: 500; word-break: break-word;
@@ -695,13 +715,15 @@
     const newMetrics = [];
     let orgEdit = null;
     let orgRaw = false;   // ORGANIZATION.md editor mode: false = rich text, true = raw Markdown
+    let termEdits = null; // edited curated glossary {term: def} | null — written back via set-terminology
 
     const editOpen = new Set();        // qnames whose inline edit form is expanded
     const expandedTables = new Set();  // qnames of tables the user has expanded (persisted across renders)
+    const colGroupOpen = new Set();    // group ids the user explicitly OPENED (overrides the wide-table default)
+    const colGroupClosed = new Set();  // group ids the user explicitly CLOSED
     let addMetricOpen = false;
     let searchQ = '';
-    const _initTab = (manifest.initial_tab || 'tables');
-    let activeTab = _initTab;
+    let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
     let activeFilter = 'all';
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
@@ -729,7 +751,6 @@
     const TABS = [
       { id: 'organization', label: 'Organization' },
       { id: 'review',       label: 'Review' },
-      { id: 'areas',        label: 'Subject areas' },
       { id: 'tables',       label: 'Tables' },
       { id: 'metrics',      label: 'Metrics' },
       { id: 'entities',     label: 'Entities' },
@@ -737,6 +758,7 @@
       { id: 'examples',     label: 'Examples' },
       { id: 'queued',       label: 'Queued' },
     ];
+    if (!TABS.some(t => t.id === activeTab)) activeTab = 'tables';  // ignore a retired initial tab (e.g. 'areas')
     // Tabs that show entity cards filterable by status (search + All/Active/Excluded/Unreviewed)
     const FILTERABLE_TABS = new Set(['tables', 'metrics', 'entities', 'joins', 'examples']);
 
@@ -1196,6 +1218,48 @@
       return row;
     }
 
+    // Wide tables (≥30 cols) carry semantic `column_groups`; render their fields under
+    // collapsible group headers so a 128-column table reads like mini subject-areas instead
+    // of one endless list. Narrow tables (no groups) fall through to a flat field list.
+    function renderFieldsGrouped(body, table) {
+      const groups = table.column_groups || [];
+      const fields = table.fields || [];
+      if (!groups.length) { fields.forEach(f => body.appendChild(renderField(f, table))); return; }
+      const wide = fields.length > 40;            // default-collapse only genuinely wide tables
+      const byGroup = {}; const ungrouped = [];
+      fields.forEach(f => {
+        if (f.group && groups.indexOf(f.group) >= 0) (byGroup[f.group] = byGroup[f.group] || []).push(f);
+        else ungrouped.push(f);
+      });
+      const order = groups.slice();
+      if (ungrouped.length) order.push('');       // '' = the catch-all "other" bucket
+      order.forEach(g => {
+        const gf = g === '' ? ungrouped : (byGroup[g] || []);
+        if (!gf.length) return;
+        const gid = table.qname + '::' + (g || '(other)');
+        const rows = gf.map(f => renderField(f, table));
+        const visible = rows.filter(r => !r.classList.contains('hidden')).length;
+        const open = searchQ ? true                                  // search forces every group open
+          : colGroupClosed.has(gid) ? false
+          : colGroupOpen.has(gid) ? true
+          : !wide;                                                   // default: open unless wide
+        const wrap = el('div', { class: 'col-group' + (visible ? '' : ' hidden') });
+        const head = el('div', { class: 'col-group-header' });
+        head.appendChild(el('span', { class: 'col-group-caret', text: open ? '▾' : '▸' }));
+        head.appendChild(el('span', { class: 'col-group-name', text: (g || 'other').replace(/_/g, ' ') }));
+        const countTxt = searchQ && visible !== gf.length ? (visible + '/' + gf.length) : String(gf.length);
+        head.appendChild(el('span', { class: 'col-group-count', text: countTxt + ' fields' }));
+        head.addEventListener('click', () => {
+          if (open) { colGroupClosed.add(gid); colGroupOpen.delete(gid); }
+          else { colGroupOpen.add(gid); colGroupClosed.delete(gid); }
+          renderAll();
+        });
+        wrap.appendChild(head);
+        if (open) rows.forEach(r => wrap.appendChild(r));
+        body.appendChild(wrap);
+      });
+    }
+
     function renderTable(table) {
       const q = searchQ;
       const eff = effExcluded(table);
@@ -1271,7 +1335,7 @@
           hint: 'Conditions added to every query on this table automatically, so you never have to repeat them. Write one SQL condition per line and use {alias} where the table name goes. For example: "{alias}.deleted_at IS NULL" keeps only rows that are not deleted · "{alias}.is_test = false" skips test rows.' },
       ]));
 
-      (table.fields || []).forEach(f => body.appendChild(renderField(f, table)));
+      renderFieldsGrouped(body, table);
       card.appendChild(body);
       return card;
     }
@@ -2064,7 +2128,63 @@
         card.appendChild(a);
       }
       root.appendChild(card);
+
+      // Read-only model-derived summary — SEPARATE from the editable narrative above, so the
+      // auto facts (subject areas, conventions, decoded glossary) can never be edited into the
+      // file. It recomputes from the model; nothing here to clobber.
+      const derived = (manifest.derived_context_md || '').trim();
+      if (derived && (!searchQ || derived.toLowerCase().includes(searchQ))) {
+        const dcard = el('div', { class: 'table-card' });
+        dcard.appendChild(el('div', { class: 'info-banner', html:
+          '<strong>From your schema (read-only).</strong> agami derives this — subject areas, conventions, and decoded terminology. ' +
+          'It updates as your model changes; edit the model, not this.' }));
+        dcard.appendChild(el('div', { class: 'org-rendered', html: renderMarkdown(derived) }));
+        root.appendChild(dcard);
+      }
+
+      // Editable glossary (curated key_terminology) — a structured field, so it gets a
+      // structured editor (add / correct / remove a term), NOT free text. Changes queue and
+      // are written back via `set-terminology`. The derived facts above stay read-only.
+      root.appendChild(renderGlossaryEditor());
       setSearchCounts('');
+    }
+
+    function curTerms() { return termEdits !== null ? termEdits : (manifest.key_terminology || {}); }
+    function mutateTerms(fn) {
+      const t = Object.assign({}, curTerms());
+      fn(t);
+      termEdits = t;
+      renderAll();
+    }
+    function renderGlossaryEditor() {
+      const card = el('div', { class: 'table-card' });
+      card.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>Glossary' + (termEdits !== null ? ' (edited — queued)' : '') + '.</strong> ' +
+        'Short definitions of terms, acronyms, and codes specific to this database, so agami uses them correctly. ' +
+        'Add or correct them here; changes apply when you paste the block back into Claude.' }));
+      const terms = curTerms();
+      const keys = Object.keys(terms).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      if (!keys.length) {
+        card.appendChild(el('div', { class: 'field-hint', style: 'padding:8px 18px;', text: 'No terms yet — add one below.' }));
+      }
+      keys.forEach(term => {
+        const row = el('div', { class: 'glossary-row' });
+        row.appendChild(el('div', { class: 'glossary-term', text: term }));
+        row.appendChild(el('input', { type: 'text', value: terms[term], class: 'org-term-input',
+          onchange: (ev) => mutateTerms(t => { t[term] = ev.target.value; }) }));
+        row.appendChild(btnSm('Remove', () => mutateTerms(t => { delete t[term]; })));
+        card.appendChild(row);
+      });
+      const addRow = el('div', { class: 'glossary-add' });
+      const ti = el('input', { type: 'text', placeholder: 'term', class: 'org-term-input term-key' });
+      const di = el('input', { type: 'text', placeholder: 'definition', class: 'org-term-input' });
+      addRow.appendChild(ti); addRow.appendChild(di);
+      addRow.appendChild(btnSm('Add term', () => {
+        const k = ti.value.trim(), v = di.value.trim();
+        if (k && v) mutateTerms(t => { t[k] = v; });
+      }, 'primary'));
+      card.appendChild(addRow);
+      return card;
     }
 
     // =====================================================================
@@ -2133,6 +2253,12 @@
       if (orgEdit !== null) {
         const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Organization context' }));
         g.appendChild(queueRow('edit', 'edit', 'ORGANIZATION.md edited', () => { orgEdit = null; }));
+        groups.push(g);
+      }
+      // glossary edit
+      if (termEdits !== null) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Glossary' }));
+        g.appendChild(queueRow('edit', 'edit', `key terminology (${Object.keys(termEdits).length} term(s))`, () => { termEdits = null; }));
         groups.push(g);
       }
 
@@ -2254,7 +2380,8 @@
     // ---- Queued totals + footer ----
     function totalQueued() {
       return Object.keys(pending).length + Object.keys(ops).length + Object.keys(edits).length
-           + Object.keys(exampleEdits).length + newMetrics.length + (orgEdit !== null ? 1 : 0);
+           + Object.keys(exampleEdits).length + newMetrics.length + (orgEdit !== null ? 1 : 0)
+           + (termEdits !== null ? 1 : 0);
     }
     function updateFooter() {
       const total = totalQueued();
@@ -2283,6 +2410,7 @@
         if (Object.keys(exampleEdits).length) parts.push(`${Object.keys(exampleEdits).length} example`);
         if (newMetrics.length) parts.push(`${newMetrics.length} new metric${newMetrics.length === 1 ? '' : 's'}`);
         if (orgEdit !== null) parts.push('org context');
+        if (termEdits !== null) parts.push('glossary');
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
         gen.disabled = false;
       }
@@ -2352,6 +2480,7 @@
       const exList = Object.values(exampleEdits);
       if (exList.length) { lines.push('example-edits:'); lines.push(JSON.stringify(exList)); }
       if (orgEdit !== null) lines.push('organization-md: ' + JSON.stringify(orgEdit));
+      if (termEdits !== null) lines.push('key-terminology: ' + JSON.stringify(termEdits));
       // Sign-off identity header (first line) — the skill applies approvals with this as --signer/--role.
       if (hasQueuedApprovals() && validEmail(signOff.email)) lines.unshift(`signed-off-by: ${signOff.email} / ${signOffRole()}`);
       if (lines.length) lines.push('done');
@@ -2376,7 +2505,7 @@
       Object.keys(ops).forEach(k => delete ops[k]);
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
-      newMetrics.length = 0; orgEdit = null; addMetricOpen = false;
+      newMetrics.length = 0; orgEdit = null; termEdits = null; addMetricOpen = false;
       editOpen.clear();
       renderAll();
     });
