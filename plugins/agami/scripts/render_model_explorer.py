@@ -105,6 +105,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 fields_out.append({
                     "name": c.name, "qname": f"{qname}.{c.name}", "type": c.type,
                     "description": c.description, "description_source": c.description_source,
+                    "aggregation": c.aggregation,
                     "review_state": c.review_state,
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
                     "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,

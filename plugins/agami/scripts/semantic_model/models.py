@@ -67,6 +67,17 @@ ColumnType = Literal[
 
 Confidence = Literal["confirmed", "inferred", "proposed"]
 ReviewState = Literal["unreviewed", "approved", "rejected", "stale", "not_applicable"]
+# How a column may be aggregated when used as a MEASURE. Column-INTRINSIC only:
+# semi-additivity (additive over some dimensions but not others — e.g. an account
+# balance is summable across accounts but NOT across time) is a column×dimension
+# property and lives on the metric as `non_additive_dimensions`, NOT here.
+#   additive     → SUM is meaningful (amount, quantity, revenue). Semi-additive measures
+#                  are ALSO `additive` here — the time exception is declared on the metric.
+#   averageable  → AVG/MIN/MAX meaningful, SUM is NOT (unit_price, rate, ratio, score).
+#   dimension    → not a measure; a grouping key (ids, codes, year, zip) — never aggregated.
+#   unknown      → not yet classified (legacy models, or the heuristic was unsure). Never
+#                  enforced against — the enforcement layer only acts on a definite class.
+Aggregation = Literal["additive", "averageable", "dimension", "unknown"]
 # Provenance of a table/column `description` (NOT a sign-off gate — advisory only).
 #   None    → unknown / legacy; treated as trusted, never surfaced for confirmation
 #   human   → written or edited by a person; trusted
@@ -206,6 +217,11 @@ class Column(_Base):
     foreign_key: Optional[ForeignKey] = None
     # enum semantics: maps stored value -> human meaning
     choice_field: Optional[dict[str, str]] = None
+    # How this column may be aggregated as a measure (additive / averageable / dimension).
+    # Set by an introspection heuristic, refined by the curator. Consumed by the query-time
+    # enforcement layer (e.g. refuse SUM of an `averageable` price, or AVG of a `dimension`
+    # id). `unknown` is never enforced against. See the `Aggregation` literal above.
+    aggregation: Aggregation = "unknown"
     sensitive: bool = False
     # declarative cleaning/transform SQL (regexp_replace, TO_TIMESTAMP, …)
     value_transform: Optional[str] = None
