@@ -311,7 +311,7 @@ The user's bullet should be self-contained — anyone reading USER_MEMORY.md sho
 
 `org_context` splits by **what kind of fact it is** — each goes to its proper home (per [`shared/organization-context-format.md`](../../shared/organization-context-format.md)). The two homes are deliberately separate; never write one kind into the other.
 
-- **A term's meaning** (the common case) — "gold tier" = lifetime spend > $10k, "MRR" = monthly recurring revenue, "TIU" = Telematics Interface Unit. This goes to the **structured glossary**, NOT a prose file — `set-terminology` merges it onto `key_terminology` (validated, committed), and it then surfaces in the derived domain context on every query automatically (no file to re-render, nothing for a human to clobber):
+- **A term's meaning** (the common case) — "gold tier" = lifetime spend > $10k, "MRR" = monthly recurring revenue, or an acronym → its expansion. This goes to the **structured glossary**, NOT a prose file — `set-terminology` merges it onto `key_terminology` (validated, committed), and it then surfaces in the derived domain context on every query automatically (no file to re-render, nothing for a human to clobber):
   ```bash
   printf '{"gold tier": "lifetime spend > $10k"}' > /tmp/agami-term.json
   bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file /tmp/agami-term.json

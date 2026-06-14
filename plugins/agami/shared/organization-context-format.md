@@ -14,7 +14,7 @@ Local-only. Never sent in telemetry.
 | Part | Where it lives | Who owns it |
 |---|---|---|
 | **Narrative** — what the company/product is, who the users are | `ORGANIZATION.md` (this file) | the human (free prose) |
-| **Glossary** — term → meaning (e.g. `TIU` → "Telematics Interface Unit") | `key_terminology` field on `org.yaml` (structured) | written by enrichment / `set-terminology`; surfaced read-only |
+| **Glossary** — term → meaning (e.g. `MRR` → "monthly recurring revenue") | `key_terminology` field on `org.yaml` (structured) | written by enrichment / `set-terminology`; surfaced read-only |
 | **Summary** — shape, subject areas, conventions (units/currency) | derived from the model each time | computed, never stored |
 
 `cli org-context "$ROOT"` assembles all three for a reader: the narrative (HTML comments stripped) + a `## Model summary (auto-generated from your schema)` block with the subject areas, conventions, and glossary. The model explorer shows the narrative as an **editable** field and the derived summary as a **read-only** field beneath it.
@@ -45,7 +45,7 @@ The user replaces the comment with real prose, or leaves it — agami works eith
 ## Where each kind of fact goes
 
 - **Narrative / "what we are"** → `ORGANIZATION.md` (this file).
-- **A term's meaning** ("gold tier = lifetime spend > $10k", `TIU` = "Telematics Interface Unit") → the structured `key_terminology` field via `cli set-terminology`. It then renders into the derived summary automatically — no file edit needed.
+- **A term's meaning** ("gold tier = lifetime spend > $10k", an acronym → its expansion) → the structured `key_terminology` field via `cli set-terminology`. It then renders into the derived summary automatically — no file edit needed.
 - **A display/formatting convention** tied to a column (currency/unit) → the column's `caveat`/`value_transform` in the model. A genuinely cross-cutting presentation rule → `USER_MEMORY.md`.
 
 ## When the skill loads it

@@ -130,7 +130,7 @@ example-edits:
 new-metrics:
 [{"area":"sales","name":"repeat_rate","description":"...","calculation":"...","bindings":{"Snowflake":"..."},"source_tables":["orders"],"other_names":["repeat purchase rate"],"unit":"percent","confidence":"proposed"}]
 organization-md: "<full new ORGANIZATION.md text, JSON-encoded>"
-key-terminology: {"TIU": "Telematics Interface Unit", "gold tier": "lifetime spend > $10k"}
+key-terminology: {"gold tier": "lifetime spend > $10k", "churned": "no order in 90 days"}
 done
 ```
 

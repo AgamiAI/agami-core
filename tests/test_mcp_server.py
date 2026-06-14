@@ -50,12 +50,12 @@ def test_distill_strips_human_scaffolding_for_llm_context():
         "<!-- Auto-generated SUMMARY (only because no org context was provided).\n"
         "     Edit freely: what the company is. -->\n\n"
         "**acme** — 8 tables across 1 subject area.\n\n"
-        "## Key terminology\n- **TIU** — Telematics Interface Unit\n"
+        "## Key terminology\n- **MRR** — monthly recurring revenue\n"
     )
     out = _distill_for_llm(raw)
     assert "<!--" not in out and "Auto-generated" not in out and "Edit freely" not in out
     assert "**acme** — 8 tables across 1 subject area." in out
-    assert "**TIU** — Telematics Interface Unit" in out
+    assert "**MRR** — monthly recurring revenue" in out
     assert "\n\n\n" not in out          # collapsed the blank lines the comment left behind
     assert _distill_for_llm(None) == "" and _distill_for_llm("") == ""
 

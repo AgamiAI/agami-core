@@ -69,12 +69,12 @@ def test_derived_context_can_exclude_curated_glossary(tmp_path):
     d = yaml.safe_load(p.read_text())
     d["columns"].append({"name": "status", "type": "string", "choice_field": {"P": "pending"}})
     p.write_text(yaml.safe_dump(d))
-    curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit"})
+    curate.set_key_terminology(tmp_path, {"MRR": "monthly recurring revenue"})
     org = load_organization(tmp_path)
     full = org_draft.derived_context(org)                                   # LLM: curated + enum
     explorer = org_draft.derived_context(org, with_curated_glossary=False)  # read-only: enum only
-    assert "TIU" in full and "Telematics Interface Unit" in full
-    assert "TIU" not in explorer                                            # curated glossary excluded
+    assert "MRR" in full and "monthly recurring revenue" in full
+    assert "MRR" not in explorer                                            # curated glossary excluded
     assert "orders.status" in explorer and "pending" in explorer           # enum legend still shown
 
 
@@ -82,10 +82,10 @@ def test_explorer_exposes_glossary_as_editable_field(tmp_path):
     from render_model_explorer import build_manifest
     from semantic_model import curate
     _model(tmp_path)
-    curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit"})
+    curate.set_key_terminology(tmp_path, {"MRR": "monthly recurring revenue"})
     m = build_manifest(tmp_path, "acme")
-    assert m["key_terminology"] == {"TIU": "Telematics Interface Unit"}     # editable structured field
-    assert "TIU" not in m["derived_context_md"]                            # not duplicated in the read-only block
+    assert m["key_terminology"] == {"MRR": "monthly recurring revenue"}     # editable structured field
+    assert "MRR" not in m["derived_context_md"]                            # not duplicated in the read-only block
 
 
 def test_compose_keeps_human_narrative_and_derived_facts_separate(tmp_path):
@@ -114,11 +114,11 @@ def test_key_terminology_seeded_from_glossary_and_enums(tmp_path):
     doc["columns"].append({"name": "status", "type": "string",
                            "choice_field": {"P": "pending", "S": "shipped"}})
     p.write_text(yaml.safe_dump(doc))
-    res = curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit", "bp": "battery pack"})
+    res = curate.set_key_terminology(tmp_path, {"MRR": "monthly recurring revenue", "ARR": "annual recurring revenue"})
     assert res.validated and res.applied
     md = org_draft.draft_organization_md(load_organization(tmp_path))
-    assert "**TIU** — Telematics Interface Unit" in md
-    assert "**bp** — battery pack" in md
+    assert "**MRR** — monthly recurring revenue" in md
+    assert "**ARR** — annual recurring revenue" in md
     assert "orders.status" in md and "`P` = pending" in md   # auto enum legend
     assert "only you can fill this in" not in md             # bare placeholder is gone
 
@@ -127,12 +127,12 @@ def test_set_key_terminology_merges_then_replaces(tmp_path):
     from semantic_model.loader import load_organization
     from semantic_model import curate
     _model(tmp_path)
-    assert curate.set_key_terminology(tmp_path, {"TIU": "Telematics Interface Unit"}).validated
-    curate.set_key_terminology(tmp_path, {"ESV": "Energy Storage Vehicle"})            # merge (default)
+    assert curate.set_key_terminology(tmp_path, {"MRR": "monthly recurring revenue"}).validated
+    curate.set_key_terminology(tmp_path, {"churn": "no order in 90 days"})             # merge (default)
     assert load_organization(tmp_path).key_terminology == {
-        "TIU": "Telematics Interface Unit", "ESV": "Energy Storage Vehicle"}
-    curate.set_key_terminology(tmp_path, {"SoC": "State of Charge"}, merge=False)      # replace
-    assert load_organization(tmp_path).key_terminology == {"SoC": "State of Charge"}
+        "MRR": "monthly recurring revenue", "churn": "no order in 90 days"}
+    curate.set_key_terminology(tmp_path, {"gold tier": "lifetime spend over 10k"}, merge=False)  # replace
+    assert load_organization(tmp_path).key_terminology == {"gold tier": "lifetime spend over 10k"}
 
 
 def test_explorer_org_md_is_human_only_derived_is_a_separate_field(tmp_path):

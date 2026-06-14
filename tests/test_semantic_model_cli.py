@@ -594,12 +594,12 @@ def test_set_terminology_writes_glossary_to_org_yaml(tmp_path):
     from semantic_model.loader import load_organization
     _model(tmp_path)
     terms = tmp_path / "terms.json"
-    terms.write_text(json.dumps({"TIU": "Telematics Interface Unit", "SoC": "State of Charge"}))
+    terms.write_text(json.dumps({"MRR": "monthly recurring revenue", "ARR": "annual recurring revenue"}))
     rc, out = _run(["set-terminology", str(tmp_path), "--file", str(terms)])
     d = json.loads(out)
     assert rc == 0 and d["validated"] and d["applied"]
     assert load_organization(tmp_path).key_terminology == {
-        "TIU": "Telematics Interface Unit", "SoC": "State of Charge"}
+        "MRR": "monthly recurring revenue", "ARR": "annual recurring revenue"}
 
 
 def test_curate_edit_sets_semantic_column_groups(tmp_path):

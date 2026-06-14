@@ -324,6 +324,16 @@
     .col-group-caret { width: 0.9em; opacity: 0.6; }
     .col-group-name { text-transform: capitalize; }
     .col-group-count { margin-left: auto; opacity: 0.55; font-weight: 400; }
+    .glossary-row { display: flex; align-items: center; gap: 12px; padding: 8px 18px;
+      border-bottom: 1px solid var(--border); font-size: 13px; }
+    .glossary-row:hover { background: var(--row-zebra); }
+    .glossary-term { flex: 0 0 150px; font-weight: 600; word-break: break-word; }
+    .org-term-input { flex: 1 1 auto; min-width: 0; padding: 6px 9px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--code-bg); color: var(--fg); font: inherit; font-size: 13px;
+      box-sizing: border-box; }
+    .org-term-input::placeholder { color: var(--muted); }
+    .org-term-input.term-key { flex: 0 0 170px; }
+    .glossary-add { display: flex; align-items: center; gap: 8px; padding: 12px 18px; }
     .field-name {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       font-size: 13px; font-weight: 500; word-break: break-word;
@@ -2151,26 +2161,24 @@
       const card = el('div', { class: 'table-card' });
       card.appendChild(el('div', { class: 'info-banner', html:
         '<strong>Glossary' + (termEdits !== null ? ' (edited — queued)' : '') + '.</strong> ' +
-        'Terms agami should know for this database — e.g. <em>TIU</em> = "Telematics Interface Unit". ' +
+        'Short definitions of terms, acronyms, and codes specific to this database, so agami uses them correctly. ' +
         'Add or correct them here; changes apply when you paste the block back into Claude.' }));
       const terms = curTerms();
       const keys = Object.keys(terms).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
       if (!keys.length) {
-        card.appendChild(el('div', { class: 'field-hint', style: 'padding:6px 2px;', text: 'No terms yet — add one below.' }));
+        card.appendChild(el('div', { class: 'field-hint', style: 'padding:8px 18px;', text: 'No terms yet — add one below.' }));
       }
       keys.forEach(term => {
-        const row = el('div', { class: 'field-row' });
-        const name = el('div', { class: 'field-name' }); name.appendChild(el('strong', { text: term }));
-        row.appendChild(name);
-        const def = el('input', { type: 'text', value: terms[term], class: 'org-term-input',
-          style: 'flex:1;min-width:0;', onchange: (ev) => mutateTerms(t => { t[term] = ev.target.value; }) });
-        row.appendChild(def);
+        const row = el('div', { class: 'glossary-row' });
+        row.appendChild(el('div', { class: 'glossary-term', text: term }));
+        row.appendChild(el('input', { type: 'text', value: terms[term], class: 'org-term-input',
+          onchange: (ev) => mutateTerms(t => { t[term] = ev.target.value; }) }));
         row.appendChild(btnSm('Remove', () => mutateTerms(t => { delete t[term]; })));
         card.appendChild(row);
       });
-      const addRow = el('div', { class: 'field-row', style: 'gap:6px;' });
-      const ti = el('input', { type: 'text', placeholder: 'term (e.g. TIU)', class: 'org-term-input', style: 'width:160px;' });
-      const di = el('input', { type: 'text', placeholder: 'definition', class: 'org-term-input', style: 'flex:1;min-width:0;' });
+      const addRow = el('div', { class: 'glossary-add' });
+      const ti = el('input', { type: 'text', placeholder: 'term', class: 'org-term-input term-key' });
+      const di = el('input', { type: 'text', placeholder: 'definition', class: 'org-term-input' });
       addRow.appendChild(ti); addRow.appendChild(di);
       addRow.appendChild(btnSm('Add term', () => {
         const k = ti.value.trim(), v = di.value.trim();
