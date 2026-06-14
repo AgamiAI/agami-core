@@ -423,6 +423,9 @@ def _build_table(
     pk_set = set(grain)
     for c in cols:
         c.primary_key = c.name in pk_set
+        # column-intrinsic aggregation class (additive / averageable / dimension / unknown).
+        # Keys are dimensions; the rest is a name+type heuristic the curator can refine.
+        c.aggregation = build.classify_aggregation(c.name, c.type, is_key=c.primary_key)
         if build.detect_sensitive(table, c.name):
             c.sensitive = True
             report.sensitive_columns += 1

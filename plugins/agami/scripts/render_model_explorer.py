@@ -105,6 +105,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 fields_out.append({
                     "name": c.name, "qname": f"{qname}.{c.name}", "type": c.type,
                     "description": c.description, "description_source": c.description_source,
+                    "aggregation": c.aggregation,
                     "review_state": c.review_state,
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
                     "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
@@ -141,6 +142,8 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
             metrics_out.append({
                 "name": mm.name, "qname": f"{sa.name}.{mm.name}", "calculation": mm.calculation,
                 "bindings": mm.bindings, "unit": mm.unit, "other_names": mm.other_names,
+                "non_additive_dimensions": mm.non_additive_dimensions,
+                "semi_additive_agg": mm.semi_additive_agg,
                 "source_tables": mm.source_tables, "description": mm.description,
                 "review_state": mm.review_state, "confidence": mm.confidence,
                 "excluded": mm.review_state == "rejected",
