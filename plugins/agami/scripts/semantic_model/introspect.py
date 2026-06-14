@@ -430,8 +430,10 @@ def _build_table(
             c.sensitive = True
             report.sensitive_columns += 1
 
-    # date encoding + timezone (epoch / yyyymmdd / iso) sniffed from a live sample
-    _sniff_dates_into(dialect, runner, schema, table, cols)
+    # One live sample → date encoding/timezone AND choice_field skeletons for low-cardinality
+    # coded columns (so catalog-mode coded columns get an enum skeleton the LLM labels, not
+    # just the probe-mode path).
+    _enrich_from_sample(dialect, runner, schema, table, cols)
 
     column_groups = build.maybe_column_groups(cols)
     if column_groups:
@@ -610,12 +612,74 @@ def _build_relationships(
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
             ))
-        return rels
+    else:
+        # probe: infer FKs from name+type match, confirm by value-overlap
+        report.mode_per_capability["relationships"] = "probe"
+        rels.extend(_probe_relationships(dialect, runner, tables, grain_by_table, report))
 
-    # probe: infer FKs from name+type match, confirm by value-overlap
-    report.mode_per_capability["relationships"] = "probe"
-    rels.extend(_probe_relationships(dialect, runner, tables, grain_by_table, report))
+    # Tier 2 — name-based reference promotion. A `<x>_id` column whose target table is
+    # identifiable by name becomes an inferred/unreviewed join even WITHOUT value overlap
+    # (which under-detects on sparse data). Conservative + type-checked, and `unreviewed` so
+    # it's discoverable but never asserted as fact — the user signs it off (or it self-approves
+    # through use). This is what lifts a sparse demo from ~9 joins toward the real graph.
+    rels.extend(_promote_reference_fields(tables, grain_by_table, rels, report))
     return rels
+
+
+_REF_ID_RE = re.compile(r"^(.+?)_id$", re.IGNORECASE)
+
+
+def _infer_reference_target(stem: str, by_name: dict, from_table: Table) -> Optional[Table]:
+    """Find the table a `<stem>_id` column points at — by exact name, plural, or singular.
+    Skips self-reference and prefers the from-table's own schema."""
+    cands = (by_name.get(stem) or by_name.get(stem + "s") or by_name.get(stem + "es")
+             or (by_name.get(stem[:-1]) if stem.endswith("s") else None) or [])
+    cands = [t for t in cands if t.name != from_table.name]
+    if not cands:
+        return None
+    same = [t for t in cands if t.schema_name == from_table.schema_name]
+    return (same or cands)[0]
+
+
+def _promote_reference_fields(
+    tables: list[Table], grain_by_table: dict[str, set[str]],
+    existing: list[Relationship], report: IntrospectReport,
+) -> list[Relationship]:
+    """Promote `<x>_id` reference columns to inferred/unreviewed joins when the target table is
+    identifiable by name and key-type-compatible — never requiring value overlap. Conservative:
+    target must exist, have a single-column grain, and a key whose type matches the ref column."""
+    by_name: dict[str, list[Table]] = {}
+    for t in tables:
+        by_name.setdefault(t.name.lower(), []).append(t)
+    # schema-aware key so a same-named table in another schema doesn't suppress promotion here
+    seen = {(r.from_schema, r.from_table, r.from_column) for r in existing}
+    out: list[Relationship] = []
+    for t in tables:
+        grain = set(t.grain)   # THIS table's key (grain_by_table is keyed by bare name → ambiguous)
+        for c in t.columns:
+            mo = _REF_ID_RE.match(c.name)
+            if not mo or c.primary_key or c.name in grain or (t.schema_name, t.name, c.name) in seen:
+                continue
+            target = _infer_reference_target(mo.group(1).lower(), by_name, t)
+            if target is None or len(target.grain) != 1:
+                continue
+            to_col = target.grain[0]
+            to_pk = next((tc for tc in target.columns if tc.name == to_col), None)
+            if to_pk is not None and to_pk.type != c.type:   # key-type mismatch → not a real ref
+                continue
+            card = build.infer_cardinality(t.name, target.name, [c.name], [to_col], grain_by_table)
+            out.append(Relationship(
+                from_table=t.name, from_column=c.name, to_table=target.name, to_column=to_col,
+                from_schema=t.schema_name, to_schema=target.schema_name,
+                relationship=card, join_type="LEFT", confidence="inferred", review_state="unreviewed",
+                description=f"inferred reference: {c.name} → {target.name}.{to_col} "
+                            "(name match; not overlap-verified — confirm)",
+            ))
+            seen.add((t.schema_name, t.name, c.name))
+    if out:
+        report.notes.append(
+            f"promoted {len(out)} reference field(s) (<x>_id) to inferred joins — review on /agami-model")
+    return out
 
 
 def _schema_of(
@@ -788,23 +852,41 @@ def _sniff_date(name: str, ctype: str, values: list) -> tuple[Optional[str], Opt
     return (None, None)
 
 
-def _sniff_dates_into(
+def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column]
 ) -> None:
-    """Set date_format/timezone on date-candidate columns from a small live sample."""
-    candidates = [c for c in cols if c.type in ("date", "timestamp", "time")
+    """ONE live sample → (a) date_format/timezone on date-candidate columns, and
+    (b) a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns (the LLM
+    enrichment fills the labels). (b) is the catalog-mode counterpart of probe mode's
+    `_maybe_choice` — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
+    `severity`) never get an enum skeleton, so the decode can only ever live in prose."""
+    date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
-    if not candidates:
+    # choice candidates: codeable columns with no choice_field yet, that aren't keys, dates,
+    # or free-text-ish. A short integer/string column with few distinct values is an enum.
+    # Exclude reference-named `*_id`/`sys_id` columns by NAME: introspection never populates
+    # Column.foreign_key, so that guard alone wouldn't catch a low-cardinality `dealer_id`
+    # (few dealers) — which is a JOIN target, not an enum to decode.
+    choice_cands = [c for c in cols
+                    if c.choice_field is None and not c.primary_key and c.foreign_key is None
+                    and c.type in ("integer", "string") and not _looks_time_named(c.name)
+                    and not _REF_ID_RE.match(c.name)]
+    if not date_cands and not choice_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
     if not sample:
         return
-    for c in candidates:
+    for c in date_cands:
         df, tz = _sniff_date(c.name, c.type, [row.get(c.name) for row in sample])
         if df:
             c.date_format = df
         if tz:
             c.timezone = tz
+    for c in choice_cands:
+        ch = _maybe_choice([row.get(c.name) for row in sample])
+        # only genuinely code-like: skip long free-text values (names, descriptions, ids).
+        if ch and all(len(str(k)) <= 40 for k in ch):
+            c.choice_field = ch
 
 
 def _infer_value_type(values: list) -> str:
