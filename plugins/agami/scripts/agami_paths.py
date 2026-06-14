@@ -6,7 +6,7 @@ agami keeps everything under ONE folder the user chooses (the "artifacts dir"):
     <artifacts_dir>/
       local/              # gitignored — secrets + per-user state (NEVER committed)
         credentials       # chmod 600 — the only place credentials live
-        config.json       # active_profile, reviewer_email/role, tool_paths, …
+        .config           # JSON: active_profile, reviewer_email/role, tool_paths, …
         .pgpass, …        # provider-native auth files materialized from credentials
         query_log.jsonl   # personal query history
         charts/, exports/ # per-query outputs
@@ -71,7 +71,8 @@ def credentials_path(art: Path | None = None) -> Path:
 
 
 def config_path(art: Path | None = None) -> Path:
-    return local_dir(art) / "config.json"
+    # JSON file; keeps the legacy name `.config` so the one-shot migration is a pure move.
+    return local_dir(art) / ".config"
 
 
 def query_log_path(art: Path | None = None) -> Path:
@@ -123,16 +124,35 @@ def ensure_gitignore(art: Path | None = None) -> None:
         pass
 
 
+def _legacy_artifacts_dir() -> Path | None:
+    """The custom artifacts dir the OLD `~/.agami/.config` recorded, if any — so the
+    migration consolidates into the user's existing model location, not the default."""
+    cfg = LEGACY_HOME / ".config"
+    if not cfg.exists():
+        return None
+    try:
+        import json
+        ad = json.loads(cfg.read_text(encoding="utf-8")).get("artifacts_dir")
+        if ad:
+            return Path(os.path.expanduser(str(ad))).resolve()
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def migrate_legacy_home(art: Path | None = None) -> bool:
     """Move a pre-consolidation `~/.agami/` into `<artifacts_dir>/local/`, once.
 
-    Returns True if a migration happened. Idempotent: a no-op if there's no legacy
-    home, or if `local/` already exists (already migrated). Leaves a tombstone in the
-    old location so a confused user can find where things went.
+    When `art` is None, consolidates into the artifacts dir the old config recorded
+    (preserving a custom location), else the current/default one. Idempotent: a no-op
+    if there's no legacy home or `local/` already exists. Leaves a tombstone behind.
     """
-    art = art or artifacts_dir()
+    if not LEGACY_HOME.is_dir():
+        return False
+    if art is None:
+        art = _legacy_artifacts_dir() or artifacts_dir()
     dest = local_dir(art)
-    if not LEGACY_HOME.is_dir() or dest.exists():
+    if dest.exists():
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     LEGACY_HOME.rename(dest)
@@ -146,3 +166,10 @@ def migrate_legacy_home(art: Path | None = None) -> bool:
     except OSError:
         pass
     return True
+
+
+def bootstrap() -> Path:
+    """Call at the start of every entry point: runs the one-shot legacy migration
+    (idempotent — a cheap no-op once done) and returns the resolved artifacts dir."""
+    migrate_legacy_home()
+    return artifacts_dir()

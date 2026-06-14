@@ -31,7 +31,7 @@ def test_local_dir_holds_secrets_and_state(monkeypatch, tmp_path):
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     assert P.local_dir() == tmp_path / "local"
     assert P.credentials_path() == tmp_path / "local" / "credentials"
-    assert P.config_path() == tmp_path / "local" / "config.json"
+    assert P.config_path() == tmp_path / "local" / ".config"
     assert P.query_log_path() == tmp_path / "local" / "query_log.jsonl"
     assert P.dashboard_dir("model", "main") == tmp_path / "local" / "model" / "main"
     # the committable model sits next to local/, not inside it
