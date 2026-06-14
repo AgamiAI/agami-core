@@ -57,7 +57,7 @@ Parse on `/`, trim, validate email against `\S+@\S+\.\S+`; accept any non-empty 
 ts=$(date -u +%Y%m%d-%H%M%S)
 # Per-profile subdir so multi-profile users can tell renders apart.
 mkdir -p <artifacts_dir>/local/model/"$profile"
-out="$HOME/.agami/model/$profile/$ts.html"
+out="<artifacts_dir>/local/model/$profile/$ts.html"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
@@ -198,11 +198,11 @@ Excluded entries vanish from the runtime model (the loader drops `review_state: 
 
 Every successful apply produces a new explorer file at a new timestamp.
 
-**Delete the previous timestamped file from this profile's dir before writing the new one** (`rm -f "$HOME/.agami/model/$profile/$prev_ts.html"`). Track `$prev_ts` across re-renders. The auto-open of the new file is the refresh signal; old files just accumulate and confuse the user about which tab is current.
+**Delete the previous timestamped file from this profile's dir before writing the new one** (`rm -f "<artifacts_dir>/local/model/$profile/$prev_ts.html"`). Track `$prev_ts` across re-renders. The auto-open of the new file is the refresh signal; old files just accumulate and confuse the user about which tab is current.
 
 ```bash
 new_ts=$(date -u +%Y%m%d-%H%M%S)
-new_out="$HOME/.agami/model/$profile/$new_ts.html"
+new_out="<artifacts_dir>/local/model/$profile/$new_ts.html"
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
   --profile "$profile" --artifacts-dir "$artifacts_dir" --out "$new_out"
 ```

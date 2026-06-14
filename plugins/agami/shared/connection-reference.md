@@ -11,8 +11,8 @@ These are non-negotiable. Skills that read this document must follow them under 
 3. **Never scan or guess.** Tool detection is `which <tool>` and `python3 -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
-   - For postgres: `PGPASSFILE=$HOME/.agami/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
-   - For mysql: `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
+   - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
+   - For mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
    These auth files are chmod 600 in `<artifacts_dir>/local/`. The visible Bash command contains NO password — psql / mysql read the password from the auth file silently. **Patterns that are FORBIDDEN**: `export PGPASSWORD='<literal>'`, `export MYSQL_PWD='<literal>'`, `psql -W <password>`, `mysql -p<password>`, or anything else where the password appears in the command, env assignment, or stdin.
 
 ## Contents
@@ -35,9 +35,9 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 
 | tier | EXACT invocation |
 |---|---|
-| `cli` postgres | `PGPASSFILE="$HOME/.agami/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
-| `cli` mysql | `mysql --defaults-file="$HOME/.agami/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
-| `cli` snowflake | `snowsql --config "$HOME/.agami/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
+| `cli` postgres | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
+| `cli` mysql | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
+| `cli` snowflake | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
 | `python` bigquery | `AGAMI_PROFILE="<profile>" "$PY" "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` (BigQuery is Python-only — there's no native CLI tier today) |
 | `cli` sqlite | `sqlite3 -csv "<path>" 'SELECT 1'` |
 | `duckdb` | `duckdb -init "$init_file" -c 'SELECT 1' --csv` |
@@ -242,11 +242,11 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
 
 # Execute a query and return CSV. PGPASSFILE points at the auth file;
 # psql reads the password silently. The bash command itself is password-free.
-PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
   psql -h "$host" -p "$port" -U "$user" -d "$database" -c "$SQL" --csv
 
 # Execute from a file
-PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
   psql -h "$host" -p "$port" -U "$user" -d "$database" -f query.sql --csv
 ```
 
@@ -268,7 +268,7 @@ Redshift speaks the PostgreSQL wire protocol, so **psql works as-is**. The only 
 
 ```bash
 # Same invocation as postgres, just with the Redshift host/port and sslmode=require.
-PGPASSFILE="$HOME/.agami/.pgpass" PGSSLMODE="require" \
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="require" \
   psql -h "$host" -p 5439 -U "$user" -d "$database" -c "$SQL" --csv
 ```
 
@@ -287,7 +287,7 @@ Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI 
 python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
 
 # Run a query — snowsql reads the password from the config silently.
-snowsql --config "$HOME/.agami/.snowsql.cnf" -c "$PROFILE" \
+snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "$PROFILE" \
         -q "$SQL" -o output_format=csv -o header=true -o friendly=false -o timing=false
 ```
 
@@ -368,19 +368,19 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
 
 # Execute a query — mysql reads creds from the auth file via --defaults-file
 # + --defaults-group-suffix=_<profile>. Visible bash command is password-free.
-mysql --defaults-file="$HOME/.agami/.mysql.cnf" \
+mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" \
       --defaults-group-suffix="_$PROFILE" \
       -h "$host" -P "$port" "$database" \
       -e "$SQL" --batch --raw
 
 # CSV-like output
-mysql --defaults-file="$HOME/.agami/.mysql.cnf" \
+mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" \
       --defaults-group-suffix="_$PROFILE" \
       -h "$host" -P "$port" "$database" \
       -e "$SQL" --batch --raw | tr '\t' ','
 ```
 
-**Security**: Never use `-p<password>`, `--password=...`, or `export MYSQL_PWD='...'` — all of those leak the password into Bash command-line / process listings / chat transcripts. Always use `--defaults-file=$HOME/.agami/.mysql.cnf` (chmod 600, generated by `scripts/setup_pgauth.py`).
+**Security**: Never use `-p<password>`, `--password=...`, or `export MYSQL_PWD='...'` — all of those leak the password into Bash command-line / process listings / chat transcripts. Always use `--defaults-file=<artifacts_dir>/local/.mysql.cnf` (chmod 600, generated by `scripts/setup_pgauth.py`).
 
 ### SQLite
 ```bash
@@ -452,8 +452,8 @@ When introspecting databases, exclude system schemas:
 ## Security Rules
 
 - **NEVER** put passwords in any visible Bash command — not in `export PGPASSWORD='...'`, not in `mysql -p<password>`, not in stdin heredocs that interpolate the password. Hosts render Bash tool calls in their UI; the password leaks into the chat. Use the auth files generated by `scripts/setup_pgauth.py`:
-  - psql: `PGPASSFILE=$HOME/.agami/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
-  - mysql: `mysql --defaults-file=$HOME/.agami/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
+  - psql: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
+  - mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
   - Python driver: `"$PY" scripts/execute_sql.py --sql-file ...` (reads creds internally; never echoes them)
 - Use `--csv` or `--batch` output modes (not interactive) for predictable parsing
 - **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `<artifacts_dir>/local/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.

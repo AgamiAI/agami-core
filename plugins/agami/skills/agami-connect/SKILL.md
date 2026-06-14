@@ -658,7 +658,7 @@ Then render the examples-validation dashboard (per-profile subdir) from those it
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_examples_validation.py" \
   --items-file /tmp/agami-examples-items.json \
-  --out "$HOME/.agami/examples-validation/<profile>/<ts>.html"
+  --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
 ```
 
 The user reviews matches (green) / mismatches (red) with drill-down. This is the strongest "do these numbers match?" trust moment — surface it.
