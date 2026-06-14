@@ -860,7 +860,10 @@
           const v = ta.value;
           const cur = edits[m.qname] || { kind: 'metric', area: m.area, name: m.name, fields: {} };
           const baseDict = cur.fields.bindings ? Object.assign({}, cur.fields.bindings) : Object.assign({}, m.bindings || {});
-          baseDict[dialect] = v;
+          // empty value: clear this dialect's binding rather than writing an empty string —
+          // so saving a blank box on a metric that had no binding for this dialect is a true
+          // no-op, not a queued edit that adds {dialect: ""}.
+          if (!(v || '').trim()) delete baseDict[dialect]; else baseDict[dialect] = v;
           if (JSON.stringify(baseDict) === JSON.stringify(m.bindings || {})) delete cur.fields.bindings;
           else cur.fields.bindings = baseDict;
           if (Object.keys(cur.fields).length) edits[m.qname] = cur; else delete edits[m.qname];
@@ -2088,10 +2091,14 @@
         if (!sql) problems.push('Add the SQL.');
         if (newExamples.some(x => x.question === question) ||
             (manifest.examples || []).some(x => x.question === question)) problems.push('An example with that question already exists.');
-        if (problems.length) { errLine.textContent = '⚠ ' + problems.join(' '); return; }
         const srcTables = tablesInSql(sql);
         const inferredArea = srcTables.map(t => TABLE_AREA[t]).find(Boolean);
-        const area = inferredArea || (AREAS.length === 1 ? AREAS[0] : (AREAS[0] || ''));
+        const area = inferredArea || (AREAS.length === 1 ? AREAS[0] : '');
+        // a multi-area profile needs the area resolvable from the SQL — an empty area would
+        // fail `sm add-example --area <area>`. Make the user name a modeled table.
+        if (!area) problems.push('Reference a modeled table in your SQL (e.g. ' +
+          (ALL_TABLES[0] ? ALL_TABLES[0] : 'sales.orders') + ') so I know which subject area this belongs to.');
+        if (problems.length) { errLine.textContent = '⚠ ' + problems.join(' '); return; }
         newExamples.push({ area, question, sql });
         addExampleOpen = false; renderAll();
       };
