@@ -847,8 +847,9 @@
       const original = (m.bindings || {})[dialect] || '';
       const queuedDict = (edits[m.qname] && edits[m.qname].fields && edits[m.qname].fields.bindings) || null;
       const shown = (queuedDict && (dialect in queuedDict)) ? queuedDict[dialect] : original;
-      const wrap = el('div', { class: 'table-description', style: 'border-bottom:none;padding:0;margin:4px 0;' });
       if (inlineEditKey === key) {
+        // 18px horizontal padding insets the width:100% textarea to the card's content column
+        const wrap = el('div', { style: 'padding:0 18px;margin:4px 0 8px;' });
         const ta = el('textarea', { id: 'active-inline-ta', rows: '3', class: 'inline-edit-ta',
           style: 'font-family:ui-monospace,Menlo,Consolas,monospace;' });
         ta.value = shown;
@@ -867,24 +868,26 @@
           else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
         });
         wrap.appendChild(ta);
+        // ground the fragment: name the tables in scope + what agami adds around it
+        const scope = (m.source_tables || []).length ? ' over ' + m.source_tables.join(', ') : '';
         const bar = el('div', { class: 'inline-edit-bar' });
         bar.appendChild(btnSm('Save', save, 'primary'));
         bar.appendChild(btnSm('Cancel', () => { inlineEditKey = null; renderAll(); }));
         bar.appendChild(el('span', { class: 'hint',
-          text: 'an aggregate expression (e.g. SUM(orders.amount)) — NOT a full SELECT · ⌘/Ctrl+Enter saves' }));
+          text: 'the SELECT aggregate' + scope + ' — agami adds FROM / WHERE / GROUP BY · ⌘/Ctrl+Enter saves' }));
         wrap.appendChild(bar);
         return wrap;
       }
       const edited = !!(queuedDict && (dialect in queuedDict) && queuedDict[dialect] !== original);
       const isEmpty = !(shown || '').trim();
+      // returned directly (like the old read-only preBlock) so it keeps the same 18px inset
       const pre = el('pre', { class: 'code-block code-editable' + (isEmpty ? ' empty' : '') + (edited ? ' edited' : ''),
         title: 'Click to edit the SQL', text: isEmpty ? '(click to add the SQL expression)' : shown });
       pre.addEventListener('click', (ev) => {
         ev.stopPropagation(); inlineEditKey = key; renderAll();
         const t = document.getElementById('active-inline-ta'); if (t) { t.focus(); }
       });
-      wrap.appendChild(pre);
-      return wrap;
+      return pre;
     }
     function btnSm(label, onclick, cls) {
       return el('button', { type: 'button', class: 'btn-sm' + (cls ? ' ' + cls : ''), onclick }, label);
