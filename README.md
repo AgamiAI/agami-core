@@ -9,7 +9,7 @@
 Ask plain-English questions of your **Postgres / MySQL / Snowflake / BigQuery / Redshift / SQLite** database, with a trust layer wrapped around every answer. Your credentials, schema, and query results never leave your machine — `agami` runs entirely inside Claude Code via the built-in Bash / Read / Write tools.
 
 - **No Agami backend.** Nothing you do touches a server we operate. The plugin runs inside Claude Code; an *optional* local MCP server (`agami serve`) lets other AI clients (e.g. Claude Desktop) use the same local model and execution — still entirely on your machine. No `pip install` if you have a native CLI for your DB. See [docs/mcp-server.md](docs/mcp-server.md).
-- **Every join is FK-derived or human-approved.** Every metric and named filter is signed off with a name, role, and timestamp. The dashboard tells you which, with the source signal.
+- **Every join is FK-derived or human-approved.** Every metric is signed off with a name, role, and timestamp. The dashboard tells you which, with the source signal.
 - **Every answer ships a receipt** — the literal SQL that ran, the model version it pinned, the relationships used, and the freshness of the source tables.
 - **Corrections persist with attribution.** Save a fix once → every subsequent query loads it as a few-shot example, with the original author and date surfaced when it influences a future answer.
 
@@ -53,43 +53,37 @@ Most "AI BI" tools quietly pick a join, quietly pick a definition of "revenue", 
 
 ### Every entry carries a confidence + a review state
 
-`agami-connect` emits the semantic model with these fields on every join, metric, named filter, and field description:
+`agami-connect` writes each join, metric, and entity with a flat **trust block** — a confidence label, a review state, and (once approved) a sign-off identity. No vendor blobs, no numeric scores to tune:
 
 ```yaml
-custom_extensions:
-  - vendor_name: COMMON
-    data: '{"agami": {
-       "confidence": 0.62,                # 0.0–1.0, computed from signals
-       "signal_breakdown": {              # which signals contributed
-         "fk_declared": false,
-         "unique_index_match": true,
-         "column_type_match": true,
-         "column_name_similarity": 0.92,
-         "plural_pattern_match": true
-       },
-       "review_state": "unreviewed",       # unreviewed | approved | rejected | stale | not_applicable
-       "origin": "introspect_heuristic",   # fk | introspect_heuristic | column_comment | llm_suggested | human_authored | no_description
-       "signed_off_by": null,
-       "signed_off_at": null,
-       "signed_off_role": null
-     }}'
+# a relationship in subject_areas/<area>/relationships.yaml
+- from_table: orders
+  to_table: customers
+  from_column: customer_id
+  to_column: id
+  relationship: many_to_one
+  confidence: confirmed        # confirmed | inferred | proposed
+  review_state: approved       # unreviewed | approved | rejected | stale | not_applicable
+  signed_off_by: null          # set when a human approves
+  signed_off_at: null
+  signed_off_role: null        # cfo | cto | data_lead | engineer | analyst | other
 ```
 
-Auto-approve rules collapse the queue to what actually needs human eyes:
-- **FK declared** in DB metadata → relationship auto-approved (`origin: fk`).
-- **DBA-authored column comment** present → field description auto-approved (`origin: column_comment`).
-- **Single-column unique index + plural-of-table-name + column-type match** → relationship auto-approved (heuristic).
-- **Structural / well-known column-name pattern match** — `id`, `*_id`, `created_at`, `*_at`, `email`, `phone`, `city`, `status`, `*_count`, `is_*`/`has_*` flags, PK/FK columns, etc. — auto-approved with `signal_breakdown.structural_pattern_match` set to the pattern name. Full list at [`plugins/agami/shared/column-name-dictionary.md`](plugins/agami/shared/column-name-dictionary.md).
-- **Empty `description` on a field** → marked `not_applicable` (no_description); the dashboard skips the card.
+A **metric** carries the same block plus its definition — prose `calculation` + per-dialect `bindings` — so an answer can show exactly what "revenue" means and who vouched for it.
 
-Everything else stays `unreviewed` and surfaces in the review dashboard. On a real Snowflake schema (12 tables, 345 fields, typical OLTP-to-warehouse shape), these rules collapse what would have been a 237-card review queue down to ~14 visible Rule 1 cards.
+Auto-approve collapses the queue to what actually needs human eyes:
+- A **DB-declared foreign key** → relationship `confidence: confirmed`, `review_state: approved` (the database already vouches for it).
+- A **probe-inferred** join (name + value overlap, no declared FK) → `confidence: proposed` / `inferred`, `review_state: unreviewed`.
+- A column with a **self-evident structural name** (`id`, `*_id`, `created_at`, `email`, `status`, `is_*`/`has_*` flags…) needs no description and is never queued. Full list at [`plugins/agami/shared/column-name-dictionary.md`](plugins/agami/shared/column-name-dictionary.md).
+
+Everything inferred stays `unreviewed` and surfaces in the Review tab.
 
 ### Rule 1 vs Rule 2 — and the hybrid review order
 
-- **Rule 1** (always queue): every `metric` and every `named_filter` that's not yet approved — these have the highest blast radius (one bad metric breaks every report that uses it). Sign-off requires a `signed_off_by` email AND a `signed_off_role` (cfo / cto / data_lead / engineer / analyst / other) AND a non-empty `definition_prose`. The validator enforces all three before a metric can be approved.
-- **Rule 2** (slider): every other entry whose `confidence < threshold` (default `0.7`). Lower the threshold to trim the queue; raise it for a Meta-bar trust posture.
+- **Rule 1 — metrics** (always queue): a metric must be signed off — a `signed_off_by` email AND a `signed_off_role` AND a non-empty `calculation` — before the runtime treats it as truth. Highest blast radius: one bad metric skews every report that uses it. The validator enforces all three before a metric can be `approved`.
+- **Rule 2 — joins & entities** (lazy): usable while `unreviewed`; they self-approve as you query and surface as receipt warnings until confirmed. No threshold to tune — it's review *state*, not a number.
 
-At runtime, `agami-query` still **answers** questions that use `unreviewed` metrics, named filters, joins, or field descriptions — but every unreviewed entry it relied on surfaces as a **warning** in the receipt (e.g. *"Used metric `revenue` which has not been signed off"*), with a one-click link to the Review tab. Nothing is silently trusted; nothing is hard-blocked. Only `rejected` (excluded) entries are dropped entirely — those never appear in an answer.
+At runtime, `agami-query` still **answers** questions that use `unreviewed` metrics, joins, or entities — but every unreviewed entry it relied on surfaces as a **warning** in the receipt (e.g. *"Used metric `revenue` which has not been signed off"*), with a one-click link to the Review tab. Nothing is silently trusted; nothing is hard-blocked. Only `rejected` (excluded) entries are dropped entirely — those never appear in an answer.
 
 **Hybrid review order in `/agami-connect`**: Phase 4 surfaces a Rule 1 sign-off gate *before* seed examples are generated (Phase 5). Reason: seed SQL exercises metric definitions; signing them off first means the seeds inherit approved truth instead of LLM guesses. Rule 2 polish (low-confidence joins / field descriptions) stays in Phase 7's optional collapsed panel — it self-approves as the user queries and never blocks the path to first answer.
 
@@ -139,7 +133,7 @@ $EDITOR ~/.agami/credentials.example
 mv ~/.agami/credentials.example ~/.agami/credentials
 chmod 600 ~/.agami/credentials
 
-# 4. Re-run connect to introspect: per-schema semantic model + seed examples
+# 4. Re-run connect to introspect: build the semantic model + seed examples
 /agami-connect
 # (mid-flow: signs off any metrics in a Rule 1 sign-off gate, then generates
 #  seed examples and opens the examples-validation dashboard)
@@ -334,7 +328,7 @@ The skill picks the first available connection method, in this order:
 |---|---|
 | `/agami-connect` | **One-stop setup + introspect.** First run: detects missing credentials, runs the DB-type picker (Postgres / Supabase / Redshift / MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks / Trino / DuckDB / SQLite), writes `~/.agami/credentials.example` for you to fill in, verifies the connection method, and ends the turn. Re-invoke after filling in the file → introspects the live DB **directly into the semantic model** at `~/agami-artifacts/<profile>/` (subject areas, tables, columns, primary-key grain, foreign-key relationships with join cardinality, deep-table column groups, sensitive-column flags) — in catalog mode, or a probe-mode fallback when the catalog is locked down — then layers LLM enrichment (descriptions, entities, metrics), generates EXPLAIN-validated seed examples, and opens the examples-validation dashboard. Validator-gated; runs `git init` and snapshots under `.snapshots/<hash>/`. |
 | `/agami-query` | Answers a NL question. Picks examples + relationships, generates SQL, runs it, formats the result, and surfaces a SQL receipt panel (provenance + model-version pin). If it uses an unreviewed metric / join / entity, it still answers but flags each as a warning on the receipt. (You usually don't need to type this — natural language routes here.) |
-| `/agami-model` | **One dashboard to browse, curate, AND sign off the model.** A static HTML browser with tabs (Organization · Review · Subject areas · Tables · Metrics · Entities · Joins · Examples · Queued), live search, and per-tab status filters. **Browse/curate:** every table / field / metric / entity / join with descriptions; per-table + per-column **Exclude / Include**; edit any description / metric / entity / join; add new metrics; edit `ORGANIZATION.md`. **Review (the former `/agami-review`):** the Review tab is the trust-layer sign-off queue — **Approve / Reject** metrics (Rule 1 — answers that use an unsigned one carry a warning until you approve it), entities, and inferred joins (Rule 2, lazy), with a one-click "Approve all" for the confident ones. Excluded/rejected entries drop out of the runtime model (joins, prompts, aggregates) but stay in the YAML for audit. Open it on the queue with `/agami-model review`. All actions queue into one "Generate feedback for Claude" block; the engine validates + commits each batch. |
+| `/agami-model` | **One dashboard to browse, curate, AND sign off the model.** A static HTML browser with tabs (Organization · Review · Tables · Metrics · Entities · Joins · Examples · Queued), live search, and per-tab status filters. **Browse/curate:** every table / field / metric / entity / join with descriptions; per-table + per-column **Exclude / Include**; edit any description / metric / entity / join; add new metrics; edit `ORGANIZATION.md`. **Review (the former `/agami-review`):** the Review tab is the trust-layer sign-off queue — **Approve / Reject** metrics (Rule 1 — answers that use an unsigned one carry a warning until you approve it), entities, and inferred joins (Rule 2, lazy), with a one-click "Approve all" for the confident ones. Excluded/rejected entries drop out of the runtime model (joins, prompts, aggregates) but stay in the YAML for audit. Open it on the queue with `/agami-model review`. All actions queue into one "Generate feedback for Claude" block; the engine validates + commits each batch. |
 | `/agami-save-correction` | Records a correction and routes it to the right destination via a 5-way classifier: SQL pattern → `examples.yaml`; per-column meaning / value normalization → the column's `description` / `choice_field` in the semantic model; cross-DB display preference → `USER_MEMORY.md`; abstract business concept tied to this DB → `ORGANIZATION.md`; new reusable aggregation → `metric` in the semantic model. Surfaces the classification + destination + reasoning before writing, so you can override. The next answer that uses the correction surfaces its attribution in the receipt. |
 | `/agami-reconcile` | Reconciliation harness: point it at a legacy dashboard's CSV (label → number rows) and it generates each NL question, runs it through agami, and shows a side-by-side diff with tolerances. Use to validate the model against numbers you already trust. |
 | `/agami-serve` | **Use agami from the Claude Desktop app**, not just Claude Code. Wires up the optional local MCP server (`scripts/mcp_server.py`) in one step: auto-detects the right Python, copies the self-contained server to a stable `~/.agami/serve/`, and safely merges into `claude_desktop_config.json` (timestamped backup, every other key preserved). The server exposes the same tools as the hosted Agami connector, backed by your local model + local execution — stdio only, read-only SQL, no network, no auth. See [docs/mcp-server.md](docs/mcp-server.md). |
@@ -370,7 +364,7 @@ $ /agami-connect
   ✓ 187 field descriptions auto-approved (DBA column comments / structural pattern match)
   ✓ 21 relationships auto-approved (unique-index + plural-pattern match)
   ⚠ 8 metric proposals stamped Rule 1 (need human sign-off)
-  ⚠ 14 inferred relationships below threshold 0.7 (need review)
+  ⚠ 14 inferred relationships unreviewed (lazy — confirm as you query)
 
 [Phase 3: validate + write]
   ✓ Validator passed (semantic-model schema + trust block)
@@ -387,7 +381,7 @@ $ /agami-connect
   ~/.agami/review/main/20260511-204100.html
 
 You (in dashboard): click Approve on 6 metrics by you@example.com role=data_lead,
-                    Edit 1 (definition_prose tweak), Reject 1.
+                    Edit 1 (calculation tweak), Reject 1.
                     Generate feedback → paste back.
 
 ✓ Applied: 7 approved (1 with edit), 1 rejected. Rule 1 complete.
@@ -417,7 +411,7 @@ You (in chat): validate 1, 3, 4, 5, 7 by you@example.com
   ✓ Rule 1 sign-off complete · 7 items approved earlier this session
 
   Optional polish (low-confidence Rule 2 entries — won't block):
-  ⚠ 14 inferred relationships below confidence 0.7
+  ⚠ 14 inferred relationships unreviewed (lazy — confirm as you query)
   ⚠ 23 field descriptions awaiting review
 
   Open the Rule 2 polish queue? (y / skip — they self-approve as you query)
@@ -461,7 +455,7 @@ You: open the model explorer
 # or: "remove the staging tables and PII columns from the model"
 ```
 
-Renders a self-contained HTML browser of every schema → table → field → **metric → named filter**. The two new top sections surface every metric (with its expression, `definition_prose`, assumptions) and every named filter (predicate + definition) so you can see exactly what the model contains without reading YAML.
+Renders a self-contained HTML browser of every subject area → table → field → **metric → entity → join**. Dedicated tabs surface every metric (with its prose `calculation` + per-dialect `bindings`), entity, and relationship so you can see exactly what the model contains without reading YAML.
 
 Live search across names + types + descriptions + metric prose + filter predicates. Filter chips (All / Active / Excluded / Unreviewed / Queued for change), per-table + per-column Exclude / Include buttons. Useful when:
 
@@ -539,7 +533,7 @@ Format reference: [`docs/format-spec.md`](docs/format-spec.md) and the Pydantic 
 Re-run `/agami-connect reintrospect` (or just `/agami-connect` and pick "Refresh the schema"). agami doesn't watch your DB for drift automatically — you have to kick the refresh yourself.
 
 **What survives the re-introspect** (your hand-edits are not lost):
-- Descriptions, `choice_field` maps, metric definitions, named filters
+- Descriptions, `choice_field` maps, metric definitions, entities
 - Trust-layer sign-offs (`signed_off_by` / `signed_off_at` / `signed_off_role`) on every unchanged entry
 - The rule is: **the DB is canonical for structure (tables / columns / types / PK / FK); the YAML is canonical for meaning** (prose, business definitions, approvals)
 
@@ -548,7 +542,7 @@ Re-run `/agami-connect reintrospect` (or just `/agami-connect` and pick "Refresh
 |---|---|
 | **New tables** | Fresh trust blocks per Phase 2c.2. FK relationships auto-approve where the DB declares them; structural column-name patterns (`id`, `*_id`, `created_at`, `email`, ...) auto-approve via the dictionary. Anything else stays `unreviewed`. |
 | **New columns on existing tables** | Same — pattern-matched columns auto-approve, others land `unreviewed`. |
-| **New metric or named filter** | If Phase 4 detects any new Rule 1 candidates, the Rule 1 gate fires *before* Phase 5 regenerates seed examples. Sign them off, then seeds inherit approved definitions. |
+| **New metric** | If Phase 4 detects any new Rule 1 candidates, the Rule 1 gate fires *before* Phase 5 regenerates seed examples. Sign them off, then seeds inherit approved definitions. |
 
 **What happens to drift** (column type change, FK target shift):
 - The entry's `agami.review_state` flips to `stale`. Prior `signed_off_*` is preserved for audit.
@@ -624,7 +618,7 @@ To override per-user (e.g., to add commands you trust beyond agami), put them in
 | Just added new tables / columns / metrics to your DB | Run `/agami-connect reintrospect`. Same as above — hand-edits + sign-offs survive; new structure flows in; drifted entries flip to `stale`. |
 | Query times out on a large table | Add a date filter or `LIMIT`; the skill flags HIGH-risk scans before running. |
 | "agami warned that revenue isn't signed off" | The answer still came back — the warning just means the `revenue` metric is unreviewed. Open `/agami-model` (Review tab), check the metric (or fix its `calculation` if it's wrong), and approve it; the warning then disappears. |
-| Validator rejects a hand-edited YAML | Read the error verbatim — it'll point at the exact line. Most common: Rule 1 metric set to `approved` without `definition_prose`, or `review_state: not_applicable` without `origin: no_description`. |
+| Validator rejects a hand-edited YAML | Read the error verbatim — it'll point at the exact line. Most common: a metric set to `approved` without `signed_off_by`/`signed_off_role`, or a non-empty `calculation`. |
 | Want to switch profiles | `AGAMI_PROFILE=staging` then re-ask the question. |
 
 If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/issues](https://github.com/AgamiAI/LiteBi/issues) with the exact error, your DB type, and what the validator says (`python3 -m semantic_model.cli validate ~/agami-artifacts/<profile>`).
@@ -636,7 +630,7 @@ If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/
 - **Semantic model** — a provider-portable, standard-concepts hierarchy: Organization → Storage Connection (physical) + Subject Area (logical) → Table / Column / Entity / Metric / Relationship, with declarative fields (default_filters, value_transform, caveats, value_pattern, sensitive, join cardinality) any LLM can traverse. The Pydantic models are the spec: [`plugins/agami/scripts/semantic_model/models.py`](plugins/agami/scripts/semantic_model/models.py); the on-disk layout + a worked example are in [`docs/format-spec.md`](docs/format-spec.md).
 - **Trust block** — every relationship + metric (and, for exclusion, every table/column/entity) carries `confidence` (confirmed/inferred/proposed), `review_state`, and `signed_off_by/at/role`. The validator + curation engine live in `plugins/agami/scripts/semantic_model/` (`validator.py`, `curate.py`).
 - **File layout** ([`plugins/agami/shared/file-layout.md`](plugins/agami/shared/file-layout.md)) — what lives where under `~/agami-artifacts/<profile>/` and how the snapshot directory works.
-- **Examples library YAML** — `<artifacts_dir>/<profile>/examples.yaml`, the NL→SQL few-shot library. Entries carry `source: seed|correction|manual`, `state: unreviewed|validated|rejected`, `validated_by`, `validated_at`.
+- **Examples library YAML** — `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`, the NL→SQL few-shot library. Entries carry `source: seed|correction|manual`, `state: unreviewed|validated|rejected`, `validated_by`, `validated_at`.
 - **Credentials INI** ([`plugins/agami/shared/credentials-format.md`](plugins/agami/shared/credentials-format.md)) — `~/.agami/credentials` (all 6 DB types).
 - **Connection methods** ([`plugins/agami/shared/connection-reference.md`](plugins/agami/shared/connection-reference.md)) — how the skill picks between psql / mysql / snowsql / bq / sqlite3 / DuckDB / Python drivers, including per-tier `SELECT 1` probe invocations.
 - **Introspect queries** ([`plugins/agami/shared/introspect-queries.md`](plugins/agami/shared/introspect-queries.md)) — the dialect-specific INFORMATION_SCHEMA queries each `agami-connect` run uses.
@@ -685,7 +679,7 @@ For fast iteration without `/plugin marketplace update` round-trips:
    ```
    Run `/reload-plugins` in Claude Code to pick up new skills.
 
-2. **`dev/reset-yamls.sh <profile>`** wipes just the artifact YAMLs (`~/agami-artifacts/<profile>/index.yaml`, per-table YAMLs, snapshots) so you can re-run `/agami-connect` against your test DB without re-typing credentials or losing your reviewer email / threshold. Flags: `--hard` (also drops `ORGANIZATION.md`, `.git/`, audit logs), `--clean-renders` (also wipes that profile's rendered dashboards), `--clean-renders-all` (also wipes legacy flat-layout files), `--dry-run` (preview).
+2. **`dev/reset-yamls.sh <profile>`** wipes just the artifact YAMLs (`~/agami-artifacts/<profile>/org.yaml`, the `subject_areas/` tree, snapshots) so you can re-run `/agami-connect` against your test DB without re-typing credentials or losing your reviewer email / role. Flags: `--hard` (also drops `ORGANIZATION.md`, `.git/`, audit logs), `--clean-renders` (also wipes that profile's rendered dashboards), `--clean-renders-all` (also wipes legacy flat-layout files), `--dry-run` (preview).
 
 3. **`python3 -m pytest tests/ -q`** runs the suite (287 tests, ~3 seconds). Covers the renderers, validator, confidence formulas, applier, reconcile parser — basically everything that doesn't need an LLM round-trip.
 

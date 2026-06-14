@@ -358,7 +358,7 @@ If `<artifacts_dir>/<profile>/org.yaml` exists and `$ARGUMENTS != reintrospect`:
 
 **Same DB, another *schema*? That's the Re-introspect path, not "Onboard another database."** If the user wants to add a schema that lives in the **same database** they already onboarded (e.g. they did `public`, now they want `billing` too), choose **Re-introspect** and **expand the schema selection** in Phase 1.3 to include both the old and the new schemas. The engine scans them together in one pass, so any relationship between the original and the new schema is detected as a first-class **cross-schema** join (Case 1) and surfaced for review. Picking "Onboard another database" instead would split the two schemas into separate models and demote any link between them to manual cross-profile glue (Phase 2b federation) — wrong for one DB. If you're unsure which the user means, ask: *"Is `billing` in the same database connection as `<profile>`, or a different server/database?"* — same connection → Re-introspect + expand schemas; different → new profile.
 
-The engine **auto-backs-up any legacy OSI** (`index.yaml` + per-schema `_schema.yaml`) it finds at the profile root into `.osi_backup/` before writing — so a first run over an old OSI profile is safe and reversible; surface a one-liner when that happens.
+The engine **auto-backs-up any legacy (v1) model** (`index.yaml` + per-schema `_schema.yaml`) it finds at the profile root into `.legacy_backup/` before writing — so a first run over an old profile is safe and reversible; surface a one-liner when that happens.
 
 ### 1.2 — Scope: schemas, and the no-catalog case
 
@@ -812,5 +812,5 @@ Options (no `(Recommended)` — it's the user's call): `Yes — look for links` 
 | **Validator fails** | **Model is NOT persisted. Show errors verbatim, fix, re-validate.** |
 | EXPLAIN fails for a seed | Auto-fix once → else move to `~/.agami/.rejected/`. Don't block. |
 | Reintrospect would lose hand-edits | Phase 2e — preserve descriptions, entities, metrics, caveats, sign-offs |
-| Legacy OSI profile at the root | Engine backs it up to `.osi_backup/` before writing; surface a one-liner |
+| Legacy (v1) model at the profile root | Engine backs it up to `.legacy_backup/` before writing; surface a one-liner |
 | Unsupported engine (MongoDB, Cassandra, …) | "Not supported yet — supported: Postgres/Redshift/Supabase, MySQL, Snowflake, BigQuery, SQL Server, Oracle, Databricks, Trino, DuckDB, SQLite." |

@@ -1,6 +1,6 @@
 """Live-DB introspection → the agami semantic model.
 
-Replaces the OSI introspection (`information_schema`-only, LLM-authored YAMLs)
+Replaces the legacy introspection (`information_schema`-only, LLM-authored YAMLs)
 with a deterministic, capability-aware engine that builds the structural model
 directly from a live database, across every supported dialect. The skill layers
 LLM enrichment (prose descriptions, entities, metrics, value_patterns) on top.
@@ -225,9 +225,9 @@ def introspect(
         cross_subject_area_relationships=cross,
     )
 
-    # 5. write (backing up any legacy OSI at the profile root)
+    # 5. write (backing up any legacy model at the profile root)
     if out == artifacts_dir / profile and not dry_run:
-        _backup_legacy_osi(out)
+        _backup_legacy_model(out)
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
     return org, report
@@ -740,11 +740,11 @@ def _maybe_choice(values: list) -> Optional[dict[str, str]]:
     return None
 
 
-def _backup_legacy_osi(profile_root: Path) -> None:
-    """Move any legacy OSI artifacts at the profile root into .osi_backup/ before
+def _backup_legacy_model(profile_root: Path) -> None:
+    """Move any legacy (v1) model artifacts at the profile root into .legacy_backup/ before
     writing the new tree, so re-onboarding never silently clobbers the old model."""
     legacy = ["index.yaml"]
-    backup = profile_root / ".osi_backup"
+    backup = profile_root / ".legacy_backup"
     moved = False
     for name in legacy:
         src = profile_root / name
@@ -752,7 +752,7 @@ def _backup_legacy_osi(profile_root: Path) -> None:
             backup.mkdir(parents=True, exist_ok=True)
             src.rename(backup / name)
             moved = True
-    # per-schema OSI dirs contain a _schema.yaml; move those too
+    # per-schema legacy dirs contain a _schema.yaml; move those too
     if profile_root.exists():
         for child in list(profile_root.iterdir()):
             if child.is_dir() and (child / "_schema.yaml").exists():

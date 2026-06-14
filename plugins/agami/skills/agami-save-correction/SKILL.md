@@ -41,7 +41,7 @@ If plan mode is not active, skip this phase silently and go to Phase 1.
 
 Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` field in `~/.agami/.config` → literal string `"default"` (legacy fallback).
 
-Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / OSI / ORGANIZATION.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
+Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `~/.agami/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / model / ORGANIZATION.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
 
 For v1.0 / v1.1 fallback paths (`~/.agami/<profile>.yaml`, `~/.agami/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
 
@@ -297,7 +297,7 @@ Reference columns plainly (`<table>.<column>`). Strip user-specific WHERE filter
 
 #### `user_preference` edit
 
-A `user_preference` correction does NOT touch the OSI semantic model. It lands in `<artifacts_dir>/USER_MEMORY.md` (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)) — the **global** preferences file that applies across every database. Steps:
+A `user_preference` correction does NOT touch the semantic model. It lands in `<artifacts_dir>/USER_MEMORY.md` (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)) — the **global** preferences file that applies across every database. Steps:
 
 1. **Read** `<artifacts_dir>/USER_MEMORY.md` (it exists — `init` seeds it).
 2. **Pick the right section** (`Default filters`, `Naming and synonyms`, `Display preferences`, or `Avoid`) based on the policy's nature. Add a new section if none of the four fits — keep this rare.
@@ -324,7 +324,7 @@ The user's bullet should be self-contained — anyone reading USER_MEMORY.md sho
 
 #### `mixed` edit
 
-Apply each individual edit as above. Show the user the combined diff in 4b before validating. If the mix includes a `user_preference` or `org_context`, those parts skip the validator (USER_MEMORY.md / ORGANIZATION.md aren't validated); the OSI-model parts still go through the validator.
+Apply each individual edit as above. Show the user the combined diff in 4b before validating. If the mix includes a `user_preference` or `org_context`, those parts skip the validator (USER_MEMORY.md / ORGANIZATION.md aren't validated); the semantic-model parts still go through the validator.
 
 ### 4b — show the diff to the user, get approval
 

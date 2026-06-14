@@ -222,15 +222,15 @@ def test_introspect_writes_canonical_tree_and_loads_back(tmp_path):
     assert {t.name for sa in reloaded.subject_areas for t in sa.tables_defined} == {"customers", "orders"}
 
 
-def test_legacy_osi_backed_up_on_reonboard(tmp_path):
-    # simulate an existing OSI profile at the root
+def test_legacy_model_backed_up_on_reonboard(tmp_path):
+    # simulate an existing legacy (v1) profile at the root
     root = tmp_path / "shop"
     (root / "PUBLIC").mkdir(parents=True)
     (root / "index.yaml").write_text("profile: shop\n")
     (root / "PUBLIC" / "_schema.yaml").write_text("schema: PUBLIC\n")
     I.introspect("shop", "postgres", runner=_catalog_runner, artifacts_dir=tmp_path, dry_run=False)
-    assert (root / ".osi_backup" / "index.yaml").exists()
-    assert (root / ".osi_backup" / "PUBLIC" / "_schema.yaml").exists()
+    assert (root / ".legacy_backup" / "index.yaml").exists()
+    assert (root / ".legacy_backup" / "PUBLIC" / "_schema.yaml").exists()
     assert (root / "org.yaml").exists()  # new model written at root
 
 

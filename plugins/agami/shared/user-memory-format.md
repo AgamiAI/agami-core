@@ -19,14 +19,14 @@ The skill loads both on every query. USER_MEMORY answers *how should I display /
 - **Display preferences that are personal to you** (date format you like, "always show top 10 not top 5"). A currency symbol / units everyone querying a database should get is a column fact (→ the model) or a database-wide convention (→ that DB's `ORGANIZATION.md`), not a personal pref.
 - **Hard avoids that apply broadly** (don't query rows where `is_test = true`)
 
-If the preference is database-specific (e.g. "in this finance DB, always join orders to invoices"), it belongs in the OSI model or in `ORGANIZATION.md`, not here.
+If the preference is database-specific (e.g. "in this finance DB, always join orders to invoices"), it belongs in the semantic model (a column/table fact) or in `ORGANIZATION.md`, not here.
 
 ## What does NOT go in here
 
 - **Connection details** → `~/.agami/credentials`
-- **Schema knowledge** (table descriptions, FK relationships, column types, choice fields, metrics) → `<artifacts_dir>/<profile>/<schema>.yaml` (OSI semantic model)
+- **Schema knowledge** (table descriptions, FK relationships, column types, choice fields, metrics) → the semantic model under `<artifacts_dir>/<profile>/` (`org.yaml` + `subject_areas/<area>/…`)
 - **Domain vocabulary specific to one database** ("MRR means…", "gold tier means…") → `<artifacts_dir>/<profile>/ORGANIZATION.md`
-- **Specific question→SQL examples** → `<artifacts_dir>/<profile>/examples.yaml` (few-shot library)
+- **Specific question→SQL examples** → `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml` (few-shot library)
 - **Connection-method choice / reviewer identity** → `~/.agami/.config`
 - **Email opt-in state** → `~/.agami/.optins`
 
@@ -51,7 +51,7 @@ Edit by hand, or ask the skill to "remember" something during a conversation
 -->
 
 ## Naming and synonyms
-<!-- Domain vocabulary that isn't already in the OSI model's ai_context.
+<!-- Domain vocabulary that isn't already in the model / ORGANIZATION.md glossary.
      - "active" means is_active = true AND status = 'live'
      - "MRR" = SUM(price) WHERE plan_type = 'subscription'
 -->

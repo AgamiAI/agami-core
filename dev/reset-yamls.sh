@@ -18,7 +18,7 @@
 #   <artifacts_dir>/USER_MEMORY.md            cross-DB preferences
 #   <artifacts_dir>/<profile>/ORGANIZATION.md domain context the user wrote
 #   <artifacts_dir>/<profile>/.git/           audit trail of past curator edits
-#   <artifacts_dir>/<profile>/.osi_backup/    legacy OSI model backed up on upgrade
+#   <artifacts_dir>/<profile>/.legacy_backup/ legacy (v1) model backed up on upgrade
 #   <artifacts_dir>/<profile>/curation_log.jsonl
 #   <artifacts_dir>/<profile>/corrections.jsonl
 #   ~/.agami/review/                          rendered review dashboards
@@ -105,7 +105,7 @@ if [[ -d "$PROFILE_DIR/.snapshots" ]]; then
   action "chmod -R u+w '$PROFILE_DIR/.snapshots'"
 fi
 
-# 1. Top-level YAML files (index.yaml, examples.yaml, agami.config.yaml, etc.)
+# 1. Top-level YAML files (org.yaml, etc.)
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   action "rm -f '$f'"
@@ -113,12 +113,12 @@ done < <(find "$PROFILE_DIR" -maxdepth 1 -name "*.yaml" -o -name "*.yml" 2>/dev/
 
 # 2. Model directories (datasources/, subject_areas/, prompt_examples/, and any
 #    other generated subdir). Preserve .git / .snapshots / .rejected (handled
-#    separately) and .osi_backup (the one-time legacy-OSI backup — never regenerable).
+#    separately) and .legacy_backup (the one-time legacy-model backup — never regenerable).
 for sub in "$PROFILE_DIR"/*/ "$PROFILE_DIR"/.*/; do
   [[ -d "$sub" ]] || continue
   bn="$(basename "$sub")"
   case "$bn" in
-    .|..|.git|.snapshots|.rejected|.osi_backup) continue ;;
+    .|..|.git|.snapshots|.rejected|.legacy_backup) continue ;;
   esac
   action "rm -rf '$sub'"
 done

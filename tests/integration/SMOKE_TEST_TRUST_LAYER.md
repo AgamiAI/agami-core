@@ -47,10 +47,10 @@ The credential-setup path that used to live in a separate `/agami-init` skill is
 
 Watch for the new behavior:
 
-- **Phase 2c trust block on every entry.** Open `~/agami-artifacts/default/public/orders.yaml` (or wherever the fixture lands). Every dataset / field / relationship's `agami` JSON payload must carry: `confidence` (number), `signal_breakdown` (object), `review_state` (enum), `origin` (enum), `signed_off_by`, `signed_off_at`, `signed_off_role`.
+- **Phase 2c trust block on every entry.** Open `~/agami-artifacts/default/subject_areas/<area>/tables/orders.yaml` (or wherever the fixture lands). Every table / column / relationship / metric carries the flat trust block: `confidence` (confirmed | inferred | proposed), `review_state` (unreviewed | approved | rejected | stale | not_applicable), and `signed_off_by` / `signed_off_at` / `signed_off_role` (set once approved).
   - **FK relationships** (`orders → customers`, `order_items → orders`, `order_items → products`) must show `review_state: approved`, `origin: fk`, `signed_off_by: agami_introspect_v1`, `signed_off_role: system`.
   - **Heuristic relationships** (none expected in this fixture since all FKs are declared) — would show `review_state: unreviewed`, `origin: introspect_heuristic`.
-  - **Field descriptions without DBA comments** (every field in this fixture, since SQLite has no column comments) — show `review_state: unreviewed` with confidence in the medium band (0.3–0.6 typical).
+  - **Field descriptions without DBA comments** (every field in this fixture, since SQLite has no column comments) — show `review_state: unreviewed` (confidence `inferred`/`proposed`).
 
 - **Phase 3d snapshot.** Run `ls ~/agami-artifacts/default/.snapshots/`. There should be one immutable directory named with a 12-char hash. Run `chmod` on a file inside — should refuse (write-protected).
 
@@ -62,9 +62,9 @@ Watch for the new behavior:
 
     ✓  4 datasets, 24 fields                                (auto-approved)
     ✓  3 FK relationships                                    (auto-approved)
-    ⚠  18 field descriptions below confidence 0.7 (review)
+    ⚠  18 field descriptions unreviewed (review)
 
-    18 items need your attention at threshold 0.7.
+    18 items need your attention.
   ```
   Counts will vary slightly with how the skill seeds fields. The shape and the dashboard prompt must appear.
 
@@ -108,7 +108,7 @@ Watch the HTML report for:
 - **Trust receipt collapsible** at the bottom — collapsed by default. Open it.
 - Inside: tables touched (with row counts + freshness), relationships used (with confidence + review-state badge), metric definitions (if any), named filters (if any), model version pin.
 - **If any unreviewed entry was used** (likely, since SQLite has no column comments and field descriptions are unreviewed), a **yellow warning banner** appears at the top of the report: *"Trust note — Used N unreviewed entr… Review now?"*
-- **Model version** at the bottom of the receipt matches the hash from `index.yaml.introspect_meta.model_version`.
+- **Model version** at the bottom of the receipt matches the model snapshot hash (the `.snapshots/<hash>/` the answer pinned).
 
 **Pass criteria:** receipt panel renders, contents match what the SQL actually used, warning banner triggers correctly.
 

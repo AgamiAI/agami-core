@@ -13,7 +13,7 @@ Every byte agami reads or writes stays on your machine:
 - **Credentials** (`~/.agami/credentials`) — chmod 600
 - **Auth files** (`~/.agami/.pgpass`, `.mysql.cnf`, `.snowsql.cnf`) — chmod 600, written by `setup_pgauth.py`
 - **Config** (`~/.agami/.config`) — `active_profile`, `artifacts_dir`, `tool_paths`, `reviewer_email`, `reviewer_role`
-- **Semantic model** (`<artifacts_dir>/<profile>/index.yaml` + `<schema>/<table>.yaml` files; default `<artifacts_dir>` is `~/agami-artifacts/`)
+- **Semantic model** (`org.yaml` + the `subject_areas/<area>/` tree under `<artifacts_dir>/<profile>/`; default `<artifacts_dir>` is `~/agami-artifacts/`)
 - **Examples library** (`<artifacts_dir>/<profile>/examples.yaml`)
 - **Organization context** (`<artifacts_dir>/<profile>/ORGANIZATION.md`) — your description of what the database represents, domain terminology
 - **User memory** (`<artifacts_dir>/USER_MEMORY.md`) — your cross-database preferences

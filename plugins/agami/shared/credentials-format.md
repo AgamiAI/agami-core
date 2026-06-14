@@ -220,7 +220,7 @@ The skill writes the semantic model under `<artifacts_dir>/<profile>/` — one d
 
 ## What the file does NOT contain
 
-- No semantic model (that's `<artifacts_dir>/<profile>/index.yaml` + per-table `<schema>/<table>.yaml` files)
+- No semantic model (that's `org.yaml` + the `subject_areas/<area>/` tree under `<artifacts_dir>/<profile>/`)
 - No example queries (those live in `<artifacts_dir>/<profile>/examples.yaml`)
 - No charts, exports, or query log
 

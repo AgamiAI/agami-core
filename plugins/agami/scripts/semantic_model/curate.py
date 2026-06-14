@@ -1,5 +1,5 @@
 """Curation engine for the semantic model — the model-native replacement for the
-OSI-era compute_confidence.py + apply_model_exclusions.py + the review/explorer
+legacy compute_confidence.py + apply_model_exclusions.py + the review/explorer
 item-building logic.
 
 Two read views + one write path, all over the on-disk model tree:

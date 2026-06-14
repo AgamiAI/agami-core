@@ -598,7 +598,7 @@ Build the receipt as a single JSON object. Schema (see [`shared/chart-template.h
 
 ```json
 {
-  "model_version": "<short hash from index.yaml.introspect_meta.model_version>",
+  "model_version": "<short hash — the .snapshots/<hash>/ dir the answer pinned>",
   "tables_used": [
     {"qname": "public.orders", "rows": <integer or null>, "freshness": "<ISO8601 + cadence note, or null>"}
   ],
@@ -644,7 +644,7 @@ How to populate each field:
   - `description_source == "ai_unvalidated"` (a guess) AND `description` non-empty → `{column, meaning: <description>, source: "ai_unvalidated"}`.
   - `description_source == "ai_unknown"` (agami couldn't read it) → `{column, meaning: null, source: "ai_unknown"}` — agami used a column it doesn't understand; flag it loudly.
   Columns with `description_source` of `human`, `ai_validated`, or `null` are NOT surfaced. **Cap at 3**, ranked by load-bearing-ness (filter/group-by > select > order-by) and putting `ai_unknown` first (an unknown the query relied on is the riskiest). Pass `[]` when none qualify. Advisory — never blocks or warns; it's a "here's what I assumed / didn't know" so the user can correct, confirm, or describe.
-- **`warnings`** — for every **non-metric** entry above whose `review_state ≠ approved` (joins, rewrites, applied filters), push a one-line warning naming the entry and its confidence. Example: `"Used 1 unreviewed join (orders → customers, conf 0.62)."`. **Do NOT add a warning line for unreviewed/ad-hoc metrics** — they get their own actionable **"metrics you haven't approved" banner** (from `receipt.metrics`) with Approve / Change controls, so a warning line would just duplicate it. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-model review to walk these items, or say 'open the review queue'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely. (Assumptions and metric-approvals are NOT warnings — keep them separate.)
+- **`warnings`** — for every **non-metric** entry above whose `review_state ≠ approved` (joins, rewrites, applied filters), push a one-line warning naming the entry and its confidence. Example: `"Used 1 unreviewed join (orders → customers, conf inferred)."`. **Do NOT add a warning line for unreviewed/ad-hoc metrics** — they get their own actionable **"metrics you haven't approved" banner** (from `receipt.metrics`) with Approve / Change controls, so a warning line would just duplicate it. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-model review to walk these items, or say 'open the review queue'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely. (Assumptions and metric-approvals are NOT warnings — keep them separate.)
 
 Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
 
@@ -942,7 +942,7 @@ End with:
 
 | Symptom | Action |
 |---|---|
-| `<artifacts_dir>/<profile>/index.yaml` missing AND `~/.agami/<profile>.yaml` missing | Invoke `connect` |
+| `<artifacts_dir>/<profile>/org.yaml` missing AND `~/.agami/<profile>.yaml` missing | Invoke `connect` |
 | Model file fails to parse as YAML | Surface error; tell the user "say 'reload the schema' to re-introspect from your DB" (the agami-connect skill handles it) |
 | `version` ≠ `"0.1.1"` | Warn but proceed; suggest "say 'reload the schema'" to regenerate the model in the latest format |
 | Credentials chmod wrong | Refuse, offer `chmod 600` |
