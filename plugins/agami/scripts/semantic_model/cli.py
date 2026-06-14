@@ -182,6 +182,16 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+def cmd_choice_coverage(args) -> int:
+    """Coded columns whose `choice_field` skeleton still has blank labels. The enrichment
+    runs this to confirm the value-enum decode ran — `ok: false` means coded columns are
+    missing their {code:label} maps (the generator can't translate 'high' → 1 without them)."""
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    _print_json(curate.unlabeled_choice_fields(org))
+    return 0
+
+
 def cmd_set_terminology(args) -> int:
     """Write the org-level domain glossary (term -> definition) onto org.yaml's
     `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
@@ -572,6 +582,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_coverage)
+
+    sp = sub.add_parser("choice-coverage", help="coded columns whose choice_field labels are still blank (value-enum decode not done)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_choice_coverage)
 
     sp = sub.add_parser("set-terminology", help="write the org domain glossary (term→definition) onto org.yaml key_terminology")
     sp.add_argument("root")

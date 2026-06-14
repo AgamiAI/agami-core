@@ -200,6 +200,30 @@ def column_coverage(org: Organization) -> dict:
     }
 
 
+def unlabeled_choice_fields(org: Organization) -> dict:
+    """Coded columns whose `choice_field` skeleton still has BLANK labels — introspection
+    seeded `{value: ""}` and the enrichment hasn't filled the meanings yet. The enrichment
+    checks this (like `column_coverage`) to confirm the value-enum decode actually ran;
+    structured `choice_field` is what lets the generator map 'high severity' → severity=1."""
+    cols: list[dict] = []
+    total_choice = 0
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if getattr(t, "review_state", "approved") == "rejected":
+                continue
+            for c in t.columns:
+                cf = c.choice_field
+                if not cf or getattr(c, "review_state", "approved") == "rejected":
+                    continue
+                total_choice += 1
+                blank = [v for v, lbl in cf.items() if not (lbl or "").strip()]
+                if blank:
+                    cols.append({"area": sa.name, "table": t.name, "column": c.name,
+                                 "values": list(cf.keys()), "blank_labels": blank})
+    return {"count": len(cols), "choice_columns": total_choice, "unlabeled": cols,
+            "ok": not cols}
+
+
 def _trust(obj) -> dict:
     return {
         "confidence": getattr(obj, "confidence", None),

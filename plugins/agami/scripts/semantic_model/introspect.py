@@ -427,8 +427,10 @@ def _build_table(
             c.sensitive = True
             report.sensitive_columns += 1
 
-    # date encoding + timezone (epoch / yyyymmdd / iso) sniffed from a live sample
-    _sniff_dates_into(dialect, runner, schema, table, cols)
+    # One live sample → date encoding/timezone AND choice_field skeletons for low-cardinality
+    # coded columns (so catalog-mode coded columns get an enum skeleton the LLM labels, not
+    # just the probe-mode path).
+    _enrich_from_sample(dialect, runner, schema, table, cols)
 
     column_groups = build.maybe_column_groups(cols)
     if column_groups:
@@ -785,23 +787,37 @@ def _sniff_date(name: str, ctype: str, values: list) -> tuple[Optional[str], Opt
     return (None, None)
 
 
-def _sniff_dates_into(
+def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column]
 ) -> None:
-    """Set date_format/timezone on date-candidate columns from a small live sample."""
-    candidates = [c for c in cols if c.type in ("date", "timestamp", "time")
+    """ONE live sample → (a) date_format/timezone on date-candidate columns, and
+    (b) a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns (the LLM
+    enrichment fills the labels). (b) is the catalog-mode counterpart of probe mode's
+    `_maybe_choice` — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
+    `severity`) never get an enum skeleton, so the decode can only ever live in prose."""
+    date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
-    if not candidates:
+    # choice candidates: codeable columns with no choice_field yet, that aren't keys, dates,
+    # or free-text-ish. A short integer/string column with few distinct values is an enum.
+    choice_cands = [c for c in cols
+                    if c.choice_field is None and not c.primary_key and c.foreign_key is None
+                    and c.type in ("integer", "string") and not _looks_time_named(c.name)]
+    if not date_cands and not choice_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
     if not sample:
         return
-    for c in candidates:
+    for c in date_cands:
         df, tz = _sniff_date(c.name, c.type, [row.get(c.name) for row in sample])
         if df:
             c.date_format = df
         if tz:
             c.timezone = tz
+    for c in choice_cands:
+        ch = _maybe_choice([row.get(c.name) for row in sample])
+        # only genuinely code-like: skip long free-text values (names, descriptions, ids).
+        if ch and all(len(str(k)) <= 40 for k in ch):
+            c.choice_field = ch
 
 
 def _infer_value_type(values: list) -> str:
