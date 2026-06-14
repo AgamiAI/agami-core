@@ -609,12 +609,73 @@ def _build_relationships(
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
             ))
-        return rels
+    else:
+        # probe: infer FKs from name+type match, confirm by value-overlap
+        report.mode_per_capability["relationships"] = "probe"
+        rels.extend(_probe_relationships(dialect, runner, tables, grain_by_table, report))
 
-    # probe: infer FKs from name+type match, confirm by value-overlap
-    report.mode_per_capability["relationships"] = "probe"
-    rels.extend(_probe_relationships(dialect, runner, tables, grain_by_table, report))
+    # Tier 2 — name-based reference promotion. A `<x>_id` column whose target table is
+    # identifiable by name becomes an inferred/unreviewed join even WITHOUT value overlap
+    # (which under-detects on sparse data). Conservative + type-checked, and `unreviewed` so
+    # it's discoverable but never asserted as fact — the user signs it off (or it self-approves
+    # through use). This is what lifts a sparse demo from ~9 joins toward the real graph.
+    rels.extend(_promote_reference_fields(tables, grain_by_table, rels, report))
     return rels
+
+
+_REF_ID_RE = re.compile(r"^(.+?)_id$", re.IGNORECASE)
+
+
+def _infer_reference_target(stem: str, by_name: dict, from_table: Table) -> Optional[Table]:
+    """Find the table a `<stem>_id` column points at — by exact name, plural, or singular.
+    Skips self-reference and prefers the from-table's own schema."""
+    cands = (by_name.get(stem) or by_name.get(stem + "s") or by_name.get(stem + "es")
+             or (by_name.get(stem[:-1]) if stem.endswith("s") else None) or [])
+    cands = [t for t in cands if t.name != from_table.name]
+    if not cands:
+        return None
+    same = [t for t in cands if t.schema_name == from_table.schema_name]
+    return (same or cands)[0]
+
+
+def _promote_reference_fields(
+    tables: list[Table], grain_by_table: dict[str, set[str]],
+    existing: list[Relationship], report: IntrospectReport,
+) -> list[Relationship]:
+    """Promote `<x>_id` reference columns to inferred/unreviewed joins when the target table is
+    identifiable by name and key-type-compatible — never requiring value overlap. Conservative:
+    target must exist, have a single-column grain, and a key whose type matches the ref column."""
+    by_name: dict[str, list[Table]] = {}
+    for t in tables:
+        by_name.setdefault(t.name.lower(), []).append(t)
+    seen = {(r.from_table, r.from_column) for r in existing}
+    out: list[Relationship] = []
+    for t in tables:
+        grain = grain_by_table.get(t.name, set())
+        for c in t.columns:
+            mo = _REF_ID_RE.match(c.name)
+            if not mo or c.primary_key or c.name in grain or (t.name, c.name) in seen:
+                continue
+            target = _infer_reference_target(mo.group(1).lower(), by_name, t)
+            if target is None or len(target.grain) != 1:
+                continue
+            to_col = target.grain[0]
+            to_pk = next((tc for tc in target.columns if tc.name == to_col), None)
+            if to_pk is not None and to_pk.type != c.type:   # key-type mismatch → not a real ref
+                continue
+            card = build.infer_cardinality(t.name, target.name, [c.name], [to_col], grain_by_table)
+            out.append(Relationship(
+                from_table=t.name, from_column=c.name, to_table=target.name, to_column=to_col,
+                from_schema=t.schema_name, to_schema=target.schema_name,
+                relationship=card, join_type="LEFT", confidence="inferred", review_state="unreviewed",
+                description=f"inferred reference: {c.name} → {target.name}.{to_col} "
+                            "(name match; not overlap-verified — confirm)",
+            ))
+            seen.add((t.name, c.name))
+    if out:
+        report.notes.append(
+            f"promoted {len(out)} reference field(s) (<x>_id) to inferred joins — review on /agami-model")
+    return out
 
 
 def _schema_of(
