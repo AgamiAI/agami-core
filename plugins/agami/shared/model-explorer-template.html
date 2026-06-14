@@ -723,7 +723,8 @@
     const colGroupClosed = new Set();  // group ids the user explicitly CLOSED
     let addMetricOpen = false;
     let searchQ = '';
-    const _initTab = (manifest.initial_tab || 'tables');
+    let _initTab = (manifest.initial_tab || 'tables');
+    if (!TABS.some(t => t.id === _initTab)) _initTab = 'tables';  // ignore retired tabs (e.g. 'areas')
     let activeTab = _initTab;
     let activeFilter = 'all';
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
@@ -752,7 +753,6 @@
     const TABS = [
       { id: 'organization', label: 'Organization' },
       { id: 'review',       label: 'Review' },
-      { id: 'areas',        label: 'Subject areas' },
       { id: 'tables',       label: 'Tables' },
       { id: 'metrics',      label: 'Metrics' },
       { id: 'entities',     label: 'Entities' },

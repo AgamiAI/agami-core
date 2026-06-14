@@ -275,7 +275,7 @@ def main() -> int:
     p.add_argument("--manifest-out",
                    help="Optional: also dump the raw manifest JSON to this path")
     p.add_argument("--initial-tab", default="auto",
-                   choices=["auto", "organization", "areas", "tables", "metrics", "entities",
+                   choices=["auto", "organization", "tables", "metrics", "entities",
                             "joins", "examples", "review", "queued"],
                    help="Tab the dashboard opens on. 'auto' (default) opens on Review when "
                         "anything needs sign-off, else Tables; 'review' forces the sign-off queue.")

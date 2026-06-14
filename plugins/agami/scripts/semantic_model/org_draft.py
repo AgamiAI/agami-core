@@ -119,15 +119,29 @@ def compose_context(human_md: str, org: "Organization") -> str:
 
 
 def starter_organization_md(org: "Organization") -> str:
-    """A tiny human-narrative STARTER for the skip path — a prompt ONLY, no model facts (those
-    are derived at read time). Purely the human's to fill; nothing here to clobber. `org` is
-    accepted for signature parity with draft_organization_md but unused."""
+    """A human-narrative STARTER for the skip path — never blank. It seeds `# About this
+    database` with a one-line factual SUMMARY drawn from the model (org + what the subject
+    areas cover) so the section reads as something, then invites the human to make it theirs.
+
+    This is a one-time editable DRAFT (not the maintained derived block) — onboarding normally
+    overwrites it with a richer 1-2 sentence narrative synthesised from the table descriptions."""
+    areas = list(org.subject_areas)
+    n_tables = sum(len(sa.tables_defined) for sa in areas)
+    names = [sa.name for sa in areas]
+    lead = f"**{org.organization}** holds {_plural(n_tables, 'table')} across {_plural(len(areas), 'subject area')}"
+    # Name the areas when they add signal (skip a lone area that just echoes the org name).
+    if names and not (len(names) == 1 and names[0].lower() == org.organization.lower()):
+        shown = ", ".join(names[:6]) + (f", and {len(names) - 6} more" if len(names) > 6 else "")
+        lead += f" covering {shown}."
+    else:
+        lead += "."
     return "\n".join([
         "# About this database",
         "",
-        "<!-- Describe what only you know: what the company/product is, who the users are,",
-        "     and what your key terms mean. agami already knows your schema — this is for the",
-        "     human context it can't infer. Leaving this as-is is fine; agami still works. -->",
+        "<!-- A starting summary from your schema — edit it to say what only you know: what the",
+        "     company/product is, who the users are, what your key terms mean. -->",
+        "",
+        lead,
         "",
     ])
 

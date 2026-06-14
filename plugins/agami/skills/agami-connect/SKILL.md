@@ -556,18 +556,19 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveat
 
 On `reintrospect`, the engine rewrites the structural skeleton. **Preserve hand-edits**: descriptions, entities, metrics, caveats, value_transforms, and trust sign-offs (`confidence`/`review_state`/`signed_off_*`) carry over for tables/columns that still exist. Only structure the DB unambiguously reports (table list, columns, types, PK, FK) is refreshed. Mark entries `stale` only when their underlying column/table changed.
 
-### 2f — Write a human-narrative starter if the user didn't write one
+### 2f — Seed the narrative if the user didn't write one
 
-ORGANIZATION.md is the human's narrative ONLY — it does **not** hold model facts. The factual summary (subject areas, conventions, the decoded glossary) is **derived from the structured model at read time** (`cli org-context` assembles it for the query path; the explorer shows it as a read-only field). So there is nothing to "auto-draft into the file" and nothing for a human to accidentally overwrite — the two homes stay separate by construction.
+ORGANIZATION.md is the human's narrative ONLY — it does **not** hold model facts. The factual summary (subject areas, conventions, the decoded glossary) is **derived from the structured model at read time** (`cli org-context` assembles it for the query path; the explorer shows it as a read-only field). The two homes stay separate by construction.
 
-**Only on the skip path** (ORGANIZATION.md missing/empty, the user gave no narrative), write a short starter prompt so there's an obvious place to add context later:
+**Only on the skip path** (ORGANIZATION.md missing/empty, the user gave no narrative), **seed it with a short factual narrative** so `# About this database` reads as something, not a blank. You've just enriched every table — so write a **1–2 sentence description of what this database is about**, synthesised from the table/area descriptions (e.g. *"Tracks an electric-vehicle battery-swap network — stations, vehicles, battery packs, the swap transactions between them, and the alerts they raise."*). Write it under `# About this database` with the editable comment, and `chmod 600`. Keep it factual (don't invent business specifics you can't see); it's a starting **draft** the user edits.
 
+If you can't summarise (no descriptions yet), fall back to the deterministic starter:
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" org-draft "$ROOT" > "$ROOT/ORGANIZATION.md"
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" org-draft "$ROOT" > "$ROOT/ORGANIZATION.md"   # one-line factual seed
 chmod 600 "$ROOT/ORGANIZATION.md"
 ```
 
-`org-draft` emits a tiny human-narrative **starter** (a prompt comment, no facts). If the user **did** write a narrative in 1.4, leave it untouched. The glossary you wrote via `set-terminology` (2b) needs no re-render here — it lives in `key_terminology` and is surfaced automatically by `org-context`. Mention in the Phase 7 summary that the domain glossary + summary are auto-derived and the narrative is theirs to edit.
+If the user **did** write a narrative in 1.4, leave it untouched. The glossary from `set-terminology` (2b) needs no re-render — it's surfaced automatically by `org-context`. Mention in the Phase 7 summary that the glossary + summary are auto-derived and the narrative is theirs to edit.
 
 ---
 
