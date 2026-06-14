@@ -331,8 +331,9 @@ def _coverage_gate(org) -> Optional[dict]:
             ),
         }
     under = cov["under_enriched_tables"]
+    under_set = set(under)   # compute once, not per row
     skipped = {r["table"]: r["blank_meaningful_columns"]
-               for r in cov["tables"] if r["table"] in set(under)}
+               for r in cov["tables"] if r["table"] in under_set}
     return {
         "refused": "columns_underenriched",
         "table_count": len(under),
