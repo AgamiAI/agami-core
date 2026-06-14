@@ -209,7 +209,7 @@ examples:
 
 ## 4. User memory (free-form Markdown)
 
-`<artifacts_dir>/local/USER_MEMORY.md` holds free-form preferences and policies that don't belong in the semantic model — default filters, domain vocabulary, display preferences, hard avoids. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
+`<artifacts_dir>/USER_MEMORY.md` (committable top-level, **not** under `local/` — it's cross-DB preferences worth sharing, not a secret) holds free-form preferences and policies that don't belong in the semantic model — default filters, domain vocabulary, display preferences, hard avoids. Every agami skill loads this file on each invocation and applies what's in it to SQL generation, formatting, and follow-up suggestions.
 
 Seeded by `agami-connect` Phase 0a on first run with section hints (HTML comments). User edits by hand, OR the `agami-save-correction` skill appends a bullet when it classifies a correction as `user_preference` ("from now on, always exclude test users where email matches @example.com").
 
@@ -236,6 +236,8 @@ Full spec: `[plugins/agami/shared/user-memory-format.md](../plugins/agami/shared
 ```
 
 Written by `agami-connect` Phase 0a on first run; updated by `agami-model` (its Review tab) the first time the curator approves a Rule 1 item (the `reviewer_email` + `reviewer_role` get persisted so future sessions don't re-ask).
+
+> **Note on `artifacts_dir`:** this field is recorded for reference (and read as a fallback signal that onboarding has already chosen a folder), but it is **not** the authoritative locator — `.config` lives *inside* `<artifacts_dir>/local/`, so it can't bootstrap its own location. The source of truth for finding `<artifacts_dir>` is, in order: `AGAMI_ARTIFACTS_DIR` → the `~/.config/agami/path` pointer → the default `~/agami-artifacts`.
 
 ### `<artifacts_dir>/local/.optins`
 

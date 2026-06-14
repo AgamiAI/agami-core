@@ -67,3 +67,29 @@ def test_migrate_legacy_home_moves_everything_once(monkeypatch, tmp_path):
     assert (legacy / "MOVED.txt").exists()
     # idempotent — second call is a no-op (local/ already exists)
     assert P.migrate_legacy_home(art) is False
+
+
+def test_migrate_legacy_home_survives_cross_device(monkeypatch, tmp_path):
+    """When ~/.agami is on a different filesystem than the artifacts dir,
+    Path.rename() raises EXDEV; the migration must fall back to a copy+delete
+    move instead of crashing bootstrap on upgrade."""
+    legacy = tmp_path / "dot_agami"
+    legacy.mkdir()
+    (legacy / "credentials").write_text("[main]\ntype=postgres\n")
+    monkeypatch.setattr(P, "LEGACY_HOME", legacy)
+    monkeypatch.setattr(P, "POINTER_PATH", tmp_path / ".config" / "agami" / "path")
+    art = tmp_path / "artifacts"
+
+    # Simulate a cross-device move: rename() raises EXDEV, shutil.move handles it.
+    orig_rename = Path.rename
+
+    def fake_rename(self, target):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(Path, "rename", fake_rename)
+    assert P.migrate_legacy_home(art) is True
+    # shutil.move still landed the contents intact under <artifacts>/local/
+    assert (art / "local" / "credentials").read_text().startswith("[main]")
+    # (the tombstone write uses mkdir + write_text, not rename, so it's unaffected)
+    assert (legacy / "MOVED.txt").exists()
+    monkeypatch.setattr(Path, "rename", orig_rename)

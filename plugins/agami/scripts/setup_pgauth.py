@@ -284,13 +284,14 @@ def materialize(profiles: list[str]) -> int:
 
 
 def main() -> int:
-    global AGAMI_HOME, CREDENTIALS_PATH, CONFIG_PATH, PGPASS_PATH, MYSQL_CNF_PATH
+    global AGAMI_HOME, CREDENTIALS_PATH, CONFIG_PATH, PGPASS_PATH, MYSQL_CNF_PATH, SNOWSQL_CONFIG_PATH
     agami_paths.bootstrap()
     AGAMI_HOME = agami_paths.local_dir()
     CREDENTIALS_PATH = AGAMI_HOME / "credentials"
     CONFIG_PATH = AGAMI_HOME / ".config"
     PGPASS_PATH = AGAMI_HOME / ".pgpass"
     MYSQL_CNF_PATH = AGAMI_HOME / ".mysql.cnf"
+    SNOWSQL_CONFIG_PATH = AGAMI_HOME / ".snowsql.cnf"
     p = argparse.ArgumentParser(
         description=(
             "Materialize provider-native auth files (.pgpass / .mysql.cnf) from "

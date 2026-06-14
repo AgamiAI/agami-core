@@ -155,7 +155,14 @@ def migrate_legacy_home(art: Path | None = None) -> bool:
     if dest.exists():
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    LEGACY_HOME.rename(dest)
+    try:
+        LEGACY_HOME.rename(dest)
+    except OSError:
+        # rename() raises EXDEV when the artifacts dir is on a different
+        # filesystem than ~/.agami (external drive, separate mount). Fall back
+        # to a copy+delete move, which crosses devices.
+        import shutil
+        shutil.move(str(LEGACY_HOME), str(dest))
     ensure_gitignore(art)
     set_artifacts_dir(art)
     try:
