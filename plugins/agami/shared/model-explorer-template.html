@@ -2081,8 +2081,7 @@
       const sTa = textarea('', 5); sTa.setAttribute('placeholder', 'SELECT zone, COUNT(*) FROM powerbi.sm_vehicles WHERE ... GROUP BY zone'); body.appendChild(sTa);
       const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
       body.appendChild(errLine);
-      const actions = el('div', { class: 'card-actions' });
-      actions.appendChild(el('button', { type: 'button', class: 'btn-sm primary', onclick: () => {
+      const submit = () => {
         const question = qTa.value.trim(), sql = sTa.value.trim();
         const problems = [];
         if (!question) problems.push('Add the question.');
@@ -2095,7 +2094,14 @@
         const area = inferredArea || (AREAS.length === 1 ? AREAS[0] : (AREAS[0] || ''));
         newExamples.push({ area, question, sql });
         addExampleOpen = false; renderAll();
-      } }, '✓ Add example'));
+      };
+      // ⌘/Ctrl+Enter from either box adds the example (matches the inline editors)
+      [qTa, sTa].forEach(t => t.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit(); }
+      }));
+      const actions = el('div', { class: 'card-actions' });
+      actions.appendChild(el('button', { type: 'button', class: 'btn-sm primary', onclick: submit }, '✓ Add example'));
+      actions.appendChild(el('span', { class: 'hint', style: 'margin-left:8px;', text: '⌘/Ctrl+Enter adds' }));
       actions.appendChild(btnSm('Cancel', () => { addExampleOpen = false; renderAll(); }));
       body.appendChild(actions);
       wrap.appendChild(body);
