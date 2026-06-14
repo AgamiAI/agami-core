@@ -304,28 +304,49 @@ def _preseed_gate(org) -> Optional[dict]:
 
 
 def _coverage_gate(org) -> Optional[dict]:
-    """Enrichment-completeness gate: refuse to seed (or finish) a model that has tables
-    whose columns enrichment never described at all (0 described + 0 ai_unknown). Naked
-    columns degrade the explorer AND every NL→SQL answer (column descriptions are the
-    generator's context). Table-level so it never collides with the deliberate
-    self-evident-blank rule. NOT bypassable: the fix is to run the column pass."""
+    """Enrichment-completeness gate: refuse to seed (or finish) a model whose column pass
+    didn't finish. Two failure modes (see curate.column_coverage):
+      - `columns_unenriched` — a table with NO column descriptions at all (the pass never ran).
+      - `columns_underenriched` — a table the pass touched but which still has a wall of blank
+        columns with non-self-evident names (skipped meaningful columns like `bptype`).
+    Naked columns degrade the explorer AND every NL→SQL answer (descriptions are the
+    generator's context). NOT bypassable: the fix is to finish the column pass."""
     from . import curate
     cov = curate.column_coverage(org)
     if cov["ok"]:
         return None
-    tbls = cov["unenriched_tables"]
+    unenr = cov["unenriched_tables"]
+    if unenr:
+        return {
+            "refused": "columns_unenriched",
+            "table_count": len(unenr),
+            "unenriched_tables": unenr,
+            "coverage_pct": cov["totals"]["coverage_pct"],
+            "message": (
+                f"{len(unenr)} table(s) have NO column descriptions at all — enrichment wrote the "
+                f"table descriptions but skipped the column pass. Run Phase 2's column pass: "
+                f"describe each meaningful column from sampled values, mark genuinely-opaque ones "
+                f"description_source=ai_unknown (self-evident id/timestamps may stay blank), then "
+                f"re-run. Tables: {', '.join(unenr[:10])}" + ("…" if len(unenr) > 10 else "")
+            ),
+        }
+    under = cov["under_enriched_tables"]
+    under_set = set(under)   # compute once, not per row
+    skipped = {r["table"]: r["blank_meaningful_columns"]
+               for r in cov["tables"] if r["table"] in under_set}
     return {
-        "refused": "columns_unenriched",
-        "table_count": len(tbls),
-        "unenriched_tables": tbls,
+        "refused": "columns_underenriched",
+        "table_count": len(under),
+        "under_enriched_tables": under,
+        "meaningful_blank": cov["totals"]["meaningful_blank"],
         "coverage_pct": cov["totals"]["coverage_pct"],
+        "skipped_columns": skipped,
         "message": (
-            f"{len(tbls)} table(s) have NO column descriptions at all — enrichment wrote the "
-            f"table descriptions but skipped the column pass. Run Phase 2's column pass: "
-            f"describe each meaningful column from sampled values, mark genuinely-opaque ones "
-            f"description_source=ai_unknown (self-evident id/timestamps may stay blank), then "
-            f"re-run. Column descriptions are what the explorer shows and what NL→SQL reads. "
-            f"Tables: {', '.join(tbls[:10])}" + ("…" if len(tbls) > 10 else "")
+            f"{len(under)} table(s) have many MEANINGFUL columns left blank — the column pass "
+            f"described the easy ones and stopped ({cov['totals']['meaningful_blank']} non-self-evident "
+            f"blanks total). Describe them from sampled values (or mark genuinely-opaque ones "
+            f"description_source=ai_unknown), then re-run. e.g. "
+            + "; ".join(f"{t}: {', '.join(cols[:5])}" for t, cols in list(skipped.items())[:3])
         ),
     }
 
