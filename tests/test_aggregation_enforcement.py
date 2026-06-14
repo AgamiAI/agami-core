@@ -111,3 +111,23 @@ def test_semi_additive_sum_without_time_group_is_allowed():
     org = _balance_org()
     r = RT.pre_flight_check("SELECT account_id, SUM(balance) FROM facts GROUP BY account_id", org)
     assert r.action == "allow"
+
+
+def test_semi_additive_is_table_scoped_no_cross_table_misfire():
+    # a SECOND table also has a `balance` column but its metric is fully additive — summing
+    # THAT balance over time must NOT be refused (keyed by (table, column), not bare name).
+    facts = m.Table(name="facts", schema="public", storage_connection="c", grain=["id"],
+                    columns=[_col("balance", "decimal", "additive"), _col("snapshot_date", "date", "dimension")])
+    ledger = m.Table(name="ledger", schema="public", storage_connection="c", grain=["id"],
+                     columns=[_col("balance", "decimal", "additive"), _col("entry_date", "date", "dimension")])
+    semi = m.Metric(name="account balance", calculation="period-end balance",
+                    bindings={"PostgreSQL": "SUM(balance)"}, source_tables=["facts"],
+                    non_additive_dimensions=["time"], semi_additive_agg="last")
+    sa = m.SubjectArea(name="area", description="d", tables_defined=[facts, ledger], metrics=[semi])
+    org = m.Organization(organization="o", version=1, subject_areas=[sa])
+    # ledger.balance is NOT the semi-additive one → allowed
+    r = RT.pre_flight_check("SELECT entry_date, SUM(balance) FROM ledger GROUP BY entry_date", org)
+    assert r.action == "allow"
+    # facts.balance IS → refused
+    r2 = RT.pre_flight_check("SELECT snapshot_date, SUM(balance) FROM facts GROUP BY snapshot_date", org)
+    assert r2.action == "refuse" and r2.risk == "semi_additive"

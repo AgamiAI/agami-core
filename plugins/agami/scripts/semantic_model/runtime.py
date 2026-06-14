@@ -530,26 +530,37 @@ def _bare_aggregate_column(agg: "exp.AggFunc") -> Optional["exp.Column"]:
     return None
 
 
-def _semi_additive_columns(org: Organization) -> dict[str, "Metric"]:
-    """Column name -> the semi-additive Metric that SUMs it (declares non_additive_dimensions).
-    Parsed from each such metric's bindings (the column inside its SUM)."""
-    out: dict[str, "Metric"] = {}
+def _semi_additive_columns(org: Organization) -> dict[tuple[str, str], "Metric"]:
+    """(table, column) -> the semi-additive Metric that SUMs it (declares
+    non_additive_dimensions). Keyed by (table, column) — NOT bare column name — so two
+    tables that both have a `balance` don't cross-contaminate. The table is the binding's
+    own qualifier when present, else the metric's source_tables. Includes org-level
+    cross-subject-area metrics."""
+    all_metrics: list["Metric"] = list(getattr(org, "cross_subject_area_metrics", []) or [])
     for sa in org.subject_areas:
-        metrics = list(sa.metrics)
-        for mm in metrics:
-            if not mm.non_additive_dimensions:
+        all_metrics.extend(sa.metrics)
+    out: dict[tuple[str, str], "Metric"] = {}
+    for mm in all_metrics:
+        if not mm.non_additive_dimensions:
+            continue
+        srcs = list(mm.source_tables or [])
+        for binding in (mm.bindings or {}).values():
+            try:
+                frag = sqlglot.parse_one(binding, error_level="ignore")
+            except Exception:
                 continue
-            for binding in (mm.bindings or {}).values():
-                try:
-                    frag = sqlglot.parse_one(binding, error_level="ignore")
-                except Exception:
+            if frag is None:
+                continue
+            for agg in frag.find_all(exp.Sum):
+                col = _bare_aggregate_column(agg)
+                if col is None:
                     continue
-                if frag is None:
-                    continue
-                for agg in frag.find_all(exp.Sum):
-                    col = _bare_aggregate_column(agg)
-                    if col is not None:
-                        out.setdefault(col.name, mm)
+                # the table the summed column belongs to: the binding's qualifier if it has
+                # one, else the metric's source table(s) (attribute to each when >1).
+                tables = [col.table] if col.table else srcs
+                for tname in tables:
+                    if tname:
+                        out.setdefault((tname, col.name), mm)
     return out
 
 
@@ -611,8 +622,14 @@ def _check_aggregation_semantics(
         for select_expr in tree.expressions:
             for agg in select_expr.find_all(exp.Sum):
                 col = _bare_aggregate_column(agg)
-                if col is not None and col.name in semi:
-                    mm = semi[col.name]
+                if col is None:
+                    continue
+                # match on (table, column) — resolve the summed column's table from the
+                # query; skip when it can't be pinned down (don't mis-fire on a bare column
+                # that happens to share a name with a semi-additive measure elsewhere).
+                ctable = _resolve_col_table(col, scope)
+                mm = semi.get((ctable, col.name)) if ctable else None
+                if mm is not None:
                     how = mm.semi_additive_agg or "last"
                     return PreFlightResult(
                         "semi_additive", "refuse", sql,

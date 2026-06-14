@@ -11,11 +11,13 @@ placeholders in its binding — so the definition lives in ONE place and never d
 `expand_binding` resolves those placeholders recursively into standalone SQL
 (`SUM(amount) / COUNT(DISTINCT order_id)`), with cycle / missing-reference guards.
 
-SCOPE: this handles case (a) — composition of metrics over the same grain (ratios,
-rates, arithmetic). Case (b) — a SECOND-ORDER statistic, an aggregate OF an aggregate
-at a finer grain (`AVG` of a daily `SUM`) — needs nested CTE composition and is
-deferred to the grain-attributed planner (#4); it's detected here and refused with a
-clear message rather than emitting illegal `AVG(SUM(...))`.
+SCOPE: case (a) — composition of metrics over the same grain (ratios, rates, arithmetic)
+— is handled by `expand_binding` (inline placeholder substitution). Case (b) — a
+SECOND-ORDER statistic, an aggregate OF an aggregate at a finer grain (`AVG` of a daily
+`SUM`) — IS supported, via `synthesize_second_order`: declare it with an `inner_grain` and
+bind it as `OUTERAGG({base})`, and the CTE is built deterministically (see
+`resolve_metric_sql`, the single entry point). A nested aggregate with NO `inner_grain`
+declared is still refused — illegal `AVG(SUM(...))` is never emitted.
 """
 
 from __future__ import annotations
@@ -86,8 +88,9 @@ def expand_binding(metric, storage_type: str, idx: dict, *, _stack: Optional[lis
     if _has_nested_aggregate(expanded):
         raise DerivedError(
             f"metric {metric.name!r} composes an aggregate of an aggregate "
-            "(second-order statistic) — that needs CTE composition and is deferred to "
-            "the grain-attributed planner (#4). Express it with a direct binding for now."
+            "(second-order statistic) but has no `inner_grain` declared. To support it, set "
+            "`inner_grain` (the dimension the base is grouped by) and bind it as "
+            "OUTERAGG({base}) — the CTE is then synthesized (see synthesize_second_order)."
         )
     return expanded
 
