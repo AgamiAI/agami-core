@@ -59,6 +59,31 @@ confidence: inferred
 review_state: unreviewed
 ```
 
+**Semi-additive metrics (`non_additive_dimensions` + `semi_additive_agg`) — set these whenever
+the measure is a STOCK, not a flow.** A balance, inventory level, headcount, or point-in-time
+subscriber count is summable across *entities* (accounts, warehouses, regions) but **NOT across
+time** — summing an account balance over 90 days multiplies it ~90×. Name the dimension(s) it
+can't be summed over (`time` is the usual shorthand for any date/time grain) and how to collapse
+over them (`last` = period-end value, `average`, `min`, `max`). Flow metrics (revenue, counts,
+quantities) leave both empty. Tell-tale: the metric's source column has `aggregation: additive`
+but is a *level/balance/on-hand* (a stock), or its name is balance/inventory/headcount/AUM/etc.
+
+```yaml
+name: total balance
+description: End-of-period balance summed across accounts.
+calculation: Sum of account balances at the period end (NOT across days within the period).
+bindings:
+  PostgreSQL: "SUM(balance)"
+unit: USD
+source_tables:
+  - daily_balances
+non_additive_dimensions:
+  - time
+semi_additive_agg: last     # over time take the period-end balance, then sum across accounts
+confidence: inferred
+review_state: unreviewed
+```
+
 ## Entity
 
 Fields: `name`, `plural`, `other_names`, `description`, `maps_to` (one entry per

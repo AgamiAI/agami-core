@@ -78,6 +78,11 @@ ReviewState = Literal["unreviewed", "approved", "rejected", "stale", "not_applic
 #   unknown      → not yet classified (legacy models, or the heuristic was unsure). Never
 #                  enforced against — the enforcement layer only acts on a definite class.
 Aggregation = Literal["additive", "averageable", "dimension", "unknown"]
+# How a SEMI-ADDITIVE metric is collapsed over a dimension it can't be summed across
+# (almost always time): take the period-end (`last`) / period-start (`first`) value, or an
+# `average`/`min`/`max`. None on a metric with `non_additive_dimensions` means "don't sum
+# over them — refuse/warn rather than auto-collapse."
+SemiAdditiveAgg = Literal["last", "first", "average", "min", "max"]
 # Provenance of a table/column `description` (NOT a sign-off gate — advisory only).
 #   None    → unknown / legacy; treated as trusted, never surfaced for confirmation
 #   human   → written or edited by a person; trusted
@@ -442,6 +447,15 @@ class Metric(_Base):
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)
     subject_areas: list[str] = Field(default_factory=list)
+    # Additivity (scorecard #3). A SEMI-ADDITIVE measure (account balance, inventory,
+    # headcount, point-in-time subscribers) is summable across some dimensions but NOT
+    # across others — almost always time. `non_additive_dimensions` names those (a column
+    # name, or the shorthand "time" = any date/time grain in the query); `semi_additive_agg`
+    # says how to collapse over them (period-end `last`, `average`, …). With dims set but no
+    # agg, the enforcement layer (#4) refuses/warns instead of auto-collapsing. A
+    # fully-additive metric leaves both empty.
+    non_additive_dimensions: list[str] = Field(default_factory=list)
+    semi_additive_agg: Optional[SemiAdditiveAgg] = None
     business_question: Optional[str] = None
     confidence: Confidence = "proposed"
     source: Optional[str] = None
@@ -457,6 +471,17 @@ class Metric(_Base):
         if not v or not v.strip():
             raise ValueError("metric calculation (prose intent) must be non-empty")
         return v
+
+    @model_validator(mode="after")
+    def _semi_additive_coherent(self) -> "Metric":
+        # "how to collapse over a non-additive dimension" is meaningless without naming
+        # the dimension(s). (The reverse is fine: dims without an agg = refuse to sum.)
+        if self.semi_additive_agg and not self.non_additive_dimensions:
+            raise ValueError(
+                "semi_additive_agg is set but non_additive_dimensions is empty — name the "
+                "dimension(s) the metric can't be summed over (e.g. [\"time\"])"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
