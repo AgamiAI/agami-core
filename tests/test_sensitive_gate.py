@@ -41,3 +41,14 @@ def test_excluded_sensitive_not_counted():
 def test_clean_db_zero():
     org = _org([m.Column(name="id", type="integer"), m.Column(name="amount", type="decimal")])
     assert C.sensitive_columns(org)["count"] == 0
+
+
+def test_sensitive_columns_under_excluded_table_not_counted():
+    # a whole table excluded → its sensitive columns are off the runtime, so not counted
+    t = m.Table(name="pii_dump", schema="public", storage_connection="c", grain=["id"],
+                review_state="rejected",
+                columns=[m.Column(name="email", type="string", sensitive=True),
+                         m.Column(name="ssn", type="string", sensitive=True)])
+    sa = m.SubjectArea(name="area", description="d", tables_defined=[t])
+    org = m.Organization(organization="o", version=1, subject_areas=[sa])
+    assert C.sensitive_columns(org)["count"] == 0

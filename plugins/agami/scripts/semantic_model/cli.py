@@ -183,8 +183,11 @@ def cmd_coverage(args) -> int:
 
 
 def cmd_sensitive(args) -> int:
-    """List the columns flagged `sensitive` (PII). The agami-connect Phase 4 curate
-    gate uses the count to decide whether to open the model explorer for review."""
+    """List the columns flagged `sensitive` (PII) that are still queryable — already-
+    excluded ones (a rejected column, or any column under a rejected table) are NOT
+    counted, since they're no longer in the runtime. The agami-connect Phase 4 curate gate
+    uses this count to decide whether to open the explorer (so the gate stops re-opening
+    once the user has excluded the flagged columns)."""
     from . import curate
     org = L.load_organization(args.root, include_rejected=True)
     _print_json(curate.sensitive_columns(org))
@@ -582,7 +585,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.set_defaults(func=cmd_coverage)
 
-    sp = sub.add_parser("sensitive", help="list columns flagged sensitive (PII) + a count — the Phase 4 curate gate signal")
+    sp = sub.add_parser("sensitive", help="list still-queryable columns flagged sensitive/PII + a count (excludes already-rejected columns/tables) — the Phase 4 curate gate signal")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_sensitive)
 

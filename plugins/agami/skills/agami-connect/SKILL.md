@@ -637,7 +637,7 @@ Seeds reference **columns, tables, metrics, and entities** — so settle those *
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" sensitive "$ROOT"               # → .count  (columns flagged PII)
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed   # length = sign-off count
 ```
-- **PII count** — columns introspection (or a curator) flagged `sensitive`.
+- **PII count** — columns introspection (or a curator) flagged `sensitive` **that are still queryable** (already-excluded columns, and any column under an excluded table, are not counted — so once the user excludes the flagged columns this drops to 0 and the gate stops re-opening).
 - **Sign-off count** — metrics + named-filters + entities needing review (relationships are NOT gated — they stay lazy: FK joins are engine-approved, inferred joins self-approve as you query).
 
 **If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface: per-column **Exclude** toggles + **Mark-PII** on the flagged columns, and the **Review** tab where metrics/entities sit under "Needs your eyes." Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns (customer names, GPS) and 5 metrics to sign off — opening the model explorer so you can exclude/mark those and review. Send the feedback block back when you're done."* — then **stop and wait** for their batch.
