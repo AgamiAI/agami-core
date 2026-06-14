@@ -189,7 +189,7 @@ def resolve_metrics(
             # the generator gets ready-to-run SQL and the single-source-of-truth holds.
             # Fall back to the raw binding if expansion fails (validator gates the model).
             bindings = mm.bindings
-            if _D.is_derived(mm):
+            if _D.is_derived(mm) or _D.is_second_order(mm):
                 try:
                     bindings = _D.expanded_bindings(mm, idx)
                 except _D.DerivedError:

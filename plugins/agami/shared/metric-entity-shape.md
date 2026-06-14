@@ -84,6 +84,39 @@ confidence: inferred
 review_state: unreviewed
 ```
 
+**Derived metrics (compose other metrics — don't re-derive).** When a metric is a function of
+OTHER metrics, reference them by name with `{…}` placeholders and list them in `base_metrics`.
+Define `revenue` once; everything downstream tracks it (no drift).
+
+```yaml
+name: average order value
+description: Revenue per order.
+calculation: Total revenue divided by order count.
+base_metrics: [revenue, order count]
+bindings:
+  PostgreSQL: "{revenue} / {order count}"   # expands to (SUM(amount)) / (COUNT(DISTINCT order_id))
+source_tables:
+  - orders
+```
+
+**Second-order statistics (an aggregate OF an aggregate).** A metric like *average daily revenue*
+or *peak monthly orders* aggregates a finer-grain aggregate — `AVG` of a daily `SUM`. Don't write
+`AVG(SUM(...))` (illegal SQL). Declare it: bind as `OUTERAGG({base_metric})` and set `inner_grain`
+to the dimension(s) the base is grouped by first. The engine synthesizes the CTE deterministically.
+
+```yaml
+name: average daily revenue
+description: Mean of each day's total revenue.
+calculation: Average over days of the daily revenue total.
+base_metrics: [daily revenue]
+bindings:
+  PostgreSQL: "AVG({daily revenue})"   # → (SELECT AVG(v) FROM (SELECT order_date, SUM(amount) AS v FROM orders GROUP BY order_date) _i)
+inner_grain:
+  - order_date
+source_tables:
+  - orders
+```
+
 ## Entity
 
 Fields: `name`, `plural`, `other_names`, `description`, `maps_to` (one entry per

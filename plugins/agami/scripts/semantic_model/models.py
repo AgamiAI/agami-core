@@ -456,6 +456,13 @@ class Metric(_Base):
     # fully-additive metric leaves both empty.
     non_additive_dimensions: list[str] = Field(default_factory=list)
     semi_additive_agg: Optional[SemiAdditiveAgg] = None
+    # Second-order statistic (scorecard #1, case b): an aggregate OF an aggregate at a finer
+    # grain — AVG of a daily SUM, MAX of a monthly COUNT. The binding is `OUTERAGG({base})`
+    # (e.g. "AVG({daily_revenue})") and `inner_grain` names the dimension(s) the BASE metric is
+    # grouped by first. The engine deterministically synthesizes the CTE (compute the base at
+    # `inner_grain`, then apply the outer aggregate) — illegal AVG(SUM(...)) is never emitted.
+    # Empty for first-order / case-(a) metrics.
+    inner_grain: list[str] = Field(default_factory=list)
     business_question: Optional[str] = None
     confidence: Confidence = "proposed"
     source: Optional[str] = None

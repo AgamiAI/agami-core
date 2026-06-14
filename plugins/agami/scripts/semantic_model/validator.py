@@ -498,15 +498,21 @@ def _check_derived_metrics(org: Organization, res: ValidationResult) -> None:
     for sa in org.subject_areas:
         all_metrics.extend(sa.metrics)
     for met in all_metrics:
-        if not D.is_derived(met):
+        if not (D.is_derived(met) or D.is_second_order(met)):
             continue
+        # resolve_metric_sql dispatches: second-order → CTE synthesis, else placeholder
+        # expansion. Either failure mode (cycle, unknown base, bad shape, multi-table inner
+        # synth, missing inner_grain) is deploy-blocking.
         for stype in (met.bindings or {}):
             try:
-                D.expand_binding(met, stype, idx)
+                D.resolve_metric_sql(met, stype, idx)
             except D.DerivedError as e:
                 res.error("derived_metric", str(e))
-        # grain sanity: a base sharing no source_table with this metric may be a
-        # cross-grain ratio that inline composition can't get right (deferred to #4).
+        # grain sanity (first-order case-a only): a base sharing no source_table may be a
+        # cross-grain ratio inline composition can't get right (the synthesizer handles the
+        # second-order case explicitly, so skip the warning there).
+        if D.is_second_order(met):
+            continue
         for stype in (met.bindings or {}):
             for ref in D.binding_refs(met.bindings.get(stype)):
                 base = idx.get(ref)
