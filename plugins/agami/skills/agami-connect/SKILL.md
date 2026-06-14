@@ -268,7 +268,9 @@ On **Yes**: `"$PY" -m pip install --user -r "$AGAMI_PLUGIN_ROOT/scripts/semantic
 
 (The `sm` wrapper also self-installs these on first use as a safety net, but doing it here makes it explicit, confirmed, and at a predictable moment rather than mid-introspection.)
 
-### 0a.6 — Ask for `<artifacts_dir>`
+### 0a.6 — Ask for `<artifacts_dir>` (first run only)
+
+**The folder is chosen once, on the very first onboarding, and reused for every profile thereafter.** Before asking, check whether it's already set: if the pointer `~/.config/agami/path` exists (non-empty) **or** `AGAMI_ARTIFACTS_DIR` is set **or** `<artifacts_dir>/local/.config` already records `artifacts_dir`, **skip this question entirely** — reuse that path and continue to 0a.7. Only a brand-new install (none of those present) reaches the question below. This guarantees a second/third database lands as a sibling inside the same folder rather than re-prompting (and risking a fragmented, multi-folder setup).
 
 Detect the OS once so the options are platform-native — `uname -s` (`Darwin` = macOS, `Linux` = Linux) or treat `$OS == Windows_NT` / a `MINGW*`/`MSYS*` uname as Windows. Then **AskUserQuestion** with the two defaults for that OS as named options (Recommended first). The auto-provided **Other** lets the user type any absolute path — so this both gives sensible options *and* allows a full custom path:
 
