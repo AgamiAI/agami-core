@@ -648,13 +648,14 @@ def _promote_reference_fields(
     by_name: dict[str, list[Table]] = {}
     for t in tables:
         by_name.setdefault(t.name.lower(), []).append(t)
-    seen = {(r.from_table, r.from_column) for r in existing}
+    # schema-aware key so a same-named table in another schema doesn't suppress promotion here
+    seen = {(r.from_schema, r.from_table, r.from_column) for r in existing}
     out: list[Relationship] = []
     for t in tables:
-        grain = grain_by_table.get(t.name, set())
+        grain = set(t.grain)   # THIS table's key (grain_by_table is keyed by bare name → ambiguous)
         for c in t.columns:
             mo = _REF_ID_RE.match(c.name)
-            if not mo or c.primary_key or c.name in grain or (t.name, c.name) in seen:
+            if not mo or c.primary_key or c.name in grain or (t.schema_name, t.name, c.name) in seen:
                 continue
             target = _infer_reference_target(mo.group(1).lower(), by_name, t)
             if target is None or len(target.grain) != 1:
@@ -671,7 +672,7 @@ def _promote_reference_fields(
                 description=f"inferred reference: {c.name} → {target.name}.{to_col} "
                             "(name match; not overlap-verified — confirm)",
             ))
-            seen.add((t.name, c.name))
+            seen.add((t.schema_name, t.name, c.name))
     if out:
         report.notes.append(
             f"promoted {len(out)} reference field(s) (<x>_id) to inferred joins — review on /agami-model")
@@ -860,9 +861,13 @@ def _enrich_from_sample(
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
     # choice candidates: codeable columns with no choice_field yet, that aren't keys, dates,
     # or free-text-ish. A short integer/string column with few distinct values is an enum.
+    # Exclude reference-named `*_id`/`sys_id` columns by NAME: introspection never populates
+    # Column.foreign_key, so that guard alone wouldn't catch a low-cardinality `dealer_id`
+    # (few dealers) — which is a JOIN target, not an enum to decode.
     choice_cands = [c for c in cols
                     if c.choice_field is None and not c.primary_key and c.foreign_key is None
-                    and c.type in ("integer", "string") and not _looks_time_named(c.name)]
+                    and c.type in ("integer", "string") and not _looks_time_named(c.name)
+                    and not _REF_ID_RE.match(c.name)]
     if not date_cands and not choice_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []

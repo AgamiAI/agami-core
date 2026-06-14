@@ -23,7 +23,7 @@ from semantic_model import validator as V  # noqa: E402
 
 
 # No catalog FKs declared; `orders` references `dealers` via dealer_id, plus a
-# mystery_id with no target table, and a string note_id (type-mismatch to dealers.id int).
+# mystery_id whose target table doesn't exist (so it must NOT be promoted).
 def _runner(sql):
     s = " ".join(sql.split())
     if "information_schema.schemata" in s:
