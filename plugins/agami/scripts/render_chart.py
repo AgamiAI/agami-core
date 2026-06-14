@@ -30,7 +30,7 @@ Usage (single section — backwards compatible with the old chart):
           "table_rows": [["Carol Chen",148.95],["Dave Davis",93.96],["Bob Brown",45.0]],
           "sql": "SELECT c.name, SUM(...) FROM ..."
         }' \\
-        --out ~/.agami/charts/single.html
+        --out <artifacts_dir>/local/charts/single.html
 
 Usage (multi-section narrative):
 
@@ -38,7 +38,7 @@ Usage (multi-section narrative):
         --title "How is the business doing?" \\
         --summary "Revenue up 12% QoQ; Carol Chen is the top customer; pending orders growing." \\
         --sections-file my-report.json \\
-        --out ~/.agami/charts/q1-review.html
+        --out <artifacts_dir>/local/charts/q1-review.html
 
 The file `my-report.json` is a JSON array of section objects, see the
 SECTIONS_JSON schema documented in shared/chart-template.html.

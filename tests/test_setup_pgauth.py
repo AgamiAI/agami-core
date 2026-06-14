@@ -30,19 +30,18 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
 @pytest.fixture
 def tmp_agami_home(tmp_path, monkeypatch):
-    """Set HOME to a temp dir so all ~/.agami paths land there."""
-    home = tmp_path / "home"
-    home.mkdir()
-    agami = home / ".agami"
-    agami.mkdir(mode=0o700)
-    monkeypatch.setenv("HOME", str(home))
+    """Point AGAMI_ARTIFACTS_DIR at a temp dir so all secrets/state land in <art>/local/."""
+    art = tmp_path / "artifacts"
+    local = art / "local"
+    local.mkdir(parents=True, mode=0o700)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
     monkeypatch.delenv("AGAMI_PROFILE", raising=False)
 
-    # Force re-import to pick up the patched HOME
+    # Force re-import so AGAMI_HOME re-resolves to <art>/local
     import importlib
     import setup_pgauth
     importlib.reload(setup_pgauth)
-    return setup_pgauth, agami
+    return setup_pgauth, local
 
 
 def _write_credentials(agami: Path, contents: str) -> None:

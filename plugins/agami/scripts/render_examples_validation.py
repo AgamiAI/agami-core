@@ -15,7 +15,7 @@ Usage:
         --title "Seed examples · default" \\
         --profile default \\
         --items-file /tmp/agami-examples-items.json \\
-        --out ~/.agami/examples-validation/20260510-141500.html
+        --out <artifacts_dir>/local/examples-validation/20260510-141500.html
 """
 
 from __future__ import annotations

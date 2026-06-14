@@ -72,12 +72,17 @@ from typing import Any, Callable
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+import agami_paths  # noqa: E402  (copied alongside this server into local/serve/ by setup_desktop_mcp)
+
 EXECUTE_SQL = SCRIPT_DIR / "execute_sql.py"
-AGAMI_HOME = Path.home() / ".agami"
-CREDENTIALS_PATH = AGAMI_HOME / "credentials"
-CONFIG_PATH = AGAMI_HOME / ".config"
-QUERY_LOG = AGAMI_HOME / "query_log.jsonl"
-FEEDBACK_LOG = AGAMI_HOME / "feedback.jsonl"
+# Secrets + per-user state live under <artifacts_dir>/local/ (the consolidated,
+# gitignored replacement for ~/.agami). Re-resolved after bootstrap() in main().
+AGAMI_LOCAL = agami_paths.local_dir()
+CREDENTIALS_PATH = agami_paths.credentials_path()
+CONFIG_PATH = agami_paths.config_path()
+QUERY_LOG = agami_paths.query_log_path()
+FEEDBACK_LOG = AGAMI_LOCAL / "feedback.jsonl"
 
 SERVER_NAME = "agami"
 # The protocol version we fall back to if the client doesn't pin one. We echo
@@ -89,7 +94,7 @@ def _server_version() -> str:
     """Best-effort plugin version.
 
     Prefer the AGAMI_VERSION env var (set by setup_desktop_mcp.py when the server
-    is copied to a standalone ~/.agami/serve dir, where the marketplace.json
+    is copied to a standalone <artifacts_dir>/local/serve dir, where the marketplace.json
     isn't reachable), then fall back to reading the shipped manifest.
     """
     env_v = os.environ.get("AGAMI_VERSION")
@@ -130,18 +135,14 @@ def resolve_profile(explicit: str | None = None) -> str:
 
 
 def resolve_artifacts_dir() -> Path:
-    """Resolution order: AGAMI_ARTIFACTS_DIR → .config.artifacts_dir → $HOME/agami-artifacts."""
-    env = os.environ.get("AGAMI_ARTIFACTS_DIR")
-    if env:
-        return Path(env).expanduser()
-    cfg = _load_config().get("artifacts_dir")
-    if isinstance(cfg, str) and cfg:
-        return Path(cfg).expanduser()
-    return Path.home() / "agami-artifacts"
+    """Resolution order: AGAMI_ARTIFACTS_DIR → ~/.config/agami/path pointer → default
+    ~/agami-artifacts. (The pointer, not .config, holds the location now — so there's no
+    chicken-and-egg: .config itself lives under <artifacts_dir>/local/.)"""
+    return agami_paths.artifacts_dir()
 
 
 def _credentials_sections() -> dict[str, dict[str, str]]:
-    """Parse ~/.agami/credentials (INI) into {profile: {field: value}}. Empty on any error."""
+    """Parse <artifacts_dir>/local/credentials (INI) into {profile: {field: value}}. Empty on any error."""
     if not CREDENTIALS_PATH.exists():
         return {}
     import configparser
@@ -290,7 +291,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
     if not out:
         return json.dumps({
             "datasources": [],
-            "note": "No profiles found in ~/.agami/credentials. Run the agami-connect skill first.",
+            "note": "No profiles found in your credentials file. Run the agami-connect skill first.",
         }, indent=2)
     return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
 
@@ -536,7 +537,7 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
 
 
 def tool_log_feedback(args: dict[str, Any]) -> str:
-    """Local analog of Ask Agami `log_feedback`: append to ~/.agami/feedback.jsonl."""
+    """Local analog of Ask Agami `log_feedback`: append to <artifacts_dir>/local/feedback.jsonl."""
     raw_query = args.get("raw_query")
     rating = args.get("rating")
     if not raw_query or not rating:
@@ -811,7 +812,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     "log_feedback": {
         "handler": tool_log_feedback,
         "description": (
-            "Record thumbs-up/down feedback for a question to the local ~/.agami/feedback.jsonl. "
+            "Record thumbs-up/down feedback for a question to the local feedback.jsonl. "
             "Local analog of the hosted log_feedback."
         ),
         "inputSchema": {
@@ -1031,6 +1032,15 @@ def _handle_tools_call(req_id: Any, params: dict[str, Any]) -> None:
 
 
 def serve() -> int:
+    # One-shot migration of a legacy ~/.agami into <artifacts_dir>/local/, then re-resolve
+    # paths (migration may set the artifacts-dir pointer to a custom location).
+    global AGAMI_LOCAL, CREDENTIALS_PATH, CONFIG_PATH, QUERY_LOG, FEEDBACK_LOG
+    agami_paths.bootstrap()
+    AGAMI_LOCAL = agami_paths.local_dir()
+    CREDENTIALS_PATH = agami_paths.credentials_path()
+    CONFIG_PATH = agami_paths.config_path()
+    QUERY_LOG = agami_paths.query_log_path()
+    FEEDBACK_LOG = AGAMI_LOCAL / "feedback.jsonl"
     _log(f"starting (version {_server_version()}); reading stdio JSON-RPC")
     for raw in sys.stdin:
         line = raw.strip()

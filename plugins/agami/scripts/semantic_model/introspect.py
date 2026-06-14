@@ -215,7 +215,7 @@ def introspect(
     storage = StorageConnection(
         name=conn_name,
         storage_type=dialect.name,
-        storage_config={"profile": profile, "credentials_ref": "~/.agami/credentials"},
+        storage_config={"profile": profile, "credentials_ref": "<artifacts_dir>/local/credentials"},
     )
     org = Organization(
         organization=profile,

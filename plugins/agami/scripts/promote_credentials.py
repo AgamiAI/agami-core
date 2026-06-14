@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministically promote ~/.agami/credentials.example into ~/.agami/credentials.
+"""Deterministically promote credentials.example into credentials (under <artifacts_dir>/local/).
 
 agami-connect Phase 0a writes a one-profile `credentials.example` for the user to fill in.
 This script consumes it deterministically — replacing the brittle skill-inline
@@ -105,11 +105,17 @@ def promote(agami_dir: Path) -> tuple[str, int]:
 
 
 def main() -> int:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import agami_paths
+    agami_paths.bootstrap()
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--agami-dir", default=os.path.expanduser("~/.agami"),
-                   help="Directory holding credentials / credentials.example (default ~/.agami).")
+    p.add_argument("--agami-dir", default=None,
+                   help="Directory holding credentials / credentials.example "
+                        "(default: <artifacts_dir>/local).")
     args = p.parse_args()
-    msg, code = promote(Path(args.agami_dir).expanduser())
+    target = Path(args.agami_dir).expanduser() if args.agami_dir else agami_paths.local_dir()
+    msg, code = promote(target)
     print(msg)
     return code
 

@@ -12,7 +12,7 @@ the same DuckDB session and run a federated JOIN. But the ATTACH statement
 needs the password inline — which means we can't put it in the Bash command
 the host renders in chat.
 
-This script writes the ATTACH statements to a temp file in `~/.agami/`, with
+This script writes the ATTACH statements to a temp file in `<artifacts_dir>/local/`, with
 chmod 600. The skill invokes:
 
     duckdb -init "$AGAMI_INIT_FILE" -c "<the federated SQL>" --csv
@@ -24,7 +24,7 @@ on each invocation in case a prior run crashed.)
 
 Usage:
     python3 build_duckdb_attach.py --profiles itsm finance
-    # Writes ~/.agami/.duckdb_init_<ts>_<rand>.sql, prints the path on stdout.
+    # Writes <artifacts_dir>/local/.duckdb_init_<ts>_<rand>.sql, prints the path on stdout.
 
 The script depends on configparser (stdlib) and reuses `_parse_dsn` /
 `_load_section` from setup_pgauth.py.
@@ -47,8 +47,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from setup_pgauth import _atomic_write, _load_section, _resolve_default_profile  # noqa: E402
+import agami_paths  # noqa: E402
 
-AGAMI_HOME = Path.home() / ".agami"
+AGAMI_HOME = agami_paths.local_dir()
 
 
 # DuckDB scanner extensions support these databases. Snowflake is NOT in the
@@ -140,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=(
             "Generate a temp DuckDB init file that ATTACHes one or more agami "
-            "profiles. Writes ~/.agami/.duckdb_init_<id>.sql (chmod 600) and "
+            "profiles. Writes <artifacts_dir>/local/.duckdb_init_<id>.sql (chmod 600) and "
             "prints the path on stdout. Credentials NEVER appear on the "
             "command line."
         )
@@ -149,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         "--profiles",
         nargs="+",
         required=True,
-        help="One or more profile names from ~/.agami/credentials.",
+        help="One or more profile names from <artifacts_dir>/local/credentials.",
     )
     args = p.parse_args(argv)
 

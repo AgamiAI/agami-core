@@ -18,7 +18,7 @@ Usage:
     python3 render_model_explorer.py \\
         --profile main \\
         --artifacts-dir ~/agami-artifacts \\
-        --out ~/.agami/model/20260512-101500.html
+        --out <artifacts_dir>/local/model/20260512-101500.html
 
 The HTML's MANIFEST_JSON schema is documented at the top of
 shared/model-explorer-template.html.

@@ -10,7 +10,7 @@
 #
 # Interpreter resolution order:
 #   $AGAMI_PYTHON               (explicit override)
-#   ~/.agami/.config tool_paths.python3   (agami's configured interpreter)
+#   <artifacts_dir>/local/.config tool_paths.python3   (agami's configured interpreter)
 #   python3 / python on PATH
 #
 # Deps: if pydantic/sqlglot/pyyaml aren't importable, install them once into that
@@ -26,13 +26,25 @@ REQ="$SCRIPT_DIR/semantic_model/requirements.txt"
 
 resolve_python() {
   if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
-  # configured interpreter from ~/.agami/.config (best-effort)
+  # configured interpreter from <artifacts_dir>/local/.config (best-effort), with a
+  # legacy ~/.agami/.config fallback during the transition
   local cfg
   cfg="$(python3 - <<'PY' 2>/dev/null || true
-import json, pathlib
+import json, os, pathlib
+art = os.environ.get("AGAMI_ARTIFACTS_DIR")
+if not art:
+    ptr = pathlib.Path("~/.config/agami/path").expanduser()
+    try:
+        art = ptr.read_text().strip() if ptr.exists() else ""
+    except OSError:
+        art = ""
+art = art or str(pathlib.Path("~/agami-artifacts").expanduser())
+p = pathlib.Path(os.path.expanduser(art)) / "local" / ".config"
+if not p.exists():
+    legacy = pathlib.Path("~/.agami/.config").expanduser()
+    p = legacy if legacy.exists() else p
 try:
-    c = json.loads(pathlib.Path("~/.agami/.config").expanduser().read_text())
-    print(c.get("tool_paths", {}).get("python3") or "")
+    print(json.loads(p.read_text()).get("tool_paths", {}).get("python3") or "")
 except Exception:
     print("")
 PY
@@ -43,7 +55,7 @@ PY
 
 PY="$(resolve_python)"
 if [ -z "$PY" ]; then
-  echo "agami: no Python interpreter found (tried \$AGAMI_PYTHON, ~/.agami/.config, PATH)." >&2
+  echo "agami: no Python interpreter found (tried \$AGAMI_PYTHON, <artifacts_dir>/local/.config, PATH)." >&2
   exit 3
 fi
 
