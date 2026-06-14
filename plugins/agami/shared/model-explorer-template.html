@@ -712,12 +712,14 @@
     // edits[qname]   = {kind, area, name, [column], fields:{field:value}}
     // exampleEdits[qname] = {area, question, sql, source, status}
     // newMetrics[]   = {area, name, description, calculation, binding, unit, other_names[], source_tables[]}
+    // newExamples[]  = {area, question, sql}   (human-added NL→SQL examples)
     // orgEdit        = new ORGANIZATION.md text | null
     const pending = {};
     const ops = {};
     const edits = {};
     const exampleEdits = {};
     const newMetrics = [];
+    const newExamples = [];
     let orgEdit = null;
     let orgRaw = false;   // ORGANIZATION.md editor mode: false = rich text, true = raw Markdown
     let termEdits = null; // edited curated glossary {term: def} | null — written back via set-terminology
@@ -727,6 +729,7 @@
     const colGroupOpen = new Set();    // group ids the user explicitly OPENED (overrides the wide-table default)
     const colGroupClosed = new Set();  // group ids the user explicitly CLOSED
     let addMetricOpen = false;
+    let addExampleOpen = false;
     let searchQ = '';
     let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
     let activeFilter = 'all';
@@ -2064,6 +2067,57 @@
       return card;
     }
 
+    // Add a NL→SQL example (human-added). Mirrors the add-metric form: question + SQL, area
+    // inferred from the tables the SQL names. Queued into newExamples and rendered as a row.
+    function renderAddExampleForm() {
+      const wrap = el('div', { class: 'table-card add-form' });
+      wrap.appendChild(el('div', { class: 'table-header static' },
+        el('div', { class: 'table-name' }, 'New example')));
+      const body = el('div', { class: 'table-body' });
+      body.appendChild(labelLine('Question (the natural-language ask)'));
+      const qTa = textarea('', 2); qTa.setAttribute('placeholder', 'e.g. How many active vehicles are deployed by zone?'); body.appendChild(qTa);
+      body.appendChild(labelLine('SQL (the full query that answers it)'));
+      body.appendChild(hintLine('A complete SELECT for this question — examples are whole queries (unlike a metric, which is just an aggregate expression).'));
+      const sTa = textarea('', 5); sTa.setAttribute('placeholder', 'SELECT zone, COUNT(*) FROM powerbi.sm_vehicles WHERE ... GROUP BY zone'); body.appendChild(sTa);
+      const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
+      body.appendChild(errLine);
+      const actions = el('div', { class: 'card-actions' });
+      actions.appendChild(el('button', { type: 'button', class: 'btn-sm primary', onclick: () => {
+        const question = qTa.value.trim(), sql = sTa.value.trim();
+        const problems = [];
+        if (!question) problems.push('Add the question.');
+        if (!sql) problems.push('Add the SQL.');
+        if (newExamples.some(x => x.question === question) ||
+            (manifest.examples || []).some(x => x.question === question)) problems.push('An example with that question already exists.');
+        if (problems.length) { errLine.textContent = '⚠ ' + problems.join(' '); return; }
+        const srcTables = tablesInSql(sql);
+        const inferredArea = srcTables.map(t => TABLE_AREA[t]).find(Boolean);
+        const area = inferredArea || (AREAS.length === 1 ? AREAS[0] : (AREAS[0] || ''));
+        newExamples.push({ area, question, sql });
+        addExampleOpen = false; renderAll();
+      } }, '✓ Add example'));
+      actions.appendChild(btnSm('Cancel', () => { addExampleOpen = false; renderAll(); }));
+      body.appendChild(actions);
+      wrap.appendChild(body);
+      return wrap;
+    }
+    function renderNewExampleCard(x, idx) {
+      const card = el('div', { class: 'table-card queued-include' });
+      const h = el('div', { class: 'table-header static' });
+      h.appendChild(el('div', { class: 'table-name' }, x.question));
+      h.appendChild(el('span', { class: 'table-state-badge badge-approved', text: 'added by you' }));
+      card.appendChild(h);
+      const body = el('div', { class: 'table-body' });
+      body.appendChild(labelLine('SQL')); body.appendChild(preBlock(x.sql));
+      body.appendChild(hintLine('Will be added to: ' + (x.area || '(default area)')));
+      const a = el('div', { class: 'card-actions' });
+      a.appendChild(el('button', { type: 'button', class: 'queued-exclude',
+        onclick: () => { newExamples.splice(idx, 1); renderAll(); } }, 'Remove'));
+      body.appendChild(a);
+      card.appendChild(body);
+      return card;
+    }
+
     // =====================================================================
     // TAB: Organization
     // =====================================================================
@@ -2315,6 +2369,11 @@
         newMetrics.forEach((m, i) => g.appendChild(queueRow('add', 'add', `metric: ${m.name}`, () => newMetrics.splice(i, 1))));
         groups.push(g);
       }
+      if (newExamples.length) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'New examples' }));
+        newExamples.forEach((x, i) => g.appendChild(queueRow('add', 'add', `example: ${(x.question || '').slice(0, 60)}`, () => newExamples.splice(i, 1))));
+        groups.push(g);
+      }
       // org edit
       if (orgEdit !== null) {
         const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Organization context' }));
@@ -2400,7 +2459,7 @@
         case 'metrics':  return (manifest.metrics || []).length + newMetrics.length;
         case 'entities': return (manifest.entities || []).length;
         case 'joins':    return (manifest.relationships || []).length + (manifest.cross_relationships || []).length;
-        case 'examples': return (manifest.examples || []).length;
+        case 'examples': return (manifest.examples || []).length + newExamples.length;
         case 'queued':   return totalQueued();
         default:         return null;
       }
@@ -2446,7 +2505,7 @@
     // ---- Queued totals + footer ----
     function totalQueued() {
       return Object.keys(pending).length + Object.keys(ops).length + Object.keys(edits).length
-           + Object.keys(exampleEdits).length + newMetrics.length + (orgEdit !== null ? 1 : 0)
+           + Object.keys(exampleEdits).length + newMetrics.length + newExamples.length + (orgEdit !== null ? 1 : 0)
            + (termEdits !== null ? 1 : 0);
     }
     function updateFooter() {
@@ -2474,6 +2533,7 @@
         if (nInc) parts.push(`${nInc} re-include${nInc === 1 ? '' : 's'}`);
         if (Object.keys(edits).length) parts.push(`${Object.keys(edits).length} edit${Object.keys(edits).length === 1 ? '' : 's'}`);
         if (Object.keys(exampleEdits).length) parts.push(`${Object.keys(exampleEdits).length} example`);
+        if (newExamples.length) parts.push(`${newExamples.length} new example${newExamples.length === 1 ? '' : 's'}`);
         if (newMetrics.length) parts.push(`${newMetrics.length} new metric${newMetrics.length === 1 ? '' : 's'}`);
         if (orgEdit !== null) parts.push('org context');
         if (termEdits !== null) parts.push('glossary');
@@ -2545,6 +2605,11 @@
 
       const exList = Object.values(exampleEdits);
       if (exList.length) { lines.push('example-edits:'); lines.push(JSON.stringify(exList)); }
+      if (newExamples.length) {
+        lines.push('new-examples:');
+        lines.push(JSON.stringify(newExamples.map(x => ({
+          area: x.area, question: x.question, sql: x.sql, source: 'human', status: 'confirmed' }))));
+      }
       if (orgEdit !== null) lines.push('organization-md: ' + JSON.stringify(orgEdit));
       if (termEdits !== null) lines.push('key-terminology: ' + JSON.stringify(termEdits));
       // Sign-off identity header (first line) — the skill applies approvals with this as --signer/--role.
@@ -2571,7 +2636,7 @@
       Object.keys(ops).forEach(k => delete ops[k]);
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
-      newMetrics.length = 0; orgEdit = null; termEdits = null; addMetricOpen = false;
+      newMetrics.length = 0; newExamples.length = 0; orgEdit = null; termEdits = null; addMetricOpen = false; addExampleOpen = false;
       editOpen.clear();
       renderAll();
     });
@@ -2622,6 +2687,11 @@
           renderJoinsTab(root);  // one tab, split into In-schema + Cross-schema sections
           break;
         case 'examples':
+          if (addExampleOpen) { root.appendChild(renderAddExampleForm()); }
+          else { const a = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+                 a.appendChild(el('button', { type: 'button', class: 'add-metric-open', onclick: () => { addExampleOpen = true; renderAll(); } }, '+ Add an example'));
+                 root.appendChild(a); }
+          newExamples.forEach((x, i) => root.appendChild(renderNewExampleCard(x, i)));
           renderFlatTab(root, manifest.examples, 'example',
             x => `${x.question} ${x.sql} ${x.area}`,
             renderExampleCard, 'example');
