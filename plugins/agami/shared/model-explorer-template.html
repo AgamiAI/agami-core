@@ -401,7 +401,7 @@
     .inline-edit-ta:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
     .inline-edit-bar { display: flex; gap: 6px; align-items: center; margin-top: 5px; }
     .inline-edit-bar .btn-sm { margin: 0; }
-    .inline-edit-bar .hint { font-size: 11px; color: var(--muted); }
+    .hint { font-size: 11px; color: var(--muted); }
 
     /* Inline edit + forms */
     .edit-form { border-top: 1px dashed var(--border); margin-top: 6px; padding-bottom: 8px; }
@@ -2101,8 +2101,8 @@
       }));
       const actions = el('div', { class: 'card-actions' });
       actions.appendChild(el('button', { type: 'button', class: 'btn-sm primary', onclick: submit }, '✓ Add example'));
-      actions.appendChild(el('span', { class: 'hint', style: 'margin-left:8px;', text: '⌘/Ctrl+Enter adds' }));
       actions.appendChild(btnSm('Cancel', () => { addExampleOpen = false; renderAll(); }));
+      actions.appendChild(el('span', { class: 'hint', text: '⌘/Ctrl+Enter adds' }));
       body.appendChild(actions);
       wrap.appendChild(body);
       return wrap;
