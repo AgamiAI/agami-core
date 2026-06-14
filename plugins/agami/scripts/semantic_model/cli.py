@@ -445,6 +445,7 @@ def cmd_introspect(args) -> int:
         artifacts_dir=args.artifacts,
         out_dir=args.out,
         tables=args.tables,
+        exclude_columns=args.exclude_columns,
         dry_run=args.dry_run,
         bigquery_region=args.bigquery_region,
     )
@@ -452,6 +453,50 @@ def cmd_introspect(args) -> int:
     print(report.render())
     print(V.format_result(res))
     return 0 if res.ok else 1
+
+
+def cmd_discover(args) -> int:
+    """First pass: cheap discovery (tables + columns only) → inventory JSON +
+    a prune HTML page. The user prunes, then `introspect --tables <kept>` runs
+    the full build on only the kept tables. No grain/FK/row-count probes here."""
+    from . import introspect as INTRO
+
+    runner = INTRO.make_execute_sql_runner(args.profile)
+    inventory = INTRO.discover_inventory(
+        args.profile,
+        args.db_type,
+        runner=runner,
+        tables=args.tables,
+        schemas=args.schemas,
+        bigquery_region=args.bigquery_region,
+    )
+
+    artifacts = Path(args.artifacts).expanduser()
+    inv_path = (Path(args.inventory_out).expanduser() if args.inventory_out
+                else artifacts / args.profile / ".introspect" / "inventory.json")
+    inv_path.parent.mkdir(parents=True, exist_ok=True)
+    inv_path.write_text(json.dumps(inventory, indent=2, default=str), encoding="utf-8")
+
+    # Render the standalone prune page (import the sibling top-level script).
+    scripts_dir = str(Path(__file__).resolve().parent.parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import render_prune  # noqa: E402
+
+    manifest = render_prune.build_manifest(inventory)
+    out_path = Path(args.out).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_prune.render(manifest), encoding="utf-8")
+
+    _print_json({
+        "profile": args.profile,
+        "table_count": inventory["table_count"],
+        "column_mode": inventory["column_mode"],
+        "schemas": inventory["schemas"],
+        "inventory_path": str(inv_path),
+        "prune_html": str(out_path),
+    })
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -602,10 +647,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--artifacts", required=True, help="artifacts_dir (output: <artifacts>/<profile>/)")
     sp.add_argument("--out", default=None, help="override output dir")
     sp.add_argument("--tables", nargs="*", default=None,
-                    help="explicit schema.table allowlist for the no-catalog (probe-only) case")
+                    help="schema.table allowlist — the prune step's kept set (also the "
+                         "no-catalog/probe-only case)")
+    sp.add_argument("--exclude-columns", nargs="*", default=None, dest="exclude_columns",
+                    help="schema.table.column list to mark excluded (the prune step's dropped columns)")
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
     sp.add_argument("--dry-run", action="store_true")
     sp.set_defaults(func=cmd_introspect)
+
+    sp = sub.add_parser("discover",
+                        help="cheap first pass: list tables + columns and render the prune page "
+                             "(no grain/FK/row-count probes) — prune, then introspect the kept set")
+    sp.add_argument("--profile", required=True)
+    sp.add_argument("--db-type", required=True, dest="db_type",
+                    help="postgres|mysql|snowflake|bigquery|redshift|sqlite|sqlserver|"
+                         "databricks|trino|oracle|duckdb|supabase")
+    sp.add_argument("--artifacts", required=True, help="artifacts_dir (inventory: <artifacts>/<profile>/.introspect/)")
+    sp.add_argument("--out", required=True, help="output HTML path for the prune page")
+    sp.add_argument("--inventory-out", default=None, dest="inventory_out",
+                    help="override inventory JSON path (default <artifacts>/<profile>/.introspect/inventory.json)")
+    sp.add_argument("--tables", nargs="*", default=None,
+                    help="optional schema.table allowlist to scope discovery (probe-only case)")
+    sp.add_argument("--schemas", nargs="*", default=None,
+                    help="restrict discovery to these schemas (the user's schema pick)")
+    sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
+    sp.set_defaults(func=cmd_discover)
 
     return p
 

@@ -83,6 +83,18 @@ def test_catalog_mode_builds_valid_model(tmp_path):
     assert rel.confidence == "confirmed"  # postgres FKs are enforced
 
 
+def test_exclude_columns_marks_them_rejected(tmp_path):
+    # The prune step dropped customers.email — full introspect should mark it excluded.
+    org, _ = I.introspect("shop", "postgres", runner=_catalog_runner,
+                          artifacts_dir=tmp_path, dry_run=True,
+                          exclude_columns=["public.customers.email"])
+    assert V.validate(org).ok
+    customers = org.subject_areas[0].defined_table("customers")
+    assert customers.get_column("email").review_state == "rejected"
+    # a column NOT in the exclude list is untouched
+    assert customers.get_column("id").review_state != "rejected"
+
+
 def test_catalog_mode_grain_from_pk(tmp_path):
     org, _ = I.introspect("shop", "postgres", runner=_catalog_runner,
                           artifacts_dir=tmp_path, dry_run=True)

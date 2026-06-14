@@ -159,6 +159,22 @@ class Dialect:
             f"AND table_name = {self.quote_lit(table)} ORDER BY ordinal_position"
         )
 
+    def sql_columns_bulk(self, schemas: list[str]) -> Optional[str]:
+        """All columns for every table across `schemas` in ONE query — used by the
+        cheap discover/prune pass so a 500-table catalog is one round-trip, not 500.
+        Returns None for dialects whose catalog can't enumerate columns in bulk
+        (SQLite PRAGMA, BigQuery per-dataset, Oracle) — the caller falls back to
+        per-table `sql_columns`. ANSI information_schema default covers most dialects."""
+        if not schemas:
+            return None
+        inlist = ", ".join(self.quote_lit(s) for s in schemas)
+        return (
+            "SELECT table_schema, table_name, column_name, data_type, "
+            "numeric_scale, ordinal_position FROM information_schema.columns "
+            f"WHERE table_schema IN ({inlist}) "
+            "ORDER BY table_schema, table_name, ordinal_position"
+        )
+
     def sql_primary_keys(self, schema: str, table: str) -> str:
         return (
             "SELECT kcu.column_name FROM information_schema.table_constraints tc "
@@ -359,6 +375,11 @@ class BigQuery(Dialect):
             f"WHERE table_name = {self.quote_lit(table)} ORDER BY ordinal_position"
         )
 
+    def sql_columns_bulk(self, schemas: list[str]) -> Optional[str]:
+        # BigQuery's INFORMATION_SCHEMA.COLUMNS is per-dataset (region-qualified) — no
+        # single cross-dataset query. The discover pass falls back to per-table.
+        return None
+
     def sql_primary_keys(self, schema: str, table: str) -> str:
         return (
             "SELECT kcu.column_name "
@@ -418,6 +439,10 @@ class SQLite(Dialect):
             f"FROM pragma_table_info({self.quote_lit(table)})"
         )
 
+    def sql_columns_bulk(self, schemas: list[str]) -> Optional[str]:
+        # pragma_table_info is per-table; the discover pass falls back to per-table.
+        return None
+
     def sql_primary_keys(self, schema: str, table: str) -> str:
         return (
             "SELECT name AS column_name FROM pragma_table_info("
@@ -470,6 +495,17 @@ class Oracle(Dialect):
             "FROM all_tab_columns "
             f"WHERE owner = {self.quote_lit(schema)} "
             f"AND table_name = {self.quote_lit(table)} ORDER BY column_id"
+        )
+
+    def sql_columns_bulk(self, schemas: list[str]) -> Optional[str]:
+        if not schemas:
+            return None
+        inlist = ", ".join(self.quote_lit(s) for s in schemas)
+        return (
+            "SELECT owner AS table_schema, table_name, column_name, data_type, "
+            "data_scale AS numeric_scale, column_id AS ordinal_position "
+            f"FROM all_tab_columns WHERE owner IN ({inlist}) "
+            "ORDER BY owner, table_name, column_id"
         )
 
     def sql_primary_keys(self, schema: str, table: str) -> str:

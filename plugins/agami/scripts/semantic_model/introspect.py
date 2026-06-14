@@ -169,12 +169,15 @@ def introspect(
     artifacts_dir: str | Path,
     out_dir: Optional[str | Path] = None,
     tables: Optional[list[str]] = None,
+    exclude_columns: Optional[list[str]] = None,
     dry_run: bool = False,
     bigquery_region: str = "region-us",
 ) -> tuple[Organization, IntrospectReport]:
     """Introspect a live DB into the semantic model and (unless dry_run) write the
-    canonical tree. `tables` (optional) is a caller-supplied allowlist for the
-    no-catalog case where table enumeration itself is denied.
+    canonical tree. `tables` (optional) is the allowlist of `schema.table` to build —
+    the prune step's kept set (also the no-catalog case where enumeration is denied).
+    `exclude_columns` (optional, `schema.table.column`) marks those columns excluded
+    (the prune step's dropped columns).
     """
     dialect = D.get_dialect(db_type)
     if isinstance(dialect, D.BigQuery):
@@ -200,6 +203,18 @@ def introspect(
         t = _build_table(dialect, runner, schema, table, conn_name, report)
         built.append(t)
         grain_by_table[t.name] = set(t.grain)
+
+    # 2b. apply prune-step column exclusions (the user dropped these in the prune
+    # view). Match on schema.table.column, with a schema-less table.column fallback.
+    # Excluded columns are marked `rejected` so they're kept for audit but off the
+    # runtime — same state the model explorer's "exclude columns" produces.
+    if exclude_columns:
+        ex = set(exclude_columns)
+        for t in built:
+            for c in t.columns:
+                if (f"{t.schema_name}.{t.name}.{c.name}" in ex
+                        or f"{t.name}.{c.name}" in ex):
+                    c.review_state = "rejected"
 
     # 3. relationships (catalog FKs, else probe by name+type+overlap)
     rels = _build_relationships(dialect, runner, pairs, built, grain_by_table, report)
@@ -231,6 +246,81 @@ def introspect(
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
     return org, report
+
+
+def discover_inventory(
+    profile: str,
+    db_type: str,
+    *,
+    runner: Runner,
+    tables: Optional[list[str]] = None,
+    schemas: Optional[list[str]] = None,
+    bigquery_region: str = "region-us",
+) -> dict:
+    """Cheap first-pass discovery for the prune UI: every (schema, table) and its
+    columns — and NOTHING expensive. No grain count-distincts, no FK-overlap probes,
+    no row-count scans, no date sniffing. The user prunes the returned table list and
+    the kept set then flows to `introspect(..., tables=<kept>)` for the full build.
+
+    `schemas` (optional) restricts discovery to those schemas (the user's 1.3 schema
+    pick) so a 50-schema warehouse isn't fully enumerated just to prune.
+
+    Returns a JSON-serializable inventory:
+        {profile, db_type, schemas:[...], table_count, column_mode,
+         tables:[{schema, table, columns:[{name, type}]}, ...]}
+    """
+    dialect = D.get_dialect(db_type)
+    if isinstance(dialect, D.BigQuery):
+        dialect = D.BigQuery(region=bigquery_region)
+
+    report = IntrospectReport(profile=profile, db_type=db_type, out_dir="", dry_run=True)
+    pairs = _discover_tables(dialect, runner, tables, report)
+    if schemas:
+        keep = {s for s in schemas}
+        pairs = [(s, t) for s, t in pairs if s in keep]
+    if not pairs:
+        raise RuntimeError(
+            "no tables discovered. If the catalog is locked down, pass an explicit "
+            "table allowlist (schema.table) so the prune view can describe them."
+        )
+
+    # One bulk catalog read for all columns where the dialect supports it (so a
+    # 500-table DB is a single round-trip), else per-table.
+    schemas = sorted({s for s, _ in pairs if s})
+    cols_by_tt: dict[tuple[Optional[str], str], list[dict]] = {}
+    used_bulk = False
+    bulk_sql = dialect.sql_columns_bulk(schemas) if schemas else None
+    if bulk_sql:
+        rows = _try(runner, bulk_sql)
+        if rows:
+            used_bulk = True
+            for r in rows:
+                key = (r.get("table_schema"), r.get("table_name"))
+                scale = r.get("numeric_scale")
+                scale_i = int(scale) if scale not in (None, "", "NULL") else None
+                ctype = dialect.map_type(r.get("data_type", ""), numeric_scale=scale_i)
+                cols_by_tt.setdefault(key, []).append({"name": r["column_name"], "type": ctype})
+
+    inv_tables: list[dict] = []
+    column_mode = "catalog-bulk" if used_bulk else "per-table"
+    for schema, table in pairs:
+        cols = cols_by_tt.get((schema, table))
+        if cols is None:
+            # bulk missed this table (or no bulk support) → per-table catalog/probe read
+            built, cmode = _columns(dialect, runner, schema, table)
+            cols = [{"name": c.name, "type": c.type} for c in built]
+            if not used_bulk:
+                column_mode = cmode
+        inv_tables.append({"schema": schema, "table": table, "columns": cols})
+
+    return {
+        "profile": profile,
+        "db_type": db_type,
+        "schemas": report.schemas or schemas,
+        "table_count": len(inv_tables),
+        "column_mode": column_mode,
+        "tables": inv_tables,
+    }
 
 
 # ---------------------------------------------------------------------------

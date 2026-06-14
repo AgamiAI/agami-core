@@ -33,13 +33,14 @@ Seed (one task per major phase, in order):
 
 ```
 1. Preflight: credentials check + tool detection
-2. Introspect database → semantic model (engine: tables, columns, grain, FK cardinality)
-3. Enrich: descriptions, entities, metrics (LLM, validated into the model)
-4. Curate before examples: exclude columns/tables + sign off metrics & entities
-5. Generate seed NL→SQL examples (validated against the live DB)
-6. Validate every seed example (user reviews via dashboard)
-7. Post-introspect trust summary
-8. Follow-up suggestions
+2. Discover & prune: list tables + columns, user prunes what they don't need
+3. Introspect the KEPT tables → semantic model (engine: grain, FK cardinality)
+4. Enrich: descriptions, entities, metrics (LLM, validated into the model)
+5. Curate before examples: exclude columns/tables + sign off metrics & entities
+6. Generate seed NL→SQL examples (validated against the live DB)
+7. Validate every seed example (user reviews via dashboard)
+8. Post-introspect trust summary
+9. Follow-up suggestions
 ```
 
 Use `content` for the imperative form and `activeForm` for the present-continuous form. **Mark each todo `in_progress` when its phase starts and `completed` immediately when it ends.** Exactly one `in_progress` at a time.
@@ -419,7 +420,36 @@ Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll
 
 Stash everything gathered (doc text + repo definitions) as `$DATA_MODEL_DOC_TEXT` for enrichment — give entities/metrics/relationships found here **`confidence: inferred`** (a declared metric is a strong signal but still wants a human sign-off; FK-derived joins stay as the engine set them). **Never written to disk** — lives only in the enrichment prompt, then discarded. `Skip` → proceed.
 
-### 1.6 — Run the introspection engine
+### 1.6 — Discover & prune the table list (cheap first pass)
+
+**Before the full, expensive introspection, show the user every table + its columns so they can drop what they don't need** — staging/backup/scratch tables, dated partition snapshots, irrelevant columns. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) is the difference between minutes and hours.
+
+**Run the discover pass** — it lists tables + columns only (no grain, FK, or row-count probes, so it's fast even over a tunnel):
+
+```bash
+ts=$(date -u +%Y%m%d-%H%M%S)
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" discover \
+  --profile <profile> --db-type <db_type> \
+  --artifacts "<artifacts_dir>" \
+  --out "<artifacts_dir>/local/prune/<profile>/$ts.html" \
+  [--schemas <selected_schemas…>]   # the 1.3 pick, if you narrowed schemas
+```
+
+It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json`, renders a standalone **prune page**, and prints JSON with `table_count` + `prune_html`. (This page is a deliberately minimal, separate artifact — *not* the model explorer — so there's no description/metric/review machinery, just tables + columns + checkboxes.)
+
+**Open the page, hand off, and END THE TURN** — same pattern as the credentials hand-off; pruning is interactive:
+- Auto-open the printed `prune_html` path.
+- Tell the user: *"I listed all `<N>` tables and their columns. Uncheck any you don't need (staging, backups, snapshots); you can also expand a table and drop irrelevant columns. Then click **Generate for Claude** and paste the block back here."*
+- **End the turn. Do NOT introspect yet.**
+
+**On re-entry — the user pastes an `AGAMI PRUNE …` block.** Parse it:
+- Lines under `keep tables: <k> of <n>` (one `schema.table` per line, until a blank line / `exclude columns:` / `done`) = the **kept allowlist** → pass as `--tables`.
+- Lines under `exclude columns: <c>` (one `schema.table.column` per line) = columns to drop → pass as `--exclude-columns`.
+- If the user kept everything (`<k>` == `<n>`, no excluded columns), just run 1.7 with no `--tables`/`--exclude-columns`.
+
+If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
+
+### 1.7 — Run the introspection engine (on the kept tables)
 
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. From `plugins/agami/scripts/`:
 
@@ -427,8 +457,11 @@ This is the deterministic core — it replaces hand-authoring tables/columns/FK 
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
   --profile <profile> --db-type <db_type> \
   --artifacts "<artifacts_dir>" \
-  [--tables schema.table …]      # only for the no-catalog case (1.2)
+  [--tables <kept schema.table list from 1.6>] \
+  [--exclude-columns <schema.table.column list from 1.6>]
 ```
+
+`--tables` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning.
 
 It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII, cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) and everything from probe mode are confirmed-by-overlap or `unreviewed`. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 

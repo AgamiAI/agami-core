@@ -151,7 +151,7 @@ fi
 #                           per-profile subdir change) AND every other
 #                           profile's renders.
 if [[ $CLEAN_RENDERS -eq 1 ]]; then
-  for render_dir in charts review examples-validation model exports; do
+  for render_dir in charts review examples-validation model exports prune; do
     base="$ARTIFACTS_DIR/local/$render_dir"
     [[ -d "$base" ]] || continue
 
