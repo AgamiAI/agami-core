@@ -43,7 +43,7 @@ try:
 except ImportError:  # pragma: no cover
     _HAVE_SQLGLOT = False
 
-from .models import Entity, Metric, Organization, Relationship, SubjectArea
+from .models import Column, Entity, Metric, Organization, Relationship, SubjectArea
 
 # A prober resolves a literal/value against the DB. Returns True if the value
 # exists in <table>.<column>. Injected so runtime stays DB-agnostic.
@@ -482,7 +482,151 @@ def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
             triggering_joins=[f"{measure_table} (1) <- {mt} (N)" for mt in sorted(many_tables)],
         )
 
-    return PreFlightResult(None, "allow", sql, reason="no fan/chasm trap detected")
+    # No structural (join) trap. Now the SEMANTIC checks the fan/chasm detector is
+    # blind to (scorecard #4): aggregation-class violations (#2) and semi-additive
+    # rollups over time (#3) — these need NO join, so cardinality analysis can't see them.
+    semantic = _check_aggregation_semantics(tree, org, tables_in_scope, sql)
+    if semantic is not None:
+        return semantic
+
+    return PreFlightResult(None, "allow", sql, reason="no fan/chasm or aggregation issue")
+
+
+# ---------------------------------------------------------------------------
+# Aggregation-semantics enforcement (#4 teeth for #2 and #3)
+# ---------------------------------------------------------------------------
+
+
+def _column_index(org: Organization) -> dict[str, dict[str, Column]]:
+    """bare table name -> {column name -> Column}."""
+    idx: dict[str, dict[str, Column]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            idx.setdefault(t.name, {}).update({c.name: c for c in t.columns})
+    return idx
+
+
+def _lookup_column(col: "exp.Column", scope: dict[str, str],
+                   colidx: dict[str, dict[str, Column]]) -> Optional[Column]:
+    t = _resolve_col_table(col, scope)
+    if t and col.name in colidx.get(t, {}):
+        return colidx[t][col.name]
+    # bare column, ambiguous table: only safe if exactly one in-scope table defines it
+    if not t:
+        owners = [tt for tt, cols in colidx.items()
+                  if tt in set(scope.values()) and col.name in cols]
+        if len(owners) == 1:
+            return colidx[owners[0]][col.name]
+    return None
+
+
+def _bare_aggregate_column(agg: "exp.AggFunc") -> Optional["exp.Column"]:
+    """The single column an aggregate is applied to, ONLY when the argument is that
+    bare column (optionally DISTINCT). Returns None for composite args like
+    SUM(price * qty) — those can be legitimately additive even if a part isn't."""
+    cols = list(agg.find_all(exp.Column))
+    if len(cols) == 1 and agg.find(exp.Binary) is None:
+        return cols[0]
+    return None
+
+
+def _semi_additive_columns(org: Organization) -> dict[str, "Metric"]:
+    """Column name -> the semi-additive Metric that SUMs it (declares non_additive_dimensions).
+    Parsed from each such metric's bindings (the column inside its SUM)."""
+    out: dict[str, "Metric"] = {}
+    for sa in org.subject_areas:
+        metrics = list(sa.metrics)
+        for mm in metrics:
+            if not mm.non_additive_dimensions:
+                continue
+            for binding in (mm.bindings or {}).values():
+                try:
+                    frag = sqlglot.parse_one(binding, error_level="ignore")
+                except Exception:
+                    continue
+                if frag is None:
+                    continue
+                for agg in frag.find_all(exp.Sum):
+                    col = _bare_aggregate_column(agg)
+                    if col is not None:
+                        out.setdefault(col.name, mm)
+    return out
+
+
+def _groups_by_time(tree: "exp.Select", scope: dict[str, str],
+                    colidx: dict[str, dict[str, Column]]) -> bool:
+    """Does the query GROUP BY a time grain — a date/timestamp column, or a
+    DATE_TRUNC/EXTRACT/TO_CHAR/DATE_PART over one?"""
+    grp = tree.args.get("group")
+    if not grp:
+        return False
+    for col in grp.find_all(exp.Column):
+        c = _lookup_column(col, scope, colidx)
+        if c and (c.type in ("date", "timestamp", "time") or c.date_format):
+            return True
+    return False
+
+
+def _check_aggregation_semantics(
+    tree: "exp.Select", org: Organization, scope: dict[str, str], sql: str
+) -> Optional[PreFlightResult]:
+    colidx = _column_index(org)
+
+    # --- #2: aggregation-class violations (SUM of a rate/id, AVG of an id) ---
+    for select_expr in tree.expressions:
+        for agg in select_expr.find_all(exp.AggFunc):
+            is_sum, is_avg = isinstance(agg, exp.Sum), isinstance(agg, exp.Avg)
+            if not (is_sum or is_avg):
+                continue  # COUNT / MIN / MAX are fine even on dimensions
+            col = _bare_aggregate_column(agg)
+            if col is None:
+                continue
+            c = _lookup_column(col, scope, colidx)
+            if c is None:
+                continue
+            cls = getattr(c, "aggregation", "unknown")
+            bad = (is_sum and cls in ("averageable", "dimension")) or (is_avg and cls == "dimension")
+            if bad:
+                verb = "SUM" if is_sum else "AVG"
+                return PreFlightResult(
+                    "bad_aggregation", "refuse", sql,
+                    reason=(
+                        f"{verb}({col.name}) is meaningless: {col.name!r} is classified "
+                        f"`{cls}` ("
+                        + ("a rate/ratio/price — summing it has no meaning"
+                           if cls == "averageable"
+                           else "an identifier/code, not a measure")
+                        + ")."
+                    ),
+                    suggestion=(
+                        "Average it instead of summing"
+                        if cls == "averageable"
+                        else f"{col.name!r} is a dimension — GROUP BY it or COUNT it, don't aggregate its value"
+                    ),
+                )
+
+    # --- #3: semi-additive measure summed over time ---
+    semi = _semi_additive_columns(org)
+    if semi and _groups_by_time(tree, scope, colidx):
+        for select_expr in tree.expressions:
+            for agg in select_expr.find_all(exp.Sum):
+                col = _bare_aggregate_column(agg)
+                if col is not None and col.name in semi:
+                    mm = semi[col.name]
+                    how = mm.semi_additive_agg or "last"
+                    return PreFlightResult(
+                        "semi_additive", "refuse", sql,
+                        reason=(
+                            f"SUM({col.name}) across time is wrong: {col.name!r} backs the "
+                            f"semi-additive metric {mm.name!r} ({mm.non_additive_dimensions}) — "
+                            "summing a stock over a date grain multiplies it."
+                        ),
+                        suggestion=(
+                            f"Take the period-end value ({how}) per entity over time "
+                            f"(e.g. window function), then sum across entities — or drop the time grouping."
+                        ),
+                    )
+    return None
 
 
 # ---------------------------------------------------------------------------
