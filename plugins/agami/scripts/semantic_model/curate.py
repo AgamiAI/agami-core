@@ -140,6 +140,19 @@ def all_items(org: Organization, *, scope: str = "all") -> list[dict]:
 
 _MIN_GATE_COLS = 2  # below this a table is too small to confidently call "skipped"
 
+# A blank column whose NAME makes its meaning self-evident (keys, audit cols, flags) may
+# stay blank by design. A blank column whose name is NOT self-evident is a SKIPPED
+# meaningful column — enrichment should have described it or marked it `ai_unknown`. This
+# is what makes the gate able to tell "intentionally blank" from "the pass didn't finish".
+_SELF_EVIDENT_NAME_RE = re.compile(
+    r"^(id|.*_id|.*_no|.*_uuid|.*_guid|.*_key|created.*|modified.*|updated.*|deleted.*|"
+    r".*_at|.*_by|.*_date|.*_ts|.*_time|.*timestamp|is_.*|has_.*|.*_flag)$",
+    re.IGNORECASE,
+)
+# More than this many skipped-meaningful columns in one table ⇒ under-enriched. A couple of
+# genuinely-ambiguous columns are tolerated; a wall of them means the column pass stopped early.
+_MEANINGFUL_BLANK_TOLERANCE = 2
+
 
 def column_coverage(org: Organization) -> dict:
     """Per-table column-description coverage — the enrichment-completeness check.
@@ -152,19 +165,25 @@ def column_coverage(org: Organization) -> dict:
     columns worth a line). A table enrichment **never ran on** has ZERO — that's the
     failure mode where the model got table descriptions but no column pass.
 
-    A table is `unenriched` when `described == 0 AND ai_unknown == 0` and it has at
-    least `_MIN_GATE_COLS` columns. `ok` is true when no kept table is unenriched.
-    Rejected tables/columns are excluded. `coverage_pct` (described / columns) is
-    informational — self-evident blanks legitimately hold it below 100%, so it is
-    surfaced for the eye, not gated on."""
+    Two failure modes gate `ok`:
+      - `unenriched` — a table with `described == 0 AND ai_unknown == 0` (≥ `_MIN_GATE_COLS`
+        columns): the column pass never ran on it.
+      - `under_enriched` — a table the pass touched but which still has more than
+        `_MEANINGFUL_BLANK_TOLERANCE` blank columns whose NAMES aren't self-evident (not
+        `*_id`/`*_date`/`created_*`/…). Those are SKIPPED meaningful columns — the pass should
+        have described them or marked them `ai_unknown`. `blank_meaningful_columns` names them.
+    `ok` is true only when neither list has entries. Rejected tables/columns are excluded.
+    `coverage_pct` stays informational — self-evident blanks legitimately hold it below 100%."""
     tables: list[dict] = []
-    tot = {"columns": 0, "described": 0, "ai_unknown": 0, "blank": 0}
+    tot = {"columns": 0, "described": 0, "ai_unknown": 0, "blank": 0, "meaningful_blank": 0}
     unenriched: list[str] = []
+    under_enriched: list[str] = []
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             if getattr(t, "review_state", "approved") == "rejected":
                 continue
-            described = ai_unknown = blank = 0
+            described = ai_unknown = blank = meaningful_blank = 0
+            blank_meaningful_names: list[str] = []
             for c in t.columns:
                 if getattr(c, "review_state", "approved") == "rejected":
                     continue
@@ -176,27 +195,39 @@ def column_coverage(org: Organization) -> dict:
                     ai_unknown += 1
                 else:                                  # blank + no source: self-evident OR skipped
                     blank += 1
+                    if not _SELF_EVIDENT_NAME_RE.match(c.name):
+                        meaningful_blank += 1
+                        blank_meaningful_names.append(c.name)
             n = described + ai_unknown + blank
             enriched = (described + ai_unknown) > 0
+            # under-enriched: the pass touched the table but left a wall of meaningful columns blank
+            is_under = enriched and meaningful_blank > _MEANINGFUL_BLANK_TOLERANCE
             tables.append({
                 "area": sa.name, "table": t.name, "columns": n,
                 "described": described, "ai_unknown": ai_unknown, "blank": blank,
+                "meaningful_blank": meaningful_blank,
+                "blank_meaningful_columns": blank_meaningful_names,
                 "coverage_pct": round(100 * described / n) if n else 100,
-                "enriched": enriched,
+                "enriched": enriched, "under_enriched": is_under,
             })
             if not enriched and n >= _MIN_GATE_COLS:
                 unenriched.append(t.name)
+            elif is_under:
+                under_enriched.append(t.name)
             tot["columns"] += n
             tot["described"] += described
             tot["ai_unknown"] += ai_unknown
             tot["blank"] += blank
-    tables.sort(key=lambda x: (x["enriched"], x["table"]))   # unenriched tables first
+            tot["meaningful_blank"] += meaningful_blank
+    # worst first: unenriched, then under-enriched, then by table
+    tables.sort(key=lambda x: (x["enriched"], not x["under_enriched"], x["table"]))
     tot["coverage_pct"] = round(100 * tot["described"] / tot["columns"]) if tot["columns"] else 100
     return {
         "tables": tables,
         "totals": tot,
         "unenriched_tables": unenriched,
-        "ok": not unenriched,
+        "under_enriched_tables": under_enriched,
+        "ok": not unenriched and not under_enriched,
     }
 
 
