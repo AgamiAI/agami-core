@@ -9,9 +9,9 @@ Two categories of Python scripts ship with agami:
 
 | Script | What it does | Requires |
 |---|---|---|
-| `execute_sql.py` | Reads `~/.agami/credentials`, opens a connection, runs ONE SQL statement, emits RFC 4180 CSV on stdout. Supports postgres / mysql / sqlite. Hard-exits with a clear message if credentials are missing — never asks in chat. | One of: `psycopg2-binary` (postgres), `pymysql` (mysql); sqlite uses stdlib |
+| `execute_sql.py` | Reads `<artifacts_dir>/local/credentials`, opens a connection, runs ONE SQL statement, emits RFC 4180 CSV on stdout. Supports postgres / mysql / sqlite. Hard-exits with a clear message if credentials are missing — never asks in chat. | One of: `psycopg2-binary` (postgres), `pymysql` (mysql); sqlite uses stdlib |
 | `mcp_server.py` | **Optional** local stdio MCP server (`agami serve`) — exposes the local semantic model + read-only local SQL execution over the Model Context Protocol, so agami can be used from Claude Code / Claude Desktop and not just inside the plugin. Pure stdlib; routes execution through `execute_sql.py`; no network, no auth, no telemetry. See [`docs/mcp-server.md`](../../../docs/mcp-server.md). | stdlib only (plus the relevant `execute_sql.py` driver for non-SQLite DBs) |
-| `setup_desktop_mcp.py` | One-command wiring of `mcp_server.py` into the Claude Desktop app (used by the `agami-serve` skill). Auto-detects the right Python interpreter, copies the two self-contained server files to a stable `~/.agami/serve/`, and safely merges the entry into `claude_desktop_config.json` (timestamped backup + atomic write, preserving every other key). `--dry-run` previews; `--in-place` skips the copy for dev checkouts. | stdlib only |
+| `setup_desktop_mcp.py` | One-command wiring of `mcp_server.py` into the Claude Desktop app (used by the `agami-serve` skill). Auto-detects the right Python interpreter, copies the two self-contained server files to a stable `<artifacts_dir>/local/serve/`, and safely merges the entry into `claude_desktop_config.json` (timestamped backup + atomic write, preserving every other key). `--dry-run` previews; `--in-place` skips the copy for dev checkouts. | stdlib only |
 
 The agami skill calls `execute_sql.py` via:
 
@@ -47,7 +47,7 @@ python render_chart.py \
   --title "Top customers" \
   --summary "" \
   --section '{"title":"Top customers by spend","insights":"Carol Chen leads at $148.95.","chart_type":"bar","labels":["Carol Chen","Dave Davis","Bob Brown"],"datasets":[{"label":"Spend","data":[148.95,93.96,45.0]}],"table_headers":["Customer","Spend"],"table_rows":[["Carol Chen",148.95],["Dave Davis",93.96],["Bob Brown",45.0]]}' \
-  --out ~/.agami/charts/top-customers.html
+  --out <artifacts_dir>/local/charts/top-customers.html
 ```
 
-These helpers work without any other agami code installed — they read `~/.agami/credentials` and `~/.agami/.config` themselves.
+These helpers work without any other agami code installed — they read `<artifacts_dir>/local/credentials` and `<artifacts_dir>/local/.config` themselves.

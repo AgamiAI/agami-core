@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 from promote_credentials import promote  # noqa: E402
 
 _FILLED = """\
-# ~/.agami/credentials.example
+# <artifacts_dir>/local/credentials.example
 [main]
 type     = postgres
 host     = db.example.com

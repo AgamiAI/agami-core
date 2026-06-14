@@ -7,7 +7,7 @@ Today that means **Claude Code** (`claude mcp add`) and **Claude Desktop**
 (`claude_desktop_config.json`).
 
 This is the local mirror of Agami's hosted "Ask Agami" connector: the same tool
-surface, but backed by your local `~/.agami` files and local DB execution instead
+surface, but backed by your local `<artifacts_dir>/local` files and local DB execution instead
 of a cloud registry. Going from this local server → the hosted team product is a
 *backend swap*, not a new product.
 
@@ -28,14 +28,14 @@ Five tools, mirroring the hosted connector so the client experience is identical
 | `get_datasource_schema` | Return the semantic model: the subject-area index, full per-table detail for requested `dataset_names`, plus `ORGANIZATION.md` / `USER_MEMORY.md`. |
 | `get_prompt_examples` | Return the curated `examples.yaml` few-shot library. |
 | `execute_sql` | Run **one read-only** `SELECT` / `WITH...SELECT` locally and return `{columns, rows, row_count, ...}`. DML/DDL/multi-statement are rejected. |
-| `log_feedback` | Append thumbs-up/down to `~/.agami/feedback.jsonl`. |
+| `log_feedback` | Append thumbs-up/down to `<artifacts_dir>/local/feedback.jsonl`. |
 
 The NL→SQL *intelligence* stays on the client side (the model generates SQL from
 the schema + examples these tools return) — exactly as with the hosted connector.
 
 ## Prerequisites
 
-- You've already run `agami-connect` (so `~/.agami/credentials` and a model under
+- You've already run `agami-connect` (so `<artifacts_dir>/local/credentials` and a model under
   `<artifacts_dir>/<profile>/` exist).
 - A **Python driver** for your database, because the server executes via
   `execute_sql.py` (the Tier-3 Python path):
@@ -87,7 +87,7 @@ It removes all three sharp edges of hand-editing:
 - **auto-detects the right Python** — the interpreter that can actually import your
   DB driver (the GUI-PATH gotcha, solved);
 - **copies the two self-contained files** (`mcp_server.py` + `execute_sql.py`) to a
-  stable `~/.agami/serve/`, so the Desktop config survives plugin updates and keeps
+  stable `<artifacts_dir>/local/serve/`, so the Desktop config survives plugin updates and keeps
   working even if the plugin is uninstalled;
 - **safely merges** the entry into `claude_desktop_config.json` — timestamped
   backup, atomic write, every other key and MCP server preserved.
@@ -140,7 +140,7 @@ over stdin/stdout — **there is no URL and no port.** Logs:
 `%APPDATA%\Claude\logs\mcp-server-agami.log` on Windows.
 
 > **Containment — confirmed working (verified 2026-06 on the macOS app).** A
-> custom stdio MCP server runs with your full user access: it reads `~/.agami`
+> custom stdio MCP server runs with your full user access: it reads `<artifacts_dir>/local`
 > and executes SQL against your DB from inside the Mac app, no directory-mount
 > prompt required. (The "mount a directory" sandbox applies to Claude's *built-in*
 > file tools, not custom MCP servers.) This is app-version-dependent, so if a
@@ -161,7 +161,7 @@ A stdio MCP server has **no authentication**, and that is correct:
 
 - The transport is a child process the client launches **as you**, communicating
   over OS pipes. The trust boundary is your OS user account — the server reads the
-  same `~/.agami/credentials` you already have. There is nothing to authenticate
+  same `<artifacts_dir>/local/credentials` you already have. There is nothing to authenticate
   *to*. (The MCP spec defines auth for the *HTTP* transport, not stdio.)
 - It does **not** widen your attack surface beyond already having `psql` + a
   `.pgpass` on your laptop.

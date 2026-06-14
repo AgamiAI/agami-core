@@ -21,19 +21,19 @@ sqlite3 shop.db "SELECT name FROM sqlite_master WHERE type='table';"
 Then point agami at it (in Claude Code or by hand):
 
 ```ini
-# ~/.agami/credentials
+# <artifacts_dir>/local/credentials
 [default]
 db_type = sqlite
 path    = <absolute path to shop.db>
 ```
 
-Set `chmod 600 ~/.agami/credentials`.
+Set `chmod 600 <artifacts_dir>/local/credentials`.
 
 ---
 
 ## 1. `/agami-connect` Phase 0a — credential preflight
 
-The credential-setup path that used to live in a separate `/agami-init` skill is now Phase 0a of `/agami-connect`. The first time you invoke `/agami-connect` after a fresh install (no `~/.agami/credentials` present), it should drop into Phase 0a: DB-type picker → write `~/.agami/credentials.example` → exit cleanly.
+The credential-setup path that used to live in a separate `/agami-init` skill is now Phase 0a of `/agami-connect`. The first time you invoke `/agami-connect` after a fresh install (no `<artifacts_dir>/local/credentials` present), it should drop into Phase 0a: DB-type picker → write `<artifacts_dir>/local/credentials.example` → exit cleanly.
 
 **Pass criteria:** the credentials check passes on the second invocation, tool detection succeeds (`sqlite3` on `PATH`).
 
@@ -80,7 +80,7 @@ Watch for the new behavior:
 
 (The former `/agami-review` is now the **Review** tab of the model dashboard.) Watch for:
 
-- **HTML dashboard rendered** at `~/.agami/model/<profile>/<ts>.html`, opened on the **Review** tab. Open it.
+- **HTML dashboard rendered** at `<artifacts_dir>/local/model/<profile>/<ts>.html`, opened on the **Review** tab. Open it.
 - The Review tab splits into **Needs your eyes** (Rule 1 metrics, low-confidence, stale) and **Looks right (confident)**, each with an "Approve all N" button.
 - Each card has: title, confidence + review-state badges, the source signal (metric `calculation` / join cardinality / entity mapping), and Approve / Reject / Edit buttons.
 - **Approve via the dashboard → "Generate feedback for Claude":** click Approve on a metric, generate the feedback block, paste it back. It contains `curate-ops:` with `{"op":"approve","kind":"metric",...,"at":"<UTC ISO>"}`.

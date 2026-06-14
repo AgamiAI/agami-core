@@ -37,7 +37,7 @@ Ask plain-English questions of your **Postgres / MySQL / Snowflake / BigQuery / 
 
 Most NL→SQL tools either send your data through a hosted backend (Snowflake-flavored ChatBI, Hex, etc.) or require a heavy local install (a database proxy, a fine-tuned model, a Python package). `agami` does neither — and goes further: it gives a data engineer the mechanical primitives to verify *why* an answer is correct, not just whether it ran.
 
-- **Local execution.** The skill reads your `~/.agami/credentials` file, runs SQL through your existing `psql` / `mysql` / `snowsql` / `bq` / `sqlite3` / DuckDB binary, parses the rows, and shows you the answer. No data path through any server we operate.
+- **Local execution.** The skill reads your `<artifacts_dir>/local/credentials` file, runs SQL through your existing `psql` / `mysql` / `snowsql` / `bq` / `sqlite3` / DuckDB binary, parses the rows, and shows you the answer. No data path through any server we operate.
 - **Zero infra.** Just a Claude Code skill plugin and a tree of YAML files under `~/agami-artifacts/<profile>/`. If you have a DB CLI, you have everything you need.
 - **Diffable, git-native.** The semantic model is YAML under `~/agami-artifacts/<profile>/` (`org.yaml` + `subject_areas/<area>/…`). `agami-connect` runs `git init` on that tree and commits each introspect — every model change is a diff you can review, blame, and revert.
 - **Snapshot-pinned answers.** Every query records the model snapshot hash it ran against. Old answers reproduce exactly. Schema drift flips affected entries to `stale` instead of silently changing the number.
@@ -113,7 +113,7 @@ Every `agami-query` answer includes a "Provenance for this answer" panel:
 
 ### Examples validation
 
-Phase 5 of `agami-connect` generates 10–12 NL→SQL seed examples that each satisfy one of five **analytical shapes**: aggregation with a measure, segmentation, time comparison, filtered top-N with context, or cohort / retention. Plain row-listing is disqualified. Each seed is EXPLAIN-validated against the live DB, then surfaced in an examples-validation dashboard (`~/.agami/examples-validation/<ts>.html`) — same per-card pattern as the review dashboard, with Validate / Reject / Edit / Add note buttons + an inline "Add example" affordance.
+Phase 5 of `agami-connect` generates 10–12 NL→SQL seed examples that each satisfy one of five **analytical shapes**: aggregation with a measure, segmentation, time comparison, filtered top-N with context, or cohort / retention. Plain row-listing is disqualified. Each seed is EXPLAIN-validated against the live DB, then surfaced in an examples-validation dashboard (`<artifacts_dir>/local/examples-validation/<ts>.html`) — same per-card pattern as the review dashboard, with Validate / Reject / Edit / Add note buttons + an inline "Add example" affordance.
 
 ---
 
@@ -124,14 +124,14 @@ Phase 5 of `agami-connect` generates 10–12 NL→SQL seed examples that each sa
 #    per host. CLI uses /plugin marketplace add; VS Code and Cursor use the
 #    "Manage Plugins" dialog.
 
-# 2. Run connect — picks your DB type, writes ~/.agami/credentials.example
+# 2. Run connect — picks your DB type, writes <artifacts_dir>/local/credentials.example
 #    (first time only; subsequent runs introspect directly)
 /agami-connect
 
 # 3. Edit the template with your DB connection details
-$EDITOR ~/.agami/credentials.example
-mv ~/.agami/credentials.example ~/.agami/credentials
-chmod 600 ~/.agami/credentials
+$EDITOR <artifacts_dir>/local/credentials.example
+mv <artifacts_dir>/local/credentials.example <artifacts_dir>/local/credentials
+chmod 600 <artifacts_dir>/local/credentials
 
 # 4. Re-run connect to introspect: build the semantic model + seed examples
 /agami-connect
@@ -206,9 +206,9 @@ Detailed walkthrough: [`docs/install/claude-code-cursor.md`](docs/install/claude
 
 ## Setup credentials
 
-`agami` reads database connection details from `~/.agami/credentials`. Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`.
+`agami` reads database connection details from `<artifacts_dir>/local/credentials`. Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`.
 
-`/agami-connect` creates a template at `~/.agami/credentials.example` on first run (its Phase 0a — formerly the separate `/agami-init` skill). Edit it and save as `~/.agami/credentials`:
+`/agami-connect` creates a template at `<artifacts_dir>/local/credentials.example` on first run (its Phase 0a — formerly the separate `/agami-init` skill). Edit it and save as `<artifacts_dir>/local/credentials`:
 
 ```ini
 [default]
@@ -223,7 +223,7 @@ password = mypassword
 Then **make it readable only by you**:
 
 ```bash
-chmod 600 ~/.agami/credentials
+chmod 600 <artifacts_dir>/local/credentials
 ```
 
 `agami` refuses to read the file unless it's `chmod 600` — the same protection `ssh` uses for private keys.
@@ -326,12 +326,12 @@ The skill picks the first available connection method, in this order:
 
 | Command | What it does |
 |---|---|
-| `/agami-connect` | **One-stop setup + introspect.** First run: detects missing credentials, runs the DB-type picker (Postgres / Supabase / Redshift / MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks / Trino / DuckDB / SQLite), writes `~/.agami/credentials.example` for you to fill in, verifies the connection method, and ends the turn. Re-invoke after filling in the file → introspects the live DB **directly into the semantic model** at `~/agami-artifacts/<profile>/` (subject areas, tables, columns, primary-key grain, foreign-key relationships with join cardinality, deep-table column groups, sensitive-column flags) — in catalog mode, or a probe-mode fallback when the catalog is locked down — then layers LLM enrichment (descriptions, entities, metrics), generates EXPLAIN-validated seed examples, and opens the examples-validation dashboard. Validator-gated; runs `git init` and snapshots under `.snapshots/<hash>/`. |
+| `/agami-connect` | **One-stop setup + introspect.** First run: detects missing credentials, runs the DB-type picker (Postgres / Supabase / Redshift / MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks / Trino / DuckDB / SQLite), writes `<artifacts_dir>/local/credentials.example` for you to fill in, verifies the connection method, and ends the turn. Re-invoke after filling in the file → introspects the live DB **directly into the semantic model** at `~/agami-artifacts/<profile>/` (subject areas, tables, columns, primary-key grain, foreign-key relationships with join cardinality, deep-table column groups, sensitive-column flags) — in catalog mode, or a probe-mode fallback when the catalog is locked down — then layers LLM enrichment (descriptions, entities, metrics), generates EXPLAIN-validated seed examples, and opens the examples-validation dashboard. Validator-gated; runs `git init` and snapshots under `.snapshots/<hash>/`. |
 | `/agami-query` | Answers a NL question. Picks examples + relationships, generates SQL, runs it, formats the result, and surfaces a SQL receipt panel (provenance + model-version pin). If it uses an unreviewed metric / join / entity, it still answers but flags each as a warning on the receipt. (You usually don't need to type this — natural language routes here.) |
 | `/agami-model` | **One dashboard to browse, curate, AND sign off the model.** A static HTML browser with tabs (Organization · Review · Tables · Metrics · Entities · Joins · Examples · Queued), live search, and per-tab status filters. **Browse/curate:** every table / field / metric / entity / join with descriptions; per-table + per-column **Exclude / Include**; edit any description / metric / entity / join; add new metrics; edit `ORGANIZATION.md`. **Review (the former `/agami-review`):** the Review tab is the trust-layer sign-off queue — **Approve / Reject** metrics (Rule 1 — answers that use an unsigned one carry a warning until you approve it), entities, and inferred joins (Rule 2, lazy), with a one-click "Approve all" for the confident ones. Excluded/rejected entries drop out of the runtime model (joins, prompts, aggregates) but stay in the YAML for audit. Open it on the queue with `/agami-model review`. All actions queue into one "Generate feedback for Claude" block; the engine validates + commits each batch. |
 | `/agami-save-correction` | Records a correction and routes it to the right destination via a 5-way classifier: SQL pattern → `examples.yaml`; per-column meaning / value normalization → the column's `description` / `choice_field` in the semantic model; cross-DB display preference → `USER_MEMORY.md`; abstract business concept tied to this DB → `ORGANIZATION.md`; new reusable aggregation → `metric` in the semantic model. Surfaces the classification + destination + reasoning before writing, so you can override. The next answer that uses the correction surfaces its attribution in the receipt. |
 | `/agami-reconcile` | Reconciliation harness: point it at a legacy dashboard's CSV (label → number rows) and it generates each NL question, runs it through agami, and shows a side-by-side diff with tolerances. Use to validate the model against numbers you already trust. |
-| `/agami-serve` | **Use agami from the Claude Desktop app**, not just Claude Code. Wires up the optional local MCP server (`scripts/mcp_server.py`) in one step: auto-detects the right Python, copies the self-contained server to a stable `~/.agami/serve/`, and safely merges into `claude_desktop_config.json` (timestamped backup, every other key preserved). The server exposes the same tools as the hosted Agami connector, backed by your local model + local execution — stdio only, read-only SQL, no network, no auth. See [docs/mcp-server.md](docs/mcp-server.md). |
+| `/agami-serve` | **Use agami from the Claude Desktop app**, not just Claude Code. Wires up the optional local MCP server (`scripts/mcp_server.py`) in one step: auto-detects the right Python, copies the self-contained server to a stable `<artifacts_dir>/local/serve/`, and safely merges into `claude_desktop_config.json` (timestamped backup, every other key preserved). The server exposes the same tools as the hosted Agami connector, backed by your local model + local execution — stdio only, read-only SQL, no network, no auth. See [docs/mcp-server.md](docs/mcp-server.md). |
 
 Natural-language phrasing routes to each skill automatically — "open the review dashboard" / "save this as a correction" / "introspect my schema" all work without typing the slash command.
 
@@ -344,14 +344,14 @@ $ /agami-connect
 [Phase 0: preflight — no credentials yet, running first-time setup]
 > Pick your database: PostgreSQL · MySQL · Snowflake · BigQuery · Other
 You: Snowflake
-✓ Wrote ~/.agami/credentials.example with a [main] section for Snowflake.
+✓ Wrote <artifacts_dir>/local/credentials.example with a [main] section for Snowflake.
   Fill it in (account, user, password OR authenticator=externalbrowser,
-  warehouse, role, database, schema) then save as ~/.agami/credentials.
+  warehouse, role, database, schema) then save as <artifacts_dir>/local/credentials.
 
 # After filling in the file:
 $ /agami-connect
 [Phase 0: preflight]
-  ✓ ~/.agami/credentials present (chmod 600)
+  ✓ <artifacts_dir>/local/credentials present (chmod 600)
   ✓ Tier detected: snowsql (Tier 2 — native CLI)
 
 [Phase 1: introspect]
@@ -378,7 +378,7 @@ $ /agami-connect
   approved truth instead of LLM guesses.
 
   Opening Rule 1 review dashboard…
-  ~/.agami/review/main/20260511-204100.html
+  <artifacts_dir>/local/review/main/20260511-204100.html
 
 You (in dashboard): click Approve on 6 metrics by you@example.com role=data_lead,
                     Edit 1 (calculation tweak), Reject 1.
@@ -394,7 +394,7 @@ You (in dashboard): click Approve on 6 metrics by you@example.com role=data_lead
   ✓ Generated 11 seed examples (≥6 multi-table, ≥1 time-comparison shape)
 
 [Phase 5: examples validation]
-  Rendered dashboard: ~/.agami/examples-validation/main/20260511-204500.html
+  Rendered dashboard: <artifacts_dir>/local/examples-validation/main/20260511-204500.html
 
 You (in chat): validate 1, 3, 4, 5, 7 by you@example.com
                edit 8 sql>>>
@@ -500,7 +500,7 @@ Charts are produced by default for every query result. To request a specific sha
 You: make that a bar chart by customer
 ```
 
-The skill writes `~/.agami/charts/<ts>.html` — self-contained Chart.js, the SQL receipt embedded as a collapsible panel. Supported: `bar`, `line`, `pie`, `doughnut`, `scatter`. Tables paginate at 20 rows.
+The skill writes `<artifacts_dir>/local/charts/<ts>.html` — self-contained Chart.js, the SQL receipt embedded as a collapsible panel. Supported: `bar`, `line`, `pie`, `doughnut`, `scatter`. Tables paginate at 20 rows.
 
 ### Export to CSV
 
@@ -508,7 +508,7 @@ The skill writes `~/.agami/charts/<ts>.html` — self-contained Chart.js, the SQ
 You: export this
 ```
 
-Writes the full result (no row cap) to `~/.agami/exports/<ts>.csv`.
+Writes the full result (no row cap) to `<artifacts_dir>/local/exports/<ts>.csv`.
 
 ### Reconcile against a legacy dashboard
 
@@ -575,7 +575,7 @@ Every introspect writes the canonical model to `~/agami-artifacts/<profile>/.sna
 AGAMI_PROFILE=staging
 ```
 
-Or in chat: *"switch to the staging profile"*. Per-profile artifacts live under `~/agami-artifacts/<profile>/`; credentials live in the same `~/.agami/credentials` file but under a different `[<profile>]` section.
+Or in chat: *"switch to the staging profile"*. Per-profile artifacts live under `~/agami-artifacts/<profile>/`; credentials live in the same `<artifacts_dir>/local/credentials` file but under a different `[<profile>]` section.
 
 ---
 
@@ -584,12 +584,12 @@ Or in chat: *"switch to the staging profile"*. Per-profile artifacts live under 
 `agami` runs entirely locally.
 
 What lives on your machine:
-- `~/.agami/credentials` (chmod 600) — DB connection details. Never read by anything outside the skill scripts in this repo.
-- `~/.agami/.config` — your reviewer email + role (for trust-layer sign-offs) and optional `artifacts_dir` override.
+- `<artifacts_dir>/local/credentials` (chmod 600) — DB connection details. Never read by anything outside the skill scripts in this repo.
+- `<artifacts_dir>/local/.config` — your reviewer email + role (for trust-layer sign-offs). The artifacts-dir location is the `~/.config/agami/path` pointer (or `AGAMI_ARTIFACTS_DIR`).
 - `~/agami-artifacts/<profile>/` — the semantic model (org.yaml + subject_areas/), examples, ORGANIZATION.md, snapshots, curation log, `corrections.jsonl`, `.git/` history.
-- `~/.agami/charts/<profile>/<ts>.html` — rendered charts (per profile).
-- `~/.agami/exports/<profile>/<ts>.csv` — CSV exports (per profile).
-- `~/.agami/review/<profile>/<ts>.html`, `~/.agami/examples-validation/<profile>/<ts>.html`, `~/.agami/model/<profile>/<ts>.html` — dashboards (per profile).
+- `<artifacts_dir>/local/charts/<profile>/<ts>.html` — rendered charts (per profile).
+- `<artifacts_dir>/local/exports/<profile>/<ts>.csv` — CSV exports (per profile).
+- `<artifacts_dir>/local/review/<profile>/<ts>.html`, `<artifacts_dir>/local/examples-validation/<profile>/<ts>.html`, `<artifacts_dir>/local/model/<profile>/<ts>.html` — dashboards (per profile).
 
 The skill never reads files outside those paths (except your DB tool's auth config — `~/.pg_service.conf`, `~/.snowsql/config`, etc. — which it sets up on first connect with your permission).
 
@@ -599,7 +599,7 @@ The skill never reads files outside those paths (except your DB tool's auth conf
 
 Claude Code prompts for permission the first time it runs a Bash command pattern. agami ships its allowlist as part of the plugin's `.claude/settings.json` — when you install agami via the marketplace, the host picks up these defaults automatically. No copy-paste step needed.
 
-The shipped allowlist covers the common agami invocation shapes: `psql` / `mysql` / `snowsql` with auth files, the bundled scripts (`execute_sql.py` / `setup_pgauth.py` / `render_chart.py` / `build_duckdb_attach.py` / the `semantic_model` package), `mkdir`/`chmod` on `~/.agami/` and `~/agami-artifacts/`, `open` on chart files, and the GitHub-star ask URL. It does NOT auto-allow arbitrary `psql` / `mysql` invocations against your DB — only the wrapper scripts that read credentials safely.
+The shipped allowlist covers the common agami invocation shapes: `psql` / `mysql` / `snowsql` with auth files, the bundled scripts (`execute_sql.py` / `setup_pgauth.py` / `render_chart.py` / `build_duckdb_attach.py` / the `semantic_model` package), `mkdir`/`chmod` on `<artifacts_dir>/local/` and `~/agami-artifacts/`, `open` on chart files, and the GitHub-star ask URL. It does NOT auto-allow arbitrary `psql` / `mysql` invocations against your DB — only the wrapper scripts that read credentials safely.
 
 To override per-user (e.g., to add commands you trust beyond agami), put them in `~/.claude/settings.local.json` — Claude Code merges that on top of the shipped allowlist. That file is gitignored; your additions stay private.
 
@@ -607,7 +607,7 @@ To override per-user (e.g., to add commands you trust beyond agami), put them in
 
 | Symptom | Fix |
 |---|---|
-| `~/.agami/credentials must be chmod 600` | `chmod 600 ~/.agami/credentials` |
+| `<artifacts_dir>/local/credentials must be chmod 600` | `chmod 600 <artifacts_dir>/local/credentials` |
 | `psql: command not found` | `brew install postgresql` (or use DuckDB: `brew install duckdb`) |
 | `mysql: command not found` | `brew install mysql` (or DuckDB) |
 | `bq: command not found` | Install the [`gcloud` SDK](https://cloud.google.com/sdk/docs/install) and run `gcloud components install bq`. Or `pip install google-cloud-bigquery` for the Python path. |
@@ -631,7 +631,7 @@ If you hit a case not in the table, file an issue at [github.com/AgamiAI/LiteBi/
 - **Trust block** — every relationship + metric (and, for exclusion, every table/column/entity) carries `confidence` (confirmed/inferred/proposed), `review_state`, and `signed_off_by/at/role`. The validator + curation engine live in `plugins/agami/scripts/semantic_model/` (`validator.py`, `curate.py`).
 - **File layout** ([`plugins/agami/shared/file-layout.md`](plugins/agami/shared/file-layout.md)) — what lives where under `~/agami-artifacts/<profile>/` and how the snapshot directory works.
 - **Examples library YAML** — `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`, the NL→SQL few-shot library. Entries carry `source: seed|correction|manual`, `state: unreviewed|validated|rejected`, `validated_by`, `validated_at`.
-- **Credentials INI** ([`plugins/agami/shared/credentials-format.md`](plugins/agami/shared/credentials-format.md)) — `~/.agami/credentials` (all 6 DB types).
+- **Credentials INI** ([`plugins/agami/shared/credentials-format.md`](plugins/agami/shared/credentials-format.md)) — `<artifacts_dir>/local/credentials` (all 6 DB types).
 - **Connection methods** ([`plugins/agami/shared/connection-reference.md`](plugins/agami/shared/connection-reference.md)) — how the skill picks between psql / mysql / snowsql / bq / sqlite3 / DuckDB / Python drivers, including per-tier `SELECT 1` probe invocations.
 - **Introspect queries** ([`plugins/agami/shared/introspect-queries.md`](plugins/agami/shared/introspect-queries.md)) — the dialect-specific INFORMATION_SCHEMA queries each `agami-connect` run uses.
 - **SQL generation rules** ([`plugins/agami/shared/sql-generation-rules.md`](plugins/agami/shared/sql-generation-rules.md)) — safety + grain-guard rules applied before execution.
@@ -644,7 +644,7 @@ Removing the plugin via the Claude Code marketplace UI marks it disabled, but th
 
 ```bash
 # 1. Optional: archive your tuned semantic model first (in case you come back)
-tar czf ~/agami-backup-$(date +%Y%m%d).tar.gz ~/agami-artifacts ~/.agami
+tar czf ~/agami-backup-$(date +%Y%m%d).tar.gz ~/agami-artifacts   # model + local/ (credentials, config) — all in one folder now
 
 # 2. Remove the plugin's on-disk cache (Claude Code doesn't auto-purge this)
 rm -rf ~/.claude/plugins/cache/litebi
@@ -654,7 +654,7 @@ rm -rf ~/.claude/plugins/cache/agami-skills   # only if you also installed our p
 #    Snapshot files are intentionally immutable — chmod first so rm can delete them.
 chmod -R u+w ~/agami-artifacts 2>/dev/null
 rm -rf ~/agami-artifacts                      # semantic model, examples, ORGANIZATION.md, USER_MEMORY.md, .snapshots/, .git/
-rm -rf ~/.agami                               # credentials, .config, charts, exports, review + examples-validation dashboards
+rm -rf <artifacts_dir>/local                               # credentials, .config, charts, exports, review + examples-validation dashboards
 
 # 4. Restart Claude Code (full quit, not just close window)
 ```

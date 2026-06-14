@@ -5,7 +5,7 @@ The script generates a temp DuckDB init file that ATTACHes one or more
 agami profiles for cross-database SQL via DuckDB's postgres_scanner +
 mysql_scanner. The init file must:
 
-- Land in ~/.agami/.duckdb_init_*.sql (chmod 600)
+- Land in <artifacts_dir>/local/.duckdb_init_*.sql (chmod 600)
 - Single-quote-escape passwords correctly
 - Refuse Snowflake federation (snowflake_scanner not in stable DuckDB)
 - Refuse a single-profile call (federation needs ≥ 2)

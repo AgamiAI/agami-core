@@ -1,8 +1,8 @@
 """
 Tests for plugins/agami/scripts/setup_pgauth.py.
 
-The script materializes provider-native auth files (~/.agami/.pgpass and
-~/.agami/.mysql.cnf) from ~/.agami/credentials so psql/mysql can run
+The script materializes provider-native auth files (.pgpass and .mysql.cnf
+under <artifacts_dir>/local/) from the credentials file so psql/mysql can run
 WITHOUT the password ever appearing on a Bash command line.
 
 These tests verify:

@@ -70,11 +70,11 @@ Try invoking it:
 /agami-connect
 ```
 
-On first run, the skill detects there are no credentials and walks you through the DB-type picker, then writes a `~/.agami/credentials.example` template you fill in. (No separate `/agami-init` — the setup flow lives in `/agami-connect` Phase 0a.)
+On first run, the skill detects there are no credentials and walks you through the DB-type picker, then writes a `<artifacts_dir>/local/credentials.example` template you fill in. (No separate `/agami-init` — the setup flow lives in `/agami-connect` Phase 0a.)
 
 ## 6. Set up credentials
 
-`agami-connect` Phase 0a writes a template at `~/.agami/credentials.example`. Edit it with your DB connection, save as `~/.agami/credentials`, run `chmod 600 ~/.agami/credentials`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials) for format.
+`agami-connect` Phase 0a writes a template at `<artifacts_dir>/local/credentials.example`. Edit it with your DB connection, save as `<artifacts_dir>/local/credentials`, run `chmod 600 <artifacts_dir>/local/credentials`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials) for format.
 
 ## Updating
 
@@ -89,7 +89,7 @@ On first run, the skill detects there are no credentials and walks you through t
 /plugin marketplace remove litebi
 ```
 
-Your `~/.agami/` directory and its contents are not touched by uninstall — delete it manually if you want to clean up.
+Your `<artifacts_dir>/local/` directory and its contents are not touched by uninstall — delete it manually if you want to clean up.
 
 ## Troubleshooting
 

@@ -2,7 +2,7 @@
 
 A renderer run as `python3 render_model_explorer.py …` inherits whatever `python3` is on
 PATH — which often lacks PyYAML / the model deps, while agami's *configured* interpreter
-(`~/.agami/.config` → `tool_paths.python3`, the same one the `sm` wrapper resolves) has them.
+(`<artifacts_dir>/local/.config` → `tool_paths.python3`, the same one the `sm` wrapper resolves) has them.
 Importing this module checks for the deps and, if they're missing, re-execs the current
 script under the configured interpreter — so the caller never has to remember to use `$PY`.
 

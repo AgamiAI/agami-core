@@ -13,24 +13,24 @@
 #   <artifacts_dir>/<profile>/.semantic_v2/              (migrate scratch, if present)
 #
 # What gets preserved (default):
-#   ~/.agami/credentials                      DB connection details
-#   ~/.agami/.config                          reviewer email, threshold, etc.
+#   <artifacts_dir>/local/credentials         DB connection details
+#   <artifacts_dir>/local/.config             reviewer email, role, etc.
 #   <artifacts_dir>/USER_MEMORY.md            cross-DB preferences
 #   <artifacts_dir>/<profile>/ORGANIZATION.md domain context the user wrote
 #   <artifacts_dir>/<profile>/.git/           audit trail of past curator edits
 #   <artifacts_dir>/<profile>/.legacy_backup/ legacy (v1) model backed up on upgrade
 #   <artifacts_dir>/<profile>/curation_log.jsonl
 #   <artifacts_dir>/<profile>/corrections.jsonl
-#   ~/.agami/review/                          rendered review dashboards
-#   ~/.agami/examples-validation/             rendered validation dashboards
-#   ~/.agami/model/                           rendered model-explorer dashboards
-#   ~/.agami/charts/                          rendered query charts
+#   <artifacts_dir>/local/review/                          rendered review dashboards
+#   <artifacts_dir>/local/examples-validation/             rendered validation dashboards
+#   <artifacts_dir>/local/model/                           rendered model-explorer dashboards
+#   <artifacts_dir>/local/charts/                          rendered query charts
 #
 # Usage:
 #   dev/reset-yamls.sh                                       # default profile, soft reset
 #   dev/reset-yamls.sh finbud                                # specific profile, soft reset
 #   dev/reset-yamls.sh finbud --hard                         # also drop ORGANIZATION.md + .git/ + logs
-#   dev/reset-yamls.sh finbud --clean-renders                # also drop ~/.agami/<kind>/finbud/* (this profile only)
+#   dev/reset-yamls.sh finbud --clean-renders                # also drop <artifacts_dir>/local/<kind>/finbud/* (this profile only)
 #   dev/reset-yamls.sh finbud --clean-renders-all            # wipe legacy flat-layout files + every profile
 #   dev/reset-yamls.sh finbud --hard --clean-renders         # full per-profile wipe
 #   dev/reset-yamls.sh finbud --dry-run                      # show what would be deleted, do nothing
@@ -73,7 +73,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 PROFILE="${PROFILE:-default}"
-ARTIFACTS_DIR="${AGAMI_ARTIFACTS_DIR:-$HOME/agami-artifacts}"
+ARTIFACTS_DIR="${AGAMI_ARTIFACTS_DIR:-}"
+if [ -z "$ARTIFACTS_DIR" ] && [ -f "$HOME/.config/agami/path" ]; then
+  ARTIFACTS_DIR="$(tr -d '\n' < "$HOME/.config/agami/path")"
+fi
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-$HOME/agami-artifacts}"
 PROFILE_DIR="$ARTIFACTS_DIR/$PROFILE"
 
 if [[ ! -d "$PROFILE_DIR" ]]; then
@@ -92,9 +96,9 @@ action() {
 echo "Resetting YAMLs in $PROFILE_DIR (profile: $PROFILE)"
 echo "  mode: $([[ $HARD -eq 1 ]] && echo 'hard (drops ORGANIZATION.md, .git/, logs)' || echo 'soft (keeps ORGANIZATION.md, .git/, logs)')"
 if [[ $CLEAN_RENDERS_ALL -eq 1 ]]; then
-  echo "  also cleaning ~/.agami/{charts,review,examples-validation,model,exports}/ (ALL profiles + legacy)"
+  echo "  also cleaning <artifacts_dir>/local/{charts,review,examples-validation,model,exports}/ (ALL profiles + legacy)"
 elif [[ $CLEAN_RENDERS -eq 1 ]]; then
-  echo "  also cleaning ~/.agami/{charts,review,examples-validation,model,exports}/$PROFILE/ (this profile only)"
+  echo "  also cleaning <artifacts_dir>/local/{charts,review,examples-validation,model,exports}/$PROFILE/ (this profile only)"
 fi
 [[ $DRY_RUN -eq 1 ]] && echo "  dry-run: nothing will actually be deleted"
 echo ""
@@ -136,19 +140,19 @@ if [[ $HARD -eq 1 ]]; then
   action "rm -f '$PROFILE_DIR/corrections.jsonl'"
 fi
 
-# 5. Optional: nuke accumulated render outputs under ~/.agami/. These pile up
+# 5. Optional: nuke accumulated render outputs under <artifacts_dir>/local/. These pile up
 #    over time (each dashboard re-render writes a new timestamp). They are
 #    regenerable from source, so safe to delete.
 #
 #    --clean-renders        wipes only this profile's renders:
-#                             ~/.agami/<kind>/<profile>/*
+#                             <artifacts_dir>/local/<kind>/<profile>/*
 #    --clean-renders-all    additionally wipes legacy flat-layout files
-#                           at ~/.agami/<kind>/*.{html,csv} (predate the
+#                           at <artifacts_dir>/local/<kind>/*.{html,csv} (predate the
 #                           per-profile subdir change) AND every other
 #                           profile's renders.
 if [[ $CLEAN_RENDERS -eq 1 ]]; then
   for render_dir in charts review examples-validation model exports; do
-    base="$HOME/.agami/$render_dir"
+    base="$ARTIFACTS_DIR/local/$render_dir"
     [[ -d "$base" ]] || continue
 
     if [[ $CLEAN_RENDERS_ALL -eq 1 ]]; then
@@ -173,11 +177,11 @@ echo ""
 echo "✓ Done."
 echo ""
 echo "Always preserved (this script never touches these regardless of flags):"
-echo "  ~/.agami/credentials              DB connection"
-echo "  ~/.agami/.config                  reviewer email, threshold"
+echo "  <artifacts_dir>/local/credentials  DB connection"
+echo "  <artifacts_dir>/local/.config      reviewer email, role"
 echo "  ~/agami-artifacts/USER_MEMORY.md  cross-DB preferences"
 if [[ $CLEAN_RENDERS -eq 0 ]]; then
-  echo "  ~/.agami/review/, charts/, ...    rendered dashboards / charts (pass --clean-renders to nuke)"
+  echo "  <artifacts_dir>/local/review/, charts/, ...    rendered dashboards / charts (pass --clean-renders to nuke)"
 fi
 if [[ $HARD -eq 0 ]]; then
   echo ""
