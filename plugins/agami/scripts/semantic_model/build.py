@@ -69,6 +69,59 @@ def detect_money_column(column_name: str) -> bool:
     return bool(_MONEY_RE.search(column_name)) and not _MONEY_NEGATIVE_RE.search(column_name)
 
 
+# --- aggregation class (the Phase-1 column-intrinsic measure semantics) ------
+
+# Only these column types can be MEASURES at all; everything else (string, date,
+# timestamp, boolean, json, …) is a grouping dimension.
+_NUMERIC_TYPES = frozenset({"integer", "decimal", "float"})
+
+# Identifier / code / calendar / flag tokens → the column is a DIMENSION, never a measure.
+# Deliberately conservative (omit ambiguous num/number/day/week/month) — a miss falls to a
+# safe class downstream, a false dimension would wrongly block a real measure.
+_DIMENSION_RE = re.compile(
+    r"(^|_)(id|guid|uuid|key|code|cd|no|zip|zipcode|pincode|pin|year|fiscal|quarter|"
+    r"status|state|type|category|flag|version|is|has)s?(_|$)",
+    re.IGNORECASE,
+)
+# Rate / ratio / per-unit / index tokens → AVERAGEABLE (AVG/MIN/MAX ok, SUM is meaningless).
+# Checked BEFORE additive so `avg_balance`, `discount_rate`, `cost_per_unit`, `unit_price`
+# resolve to averageable rather than being summed.
+_AVERAGEABLE_RE = re.compile(
+    r"(^|_)(rate|ratio|pct|percent|percentage|avg|average|mean|median|per|price|"
+    r"score|rating|temperature|temp|index|margin|share|utilization|util|occupancy)s?(_|$)",
+    re.IGNORECASE,
+)
+# Quantity / money / volume tokens → ADDITIVE (SUM is meaningful). Includes semi-additive
+# STOCKS (balance, inventory, headcount) — they ARE summable; the time exception is declared
+# on the metric as `non_additive_dimensions` (Phase 2 / #3), not here.
+_ADDITIVE_RE = re.compile(
+    r"(^|_)(amount|amt|total|subtotal|sum|qty|quantity|count|cnt|revenue|sales|cost|"
+    r"spend|spent|value|volume|units|gmv|charge|fee|tax|discount|paid|due|gross|net|"
+    r"profit|income|expense|balance|deposit|withdrawal|refund|credit|debit|payment|"
+    r"inventory|stock|headcount|distance|weight|duration|bytes|size)s?(_|$)",
+    re.IGNORECASE,
+)
+
+
+def classify_aggregation(column_name: str, column_type: str, is_key: bool = False) -> str:
+    """Heuristic column-intrinsic aggregation class — one of additive / averageable /
+    dimension / unknown (see models.Aggregation). Name + type only; advisory, refined by
+    the curator, and `unknown` is never enforced against. Order matters: keys and
+    non-numeric types are dimensions; rate-ish names are averageable; money/quantity names
+    are additive; anything else stays `unknown` (safe — no enforcement)."""
+    if is_key:
+        return "dimension"
+    if column_type not in _NUMERIC_TYPES:
+        return "dimension"
+    if _DIMENSION_RE.search(column_name):
+        return "dimension"
+    if _AVERAGEABLE_RE.search(column_name):
+        return "averageable"
+    if detect_money_column(column_name) or _ADDITIVE_RE.search(column_name):
+        return "additive"
+    return "unknown"
+
+
 def detect_sensitive(table_name: str, column_name: str) -> bool:
     """Strongly-PII column names (email/phone/dob/ssn/address/…) are sensitive
     regardless of table. Weakly-PII names (name/first_name/…) are sensitive only

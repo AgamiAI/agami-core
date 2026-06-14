@@ -192,6 +192,18 @@ def cmd_choice_coverage(args) -> int:
     return 0
 
 
+def cmd_sensitive(args) -> int:
+    """List the columns flagged `sensitive` (PII) that are still queryable — already-
+    excluded ones (a rejected column, or any column under a rejected table) are NOT
+    counted, since they're no longer in the runtime. The agami-connect Phase 4 curate gate
+    uses this count to decide whether to open the explorer (so the gate stops re-opening
+    once the user has excluded the flagged columns)."""
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    _print_json(curate.sensitive_columns(org))
+    return 0
+
+
 def cmd_set_terminology(args) -> int:
     """Write the org-level domain glossary (term -> definition) onto org.yaml's
     `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
@@ -314,28 +326,49 @@ def _preseed_gate(org) -> Optional[dict]:
 
 
 def _coverage_gate(org) -> Optional[dict]:
-    """Enrichment-completeness gate: refuse to seed (or finish) a model that has tables
-    whose columns enrichment never described at all (0 described + 0 ai_unknown). Naked
-    columns degrade the explorer AND every NL→SQL answer (column descriptions are the
-    generator's context). Table-level so it never collides with the deliberate
-    self-evident-blank rule. NOT bypassable: the fix is to run the column pass."""
+    """Enrichment-completeness gate: refuse to seed (or finish) a model whose column pass
+    didn't finish. Two failure modes (see curate.column_coverage):
+      - `columns_unenriched` — a table with NO column descriptions at all (the pass never ran).
+      - `columns_underenriched` — a table the pass touched but which still has a wall of blank
+        columns with non-self-evident names (skipped meaningful columns like `bptype`).
+    Naked columns degrade the explorer AND every NL→SQL answer (descriptions are the
+    generator's context). NOT bypassable: the fix is to finish the column pass."""
     from . import curate
     cov = curate.column_coverage(org)
     if cov["ok"]:
         return None
-    tbls = cov["unenriched_tables"]
+    unenr = cov["unenriched_tables"]
+    if unenr:
+        return {
+            "refused": "columns_unenriched",
+            "table_count": len(unenr),
+            "unenriched_tables": unenr,
+            "coverage_pct": cov["totals"]["coverage_pct"],
+            "message": (
+                f"{len(unenr)} table(s) have NO column descriptions at all — enrichment wrote the "
+                f"table descriptions but skipped the column pass. Run Phase 2's column pass: "
+                f"describe each meaningful column from sampled values, mark genuinely-opaque ones "
+                f"description_source=ai_unknown (self-evident id/timestamps may stay blank), then "
+                f"re-run. Tables: {', '.join(unenr[:10])}" + ("…" if len(unenr) > 10 else "")
+            ),
+        }
+    under = cov["under_enriched_tables"]
+    under_set = set(under)   # compute once, not per row
+    skipped = {r["table"]: r["blank_meaningful_columns"]
+               for r in cov["tables"] if r["table"] in under_set}
     return {
-        "refused": "columns_unenriched",
-        "table_count": len(tbls),
-        "unenriched_tables": tbls,
+        "refused": "columns_underenriched",
+        "table_count": len(under),
+        "under_enriched_tables": under,
+        "meaningful_blank": cov["totals"]["meaningful_blank"],
         "coverage_pct": cov["totals"]["coverage_pct"],
+        "skipped_columns": skipped,
         "message": (
-            f"{len(tbls)} table(s) have NO column descriptions at all — enrichment wrote the "
-            f"table descriptions but skipped the column pass. Run Phase 2's column pass: "
-            f"describe each meaningful column from sampled values, mark genuinely-opaque ones "
-            f"description_source=ai_unknown (self-evident id/timestamps may stay blank), then "
-            f"re-run. Column descriptions are what the explorer shows and what NL→SQL reads. "
-            f"Tables: {', '.join(tbls[:10])}" + ("…" if len(tbls) > 10 else "")
+            f"{len(under)} table(s) have many MEANINGFUL columns left blank — the column pass "
+            f"described the easy ones and stopped ({cov['totals']['meaningful_blank']} non-self-evident "
+            f"blanks total). Describe them from sampled values (or mark genuinely-opaque ones "
+            f"description_source=ai_unknown), then re-run. e.g. "
+            + "; ".join(f"{t}: {', '.join(cols[:5])}" for t, cols in list(skipped.items())[:3])
         ),
     }
 
@@ -586,6 +619,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("choice-coverage", help="coded columns whose choice_field labels are still blank (value-enum decode not done)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_choice_coverage)
+
+    sp = sub.add_parser("sensitive", help="list still-queryable columns flagged sensitive/PII + a count (excludes already-rejected columns/tables) — the Phase 4 curate gate signal")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_sensitive)
 
     sp = sub.add_parser("set-terminology", help="write the org domain glossary (term→definition) onto org.yaml key_terminology")
     sp.add_argument("root")

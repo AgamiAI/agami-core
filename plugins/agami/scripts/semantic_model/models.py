@@ -67,6 +67,22 @@ ColumnType = Literal[
 
 Confidence = Literal["confirmed", "inferred", "proposed"]
 ReviewState = Literal["unreviewed", "approved", "rejected", "stale", "not_applicable"]
+# How a column may be aggregated when used as a MEASURE. Column-INTRINSIC only:
+# semi-additivity (additive over some dimensions but not others — e.g. an account
+# balance is summable across accounts but NOT across time) is a column×dimension
+# property and lives on the metric as `non_additive_dimensions`, NOT here.
+#   additive     → SUM is meaningful (amount, quantity, revenue). Semi-additive measures
+#                  are ALSO `additive` here — the time exception is declared on the metric.
+#   averageable  → AVG/MIN/MAX meaningful, SUM is NOT (unit_price, rate, ratio, score).
+#   dimension    → not a measure; a grouping key (ids, codes, year, zip) — never aggregated.
+#   unknown      → not yet classified (legacy models, or the heuristic was unsure). Never
+#                  enforced against — the enforcement layer only acts on a definite class.
+Aggregation = Literal["additive", "averageable", "dimension", "unknown"]
+# How a SEMI-ADDITIVE metric is collapsed over a dimension it can't be summed across
+# (almost always time): take the period-end (`last`) / period-start (`first`) value, or an
+# `average`/`min`/`max`. None on a metric with `non_additive_dimensions` means "don't sum
+# over them — refuse/warn rather than auto-collapse."
+SemiAdditiveAgg = Literal["last", "first", "average", "min", "max"]
 # Provenance of a table/column `description` (NOT a sign-off gate — advisory only).
 #   None    → unknown / legacy; treated as trusted, never surfaced for confirmation
 #   human   → written or edited by a person; trusted
@@ -206,6 +222,11 @@ class Column(_Base):
     foreign_key: Optional[ForeignKey] = None
     # enum semantics: maps stored value -> human meaning
     choice_field: Optional[dict[str, str]] = None
+    # How this column may be aggregated as a measure (additive / averageable / dimension).
+    # Set by an introspection heuristic, refined by the curator. Consumed by the query-time
+    # enforcement layer (e.g. refuse SUM of an `averageable` price, or AVG of a `dimension`
+    # id). `unknown` is never enforced against. See the `Aggregation` literal above.
+    aggregation: Aggregation = "unknown"
     sensitive: bool = False
     # declarative cleaning/transform SQL (regexp_replace, TO_TIMESTAMP, …)
     value_transform: Optional[str] = None
@@ -426,6 +447,22 @@ class Metric(_Base):
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)
     subject_areas: list[str] = Field(default_factory=list)
+    # Additivity (scorecard #3). A SEMI-ADDITIVE measure (account balance, inventory,
+    # headcount, point-in-time subscribers) is summable across some dimensions but NOT
+    # across others — almost always time. `non_additive_dimensions` names those (a column
+    # name, or the shorthand "time" = any date/time grain in the query); `semi_additive_agg`
+    # says how to collapse over them (period-end `last`, `average`, …). With dims set but no
+    # agg, the enforcement layer (#4) refuses/warns instead of auto-collapsing. A
+    # fully-additive metric leaves both empty.
+    non_additive_dimensions: list[str] = Field(default_factory=list)
+    semi_additive_agg: Optional[SemiAdditiveAgg] = None
+    # Second-order statistic (scorecard #1, case b): an aggregate OF an aggregate at a finer
+    # grain — AVG of a daily SUM, MAX of a monthly COUNT. The binding is `OUTERAGG({base})`
+    # (e.g. "AVG({daily_revenue})") and `inner_grain` names the dimension(s) the BASE metric is
+    # grouped by first. The engine deterministically synthesizes the CTE (compute the base at
+    # `inner_grain`, then apply the outer aggregate) — illegal AVG(SUM(...)) is never emitted.
+    # Empty for first-order / case-(a) metrics.
+    inner_grain: list[str] = Field(default_factory=list)
     business_question: Optional[str] = None
     confidence: Confidence = "proposed"
     source: Optional[str] = None
@@ -441,6 +478,17 @@ class Metric(_Base):
         if not v or not v.strip():
             raise ValueError("metric calculation (prose intent) must be non-empty")
         return v
+
+    @model_validator(mode="after")
+    def _semi_additive_coherent(self) -> "Metric":
+        # "how to collapse over a non-additive dimension" is meaningless without naming
+        # the dimension(s). (The reverse is fine: dims without an agg = refuse to sum.)
+        if self.semi_additive_agg and not self.non_additive_dimensions:
+            raise ValueError(
+                "semi_additive_agg is set but non_additive_dimensions is empty — name the "
+                "dimension(s) the metric can't be summed over (e.g. [\"time\"])"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

@@ -401,7 +401,7 @@
     .inline-edit-ta:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
     .inline-edit-bar { display: flex; gap: 6px; align-items: center; margin-top: 5px; }
     .inline-edit-bar .btn-sm { margin: 0; }
-    .inline-edit-bar .hint { font-size: 11px; color: var(--muted); }
+    .hint { font-size: 11px; color: var(--muted); }
 
     /* Inline edit + forms */
     .edit-form { border-top: 1px dashed var(--border); margin-top: 6px; padding-bottom: 8px; }
@@ -438,6 +438,11 @@
       background: var(--code-bg); padding: 8px 18px; margin: 4px 18px 8px;
       border-radius: 4px; white-space: pre-wrap; word-break: break-word;
     }
+    /* click-to-edit SQL binding */
+    pre.code-block.code-editable { cursor: text; transition: box-shadow 100ms, background 100ms; }
+    pre.code-block.code-editable:hover { box-shadow: inset 0 0 0 1px var(--border); background: var(--row-zebra); }
+    pre.code-block.code-editable.empty { font-style: italic; color: var(--muted); opacity: 0.7; }
+    pre.code-block.code-editable.edited { box-shadow: inset 3px 0 0 var(--accent); }
 
     /* Organization markdown rendering */
     .org-rendered { padding: 4px 18px 14px; font-size: 14px; }
@@ -707,12 +712,14 @@
     // edits[qname]   = {kind, area, name, [column], fields:{field:value}}
     // exampleEdits[qname] = {area, question, sql, source, status}
     // newMetrics[]   = {area, name, description, calculation, binding, unit, other_names[], source_tables[]}
+    // newExamples[]  = {area, question, sql}   (human-added NL→SQL examples)
     // orgEdit        = new ORGANIZATION.md text | null
     const pending = {};
     const ops = {};
     const edits = {};
     const exampleEdits = {};
     const newMetrics = [];
+    const newExamples = [];
     let orgEdit = null;
     let orgRaw = false;   // ORGANIZATION.md editor mode: false = rich text, true = raw Markdown
     let termEdits = null; // edited curated glossary {term: def} | null — written back via set-terminology
@@ -722,6 +729,7 @@
     const colGroupOpen = new Set();    // group ids the user explicitly OPENED (overrides the wide-table default)
     const colGroupClosed = new Set();  // group ids the user explicitly CLOSED
     let addMetricOpen = false;
+    let addExampleOpen = false;
     let searchQ = '';
     let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
     let activeFilter = 'all';
@@ -817,7 +825,7 @@
       if (source === 'ai_validated') return el('span', { class: 'ai-tag val tip', text: '✓ AI',
         'data-tip': 'agami wrote this description and a person has confirmed it.' });
       if (source === 'ai_unknown') return el('span', { class: 'ai-tag unknown tip', text: '❓ describe',
-        'data-tip': "agami couldn't tell what this column means. Describe it on the Review tab (the “Couldn't read” group) — or agami will ask the first time a query uses it." });
+        'data-tip': "agami couldn't tell what this column means. Describe it on the Review tab (under “Needs your eyes”) — or agami will ask the first time a query uses it." });
       return null;  // human-written or unknown source → no tag (trusted)
     }
     function labelLine(text) { return el('div', { class: 'label-line', text }); }
@@ -833,6 +841,59 @@
       const d = el('div', { class: 'table-description', style: 'border-bottom:none;padding-top:4px;' });
       d.appendChild(inlineText(o));
       return d;
+    }
+    // Click-to-edit SQL binding for one dialect. Edits a single dialect's SQL but stores the
+    // FULL bindings dict (other dialects preserved) under the metric's `bindings` field, so it
+    // queues into the same `edits` store and emits one `edit` op the curate engine applies.
+    function inlineBindingBlock(m, dialect) {
+      const key = m.qname + '|bindings:' + dialect;
+      const original = (m.bindings || {})[dialect] || '';
+      const queuedDict = (edits[m.qname] && edits[m.qname].fields && edits[m.qname].fields.bindings) || null;
+      const shown = (queuedDict && (dialect in queuedDict)) ? queuedDict[dialect] : original;
+      if (inlineEditKey === key) {
+        // 18px horizontal padding insets the width:100% textarea to the card's content column
+        const wrap = el('div', { style: 'padding:0 18px;margin:4px 0 8px;' });
+        const ta = el('textarea', { id: 'active-inline-ta', rows: '3', class: 'inline-edit-ta',
+          style: 'font-family:ui-monospace,Menlo,Consolas,monospace;' });
+        ta.value = shown;
+        const save = () => {
+          const v = ta.value;
+          const cur = edits[m.qname] || { kind: 'metric', area: m.area, name: m.name, fields: {} };
+          const baseDict = cur.fields.bindings ? Object.assign({}, cur.fields.bindings) : Object.assign({}, m.bindings || {});
+          // empty value: clear this dialect's binding rather than writing an empty string —
+          // so saving a blank box on a metric that had no binding for this dialect is a true
+          // no-op, not a queued edit that adds {dialect: ""}.
+          if (!(v || '').trim()) delete baseDict[dialect]; else baseDict[dialect] = v;
+          if (JSON.stringify(baseDict) === JSON.stringify(m.bindings || {})) delete cur.fields.bindings;
+          else cur.fields.bindings = baseDict;
+          if (Object.keys(cur.fields).length) edits[m.qname] = cur; else delete edits[m.qname];
+          inlineEditKey = null; renderAll();
+        };
+        ta.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Escape') { ev.preventDefault(); inlineEditKey = null; renderAll(); }
+          else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
+        });
+        wrap.appendChild(ta);
+        // ground the fragment: name the tables in scope + what agami adds around it
+        const scope = (m.source_tables || []).length ? ' over ' + m.source_tables.join(', ') : '';
+        const bar = el('div', { class: 'inline-edit-bar' });
+        bar.appendChild(btnSm('Save', save, 'primary'));
+        bar.appendChild(btnSm('Cancel', () => { inlineEditKey = null; renderAll(); }));
+        bar.appendChild(el('span', { class: 'hint',
+          text: 'the SELECT aggregate' + scope + ' — agami adds FROM / WHERE / GROUP BY · ⌘/Ctrl+Enter saves' }));
+        wrap.appendChild(bar);
+        return wrap;
+      }
+      const edited = !!(queuedDict && (dialect in queuedDict) && queuedDict[dialect] !== original);
+      const isEmpty = !(shown || '').trim();
+      // returned directly (like the old read-only preBlock) so it keeps the same 18px inset
+      const pre = el('pre', { class: 'code-block code-editable' + (isEmpty ? ' empty' : '') + (edited ? ' edited' : ''),
+        title: 'Click to edit the SQL', text: isEmpty ? '(click to add the SQL expression)' : shown });
+      pre.addEventListener('click', (ev) => {
+        ev.stopPropagation(); inlineEditKey = key; renderAll();
+        const t = document.getElementById('active-inline-ta'); if (t) { t.focus(); }
+      });
+      return pre;
     }
     function btnSm(label, onclick, cls) {
       return el('button', { type: 'button', class: 'btn-sm' + (cls ? ' ' + cls : ''), onclick }, label);
@@ -1535,8 +1596,15 @@
       body.appendChild(labelLine('What it measures (click to edit)'));
       body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
         field: 'calculation', original: m.calculation, placeholder: '(click to add the calculation)' }));
+      // SQL bindings — click-to-edit (per dialect). When a metric has no binding yet, still
+      // offer an editable slot for the profile's dialect so "the SQL is incomplete/empty" is
+      // fixable here, not via the description.
       const bindings = m.bindings || {};
-      Object.keys(bindings).forEach(d => { body.appendChild(labelLine(d + ' SQL')); body.appendChild(preBlock(bindings[d])); });
+      const dialects = Object.keys(bindings).length ? Object.keys(bindings) : (STORAGE_TYPE ? [STORAGE_TYPE] : ['SQL']);
+      dialects.forEach(d => {
+        body.appendChild(labelLine(d + ' SQL (click to edit)'));
+        body.appendChild(inlineBindingBlock(m, d));
+      });
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
       if ((m.source_tables || []).length) { body.appendChild(labelLine('Source tables')); body.appendChild(descBlock(m.source_tables.join(', '))); }
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
@@ -1784,20 +1852,29 @@
       nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
       nameEl.appendChild(highlight(uc.col, searchQ));
       h.appendChild(nameEl);
-      if (uc.type) h.appendChild(el('div', { class: 'field-type', text: uc.type }));
+      if (uc.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: uc.type }));
       card.appendChild(h);
-      const body = el('div', { class: 'table-body' });
-      body.appendChild(el('div', { class: 'field-hint', style: 'padding:8px 18px 0;',
-        text: 'agami could not tell what this column means. If you know, describe it in one line — it becomes your (trusted) description.' }));
-      const ta = textarea((edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '', 2);
-      body.appendChild(ta);
-      body.appendChild(btnSm('Save description', () => {
+      // Compact body: a properly-styled, inset textarea + Save — no per-card hint (the
+      // section header above carries the explanation, so the cards stay tight).
+      const body = el('div', { class: 'table-body', style: 'padding:10px 18px 12px;' });
+      const ta = el('textarea', { class: 'inline-edit-ta', rows: '2',
+        placeholder: 'Describe this column in one line (optional)…' });
+      ta.value = (edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '';
+      const save = () => {
         const v = ta.value.trim();
         const cur = edits[uc.qname] || { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
         if (v) cur.fields.description = v; else delete cur.fields.description;
         if (Object.keys(cur.fields).length) edits[uc.qname] = cur; else delete edits[uc.qname];
         renderAll();
-      }, 'primary'));
+      };
+      ta.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
+      });
+      body.appendChild(ta);
+      const bar = el('div', { class: 'inline-edit-bar' });
+      bar.appendChild(btnSm('Save description', save, 'primary'));
+      bar.appendChild(el('span', { class: 'hint', text: '⌘/Ctrl+Enter saves' }));
+      body.appendChild(bar);
       card.appendChild(body);
       return card;
     }
@@ -1833,54 +1910,49 @@
                     items: all.filter(it => effExcluded(it)) },
       };
 
-      // columns agami couldn't read — searchable, shown as their own group
+      // Columns agami couldn't read fold INTO "Needs your eyes" — one review queue, not a
+      // separate "Couldn't read" sub-tab. They're describe-or-leave (no approve/reject).
       const unknown = unknownColumns().filter(uc => !searchQ
         || (uc.col + ' ' + uc.table).toLowerCase().includes(searchQ));
 
-      // sub-tab bar with counts ("Edited" and "Couldn't read" appear only when non-empty)
+      // sub-tab bar with counts ("Edited" appears only when non-empty)
       const order = ['eyes', 'looks'];
       if (groups.edited.items.length) order.push('edited');
       order.push('approved', 'rejected');
-      if (unknown.length) order.push('unknown');
-      if ((reviewSubTab === 'unknown' && !unknown.length) ||
-          (reviewSubTab === 'edited' && !groups.edited.items.length)) reviewSubTab = 'eyes';
-      const labels = { unknown: "Couldn't read" };
-      const counts = { unknown: unknown.length };
+      if (reviewSubTab === 'edited' && !groups.edited.items.length) reviewSubTab = 'eyes';
+      if (reviewSubTab === 'unknown') reviewSubTab = 'eyes';  // retired sub-tab → eyes
+      const eyesCount = groups.eyes.items.length + unknown.length;  // couldn't-read counts here now
       const bar = el('div', { class: 'subtab-bar' });
       order.forEach(k => {
-        const lbl = groups[k] ? groups[k].label : labels[k];
-        const cnt = groups[k] ? groups[k].items.length : counts[k];
+        const cnt = k === 'eyes' ? eyesCount : groups[k].items.length;
         const b = el('button', { type: 'button', class: reviewSubTab === k ? 'active' : '',
-          onclick: () => { reviewSubTab = k; renderBody(); } }, lbl);
+          onclick: () => { reviewSubTab = k; renderBody(); } }, groups[k].label);
         b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
         bar.appendChild(b);
       });
       root.appendChild(bar);
 
-      // "Couldn't read" group — inline describe editors, not approve/reject
-      if (reviewSubTab === 'unknown') {
-        setSearchCounts(`${unknown.length} column${unknown.length === 1 ? '' : 's'} agami couldn't read`);
-        const sec = el('div', { class: 'schema-section' });
-        sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;',
-          text: "agami looked at these columns and couldn't tell what they mean (opaque names, no clue in the data). If you know, describe one in a line — or just leave them; agami will also ask the first time a query actually uses one." }));
-        if (!unknown.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing here — agami understood every column.' }));
-        else unknown.forEach(uc => sec.appendChild(describeCard(uc)));
-        root.appendChild(sec);
-        root.appendChild(nextStepsCallout({ looksCount: groups.looks.items.filter(isApprovable).length }));
-        return;
-      }
-
       const g = groups[reviewSubTab] || groups.eyes;
-      setSearchCounts(`${g.items.length} ${g.label.toLowerCase()}`);
+      const isEyes = reviewSubTab === 'eyes' || !groups[reviewSubTab];
+      setSearchCounts(`${isEyes ? eyesCount : g.items.length} ${g.label.toLowerCase()}`);
 
       const sec = el('div', { class: 'schema-section' });
       // No blanket "Approve all" — each kind sub-header carries its own scoped "✓ Approve N",
       // so approving metrics can't silently approve the joins too (that was the footgun).
       if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
-      if (!g.items.length) {
-        sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing in “' + g.label + '”.' }));
-      } else {
-        appendGroupedCards(sec, g.items, g.bulk);
+      if (g.items.length) appendGroupedCards(sec, g.items, g.bulk);
+
+      // The couldn't-read columns, as their own sub-group at the bottom of "Needs your eyes".
+      if (isEyes && unknown.length) {
+        sec.appendChild(kindSubhead("Columns agami couldn't read", unknown, false));
+        sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
+          text: "Opaque names with no clue in the data. Describe one in a line if you know it — or leave it; agami asks again the first time a query actually uses it." }));
+        unknown.forEach(uc => sec.appendChild(describeCard(uc)));
+      }
+
+      if (!g.items.length && !(isEyes && unknown.length)) {
+        sec.appendChild(el('div', { class: 'empty-state',
+          text: isEyes ? 'Nothing needs your eyes.' : 'Nothing in “' + g.label + '”.' }));
       }
       root.appendChild(sec);
       root.appendChild(nextStepsCallout({ looksCount: groups.looks.items.filter(isApprovable).length }));
@@ -1993,6 +2065,67 @@
       const a = el('div', { class: 'card-actions' });
       a.appendChild(el('button', { type: 'button', class: 'queued-exclude',
         onclick: () => { newMetrics.splice(idx, 1); renderAll(); } }, 'Remove'));
+      body.appendChild(a);
+      card.appendChild(body);
+      return card;
+    }
+
+    // Add a NL→SQL example (human-added). Mirrors the add-metric form: question + SQL, area
+    // inferred from the tables the SQL names. Queued into newExamples and rendered as a row.
+    function renderAddExampleForm() {
+      const wrap = el('div', { class: 'table-card add-form' });
+      wrap.appendChild(el('div', { class: 'table-header static' },
+        el('div', { class: 'table-name' }, 'New example')));
+      const body = el('div', { class: 'table-body' });
+      body.appendChild(labelLine('Question (the natural-language ask)'));
+      const qTa = textarea('', 2); qTa.setAttribute('placeholder', 'e.g. How many active vehicles are deployed by zone?'); body.appendChild(qTa);
+      body.appendChild(labelLine('SQL (the full query that answers it)'));
+      body.appendChild(hintLine('A complete SELECT for this question — examples are whole queries (unlike a metric, which is just an aggregate expression).'));
+      const sTa = textarea('', 5); sTa.setAttribute('placeholder', 'SELECT zone, COUNT(*) FROM powerbi.sm_vehicles WHERE ... GROUP BY zone'); body.appendChild(sTa);
+      const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
+      body.appendChild(errLine);
+      const submit = () => {
+        const question = qTa.value.trim(), sql = sTa.value.trim();
+        const problems = [];
+        if (!question) problems.push('Add the question.');
+        if (!sql) problems.push('Add the SQL.');
+        if (newExamples.some(x => x.question === question) ||
+            (manifest.examples || []).some(x => x.question === question)) problems.push('An example with that question already exists.');
+        const srcTables = tablesInSql(sql);
+        const inferredArea = srcTables.map(t => TABLE_AREA[t]).find(Boolean);
+        const area = inferredArea || (AREAS.length === 1 ? AREAS[0] : '');
+        // a multi-area profile needs the area resolvable from the SQL — an empty area would
+        // fail `sm add-example --area <area>`. Make the user name a modeled table.
+        if (!area) problems.push('Reference a modeled table in your SQL (e.g. ' +
+          (ALL_TABLES[0] ? ALL_TABLES[0] : 'sales.orders') + ') so I know which subject area this belongs to.');
+        if (problems.length) { errLine.textContent = '⚠ ' + problems.join(' '); return; }
+        newExamples.push({ area, question, sql });
+        addExampleOpen = false; renderAll();
+      };
+      // ⌘/Ctrl+Enter from either box adds the example (matches the inline editors)
+      [qTa, sTa].forEach(t => t.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit(); }
+      }));
+      const actions = el('div', { class: 'card-actions' });
+      actions.appendChild(el('button', { type: 'button', class: 'btn-sm primary', onclick: submit }, '✓ Add example'));
+      actions.appendChild(btnSm('Cancel', () => { addExampleOpen = false; renderAll(); }));
+      actions.appendChild(el('span', { class: 'hint', text: '⌘/Ctrl+Enter adds' }));
+      body.appendChild(actions);
+      wrap.appendChild(body);
+      return wrap;
+    }
+    function renderNewExampleCard(x, idx) {
+      const card = el('div', { class: 'table-card queued-include' });
+      const h = el('div', { class: 'table-header static' });
+      h.appendChild(el('div', { class: 'table-name' }, x.question));
+      h.appendChild(el('span', { class: 'table-state-badge badge-approved', text: 'added by you' }));
+      card.appendChild(h);
+      const body = el('div', { class: 'table-body' });
+      body.appendChild(labelLine('SQL')); body.appendChild(preBlock(x.sql));
+      body.appendChild(hintLine('Will be added to: ' + (x.area || '(default area)')));
+      const a = el('div', { class: 'card-actions' });
+      a.appendChild(el('button', { type: 'button', class: 'queued-exclude',
+        onclick: () => { newExamples.splice(idx, 1); renderAll(); } }, 'Remove'));
       body.appendChild(a);
       card.appendChild(body);
       return card;
@@ -2249,6 +2382,11 @@
         newMetrics.forEach((m, i) => g.appendChild(queueRow('add', 'add', `metric: ${m.name}`, () => newMetrics.splice(i, 1))));
         groups.push(g);
       }
+      if (newExamples.length) {
+        const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'New examples' }));
+        newExamples.forEach((x, i) => g.appendChild(queueRow('add', 'add', `example: ${(x.question || '').slice(0, 60)}`, () => newExamples.splice(i, 1))));
+        groups.push(g);
+      }
       // org edit
       if (orgEdit !== null) {
         const g = el('div', { class: 'queue-group' }); g.appendChild(el('h3', { text: 'Organization context' }));
@@ -2334,7 +2472,7 @@
         case 'metrics':  return (manifest.metrics || []).length + newMetrics.length;
         case 'entities': return (manifest.entities || []).length;
         case 'joins':    return (manifest.relationships || []).length + (manifest.cross_relationships || []).length;
-        case 'examples': return (manifest.examples || []).length;
+        case 'examples': return (manifest.examples || []).length + newExamples.length;
         case 'queued':   return totalQueued();
         default:         return null;
       }
@@ -2380,7 +2518,7 @@
     // ---- Queued totals + footer ----
     function totalQueued() {
       return Object.keys(pending).length + Object.keys(ops).length + Object.keys(edits).length
-           + Object.keys(exampleEdits).length + newMetrics.length + (orgEdit !== null ? 1 : 0)
+           + Object.keys(exampleEdits).length + newMetrics.length + newExamples.length + (orgEdit !== null ? 1 : 0)
            + (termEdits !== null ? 1 : 0);
     }
     function updateFooter() {
@@ -2408,6 +2546,7 @@
         if (nInc) parts.push(`${nInc} re-include${nInc === 1 ? '' : 's'}`);
         if (Object.keys(edits).length) parts.push(`${Object.keys(edits).length} edit${Object.keys(edits).length === 1 ? '' : 's'}`);
         if (Object.keys(exampleEdits).length) parts.push(`${Object.keys(exampleEdits).length} example`);
+        if (newExamples.length) parts.push(`${newExamples.length} new example${newExamples.length === 1 ? '' : 's'}`);
         if (newMetrics.length) parts.push(`${newMetrics.length} new metric${newMetrics.length === 1 ? '' : 's'}`);
         if (orgEdit !== null) parts.push('org context');
         if (termEdits !== null) parts.push('glossary');
@@ -2479,6 +2618,11 @@
 
       const exList = Object.values(exampleEdits);
       if (exList.length) { lines.push('example-edits:'); lines.push(JSON.stringify(exList)); }
+      if (newExamples.length) {
+        lines.push('new-examples:');
+        lines.push(JSON.stringify(newExamples.map(x => ({
+          area: x.area, question: x.question, sql: x.sql, source: 'human', status: 'confirmed' }))));
+      }
       if (orgEdit !== null) lines.push('organization-md: ' + JSON.stringify(orgEdit));
       if (termEdits !== null) lines.push('key-terminology: ' + JSON.stringify(termEdits));
       // Sign-off identity header (first line) — the skill applies approvals with this as --signer/--role.
@@ -2505,7 +2649,7 @@
       Object.keys(ops).forEach(k => delete ops[k]);
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
-      newMetrics.length = 0; orgEdit = null; termEdits = null; addMetricOpen = false;
+      newMetrics.length = 0; newExamples.length = 0; orgEdit = null; termEdits = null; addMetricOpen = false; addExampleOpen = false;
       editOpen.clear();
       renderAll();
     });
@@ -2556,6 +2700,11 @@
           renderJoinsTab(root);  // one tab, split into In-schema + Cross-schema sections
           break;
         case 'examples':
+          if (addExampleOpen) { root.appendChild(renderAddExampleForm()); }
+          else { const a = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+                 a.appendChild(el('button', { type: 'button', class: 'add-metric-open', onclick: () => { addExampleOpen = true; renderAll(); } }, '+ Add an example'));
+                 root.appendChild(a); }
+          newExamples.forEach((x, i) => root.appendChild(renderNewExampleCard(x, i)));
           renderFlatTab(root, manifest.examples, 'example',
             x => `${x.question} ${x.sql} ${x.area}`,
             renderExampleCard, 'example');
