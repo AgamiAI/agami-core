@@ -822,7 +822,7 @@
       if (source === 'ai_validated') return el('span', { class: 'ai-tag val tip', text: '✓ AI',
         'data-tip': 'agami wrote this description and a person has confirmed it.' });
       if (source === 'ai_unknown') return el('span', { class: 'ai-tag unknown tip', text: '❓ describe',
-        'data-tip': "agami couldn't tell what this column means. Describe it on the Review tab (the “Couldn't read” group) — or agami will ask the first time a query uses it." });
+        'data-tip': "agami couldn't tell what this column means. Describe it on the Review tab (under “Needs your eyes”) — or agami will ask the first time a query uses it." });
       return null;  // human-written or unknown source → no tag (trusted)
     }
     function labelLine(text) { return el('div', { class: 'label-line', text }); }
@@ -1846,20 +1846,29 @@
       nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
       nameEl.appendChild(highlight(uc.col, searchQ));
       h.appendChild(nameEl);
-      if (uc.type) h.appendChild(el('div', { class: 'field-type', text: uc.type }));
+      if (uc.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: uc.type }));
       card.appendChild(h);
-      const body = el('div', { class: 'table-body' });
-      body.appendChild(el('div', { class: 'field-hint', style: 'padding:8px 18px 0;',
-        text: 'agami could not tell what this column means. If you know, describe it in one line — it becomes your (trusted) description.' }));
-      const ta = textarea((edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '', 2);
-      body.appendChild(ta);
-      body.appendChild(btnSm('Save description', () => {
+      // Compact body: a properly-styled, inset textarea + Save — no per-card hint (the
+      // section header above carries the explanation, so the cards stay tight).
+      const body = el('div', { class: 'table-body', style: 'padding:10px 18px 12px;' });
+      const ta = el('textarea', { class: 'inline-edit-ta', rows: '2',
+        placeholder: 'Describe this column in one line (optional)…' });
+      ta.value = (edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '';
+      const save = () => {
         const v = ta.value.trim();
         const cur = edits[uc.qname] || { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
         if (v) cur.fields.description = v; else delete cur.fields.description;
         if (Object.keys(cur.fields).length) edits[uc.qname] = cur; else delete edits[uc.qname];
         renderAll();
-      }, 'primary'));
+      };
+      ta.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
+      });
+      body.appendChild(ta);
+      const bar = el('div', { class: 'inline-edit-bar' });
+      bar.appendChild(btnSm('Save description', save, 'primary'));
+      bar.appendChild(el('span', { class: 'hint', text: '⌘/Ctrl+Enter saves' }));
+      body.appendChild(bar);
       card.appendChild(body);
       return card;
     }
@@ -1895,54 +1904,49 @@
                     items: all.filter(it => effExcluded(it)) },
       };
 
-      // columns agami couldn't read — searchable, shown as their own group
+      // Columns agami couldn't read fold INTO "Needs your eyes" — one review queue, not a
+      // separate "Couldn't read" sub-tab. They're describe-or-leave (no approve/reject).
       const unknown = unknownColumns().filter(uc => !searchQ
         || (uc.col + ' ' + uc.table).toLowerCase().includes(searchQ));
 
-      // sub-tab bar with counts ("Edited" and "Couldn't read" appear only when non-empty)
+      // sub-tab bar with counts ("Edited" appears only when non-empty)
       const order = ['eyes', 'looks'];
       if (groups.edited.items.length) order.push('edited');
       order.push('approved', 'rejected');
-      if (unknown.length) order.push('unknown');
-      if ((reviewSubTab === 'unknown' && !unknown.length) ||
-          (reviewSubTab === 'edited' && !groups.edited.items.length)) reviewSubTab = 'eyes';
-      const labels = { unknown: "Couldn't read" };
-      const counts = { unknown: unknown.length };
+      if (reviewSubTab === 'edited' && !groups.edited.items.length) reviewSubTab = 'eyes';
+      if (reviewSubTab === 'unknown') reviewSubTab = 'eyes';  // retired sub-tab → eyes
+      const eyesCount = groups.eyes.items.length + unknown.length;  // couldn't-read counts here now
       const bar = el('div', { class: 'subtab-bar' });
       order.forEach(k => {
-        const lbl = groups[k] ? groups[k].label : labels[k];
-        const cnt = groups[k] ? groups[k].items.length : counts[k];
+        const cnt = k === 'eyes' ? eyesCount : groups[k].items.length;
         const b = el('button', { type: 'button', class: reviewSubTab === k ? 'active' : '',
-          onclick: () => { reviewSubTab = k; renderBody(); } }, lbl);
+          onclick: () => { reviewSubTab = k; renderBody(); } }, groups[k].label);
         b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
         bar.appendChild(b);
       });
       root.appendChild(bar);
 
-      // "Couldn't read" group — inline describe editors, not approve/reject
-      if (reviewSubTab === 'unknown') {
-        setSearchCounts(`${unknown.length} column${unknown.length === 1 ? '' : 's'} agami couldn't read`);
-        const sec = el('div', { class: 'schema-section' });
-        sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;',
-          text: "agami looked at these columns and couldn't tell what they mean (opaque names, no clue in the data). If you know, describe one in a line — or just leave them; agami will also ask the first time a query actually uses one." }));
-        if (!unknown.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing here — agami understood every column.' }));
-        else unknown.forEach(uc => sec.appendChild(describeCard(uc)));
-        root.appendChild(sec);
-        root.appendChild(nextStepsCallout({ looksCount: groups.looks.items.filter(isApprovable).length }));
-        return;
-      }
-
       const g = groups[reviewSubTab] || groups.eyes;
-      setSearchCounts(`${g.items.length} ${g.label.toLowerCase()}`);
+      const isEyes = reviewSubTab === 'eyes' || !groups[reviewSubTab];
+      setSearchCounts(`${isEyes ? eyesCount : g.items.length} ${g.label.toLowerCase()}`);
 
       const sec = el('div', { class: 'schema-section' });
       // No blanket "Approve all" — each kind sub-header carries its own scoped "✓ Approve N",
       // so approving metrics can't silently approve the joins too (that was the footgun).
       if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
-      if (!g.items.length) {
-        sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing in “' + g.label + '”.' }));
-      } else {
-        appendGroupedCards(sec, g.items, g.bulk);
+      if (g.items.length) appendGroupedCards(sec, g.items, g.bulk);
+
+      // The couldn't-read columns, as their own sub-group at the bottom of "Needs your eyes".
+      if (isEyes && unknown.length) {
+        sec.appendChild(kindSubhead("Columns agami couldn't read", unknown, false));
+        sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
+          text: "Opaque names with no clue in the data. Describe one in a line if you know it — or leave it; agami asks again the first time a query actually uses it." }));
+        unknown.forEach(uc => sec.appendChild(describeCard(uc)));
+      }
+
+      if (!g.items.length && !(isEyes && unknown.length)) {
+        sec.appendChild(el('div', { class: 'empty-state',
+          text: isEyes ? 'Nothing needs your eyes.' : 'Nothing in “' + g.label + '”.' }));
       }
       root.appendChild(sec);
       root.appendChild(nextStepsCallout({ looksCount: groups.looks.items.filter(isApprovable).length }));
