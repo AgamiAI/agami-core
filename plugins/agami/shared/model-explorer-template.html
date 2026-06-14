@@ -438,6 +438,11 @@
       background: var(--code-bg); padding: 8px 18px; margin: 4px 18px 8px;
       border-radius: 4px; white-space: pre-wrap; word-break: break-word;
     }
+    /* click-to-edit SQL binding */
+    pre.code-block.code-editable { cursor: text; transition: box-shadow 100ms, background 100ms; }
+    pre.code-block.code-editable:hover { box-shadow: inset 0 0 0 1px var(--border); background: var(--row-zebra); }
+    pre.code-block.code-editable.empty { font-style: italic; color: var(--muted); opacity: 0.7; }
+    pre.code-block.code-editable.edited { box-shadow: inset 3px 0 0 var(--accent); }
 
     /* Organization markdown rendering */
     .org-rendered { padding: 4px 18px 14px; font-size: 14px; }
@@ -833,6 +838,53 @@
       const d = el('div', { class: 'table-description', style: 'border-bottom:none;padding-top:4px;' });
       d.appendChild(inlineText(o));
       return d;
+    }
+    // Click-to-edit SQL binding for one dialect. Edits a single dialect's SQL but stores the
+    // FULL bindings dict (other dialects preserved) under the metric's `bindings` field, so it
+    // queues into the same `edits` store and emits one `edit` op the curate engine applies.
+    function inlineBindingBlock(m, dialect) {
+      const key = m.qname + '|bindings:' + dialect;
+      const original = (m.bindings || {})[dialect] || '';
+      const queuedDict = (edits[m.qname] && edits[m.qname].fields && edits[m.qname].fields.bindings) || null;
+      const shown = (queuedDict && (dialect in queuedDict)) ? queuedDict[dialect] : original;
+      const wrap = el('div', { class: 'table-description', style: 'border-bottom:none;padding:0;margin:4px 0;' });
+      if (inlineEditKey === key) {
+        const ta = el('textarea', { id: 'active-inline-ta', rows: '3', class: 'inline-edit-ta',
+          style: 'font-family:ui-monospace,Menlo,Consolas,monospace;' });
+        ta.value = shown;
+        const save = () => {
+          const v = ta.value;
+          const cur = edits[m.qname] || { kind: 'metric', area: m.area, name: m.name, fields: {} };
+          const baseDict = cur.fields.bindings ? Object.assign({}, cur.fields.bindings) : Object.assign({}, m.bindings || {});
+          baseDict[dialect] = v;
+          if (JSON.stringify(baseDict) === JSON.stringify(m.bindings || {})) delete cur.fields.bindings;
+          else cur.fields.bindings = baseDict;
+          if (Object.keys(cur.fields).length) edits[m.qname] = cur; else delete edits[m.qname];
+          inlineEditKey = null; renderAll();
+        };
+        ta.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Escape') { ev.preventDefault(); inlineEditKey = null; renderAll(); }
+          else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
+        });
+        wrap.appendChild(ta);
+        const bar = el('div', { class: 'inline-edit-bar' });
+        bar.appendChild(btnSm('Save', save, 'primary'));
+        bar.appendChild(btnSm('Cancel', () => { inlineEditKey = null; renderAll(); }));
+        bar.appendChild(el('span', { class: 'hint',
+          text: 'an aggregate expression (e.g. SUM(orders.amount)) — NOT a full SELECT · ⌘/Ctrl+Enter saves' }));
+        wrap.appendChild(bar);
+        return wrap;
+      }
+      const edited = !!(queuedDict && (dialect in queuedDict) && queuedDict[dialect] !== original);
+      const isEmpty = !(shown || '').trim();
+      const pre = el('pre', { class: 'code-block code-editable' + (isEmpty ? ' empty' : '') + (edited ? ' edited' : ''),
+        title: 'Click to edit the SQL', text: isEmpty ? '(click to add the SQL expression)' : shown });
+      pre.addEventListener('click', (ev) => {
+        ev.stopPropagation(); inlineEditKey = key; renderAll();
+        const t = document.getElementById('active-inline-ta'); if (t) { t.focus(); }
+      });
+      wrap.appendChild(pre);
+      return wrap;
     }
     function btnSm(label, onclick, cls) {
       return el('button', { type: 'button', class: 'btn-sm' + (cls ? ' ' + cls : ''), onclick }, label);
@@ -1535,8 +1587,15 @@
       body.appendChild(labelLine('What it measures (click to edit)'));
       body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
         field: 'calculation', original: m.calculation, placeholder: '(click to add the calculation)' }));
+      // SQL bindings — click-to-edit (per dialect). When a metric has no binding yet, still
+      // offer an editable slot for the profile's dialect so "the SQL is incomplete/empty" is
+      // fixable here, not via the description.
       const bindings = m.bindings || {};
-      Object.keys(bindings).forEach(d => { body.appendChild(labelLine(d + ' SQL')); body.appendChild(preBlock(bindings[d])); });
+      const dialects = Object.keys(bindings).length ? Object.keys(bindings) : (STORAGE_TYPE ? [STORAGE_TYPE] : ['SQL']);
+      dialects.forEach(d => {
+        body.appendChild(labelLine(d + ' SQL (click to edit)'));
+        body.appendChild(inlineBindingBlock(m, d));
+      });
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
       if ((m.source_tables || []).length) { body.appendChild(labelLine('Source tables')); body.appendChild(descBlock(m.source_tables.join(', '))); }
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
