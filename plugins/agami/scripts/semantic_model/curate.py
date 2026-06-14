@@ -200,6 +200,22 @@ def column_coverage(org: Organization) -> dict:
     }
 
 
+def sensitive_columns(org: Organization) -> dict:
+    """Every column introspection (or a curator) flagged `sensitive` and hasn't excluded —
+    the PII the agami-connect curate gate uses to decide whether to open the explorer.
+    Deterministic + resumable (a turn-boundary-safe count, unlike remembering the
+    introspect report's number)."""
+    cols: list[dict] = []
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if getattr(t, "review_state", "approved") == "rejected":
+                continue
+            for c in t.columns:
+                if c.sensitive and getattr(c, "review_state", "approved") != "rejected":
+                    cols.append({"area": sa.name, "table": t.name, "column": c.name})
+    return {"count": len(cols), "columns": cols}
+
+
 def _trust(obj) -> dict:
     return {
         "confidence": getattr(obj, "confidence", None),

@@ -182,6 +182,15 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+def cmd_sensitive(args) -> int:
+    """List the columns flagged `sensitive` (PII). The agami-connect Phase 4 curate
+    gate uses the count to decide whether to open the model explorer for review."""
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    _print_json(curate.sensitive_columns(org))
+    return 0
+
+
 def cmd_set_terminology(args) -> int:
     """Write the org-level domain glossary (term -> definition) onto org.yaml's
     `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
@@ -572,6 +581,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_coverage)
+
+    sp = sub.add_parser("sensitive", help="list columns flagged sensitive (PII) + a count — the Phase 4 curate gate signal")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_sensitive)
 
     sp = sub.add_parser("set-terminology", help="write the org domain glossary (term→definition) onto org.yaml key_terminology")
     sp.add_argument("root")
