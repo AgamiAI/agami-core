@@ -129,24 +129,32 @@ def description_ops(
     return ops
 
 
-def reference_specs(
-    rows: Iterable[dict], *, table_col: str, column_col: str, type_col: str, reference_col: str,
-    reference_type: str = "reference", valid: Optional[set[ColKey]] = None,
-) -> list[dict]:
-    """Reference (FK) edges from a metadata table: rows whose `type` marks a reference and whose
-    `reference` names the target table. Returns specs `{from_table, from_column, to_table}` — the
-    caller resolves the target key column and writes them as relationships (this is the
-    authoritative answer for platforms like ServiceNow whose refs don't follow `<x>_id` naming).
-    `valid` restricts to modelled source columns."""
-    seen: set[ColKey] = set()
-    out: list[dict] = []
+def reference_declarations(
+    rows: Iterable[dict], *, column_col: str, type_col: str, reference_col: str,
+    reference_type: str = "reference",
+) -> dict[str, str]:
+    """Map a reference FIELD NAME → its target table, from a metadata table's reference rows.
+
+    Keyed by the ELEMENT (column), deliberately NOT by the declaring table. ServiceNow (and any
+    table-inheritance platform) declares a shared reference field ONCE on the base table —
+    `assignment_group → sys_user_group` lives under `sys_dictionary.name='task'` — but the column
+    physically exists on every child (`incident`/`problem`/`change`). Keying on the field name lets
+    the caller resolve the join for whichever table actually HAS that column, which is exactly how
+    inheritance surfaces in the data. (Matching the declaring table instead — the old behaviour —
+    returned 0 joins for the children.) Elements whose target CONFLICTS across declarations are
+    dropped as ambiguous."""
+    target: dict[str, str] = {}
+    conflict: set[str] = set()
     for r in rows:
-        tbl, col = _norm(r.get(table_col)), _norm(r.get(column_col))
-        typ, tgt = _norm(r.get(type_col)).lower(), _norm(r.get(reference_col))
-        if not (tbl and col and tgt) or typ != reference_type.lower() or (tbl, col) in seen:
+        if _norm(r.get(type_col)).lower() != reference_type.lower():
             continue
-        if valid is not None and (tbl.lower(), col.lower()) not in valid:
+        el, tgt = _norm(r.get(column_col)).lower(), _norm(r.get(reference_col))
+        if not (el and tgt):
             continue
-        seen.add((tbl, col))
-        out.append({"from_table": tbl, "from_column": col, "to_table": tgt})
-    return out
+        if el in target and target[el] != tgt:
+            conflict.add(el)
+        else:
+            target[el] = tgt
+    for el in conflict:
+        target.pop(el, None)
+    return target

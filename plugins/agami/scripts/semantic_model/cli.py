@@ -682,12 +682,25 @@ def cmd_enrich_metadata(args) -> int:
     # the curate batch above touched only descriptions/choices, so the loaded `org` is still
     # valid for routing references (names, schemas, grain, areas unchanged).
     refs_added = 0
+    refs_skipped_target = 0
+    refs_declared = 0
     if not args.skip_references and dict_rows and "reference_col" in dict_cfg:
-        specs = MS.reference_specs(
-            dict_rows, table_col=dict_cfg["table_col"], column_col=dict_cfg["column_col"],
-            type_col=dict_cfg["type_col"], reference_col=dict_cfg["reference_col"],
-            reference_type=dict_cfg.get("reference_type", "reference"), valid=valid)
-        intra, cross = _route_references(org, specs)
+        # field-name → target. Applied to EVERY modelled column with that name, so an inherited
+        # field declared on the parent (sys_dictionary `assignment_group` on `task`) resolves for
+        # incident/problem/change too — the table-inheritance fix.
+        decls = MS.reference_declarations(
+            dict_rows, column_col=dict_cfg["column_col"], type_col=dict_cfg["type_col"],
+            reference_col=dict_cfg["reference_col"],
+            reference_type=dict_cfg.get("reference_type", "reference"))
+        refs_declared = len(decls)
+        specs = []
+        for sa in org.subject_areas:
+            for t in sa.tables_defined:
+                for c in t.columns:
+                    tgt = decls.get(c.name.lower())
+                    if tgt:
+                        specs.append({"from_table": t.name, "from_column": c.name, "to_table": tgt})
+        intra, cross, refs_skipped_target = _route_references(org, specs)
         if intra or cross:
             rres = curate.add_relationships(root, intra=intra, cross=cross)
             refs_added = len(rres.applied)
@@ -695,19 +708,25 @@ def cmd_enrich_metadata(args) -> int:
 
     if not cols_applied and not refs_added:
         _print_json({"enriched": False, "preset": preset, "fetched": fetched,
+                     "reference_fields_declared": refs_declared,
+                     "relationships_skipped_target_not_modelled": refs_skipped_target,
                      "reason": "nothing applicable for modelled columns", "errors": errors})
         return 0
     _print_json({"enriched": not errors, "preset": preset, "fetched": fetched,
                  "columns_enriched": cols_applied, "relationships_added": refs_added,
+                 "reference_fields_declared": refs_declared,
+                 "relationships_skipped_target_not_modelled": refs_skipped_target,
                  "errors": errors})
     return 0 if not errors else 1
 
 
-def _route_references(org, specs: list[dict]) -> tuple[dict, list]:
+def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     """Resolve `{from_table, from_column, to_table}` specs into routed relationship dicts:
-    `(intra: {area: [rel,…]}, cross: [xrel,…])`. Skips self-refs, edges whose target isn't
-    modelled, and edges already present. References are `many_to_one` to the target's grain,
-    written `inferred`/`unreviewed` (authoritative declaration, signed off in the explorer)."""
+    `(intra: {area: [rel,…]}, cross: [xrel,…], skipped_target_count)`. SELF-references are kept
+    (a hierarchical `parent → same table` is a real join). Edges whose TARGET isn't modelled are
+    skipped and COUNTED (so pruning that drops a join target is reported, not silent). Already-
+    present edges are skipped. References are `many_to_one` to the target's grain, written
+    `inferred`/`unreviewed` (authoritative declaration, signed off in the explorer)."""
     from collections import defaultdict
     tindex: dict = {}
     for sa in org.subject_areas:
@@ -722,13 +741,17 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list]:
 
     intra: dict = defaultdict(list)
     cross: list = []
+    skipped_target = 0
     for spec in specs:
         ft, fc, tt = spec["from_table"], spec["from_column"], spec["to_table"]
         key = (ft.lower(), fc.lower(), tt.lower())
-        if ft.lower() == tt.lower() or key in existing:
+        if key in existing:
             continue
         fr, to = tindex.get(ft.lower()), tindex.get(tt.lower())
-        if not fr or not to:
+        if fr is None:
+            continue
+        if to is None:                 # target table pruned / not in the model → can't join, but count it
+            skipped_target += 1
             continue
         ftab, farea = fr
         ttab, tarea = to
@@ -744,7 +767,7 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list]:
             intra[farea].append(base)
         else:
             cross.append({**base, "from_subject_area": farea, "to_subject_area": tarea})
-    return dict(intra), cross
+    return dict(intra), cross, skipped_target
 
 
 def cmd_discover(args) -> int:

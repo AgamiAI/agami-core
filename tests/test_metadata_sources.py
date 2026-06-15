@@ -75,10 +75,22 @@ def test_description_ops_prefers_comment_then_label_with_metadata_source():
     assert all(o["source"] == "metadata" for o in ops)        # authoritative provenance
 
 
-def test_reference_specs_extracts_only_reference_rows():
-    specs = M.reference_specs(SYS_DICTIONARY, table_col="name", column_col="element",
-                              type_col="internal_type", reference_col="reference")
-    assert specs == [{"from_table": "incident", "from_column": "caller_id", "to_table": "sys_user"}]
+def test_reference_declarations_keyed_by_field_not_table():
+    # keyed by the FIELD name (so inherited fields resolve for children), reference rows only
+    decls = M.reference_declarations(SYS_DICTIONARY, column_col="element",
+                                     type_col="internal_type", reference_col="reference")
+    assert decls == {"caller_id": "sys_user"}   # the one reference row; non-reference rows ignored
+
+
+def test_reference_declarations_drops_conflicting_targets():
+    rows = [
+        {"element": "owner", "internal_type": "reference", "reference": "sys_user"},
+        {"element": "owner", "internal_type": "reference", "reference": "sys_user_group"},  # conflict
+        {"element": "company", "internal_type": "reference", "reference": "core_company"},
+    ]
+    decls = M.reference_declarations(rows, column_col="element",
+                                     type_col="internal_type", reference_col="reference")
+    assert decls == {"company": "core_company"}   # ambiguous `owner` dropped
 
 
 def test_detect_preset_and_usable_sources():
@@ -135,6 +147,31 @@ def test_generated_ops_apply_and_stamp_metadata(tmp_path):
     assert cols["short_description"].description == "Short description"
 
 
+def test_inheritance_inherited_reference_applies_to_all_children():
+    # THE fix: `assignment_group → sys_user_group` is declared ONCE (as on base `task`), but the
+    # COLUMN exists on both children — so both incident AND problem must get the join.
+    from semantic_model import cli, models as mm
+    decls = M.reference_declarations(
+        [{"element": "assignment_group", "internal_type": "reference", "reference": "sys_user_group"}],
+        column_col="element", type_col="internal_type", reference_col="reference")
+
+    def tbl(name, extra):
+        cols = [mm.Column(name="id", type="integer", primary_key=True)]
+        cols += [mm.Column(name=c, type="string") for c in extra]
+        return mm.Table(name=name, schema="public", storage_connection="c", grain=["id"], columns=cols)
+    itsm = mm.SubjectArea(name="itsm", description="d",
+                          tables_defined=[tbl("incident", ["assignment_group"]),
+                                          tbl("problem", ["assignment_group"])])
+    sysa = mm.SubjectArea(name="sys", description="d", tables_defined=[tbl("sys_user_group", [])])
+    org = mm.Organization(organization="o", version=1, subject_areas=[itsm, sysa])
+    specs = [{"from_table": t.name, "from_column": c.name, "to_table": decls[c.name.lower()]}
+             for sa in org.subject_areas for t in sa.tables_defined for c in t.columns
+             if c.name.lower() in decls]
+    intra, cross, skipped = cli._route_references(org, specs)
+    assert {r["from_table"] for r in cross} == {"incident", "problem"}   # both children joined
+    assert all(r["to_table"] == "sys_user_group" for r in cross)
+
+
 def test_route_references_intra_cross_and_skips_unmodelled():
     from semantic_model import cli, models as mm
 
@@ -147,15 +184,17 @@ def test_route_references_intra_cross_and_skips_unmodelled():
     specs = [
         {"from_table": "incident", "from_column": "problem_id", "to_table": "problem"},   # intra (itsm)
         {"from_table": "incident", "from_column": "caller_id", "to_table": "sys_user"},    # cross (itsm→sys)
-        {"from_table": "incident", "from_column": "x", "to_table": "nope"},                # target unmodelled → skip
+        {"from_table": "problem", "from_column": "parent", "to_table": "problem"},         # SELF-ref — kept
+        {"from_table": "incident", "from_column": "x", "to_table": "nope"},                # target unmodelled → skip+count
     ]
-    intra, cross = cli._route_references(org, specs)
-    assert [r["to_table"] for r in intra.get("itsm", [])] == ["problem"]
-    assert "from_subject_area" not in intra["itsm"][0]                # plain intra-area edge
-    assert intra["itsm"][0]["to_column"] == "id" and intra["itsm"][0]["relationship"] == "many_to_one"
+    intra, cross, skipped = cli._route_references(org, specs)
+    itsm_edges = {r["from_column"]: r["to_table"] for r in intra.get("itsm", [])}
+    assert itsm_edges == {"problem_id": "problem", "parent": "problem"}   # intra + self-ref both kept
+    assert "from_subject_area" not in next(r for r in intra["itsm"] if r["from_column"] == "problem_id")
     assert len(cross) == 1
     assert cross[0]["from_subject_area"] == "itsm" and cross[0]["to_subject_area"] == "sys"
     assert cross[0]["to_column"] == "id"
+    assert skipped == 1   # the `nope` target wasn't modelled → counted, not silent
 
 
 def _servicenow_model(root: Path) -> None:
