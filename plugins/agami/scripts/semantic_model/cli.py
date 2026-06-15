@@ -283,6 +283,72 @@ def cmd_suggest_units(args) -> int:
     return 0
 
 
+def cmd_set_units(args) -> int:
+    """The APPLY half of suggest-units: stamp a currency/unit on every detected money column in
+    ONE validated curate batch — so a skill never pipes suggest-units JSON through a hand-rolled
+    script (the fragile glue that broke on empty stdin). Detects the same money columns (tested
+    matcher); `--columns` overrides detection for non-obvious names; `--area` scopes it."""
+    from . import build as B
+    from . import curate
+    unit = args.currency or args.unit
+    if not unit:
+        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>"})
+        return 1
+    org = L.load_organization(args.root)
+    numeric = {"integer", "decimal", "float"}
+    explicit = set(args.columns or [])
+    ops = []
+    for sa in org.subject_areas:
+        if args.area and sa.name != args.area:
+            continue
+        for t in sa.tables_defined:
+            for c in t.columns:
+                if c.unit:
+                    continue
+                if explicit:
+                    if f"{t.name}.{c.name}" not in explicit and c.name not in explicit:
+                        continue
+                elif not (c.type in numeric and B.detect_money_column(c.name)):
+                    continue
+                ops.append({"op": "edit", "kind": "table", "area": sa.name, "name": t.name,
+                            "column": c.name, "field": "unit", "value": unit})
+    if not ops:
+        _print_json({"set": 0, "unit": unit, "reason": "no matching money columns"})
+        return 0
+    res = curate.apply(args.root, ops)
+    _print_json({"set": len(res.applied), "unit": unit, "errors": res.errors})
+    return 0 if res.validated else 1
+
+
+def cmd_describe_file(args) -> int:
+    """Apply many column descriptions from a lightweight TSV — one per line,
+    `<table.column>` or `<area.table.column>` then a TAB then the description — as ONE validated
+    curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
+    generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
+    from . import curate
+    text = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    ops = []
+    for ln in text.splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
+            continue
+        loc, desc = (p.strip() for p in ln.split("\t", 1))
+        segs = loc.split(".")
+        if not desc or len(segs) not in (2, 3):
+            continue
+        op = {"op": "edit", "kind": "table", "field": "description", "value": desc, "source": "ai"}
+        if len(segs) == 3:
+            op["area"], op["name"], op["column"] = segs
+        else:
+            op["name"], op["column"] = segs
+        ops.append(op)
+    if not ops:
+        _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
+        return 0
+    res = curate.apply(args.root, ops)
+    _print_json({"described": len(res.applied), "errors": res.errors})
+    return 0 if res.validated else 1
+
+
 def cmd_format_table(args) -> int:
     """Format a result CSV into a deterministic markdown table — exact numbers, full
     grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
@@ -794,6 +860,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None, help="who rejected it (recorded in the curation log)")
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example)
+
+    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch")
+    sp.add_argument("root")
+    sp.add_argument("--currency", default=None, help="ISO currency code (USD/EUR/INR/…)")
+    sp.add_argument("--unit", default=None, help="non-currency unit (cents/percent/days/…)")
+    sp.add_argument("--area", default=None, help="restrict to one subject area")
+    sp.add_argument("--columns", nargs="*", default=None,
+                    help="explicit table.column (or bare column) list — overrides money detection")
+    sp.set_defaults(func=cmd_set_units)
+
+    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")
+    sp.add_argument("root")
+    sp.add_argument("--file", default=None, help="TSV path (default: read stdin)")
+    sp.set_defaults(func=cmd_describe_file)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")
     sp.add_argument("root")

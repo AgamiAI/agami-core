@@ -62,6 +62,38 @@ def _run(args):
     return rc, buf.getvalue()
 
 
+def test_set_units_stamps_currency_on_money_columns(tmp_path):
+    _model(tmp_path)
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD"])
+    d = json.loads(out)
+    assert rc == 0 and d["unit"] == "USD" and d["set"] >= 1, d
+    orders = yaml.safe_load((tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml").read_text())
+    total = next(c for c in orders["columns"] if c["name"] == "total")
+    assert total["unit"] == "USD"   # money column stamped without any LLM-piped glue
+
+
+def test_set_units_requires_a_unit(tmp_path):
+    _model(tmp_path)
+    rc, out = _run(["set-units", str(tmp_path)])
+    assert rc == 1 and "error" in json.loads(out)
+
+
+def test_describe_file_applies_tsv(tmp_path):
+    _model(tmp_path)
+    tsv = tmp_path / "desc.tsv"
+    tsv.write_text("# bulk descriptions\n"
+                   "orders.total\tTotal order value\n"
+                   "s.order_items.qty\tQuantity ordered\n"
+                   "malformed-no-tab\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(tsv)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 2, d
+    orders = yaml.safe_load((tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml").read_text())
+    total = next(c for c in orders["columns"] if c["name"] == "total")
+    assert total["description"] == "Total order value"
+    assert total["description_source"] == "ai_unvalidated"   # source:ai → earns trust via use
+
+
 def test_prepare_allow_applies_default_filters(tmp_path):
     _model(tmp_path)
     rc, out = _run(["prepare", str(tmp_path), "--area", "s", "--sql", "SELECT SUM(total) FROM orders"])
