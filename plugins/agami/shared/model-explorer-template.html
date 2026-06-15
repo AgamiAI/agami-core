@@ -715,6 +715,7 @@
       { id: 'organization', label: 'Organization' },
       { id: 'review',       label: 'Review' },
       { id: 'tables',       label: 'Tables' },
+      { id: 'pii',          label: 'PII' },
       { id: 'metrics',      label: 'Metrics' },
       { id: 'entities',     label: 'Entities' },
       { id: 'joins',        label: 'Joins' },
@@ -1437,6 +1438,67 @@
         }
       })));
       renderAll();
+    }
+
+    // =====================================================================
+    // TAB: PII — every sensitive + suspected column in one place
+    // =====================================================================
+    // Review organized by TASK, not structure: instead of hunting PII inside table cards, this
+    // aggregates every flagged column AND every "looks like PII but wasn't flagged" column into
+    // one list, each with the same queued `sensitive` toggle. Confirms hits and catches misses.
+    function piiRows() {
+      const flagged = [], suspected = [];
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => {
+        if (t.excluded) return;
+        const ctx = { area: s.name, name: t.name, db_schema: t.db_schema };
+        (t.fields || []).forEach(f => {
+          if (f.excluded) return;
+          if (effSensitive(f)) flagged.push({ t, f, ctx });
+          else if (f.suspected_pii) suspected.push({ t, f, ctx });
+        });
+      }));
+      return { flagged, suspected };
+    }
+    function piiSubhead(label, n, hint) {
+      const w = el('div', { style: 'margin:14px 0 4px;' });
+      w.appendChild(el('div', { class: 'kind-subhead', html: label + ' <span class="subtab-count">' + n + '</span>' }));
+      if (hint) w.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 6px;', text: hint }));
+      return w;
+    }
+    function piiRowCard(r) {
+      const card = el('div', { class: 'table-card' });
+      const h = el('div', { class: 'table-header static' });
+      const nameEl = el('div', { class: 'table-name' });
+      nameEl.appendChild(el('span', { class: 'schema-prefix', text: (r.ctx.db_schema || r.ctx.area) + '.' + r.t.name + '.' }));
+      nameEl.appendChild(highlight(r.f.name, searchQ));
+      h.appendChild(nameEl);
+      if (r.f.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: r.f.type }));
+      h.appendChild(piiToggleBtn(r.f, r.ctx));
+      card.appendChild(h);
+      return card;
+    }
+    function renderPiiTab(root) {
+      root.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>PII review — one queue, nothing buried.</strong> Every column flagged sensitive, plus ones that <em>look</em> like PII but weren’t auto-flagged. ' +
+        'agami never shows a sensitive column’s raw values (only aggregates). Confirm the real ones; clear the false alarms. Toggles queue like any edit — submit with the footer.' }));
+      const q = searchQ;
+      const match = r => !q || (r.f.name + ' ' + r.t.name).toLowerCase().includes(q);
+      const { flagged, suspected } = piiRows();
+      const fl = flagged.filter(match), su = suspected.filter(match);
+      setSearchCounts(`${fl.length} flagged · ${su.length} suspected`);
+      const sec = el('div', { class: 'schema-section' });
+
+      sec.appendChild(piiSubhead('Flagged as PII', fl.length,
+        'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive.'));
+      if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
+      fl.forEach(r => sec.appendChild(piiRowCard(r)));
+
+      sec.appendChild(piiSubhead('Suspected — confirm or leave', su.length,
+        'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.'));
+      if (!su.length) sec.appendChild(el('div', { class: 'empty-state', text: 'None suspected.' }));
+      su.forEach(r => sec.appendChild(piiRowCard(r)));
+
+      root.appendChild(sec);
     }
 
     // =====================================================================
@@ -2427,6 +2489,7 @@
         case 'review':   return reviewQueue().length + unknownColumns().length;
         case 'areas':    return (manifest.subject_areas || []).length;
         case 'tables':   return t.tables || 0;
+        case 'pii':      return piiRows().suspected.length;  // suspected = needs a human call
         case 'metrics':  return (manifest.metrics || []).length + newMetrics.length;
         case 'entities': return (manifest.entities || []).length;
         case 'joins':    return (manifest.relationships || []).length + (manifest.cross_relationships || []).length;
@@ -2639,6 +2702,7 @@
         case 'review': renderReviewTab(root); break;
         case 'areas': renderAreasTab(root); break;
         case 'tables': renderTablesTab(root); break;
+        case 'pii': renderPiiTab(root); break;
         case 'metrics':
           if (addMetricOpen) { root.appendChild(renderAddMetricForm()); }
           else { const a = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });

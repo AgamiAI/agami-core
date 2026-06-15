@@ -54,6 +54,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     _scripts = str(Path(__file__).resolve().parent)
     if _scripts not in _sys.path:
         _sys.path.insert(0, _scripts)
+    from semantic_model import build as _B
     from semantic_model import loader as _L
 
     org = _L.load_organization(profile_dir, include_rejected=True)
@@ -108,7 +109,11 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "aggregation": c.aggregation,
                     "review_state": c.review_state,
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
-                    "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
+                    "sensitive": c.sensitive,
+                    # broader "might be PII" the strict flag missed — drives the PII tab's
+                    # suspected tier (review aid; never auto-marks).
+                    "suspected_pii": (not c.sensitive) and _B.suspected_pii(c.name),
+                    "unit": c.unit, "caveats": c.caveats,
                     "date_format": c.date_format, "timezone": c.timezone,
                     "group": col_group.get(c.name, ""),
                 })
