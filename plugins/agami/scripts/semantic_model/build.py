@@ -416,10 +416,37 @@ def write_tree(
     return rep
 
 
+def suggest_metrics(table: Table, storage_type: str, *, max_per_table: int = 10) -> list[dict]:
+    """Per-table reusable measures inferred from column AGGREGATION CLASSES — count of rows,
+    SUM of `additive` columns, AVG of `averageable` columns. `dimension` and `unknown` columns
+    are skipped (never SUM an id, never AVG a status code), which is what keeps the suggestions
+    sensible rather than "aggregate every number." Returns proposed/unreviewed Metric dicts for
+    curate.write_items — the user signs them off in bulk in the explorer. Count is always kept;
+    the rest are capped at max_per_table to avoid flooding a very wide table."""
+    t = table.name
+    out: list[dict] = [{"name": f"{t}_count", "calculation": f"Number of {t} records",
+                        "bindings": {storage_type: "COUNT(*)"}, "source_tables": [t]}]
+    for c in table.columns:
+        if c.primary_key:
+            continue
+        if c.aggregation == "additive":
+            out.append({"name": f"{t}_total_{c.name}", "calculation": f"Total {c.name} across {t}",
+                        "bindings": {storage_type: f"SUM({c.name})"}, "source_tables": [t]})
+        elif c.aggregation == "averageable":
+            out.append({"name": f"{t}_avg_{c.name}", "calculation": f"Average {c.name} in {t}",
+                        "bindings": {storage_type: f"AVG({c.name})"}, "source_tables": [t]})
+    out = out[: max(1, max_per_table)]
+    for m in out:
+        m["confidence"] = "proposed"
+        m["review_state"] = "unreviewed"
+    return out
+
+
 __all__ = [
     "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
     "derive_column_groups", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
+    "suggest_metrics",
     "write_tree", "WriteReport",
 ]

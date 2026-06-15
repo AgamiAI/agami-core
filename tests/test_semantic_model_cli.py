@@ -78,6 +78,18 @@ def test_set_units_requires_a_unit(tmp_path):
     assert rc == 1 and "error" in json.loads(out)
 
 
+def test_suggest_metrics_writes_proposed(tmp_path):
+    _model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    d = json.loads(out)
+    assert rc == 0 and d["written"] >= 2, d   # at least orders_count + order_items_count
+    f = tmp_path / "subject_areas" / "s" / "metrics" / "orders_count.yaml"
+    assert f.exists()
+    met = yaml.safe_load(f.read_text())
+    assert met["confidence"] == "proposed" and met["review_state"] == "unreviewed"
+    assert met["bindings"] == {"PostgreSQL": "COUNT(*)"}
+
+
 def test_describe_file_applies_tsv(tmp_path):
     _model(tmp_path)
     tsv = tmp_path / "desc.tsv"

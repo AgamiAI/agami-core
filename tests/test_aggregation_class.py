@@ -123,3 +123,22 @@ def test_curator_edit_rejects_bad_value(tmp_path):
     }])
     # strict schema rejects the batch (reverted); the model on disk is unchanged
     assert res.errors
+
+
+def test_suggest_metrics_gated_on_aggregation():
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True, aggregation="dimension"),
+                    m.Column(name="amount", type="decimal", aggregation="additive"),
+                    m.Column(name="discount_rate", type="decimal", aggregation="averageable"),
+                    m.Column(name="status", type="string", aggregation="dimension"),
+                    m.Column(name="weird", type="decimal", aggregation="unknown")])
+    mets = build.suggest_metrics(t, "PostgreSQL")
+    names = {x["name"] for x in mets}
+    assert "orders_count" in names
+    assert "orders_total_amount" in names           # additive → SUM
+    assert "orders_avg_discount_rate" in names      # averageable → AVG
+    assert not any("status" in n or "weird" in n for n in names)  # dimension/unknown skipped
+    assert all(x["confidence"] == "proposed" and x["review_state"] == "unreviewed" for x in mets)
+    amt = next(x for x in mets if x["name"] == "orders_total_amount")
+    assert amt["bindings"] == {"PostgreSQL": "SUM(amount)"} and amt["source_tables"] == ["orders"]

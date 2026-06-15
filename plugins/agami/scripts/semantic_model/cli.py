@@ -320,6 +320,40 @@ def cmd_set_units(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_suggest_metrics(args) -> int:
+    """Infer a sensible per-table metric set (count + SUM of additive cols + AVG of averageable
+    cols, gated on aggregation class) and write them PROPOSED/unreviewed for bulk sign-off in the
+    explorer — instead of asking the user to pick ~4 upfront. Rule 1 keeps proposed metrics out of
+    any answer until approved, so a large suggested set can't degrade results."""
+    from . import build as B
+    from . import curate
+    org = L.load_organization(args.root)
+    conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
+    default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
+    suggested = written = 0
+    errors: list[str] = []
+    for sa in org.subject_areas:
+        if args.area and sa.name != args.area:
+            continue
+        existing = {m.name for m in sa.metrics}
+        items: list[dict] = []
+        for t in sa.tables_defined:
+            st = conn_type.get(t.storage_connection, default_type)
+            for met in B.suggest_metrics(t, st, max_per_table=args.max_per_table):
+                if met["name"] in existing:
+                    continue
+                existing.add(met["name"])
+                items.append(met)
+                suggested += 1
+        if items:
+            res = curate.write_items(args.root, sa.name, "metric", items)
+            written += len(res.applied)
+            errors += res.errors
+    _print_json({"suggested": suggested, "written": written, "errors": errors,
+                 "note": "proposed/unreviewed — review & sign off in the model explorer (/agami-model)"})
+    return 0 if not errors else 1
+
+
 def cmd_describe_file(args) -> int:
     """Apply many column descriptions from a lightweight TSV — one per line,
     `<table.column>` or `<area.table.column>` then a TAB then the description — as ONE validated
@@ -869,6 +903,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--columns", nargs="*", default=None,
                     help="explicit table.column (or bare column) list — overrides money detection")
     sp.set_defaults(func=cmd_set_units)
+
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (count/sum/avg, gated on aggregation class) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp.add_argument("root")
+    sp.add_argument("--area", default=None, help="restrict to one subject area")
+    sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
+                    help="cap measures per table (count always kept)")
+    sp.set_defaults(func=cmd_suggest_metrics)
 
     sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")
     sp.add_argument("root")
