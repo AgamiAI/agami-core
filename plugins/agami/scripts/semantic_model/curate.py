@@ -271,6 +271,24 @@ def sensitive_columns(org: Organization) -> dict:
     return {"count": len(cols), "columns": cols}
 
 
+def suspected_sensitive_columns(org: Organization) -> dict:
+    """Columns the strict flag may have MISSED — `build.suspected_pii` matches the name but the
+    column isn't marked `sensitive` (e.g. `first_name` in a non-PII-named table). Surfaced so a
+    PII review catches false NEGATIVES, not just confirms hits. Excludes already-sensitive and
+    rejected columns. A review aid — never auto-marks."""
+    from . import build as B
+    cols: list[dict] = []
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if getattr(t, "review_state", "approved") == "rejected":
+                continue
+            for c in t.columns:
+                if (not c.sensitive and B.suspected_pii(c.name)
+                        and getattr(c, "review_state", "approved") != "rejected"):
+                    cols.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type})
+    return {"count": len(cols), "columns": cols}
+
+
 def _trust(obj) -> dict:
     return {
         "confidence": getattr(obj, "confidence", None),

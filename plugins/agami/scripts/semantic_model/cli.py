@@ -200,7 +200,11 @@ def cmd_sensitive(args) -> int:
     once the user has excluded the flagged columns)."""
     from . import curate
     org = L.load_organization(args.root, include_rejected=True)
-    _print_json(curate.sensitive_columns(org))
+    flagged = curate.sensitive_columns(org)
+    suspected = curate.suspected_sensitive_columns(org)
+    # `count`/`columns` keep their meaning (flagged PII — the gate signal); `suspected` is the
+    # second review tier (might-be-PII the strict flag missed, for the PII tab to confirm).
+    _print_json({**flagged, "suspected": suspected["columns"], "suspected_count": suspected["count"]})
     return 0
 
 

@@ -52,3 +52,24 @@ def test_sensitive_columns_under_excluded_table_not_counted():
     sa = m.SubjectArea(name="area", description="d", tables_defined=[t])
     org = m.Organization(organization="o", version=1, subject_areas=[sa])
     assert C.sensitive_columns(org)["count"] == 0
+
+
+def test_suspected_tier_surfaces_missed_pii():
+    # first_name in a non-PII-named table is NOT auto-flagged (table-gated weak rule), but the
+    # suspected tier surfaces it so a reviewer can confirm. Already-sensitive cols don't repeat.
+    org = _org([m.Column(name="id", type="integer"),
+                m.Column(name="email", type="string", sensitive=True),   # flagged
+                m.Column(name="first_name", type="string"),              # suspected, not flagged
+                m.Column(name="gender", type="string"),                  # suspected (extra tokens)
+                m.Column(name="total", type="decimal")])                 # not PII
+    susp = C.suspected_sensitive_columns(org)
+    names = {c["column"] for c in susp["columns"]}
+    assert names == {"first_name", "gender"}
+    assert "email" not in names   # already sensitive → not re-surfaced
+    assert "total" not in names
+
+
+def test_suspected_excludes_rejected():
+    org = _org([m.Column(name="maiden_name", type="string", review_state="rejected"),
+                m.Column(name="nationality", type="string")])
+    assert {c["column"] for c in C.suspected_sensitive_columns(org)["columns"]} == {"nationality"}
