@@ -107,7 +107,7 @@ SemiAdditiveAgg = Literal["last", "first", "average", "min", "max"]
 # context instead of rubber-stamping a giant list. An `ai_unknown` column used in an answer
 # is surfaced the same way ("I used `xyz` but don't know what it is — is this right?").
 # See docs/design/validated-through-use-descriptions.md.
-DescriptionSource = Literal["human", "ai_unvalidated", "ai_validated", "ai_unknown"]
+DescriptionSource = Literal["human", "ai_unvalidated", "ai_validated", "ai_unknown", "metadata"]
 Cardinality = Literal["many_to_one", "one_to_many", "one_to_one"]
 JoinType = Literal["INNER", "LEFT", "RIGHT", "FULL", "CROSS"]
 Executable = Literal["same_engine", "split", "informational"]

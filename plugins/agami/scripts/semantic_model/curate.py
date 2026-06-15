@@ -633,14 +633,19 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         # and columns carry `description_source`; relationships / metrics / entities have a
         # `description` but no source field, so stamping it there would fail `extra=forbid`.
         # An edit that sets a table/column `description` also stamps `description_source`:
-        #   source:"ai" → ai_unvalidated (agami-connect generation)
-        #   otherwise   → human (a person edited it, so it's trusted)
+        #   source:"ai"       → ai_unvalidated (agami-connect LLM generation; earns trust via use)
+        #   source:"metadata" → metadata (read from the DB's own data dictionary — authoritative,
+        #                       trusted, NOT validated-through-use; see metadata_sources.py)
+        #   otherwise         → human (a person edited it, so it's trusted)
         #   empty value → clear it. A direct edit of `description_source` itself
         #   (e.g. confirm → "ai_validated") falls through the generic `doc[fld]=val`.
         if fld == "description" and desc_source:
+            src = op.get("source")
             doc["description_source"] = (
                 None if not (val or "").strip()
-                else ("ai_unvalidated" if op.get("source") == "ai" else "human")
+                else "ai_unvalidated" if src == "ai"
+                else "metadata" if src == "metadata"
+                else "human"
             )
         return
     if new_state:
