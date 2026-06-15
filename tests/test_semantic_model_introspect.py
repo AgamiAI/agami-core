@@ -683,3 +683,19 @@ def test_introspect_writes_progress_log(tmp_path):
     assert any("discovered" in ln for ln in lines)
     assert any(ln.startswith("columns+grain 1/") for ln in lines)
     assert lines[-1].startswith("done:")
+
+
+def test_normalize_table_list_splits_zsh_blob():
+    from semantic_model import cli
+    assert cli._normalize_table_list(["a", "b"]) == ["a", "b"]          # clean list untouched
+    assert cli._normalize_table_list(["incident orders customers"]) == ["incident", "orders", "customers"]
+    assert cli._normalize_table_list(["a,b, c"]) == ["a", "b", "c"]     # comma/space mix
+    assert cli._normalize_table_list(None) is None
+
+
+def test_introspect_fails_fast_on_bogus_allowlist(tmp_path):
+    """A bogus allowlist entry (mis-joined names) describes nothing — introspect must raise, not
+    persist a garbage zero-column table."""
+    with pytest.raises(RuntimeError):
+        I.introspect("shop", "postgres", runner=lambda sql: [],
+                     artifacts_dir=tmp_path, tables=["public.nonexistent_blob"], dry_run=True)

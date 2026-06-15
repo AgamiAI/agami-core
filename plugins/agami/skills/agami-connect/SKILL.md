@@ -452,8 +452,8 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 - **End the turn. Do NOT introspect yet.**
 
 **On re-entry — the user pastes an `AGAMI PRUNE …` block.** Parse it:
-- Lines under `keep tables: <k> of <n>` (one `schema.table` per line, until a blank line / `exclude columns:` / `done`) = the **kept allowlist** → pass as `--tables`.
-- Lines under `exclude columns: <c>` (one `schema.table.column` per line) = columns to drop → pass as `--exclude-columns`.
+- Lines under `keep tables: <k> of <n>` (one `schema.table` per line, until a blank line / `exclude columns:` / `done`) = the **kept allowlist**. **Write them to a file (one `schema.table` per line) and pass `--tables-file <path>` — do NOT pass them as an unquoted shell variable.** Under zsh (the Bash tool's shell) an unquoted `$list` does *not* word-split, so all N names arrive as one giant argument and the engine builds a single garbage table. The file path sidesteps shell quoting entirely. (`--tables` still works if you list them inline, and a single mis-joined blob is now split defensively — but the file is the safe default.)
+- Lines under `exclude columns: <c>` (one `schema.table.column` per line) = columns to drop → pass as `--exclude-columns` (same zsh caveat — write to a file or list inline, don't pass an unquoted variable).
 - If the user kept everything (`<k>` == `<n>`, no excluded columns), just run 1.7 with no `--tables`/`--exclude-columns`.
 
 If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
@@ -463,14 +463,16 @@ If the user instead asks to skip pruning ("just introspect everything"), proceed
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. From `plugins/agami/scripts/`:
 
 ```bash
+# write the kept allowlist to a file first (zsh-safe — no word-splitting to get wrong)
+printf '%s\n' incident problem change_request sys_user ... > /tmp/agami-keep.txt
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
   --profile <profile> --db-type <db_type> \
   --artifacts "<artifacts_dir>" \
-  [--tables <kept schema.table list from 1.6>] \
+  [--tables-file /tmp/agami-keep.txt] \
   [--exclude-columns <schema.table.column list from 1.6>]
 ```
 
-`--tables` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning.
+`--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
 
 **On a large schema (50+ tables) over a tunnel this takes minutes and the command prints nothing until it returns — which reads as hung. Stream a heartbeat:** run the introspect call **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line, until the command completes. The engine writes a flushed per-phase/per-table log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52: incident`, `building relationships …`, `done: 52 tables, 187 relationships`. So instead of one silent block the user sees live progress. (For a small DB it returns in seconds — no need to background it.)
 

@@ -234,6 +234,23 @@ def introspect(
         grain_by_table[t.name] = set(t.grain)
         _progress(pp, f"columns+grain {i}/{len(pairs)}: {table}")
 
+    # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
+    # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
+    # a garbage table. Drop them with a clear note; if that leaves nothing, raise rather than
+    # write an empty model.
+    empty = [t.name for t in built if not t.columns]
+    if empty:
+        built = [t for t in built if t.columns]
+        grain_by_table = {t.name: set(t.grain) for t in built}
+        report.notes.append(
+            f"dropped {len(empty)} table(s) with no readable columns (not found / bad allowlist): "
+            + ", ".join(empty[:8]) + (" …" if len(empty) > 8 else ""))
+    if not built:
+        raise RuntimeError(
+            "no allowlisted table could be described — every name yielded zero columns. "
+            "Check the --tables list (a shell-quoting issue can mis-join all names into one); "
+            "or pass --tables-file with one schema.table per line.")
+
     # 2b. apply prune-step column exclusions (the user dropped these in the prune
     # view). Match on schema.table.column, with a schema-less table.column fallback.
     # Excluded columns are marked `rejected` so they're kept for audit but off the

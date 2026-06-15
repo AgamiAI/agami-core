@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -591,9 +592,30 @@ def cmd_seed_validate(args) -> int:
     return 0
 
 
+def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:
+    """Split any element that arrived as one whitespace/comma-joined blob into separate names.
+    Defends against the zsh gotcha where an unquoted `$TBLS` passes all 52 names as ONE argument
+    (`--tables "incident orders …"` → one giant bogus table name). Idempotent on a clean list."""
+    if not raw:
+        return raw
+    out: list[str] = []
+    for item in raw:
+        out.extend(p for p in re.split(r"[\s,]+", item.strip()) if p)
+    return out or None
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
+
+    tables = _normalize_table_list(args.tables)
+    if getattr(args, "tables_file", None):
+        # a newline-separated allowlist file — the shell-quoting-proof way to pass a big kept set
+        # (no word-splitting to get wrong). `#` comments and blank lines ignored.
+        text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
+        from_file = [ln.strip() for ln in text.splitlines()
+                     if ln.strip() and not ln.lstrip().startswith("#")]
+        tables = (tables or []) + _normalize_table_list(from_file)
 
     runner = INTRO.make_execute_sql_runner(args.profile)
     progress = args.progress or str(
@@ -604,7 +626,7 @@ def cmd_introspect(args) -> int:
         runner=runner,
         artifacts_dir=args.artifacts,
         out_dir=args.out,
-        tables=args.tables,
+        tables=tables,
         exclude_columns=args.exclude_columns,
         dry_run=args.dry_run,
         bigquery_region=args.bigquery_region,
@@ -992,7 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", default=None, help="override output dir")
     sp.add_argument("--tables", nargs="*", default=None,
                     help="schema.table allowlist — the prune step's kept set (also the "
-                         "no-catalog/probe-only case)")
+                         "no-catalog/probe-only case). A single whitespace/comma-joined blob is "
+                         "split defensively (zsh-safe).")
+    sp.add_argument("--tables-file", default=None, dest="tables_file",
+                    help="path to a newline-separated allowlist file — the shell-quoting-proof way "
+                         "to pass a large kept set (no word-splitting to get wrong)")
     sp.add_argument("--exclude-columns", nargs="*", default=None, dest="exclude_columns",
                     help="schema.table.column list to mark excluded (the prune step's dropped columns)")
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
