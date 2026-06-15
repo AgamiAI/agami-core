@@ -1728,6 +1728,48 @@
       root.appendChild(sec);
     }
 
+    // Metrics grouped by source table, COLLAPSED by default — so 200 proposed measures read as
+    // "incident · 9 [✓ Approve 9]", not a flat wall. Expand a group to scrutinize; bulk-approve a
+    // whole table's measures at once; or approve every proposed metric in one click. This is the
+    // "comprehensive but not overwhelming" review for the suggest-metrics output.
+    let metricGroupsOpen = new Set();
+    function metricGroupKey(m) { return (m.area || '?') + '.' + ((m.source_tables || [])[0] || '?'); }
+    function renderMetricsGrouped(root) {
+      const all = (manifest.metrics || []).filter(m =>
+        (!searchQ || `${m.name} ${m.calculation} ${m.description} ${m.area}`.toLowerCase().includes(searchQ))
+        && passesFilter(m, 'metric'));
+      setSearchCounts(`${all.length} of ${(manifest.metrics || []).length} metric${(manifest.metrics || []).length === 1 ? '' : 's'} shown`);
+      if (!all.length) {
+        root.appendChild(el('div', { class: 'empty-state', text: (manifest.metrics || []).length ? 'No metrics match.' : 'No metrics defined yet.' }));
+        return;
+      }
+      const order = [], byKey = {};
+      all.forEach(m => { const k = metricGroupKey(m); if (!byKey[k]) { byKey[k] = []; order.push(k); } byKey[k].push(m); });
+      const sec = el('div', { class: 'schema-section' });
+      const allApprovable = all.filter(isApprovable);
+      if (allApprovable.length) {
+        const bar = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+        bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
+          onclick: () => bulkApprove(all) }, `✓ Approve all ${allApprovable.length} proposed`));
+        sec.appendChild(bar);
+      }
+      order.forEach(k => {
+        const items = byKey[k];
+        const open = metricGroupsOpen.has(k) || !!searchQ;   // search expands everything
+        const head = kindSubhead(k, items, true);            // per-table bulk approve
+        head.style.cursor = 'pointer';
+        head.insertBefore(el('span', { class: 'group-caret', text: open ? '▾ ' : '▸ ' }), head.firstChild);
+        head.addEventListener('click', (ev) => {
+          if (ev.target.tagName === 'BUTTON') return;        // approve click shouldn't toggle
+          if (metricGroupsOpen.has(k)) metricGroupsOpen.delete(k); else metricGroupsOpen.add(k);
+          renderBody();
+        });
+        sec.appendChild(head);
+        if (open) items.forEach(m => sec.appendChild(renderMetricCard(m)));
+      });
+      root.appendChild(sec);
+    }
+
     // The Joins tab: one tab, but split into "In-schema joins" and "Cross-schema joins"
     // sections so the cross-schema (cross-area) edges read distinctly. Split only when
     // cross-schema joins exist — a single-schema DB just renders one flat list as before.
@@ -2709,9 +2751,7 @@
                  a.appendChild(el('button', { type: 'button', class: 'add-metric-open', onclick: () => { addMetricOpen = true; renderAll(); } }, '+ Add a metric'));
                  root.appendChild(a); }
           newMetrics.forEach((m, i) => root.appendChild(renderNewMetricCard(m, i)));
-          renderFlatTab(root, manifest.metrics, 'metric',
-            m => `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`,
-            renderMetricCard, 'metric');
+          renderMetricsGrouped(root);   // by-table, collapsed, per-table + global bulk approve
           break;
         case 'entities':
           renderFlatTab(root, manifest.entities, 'entity',
