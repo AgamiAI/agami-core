@@ -350,11 +350,11 @@ Introspection can take a while against cloud DBs. Tell the user **before** the f
 | sqlite / duckdb | < 5s | local file |
 | postgres / mysql (local) | 5–15s | fast catalog |
 | postgres / mysql (cloud) | 15–60s | network RTT per query + FK overlap checks |
-| redshift | 1–5 min | slow metadata + overlap joins |
+| **redshift / databricks / trino** | **~30s for ≤20 tables; 10–30+ min for 50+** | unenforced FKs → the relationship phase confirms joins by value-overlap, one scan per candidate over the network, and big fact tables dominate. **Scale your estimate with table count and warn explicitly.** |
 | **snowflake** | **5–15 min** | cold-warehouse spin-up dominates; per-table queries, sample scans, EXPLAIN validation. A 100-table account measured ~12 min. |
-| sqlserver / oracle / databricks / trino | 30s–5 min | network + per-table catalog |
+| sqlserver / oracle | 30s–5 min | network + per-table catalog |
 
-Surface a one-liner with per-step estimates and **narrate per-table progress** so it never looks hung. For `reintrospect`, prepend "Re-introspecting (about as long as initial setup)."
+**Set a HONEST estimate — understating it is what makes a working run read as "stuck."** For a large schema (50+ tables) on Redshift/Databricks/Trino, say so up front: e.g. *"This is ~50 tables on Redshift — the relationship phase confirms joins by value-overlap, so expect **10–30 minutes**. I'll stream progress and report when it lands."* Then **stream the heartbeat** (background + tail, per 1.7) so the user sees `columns+grain 30/52` and `relationships: declared FK 80/187` rather than silence. For `reintrospect`, prepend "Re-introspecting (about as long as initial setup)."
 
 ### 1.1 — Existing-model check
 

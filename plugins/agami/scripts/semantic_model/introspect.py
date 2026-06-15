@@ -233,11 +233,13 @@ def introspect(
     # 2. per-table columns + grain
     built: list[Table] = []
     grain_by_table: dict[str, set[str]] = {}
+    _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
     for i, (schema, table) in enumerate(pairs, 1):
         t = _build_table(dialect, runner, schema, table, conn_name, report)
         built.append(t)
         grain_by_table[t.name] = set(t.grain)
-        _progress(pp, f"columns+grain {i}/{len(pairs)}: {table}")
+        if i % _step == 0 or i == len(pairs):
+            _progress(pp, f"columns+grain {i}/{len(pairs)}")
 
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
@@ -270,7 +272,7 @@ def introspect(
 
     # 3. relationships (catalog FKs, else probe by name+type+overlap)
     _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
-    rels = _build_relationships(dialect, runner, pairs, built, grain_by_table, report)
+    rels = _build_relationships(dialect, runner, pairs, built, grain_by_table, report, pp=pp)
     report.table_count = len(built)
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
@@ -611,6 +613,7 @@ def _grain(
 def _build_relationships(
     dialect: D.Dialect, runner: Runner, pairs: list[tuple[Optional[str], str]],
     tables: list[Table], grain_by_table: dict[str, set[str]], report: IntrospectReport,
+    pp: Optional[Path] = None,
 ) -> list[Relationship]:
     # catalog FKs per schema
     schemas = {s for s, _ in pairs if s}
@@ -637,7 +640,10 @@ def _build_relationships(
     overlap_probes = 0   # budget guard for declared-FK overlap confirmation (see FK_OVERLAP_PROBE_CAP)
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
-        for fk in catalog_fks:
+        _fk_step = max(1, len(catalog_fks) // 10)   # ~10 heartbeat lines over the (slow) FK pass
+        for _fi, fk in enumerate(catalog_fks, 1):
+            if _fi % _fk_step == 0 or _fi == len(catalog_fks):
+                _progress(pp, f"relationships: declared FK {_fi}/{len(catalog_fks)}")
             ft, fc, tt, tc = fk.get("from_table"), fk.get("from_column"), fk.get("to_table"), fk.get("to_column")
             if not (ft and fc and tt and tc):
                 continue
