@@ -412,7 +412,13 @@ Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll
 
 **If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). `.xlsx`/`.docx` → ask for PDF, proceed without if not.
 
-**If a published product schema (or the user names one — "use the ServiceNow data model online"):** the user is pointing you at an authoritative public reference. **`WebSearch`/`WebFetch` it** — the official developer/data-dictionary docs for the named product and the specific tables you discovered in 1.6 (e.g. ServiceNow's `task`/`incident`/`sys_user` table docs, Salesforce's Object Reference). Pull the canonical **meaning of each standard table and column** (e.g. ServiceNow `task.made_sla`, `task.reassignment_count`, `sys_created_on`, `number`, `state`) and any well-known metric definitions. Stash the same way (`$DATA_MODEL_DOC_TEXT`, never written to disk). This is what fills the "basic column has no description" gap on standard schemas — those fields are documented even when the data sample alone can't reveal them, so describe them from the reference instead of marking them `ai_unknown`. Stay anchored to the tables you actually introspected; don't invent fields the live DB doesn't have. If the docs are unreachable, say so and proceed without.
+**If a published product schema (or the user names one — "use the ServiceNow data model online"):** the user wants the standard fields grounded in the authoritative reference, not your training memory.
+
+1. **Prefer the in-DB metadata.** Most metadata-driven platforms carry their own dictionary *in the database* (ServiceNow `sys_dictionary`/`sys_choice`, SAP `DD03L`, …). That's authoritative AND machine-readable — far better than scraping docs. So the real answer here is usually **Phase 2a.0's `sm enrich-metadata`**, not a web fetch. Note that intent now; it runs during enrichment.
+2. **Web reference as fallback / supplement.** When there's no in-DB dictionary, **`WebSearch`/`WebFetch`** the official developer/data-dictionary docs for the named product + the tables you discovered in 1.6. If you chose this path, the fetch is **mandatory, not optional** — do it once, upfront, and stash into `$DATA_MODEL_DOC_TEXT` (never written to disk). Note that vendor doc portals are often **JS-rendered and return only nav skeletons** (ServiceNow's does); when a fetch comes back empty, fall back to WebSearch result snippets / community pages and say so — don't silently substitute training knowledge.
+3. **Propagate it.** If you fan enrichment out to subagents, **every subagent prompt MUST include `$DATA_MODEL_DOC_TEXT`** with the instruction: *describe standard fields from this reference; if a field isn't in the reference or the data, mark it `ai_unknown` — do NOT fill it from general product knowledge.* (This is the hole that let subagents drift to "from ServiceNow domain knowledge.")
+
+Stay anchored to the tables you actually introspected; don't invent fields the live DB doesn't have.
 
 **If a semantic-layer repo:** ask for the directory (a local clone / monorepo path — no upload needed since it's git-backed). Glob the **definition** files and `Read` them up to a budget (~30 files / ~250 KB total; if larger, prefer metric/model definitions and tell the user what you sampled). **Skip compiled SQL and data files** — you want the declared metrics/joins, not the warehouse output:
 > | Layer | Read these | Carries |
@@ -477,6 +483,18 @@ Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe
 ## Phase 2: Enrich (the LLM layer — validated into the model)
 
 The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
+
+> **HARD RULE — decisions to you, plumbing to the engine. NEVER write a generator script** (`build_ops.py`, `build_desc.py`, `enrich_*.py`, a one-off that loops to build curate ops). It's the recurring failure mode and it's banned. When you have many edits, emit them as data and let a tested command apply them: `sm describe-file` (TSV of descriptions), `sm enrich-metadata` (in-DB metadata), `sm set-units`, `sm suggest-metrics`, or `sm curate --ops-file <json>`. You decide *what* (currency, which metrics, a column's meaning); the engine does the *applying*.
+
+### 2a.0 — Deterministic metadata FIRST (run before any hand-enrichment)
+
+**Many databases describe themselves.** Metadata-driven platforms ship their own data dictionary + value-label tables (ServiceNow `sys_dictionary` + `sys_choice`, SAP `DD03L`, Salesforce metadata…), and plenty of ordinary schemas have code→label lookup/dimension tables. When that metadata is present it is **authoritative** — strictly better than LLM guessing or fetching JS-walled vendor docs. Always try it first:
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" enrich-metadata "$ROOT" --profile <profile> --db-type <db_type>
+```
+
+It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables, and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
 
 ### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
@@ -573,7 +591,7 @@ Metrics come from two sources, handled very differently. **Always prefer declare
 
 Translate the declared SQL/agg to the profile's dialect for `bindings`, set `source_tables`, write **`confidence: inferred, review_state: unreviewed`** (declared = strong signal, still wants a human sign-off on the `/agami-model` Review tab). If there are many (> ~8), **don't** funnel them through a 4-item picker — write them all and tell the user once: *"Added N metrics from your `<LookML/dbt/file>` — review or trim them in /agami-model."* (Offer a single "add all N / let me pick a subset" confirm if you want, but never silently drop declared metrics to fit a cap.)
 
-**(B) Inferred metrics — only when there's no declared source (or to supplement a thin one).** These genuinely drift, so **suggest, don't auto-add**, capped at ~4 (AskUserQuestion fits ~4 + Other) from: aggregate-shaped numeric fields (SUM/AVG), fact tables (`count_<table>`), time fields, `ORGANIZATION.md` KPI mentions. **AskUserQuestion** multi-select: "I'd suggest these reusable metrics — pick which make sense." `Other (Other field)` for "describe a metric I want"; submitting none = skip. Write `confidence: proposed`.
+**(B) Inferred metrics — infer a sensible set for BULK review, don't ask for 4.** Run **`sm suggest-metrics "$ROOT"`**: it infers per-table measures (count of rows, SUM of `additive` columns, AVG of `averageable` columns — **gated on the aggregation class** so it's sensible, never "aggregate every number") and writes them `proposed/unreviewed`. Rule 1 keeps proposed metrics out of every answer until the user signs off, so a large set is safe — the user reviews them **in bulk in the explorer** (Phase 4), not through a 4-at-a-time modal. This is what closes the thin-metrics gap (9 vs a mature model's 200+). Reserve **AskUserQuestion** only for a bespoke KPI the user describes in words that the column shapes don't imply.
 
 For every metric (A or B) fill `name`, prose `calculation` (intent — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`. The canonical YAML shape is [`shared/metric-entity-shape.md`](../../shared/metric-entity-shape.md) (synthetic example). **Write them with the packaged command** — build a JSON array and run it once; never hand-write each YAML and never author a throwaway loop script. It validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, validates the whole model, and reverts the batch on failure:
 ```bash
@@ -588,7 +606,13 @@ From samples + the domain doc, add provider-portable cleaning where evidence sup
 - **Caveats** (`caveats[]` on table/column/entity): data-quality notes, anti-patterns (e.g. "filter on the event date, not the load date"), dedup warnings.
 - **value_transform** on columns whose raw value needs cleaning (`regexp_replace(...)` for bracketed text, `TO_TIMESTAMP(...)` for epoch). Must parse as SQL (validator checks).
 - **default_filters** (`default_filters[]` on a table): soft-delete / tenancy filters AND-ed in at query time (use the `{alias}` placeholder, e.g. `{alias}.deleted_at IS NULL`).
-- **Currency (one ask per profile):** **find the money columns with `sm suggest-units "$ROOT"` — don't hand-roll a name regex** (a bare `count` pattern matches inside `discount` and silently drops `discount_amount`; the command's matcher is word-boundary-correct and tested). It returns `{money_columns: [{area, table, column, type}]}` (numeric columns named like money — amount/price/revenue/discount/… — minus rate/count/id/score, and skipping any that already have a `unit`). Glance at the list; if a `_usd`/`_inr`-suffixed column makes the currency obvious, set it directly. Otherwise ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). On the answer, **set the column `unit` to the ISO code** on every returned column — via `cli curate` edit ops (`{op:edit, kind:table, area, name:<table>, column:<col>, field:unit, value:"INR"}`), one batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → leave `unit` unset, one-liner. (Non-currency units — `cents`, `percent`, `days` — set `unit` the same way when a column's scale/unit is unambiguous.)
+- **Currency (one ask per profile):** **find the money columns with `sm suggest-units "$ROOT"` — don't hand-roll a name regex** (a bare `count` pattern matches inside `discount` and silently drops `discount_amount`; the command's matcher is word-boundary-correct and tested). It returns `{money_columns: [{area, table, column, type}]}` (numeric columns named like money — amount/price/revenue/discount/… — minus rate/count/id/score, and skipping any that already have a `unit`). Glance at the list; if a `_usd`/`_inr`-suffixed column makes the currency obvious, set it directly. Otherwise ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). On the answer, apply it with **one tested command — never pipe `suggest-units` through a hand-rolled script** (that glue breaks, e.g. on empty stdin):
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-units "$ROOT" --currency INR
+```
+
+It stamps `unit` on every detected money column in a single validated curate batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → skip (leave `unit` unset), one-liner. Non-currency units (`cents`/`percent`/`days`) → `--unit <name>`; `--columns <table.col …>` to override the money detection for a non-obvious name.
 - **Date encodings (auto-sniffed — no question):** introspection already sets `date_format` (`epoch_s`/`ms`/`us`/`ns`, `yyyymmdd`, `iso8601`) + `timezone` on date-named columns whose sample values fit the shape, so epoch integers render as human dates (UTC) deterministically. You don't ask. **Do** glance at the result: if a time column was missed or mis-scaled (e.g. an epoch_ms tagged epoch_s), fix it with a `field:date_format`/`field:timezone` edit op in the same batch; mention any epoch columns found in the Phase 7 summary.
 
 **Write all of these with `sm curate` edit ops — never hand-edit `tables/*.yaml` or script a loop over them.** One ops array, one call (validated + committed + reverted on failure):
@@ -632,7 +656,11 @@ I split <N> tables into <A> subject areas:
 <C> joins span areas (kept as cross-area relationships).
 ```
 
-**AskUserQuestion:** `Looks good (Recommended)` / `Adjust — merge/rename/move tables (Other field)` / `Open the model explorer`. If they adjust, edit the `subject_areas/` tree accordingly and re-validate (sizing warns at 25 tables, errors at 30). For a single-area small DB, skip this phase silently.
+**The model explorer is the review surface — route adjustment through it, don't pre-empt it with a modal.** So:
+- **Trivial split** (single area, or a handful of obviously-right areas with nothing else to curate): a quick **AskUserQuestion** `Looks good (Recommended)` / `Adjust — merge/rename/move (Other field)` is fine. Skip silently for a single-area small DB.
+- **Non-trivial model** (many areas, or there's PII / proposed metrics / sign-offs pending — i.e. the Phase 4 curate gate will fire anyway): **make `Open the model explorer` the default** and let the user review the area split *there*, in one pass alongside PII, descriptions, and metric sign-off — rather than eyeballing a text table in a modal then opening the explorer separately. Don't ask the same thing twice.
+
+If they adjust, edit the `subject_areas/` tree accordingly and re-validate (sizing warns at 25 tables, errors at 30).
 
 ---
 

@@ -146,7 +146,11 @@ _MIN_GATE_COLS = 2  # below this a table is too small to confidently call "skipp
 # is what makes the gate able to tell "intentionally blank" from "the pass didn't finish".
 _SELF_EVIDENT_NAME_RE = re.compile(
     r"^(id|.*_id|.*_no|.*_uuid|.*_guid|.*_key|created.*|modified.*|updated.*|deleted.*|"
-    r".*_at|.*_by|.*_date|.*_ts|.*_time|.*timestamp|is_.*|has_.*|.*_flag)$",
+    r".*_at|.*_by|.*_date|.*_ts|.*_time|.*timestamp|is_.*|has_.*|.*_flag|"
+    # unambiguous geography / contact names — self-evident, may stay blank. Deliberately NOT
+    # state/title/type/status (coded lifecycle fields in ServiceNow & many apps — need decode).
+    r"city|country|street|postal_code|zip|zipcode|email|.*_email|phone|.*_phone|"
+    r"website|url|.*_url|latitude|longitude|first_name|last_name|full_name)$",
     re.IGNORECASE,
 )
 # More than this many skipped-meaningful columns in one table ⇒ under-enriched. A couple of
