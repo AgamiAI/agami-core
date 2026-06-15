@@ -498,6 +498,67 @@ def cmd_introspect(args) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_enrich_metadata(args) -> int:
+    """Deterministically enrich columns from the database's OWN metadata/lookup tables —
+    descriptions + choice_field labels — in one validated curate batch. No LLM, no generator
+    script, no external doc fetch. Recognizes presets (e.g. ServiceNow sys_dictionary + sys_choice)
+    or takes --preset; the authoritative platform metadata becomes the model's enrichment."""
+    from . import curate
+    from . import dialects as D
+    from . import introspect as INTRO
+    from . import metadata_sources as MS
+    from .loader import load_organization
+
+    root = Path(args.root).expanduser()
+    org = load_organization(root)
+    model_tables = [t.name for sa in org.subject_areas for t in sa.tables_defined]
+    valid = {(t.name.lower(), c.name.lower())
+             for sa in org.subject_areas for t in sa.tables_defined for c in t.columns}
+    schema_of: dict[str, str] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema_of.setdefault(t.name.lower(), t.schema_name)
+
+    preset = args.preset or MS.detect_preset(model_tables)
+    if not preset:
+        _print_json({"enriched": False, "reason": "no metadata preset detected — pass --preset"})
+        return 1
+    sources = MS.usable_sources(preset, model_tables)
+    if not sources:
+        _print_json({"enriched": False, "preset": preset,
+                     "reason": "preset's source table(s) are not in the model"})
+        return 1
+
+    dialect = D.get_dialect(args.db_type)
+    runner = INTRO.make_execute_sql_runner(args.profile)
+    ops: list[dict] = []
+    fetched: dict[str, int] = {}
+    for role, cfg in sources.items():
+        src = cfg["source"]
+        sch = schema_of.get(src.lower())
+        fq = dialect.qualified(sch, src) if sch else dialect.quote_ident(src)
+        col_names = [v for k, v in cfg.items() if k.endswith("_col")]
+        sel = ", ".join(dialect.quote_ident(c) for c in col_names)
+        rows = runner(f"SELECT {sel} FROM {fq}") or []
+        fetched[role] = len(rows)
+        if role == "choice":
+            ops += MS.choice_field_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
+                                       value_col=cfg["value_col"], label_col=cfg["label_col"], valid=valid)
+        elif role == "dictionary":
+            ops += MS.description_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
+                                      label_col=cfg.get("label_col"), comment_col=cfg.get("comment_col"),
+                                      valid=valid)
+
+    if not ops:
+        _print_json({"enriched": False, "preset": preset, "fetched": fetched,
+                     "reason": "no applicable labels/descriptions for modelled columns"})
+        return 0
+    res = curate.apply(root, ops)
+    _print_json({"enriched": res.validated, "preset": preset, "fetched": fetched,
+                 "ops": len(ops), "applied": len(res.applied), "errors": res.errors})
+    return 0 if res.validated else 1
+
+
 def cmd_discover(args) -> int:
     """First pass: cheap discovery (tables + columns only) → inventory JSON +
     a prune HTML page. The user prunes, then `introspect --tables <kept>` runs
@@ -705,6 +766,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
     sp.add_argument("--dry-run", action="store_true")
     sp.set_defaults(func=cmd_introspect)
+
+    sp = sub.add_parser("enrich-metadata",
+                        help="enrich columns from the DB's own metadata/lookup tables "
+                             "(descriptions + choice_field), e.g. ServiceNow sys_dictionary/sys_choice")
+    sp.add_argument("root")
+    sp.add_argument("--profile", required=True)
+    sp.add_argument("--db-type", required=True, dest="db_type")
+    sp.add_argument("--preset", default=None,
+                    help="metadata preset (e.g. servicenow); auto-detected from the model if omitted")
+    sp.set_defaults(func=cmd_enrich_metadata)
 
     sp = sub.add_parser("discover",
                         help="cheap first pass: list tables + columns and render the prune page "

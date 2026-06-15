@@ -133,3 +133,58 @@ def test_generated_ops_apply_and_stamp_metadata(tmp_path):
     assert cols["severity"].description == "Severity level of the incident impact."
     assert cols["severity"].description_source == "metadata"          # authoritative, not a guess
     assert cols["short_description"].description == "Short description"
+
+
+def _servicenow_model(root: Path) -> None:
+    """incident + the two metadata tables, as a ServiceNow export carries them."""
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "subject_areas" / "sn" / "tables").mkdir(parents=True)
+    (root / "org.yaml").write_text(yaml.safe_dump({
+        "organization": "sn", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/sn"],
+    }))
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "Redshift"}))
+    (root / "subject_areas" / "sn" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "sn",
+        "tables": [{"storage_connection": "c", "schema": "public", "table": t}
+                   for t in ("incident", "sys_choice", "sys_dictionary")],
+    }))
+    (root / "subject_areas" / "sn" / "tables" / "incident.yaml").write_text(yaml.safe_dump({
+        "name": "incident", "schema": "public", "storage_connection": "c", "grain": ["id"],
+        "description": "incidents",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "severity", "type": "integer"},
+                    {"name": "short_description", "type": "string"}],
+    }))
+    for meta in ("sys_choice", "sys_dictionary"):
+        (root / "subject_areas" / "sn" / "tables" / f"{meta}.yaml").write_text(yaml.safe_dump({
+            "name": meta, "schema": "public", "storage_connection": "c", "grain": ["id"],
+            "description": meta,
+            "columns": [{"name": "id", "type": "integer", "primary_key": True}],
+        }))
+
+
+def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
+    _servicenow_model(tmp_path)
+    from semantic_model import introspect as INTRO
+
+    def fake_factory(profile, python=None):
+        def run(sql):
+            s = sql.lower()
+            return SYS_CHOICE if "sys_choice" in s else SYS_DICTIONARY if "sys_dictionary" in s else []
+        return run
+
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", fake_factory)
+    from semantic_model import cli
+
+    ns = cli.build_parser().parse_args(
+        ["enrich-metadata", str(tmp_path), "--profile", "servicenow", "--db-type", "redshift"])
+    assert ns.func(ns) == 0
+
+    org = loader.load_organization(tmp_path)
+    incident = next(t for sa in org.subject_areas for t in sa.tables_defined if t.name == "incident")
+    cols = {c.name: c for c in incident.columns}
+    assert cols["severity"].choice_field == {"1": "High", "2": "Medium", "3": "Low"}
+    assert cols["severity"].description_source == "metadata"
