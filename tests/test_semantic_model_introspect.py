@@ -699,3 +699,45 @@ def test_introspect_fails_fast_on_bogus_allowlist(tmp_path):
     with pytest.raises(RuntimeError):
         I.introspect("shop", "postgres", runner=lambda sql: [],
                      artifacts_dir=tmp_path, tables=["public.nonexistent_blob"], dry_run=True)
+
+
+def _append_runner(sql):
+    s = " ".join(sql.split())
+    if "information_schema.columns" in s:
+        if "'orders'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "total", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": "2"}]
+        if "'customers'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        if "'order_items'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "order_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        return []
+    if "PRIMARY KEY" in s:
+        return [{"column_name": "id"}]
+    if "FOREIGN KEY" in s:
+        return [{"from_table": "order_items", "from_column": "order_id", "to_table": "orders",
+                 "to_column": "id", "from_schema": "public", "to_schema": "public"}]
+    if "reltuples" in s:
+        return [{"estimated_rows": "100"}]
+    if "matched" in s:
+        return [{"matched": "5"}]
+    return []
+
+
+def test_introspect_append_merges_batches(tmp_path):
+    from semantic_model import loader as L
+    # batch 1 → orders, customers
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.orders", "public.customers"])
+    # batch 2 (append) → order_items, which FK-references orders (a CROSS-batch edge)
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.order_items"], append=True)
+
+    org = L.load_organization(tmp_path / "shop")
+    tnames = {t.name for sa in org.subject_areas for t in sa.tables_defined}
+    assert tnames == {"orders", "customers", "order_items"}   # union — nothing lost, no re-query
+    allrels = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
+    oi = [r for r in allrels if r.from_table == "order_items" and r.to_table == "orders"]
+    assert len(oi) == 1   # the cross-batch FK was built once (not lost, not duplicated)

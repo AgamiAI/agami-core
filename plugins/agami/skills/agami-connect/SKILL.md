@@ -474,7 +474,20 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
 
 `--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
 
-**On a large schema (50+ tables) over a tunnel this takes minutes and the command prints nothing until it returns — which reads as hung. Stream a heartbeat:** run the introspect call **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line, until the command completes. The engine writes a flushed per-phase/per-table log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52: incident`, `building relationships …`, `done: 52 tables, 187 relationships`. So instead of one silent block the user sees live progress. (For a small DB it returns in seconds — no need to background it.)
+**On a large schema (50+ tables) over a tunnel this takes minutes and the command prints nothing until it returns — which reads as hung.** Two ways to keep it legible, in order of preference:
+
+1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
+   ```bash
+   split -l 12 /tmp/agami-keep.txt /tmp/agami-batch-      # batch files
+   for b in /tmp/agami-batch-*; do
+     bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect --profile <p> --db-type <t> \
+       --artifacts "<artifacts_dir>" --tables-file "$b" --append
+   done
+   ```
+   (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph.)
+2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52`, `relationships: declared FK 80/187`, `done`.
+
+(For a small DB introspect returns in seconds — no batching or backgrounding needed.)
 
 It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII, cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) and everything from probe mode are confirmed-by-overlap or `unreviewed`. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 

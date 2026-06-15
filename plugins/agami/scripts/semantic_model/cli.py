@@ -631,6 +631,7 @@ def cmd_introspect(args) -> int:
         dry_run=args.dry_run,
         bigquery_region=args.bigquery_region,
         progress_path=progress,
+        append=getattr(args, "append", False),
     )
     res = V.validate(org)
     print(report.render())
@@ -1074,6 +1075,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--progress", default=None,
                     help="progress-log path (flushed per phase/table; default "
                          "<artifacts>/<profile>/.introspect/progress.log) — tail it for a heartbeat")
+    sp.add_argument("--append", action="store_true",
+                    help="batched build: introspect only --tables this call, MERGE into the existing "
+                         "model (prior tables loaded, not re-queried), write the union. Call once per "
+                         "batch for quick foreground progress on a big schema (no background monitor).")
     sp.set_defaults(func=cmd_introspect)
 
     sp = sub.add_parser("enrich-metadata",

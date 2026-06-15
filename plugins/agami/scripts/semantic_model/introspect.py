@@ -197,6 +197,7 @@ def introspect(
     dry_run: bool = False,
     bigquery_region: str = "region-us",
     progress_path: Optional[str | Path] = None,
+    append: bool = False,
 ) -> tuple[Organization, IntrospectReport]:
     """Introspect a live DB into the semantic model and (unless dry_run) write the
     canonical tree. `tables` (optional) is the allowlist of `schema.table` to build —
@@ -270,9 +271,38 @@ def introspect(
                         or f"{t.name}.{c.name}" in ex):
                     c.review_state = "rejected"
 
-    # 3. relationships (catalog FKs, else probe by name+type+overlap)
+    # 2c. APPEND (batched introspection): fold the EXISTING model's tables back in — loaded from
+    # disk, never re-queried — so each batch call builds only its own tables but writes the full
+    # union. Lets the skill introspect ~10 tables per quick foreground call (natural progress, no
+    # background monitor) and still end with a complete model. Safe during onboarding (no hand-
+    # edits to lose); the relationship pass below rebuilds across the union, prior edges kept.
+    prev_rels: list[Relationship] = []
+    skip_keys: set = set()
+    if append and not dry_run and (out / "org.yaml").exists():
+        from .loader import load_organization
+        prev = load_organization(out, include_rejected=True)
+        batch_names = {t.name for t in built}
+        for sa in prev.subject_areas:
+            for t in sa.tables_defined:
+                if t.name not in batch_names:        # keep prior tables (don't re-query)
+                    built.append(t)
+                    grain_by_table.setdefault(t.name, set(t.grain))
+        for sa in prev.subject_areas:
+            prev_rels.extend(sa.relationships)
+        prev_rels.extend(prev.cross_subject_area_relationships)
+        skip_keys = {(r.from_table.lower(), r.from_column.lower(), r.to_table.lower()) for r in prev_rels}
+        report.notes.append(f"append: merged {len(batch_names)} new table(s) into {len(built)} total")
+
+    # 3. relationships (catalog FKs, else probe by name+type+overlap). Use the FULL built set's
+    # (schema, table) pairs so an --append batch builds relationships across the whole union, not
+    # just its own batch (covers every schema present).
     _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
-    rels = _build_relationships(dialect, runner, pairs, built, grain_by_table, report, pp=pp)
+    rel_pairs = [(t.schema_name, t.name) for t in built]
+    rels = _build_relationships(dialect, runner, rel_pairs, built, grain_by_table, report, pp=pp)
+    if prev_rels:   # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
+        rels = list(prev_rels) + [
+            r for r in rels
+            if (r.from_table.lower(), r.from_column.lower(), r.to_table.lower()) not in skip_keys]
     report.table_count = len(built)
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
