@@ -39,6 +39,21 @@ _PLACEHOLDER_RE = re.compile(
 )
 
 
+def _uncommented(text: str) -> str:
+    """The fillable content only — comment lines and inline comments stripped. A placeholder
+    inside a commented-out alternative form (e.g. the recommended `url = …your-password…` line
+    the user disabled in favour of the discrete host/port/… fields) is NOT an unfilled field,
+    so it must not trip the placeholder refusal. Detection only — the actual write preserves
+    the user's exact lines via `_section_block`."""
+    out: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith(("#", ";")):
+            continue  # whole-line comment
+        m = re.search(r"\s[#;]", line)  # inline comment (prefix preceded by whitespace)
+        out.append(line[: m.start()] if m else line)
+    return "\n".join(out)
+
+
 def _sections(path: Path) -> list[str]:
     """Profile names ([section] headers) in an INI credentials file. strict=False so an
     already-imperfect existing file (e.g. a pre-existing duplicate) doesn't crash the read."""
@@ -70,7 +85,7 @@ def promote(agami_dir: Path) -> tuple[str, int]:
         return "NOTHING", 1
 
     text = example.read_text(encoding="utf-8")
-    placeholders = sorted({m.group(0) for m in _PLACEHOLDER_RE.finditer(text)})
+    placeholders = sorted({m.group(0) for m in _PLACEHOLDER_RE.finditer(_uncommented(text))})
     if placeholders:
         return "PLACEHOLDERS_REMAIN " + ", ".join(placeholders), 2
 

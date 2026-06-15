@@ -82,6 +82,39 @@ def test_placeholders_refused(tmp_path):
     assert (tmp_path / "credentials.example").exists()  # left for the user to finish
 
 
+# The redshift template ships BOTH a recommended `url = …` form and discrete host/port/…
+# fields. The user fills one and comments out the other. Placeholders left inside the
+# commented-out form must NOT trip the refusal (the bug: detection scanned commented lines).
+_FILLED_WITH_COMMENTED_URL = """\
+[servicenow]
+type     = redshift
+# URL form (recommended) — sslmode=require keeps the connection encrypted:
+# url  = redshift+psycopg2://your-user:your-password@your-cluster.xxx.redshift.amazonaws.com:5439/your-database
+host     = real-cluster.abc123.us-east-1.redshift.amazonaws.com
+port     = 5439
+database = analytics
+user     = svc_agami
+password = r3alSecret
+sslmode  = require
+"""
+
+
+def test_placeholders_in_commented_lines_are_ignored(tmp_path):
+    _example(tmp_path, _FILLED_WITH_COMMENTED_URL)
+    msg, code = promote(tmp_path)
+    assert code == 0 and msg.startswith("SECURED") and "servicenow" in msg, msg
+    assert (tmp_path / "credentials").exists()
+    assert not (tmp_path / "credentials.example").exists()  # template consumed
+
+
+def test_placeholder_in_active_value_still_refused(tmp_path):
+    # guard the fix didn't go too far: an UNCOMMENTED placeholder must still refuse
+    body = _FILLED_WITH_COMMENTED_URL.replace("password = r3alSecret", "password = your-password")
+    _example(tmp_path, body)
+    msg, code = promote(tmp_path)
+    assert code == 2 and "your-password" in msg, msg
+
+
 def test_no_example_is_noop(tmp_path):
     msg, code = promote(tmp_path)
     assert code == 1 and msg == "NOTHING"
