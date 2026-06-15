@@ -126,6 +126,7 @@ def test_curator_edit_rejects_bad_value(tmp_path):
 
 
 def test_suggest_metrics_gated_on_aggregation():
+    from semantic_model import dialects as D
     t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
                 description="o", columns=[
                     m.Column(name="id", type="integer", primary_key=True, aggregation="dimension"),
@@ -133,7 +134,7 @@ def test_suggest_metrics_gated_on_aggregation():
                     m.Column(name="discount_rate", type="decimal", aggregation="averageable"),
                     m.Column(name="status", type="string", aggregation="dimension"),
                     m.Column(name="weird", type="decimal", aggregation="unknown")])
-    mets = build.suggest_metrics(t, "PostgreSQL")
+    mets = build.suggest_metrics(t, D.get_dialect("postgresql"))
     names = {x["name"] for x in mets}
     assert "orders_count" in names
     assert "orders_total_amount" in names           # additive → SUM
@@ -142,3 +143,22 @@ def test_suggest_metrics_gated_on_aggregation():
     assert all(x["confidence"] == "proposed" and x["review_state"] == "unreviewed" for x in mets)
     amt = next(x for x in mets if x["name"] == "orders_total_amount")
     assert amt["bindings"] == {"PostgreSQL": "SUM(amount)"} and amt["source_tables"] == ["orders"]
+
+
+def test_suggest_metrics_rate_and_duration_patterns():
+    from semantic_model import dialects as D
+    t = m.Table(name="incident", schema="public", storage_connection="c", grain=["id"],
+                description="i", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="made_sla", type="boolean"),
+                    m.Column(name="is_active", type="integer"),       # int flag → rate
+                    m.Column(name="opened_at", type="timestamp"),
+                    m.Column(name="resolved_at", type="timestamp")])
+    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("redshift"))}
+    assert mets["incident_made_sla_rate"]["bindings"]["Redshift"] == \
+        "AVG(CASE WHEN made_sla THEN 1.0 ELSE 0.0 END)"
+    assert mets["incident_is_active_rate"]["bindings"]["Redshift"] == \
+        "AVG(CASE WHEN is_active <> 0 THEN 1.0 ELSE 0.0 END)"
+    dur = mets["incident_avg_duration_days"]   # start+end timestamp pair → dialect DATEDIFF
+    assert dur["bindings"]["Redshift"] == "AVG(DATEDIFF('day', opened_at, resolved_at))"
+    assert dur["unit"] == "days"

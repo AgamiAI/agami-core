@@ -327,9 +327,20 @@ def cmd_suggest_metrics(args) -> int:
     any answer until approved, so a large suggested set can't degrade results."""
     from . import build as B
     from . import curate
+    from . import dialects as D
     org = L.load_organization(args.root)
     conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
     default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
+    _dcache: dict = {}
+
+    def _dialect(st: str):
+        if st not in _dcache:
+            try:
+                _dcache[st] = D.get_dialect(st)
+            except Exception:
+                _dcache[st] = D.get_dialect("postgresql")
+        return _dcache[st]
+
     suggested = written = 0
     errors: list[str] = []
     for sa in org.subject_areas:
@@ -339,7 +350,7 @@ def cmd_suggest_metrics(args) -> int:
         items: list[dict] = []
         for t in sa.tables_defined:
             st = conn_type.get(t.storage_connection, default_type)
-            for met in B.suggest_metrics(t, st, max_per_table=args.max_per_table):
+            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
                 if met["name"] in existing:
                     continue
                 existing.add(met["name"])

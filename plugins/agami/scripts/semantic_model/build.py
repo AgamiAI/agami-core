@@ -416,25 +416,60 @@ def write_tree(
     return rep
 
 
-def suggest_metrics(table: Table, storage_type: str, *, max_per_table: int = 10) -> list[dict]:
-    """Per-table reusable measures inferred from column AGGREGATION CLASSES — count of rows,
-    SUM of `additive` columns, AVG of `averageable` columns. `dimension` and `unknown` columns
-    are skipped (never SUM an id, never AVG a status code), which is what keeps the suggestions
-    sensible rather than "aggregate every number." Returns proposed/unreviewed Metric dicts for
-    curate.write_items — the user signs them off in bulk in the explorer. Count is always kept;
-    the rest are capped at max_per_table to avoid flooding a very wide table."""
+# Structural patterns for DERIVED metrics — general (English start/end + flag vocabulary), not
+# vendor-specific. A flag is a flag and two timestamps are two timestamps on any schema.
+_START_NAME_RE = re.compile(
+    r"(^|_)(opened|created|started|start|begin|requested|received|logged|reported)(_|$)", re.I)
+_END_NAME_RE = re.compile(
+    r"(^|_)(closed|resolved|ended|end|finished|completed|fulfilled|approved|delivered)(_|$)", re.I)
+_FLAG_NAME_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.I)
+_TS_TYPES = {"timestamp", "date"}
+
+
+def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[dict]:
+    """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
+      • count of rows;
+      • SUM of `additive` columns, AVG of `averageable` columns (gated on aggregation class —
+        never SUM an id, never AVG a status code);
+      • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
+        pattern — fraction true);
+      • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
+        pattern — `AVG(end − start)` via the dialect's day-difference form).
+    Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
+    bulk in the explorer. Count is always kept; the rest are capped at max_per_table."""
     t = table.name
+    st = dialect.name
     out: list[dict] = [{"name": f"{t}_count", "calculation": f"Number of {t} records",
-                        "bindings": {storage_type: "COUNT(*)"}, "source_tables": [t]}]
+                        "bindings": {st: "COUNT(*)"}, "source_tables": [t]}]
+    ts_cols: list[str] = []
     for c in table.columns:
         if c.primary_key:
             continue
+        is_bool = c.type == "boolean"
+        is_int_flag = c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))
+        if is_bool or is_int_flag:
+            cond = c.name if is_bool else f"{c.name} <> 0"
+            out.append({"name": f"{t}_{c.name}_rate",
+                        "calculation": f"Fraction of {t} where {c.name} is true",
+                        "bindings": {st: f"AVG(CASE WHEN {cond} THEN 1.0 ELSE 0.0 END)"},
+                        "source_tables": [t]})
+            continue
         if c.aggregation == "additive":
             out.append({"name": f"{t}_total_{c.name}", "calculation": f"Total {c.name} across {t}",
-                        "bindings": {storage_type: f"SUM({c.name})"}, "source_tables": [t]})
+                        "bindings": {st: f"SUM({c.name})"}, "source_tables": [t]})
         elif c.aggregation == "averageable":
             out.append({"name": f"{t}_avg_{c.name}", "calculation": f"Average {c.name} in {t}",
-                        "bindings": {storage_type: f"AVG({c.name})"}, "source_tables": [t]})
+                        "bindings": {st: f"AVG({c.name})"}, "source_tables": [t]})
+        if c.type in _TS_TYPES:
+            ts_cols.append(c.name)
+    starts = [c for c in ts_cols if _START_NAME_RE.search(c)]
+    ends = [c for c in ts_cols if _END_NAME_RE.search(c)]
+    if starts and ends and starts[0] != ends[0]:
+        s, e = starts[0], ends[0]
+        out.append({"name": f"{t}_avg_duration_days",
+                    "calculation": f"Average days from {s} to {e} in {t}",
+                    "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
+                    "source_tables": [t], "unit": "days"})
     out = out[: max(1, max_per_table)]
     for m in out:
         m["confidence"] = "proposed"
