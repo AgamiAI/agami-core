@@ -533,6 +533,8 @@ def cmd_enrich_metadata(args) -> int:
     runner = INTRO.make_execute_sql_runner(args.profile)
     ops: list[dict] = []
     fetched: dict[str, int] = {}
+    dict_rows: list[dict] = []
+    dict_cfg: dict = {}
     for role, cfg in sources.items():
         src = cfg["source"]
         sch = schema_of.get(src.lower())
@@ -548,15 +550,83 @@ def cmd_enrich_metadata(args) -> int:
             ops += MS.description_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
                                       label_col=cfg.get("label_col"), comment_col=cfg.get("comment_col"),
                                       valid=valid)
+            dict_rows, dict_cfg = rows, cfg
 
-    if not ops:
+    # 1) descriptions + choice_field — one validated curate batch
+    cols_applied = 0
+    errors: list[str] = []
+    if ops:
+        res = curate.apply(root, ops)
+        cols_applied = len(res.applied)
+        errors += res.errors
+
+    # 2) reference/FK edges from the dictionary — the join-graph half. The table/area structure
+    # the curate batch above touched only descriptions/choices, so the loaded `org` is still
+    # valid for routing references (names, schemas, grain, areas unchanged).
+    refs_added = 0
+    if not args.skip_references and dict_rows and "reference_col" in dict_cfg:
+        specs = MS.reference_specs(
+            dict_rows, table_col=dict_cfg["table_col"], column_col=dict_cfg["column_col"],
+            type_col=dict_cfg["type_col"], reference_col=dict_cfg["reference_col"],
+            reference_type=dict_cfg.get("reference_type", "reference"), valid=valid)
+        intra, cross = _route_references(org, specs)
+        if intra or cross:
+            rres = curate.add_relationships(root, intra=intra, cross=cross)
+            refs_added = len(rres.applied)
+            errors += rres.errors
+
+    if not cols_applied and not refs_added:
         _print_json({"enriched": False, "preset": preset, "fetched": fetched,
-                     "reason": "no applicable labels/descriptions for modelled columns"})
+                     "reason": "nothing applicable for modelled columns", "errors": errors})
         return 0
-    res = curate.apply(root, ops)
-    _print_json({"enriched": res.validated, "preset": preset, "fetched": fetched,
-                 "ops": len(ops), "applied": len(res.applied), "errors": res.errors})
-    return 0 if res.validated else 1
+    _print_json({"enriched": not errors, "preset": preset, "fetched": fetched,
+                 "columns_enriched": cols_applied, "relationships_added": refs_added,
+                 "errors": errors})
+    return 0 if not errors else 1
+
+
+def _route_references(org, specs: list[dict]) -> tuple[dict, list]:
+    """Resolve `{from_table, from_column, to_table}` specs into routed relationship dicts:
+    `(intra: {area: [rel,…]}, cross: [xrel,…])`. Skips self-refs, edges whose target isn't
+    modelled, and edges already present. References are `many_to_one` to the target's grain,
+    written `inferred`/`unreviewed` (authoritative declaration, signed off in the explorer)."""
+    from collections import defaultdict
+    tindex: dict = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            tindex.setdefault(t.name.lower(), (t, sa.name))
+    existing = set()
+    for sa in org.subject_areas:
+        for r in sa.relationships:
+            existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
+    for r in org.cross_subject_area_relationships:
+        existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
+
+    intra: dict = defaultdict(list)
+    cross: list = []
+    for spec in specs:
+        ft, fc, tt = spec["from_table"], spec["from_column"], spec["to_table"]
+        key = (ft.lower(), fc.lower(), tt.lower())
+        if ft.lower() == tt.lower() or key in existing:
+            continue
+        fr, to = tindex.get(ft.lower()), tindex.get(tt.lower())
+        if not fr or not to:
+            continue
+        ftab, farea = fr
+        ttab, tarea = to
+        if not ttab.grain:
+            continue
+        existing.add(key)
+        base = {"from_table": ft, "from_column": fc, "to_table": tt, "to_column": ttab.grain[0],
+                "from_schema": ftab.schema_name, "to_schema": ttab.schema_name,
+                "relationship": "many_to_one", "join_type": "LEFT",
+                "confidence": "inferred", "review_state": "unreviewed",
+                "description": f"reference (data dictionary): {fc} → {tt}.{ttab.grain[0]}"}
+        if farea == tarea:
+            intra[farea].append(base)
+        else:
+            cross.append({**base, "from_subject_area": farea, "to_subject_area": tarea})
+    return dict(intra), cross
 
 
 def cmd_discover(args) -> int:
@@ -775,6 +845,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--db-type", required=True, dest="db_type")
     sp.add_argument("--preset", default=None,
                     help="metadata preset (e.g. servicenow); auto-detected from the model if omitted")
+    sp.add_argument("--skip-references", action="store_true", dest="skip_references",
+                    help="only descriptions + choice_field; do not add reference/FK relationships")
     sp.set_defaults(func=cmd_enrich_metadata)
 
     sp = sub.add_parser("discover",

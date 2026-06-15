@@ -136,30 +136,42 @@ def test_generated_ops_apply_and_stamp_metadata(tmp_path):
 
 
 def _servicenow_model(root: Path) -> None:
-    """incident + the two metadata tables, as a ServiceNow export carries them."""
+    """`incident` (+ metadata tables) in the itsm area; `sys_user` in a SEPARATE sys area — so the
+    dictionary's caller_id→sys_user reference is a CROSS-area edge, as it is in real ServiceNow."""
     (root / "datasources" / "c").mkdir(parents=True)
-    (root / "subject_areas" / "sn" / "tables").mkdir(parents=True)
+    for area in ("itsm", "sys"):
+        (root / "subject_areas" / area / "tables").mkdir(parents=True)
     (root / "org.yaml").write_text(yaml.safe_dump({
         "organization": "sn", "version": 1,
         "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
-        "subject_areas": ["subject_areas/sn"],
+        "subject_areas": ["subject_areas/itsm", "subject_areas/sys"],
     }))
     (root / "datasources" / "c" / "storage.yaml").write_text(
         yaml.safe_dump({"name": "c", "storage_type": "Redshift"}))
-    (root / "subject_areas" / "sn" / "subject_area.yaml").write_text(yaml.safe_dump({
-        "name": "sn",
+    (root / "subject_areas" / "itsm" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "itsm",
         "tables": [{"storage_connection": "c", "schema": "public", "table": t}
                    for t in ("incident", "sys_choice", "sys_dictionary")],
     }))
-    (root / "subject_areas" / "sn" / "tables" / "incident.yaml").write_text(yaml.safe_dump({
+    (root / "subject_areas" / "sys" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "sys",
+        "tables": [{"storage_connection": "c", "schema": "public", "table": "sys_user"}],
+    }))
+    (root / "subject_areas" / "itsm" / "tables" / "incident.yaml").write_text(yaml.safe_dump({
         "name": "incident", "schema": "public", "storage_connection": "c", "grain": ["id"],
         "description": "incidents",
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "severity", "type": "integer"},
-                    {"name": "short_description", "type": "string"}],
+                    {"name": "short_description", "type": "string"},
+                    {"name": "caller_id", "type": "integer"}],
+    }))
+    (root / "subject_areas" / "sys" / "tables" / "sys_user.yaml").write_text(yaml.safe_dump({
+        "name": "sys_user", "schema": "public", "storage_connection": "c", "grain": ["id"],
+        "description": "users",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True}],
     }))
     for meta in ("sys_choice", "sys_dictionary"):
-        (root / "subject_areas" / "sn" / "tables" / f"{meta}.yaml").write_text(yaml.safe_dump({
+        (root / "subject_areas" / "itsm" / "tables" / f"{meta}.yaml").write_text(yaml.safe_dump({
             "name": meta, "schema": "public", "storage_connection": "c", "grain": ["id"],
             "description": meta,
             "columns": [{"name": "id", "type": "integer", "primary_key": True}],
@@ -188,3 +200,9 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     cols = {c.name: c for c in incident.columns}
     assert cols["severity"].choice_field == {"1": "High", "2": "Medium", "3": "Low"}
     assert cols["severity"].description_source == "metadata"
+    # the caller_id→sys_user reference (cross-area, NOT <x>_id name-matchable) was written
+    xrels = org.cross_subject_area_relationships
+    edge = next((r for r in xrels if r.from_table == "incident" and r.to_table == "sys_user"), None)
+    assert edge is not None and edge.from_column == "caller_id"
+    assert edge.from_subject_area == "itsm" and edge.to_subject_area == "sys"
+    assert edge.review_state == "unreviewed" and edge.confidence == "inferred"

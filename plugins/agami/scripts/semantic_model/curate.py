@@ -32,7 +32,7 @@ import yaml
 
 from . import validator as V
 from .loader import load_organization, _read_yaml as _load
-from .models import Entity, Metric, Organization
+from .models import CrossSubjectAreaRelationship, Entity, Metric, Organization, Relationship
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +744,72 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
         root, [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]}
                for a in res.applied], signer, role)
     res.committed = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
+    return res
+
+
+def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]] = None,
+                      cross: Optional[list[dict]] = None,
+                      signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
+    """Append inferred relationships — intra-area into <area>/relationships.yaml, cross-area into
+    cross_subject_area_relationships.yaml — as ONE validated, revertable batch. The packaged
+    writer so a skill/command never hand-edits relationship YAML or scripts a loop over it.
+    Each edge is structurally validated; the whole model is validated and the batch reverted on
+    any failure. Callers pre-route by area and pre-resolve to_column/cardinality."""
+    root = Path(root)
+    res = ApplyResult()
+    intra, cross = intra or {}, cross or []
+    backups: list[tuple[Path, Optional[str]]] = []
+
+    for area, rels in intra.items():
+        if not rels:
+            continue
+        path = _area_dir(root, area) / "relationships.yaml"
+        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+        doc = _load(path) if path.exists() else None
+        lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
+        for r in rels:
+            try:
+                Relationship(**r)
+            except Exception as e:
+                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
+                continue
+            lst.append(r)
+            res.applied.append(f"rel {area}/{r['from_table']}.{r['from_column']}→{r['to_table']}")
+        _dump(path, {"relationships": lst})
+
+    if cross:
+        path = root / "cross_subject_area_relationships.yaml"
+        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+        doc = _load(path) if path.exists() else None
+        edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
+        for r in cross:
+            try:
+                CrossSubjectAreaRelationship(**r)
+            except Exception as e:
+                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
+                continue
+            edges.append(r)
+            res.applied.append(f"xrel {r['from_table']}.{r['from_column']}→{r['to_table']}")
+        _dump(path, {"edges": edges})
+
+    if not res.applied:
+        return res
+    try:
+        vres = V.validate(load_organization(root, include_rejected=True))
+        res.validated = vres.ok
+        if not vres.ok:
+            res.errors = vres.errors
+            _restore(backups)
+            res.applied = []
+            return res
+    except Exception as e:
+        res.errors.append(f"validation failed to run: {e}")
+        _restore(backups)
+        res.applied = []
+        return res
+    _append_curation_log(
+        root, [{"op": "add", "kind": "relationship", "name": a} for a in res.applied], signer, role)
+    res.committed = _git_commit(root, f"enrich: +{len(res.applied)} relationship(s) from metadata")
     return res
 
 
