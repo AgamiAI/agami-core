@@ -1,0 +1,49 @@
+    /* agami dashboard palette — single source of truth, injected into every
+       rendered surface (model explorer, chart, examples-validation, prune) by
+       the render scripts. A brand-colour change happens here, once. */
+    :root {
+      --bg: #ffffff;
+      --bg-elev: #fafafa;
+      --fg: #1a1a1a;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --row-zebra: rgba(0, 0, 0, 0.025);
+      --code-bg: rgba(0, 0, 0, 0.04);
+      --ok-bg: #dcfce7;
+      --ok-fg: #166534;
+      --ok-border: #86efac;
+      --bad-bg: #fee2e2;
+      --bad-fg: #991b1b;
+      --bad-border: #fca5a5;
+      --warn-bg: #fef3c7;
+      --warn-fg: #92400e;
+      --hi-bg: #fef08a;
+      --info-bg: #eff6ff;
+      --info-border: #bfdbfe;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --bg-elev: #131c2f;
+        --fg: #f1f5f9;
+        --muted: #94a3b8;
+        --border: #1e293b;
+        --accent: #60a5fa;
+        --accent-hover: #93c5fd;
+        --row-zebra: rgba(255, 255, 255, 0.03);
+        --code-bg: rgba(255, 255, 255, 0.04);
+        --ok-bg: #052e16;
+        --ok-fg: #86efac;
+        --ok-border: #14532d;
+        --bad-bg: #450a0a;
+        --bad-fg: #fca5a5;
+        --bad-border: #7f1d1d;
+        --warn-bg: #422006;
+        --warn-fg: #fbbf24;
+        --hi-bg: #78350f;
+        --info-bg: #0c1c33;
+        --info-border: #1e3a5f;
+      }
+    }

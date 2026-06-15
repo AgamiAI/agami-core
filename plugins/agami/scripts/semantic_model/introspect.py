@@ -99,6 +99,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent  # plugins/agami/scripts
 SAMPLE_ROWS = 500
 ENUM_MAX_DISTINCT = 25
 PROBE_TABLE_CAP = 200  # cap value-overlap probing work
+# Safety valve for confirming DECLARED-but-unenforced catalog FKs (Redshift/Databricks/Trino)
+# by value-overlap: each confirmation is one sequential COUNT probe, so a schema that declares
+# hundreds of FKs could otherwise fire hundreds of round-trips. Past the budget we stop probing
+# and leave the remaining declared FKs inferred/unreviewed (they still surface for sign-off).
+FK_OVERLAP_PROBE_CAP = 300
 
 
 @dataclass
@@ -580,6 +585,7 @@ def _build_relationships(
         tables_by_name.setdefault(t.name, []).append(t)
 
     rels: list[Relationship] = []
+    overlap_probes = 0   # budget guard for declared-FK overlap confirmation (see FK_OVERLAP_PROBE_CAP)
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
         for fk in catalog_fks:
@@ -592,16 +598,33 @@ def _build_relationships(
             to_schema = fk.get("to_schema") or _schema_of(tt, tables_by_name, prefer=from_schema, report=report)
             cross = bool(from_schema and to_schema and from_schema != to_schema)
             card = build.infer_cardinality(ft, tt, [fc], [tc], grain_by_table)
-            # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap
+            # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap.
+            # The catalog's FK is a *declaration*, not a guarantee, so probe the data: if the
+            # child values actually live in the parent key, treat it like an enforced FK
+            # (confirmed + auto-approved) instead of dumping it in the review queue. Only FKs we
+            # can't confirm against the data stay inferred/unreviewed for a human glance. This is
+            # what keeps inheritance-heavy schemas (ServiceNow on Redshift) from flooding review.
             confidence = "confirmed" if dialect.fk_enforced else "inferred"
-            # enforced-FK joins are trustworthy structure -> auto-approve with a system
-            # sign-off (don't flood the review queue); unenforced/probed ones need a glance.
+            overlap_confirmed = False
+            if not dialect.fk_enforced and overlap_probes < FK_OVERLAP_PROBE_CAP:
+                fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
+                tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
+                if fobj is not None and tobj is not None:
+                    overlap_probes += 1
+                    if _overlaps(dialect, runner, fobj, fc, tobj, tc):
+                        confidence = "confirmed"
+                        overlap_confirmed = True
+            trusted = dialect.fk_enforced or overlap_confirmed
+            # trusted joins are sound structure -> auto-approve with a system sign-off (don't
+            # flood the review queue); unconfirmed ones need a glance.
             # EXCEPTION: a join that spans two schemas is an architectural claim — the model now
-            # reaches across namespaces — so surface it for review even when the FK is enforced.
+            # reaches across namespaces — so surface it for review even when the FK is trusted.
             desc = ""
-            if dialect.fk_enforced and not cross:
+            if trusted and not cross:
                 kw: dict = {"review_state": "approved", "signed_off_by": "agami_introspect",
                             "signed_off_role": "system", "signed_off_at": _NOW}
+                if overlap_confirmed:
+                    desc = "declared FK, confirmed by value-overlap probe"
             else:
                 kw = {"review_state": "unreviewed"}
             if cross:
@@ -612,6 +635,10 @@ def _build_relationships(
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
             ))
+        if overlap_probes >= FK_OVERLAP_PROBE_CAP:
+            report.notes.append(
+                f"declared-FK overlap confirmation capped at {FK_OVERLAP_PROBE_CAP} probes — "
+                "remaining declared FKs left unreviewed for sign-off on /agami-model")
     else:
         # probe: infer FKs from name+type match, confirm by value-overlap
         report.mode_per_capability["relationships"] = "probe"

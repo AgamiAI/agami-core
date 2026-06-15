@@ -51,6 +51,7 @@ from .models import (
     SubjectArea,
     Table,
     TableRef,
+    bare_name,
 )
 
 
@@ -167,8 +168,8 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectA
                 # drop rejected joins, and joins whose endpoint table was excluded
                 if _rejected(rel):
                     continue
-                if (rel.from_table.split(".")[-1] not in live_tables
-                        or rel.to_table.split(".")[-1] not in live_tables):
+                if (bare_name(rel.from_table) not in live_tables
+                        or bare_name(rel.to_table) not in live_tables):
                     continue
             relationships.append(rel)
 
@@ -228,7 +229,7 @@ def _load_cross_metrics(root: Path, org_doc: dict) -> list[Metric]:
 
 
 def _find_table(org: Organization, table_name: str, area: Optional[str] = None) -> Optional[Table]:
-    bare = table_name.split(".")[-1]
+    bare = bare_name(table_name)
     areas = [org.subject_area(area)] if area else org.subject_areas
     for sa in areas:
         if sa is None:
@@ -240,7 +241,7 @@ def _find_table(org: Organization, table_name: str, area: Optional[str] = None) 
 
 
 def _table_alias(table_name: str) -> str:
-    return table_name.split(".")[-1]
+    return bare_name(table_name)
 
 
 def collect_default_filters(

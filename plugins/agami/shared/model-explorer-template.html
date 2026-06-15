@@ -49,52 +49,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{REPORT_TITLE}} — agami</title>
   <style>
-    :root {
-      --bg: #ffffff;
-      --bg-elev: #fafafa;
-      --fg: #1a1a1a;
-      --muted: #6b7280;
-      --border: #e5e7eb;
-      --accent: #2563eb;
-      --accent-hover: #1d4ed8;
-      --row-zebra: rgba(0, 0, 0, 0.025);
-      --code-bg: rgba(0, 0, 0, 0.04);
-      --ok-bg: #dcfce7;
-      --ok-fg: #166534;
-      --ok-border: #86efac;
-      --bad-bg: #fee2e2;
-      --bad-fg: #991b1b;
-      --bad-border: #fca5a5;
-      --warn-bg: #fef3c7;
-      --warn-fg: #92400e;
-      --hi-bg: #fef08a;
-      --info-bg: #eff6ff;
-      --info-border: #bfdbfe;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #0f172a;
-        --bg-elev: #131c2f;
-        --fg: #f1f5f9;
-        --muted: #94a3b8;
-        --border: #1e293b;
-        --accent: #60a5fa;
-        --accent-hover: #93c5fd;
-        --row-zebra: rgba(255, 255, 255, 0.03);
-        --code-bg: rgba(255, 255, 255, 0.04);
-        --ok-bg: #052e16;
-        --ok-fg: #86efac;
-        --ok-border: #14532d;
-        --bad-bg: #450a0a;
-        --bad-fg: #fca5a5;
-        --bad-border: #7f1d1d;
-        --warn-bg: #422006;
-        --warn-fg: #fbbf24;
-        --hi-bg: #78350f;
-        --info-bg: #0c1c33;
-        --info-border: #1e3a5f;
-      }
-    }
+{{THEME_CSS}}
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -956,7 +911,10 @@
         if (tableEffExcluded(toArea, it.to_table)) ex.push(it.to_table);
         if (ex.length) return ex.join(' & ') + ' excluded';
       } else if (it.source_tables) {  // metric — needs ALL its source tables
-        const ex = (it.source_tables || []).filter(t => tableEffExcluded(area, t));
+        // A source table may live in a DIFFERENT area than the metric (e.g. ServiceNow's
+        // base `task` table is its own area but feeds `incident`/`problem` metrics). Resolve
+        // each table to its real area, else it looks "missing" here and the metric is wrongly moot.
+        const ex = (it.source_tables || []).filter(t => tableEffExcluded(TABLE_AREA[t] || area, t));
         if (ex.length) return ex.join(', ') + ' excluded';
       } else if (it.maps_to) {  // entity — moot only if ALL mapped tables are excluded
         const tbls = [...new Set((it.maps_to || []).map(_tblOf))];
@@ -973,11 +931,11 @@
     // The "untouched" review queue — items not yet approved/rejected AND not yet edited.
     // Drives the Review tab badge, so taking ANY action (approve / reject / edit) shrinks it.
     function reviewQueue() {
-      const out = [];
-      (manifest.metrics || []).forEach(m => out.push({ ...m, _kind: 'metric' }));
-      (manifest.entities || []).forEach(e => out.push({ ...e, _kind: 'entity' }));
-      (manifest.relationships || []).forEach(r => out.push({ ...r, _kind: 'relationship' }));
-      return out.filter(it => {
+      // Same item set the Review sub-tabs draw from (reviewAll) — INCLUDING cross-area joins.
+      // If this omitted cross_relationships, the nav badge would undercount vs the "Needs your
+      // eyes" sub-tab, which does include them (the 758-vs-790 mismatch on inheritance-heavy
+      // schemas like ServiceNow, where base→subtype joins are all cross-area).
+      return reviewAll().filter(it => {
         const rs = effReviewState(it);
         return (rs === 'unreviewed' || rs === 'stale') && !edits[it.qname];
       });

@@ -46,6 +46,17 @@ from pydantic import (
 )
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def bare_name(qualified: str) -> str:
+    """A table name without its schema/area prefix: ``sales.orders`` -> ``orders``.
+    Single source of truth so the several places that strip the prefix stay in lockstep."""
+    return qualified.split(".")[-1]
+
+
+# ---------------------------------------------------------------------------
 # Shared enums / literals
 # ---------------------------------------------------------------------------
 

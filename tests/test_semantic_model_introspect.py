@@ -15,6 +15,7 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
+from catalog_helpers import col, make_catalog_runner  # noqa: E402
 from semantic_model import build  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
 from semantic_model import models as m  # noqa: E402
@@ -26,27 +27,15 @@ from semantic_model import validator as V  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _catalog_runner(sql):
-    s = " ".join(sql.split())
-    if "information_schema.schemata" in s:
-        return [{"schema_name": "public"}]
-    if "information_schema.tables" in s and "table_type" in s:
-        return [{"schema_name": "public", "table_name": "customers", "table_type": "BASE TABLE"},
-                {"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
-        if "'customers'" in s:
-            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
-                    {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
-        return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
-                {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
-                {"column_name": "total", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "3", "numeric_scale": "2"}]
-    if "PRIMARY KEY" in s:
-        return [{"column_name": "id"}]
-    if "FOREIGN KEY" in s:
-        return [{"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id"}]
-    if "reltuples" in s:
-        return [{"estimated_rows": "1000"}]
-    return []
+_catalog_runner = make_catalog_runner(
+    tables=["customers", "orders"],
+    columns={
+        "customers": [col("id", "integer", nullable=False), col("email", "varchar")],
+        "orders": [col("id", "integer", nullable=False), col("customer_id", "integer"),
+                   col("total", "numeric", scale=2)],
+    },
+    fks=[{"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id"}],
+)
 
 
 def _probe_runner(sql):
@@ -582,3 +571,104 @@ def test_same_named_tables_in_two_schemas_both_survive(tmp_path):
     bil = next(sa for sa in reloaded.subject_areas if sa.name == "billing")
     inv_join = [r for r in bil.relationships if r.from_table == "invoices"]
     assert inv_join and inv_join[0].to_table == "products" and inv_join[0].cross_schema is False
+
+
+def _redshift_fk_runner(overlap_matches: bool):
+    """A single-schema Redshift catalog: orders.customer_id is a DECLARED (but unenforced)
+    FK to customers.id. Redshift's catalog records the FK; the data may or may not honour it,
+    which is what the value-overlap probe decides."""
+    def run(sql):
+        s = " ".join(sql.split())
+        if "information_schema.schemata" in s:
+            return [{"schema_name": "public"}]
+        if "information_schema.tables" in s and "table_type" in s:
+            return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"},
+                    {"schema_name": "public", "table_name": "customers", "table_type": "BASE TABLE"}]
+        if "information_schema.columns" in s:
+            if "'orders'" in s:
+                return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                        {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        if "PRIMARY KEY" in s:
+            return [{"column_name": "id"}]
+        if "FOREIGN KEY" in s:
+            return [{"from_table": "orders", "from_column": "customer_id", "from_schema": "public",
+                     "to_table": "customers", "to_column": "id", "to_schema": "public"}]
+        if "matched" in s:                       # _overlaps EXISTS probe
+            return [{"matched": "5"}] if overlap_matches else [{"matched": "0"}]
+        if "reltuples" in s:
+            return [{"estimated_rows": "1000"}]
+        return []
+    return run
+
+
+def test_unenforced_fk_confirmed_by_overlap_auto_approves(tmp_path):
+    """Redshift declares but does not enforce FKs. A declared FK whose child values actually
+    live in the parent key is sound structure -> confirmed + auto-approved (kept OUT of the
+    review queue), exactly like an enforced Postgres FK. This is what stops inheritance-heavy
+    Redshift schemas from flooding the trust queue with already-valid joins."""
+    org, _ = I.introspect("shop", "redshift", runner=_redshift_fk_runner(True),
+                          artifacts_dir=tmp_path, dry_run=True)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    match = [r for r in rels if r.from_table == "orders" and r.to_table == "customers"]
+    assert len(match) == 1, rels
+    r = match[0]
+    assert r.confidence == "confirmed"
+    assert r.review_state == "approved"
+    assert r.signed_off_by == "agami_introspect" and r.signed_off_role == "system"
+
+
+def test_unenforced_fk_without_overlap_stays_unreviewed(tmp_path):
+    """The same declared FK, but the data does NOT back it (no value overlap) -> we can't
+    confirm it, so it stays inferred/unreviewed for a human glance rather than being asserted."""
+    org, _ = I.introspect("shop", "redshift", runner=_redshift_fk_runner(False),
+                          artifacts_dir=tmp_path, dry_run=True)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    match = [r for r in rels if r.from_table == "orders" and r.to_table == "customers"]
+    assert len(match) == 1, rels
+    r = match[0]
+    assert r.confidence == "inferred"
+    assert r.review_state == "unreviewed" and r.signed_off_by is None
+
+
+def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
+    """A schema that declares MANY FKs on an unenforced dialect must not fire one sequential
+    overlap COUNT per FK without bound. Past FK_OVERLAP_PROBE_CAP we stop probing and leave the
+    rest unreviewed — the run stays bounded on inheritance-heavy Redshift/ServiceNow schemas."""
+    monkeypatch.setattr(I, "FK_OVERLAP_PROBE_CAP", 3)
+    N = 8
+    probes = {"n": 0}
+
+    def runner(sql):
+        s = " ".join(sql.split())
+        if "information_schema.schemata" in s:
+            return [{"schema_name": "public"}]
+        if "information_schema.tables" in s and "table_type" in s:
+            rows = [{"schema_name": "public", "table_name": "parent", "table_type": "BASE TABLE"}]
+            rows += [{"schema_name": "public", "table_name": f"child{i}", "table_type": "BASE TABLE"} for i in range(N)]
+            return rows
+        if "information_schema.columns" in s:
+            if "'parent'" in s:
+                return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""}]
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "parent_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        if "PRIMARY KEY" in s:
+            return [{"column_name": "id"}]
+        if "FOREIGN KEY" in s:
+            return [{"from_table": f"child{i}", "from_column": "parent_id", "from_schema": "public",
+                     "to_table": "parent", "to_column": "id", "to_schema": "public"} for i in range(N)]
+        if "matched" in s:
+            probes["n"] += 1
+            return [{"matched": "5"}]
+        if "reltuples" in s:
+            return [{"estimated_rows": "1000"}]
+        return []
+
+    org, rep = I.introspect("shop", "redshift", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    # never probed more than the cap, even though there are N=8 declared FKs
+    assert probes["n"] <= 3
+    assert any("capped" in n for n in rep.notes), rep.notes
+    # all FKs still modeled (the uncapped ones simply stay unreviewed rather than vanishing)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    assert len([r for r in rels if r.to_table == "parent"]) == N

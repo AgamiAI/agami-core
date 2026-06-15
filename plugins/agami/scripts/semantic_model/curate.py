@@ -31,7 +31,7 @@ from typing import Any, Optional
 import yaml
 
 from . import validator as V
-from .loader import load_organization
+from .loader import load_organization, _read_yaml as _load
 from .models import Entity, Metric, Organization
 
 
@@ -362,11 +362,6 @@ class ApplyResult:
 
 def _area_dir(root: Path, area: str) -> Path:
     return root / "subject_areas" / area
-
-
-def _load(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
 
 
 def _dump(path: Path, obj: Any) -> None:

@@ -75,6 +75,7 @@ def render(
     template = TEMPLATE_PATH.read_text()
     logo_dark_svg = LOGO_DARK_PATH.read_text()
     logo_light_svg = LOGO_LIGHT_PATH.read_text()
+    theme_css = (SHARED_DIR / "theme.css").read_text()
 
     total_rows = sum(int(it.get("row_count") or 0) for it in items)
 
@@ -92,6 +93,7 @@ def render(
         .replace("{{TOTAL_ROW_COUNT}}", str(total_rows))
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark_svg)
         .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", logo_light_svg)
+        .replace("{{THEME_CSS}}", theme_css)
     )
     return out
 

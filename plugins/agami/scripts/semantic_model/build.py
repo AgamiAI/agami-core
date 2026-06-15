@@ -25,6 +25,7 @@ from .models import (
     SubjectArea,
     Table,
     TableRef,
+    bare_name,
 )
 from .models import DEEP_TABLE_COLUMN_THRESHOLD
 
@@ -209,7 +210,7 @@ def cluster_by_family(names: list[str]) -> dict[str, str]:
     then merging prefix-families (one key being a prefix of another)."""
     raw_key: dict[str, str] = {}
     for name in names:
-        bare = name.split(".")[-1]
+        bare = bare_name(name)
         token = _singularize(re.split(r"[_\s]", bare)[0].lower())
         raw_key[name] = token or "misc"
 
@@ -254,8 +255,8 @@ def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
     relationships (SQLite / legacy) fall back to bare-name membership."""
     def here(table: str, schema) -> bool:
         return (schema, table) in keys if schema is not None else table in bare
-    return (here(r.from_table.split(".")[-1], r.from_schema)
-            and here(r.to_table.split(".")[-1], r.to_schema))
+    return (here(bare_name(r.from_table), r.from_schema)
+            and here(bare_name(r.to_table), r.to_schema))
 
 
 def make_area(name: str, tables: list[Table], rels: list[Relationship], conn: str) -> SubjectArea:
@@ -325,7 +326,7 @@ def extract_cross_area_relationships(
     for r in rels:
         if id(r) in intra_ids:
             continue
-        ft, tt = r.from_table.split(".")[-1], r.to_table.split(".")[-1]
+        ft, tt = bare_name(r.from_table), bare_name(r.to_table)
         fa = area_of.get((r.from_schema, ft)) or bare_of.get(ft)
         ta = area_of.get((r.to_schema, tt)) or bare_of.get(tt)
         if fa and ta and fa != ta:

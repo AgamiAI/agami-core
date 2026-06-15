@@ -57,6 +57,7 @@ from .models import (
     SubjectArea,
     Table,
     TableRef,
+    bare_name,
 )
 
 # Sizing thresholds (design doc: warn at 25, error at 30).
@@ -268,7 +269,7 @@ def _check_default_filters_columns(sa: SubjectArea, res: ValidationResult) -> No
 
     for table in sa.tables_defined:
         cols = table.column_names()
-        alias = table.name.split(".")[-1]
+        alias = bare_name(table.name)
         for flt in table.default_filters:
             # `{alias}` is the runtime table-alias placeholder, and `:param` are bind
             # markers the executor fills in — neither is a column. Resolve / strip them
@@ -614,7 +615,7 @@ def _table_connection(sa: Optional[SubjectArea], table_name: str) -> Optional[st
     if sa is None:
         return None
     # table_name in cross-area edges may be "schema.table"; match on suffix too.
-    bare = table_name.split(".")[-1]
+    bare = bare_name(table_name)
     for ref in sa.tables:
         if ref.table == table_name or ref.table == bare:
             return ref.storage_connection

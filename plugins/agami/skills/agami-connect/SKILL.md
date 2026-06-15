@@ -400,16 +400,19 @@ This runs on **every** invocation. The user's yes/skip is theirs; the skill neve
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 
-Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Two very different sources qualify, so ask once and branch on the answer. **AskUserQuestion** (multi-select; the repo path is the high-value one — it encodes metrics + joins, not just structure):
+Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Several very different sources qualify, so ask once and branch on the answer. **AskUserQuestion** (multi-select; the repo path is the high-value one — it encodes metrics + joins, not just structure):
 
-> Got an existing data model or metrics list I can read? Three kinds help:
+> Got an existing data model or metrics list I can read? A few kinds help:
 > • **A doc** — ERD, data dictionary, schema diagram (PDF, PNG/JPG, text, markdown, CSV).
 > • **A metrics / KPI list** — a spreadsheet, CSV, or doc of your metrics and how each is defined (e.g. "Approval rate = approved ÷ applications"). I'll turn each into a reusable metric so answers match your numbers.
 > • **A semantic-layer / transform repo** — LookML, dbt, Cube, MetricFlow. These define your metrics, dimensions, and joins explicitly, which is gold for NL→SQL accuracy. They're usually git-backed — just point me at the folder.
+> • **A published product schema** — if this DB is a well-known product (ServiceNow, Salesforce, Jira, NetSuite, SAP, HubSpot, Workday…), I can look up its official table/column reference online so the standard fields get correct descriptions automatically.
 
-Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Both` / `Skip — nothing to share`.
+Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Skip — nothing to share`. (Multi-select — combine as needed.)
 
 **If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). `.xlsx`/`.docx` → ask for PDF, proceed without if not.
+
+**If a published product schema (or the user names one — "use the ServiceNow data model online"):** the user is pointing you at an authoritative public reference. **`WebSearch`/`WebFetch` it** — the official developer/data-dictionary docs for the named product and the specific tables you discovered in 1.6 (e.g. ServiceNow's `task`/`incident`/`sys_user` table docs, Salesforce's Object Reference). Pull the canonical **meaning of each standard table and column** (e.g. ServiceNow `task.made_sla`, `task.reassignment_count`, `sys_created_on`, `number`, `state`) and any well-known metric definitions. Stash the same way (`$DATA_MODEL_DOC_TEXT`, never written to disk). This is what fills the "basic column has no description" gap on standard schemas — those fields are documented even when the data sample alone can't reveal them, so describe them from the reference instead of marking them `ai_unknown`. Stay anchored to the tables you actually introspected; don't invent fields the live DB doesn't have. If the docs are unreachable, say so and proceed without.
 
 **If a semantic-layer repo:** ask for the directory (a local clone / monorepo path — no upload needed since it's git-backed). Glob the **definition** files and `Read` them up to a budget (~30 files / ~250 KB total; if larger, prefer metric/model definitions and tell the user what you sampled). **Skip compiled SQL and data files** — you want the declared metrics/joins, not the warehouse output:
 > | Layer | Read these | Carries |

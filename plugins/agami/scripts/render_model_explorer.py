@@ -241,6 +241,7 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
     template = TEMPLATE_PATH.read_text()
     logo_dark = LOGO_DARK_PATH.read_text() if LOGO_DARK_PATH.exists() else ""
     logo_light = LOGO_LIGHT_PATH.read_text() if LOGO_LIGHT_PATH.exists() else ""
+    theme_css = (SHARED_DIR / "theme.css").read_text()
 
     # The manifest embeds arbitrary model text (descriptions, ORGANIZATION.md, SQL).
     # Escape `</` so a `</script>` in that text can't terminate the <script> block that
@@ -261,6 +262,7 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
         .replace("{{MANIFEST_JSON}}", manifest_json)
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark)
         .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", logo_light)
+        .replace("{{THEME_CSS}}", theme_css)
     )
     return out
 

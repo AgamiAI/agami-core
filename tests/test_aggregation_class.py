@@ -18,6 +18,7 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
+from catalog_helpers import col as _col, make_catalog_runner  # noqa: E402
 from semantic_model import build  # noqa: E402
 from semantic_model import curate as C  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
@@ -71,22 +72,16 @@ def test_invalid_aggregation_value_rejected():
 
 # --- introspection stamps the class ----------------------------------------
 
-def _catalog_runner(sql):
-    s = " ".join(sql.split())
-    if "information_schema.schemata" in s:
-        return [{"schema_name": "public"}]
-    if "information_schema.tables" in s and "table_type" in s:
-        return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
-        return [
-            {"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
-            {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
-            {"column_name": "amount", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "3", "numeric_scale": "2"},
-            {"column_name": "discount_rate", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "4", "numeric_scale": "4"},
-        ]
-    if "PRIMARY KEY" in s:
-        return [{"column_name": "id"}]
-    return []
+_catalog_runner = make_catalog_runner(
+    tables=["orders"],
+    columns={"orders": [
+        _col("id", "integer", nullable=False),
+        _col("customer_id", "integer"),
+        _col("amount", "numeric", scale=2),
+        _col("discount_rate", "numeric", scale=4),
+    ]},
+    estimate=None,
+)
 
 
 def test_introspect_stamps_aggregation(tmp_path):

@@ -79,14 +79,6 @@ def query_log_path(art: Path | None = None) -> Path:
     return local_dir(art) / "query_log.jsonl"
 
 
-def charts_dir(profile: str, art: Path | None = None) -> Path:
-    return local_dir(art) / "charts" / profile
-
-
-def exports_dir(profile: str, art: Path | None = None) -> Path:
-    return local_dir(art) / "exports" / profile
-
-
 def dashboard_dir(kind: str, profile: str, art: Path | None = None) -> Path:
     """Rendered dashboards: kind in {model, review, examples-validation}."""
     return local_dir(art) / kind / profile
@@ -94,10 +86,6 @@ def dashboard_dir(kind: str, profile: str, art: Path | None = None) -> Path:
 
 def serve_dir(art: Path | None = None) -> Path:
     return local_dir(art) / "serve"
-
-
-def tunnels_dir(art: Path | None = None) -> Path:
-    return local_dir(art) / "tunnels"
 
 
 def profile_dir(profile: str, art: Path | None = None) -> Path:

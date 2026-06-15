@@ -289,7 +289,7 @@ def cmd_format_table(args) -> int:
     this verbatim so verification numbers don't depend on the LLM's formatting."""
     import csv as _csv
     from . import units
-    text = open(args.csv_file, newline="").read() if args.csv_file else sys.stdin.read()
+    text = Path(args.csv_file).read_text() if args.csv_file else sys.stdin.read()
     reader = list(_csv.reader(io.StringIO(text)))
     if not reader:
         print("")
