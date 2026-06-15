@@ -135,6 +135,29 @@ def test_generated_ops_apply_and_stamp_metadata(tmp_path):
     assert cols["short_description"].description == "Short description"
 
 
+def test_route_references_intra_cross_and_skips_unmodelled():
+    from semantic_model import cli, models as mm
+
+    def tbl(name):
+        return mm.Table(name=name, schema="public", storage_connection="c", grain=["id"],
+                        columns=[mm.Column(name="id", type="integer", primary_key=True)])
+    itsm = mm.SubjectArea(name="itsm", description="d", tables_defined=[tbl("incident"), tbl("problem")])
+    sysa = mm.SubjectArea(name="sys", description="d", tables_defined=[tbl("sys_user")])
+    org = mm.Organization(organization="o", version=1, subject_areas=[itsm, sysa])
+    specs = [
+        {"from_table": "incident", "from_column": "problem_id", "to_table": "problem"},   # intra (itsm)
+        {"from_table": "incident", "from_column": "caller_id", "to_table": "sys_user"},    # cross (itsm→sys)
+        {"from_table": "incident", "from_column": "x", "to_table": "nope"},                # target unmodelled → skip
+    ]
+    intra, cross = cli._route_references(org, specs)
+    assert [r["to_table"] for r in intra.get("itsm", [])] == ["problem"]
+    assert "from_subject_area" not in intra["itsm"][0]                # plain intra-area edge
+    assert intra["itsm"][0]["to_column"] == "id" and intra["itsm"][0]["relationship"] == "many_to_one"
+    assert len(cross) == 1
+    assert cross[0]["from_subject_area"] == "itsm" and cross[0]["to_subject_area"] == "sys"
+    assert cross[0]["to_column"] == "id"
+
+
 def _servicenow_model(root: Path) -> None:
     """`incident` (+ metadata tables) in the itsm area; `sys_user` in a SEPARATE sys area — so the
     dictionary's caller_id→sys_user reference is a CROSS-area edge, as it is in real ServiceNow."""

@@ -1736,7 +1736,7 @@
     function metricGroupKey(m) { return (m.area || '?') + '.' + ((m.source_tables || [])[0] || '?'); }
     function renderMetricsGrouped(root) {
       const all = (manifest.metrics || []).filter(m =>
-        (!searchQ || `${m.name} ${m.calculation} ${m.description} ${m.area}`.toLowerCase().includes(searchQ))
+        (!searchQ || `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`.toLowerCase().includes(searchQ))
         && passesFilter(m, 'metric'));
       setSearchCounts(`${all.length} of ${(manifest.metrics || []).length} metric${(manifest.metrics || []).length === 1 ? '' : 's'} shown`);
       if (!all.length) {
@@ -1760,7 +1760,7 @@
         head.style.cursor = 'pointer';
         head.insertBefore(el('span', { class: 'group-caret', text: open ? '▾ ' : '▸ ' }), head.firstChild);
         head.addEventListener('click', (ev) => {
-          if (ev.target.tagName === 'BUTTON') return;        // approve click shouldn't toggle
+          if (ev.target.closest('button')) return;           // approve click shouldn't toggle
           if (metricGroupsOpen.has(k)) metricGroupsOpen.delete(k); else metricGroupsOpen.add(k);
           renderBody();
         });

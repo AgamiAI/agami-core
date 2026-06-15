@@ -78,6 +78,22 @@ def test_set_units_requires_a_unit(tmp_path):
     assert rc == 1 and "error" in json.loads(out)
 
 
+def test_set_units_columns_override_detection(tmp_path):
+    _model(tmp_path)
+    # qty is NOT money — explicit --columns stamps it anyway, overriding the money matcher
+    rc, out = _run(["set-units", str(tmp_path), "--unit", "each", "--columns", "order_items.qty"])
+    assert rc == 0 and json.loads(out)["set"] == 1, out
+    oi = yaml.safe_load((tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml").read_text())
+    assert next(c for c in oi["columns"] if c["name"] == "qty")["unit"] == "each"
+
+
+def test_set_units_is_idempotent(tmp_path):
+    _model(tmp_path)
+    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] >= 1
+    # re-running skips columns that already carry a unit → nothing re-stamped
+    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] == 0
+
+
 def test_suggest_metrics_writes_proposed(tmp_path):
     _model(tmp_path)
     rc, out = _run(["suggest-metrics", str(tmp_path)])
