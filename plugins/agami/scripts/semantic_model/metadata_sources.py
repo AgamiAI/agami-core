@@ -47,8 +47,33 @@ PRESETS: dict[str, dict] = {
             "type_col": "internal_type", "reference_col": "reference",
             "reference_type": "reference",
         },
+        # KNOWN reference graph — purely declarative config (field name → target table) for
+        # ServiceNow's standard, published reference fields. This exists because a sparse export's
+        # sys_dictionary often DOESN'T declare these (the joins live as sys_id GUIDs with no
+        # readable target), so deterministic extraction alone returns a thin graph. The engine
+        # applies this map inheritance-aware AND VERIFIES every candidate by value-overlap against
+        # the live data before adding — so a standard join that doesn't match THIS export is simply
+        # dropped, never blindly trusted. It's config + verification, not engine logic, and not a
+        # substitute for the dictionary (instance declarations override these on conflict).
+        "reference_graph": {
+            "caller_id": "sys_user", "opened_by": "sys_user", "closed_by": "sys_user",
+            "resolved_by": "sys_user", "assigned_to": "sys_user", "opened_for": "sys_user",
+            "requested_by": "sys_user", "requested_for": "sys_user", "watch_list": "sys_user",
+            "assignment_group": "sys_user_group", "group": "sys_user_group",
+            "cmdb_ci": "cmdb_ci", "business_service": "cmdb_ci_service",
+            "company": "core_company", "location": "cmn_location",
+            "department": "cmn_department", "cost_center": "cmn_cost_center",
+            "parent": "task", "problem_id": "problem", "rfc": "change_request",
+            "request": "sc_request", "request_item": "sc_req_item", "cat_item": "sc_cat_item",
+        },
     },
 }
+
+
+def known_reference_graph(preset: Optional[str]) -> dict[str, str]:
+    """The preset's declarative `field name → target table` map (empty if none). Config only —
+    every entry is overlap-verified by the engine before any join is written."""
+    return dict(PRESETS.get(preset or "", {}).get("reference_graph", {}))
 
 
 def detect_preset(table_names: Iterable[str]) -> Optional[str]:

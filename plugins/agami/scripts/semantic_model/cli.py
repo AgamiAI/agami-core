@@ -703,43 +703,86 @@ def cmd_enrich_metadata(args) -> int:
     # 2) reference/FK edges from the dictionary — the join-graph half. The table/area structure
     # the curate batch above touched only descriptions/choices, so the loaded `org` is still
     # valid for routing references (names, schemas, grain, areas unchanged).
-    refs_added = 0
-    refs_skipped_target = 0
-    refs_declared = 0
-    if not args.skip_references and dict_rows and "reference_col" in dict_cfg:
-        # field-name → target. Applied to EVERY modelled column with that name, so an inherited
-        # field declared on the parent (sys_dictionary `assignment_group` on `task`) resolves for
-        # incident/problem/change too — the table-inheritance fix.
-        decls = MS.reference_declarations(
-            dict_rows, column_col=dict_cfg["column_col"], type_col=dict_cfg["type_col"],
-            reference_col=dict_cfg["reference_col"],
-            reference_type=dict_cfg.get("reference_type", "reference"))
-        refs_declared = len(decls)
-        specs = []
-        for sa in org.subject_areas:
-            for t in sa.tables_defined:
-                for c in t.columns:
-                    tgt = decls.get(c.name.lower())
-                    if tgt:
-                        specs.append({"from_table": t.name, "from_column": c.name, "to_table": tgt})
-        intra, cross, refs_skipped_target = _route_references(org, specs)
-        if intra or cross:
-            rres = curate.add_relationships(root, intra=intra, cross=cross)
-            refs_added = len(rres.applied)
-            errors += rres.errors
+    refs_added = refs_skipped_target = refs_declared = refs_unverified = 0
+    if not args.skip_references:
+        # field-name → target, from this instance's dictionary AND the preset's KNOWN reference
+        # graph (declarative config). Instance declarations override the preset on conflict.
+        decls = (MS.reference_declarations(
+                    dict_rows, column_col=dict_cfg["column_col"], type_col=dict_cfg["type_col"],
+                    reference_col=dict_cfg["reference_col"],
+                    reference_type=dict_cfg.get("reference_type", "reference"))
+                 if (dict_rows and "reference_col" in dict_cfg) else {})
+        ref_map = {**MS.known_reference_graph(preset), **decls}
+        refs_declared = len(ref_map)
+        if ref_map:
+            intra, cross, refs_skipped_target, refs_unverified = _build_verified_references(
+                org, runner, dialect, ref_map)
+            if intra or cross:
+                rres = curate.add_relationships(root, intra=intra, cross=cross)
+                refs_added = len(rres.applied)
+                errors += rres.errors
 
     if not cols_applied and not refs_added:
         _print_json({"enriched": False, "preset": preset, "fetched": fetched,
-                     "reference_fields_declared": refs_declared,
+                     "reference_fields_known": refs_declared,
                      "relationships_skipped_target_not_modelled": refs_skipped_target,
                      "reason": "nothing applicable for modelled columns", "errors": errors})
         return 0
     _print_json({"enriched": not errors, "preset": preset, "fetched": fetched,
                  "columns_enriched": cols_applied, "relationships_added": refs_added,
-                 "reference_fields_declared": refs_declared,
+                 "relationships_added_unverified": refs_unverified,
+                 "reference_fields_known": refs_declared,
                  "relationships_skipped_target_not_modelled": refs_skipped_target,
                  "errors": errors})
     return 0 if not errors else 1
+
+
+def _build_verified_references(org, runner, dialect, ref_map: dict) -> tuple[dict, list, int, int]:
+    """Turn a `field → target` map (preset known graph ∪ dictionary declarations) into reference
+    relationships, applied to EVERY modelled column with that name (inheritance-aware), and VERIFY
+    each candidate by value-overlap against the live data before keeping it:
+      overlap holds            → confirmed + system-approved (the standard join matches THIS data),
+      overlap can't be checked → inferred/unreviewed (target/from too big to scan, or probe cap hit),
+      overlap FAILS            → DROPPED (the standard join doesn't apply to this export — never
+                                 blindly trust the preset).
+    Returns `(intra, cross, skipped_target_count, unverified_count)`."""
+    from . import introspect as INTRO
+    specs: list[dict] = []
+    skipped_target = unverified = probes = 0
+    # resolve targets up front so we can verify before routing
+    tindex = {t.name.lower(): t for sa in org.subject_areas for t in sa.tables_defined}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for c in t.columns:
+                tgt = ref_map.get(c.name.lower())
+                if not tgt:
+                    continue
+                ttab = tindex.get(tgt.lower())
+                if ttab is None:
+                    skipped_target += 1
+                    continue
+                if not ttab.grain:
+                    continue
+                verified = None  # None = couldn't check
+                if INTRO._too_big_to_probe(t) or INTRO._too_big_to_probe(ttab):
+                    verified = None
+                elif probes < INTRO.FK_OVERLAP_PROBE_CAP:
+                    probes += 1
+                    verified = INTRO._overlaps(dialect, runner, t, c.name, ttab, ttab.grain[0])
+                if verified is False:
+                    continue  # standard join doesn't hold in this data → drop
+                spec = {"from_table": t.name, "from_column": c.name, "to_table": ttab.name}
+                if verified:
+                    spec.update(confidence="confirmed", review_state="approved",
+                                signed_off_by="agami_enrich", signed_off_role="system",
+                                signed_off_at=INTRO._NOW,
+                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (value-overlap verified)")
+                else:
+                    unverified += 1
+                    spec["description"] = f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (not overlap-verified — confirm)"
+                specs.append(spec)
+    intra, cross, skipped_more = _route_references(org, specs)
+    return intra, cross, skipped_target + skipped_more, unverified
 
 
 def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
@@ -783,8 +826,13 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
         base = {"from_table": ft, "from_column": fc, "to_table": tt, "to_column": ttab.grain[0],
                 "from_schema": ftab.schema_name, "to_schema": ttab.schema_name,
                 "relationship": "many_to_one", "join_type": "LEFT",
-                "confidence": "inferred", "review_state": "unreviewed",
-                "description": f"reference (data dictionary): {fc} → {tt}.{ttab.grain[0]}"}
+                # per-spec trust (a verified candidate is confirmed/approved); defaults otherwise
+                "confidence": spec.get("confidence", "inferred"),
+                "review_state": spec.get("review_state", "unreviewed"),
+                "description": spec.get("description", f"reference: {fc} → {tt}.{ttab.grain[0]}")}
+        for k in ("signed_off_by", "signed_off_role", "signed_off_at"):
+            if spec.get(k):
+                base[k] = spec[k]
         if farea == tarea:
             intra[farea].append(base)
         else:

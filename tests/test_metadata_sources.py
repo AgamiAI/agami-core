@@ -247,7 +247,13 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     def fake_factory(profile, python=None):
         def run(sql):
             s = sql.lower()
-            return SYS_CHOICE if "sys_choice" in s else SYS_DICTIONARY if "sys_dictionary" in s else []
+            if "sys_choice" in s:
+                return SYS_CHOICE
+            if "sys_dictionary" in s:
+                return SYS_DICTIONARY
+            if "matched" in s:                 # the value-overlap verification probe
+                return [{"matched": "5"}]
+            return []
         return run
 
     monkeypatch.setattr(INTRO, "make_execute_sql_runner", fake_factory)
@@ -262,9 +268,44 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     cols = {c.name: c for c in incident.columns}
     assert cols["severity"].choice_field == {"1": "High", "2": "Medium", "3": "Low"}
     assert cols["severity"].description_source == "metadata"
-    # the caller_id→sys_user reference (cross-area, NOT <x>_id name-matchable) was written
+    # caller_id→sys_user (cross-area, NOT <x>_id name-matchable) — written AND overlap-verified,
+    # so it's confirmed + system-approved rather than left unreviewed.
     xrels = org.cross_subject_area_relationships
     edge = next((r for r in xrels if r.from_table == "incident" and r.to_table == "sys_user"), None)
     assert edge is not None and edge.from_column == "caller_id"
     assert edge.from_subject_area == "itsm" and edge.to_subject_area == "sys"
-    assert edge.review_state == "unreviewed" and edge.confidence == "inferred"
+    assert edge.review_state == "approved" and edge.confidence == "confirmed"
+    assert edge.signed_off_role == "system"
+
+
+def test_known_reference_graph_is_config():
+    g = M.known_reference_graph("servicenow")
+    assert g["caller_id"] == "sys_user" and g["assignment_group"] == "sys_user_group"
+    assert M.known_reference_graph(None) == {} and M.known_reference_graph("nope") == {}
+
+
+def test_enrich_metadata_drops_unverified_preset_reference(tmp_path, monkeypatch):
+    # overlap probe returns NO match → the preset's standard caller_id→sys_user does NOT hold in
+    # this export, so it must be DROPPED, never blindly trusted.
+    _servicenow_model(tmp_path)
+    from semantic_model import introspect as INTRO
+
+    def fake_factory(profile, python=None):
+        def run(sql):
+            s = sql.lower()
+            if "sys_choice" in s:
+                return SYS_CHOICE
+            if "sys_dictionary" in s:
+                return SYS_DICTIONARY
+            if "matched" in s:
+                return [{"matched": "0"}]          # NO overlap
+            return []
+        return run
+
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", fake_factory)
+    from semantic_model import cli
+    ns = cli.build_parser().parse_args(
+        ["enrich-metadata", str(tmp_path), "--profile", "servicenow", "--db-type", "redshift"])
+    assert ns.func(ns) == 0
+    org = loader.load_organization(tmp_path)
+    assert not [r for r in org.cross_subject_area_relationships if r.to_table == "sys_user"]

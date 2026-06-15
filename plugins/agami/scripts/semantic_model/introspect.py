@@ -104,6 +104,11 @@ PROBE_TABLE_CAP = 200  # cap value-overlap probing work
 # hundreds of FKs could otherwise fire hundreds of round-trips. Past the budget we stop probing
 # and leave the remaining declared FKs inferred/unreviewed (they still surface for sign-off).
 FK_OVERLAP_PROBE_CAP = 300
+# Above this FROM-table row estimate we SKIP the value-overlap scan and leave the join
+# unverified (inferred/unreviewed) rather than scan millions of rows over the network — the
+# guard that stops a 50-table Redshift introspect from crawling for half an hour on big fact
+# tables (incident/task/metric_instance). Mirrors the grain-probe size guard.
+_OVERLAP_PROBE_MAX_ROWS = 3_000_000
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
@@ -653,7 +658,9 @@ def _build_relationships(
             if not dialect.fk_enforced and overlap_probes < FK_OVERLAP_PROBE_CAP:
                 fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
                 tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
-                if fobj is not None and tobj is not None:
+                # Skip the scan on huge FROM tables (the slow case on Redshift fact tables) —
+                # leave the declared FK inferred/unreviewed rather than full-scan to confirm it.
+                if fobj is not None and tobj is not None and not _too_big_to_probe(fobj):
                     overlap_probes += 1
                     if _overlaps(dialect, runner, fobj, fc, tobj, tc):
                         confidence = "confirmed"
@@ -834,6 +841,14 @@ def _probe_relationships(
                         ))
                         break
     return rels
+
+
+def _too_big_to_probe(t: Table) -> bool:
+    """True when a table's estimated row count is above the overlap-probe guard — scanning it to
+    confirm a join would crawl, so we skip the scan and leave the join unverified."""
+    perf = getattr(t, "performance_hints", None)
+    rows = getattr(perf, "estimated_row_count", None) if perf else None
+    return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
 def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
