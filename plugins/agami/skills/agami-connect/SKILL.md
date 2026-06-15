@@ -679,7 +679,12 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed   # le
 - **PII count** — columns introspection (or a curator) flagged `sensitive` **that are still queryable** (already-excluded columns, and any column under an excluded table, are not counted — so once the user excludes the flagged columns this drops to 0 and the gate stops re-opening).
 - **Sign-off count** — metrics + named-filters + entities needing review (relationships are NOT gated — they stay lazy: FK joins are engine-approved, inferred joins self-approve as you query).
 
-**If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface: per-column **Exclude** toggles + **Mark-PII** on the flagged columns, and the **Review** tab where metrics/entities sit under "Needs your eyes." Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns (customer names, GPS) and 5 metrics to sign off — opening the model explorer so you can exclude/mark those and review. Send the feedback block back when you're done."* — then **stop and wait** for their batch.
+**If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
+- the **PII tab** — every flagged column *and* every suspected-but-unflagged one (e.g. `first_name` in `sys_user`) in one list, each with a confirm/clear toggle. This is where the user reviews PII without hunting through tables.
+- the **Metrics tab** — the proposed measures grouped by table and collapsed (`incident · 9 [✓ Approve 9]`), with per-table and "approve all proposed" bulk buttons, so a few-hundred-metric set signs off fast.
+- the **Review** tab — metrics/entities/joins under "Needs your eyes" for anything needing a closer look; per-column **Exclude** toggles live on **Tables**.
+
+Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns and surfaced 8 more that look like PII, plus ~180 proposed metrics to sign off — opening the model explorer. Review on the PII and Metrics tabs and send the feedback block back when you're done."* — then **stop and wait** for their batch.
 
 **Do NOT** present an inline `AskUserQuestion` to quick-exclude a few columns, and do NOT offer "continue now vs open explorer" here. The explorer **is** the exclude-and-review surface; a 4-option modal holds a fraction of what a real DB needs dropped, and splitting PII exclusion across a modal + the explorer is exactly the fragmented flow we're removing. (This replaces the old inline PII multiSelect — PII now routes through the explorer like every other exclusion.)
 
