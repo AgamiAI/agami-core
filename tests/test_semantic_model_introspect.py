@@ -741,3 +741,16 @@ def test_introspect_append_merges_batches(tmp_path):
     allrels = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
     oi = [r for r in allrels if r.from_table == "order_items" and r.to_table == "orders"]
     assert len(oi) == 1   # the cross-batch FK was built once (not lost, not duplicated)
+
+
+def test_introspect_append_relisting_table_no_duplicate(tmp_path):
+    """Re-listing a batch-1 table in a later --append batch must not duplicate it or its grain."""
+    from semantic_model import loader as L
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.orders", "public.customers"])
+    # batch 2 re-lists orders (already built) + adds order_items
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.orders", "public.order_items"], append=True)
+    org = L.load_organization(tmp_path / "shop")
+    names = [t.name for sa in org.subject_areas for t in sa.tables_defined]
+    assert sorted(names) == ["customers", "order_items", "orders"]   # each table exactly once

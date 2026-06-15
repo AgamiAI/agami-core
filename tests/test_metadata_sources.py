@@ -309,3 +309,31 @@ def test_enrich_metadata_drops_unverified_preset_reference(tmp_path, monkeypatch
     assert ns.func(ns) == 0
     org = loader.load_organization(tmp_path)
     assert not [r for r in org.cross_subject_area_relationships if r.to_table == "sys_user"]
+
+
+def test_verified_references_unverified_when_table_too_big():
+    # the #7 guard: a FROM table above the row threshold must NOT be overlap-scanned — the ref is
+    # kept UNVERIFIED (inferred/unreviewed), not dropped, not probed.
+    from semantic_model import cli, introspect as INTRO, models as mm, dialects as D
+    big = mm.PerformanceHints(estimated_row_count=INTRO._OVERLAP_PROBE_MAX_ROWS + 1)
+
+    def tbl(name, cols, perf=None):
+        return mm.Table(name=name, schema="public", storage_connection="c", grain=["sys_id"],
+                        performance_hints=perf,
+                        columns=[mm.Column(name="sys_id", type="integer", primary_key=True)]
+                                + [mm.Column(name=c, type="integer") for c in cols])
+    itsm = mm.SubjectArea(name="itsm", description="d", tables_defined=[tbl("incident", ["caller_id"], big)])
+    sysa = mm.SubjectArea(name="sys", description="d", tables_defined=[tbl("sys_user", [])])
+    org = mm.Organization(organization="o", version=1, subject_areas=[itsm, sysa])
+    probed = {"n": 0}
+
+    def runner(sql):
+        if "matched" in sql:
+            probed["n"] += 1
+            return [{"matched": "5"}]
+        return []
+    intra, cross, skipped, unverified = cli._build_verified_references(
+        org, runner, D.get_dialect("redshift"), {"caller_id": "sys_user"})
+    assert probed["n"] == 0          # too big → not scanned
+    assert unverified == 1 and len(cross) == 1
+    assert cross[0]["review_state"] == "unreviewed" and cross[0]["confidence"] == "inferred"
