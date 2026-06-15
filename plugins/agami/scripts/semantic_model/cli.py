@@ -581,6 +581,8 @@ def cmd_introspect(args) -> int:
     from . import validator as V
 
     runner = INTRO.make_execute_sql_runner(args.profile)
+    progress = args.progress or str(
+        Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
     org, report = INTRO.introspect(
         args.profile,
         args.db_type,
@@ -591,6 +593,7 @@ def cmd_introspect(args) -> int:
         exclude_columns=args.exclude_columns,
         dry_run=args.dry_run,
         bigquery_region=args.bigquery_region,
+        progress_path=progress,
     )
     res = V.validate(org)
     print(report.render())
@@ -956,6 +959,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="schema.table.column list to mark excluded (the prune step's dropped columns)")
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
     sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--progress", default=None,
+                    help="progress-log path (flushed per phase/table; default "
+                         "<artifacts>/<profile>/.introspect/progress.log) — tail it for a heartbeat")
     sp.set_defaults(func=cmd_introspect)
 
     sp = sub.add_parser("enrich-metadata",

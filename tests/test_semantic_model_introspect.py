@@ -672,3 +672,14 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
     # all FKs still modeled (the uncapped ones simply stay unreviewed rather than vanishing)
     rels = [r for sa in org.subject_areas for r in sa.relationships]
     assert len([r for r in rels if r.to_table == "parent"]) == N
+
+
+def test_introspect_writes_progress_log(tmp_path):
+    """A long introspection must emit a flushed heartbeat so a tailing skill doesn't read 'stuck'."""
+    pp = tmp_path / "progress.log"
+    I.introspect("shop", "postgres", runner=_catalog_runner,
+                 artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
+    lines = pp.read_text().splitlines()
+    assert any("discovered" in ln for ln in lines)
+    assert any(ln.startswith("columns+grain 1/") for ln in lines)
+    assert lines[-1].startswith("done:")

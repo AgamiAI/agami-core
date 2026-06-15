@@ -106,6 +106,20 @@ PROBE_TABLE_CAP = 200  # cap value-overlap probing work
 FK_OVERLAP_PROBE_CAP = 300
 
 
+def _progress(path: Optional[Path], msg: str) -> None:
+    """Append a FLUSHED progress line so a tailing skill can surface a heartbeat during a long
+    introspection (the engine is otherwise silent until it returns — which reads as 'stuck' on a
+    big Redshift schema). Best-effort; never raises."""
+    if path is None:
+        return
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(msg.rstrip("\n") + "\n")
+            fh.flush()
+    except Exception:
+        pass
+
+
 @dataclass
 class IntrospectReport:
     profile: str
@@ -177,6 +191,7 @@ def introspect(
     exclude_columns: Optional[list[str]] = None,
     dry_run: bool = False,
     bigquery_region: str = "region-us",
+    progress_path: Optional[str | Path] = None,
 ) -> tuple[Organization, IntrospectReport]:
     """Introspect a live DB into the semantic model and (unless dry_run) write the
     canonical tree. `tables` (optional) is the allowlist of `schema.table` to build —
@@ -193,6 +208,14 @@ def introspect(
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir=str(out), dry_run=dry_run)
 
+    pp = Path(progress_path) if progress_path else None
+    if pp is not None:
+        try:
+            pp.parent.mkdir(parents=True, exist_ok=True)
+            pp.write_text("", encoding="utf-8")  # fresh log per run
+        except Exception:
+            pp = None
+
     # 1. discover (schema, table) pairs
     pairs = _discover_tables(dialect, runner, tables, report)
     if not pairs:
@@ -200,14 +223,16 @@ def introspect(
             "no tables discovered. If the catalog is locked down, pass an explicit "
             "table allowlist (schema.table) so probe mode can describe them."
         )
+    _progress(pp, f"discovered {len(pairs)} tables — reading columns, grain, keys")
 
     # 2. per-table columns + grain
     built: list[Table] = []
     grain_by_table: dict[str, set[str]] = {}
-    for schema, table in pairs:
+    for i, (schema, table) in enumerate(pairs, 1):
         t = _build_table(dialect, runner, schema, table, conn_name, report)
         built.append(t)
         grain_by_table[t.name] = set(t.grain)
+        _progress(pp, f"columns+grain {i}/{len(pairs)}: {table}")
 
     # 2b. apply prune-step column exclusions (the user dropped these in the prune
     # view). Match on schema.table.column, with a schema-less table.column fallback.
@@ -222,9 +247,11 @@ def introspect(
                     c.review_state = "rejected"
 
     # 3. relationships (catalog FKs, else probe by name+type+overlap)
+    _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
     rels = _build_relationships(dialect, runner, pairs, built, grain_by_table, report)
     report.table_count = len(built)
     report.relationship_count = len(rels)
+    _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
 
     # 4. propose subject areas + cross-area edges
     areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
