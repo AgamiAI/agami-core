@@ -556,11 +556,17 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                         "source_tables": [t]})
             continue
         if c.aggregation == "additive":
-            out.append({"name": f"{t}_total_{c.name}", "calculation": f"Total {c.name} across {t}",
-                        "bindings": {st: f"SUM({c.name})"}, "source_tables": [t]})
+            m = {"name": f"{t}_total_{c.name}", "calculation": f"Total {c.name} across {t}",
+                 "bindings": {st: f"SUM({c.name})"}, "source_tables": [t]}
+            if c.unit:  # SUM(col) carries the column's unit — USD column → USD total
+                m["unit"] = c.unit
+            out.append(m)
         elif c.aggregation == "averageable":
-            out.append({"name": f"{t}_avg_{c.name}", "calculation": f"Average {c.name} in {t}",
-                        "bindings": {st: f"AVG({c.name})"}, "source_tables": [t]})
+            m = {"name": f"{t}_avg_{c.name}", "calculation": f"Average {c.name} in {t}",
+                 "bindings": {st: f"AVG({c.name})"}, "source_tables": [t]}
+            if c.unit:  # AVG(col) is in the same unit as the column
+                m["unit"] = c.unit
+            out.append(m)
         if c.type in _TS_TYPES:
             ts_cols.append(c.name)
     starts = [c for c in ts_cols if _START_NAME_RE.search(c)]

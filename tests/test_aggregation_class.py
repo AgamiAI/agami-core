@@ -175,6 +175,21 @@ def test_suggest_metrics_rate_and_duration_patterns():
     assert dur["review_state"] == "unreviewed" and dur["confidence"] == "proposed"
 
 
+def test_suggest_metrics_inherits_column_unit():
+    from semantic_model import dialects as D
+    t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],
+                description="a", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="cost", type="decimal", aggregation="additive", unit="USD"),
+                    m.Column(name="quantity", type="integer", aggregation="additive"),          # no unit
+                    m.Column(name="margin_pct", type="decimal", aggregation="averageable", unit="percent")])
+    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert mets["alm_asset_total_cost"]["unit"] == "USD"          # SUM(cost) inherits USD
+    assert mets["alm_asset_avg_margin_pct"]["unit"] == "percent"  # AVG inherits percent
+    assert "unit" not in mets["alm_asset_total_quantity"]         # column has no unit → metric has none
+    assert "unit" not in mets["alm_asset_count"]                  # COUNT(*) is unitless
+
+
 def test_suggest_metrics_auto_approve_stamps_signoff_timestamp():
     from semantic_model import dialects as D
     t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
