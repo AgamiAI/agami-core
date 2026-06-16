@@ -110,6 +110,12 @@ class Dialect:
             return f"{self.quote_ident(schema)}.{self.quote_ident(table)}"
         return self.quote_ident(table)
 
+    def duration_days_expr(self, start: str, end: str) -> str:
+        """Per-row 'days between two timestamps' (bare column names) for an avg-duration metric.
+        Postgres-family default (interval epoch); overridden where the dialect needs a
+        DATEDIFF / TIMESTAMP_DIFF form."""
+        return f"EXTRACT(EPOCH FROM ({end} - {start})) / 86400.0"
+
     # --- row-limit syntax (probe mode) ---
 
     def sample_sql(self, schema: Optional[str], table: str, n: int) -> str:
@@ -243,6 +249,9 @@ class Redshift(PostgreSQL):
     name = "Redshift"
     fk_enforced = False  # Redshift declares but does not enforce FKs
 
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"DATEDIFF('day', {start}, {end})"
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT tbl_rows AS estimated_rows FROM svv_table_info "
@@ -257,6 +266,9 @@ class MySQL(Dialect):
 
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
+
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"DATEDIFF({end}, {start})"
 
     def sql_foreign_keys(self, schema: str) -> str:
         # MySQL exposes the target (incl. its schema) directly on key_column_usage.
@@ -282,6 +294,9 @@ class Snowflake(Dialect):
     name = "Snowflake"
     _SYS_SCHEMAS = ("INFORMATION_SCHEMA",)
 
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"DATEDIFF('day', {start}, {end})"
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT row_count AS estimated_rows FROM information_schema.tables "
@@ -301,10 +316,16 @@ class Databricks(Dialect):
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
 
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"datediff({end}, {start})"
+
 
 class Trino(Dialect):
     name = "Trino"
     fk_enforced = False  # Trino generally has no constraints -> probe FKs
+
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"date_diff('day', {start}, {end})"
 
     def sql_primary_keys(self, schema: str, table: str) -> str:
         # Most Trino connectors don't expose PK constraints; return nothing and
@@ -325,6 +346,9 @@ class SQLServer(Dialect):
 
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
+
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"DATEDIFF(day, {start}, {end})"
 
     def sql_foreign_keys(self, schema: str) -> str:
         # SQL Server's constraint_column_usage works for FK targets.
@@ -349,6 +373,9 @@ class BigQuery(Dialect):
 
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "") + "`"
+
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"TIMESTAMP_DIFF({end}, {start}, DAY)"
 
     def qualified(self, schema: Optional[str], table: str) -> str:
         # BigQuery: dataset.table, backtick-wrapped as one path.
@@ -419,6 +446,9 @@ class BigQuery(Dialect):
 class SQLite(Dialect):
     name = "SQLite"
 
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"julianday({end}) - julianday({start})"
+
     def sql_schemas(self) -> str:
         # SQLite has no schemas; emit a single synthetic "main".
         return "SELECT 'main' AS schema_name"
@@ -473,6 +503,9 @@ class SQLite(Dialect):
 class Oracle(Dialect):
     name = "Oracle"
     limit_style = "fetch"
+
+    def duration_days_expr(self, start: str, end: str) -> str:
+        return f"({end} - {start})"  # Oracle DATE subtraction yields days
 
     def sql_schemas(self) -> str:
         return (

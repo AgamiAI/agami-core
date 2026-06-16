@@ -46,6 +46,17 @@ from pydantic import (
 )
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def bare_name(qualified: str) -> str:
+    """A table name without its schema/area prefix: ``sales.orders`` -> ``orders``.
+    Single source of truth so the several places that strip the prefix stay in lockstep."""
+    return qualified.split(".")[-1]
+
+
+# ---------------------------------------------------------------------------
 # Shared enums / literals
 # ---------------------------------------------------------------------------
 
@@ -96,7 +107,7 @@ SemiAdditiveAgg = Literal["last", "first", "average", "min", "max"]
 # context instead of rubber-stamping a giant list. An `ai_unknown` column used in an answer
 # is surfaced the same way ("I used `xyz` but don't know what it is — is this right?").
 # See docs/design/validated-through-use-descriptions.md.
-DescriptionSource = Literal["human", "ai_unvalidated", "ai_validated", "ai_unknown"]
+DescriptionSource = Literal["human", "ai_unvalidated", "ai_validated", "ai_unknown", "metadata"]
 Cardinality = Literal["many_to_one", "one_to_many", "one_to_one"]
 JoinType = Literal["INNER", "LEFT", "RIGHT", "FULL", "CROSS"]
 Executable = Literal["same_engine", "split", "informational"]
@@ -312,6 +323,11 @@ class Table(_Base):
 
     # logical column groupings; REQUIRED on deep tables (enforced in validator).
     column_groups: dict[str, list[str]] = Field(default_factory=dict)
+    # OPTIONAL one-line gloss per column-group name (e.g. {"references": "FK columns linking
+    # to other tables"}). Lets the explorer/MCP explain a group instead of showing a bare key.
+    # Keys SHOULD be a subset of column_groups; extras are ignored, missing ones just render
+    # without a description.
+    column_group_descriptions: dict[str, str] = Field(default_factory=dict)
 
     # importer composition hook (v2; nothing consumes it in v1).
     inherits_columns_from: Optional[str] = None
@@ -401,6 +417,10 @@ class Entity(_Base):
     other_names: list[str] = Field(default_factory=list)
     description: str = ""
     maps_to: list[EntityMapping] = Field(default_factory=list)
+    # OPTIONAL display anchor — the single table to file this entity under in the explorer/MCP.
+    # An entity maps to many tables by design (`maps_to`); this just names the one a reader
+    # would consider its home (usually the primary mapping's table). None = list it un-anchored.
+    primary_table: Optional[str] = None
     # declarative opaque-literal identification (provider-neutral regex)
     value_pattern: Optional[str] = None
     value_format_hint: Optional[str] = None
@@ -415,6 +435,18 @@ class Entity(_Base):
     signed_off_by: Optional[str] = None
     signed_off_at: Optional[str] = None
     signed_off_role: Optional[str] = None
+
+    @property
+    def resolved_primary_table(self) -> Optional[str]:
+        """Display anchor for the explorer/MCP: the explicit `primary_table` if set, else the
+        primary `maps_to` table (or the first mapping). None only when it maps to nothing — so an
+        entity gets filed under a table without anyone having to set `primary_table` by hand."""
+        if self.primary_table:
+            return self.primary_table
+        for m in self.maps_to:
+            if m.primary:
+                return m.table
+        return self.maps_to[0].table if self.maps_to else None
 
     @model_validator(mode="after")
     def _one_primary(self) -> "Entity":
@@ -447,6 +479,12 @@ class Metric(_Base):
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)
     subject_areas: list[str] = Field(default_factory=list)
+    # OPTIONAL display anchor — the single table this metric is primarily "about", so the
+    # explorer/MCP can present it under that table. NOT ownership and NOT a scope change: a
+    # metric still lives in its subject area and may join several `source_tables`; this just
+    # picks the one a reader would file it under (usually source_tables[0]). None = no single
+    # home (a genuinely cross-table metric); the UI then lists it un-anchored.
+    primary_table: Optional[str] = None
     # Additivity (scorecard #3). A SEMI-ADDITIVE measure (account balance, inventory,
     # headcount, point-in-time subscribers) is summable across some dimensions but NOT
     # across others — almost always time. `non_additive_dimensions` names those (a column

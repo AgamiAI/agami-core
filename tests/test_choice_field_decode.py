@@ -18,40 +18,33 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
+from catalog_helpers import col, make_catalog_runner  # noqa: E402
 from semantic_model import curate as C  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
 from semantic_model import models as m  # noqa: E402
 from semantic_model import validator as V  # noqa: E402
 
 
+# the sample query (SELECT ... LIMIT) → low-cardinality severity, varied free text
+def _incident_sample(_sql):
+    return [{"id": i, "severity": (i % 3) + 1,
+             "short_description": f"issue number {i} with a long unique description",
+             "caller_id": 1000 + i} for i in range(30)]
+
+
 # Catalog runner: an incident-like table with a coded `severity` (1/2/3), a free-text
 # `short_description`, a PK `id`, and an FK `caller_id`.
-def _catalog_runner(sql):
-    s = " ".join(sql.split())
-    if "information_schema.schemata" in s:
-        return [{"schema_name": "public"}]
-    if "information_schema.tables" in s and "table_type" in s:
-        return [{"schema_name": "public", "table_name": "incident", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
-        return [
-            {"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
-            {"column_name": "severity", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
-            {"column_name": "short_description", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "3", "numeric_scale": ""},
-            {"column_name": "caller_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "4", "numeric_scale": ""},
-        ]
-    if "PRIMARY KEY" in s:
-        return [{"column_name": "id"}]
-    if "FOREIGN KEY" in s:
-        return []
-    # the sample query (SELECT ... LIMIT) → low-cardinality severity, varied free text
-    if s.upper().startswith("SELECT") and "LIMIT" in s.upper():
-        rows = []
-        for i in range(30):
-            rows.append({"id": i, "severity": (i % 3) + 1,
-                         "short_description": f"issue number {i} with a long unique description",
-                         "caller_id": 1000 + i})
-        return rows
-    return []
+_catalog_runner = make_catalog_runner(
+    tables=["incident"],
+    columns={"incident": [
+        col("id", "integer", nullable=False),
+        col("severity", "integer"),
+        col("short_description", "varchar"),
+        col("caller_id", "integer"),
+    ]},
+    estimate=None,  # original runner had no reltuples branch — keep row-count unknown
+    sample=_incident_sample,
+)
 
 
 def test_catalog_coded_column_gets_choice_skeleton(tmp_path):

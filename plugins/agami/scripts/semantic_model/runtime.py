@@ -43,7 +43,15 @@ try:
 except ImportError:  # pragma: no cover
     _HAVE_SQLGLOT = False
 
-from .models import Column, Entity, Metric, Organization, Relationship, SubjectArea
+from .models import (
+    Column,
+    Entity,
+    Metric,
+    Organization,
+    Relationship,
+    SubjectArea,
+    bare_name as _bare,
+)
 
 # A prober resolves a literal/value against the DB. Returns True if the value
 # exists in <table>.<column>. Injected so runtime stays DB-agnostic.
@@ -858,10 +866,6 @@ def assemble_receipt(
 # ---------------------------------------------------------------------------
 # SQL helpers (sqlglot)
 # ---------------------------------------------------------------------------
-
-
-def _bare(name: str) -> str:
-    return name.split(".")[-1]
 
 
 def _tables_in_scope(tree: "exp.Select") -> dict[str, str]:

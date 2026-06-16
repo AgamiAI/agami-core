@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -200,7 +201,11 @@ def cmd_sensitive(args) -> int:
     once the user has excluded the flagged columns)."""
     from . import curate
     org = L.load_organization(args.root, include_rejected=True)
-    _print_json(curate.sensitive_columns(org))
+    flagged = curate.sensitive_columns(org)
+    suspected = curate.suspected_sensitive_columns(org)
+    # `count`/`columns` keep their meaning (flagged PII — the gate signal); `suspected` is the
+    # second review tier (might-be-PII the strict flag missed, for the PII tab to confirm).
+    _print_json({**flagged, "suspected": suspected["columns"], "suspected_count": suspected["count"]})
     return 0
 
 
@@ -283,13 +288,139 @@ def cmd_suggest_units(args) -> int:
     return 0
 
 
+def cmd_set_units(args) -> int:
+    """The APPLY half of suggest-units: stamp a currency/unit on every detected money column in
+    ONE validated curate batch — so a skill never pipes suggest-units JSON through a hand-rolled
+    script (the fragile glue that broke on empty stdin). Detects the same money columns (tested
+    matcher); `--columns` overrides detection for non-obvious names; `--area` scopes it."""
+    from . import build as B
+    from . import curate
+    unit = args.currency or args.unit
+    if not unit:
+        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>"})
+        return 1
+    org = L.load_organization(args.root)
+    numeric = {"integer", "decimal", "float"}
+    explicit = set(args.columns or [])
+    ops = []
+    for sa in org.subject_areas:
+        if args.area and sa.name != args.area:
+            continue
+        for t in sa.tables_defined:
+            for c in t.columns:
+                if c.unit:
+                    continue
+                if explicit:
+                    if f"{t.name}.{c.name}" not in explicit and c.name not in explicit:
+                        continue
+                elif not (c.type in numeric and B.detect_money_column(c.name)):
+                    continue
+                ops.append({"op": "edit", "kind": "table", "area": sa.name, "name": t.name,
+                            "column": c.name, "field": "unit", "value": unit})
+    if not ops:
+        _print_json({"set": 0, "unit": unit, "reason": "no matching money columns"})
+        return 0
+    res = curate.apply(args.root, ops)
+    _print_json({"set": len(res.applied), "unit": unit, "errors": res.errors})
+    return 0 if res.validated else 1
+
+
+def cmd_suggest_metrics(args) -> int:
+    """Infer a sensible per-table metric set (count + SUM of additive cols + AVG of averageable
+    cols, gated on aggregation class) and write them PROPOSED/unreviewed for bulk sign-off in the
+    explorer — instead of asking the user to pick ~4 upfront. Rule 1 keeps proposed metrics out of
+    any answer until approved, so a large suggested set can't degrade results."""
+    from . import build as B
+    from . import curate
+    from . import dialects as D
+    from . import introspect as INTRO
+    org = L.load_organization(args.root)
+    conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
+    default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
+    _dcache: dict = {}
+
+    def _dialect(st: str):
+        if st not in _dcache:
+            try:
+                _dcache[st] = D.get_dialect(st)
+            except Exception:
+                _dcache[st] = D.get_dialect("postgresql")
+        return _dcache[st]
+
+    suggested = written = auto = skipped_opaque = 0
+    errors: list[str] = []
+    for sa in org.subject_areas:
+        if args.area and sa.name != args.area:
+            continue
+        existing = {m.name for m in sa.metrics}
+        items: list[dict] = []
+        for t in sa.tables_defined:
+            # columns agami couldn't read yield no metric until described — count them so the
+            # user knows describing the "couldn't read" pile unlocks more metrics on a re-run.
+            skipped_opaque += sum(
+                1 for c in t.columns
+                if c.description_source == "ai_unknown" and not c.primary_key
+                and (c.type == "boolean" or c.aggregation in ("additive", "averageable")))
+            st = conn_type.get(t.storage_connection, default_type)
+            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table,
+                                         now=INTRO._NOW):
+                if met["name"] in existing:
+                    continue
+                existing.add(met["name"])
+                items.append(met)
+                suggested += 1
+                if met.get("review_state") == "approved":
+                    auto += 1
+        if items:
+            res = curate.write_items(args.root, sa.name, "metric", items)
+            written += len(res.applied)
+            errors += res.errors
+    note = ("basic COUNT/SUM/AVG auto-approved (system-signed); flag rates & durations left "
+            "proposed — review & sign off in the explorer (/agami-model)")
+    if skipped_opaque:
+        note += (f". {skipped_opaque} column(s) skipped as un-described (ai_unknown) — describe "
+                 "them, then re-run suggest-metrics to pick up their metrics (incremental, no dupes)")
+    _print_json({"suggested": suggested, "written": written, "auto_approved": auto,
+                 "skipped_opaque": skipped_opaque, "errors": errors, "note": note})
+    return 0 if not errors else 1
+
+
+def cmd_describe_file(args) -> int:
+    """Apply many column descriptions from a lightweight TSV — one per line,
+    `<table.column>` or `<area.table.column>` then a TAB then the description — as ONE validated
+    curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
+    generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
+    from . import curate
+    text = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    ops = []
+    for ln in text.splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
+            continue
+        loc, desc = (p.strip() for p in ln.split("\t", 1))
+        segs = loc.split(".")
+        if not desc or len(segs) not in (2, 3):
+            continue
+        op = {"op": "edit", "kind": "table", "field": "description", "value": desc, "source": "ai"}
+        if len(segs) == 3:
+            op["area"], op["name"], op["column"] = segs
+        else:
+            op["name"], op["column"] = segs
+        ops.append(op)
+    if not ops:
+        _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
+        return 0
+    res = curate.apply(args.root, ops)
+    _print_json({"described": len(res.applied), "errors": res.errors})
+    return 0 if res.validated else 1
+
+
 def cmd_format_table(args) -> int:
     """Format a result CSV into a deterministic markdown table — exact numbers, full
     grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
     this verbatim so verification numbers don't depend on the LLM's formatting."""
     import csv as _csv
     from . import units
-    text = open(args.csv_file, newline="").read() if args.csv_file else sys.stdin.read()
+    text = Path(args.csv_file).read_text() if args.csv_file else sys.stdin.read()
     reader = list(_csv.reader(io.StringIO(text)))
     if not reader:
         print("")
@@ -476,26 +607,253 @@ def cmd_seed_validate(args) -> int:
     return 0
 
 
+def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:
+    """Split any element that arrived as one whitespace/comma-joined blob into separate names.
+    Defends against the zsh gotcha where an unquoted `$TBLS` passes all 52 names as ONE argument
+    (`--tables "incident orders …"` → one giant bogus table name). Idempotent on a clean list."""
+    if not raw:
+        return raw
+    out: list[str] = []
+    for item in raw:
+        out.extend(p for p in re.split(r"[\s,]+", item.strip()) if p)
+    return out or None
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
 
+    tables = _normalize_table_list(args.tables)
+    if getattr(args, "tables_file", None):
+        # a newline-separated allowlist file — the shell-quoting-proof way to pass a big kept set
+        # (no word-splitting to get wrong). `#` comments and blank lines ignored.
+        text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
+        from_file = [ln.strip() for ln in text.splitlines()
+                     if ln.strip() and not ln.lstrip().startswith("#")]
+        tables = (tables or []) + _normalize_table_list(from_file)
+
     runner = INTRO.make_execute_sql_runner(args.profile)
+    progress = args.progress or str(
+        Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
     org, report = INTRO.introspect(
         args.profile,
         args.db_type,
         runner=runner,
         artifacts_dir=args.artifacts,
         out_dir=args.out,
-        tables=args.tables,
+        tables=tables,
         exclude_columns=args.exclude_columns,
         dry_run=args.dry_run,
         bigquery_region=args.bigquery_region,
+        progress_path=progress,
+        append=getattr(args, "append", False),
     )
     res = V.validate(org)
     print(report.render())
     print(V.format_result(res))
     return 0 if res.ok else 1
+
+
+def cmd_enrich_metadata(args) -> int:
+    """Deterministically enrich columns from the database's OWN metadata/lookup tables —
+    descriptions + choice_field labels — in one validated curate batch. No LLM, no generator
+    script, no external doc fetch. Recognizes presets (e.g. ServiceNow sys_dictionary + sys_choice)
+    or takes --preset; the authoritative platform metadata becomes the model's enrichment."""
+    from . import curate
+    from . import dialects as D
+    from . import introspect as INTRO
+    from . import metadata_sources as MS
+    from .loader import load_organization
+
+    root = Path(args.root).expanduser()
+    org = load_organization(root)
+    model_tables = [t.name for sa in org.subject_areas for t in sa.tables_defined]
+    valid = {(t.name.lower(), c.name.lower())
+             for sa in org.subject_areas for t in sa.tables_defined for c in t.columns}
+    schema_of: dict[str, str] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema_of.setdefault(t.name.lower(), t.schema_name)
+
+    preset = args.preset or MS.detect_preset(model_tables)
+    if not preset:
+        _print_json({"enriched": False, "reason": "no metadata preset detected — pass --preset"})
+        return 1
+    sources = MS.usable_sources(preset, model_tables)
+    if not sources:
+        _print_json({"enriched": False, "preset": preset,
+                     "reason": "preset's source table(s) are not in the model"})
+        return 1
+
+    dialect = D.get_dialect(args.db_type)
+    runner = INTRO.make_execute_sql_runner(args.profile)
+    ops: list[dict] = []
+    fetched: dict[str, int] = {}
+    dict_rows: list[dict] = []
+    dict_cfg: dict = {}
+    for role, cfg in sources.items():
+        src = cfg["source"]
+        sch = schema_of.get(src.lower())
+        fq = dialect.qualified(sch, src) if sch else dialect.quote_ident(src)
+        col_names = [v for k, v in cfg.items() if k.endswith("_col")]
+        sel = ", ".join(dialect.quote_ident(c) for c in col_names)
+        rows = runner(f"SELECT {sel} FROM {fq}") or []
+        fetched[role] = len(rows)
+        if role == "choice":
+            ops += MS.choice_field_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
+                                       value_col=cfg["value_col"], label_col=cfg["label_col"], valid=valid)
+        elif role == "dictionary":
+            ops += MS.description_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
+                                      label_col=cfg.get("label_col"), comment_col=cfg.get("comment_col"),
+                                      valid=valid)
+            dict_rows, dict_cfg = rows, cfg
+
+    # 1) descriptions + choice_field — one validated curate batch
+    cols_applied = 0
+    errors: list[str] = []
+    if ops:
+        res = curate.apply(root, ops)
+        cols_applied = len(res.applied)
+        errors += res.errors
+
+    # 2) reference/FK edges from the dictionary — the join-graph half. The table/area structure
+    # the curate batch above touched only descriptions/choices, so the loaded `org` is still
+    # valid for routing references (names, schemas, grain, areas unchanged).
+    refs_added = refs_skipped_target = refs_declared = refs_unverified = 0
+    if not args.skip_references:
+        # field-name → target, from this instance's dictionary AND the preset's KNOWN reference
+        # graph (declarative config). Instance declarations override the preset on conflict.
+        decls = (MS.reference_declarations(
+                    dict_rows, column_col=dict_cfg["column_col"], type_col=dict_cfg["type_col"],
+                    reference_col=dict_cfg["reference_col"],
+                    reference_type=dict_cfg.get("reference_type", "reference"))
+                 if (dict_rows and "reference_col" in dict_cfg) else {})
+        ref_map = {**MS.known_reference_graph(preset), **decls}
+        refs_declared = len(ref_map)
+        if ref_map:
+            intra, cross, refs_skipped_target, refs_unverified = _build_verified_references(
+                org, runner, dialect, ref_map)
+            if intra or cross:
+                rres = curate.add_relationships(root, intra=intra, cross=cross)
+                refs_added = len(rres.applied)
+                errors += rres.errors
+
+    if not cols_applied and not refs_added:
+        _print_json({"enriched": False, "preset": preset, "fetched": fetched,
+                     "reference_fields_known": refs_declared,
+                     "relationships_skipped_target_not_modelled": refs_skipped_target,
+                     "reason": "nothing applicable for modelled columns", "errors": errors})
+        return 0
+    _print_json({"enriched": not errors, "preset": preset, "fetched": fetched,
+                 "columns_enriched": cols_applied, "relationships_added": refs_added,
+                 "relationships_added_unverified": refs_unverified,
+                 "reference_fields_known": refs_declared,
+                 "relationships_skipped_target_not_modelled": refs_skipped_target,
+                 "errors": errors})
+    return 0 if not errors else 1
+
+
+def _build_verified_references(org, runner, dialect, ref_map: dict) -> tuple[dict, list, int, int]:
+    """Turn a `field → target` map (preset known graph ∪ dictionary declarations) into reference
+    relationships, applied to EVERY modelled column with that name (inheritance-aware), and VERIFY
+    each candidate by value-overlap against the live data before keeping it:
+      overlap holds            → confirmed + system-approved (the standard join matches THIS data),
+      overlap can't be checked → inferred/unreviewed (target/from too big to scan, or probe cap hit),
+      overlap FAILS            → DROPPED (the standard join doesn't apply to this export — never
+                                 blindly trust the preset).
+    Returns `(intra, cross, skipped_target_count, unverified_count)`."""
+    from . import introspect as INTRO
+    specs: list[dict] = []
+    skipped_target = unverified = probes = 0
+    # resolve targets up front so we can verify before routing
+    tindex = {t.name.lower(): t for sa in org.subject_areas for t in sa.tables_defined}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for c in t.columns:
+                tgt = ref_map.get(c.name.lower())
+                if not tgt:
+                    continue
+                ttab = tindex.get(tgt.lower())
+                if ttab is None:
+                    skipped_target += 1
+                    continue
+                if not ttab.grain:
+                    continue
+                verified = None  # None = couldn't check
+                if INTRO._too_big_to_probe(t) or INTRO._too_big_to_probe(ttab):
+                    verified = None
+                elif probes < INTRO.FK_OVERLAP_PROBE_CAP:
+                    probes += 1
+                    verified = INTRO._overlaps(dialect, runner, t, c.name, ttab, ttab.grain[0])
+                if verified is False:
+                    continue  # standard join doesn't hold in this data → drop
+                spec = {"from_table": t.name, "from_column": c.name, "to_table": ttab.name}
+                if verified:
+                    spec.update(confidence="confirmed", review_state="approved",
+                                signed_off_by="agami_enrich", signed_off_role="system",
+                                signed_off_at=INTRO._NOW,
+                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (value-overlap verified)")
+                else:
+                    unverified += 1
+                    spec["description"] = f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (not overlap-verified — confirm)"
+                specs.append(spec)
+    intra, cross, skipped_more = _route_references(org, specs)
+    return intra, cross, skipped_target + skipped_more, unverified
+
+
+def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
+    """Resolve `{from_table, from_column, to_table}` specs into routed relationship dicts:
+    `(intra: {area: [rel,…]}, cross: [xrel,…], skipped_target_count)`. SELF-references are kept
+    (a hierarchical `parent → same table` is a real join). Edges whose TARGET isn't modelled are
+    skipped and COUNTED (so pruning that drops a join target is reported, not silent). Already-
+    present edges are skipped. References are `many_to_one` to the target's grain, written
+    `inferred`/`unreviewed` (authoritative declaration, signed off in the explorer)."""
+    from collections import defaultdict
+    tindex: dict = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            tindex.setdefault(t.name.lower(), (t, sa.name))
+    existing = set()
+    for sa in org.subject_areas:
+        for r in sa.relationships:
+            existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
+    for r in org.cross_subject_area_relationships:
+        existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
+
+    intra: dict = defaultdict(list)
+    cross: list = []
+    skipped_target = 0
+    for spec in specs:
+        ft, fc, tt = spec["from_table"], spec["from_column"], spec["to_table"]
+        key = (ft.lower(), fc.lower(), tt.lower())
+        if key in existing:
+            continue
+        fr, to = tindex.get(ft.lower()), tindex.get(tt.lower())
+        if fr is None:
+            continue
+        if to is None:                 # target table pruned / not in the model → can't join, but count it
+            skipped_target += 1
+            continue
+        ftab, farea = fr
+        ttab, tarea = to
+        if not ttab.grain:
+            continue
+        existing.add(key)
+        base = {"from_table": ft, "from_column": fc, "to_table": tt, "to_column": ttab.grain[0],
+                "from_schema": ftab.schema_name, "to_schema": ttab.schema_name,
+                "relationship": "many_to_one", "join_type": "LEFT",
+                # per-spec trust (a verified candidate is confirmed/approved); defaults otherwise
+                "confidence": spec.get("confidence", "inferred"),
+                "review_state": spec.get("review_state", "unreviewed"),
+                "description": spec.get("description", f"reference: {fc} → {tt}.{ttab.grain[0]}")}
+        for k in ("signed_off_by", "signed_off_role", "signed_off_at"):
+            if spec.get(k):
+                base[k] = spec[k]
+        if farea == tarea:
+            intra[farea].append(base)
+        else:
+            cross.append({**base, "from_subject_area": farea, "to_subject_area": tarea})
+    return dict(intra), cross, skipped_target
 
 
 def cmd_discover(args) -> int:
@@ -664,6 +1022,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example)
 
+    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch")
+    sp.add_argument("root")
+    sp.add_argument("--currency", default=None, help="ISO currency code (USD/EUR/INR/…)")
+    sp.add_argument("--unit", default=None, help="non-currency unit (cents/percent/days/…)")
+    sp.add_argument("--area", default=None, help="restrict to one subject area")
+    sp.add_argument("--columns", nargs="*", default=None,
+                    help="explicit table.column (or bare column) list — overrides money detection")
+    sp.set_defaults(func=cmd_set_units)
+
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (count/sum/avg, gated on aggregation class) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp.add_argument("root")
+    sp.add_argument("--area", default=None, help="restrict to one subject area")
+    sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
+                    help="cap measures per table (count always kept)")
+    sp.set_defaults(func=cmd_suggest_metrics)
+
+    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")
+    sp.add_argument("root")
+    sp.add_argument("--file", default=None, help="TSV path (default: read stdin)")
+    sp.set_defaults(func=cmd_describe_file)
+
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_suggest_units)
@@ -699,12 +1078,35 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", default=None, help="override output dir")
     sp.add_argument("--tables", nargs="*", default=None,
                     help="schema.table allowlist — the prune step's kept set (also the "
-                         "no-catalog/probe-only case)")
+                         "no-catalog/probe-only case). A single whitespace/comma-joined blob is "
+                         "split defensively (zsh-safe).")
+    sp.add_argument("--tables-file", default=None, dest="tables_file",
+                    help="path to a newline-separated allowlist file — the shell-quoting-proof way "
+                         "to pass a large kept set (no word-splitting to get wrong)")
     sp.add_argument("--exclude-columns", nargs="*", default=None, dest="exclude_columns",
                     help="schema.table.column list to mark excluded (the prune step's dropped columns)")
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
     sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--progress", default=None,
+                    help="progress-log path (flushed per phase/table; default "
+                         "<artifacts>/<profile>/.introspect/progress.log) — tail it for a heartbeat")
+    sp.add_argument("--append", action="store_true",
+                    help="batched build: introspect only --tables this call, MERGE into the existing "
+                         "model (prior tables loaded, not re-queried), write the union. Call once per "
+                         "batch for quick foreground progress on a big schema (no background monitor).")
     sp.set_defaults(func=cmd_introspect)
+
+    sp = sub.add_parser("enrich-metadata",
+                        help="enrich columns from the DB's own metadata/lookup tables "
+                             "(descriptions + choice_field), e.g. ServiceNow sys_dictionary/sys_choice")
+    sp.add_argument("root")
+    sp.add_argument("--profile", required=True)
+    sp.add_argument("--db-type", required=True, dest="db_type")
+    sp.add_argument("--preset", default=None,
+                    help="metadata preset (e.g. servicenow); auto-detected from the model if omitted")
+    sp.add_argument("--skip-references", action="store_true", dest="skip_references",
+                    help="only descriptions + choice_field; do not add reference/FK relationships")
+    sp.set_defaults(func=cmd_enrich_metadata)
 
     sp = sub.add_parser("discover",
                         help="cheap first pass: list tables + columns and render the prune page "

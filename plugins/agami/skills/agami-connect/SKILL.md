@@ -350,11 +350,11 @@ Introspection can take a while against cloud DBs. Tell the user **before** the f
 | sqlite / duckdb | < 5s | local file |
 | postgres / mysql (local) | 5–15s | fast catalog |
 | postgres / mysql (cloud) | 15–60s | network RTT per query + FK overlap checks |
-| redshift | 1–5 min | slow metadata + overlap joins |
+| **redshift / databricks / trino** | **~30s for ≤20 tables; 10–30+ min for 50+** | unenforced FKs → the relationship phase confirms joins by value-overlap, one scan per candidate over the network, and big fact tables dominate. **Scale your estimate with table count and warn explicitly.** |
 | **snowflake** | **5–15 min** | cold-warehouse spin-up dominates; per-table queries, sample scans, EXPLAIN validation. A 100-table account measured ~12 min. |
-| sqlserver / oracle / databricks / trino | 30s–5 min | network + per-table catalog |
+| sqlserver / oracle | 30s–5 min | network + per-table catalog |
 
-Surface a one-liner with per-step estimates and **narrate per-table progress** so it never looks hung. For `reintrospect`, prepend "Re-introspecting (about as long as initial setup)."
+**Set a HONEST estimate — understating it is what makes a working run read as "stuck."** For a large schema (50+ tables) on Redshift/Databricks/Trino, say so up front: e.g. *"This is ~50 tables on Redshift — the relationship phase confirms joins by value-overlap, so expect **10–30 minutes**. I'll stream progress and report when it lands."* Then **stream the heartbeat** (background + tail, per 1.7) so the user sees `columns+grain 30/52` and `relationships: declared FK 80/187` rather than silence. For `reintrospect`, prepend "Re-introspecting (about as long as initial setup)."
 
 ### 1.1 — Existing-model check
 
@@ -389,6 +389,13 @@ For non-SQLite/DuckDB with multiple schemas, **AskUserQuestion** multi-select: "
 
 This is the union-rescan that makes Case 2 work: adding `billing` to a model that already has `public` must scan `public` ∪ `billing` together — scanning only `billing` would build the new schema's internal joins but **miss every join back to `public`** (a cross-schema edge needs both endpoints in one introspection pass). Never silently re-scan just the delta.
 
+**Reconcile what you'll scan vs what's actually there — NEVER silently shrink the scope.** When the user picks `All schemas` (or you narrow the set yourself), do NOT quietly hand the engine a smaller list. Count what the catalog holds (schemas + tables) and **state plainly what you're INCLUDING and what you're LEAVING OUT, with a reason for each exclusion**, then confirm. Three kinds get excluded and each must be named, not dropped silently:
+- **System/internal schemas** — `pg_auto_copy`, `pg_*`, `information_schema`, Supabase `auth`/`storage`/… (the engine already drops these; still *report* them).
+- **A schema that looks like a DIFFERENT dataset** — e.g. a `public` full of Salesforce objects (`accounts`, `opportunities`, `leads`, `contacts`, `pricebooks`) sitting next to ServiceNow module schemas. Don't fold a foreign domain into this model; **name it and offer it as its own profile**.
+- **Tables you allowlist away** — any explicit `--tables`/`--tables-file` subset.
+
+Example to say BEFORE introspecting: *"Found 70 tables across 18 schemas. I'll model the **52** in the 16 ServiceNow module schemas. **Excluding:** `public` (17 — `accounts`/`opportunities`/`leads`… looks like a separate Salesforce dataset; onboard it as its own profile if you want it) and `pg_auto_copy` (1 — Redshift system). Good?"* A user who said "all" must SEE the delta up front — never discover later that 19 tables never made it in. This is mandatory whenever discovered-count ≠ scanned-count.
+
 ### 1.4 — Organization context (MANDATORY — ALWAYS ASK)
 
 This runs on **every** invocation. The user's yes/skip is theirs; the skill never decides for them. "don't ask clarifying questions" does NOT cancel this — it's required state-gathering, not a clarifying question. **Only conditional skip:** `ORGANIZATION.md` exists and has been edited beyond the template.
@@ -400,16 +407,25 @@ This runs on **every** invocation. The user's yes/skip is theirs; the skill neve
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 
-Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Two very different sources qualify, so ask once and branch on the answer. **AskUserQuestion** (multi-select; the repo path is the high-value one — it encodes metrics + joins, not just structure):
+Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Several very different sources qualify, so ask once and branch on the answer. **AskUserQuestion** (multi-select; the repo path is the high-value one — it encodes metrics + joins, not just structure):
 
-> Got an existing data model or metrics list I can read? Three kinds help:
+> Got an existing data model or metrics list I can read? A few kinds help:
 > • **A doc** — ERD, data dictionary, schema diagram (PDF, PNG/JPG, text, markdown, CSV).
 > • **A metrics / KPI list** — a spreadsheet, CSV, or doc of your metrics and how each is defined (e.g. "Approval rate = approved ÷ applications"). I'll turn each into a reusable metric so answers match your numbers.
 > • **A semantic-layer / transform repo** — LookML, dbt, Cube, MetricFlow. These define your metrics, dimensions, and joins explicitly, which is gold for NL→SQL accuracy. They're usually git-backed — just point me at the folder.
+> • **A published product schema** — if this DB is a well-known product (ServiceNow, Salesforce, Jira, NetSuite, SAP, HubSpot, Workday…), I can look up its official table/column reference online so the standard fields get correct descriptions automatically.
 
-Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Both` / `Skip — nothing to share`.
+Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Skip — nothing to share`. (Multi-select — combine as needed.)
 
 **If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). `.xlsx`/`.docx` → ask for PDF, proceed without if not.
+
+**If a published product schema (or the user names one — "use the ServiceNow data model online"):** the user wants the standard fields grounded in the authoritative reference, not your training memory.
+
+1. **Prefer the in-DB metadata.** Most metadata-driven platforms carry their own dictionary *in the database* (ServiceNow `sys_dictionary`/`sys_choice`, SAP `DD03L`, …). That's authoritative AND machine-readable — far better than scraping docs. So the real answer here is usually **Phase 2a.0's `sm enrich-metadata`**, not a web fetch. Note that intent now; it runs during enrichment.
+2. **Web reference as fallback / supplement.** When there's no in-DB dictionary, **`WebSearch`/`WebFetch`** the official developer/data-dictionary docs for the named product + the tables you discovered in 1.6. If you chose this path, the fetch is **mandatory, not optional** — do it once, upfront, and stash into `$DATA_MODEL_DOC_TEXT` (never written to disk). Note that vendor doc portals are often **JS-rendered and return only nav skeletons** (ServiceNow's does); when a fetch comes back empty, fall back to WebSearch result snippets / community pages and say so — don't silently substitute training knowledge.
+3. **Propagate it.** If you fan enrichment out to subagents, **every subagent prompt MUST include `$DATA_MODEL_DOC_TEXT`** with the instruction: *describe standard fields from this reference; if a field isn't in the reference or the data, mark it `ai_unknown` — do NOT fill it from general product knowledge.* (This is the hole that let subagents drift to "from ServiceNow domain knowledge.")
+
+Stay anchored to the tables you actually introspected; don't invent fields the live DB doesn't have.
 
 **If a semantic-layer repo:** ask for the directory (a local clone / monorepo path — no upload needed since it's git-backed). Glob the **definition** files and `Read` them up to a budget (~30 files / ~250 KB total; if larger, prefer metric/model definitions and tell the user what you sampled). **Skip compiled SQL and data files** — you want the declared metrics/joins, not the warehouse output:
 > | Layer | Read these | Carries |
@@ -443,8 +459,8 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 - **End the turn. Do NOT introspect yet.**
 
 **On re-entry — the user pastes an `AGAMI PRUNE …` block.** Parse it:
-- Lines under `keep tables: <k> of <n>` (one `schema.table` per line, until a blank line / `exclude columns:` / `done`) = the **kept allowlist** → pass as `--tables`.
-- Lines under `exclude columns: <c>` (one `schema.table.column` per line) = columns to drop → pass as `--exclude-columns`.
+- Lines under `keep tables: <k> of <n>` (one `schema.table` per line, until a blank line / `exclude columns:` / `done`) = the **kept allowlist**. **Write them to a file (one `schema.table` per line) and pass `--tables-file <path>` — do NOT pass them as an unquoted shell variable.** Under zsh (the Bash tool's shell) an unquoted `$list` does *not* word-split, so all N names arrive as one giant argument and the engine builds a single garbage table. The file path sidesteps shell quoting entirely. (`--tables` still works if you list them inline, and a single mis-joined blob is now split defensively — but the file is the safe default.)
+- Lines under `exclude columns: <c>` (one `schema.table.column` per line) = columns to drop → pass as `--exclude-columns` (same zsh caveat — write to a file or list inline, don't pass an unquoted variable).
 - If the user kept everything (`<k>` == `<n>`, no excluded columns), just run 1.7 with no `--tables`/`--exclude-columns`.
 
 If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
@@ -454,14 +470,31 @@ If the user instead asks to skip pruning ("just introspect everything"), proceed
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. From `plugins/agami/scripts/`:
 
 ```bash
+# write the kept allowlist to a file first (zsh-safe — no word-splitting to get wrong)
+printf '%s\n' incident problem change_request sys_user ... > /tmp/agami-keep.txt
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
   --profile <profile> --db-type <db_type> \
   --artifacts "<artifacts_dir>" \
-  [--tables <kept schema.table list from 1.6>] \
+  [--tables-file /tmp/agami-keep.txt] \
   [--exclude-columns <schema.table.column list from 1.6>]
 ```
 
-`--tables` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning.
+`--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
+
+**On a large schema (50+ tables) over a tunnel this takes minutes and the command prints nothing until it returns — which reads as hung.** Two ways to keep it legible, in order of preference:
+
+1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
+   ```bash
+   split -l 12 /tmp/agami-keep.txt /tmp/agami-batch-      # batch files
+   for b in /tmp/agami-batch-*; do
+     bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect --profile <p> --db-type <t> \
+       --artifacts "<artifacts_dir>" --tables-file "$b" --append
+   done
+   ```
+   (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph.)
+2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52`, `relationships: declared FK 80/187`, `done`.
+
+(For a small DB introspect returns in seconds — no batching or backgrounding needed.)
 
 It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII, cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) and everything from probe mode are confirmed-by-overlap or `unreviewed`. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 
@@ -469,11 +502,25 @@ The validator gates the write — **if it fails, the model is not persisted.** S
 
 Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe> mode); <R> relationships, <D> deep tables, <S> sensitive columns flagged.`
 
+**Backstop reconciliation — if `<N>` is fewer than the catalog held, say what's NOT in the model and why** (the 1.3 guard should have covered this up front; repeat it here so it can't slip). E.g. *"Modeled 52 of 70 tables — left out `public` (17, separate Salesforce dataset) and `pg_auto_copy` (1, system). Say the word if you want any of them."* A user who picked "all" should never have to diff the catalog themselves to notice a schema is missing.
+
 ---
 
 ## Phase 2: Enrich (the LLM layer — validated into the model)
 
 The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
+
+> **HARD RULE — decisions to you, plumbing to the engine. NEVER write a generator script** (`build_ops.py`, `build_desc.py`, `enrich_*.py`, a one-off that loops to build curate ops). It's the recurring failure mode and it's banned. When you have many edits, emit them as data and let a tested command apply them: `sm describe-file` (TSV of descriptions), `sm enrich-metadata` (in-DB metadata), `sm set-units`, `sm suggest-metrics`, or `sm curate --ops-file <json>`. You decide *what* (currency, which metrics, a column's meaning); the engine does the *applying*.
+
+### 2a.0 — Deterministic metadata FIRST (run before any hand-enrichment)
+
+**Many databases describe themselves.** Metadata-driven platforms ship their own data dictionary + value-label tables (ServiceNow `sys_dictionary` + `sys_choice`, SAP `DD03L`, Salesforce metadata…), and plenty of ordinary schemas have code→label lookup/dimension tables. When that metadata is present it is **authoritative** — strictly better than LLM guessing or fetching JS-walled vendor docs. Always try it first:
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" enrich-metadata "$ROOT" --profile <profile> --db-type <db_type>
+```
+
+It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables, and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
 
 ### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
@@ -570,7 +617,11 @@ Metrics come from two sources, handled very differently. **Always prefer declare
 
 Translate the declared SQL/agg to the profile's dialect for `bindings`, set `source_tables`, write **`confidence: inferred, review_state: unreviewed`** (declared = strong signal, still wants a human sign-off on the `/agami-model` Review tab). If there are many (> ~8), **don't** funnel them through a 4-item picker — write them all and tell the user once: *"Added N metrics from your `<LookML/dbt/file>` — review or trim them in /agami-model."* (Offer a single "add all N / let me pick a subset" confirm if you want, but never silently drop declared metrics to fit a cap.)
 
-**(B) Inferred metrics — only when there's no declared source (or to supplement a thin one).** These genuinely drift, so **suggest, don't auto-add**, capped at ~4 (AskUserQuestion fits ~4 + Other) from: aggregate-shaped numeric fields (SUM/AVG), fact tables (`count_<table>`), time fields, `ORGANIZATION.md` KPI mentions. **AskUserQuestion** multi-select: "I'd suggest these reusable metrics — pick which make sense." `Other (Other field)` for "describe a metric I want"; submitting none = skip. Write `confidence: proposed`.
+**(B) Inferred metrics — infer a sensible set for BULK review, don't ask for 4.** Run **`sm suggest-metrics "$ROOT"`**: it infers per-table measures (count of rows, SUM of `additive` columns, AVG of `averageable` columns, flag rates, start→end durations — **gated on the aggregation class** so it's sensible, never "aggregate every number"). It auto-approves the *mechanically trivial* ones (COUNT(*) / SUM(col) / AVG(col) — system-signed, no judgment beyond the column's aggregation class) and leaves the interpretive ones (rates, durations) `proposed`. SUM/AVG metrics **inherit the source column's `unit`** automatically. Rule 1 keeps proposed metrics out of every answer until sign-off, so a large set is safe — the user reviews them **in bulk in the explorer** (Phase 4). This closes the thin-metrics gap (9 vs a mature model's 200+). Reserve **AskUserQuestion** only for a bespoke KPI the user describes in words that the column shapes don't imply.
+
+**Run order matters — describe columns FIRST, then suggest metrics.** `suggest-metrics` **skips columns agami couldn't read** (`description_source: ai_unknown`) — it won't propose a metric on a column it can't explain (the prose would just restate opaque SQL like *"Fraction of alm_asset where active_to is true"*). Its output reports `skipped_opaque: N`. So: settle 2b/2c column descriptions first, run suggest-metrics, and **after the user describes any still-opaque columns** (the explorer's "couldn't read" pile, or a later pass), **re-run `sm suggest-metrics "$ROOT"`** — it's incremental (skips names already written), so the newly-described columns pick up their metrics with no duplicates. This is the re-pass: *describe → suggest → describe more → suggest again.*
+
+**Then HUMANIZE the inferred prose (B-metrics only).** The `calculation` that `suggest-metrics` writes is a *mechanical restatement of the SQL* (`"Total cost across alm_asset"`, `"Fraction of alm_asset where active_to is true"`) — accurate but not a business definition, and it's what agami matches a question against. Once the columns are described, **rewrite each inferred metric's `calculation` into a one-line business definition that conveys WHEN to use it**, grounded in the column/table descriptions + the glossary (NOT product memory). E.g. `"Fraction of alm_asset where active_to is true"` → `"Share of assets still within their active lifecycle window"`. Apply as **one `sm curate` batch** of `{op:edit, kind:metric, area, name, field:"calculation", value:"<prose>"}` ops (decisions to you, plumbing to the engine — never a generator script). Keep auto-approved metrics `approved` and **re-stamp `signed_off_at`** (the definition changed, but the trivial SQL didn't — the user isn't re-vetting math, just better words). Leave declared (A) metrics alone — their prose already came from the source.
 
 For every metric (A or B) fill `name`, prose `calculation` (intent — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`. The canonical YAML shape is [`shared/metric-entity-shape.md`](../../shared/metric-entity-shape.md) (synthetic example). **Write them with the packaged command** — build a JSON array and run it once; never hand-write each YAML and never author a throwaway loop script. It validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, validates the whole model, and reverts the batch on failure:
 ```bash
@@ -585,7 +636,13 @@ From samples + the domain doc, add provider-portable cleaning where evidence sup
 - **Caveats** (`caveats[]` on table/column/entity): data-quality notes, anti-patterns (e.g. "filter on the event date, not the load date"), dedup warnings.
 - **value_transform** on columns whose raw value needs cleaning (`regexp_replace(...)` for bracketed text, `TO_TIMESTAMP(...)` for epoch). Must parse as SQL (validator checks).
 - **default_filters** (`default_filters[]` on a table): soft-delete / tenancy filters AND-ed in at query time (use the `{alias}` placeholder, e.g. `{alias}.deleted_at IS NULL`).
-- **Currency (one ask per profile):** **find the money columns with `sm suggest-units "$ROOT"` — don't hand-roll a name regex** (a bare `count` pattern matches inside `discount` and silently drops `discount_amount`; the command's matcher is word-boundary-correct and tested). It returns `{money_columns: [{area, table, column, type}]}` (numeric columns named like money — amount/price/revenue/discount/… — minus rate/count/id/score, and skipping any that already have a `unit`). Glance at the list; if a `_usd`/`_inr`-suffixed column makes the currency obvious, set it directly. Otherwise ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). On the answer, **set the column `unit` to the ISO code** on every returned column — via `cli curate` edit ops (`{op:edit, kind:table, area, name:<table>, column:<col>, field:unit, value:"INR"}`), one batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → leave `unit` unset, one-liner. (Non-currency units — `cents`, `percent`, `days` — set `unit` the same way when a column's scale/unit is unambiguous.)
+- **Currency (one ask per profile):** **find the money columns with `sm suggest-units "$ROOT"` — don't hand-roll a name regex** (a bare `count` pattern matches inside `discount` and silently drops `discount_amount`; the command's matcher is word-boundary-correct and tested). It returns `{money_columns: [{area, table, column, type}]}` (numeric columns named like money — amount/price/revenue/discount/… — minus rate/count/id/score, and skipping any that already have a `unit`). Glance at the list; if a `_usd`/`_inr`-suffixed column makes the currency obvious, set it directly. Otherwise ask once: "What currency are these in?" (`USD`/`EUR`/`GBP`/`JPY`/`INR`/`Other`/`Mixed`). On the answer, apply it with **one tested command — never pipe `suggest-units` through a hand-rolled script** (that glue breaks, e.g. on empty stdin):
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-units "$ROOT" --currency INR
+```
+
+It stamps `unit` on every detected money column in a single validated curate batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → skip (leave `unit` unset), one-liner. Non-currency units (`cents`/`percent`/`days`) → `--unit <name>`; `--columns <table.col …>` to override the money detection for a non-obvious name.
 - **Date encodings (auto-sniffed — no question):** introspection already sets `date_format` (`epoch_s`/`ms`/`us`/`ns`, `yyyymmdd`, `iso8601`) + `timezone` on date-named columns whose sample values fit the shape, so epoch integers render as human dates (UTC) deterministically. You don't ask. **Do** glance at the result: if a time column was missed or mis-scaled (e.g. an epoch_ms tagged epoch_s), fix it with a `field:date_format`/`field:timezone` edit op in the same batch; mention any epoch columns found in the Phase 7 summary.
 
 **Write all of these with `sm curate` edit ops — never hand-edit `tables/*.yaml` or script a loop over them.** One ops array, one call (validated + committed + reverted on failure):
@@ -629,7 +686,17 @@ I split <N> tables into <A> subject areas:
 <C> joins span areas (kept as cross-area relationships).
 ```
 
-**AskUserQuestion:** `Looks good (Recommended)` / `Adjust — merge/rename/move tables (Other field)` / `Open the model explorer`. If they adjust, edit the `subject_areas/` tree accordingly and re-validate (sizing warns at 25 tables, errors at 30). For a single-area small DB, skip this phase silently.
+**The model explorer is the review surface — route adjustment through it, don't pre-empt it with a modal.** So:
+- **Trivial split** (single area, or a handful of obviously-right areas with nothing else to curate): a quick **AskUserQuestion** `Looks good (Recommended)` / `Adjust — merge/rename/move (Other field)` is fine. Skip silently for a single-area small DB.
+- **Non-trivial model** (many areas, or there's PII / proposed metrics / sign-offs pending — i.e. the Phase 4 curate gate will fire anyway): **make `Open the model explorer` the default** and let the user review the area split *there*, in one pass alongside PII, descriptions, and metric sign-off — rather than eyeballing a text table in a modal then opening the explorer separately. Don't ask the same thing twice.
+
+If they adjust, edit the `subject_areas/` tree accordingly and re-validate (sizing warns at 25 tables, errors at 30).
+
+**Replace each area's auto-proposed description with a real one** — the engine seeds `"Auto-proposed subject area covering: <tables>"`, which is boilerplate, but the **subject-area description is load-bearing**: it's what the MCP shows in its first pass so the LLM can ROUTE a question to the right area (`get_datasource_schema` returns name + description per area). A blank/boilerplate description means the router is guessing. So write one business line per area — what domain it covers and when you'd query it — grounded in its tables/columns (NOT product memory). Apply through the validated path, one batch (no generator script):
+```bash
+# one {op:edit, kind:subject_area, area:<name>, name:<name>, field:description, value:"<line>"} per area
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-area-desc.json
+```
 
 ---
 
@@ -646,7 +713,12 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed   # le
 - **PII count** — columns introspection (or a curator) flagged `sensitive` **that are still queryable** (already-excluded columns, and any column under an excluded table, are not counted — so once the user excludes the flagged columns this drops to 0 and the gate stops re-opening).
 - **Sign-off count** — metrics + named-filters + entities needing review (relationships are NOT gated — they stay lazy: FK joins are engine-approved, inferred joins self-approve as you query).
 
-**If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface: per-column **Exclude** toggles + **Mark-PII** on the flagged columns, and the **Review** tab where metrics/entities sit under "Needs your eyes." Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns (customer names, GPS) and 5 metrics to sign off — opening the model explorer so you can exclude/mark those and review. Send the feedback block back when you're done."* — then **stop and wait** for their batch.
+**If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
+- the **PII tab** — every flagged column *and* every suspected-but-unflagged one (e.g. `first_name` in `sys_user`) in one list, each with a confirm/clear toggle. This is where the user reviews PII without hunting through tables.
+- the **Metrics tab** — the proposed measures grouped by table and collapsed (`incident · 9 [✓ Approve 9]`), with per-table and "approve all proposed" bulk buttons, so a few-hundred-metric set signs off fast.
+- the **Review** tab — metrics/entities/joins under "Needs your eyes" for anything needing a closer look; per-column **Exclude** toggles live on **Tables**.
+
+Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns and surfaced 8 more that look like PII, plus ~180 proposed metrics to sign off — opening the model explorer. Review on the PII and Metrics tabs and send the feedback block back when you're done."* — then **stop and wait** for their batch.
 
 **Do NOT** present an inline `AskUserQuestion` to quick-exclude a few columns, and do NOT offer "continue now vs open explorer" here. The explorer **is** the exclude-and-review surface; a 4-option modal holds a fraction of what a real DB needs dropped, and splitting PII exclusion across a modal + the explorer is exactly the fragmented flow we're removing. (This replaces the old inline PII multiSelect — PII now routes through the explorer like every other exclusion.)
 

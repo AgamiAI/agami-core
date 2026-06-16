@@ -77,6 +77,7 @@ def render(manifest: dict) -> str:
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     logo_dark = LOGO_DARK_PATH.read_text(encoding="utf-8") if LOGO_DARK_PATH.exists() else ""
     logo_light = LOGO_LIGHT_PATH.read_text(encoding="utf-8") if LOGO_LIGHT_PATH.exists() else ""
+    theme_css = (SHARED_DIR / "theme.css").read_text(encoding="utf-8")
     # Escape `</` so a `</script>` inside any column/table name can't terminate
     # the <script> block holding `const MANIFEST = …`.
     manifest_json = json.dumps(manifest, separators=(",", ":")).replace("</", "<\\/")
@@ -92,6 +93,7 @@ def render(manifest: dict) -> str:
         .replace("{{MANIFEST_JSON}}", manifest_json)
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark)
         .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", logo_light)
+        .replace("{{THEME_CSS}}", theme_css)
     )
 
 

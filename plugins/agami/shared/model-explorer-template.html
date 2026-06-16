@@ -49,52 +49,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{REPORT_TITLE}} — agami</title>
   <style>
-    :root {
-      --bg: #ffffff;
-      --bg-elev: #fafafa;
-      --fg: #1a1a1a;
-      --muted: #6b7280;
-      --border: #e5e7eb;
-      --accent: #2563eb;
-      --accent-hover: #1d4ed8;
-      --row-zebra: rgba(0, 0, 0, 0.025);
-      --code-bg: rgba(0, 0, 0, 0.04);
-      --ok-bg: #dcfce7;
-      --ok-fg: #166534;
-      --ok-border: #86efac;
-      --bad-bg: #fee2e2;
-      --bad-fg: #991b1b;
-      --bad-border: #fca5a5;
-      --warn-bg: #fef3c7;
-      --warn-fg: #92400e;
-      --hi-bg: #fef08a;
-      --info-bg: #eff6ff;
-      --info-border: #bfdbfe;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #0f172a;
-        --bg-elev: #131c2f;
-        --fg: #f1f5f9;
-        --muted: #94a3b8;
-        --border: #1e293b;
-        --accent: #60a5fa;
-        --accent-hover: #93c5fd;
-        --row-zebra: rgba(255, 255, 255, 0.03);
-        --code-bg: rgba(255, 255, 255, 0.04);
-        --ok-bg: #052e16;
-        --ok-fg: #86efac;
-        --ok-border: #14532d;
-        --bad-bg: #450a0a;
-        --bad-fg: #fca5a5;
-        --bad-border: #7f1d1d;
-        --warn-bg: #422006;
-        --warn-fg: #fbbf24;
-        --hi-bg: #78350f;
-        --info-bg: #0c1c33;
-        --info-border: #1e3a5f;
-      }
-    }
+{{THEME_CSS}}
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -323,7 +278,9 @@
     .col-group-header:hover { filter: brightness(0.97); }
     .col-group-caret { width: 0.9em; opacity: 0.6; }
     .col-group-name { text-transform: capitalize; }
-    .col-group-count { margin-left: auto; opacity: 0.55; font-weight: 400; }
+    .col-group-desc { margin-left: 10px; opacity: 0.55; font-weight: 400; font-style: italic;
+                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46ch; }
+    .col-group-count { margin-left: auto; opacity: 0.55; font-weight: 400; white-space: nowrap; }
     .glossary-row { display: flex; align-items: center; gap: 12px; padding: 8px 18px;
       border-bottom: 1px solid var(--border); font-size: 13px; }
     .glossary-row:hover { background: var(--row-zebra); }
@@ -375,6 +332,9 @@
       background: transparent; color: var(--accent); border: 1px dashed var(--accent); white-space: nowrap;
     }
     .field-actions button.btn-propagate:hover { background: var(--ok-bg); }
+    /* the PII-toggle button also renders in the PII tab OUTSIDE .field-actions, so give it a
+       pointer cursor of its own (the .field-actions button rule doesn't reach it there) */
+    button.btn-pii { cursor: pointer; }
     .field-actions button.btn-pii.on { background: var(--bad-bg); color: var(--bad-fg); border-color: var(--bad-border); }
     .field-actions button.btn-pii.on:hover { color: var(--bad-fg); border-color: var(--bad-fg); }
     .field-actions button.btn-pii.queued { box-shadow: inset 2px 0 0 var(--accent); }
@@ -564,6 +524,13 @@
       background: var(--code-bg); color: var(--muted); min-width: 18px; text-align: center;
     }
     .subtab-bar button.active .subtab-count { background: var(--accent); color: #fff; }
+    /* second-layer kind pills sit just under the sub-tab bar — smaller + tighter so the
+       hierarchy reads (sub-tab = which pile state, kind-bar = which kind within it) */
+    .subtab-bar.kind-bar { margin: -8px 0 16px; gap: 6px; }
+    .subtab-bar.kind-bar button { font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 7px; border-style: dashed; }
+    .subtab-bar.kind-bar button.active { border-style: solid; }
+    /* Joins-tab In-schema/Cross-schema bar — sits in the toolbar above the Status chips */
+    .subtab-bar.join-type-bar { margin: 4px 0 8px; }
 
     /* Reliable CSS hover tooltip (native title= is flaky on file://) — element needs
        class "tip" + a data-tip="..." attribute. */
@@ -651,6 +618,8 @@
         <span class="search-counts" id="search-counts"></span>
       </div>
       <div class="tab-bar" id="tab-bar"></div>
+      <!-- Joins-tab only: split the list by In-schema / Cross-schema, above the Status filter. -->
+      <div class="subtab-bar join-type-bar" id="join-type-bar" style="display:none"></div>
       <div class="filter-chips" id="filter-chips">
         <span class="filter-label">Status</span>
         <button type="button" data-filter="all" class="active">All</button>
@@ -734,6 +703,9 @@
     let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
     let activeFilter = 'all';
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
+    let piiSubTab = 'all';       // PII tab sub-view: all | flagged | suspected
+    let reviewKind = 'all';      // Review tab: which kind-pile within the sub-tab (all | a REVIEW_GROUPS label | __unknown)
+    let joinTypeFilter = 'all';  // Joins tab: all | in | cross
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
 
     // Sign-off identity (stamped on every Approve). Persisted to localStorage so it's
@@ -760,6 +732,7 @@
       { id: 'organization', label: 'Organization' },
       { id: 'review',       label: 'Review' },
       { id: 'tables',       label: 'Tables' },
+      { id: 'pii',          label: 'PII' },
       { id: 'metrics',      label: 'Metrics' },
       { id: 'entities',     label: 'Entities' },
       { id: 'joins',        label: 'Joins' },
@@ -956,7 +929,10 @@
         if (tableEffExcluded(toArea, it.to_table)) ex.push(it.to_table);
         if (ex.length) return ex.join(' & ') + ' excluded';
       } else if (it.source_tables) {  // metric — needs ALL its source tables
-        const ex = (it.source_tables || []).filter(t => tableEffExcluded(area, t));
+        // A source table may live in a DIFFERENT area than the metric (e.g. ServiceNow's
+        // base `task` table is its own area but feeds `incident`/`problem` metrics). Resolve
+        // each table to its real area, else it looks "missing" here and the metric is wrongly moot.
+        const ex = (it.source_tables || []).filter(t => tableEffExcluded(TABLE_AREA[t] || area, t));
         if (ex.length) return ex.join(', ') + ' excluded';
       } else if (it.maps_to) {  // entity — moot only if ALL mapped tables are excluded
         const tbls = [...new Set((it.maps_to || []).map(_tblOf))];
@@ -973,11 +949,11 @@
     // The "untouched" review queue — items not yet approved/rejected AND not yet edited.
     // Drives the Review tab badge, so taking ANY action (approve / reject / edit) shrinks it.
     function reviewQueue() {
-      const out = [];
-      (manifest.metrics || []).forEach(m => out.push({ ...m, _kind: 'metric' }));
-      (manifest.entities || []).forEach(e => out.push({ ...e, _kind: 'entity' }));
-      (manifest.relationships || []).forEach(r => out.push({ ...r, _kind: 'relationship' }));
-      return out.filter(it => {
+      // Same item set the Review sub-tabs draw from (reviewAll) — INCLUDING cross-area joins.
+      // If this omitted cross_relationships, the nav badge would undercount vs the "Needs your
+      // eyes" sub-tab, which does include them (the 758-vs-790 mismatch on inheritance-heavy
+      // schemas like ServiceNow, where base→subtype joins are all cross-area).
+      return reviewAll().filter(it => {
         const rs = effReviewState(it);
         return (rs === 'unreviewed' || rs === 'stale') && !edits[it.qname];
       });
@@ -1284,6 +1260,7 @@
     // of one endless list. Narrow tables (no groups) fall through to a flat field list.
     function renderFieldsGrouped(body, table) {
       const groups = table.column_groups || [];
+      const groupDescs = table.column_group_descriptions || {};
       const fields = table.fields || [];
       if (!groups.length) { fields.forEach(f => body.appendChild(renderField(f, table))); return; }
       const wide = fields.length > 40;            // default-collapse only genuinely wide tables
@@ -1304,10 +1281,13 @@
           : colGroupClosed.has(gid) ? false
           : colGroupOpen.has(gid) ? true
           : !wide;                                                   // default: open unless wide
+        const desc = g ? (groupDescs[g] || '') : '';
         const wrap = el('div', { class: 'col-group' + (visible ? '' : ' hidden') });
         const head = el('div', { class: 'col-group-header' });
+        if (desc) head.setAttribute('title', desc);                 // hover tooltip explains the group
         head.appendChild(el('span', { class: 'col-group-caret', text: open ? '▾' : '▸' }));
         head.appendChild(el('span', { class: 'col-group-name', text: (g || 'other').replace(/_/g, ' ') }));
+        if (desc) head.appendChild(el('span', { class: 'col-group-desc', text: desc }));
         const countTxt = searchQ && visible !== gf.length ? (visible + '/' + gf.length) : String(gf.length);
         head.appendChild(el('span', { class: 'col-group-count', text: countTxt + ' fields' }));
         head.addEventListener('click', () => {
@@ -1482,6 +1462,86 @@
     }
 
     // =====================================================================
+    // TAB: PII — every sensitive + suspected column in one place
+    // =====================================================================
+    // Review organized by TASK, not structure: instead of hunting PII inside table cards, this
+    // aggregates every flagged column AND every "looks like PII but wasn't flagged" column into
+    // one list, each with the same queued `sensitive` toggle. Confirms hits and catches misses.
+    function piiRows() {
+      const flagged = [], suspected = [];
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => {
+        if (t.excluded) return;
+        const ctx = { area: s.name, name: t.name, db_schema: t.db_schema };
+        (t.fields || []).forEach(f => {
+          if (f.excluded) return;
+          if (effSensitive(f)) flagged.push({ t, f, ctx });
+          else if (f.suspected_pii) suspected.push({ t, f, ctx });
+        });
+      }));
+      return { flagged, suspected };
+    }
+    function piiSubhead(label, n, hint) {
+      const w = el('div', { style: 'margin:14px 0 4px;' });
+      w.appendChild(el('div', { class: 'kind-subhead', html: label + ' <span class="subtab-count">' + n + '</span>' }));
+      if (hint) w.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 6px;', text: hint }));
+      return w;
+    }
+    function piiRowCard(r) {
+      const card = el('div', { class: 'table-card' });
+      const h = el('div', { class: 'table-header static' });
+      const nameEl = el('div', { class: 'table-name' });
+      nameEl.appendChild(el('span', { class: 'schema-prefix', text: (r.ctx.db_schema || r.ctx.area) + '.' + r.t.name + '.' }));
+      nameEl.appendChild(highlight(r.f.name, searchQ));
+      h.appendChild(nameEl);
+      if (r.f.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: r.f.type }));
+      h.appendChild(piiToggleBtn(r.f, r.ctx));
+      card.appendChild(h);
+      return card;
+    }
+    function renderPiiTab(root) {
+      root.appendChild(el('div', { class: 'info-banner', html:
+        '<strong>PII review — one queue, nothing buried.</strong> Every column flagged sensitive, plus ones that <em>look</em> like PII but weren’t auto-flagged. ' +
+        'agami never shows a sensitive column’s raw values (only aggregates). Confirm the real ones; clear the false alarms. Toggles queue like any edit — submit with the footer.' }));
+      const q = searchQ;
+      const match = r => !q || (r.f.name + ' ' + r.t.name).toLowerCase().includes(q);
+      const { flagged, suspected } = piiRows();
+      const fl = flagged.filter(match), su = suspected.filter(match);
+      setSearchCounts(`${fl.length} flagged · ${su.length} suspected`);
+
+      // sub-tab pills — make the two groups (and the often-missed "suspected" one) discoverable
+      // and jump-to-able without scrolling. 'all' shows both; the others scope to one group.
+      const pills = [
+        { k: 'all', label: 'All', cnt: fl.length + su.length },
+        { k: 'flagged', label: 'Flagged PII', cnt: fl.length },
+        { k: 'suspected', label: 'Suspected PII', cnt: su.length },
+      ];
+      const bar = el('div', { class: 'subtab-bar' });
+      pills.forEach(p => {
+        const b = el('button', { type: 'button', class: piiSubTab === p.k ? 'active' : '',
+          onclick: () => { piiSubTab = p.k; renderBody(); } }, p.label);
+        b.appendChild(el('span', { class: 'subtab-count', text: String(p.cnt) }));
+        bar.appendChild(b);
+      });
+      root.appendChild(bar);
+
+      const sec = el('div', { class: 'schema-section' });
+      if (piiSubTab !== 'suspected') {
+        sec.appendChild(piiSubhead('Flagged as PII', fl.length,
+          'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive.'));
+        if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
+        fl.forEach(r => sec.appendChild(piiRowCard(r)));
+      }
+      if (piiSubTab !== 'flagged') {
+        sec.appendChild(piiSubhead('Suspected — confirm or leave', su.length,
+          'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.'));
+        if (!su.length) sec.appendChild(el('div', { class: 'empty-state', text: 'None suspected.' }));
+        su.forEach(r => sec.appendChild(piiRowCard(r)));
+      }
+
+      root.appendChild(sec);
+    }
+
+    // =====================================================================
     // TAB: Subject areas
     // =====================================================================
     function renderAreaCard(a) {
@@ -1594,6 +1654,7 @@
       card.appendChild(flatCardHeader(m.name, m, eff));
       const body = el('div', { class: 'table-body' });
       body.appendChild(labelLine('What it measures (click to edit)'));
+      body.appendChild(hintLine('The plain-language definition — this is what agami matches a question against. The SQL below is how it’s computed.'));
       body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
         field: 'calculation', original: m.calculation, placeholder: '(click to add the calculation)' }));
       // SQL bindings — click-to-edit (per dialect). When a metric has no binding yet, still
@@ -1601,8 +1662,14 @@
       // fixable here, not via the description.
       const bindings = m.bindings || {};
       const dialects = Object.keys(bindings).length ? Object.keys(bindings) : (STORAGE_TYPE ? [STORAGE_TYPE] : ['SQL']);
-      dialects.forEach(d => {
-        body.appendChild(labelLine(d + ' SQL (click to edit)'));
+      dialects.forEach((d, i) => {
+        body.appendChild(labelLine(d + ' SQL expression (click to edit)'));
+        // SQL is hand-edited with no autocomplete, and agami doesn't verify column names here —
+        // a typo'd column slips through to query time. Say so once, under the first binding.
+        if (i === 0) body.appendChild(hintLine(
+          'Just the aggregate expression — e.g. SUM(cost) or COUNT(DISTINCT user_id) — not a full ' +
+          'SELECT (no FROM/WHERE). When you submit, agami flags any column it can’t find on the source ' +
+          'table(s) — it catches typos, but double-check anyway.'));
         body.appendChild(inlineBindingBlock(m, d));
       });
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
@@ -1610,8 +1677,10 @@
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
       body.appendChild(flatCardActions('metric', m));
       if (editOpen.has(m.qname)) body.appendChild(renderEditForm(m, 'metric', [
-        { field: 'unit', label: 'Unit (e.g. INR, percent)', current: m.unit, rows: 1 },
-        { field: 'description', label: 'Description', current: m.description, rows: 2 },
+        { field: 'unit', label: 'Unit', current: m.unit, rows: 1,
+          hint: 'What the result is measured in, so answers format nicely — a currency like USD/INR, or "percent" / "days". For a SUM/AVG, agami inherits the source column’s unit automatically; set it here only if it’s missing or wrong. Leave blank for a plain count.' },
+        { field: 'description', label: 'Notes (optional)', current: m.description, rows: 2,
+          hint: 'Extra business context beyond the definition above — when to use it, caveats, how it differs from a similar metric. The definition itself goes in “What it measures”; leave this blank if there’s nothing to add.' },
         { field: 'other_names', label: 'Also called', type: 'list', current: m.other_names, rows: 2 },
       ]));
       card.appendChild(body);
@@ -1708,30 +1777,102 @@
       root.appendChild(sec);
     }
 
+    // Metrics grouped by source table, COLLAPSED by default — so 200 proposed measures read as
+    // "incident · 9 [✓ Approve 9]", not a flat wall. Expand a group to scrutinize; bulk-approve a
+    // whole table's measures at once; or approve every proposed metric in one click. This is the
+    // "comprehensive but not overwhelming" review for the suggest-metrics output.
+    let metricGroupsOpen = new Set();
+    // Group a metric under its table: prefer the explicit `primary_table` anchor, fall back to
+    // the first source table (legacy models carry no anchor).
+    function metricGroupKey(m) { return (m.area || '?') + '.' + (m.primary_table || (m.source_tables || [])[0] || '?'); }
+    function renderMetricsGrouped(root) {
+      const all = (manifest.metrics || []).filter(m =>
+        (!searchQ || `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`.toLowerCase().includes(searchQ))
+        && passesFilter(m, 'metric'));
+      setSearchCounts(`${all.length} of ${(manifest.metrics || []).length} metric${(manifest.metrics || []).length === 1 ? '' : 's'} shown`);
+      if (!all.length) {
+        root.appendChild(el('div', { class: 'empty-state', text: (manifest.metrics || []).length ? 'No metrics match.' : 'No metrics defined yet.' }));
+        return;
+      }
+      const order = [], byKey = {};
+      all.forEach(m => { const k = metricGroupKey(m); if (!byKey[k]) { byKey[k] = []; order.push(k); } byKey[k].push(m); });
+      const sec = el('div', { class: 'schema-section' });
+      const allApprovable = all.filter(isApprovable);
+      if (allApprovable.length) {
+        const bar = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+        bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
+          onclick: () => bulkApprove(all) }, `✓ Approve all ${allApprovable.length} proposed`));
+        sec.appendChild(bar);
+      }
+      order.forEach(k => {
+        const items = byKey[k];
+        const open = metricGroupsOpen.has(k) || !!searchQ;   // search expands everything
+        const head = kindSubhead(k, items, true);            // per-table bulk approve
+        head.style.cursor = 'pointer';
+        head.insertBefore(el('span', { class: 'group-caret', text: open ? '▾ ' : '▸ ' }), head.firstChild);
+        head.addEventListener('click', (ev) => {
+          if (ev.target.closest('button')) return;           // approve click shouldn't toggle
+          if (metricGroupsOpen.has(k)) metricGroupsOpen.delete(k); else metricGroupsOpen.add(k);
+          renderBody();
+        });
+        sec.appendChild(head);
+        if (open) items.forEach(m => sec.appendChild(renderMetricCard(m)));
+      });
+      root.appendChild(sec);
+    }
+
     // The Joins tab: one tab, but split into "In-schema joins" and "Cross-schema joins"
     // sections so the cross-schema (cross-area) edges read distinctly. Split only when
     // cross-schema joins exist — a single-schema DB just renders one flat list as before.
+    // The In-schema / Cross-schema pill bar (above the Status filter). Shown only when the join
+    // set actually has cross-schema edges — otherwise there's nothing to split. Populated here
+    // because it lives in the toolbar, OUTSIDE #tab-content.
+    function renderJoinTypeBar(inCount, crossCount) {
+      const bar = document.getElementById('join-type-bar');
+      if (!bar) return;
+      bar.innerHTML = '';
+      if (!crossCount) { bar.style.display = 'none'; return; }   // no cross-schema joins → no split
+      bar.style.display = 'flex';
+      const mk = (key, label, cnt) => {
+        const b = el('button', { type: 'button', class: joinTypeFilter === key ? 'active' : '',
+          onclick: () => { joinTypeFilter = key; renderBody(); } }, label);
+        b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
+        return b;
+      };
+      bar.appendChild(mk('all', 'All', inCount + crossCount));
+      bar.appendChild(mk('in', 'In-schema', inCount));
+      bar.appendChild(mk('cross', 'Cross-schema', crossCount));
+    }
+
     function renderJoinsTab(root) {
       const all = [...(manifest.relationships || []), ...(manifest.cross_relationships || [])];
       const hay = r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area || ''} ${r.from_schema || ''} ${r.to_schema || ''}`;
       const matched = all.filter(it => (!searchQ || hay(it).toLowerCase().includes(searchQ)) && passesFilter(it, 'relationship'));
-      setSearchCounts(`${matched.length} of ${all.length} join${all.length === 1 ? '' : 's'} shown`);
-      if (!matched.length) {
+      const inSchema = matched.filter(r => !r.cross_schema);
+      const crossSchema = matched.filter(r => r.cross_schema);
+      // keep the pill selection valid for the current (search/status-filtered) set
+      if (!crossSchema.length) joinTypeFilter = 'all';
+      else if (joinTypeFilter === 'in' && !inSchema.length) joinTypeFilter = 'all';
+      renderJoinTypeBar(inSchema.length, crossSchema.length);
+
+      const shown = joinTypeFilter === 'in' ? inSchema : joinTypeFilter === 'cross' ? crossSchema : matched;
+      setSearchCounts(`${shown.length} of ${all.length} join${all.length === 1 ? '' : 's'} shown`);
+      if (!shown.length) {
         root.appendChild(el('div', { class: 'empty-state',
           text: all.length === 0 ? 'No joins defined yet.' : 'No joins match the current search / filter.' }));
         return;
       }
       const sec = el('div', { class: 'schema-section' });
-      const inSchema = matched.filter(r => !r.cross_schema);
-      const crossSchema = matched.filter(r => r.cross_schema);
-      if (crossSchema.length) {
+      // When showing "All" and both kinds exist, keep the labelled sections; a focused pill
+      // (In-schema / Cross-schema) renders a single flat list of just that kind.
+      if (joinTypeFilter === 'all' && crossSchema.length) {
         [['In-schema joins', inSchema], ['Cross-schema joins', crossSchema]].forEach(([label, items]) => {
           if (!items.length) return;
           sec.appendChild(kindSubhead(label, items, false));
           items.forEach(r => sec.appendChild(renderRelCard(r)));
         });
       } else {
-        matched.forEach(r => sec.appendChild(renderRelCard(r)));
+        shown.forEach(r => sec.appendChild(renderRelCard(r)));
       }
       root.appendChild(sec);
     }
@@ -1765,22 +1906,20 @@
       }
       return h;
     }
-    function appendGroupedCards(sec, items, bulk) {
+    // Split a sub-tab's items into kind-piles (Metrics / Joins / Cross-schema joins / Entities /
+    // Other) in REVIEW_GROUPS order. Returns [{key,label,items}] for the kind-pill bar + scoped
+    // rendering, so a reviewer can knock out the 21-item pile before the 285-item one.
+    function reviewKindGroups(items) {
       const used = new Set();
       const groups = [];
       REVIEW_GROUPS.forEach(gd => {
         const gi = items.filter(it => gd.match(it));
         gi.forEach(it => used.add(it));
-        if (gi.length) groups.push({ label: gd.label, items: gi });
+        if (gi.length) groups.push({ key: gd.label, label: gd.label, items: gi });
       });
       const other = items.filter(it => !used.has(it));
-      if (other.length) groups.push({ label: 'Other', items: other });
-      // ALWAYS show the kind header — even for a single group — so "Cross-schema joins"
-      // stays labelled when it's the only pile left, instead of looking like plain joins.
-      groups.forEach(g => {
-        sec.appendChild(kindSubhead(g.label, g.items, bulk));
-        g.items.forEach(it => sec.appendChild(reviewCard(it)));
-      });
+      if (other.length) groups.push({ key: 'Other', label: 'Other', items: other });
+      return groups;
     }
     function needsEyes(it) {
       // Rule 1 (metrics — block runtime), low-confidence guesses, and drifted entries
@@ -1837,20 +1976,34 @@
     }
     function unknownColumns() {
       const out = [];
-      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => (t.fields || []).forEach(f => {
-        const qn = s.name + '.' + t.name + '.' + f.name;
-        if (f.description_source === 'ai_unknown' && !f.excluded && !describedInQueue(qn)) {
-          out.push({ qname: qn, area: s.name, table: t.name, col: f.name, type: f.type, db_schema: t.db_schema });
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => {
+        // an opaque TABLE itself (agami couldn't describe the table) — rarer than a column, but
+        // surface it in the same pile so it's not silently un-actioned.
+        if (t.description_source === 'ai_unknown' && !t.excluded && !describedInQueue(t.qname)) {
+          out.push({ qname: t.qname, area: s.name, table: t.name, col: null, kind: 'table', db_schema: t.db_schema });
         }
-      })));
+        (t.fields || []).forEach(f => {
+          const qn = s.name + '.' + t.name + '.' + f.name;
+          if (f.description_source === 'ai_unknown' && !f.excluded && !describedInQueue(qn)) {
+            out.push({ qname: qn, area: s.name, table: t.name, col: f.name, kind: 'column', type: f.type, db_schema: t.db_schema });
+          }
+        });
+      }));
       return out;
     }
     function describeCard(uc) {
-      const card = el('div', { class: 'table-card' });
+      const isTable = uc.kind === 'table';
+      const card = el('div', { class: 'table-card' + (effExcluded(uc) ? ' excluded' : '') });
       const h = el('div', { class: 'table-header static' });
       const nameEl = el('div', { class: 'table-name' });
-      nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
-      nameEl.appendChild(highlight(uc.col, searchQ));
+      if (isTable) {
+        nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' }));
+        nameEl.appendChild(highlight(uc.table, searchQ));
+        nameEl.appendChild(el('span', { class: 'pii-tag', text: 'whole table', style: 'margin-left:8px;' }));
+      } else {
+        nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
+        nameEl.appendChild(highlight(uc.col, searchQ));
+      }
       h.appendChild(nameEl);
       if (uc.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: uc.type }));
       card.appendChild(h);
@@ -1858,11 +2011,13 @@
       // section header above carries the explanation, so the cards stay tight).
       const body = el('div', { class: 'table-body', style: 'padding:10px 18px 12px;' });
       const ta = el('textarea', { class: 'inline-edit-ta', rows: '2',
-        placeholder: 'Describe this column in one line (optional)…' });
+        placeholder: isTable ? 'Describe this table in one line (optional)…' : 'Describe this column in one line (optional)…' });
       ta.value = (edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '';
       const save = () => {
         const v = ta.value.trim();
-        const cur = edits[uc.qname] || { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
+        const base = isTable ? { kind: 'table', area: uc.area, name: uc.table, fields: {} }
+                             : { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
+        const cur = edits[uc.qname] || base;
         if (v) cur.fields.description = v; else delete cur.fields.description;
         if (Object.keys(cur.fields).length) edits[uc.qname] = cur; else delete edits[uc.qname];
         renderAll();
@@ -1873,6 +2028,9 @@
       body.appendChild(ta);
       const bar = el('div', { class: 'inline-edit-bar' });
       bar.appendChild(btnSm('Save description', save, 'primary'));
+      // Keep it actionable: if you can't read it and won't describe it, exclude it so agami
+      // stops considering it (the column on the Tables tab, the whole table from the model).
+      bar.appendChild(excludeToggleBtn(isTable ? 'table' : 'field', uc, 'btn-sm'));
       bar.appendChild(el('span', { class: 'hint', text: '⌘/Ctrl+Enter saves' }));
       body.appendChild(bar);
       card.appendChild(body);
@@ -1913,7 +2071,7 @@
       // Columns agami couldn't read fold INTO "Needs your eyes" — one review queue, not a
       // separate "Couldn't read" sub-tab. They're describe-or-leave (no approve/reject).
       const unknown = unknownColumns().filter(uc => !searchQ
-        || (uc.col + ' ' + uc.table).toLowerCase().includes(searchQ));
+        || ((uc.col || '') + ' ' + uc.table).toLowerCase().includes(searchQ));
 
       // sub-tab bar with counts ("Edited" appears only when non-empty)
       const order = ['eyes', 'looks'];
@@ -1926,7 +2084,7 @@
       order.forEach(k => {
         const cnt = k === 'eyes' ? eyesCount : groups[k].items.length;
         const b = el('button', { type: 'button', class: reviewSubTab === k ? 'active' : '',
-          onclick: () => { reviewSubTab = k; renderBody(); } }, groups[k].label);
+          onclick: () => { reviewSubTab = k; reviewKind = 'all'; renderBody(); } }, groups[k].label);
         b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
         bar.appendChild(b);
       });
@@ -1934,23 +2092,67 @@
 
       const g = groups[reviewSubTab] || groups.eyes;
       const isEyes = reviewSubTab === 'eyes' || !groups[reviewSubTab];
-      setSearchCounts(`${isEyes ? eyesCount : g.items.length} ${g.label.toLowerCase()}`);
+
+      // Second-layer KIND pills: within this sub-tab, split the pile by kind (Metrics / Joins /
+      // Cross-schema joins / Entities / couldn't-read columns) with counts, so the reviewer can
+      // jump straight to — and knock out — the small pile before the big one, instead of scrolling.
+      const kindGroups = reviewKindGroups(g.items);
+      if (isEyes && unknown.length) {
+        kindGroups.push({ key: '__unknown', label: "Couldn't read", items: unknown, special: 'unknown' });
+      }
+      const totalItems = kindGroups.reduce((n, kg) => n + kg.items.length, 0);
+      if (reviewKind !== 'all' && !kindGroups.some(kg => kg.key === reviewKind)) reviewKind = 'all';
+      // Kind pills on EVERY sub-tab (Needs eyes / Looks right / Approved / Rejected) so each pile
+      // breaks down by type. Single-kind piles show just the one labelled pill (no redundant "All").
+      if (kindGroups.length) {
+        const kbar = el('div', { class: 'subtab-bar kind-bar' });
+        const mkPill = (key, label, cnt, forceActive) => {
+          const b = el('button', { type: 'button', class: (reviewKind === key || forceActive) ? 'active' : '',
+            onclick: () => { reviewKind = key; renderBody(); } }, label);
+          b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
+          return b;
+        };
+        if (kindGroups.length > 1) kbar.appendChild(mkPill('all', 'All', totalItems));
+        kindGroups.forEach(kg => kbar.appendChild(
+          mkPill(kg.key, kg.label, kg.items.length, kindGroups.length === 1 && reviewKind === 'all')));
+        root.appendChild(kbar);
+      }
+
+      const shown = reviewKind === 'all' ? kindGroups : kindGroups.filter(kg => kg.key === reviewKind);
+      const renderedCount = shown.reduce((n, kg) => n + kg.items.length, 0);
+      const shownLabel = (reviewKind === 'all' || !shown.length) ? g.label.toLowerCase() : shown[0].label.toLowerCase();
+      setSearchCounts(`${renderedCount} ${shownLabel}`);
 
       const sec = el('div', { class: 'schema-section' });
       // No blanket "Approve all" — each kind sub-header carries its own scoped "✓ Approve N",
       // so approving metrics can't silently approve the joins too (that was the footgun).
       if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
-      if (g.items.length) appendGroupedCards(sec, g.items, g.bulk);
 
-      // The couldn't-read columns, as their own sub-group at the bottom of "Needs your eyes".
-      if (isEyes && unknown.length) {
-        sec.appendChild(kindSubhead("Columns agami couldn't read", unknown, false));
-        sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
-          text: "Opaque names with no clue in the data. Describe one in a line if you know it — or leave it; agami asks again the first time a query actually uses it." }));
-        unknown.forEach(uc => sec.appendChild(describeCard(uc)));
-      }
+      shown.forEach(kg => {
+        if (kg.special === 'unknown') {
+          // Opaque tables/columns — described via a one-line edit, or excluded so agami stops
+          // considering them. Not approve/reject (there's no proposal to sign off on).
+          const nTab = kg.items.filter(u => u.kind === 'table').length;
+          sec.appendChild(kindSubhead(nTab ? "Tables & columns agami couldn't read" : "Columns agami couldn't read", kg.items, false));
+          sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
+            text: "Opaque names with no clue in the data. Describe one in a line if you know it, or exclude it so agami stops considering it — otherwise agami asks again the first time a query uses it." }));
+          // bulk: take the whole pile out of consideration (or put it back) in one click
+          const bulk = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+          bulk.appendChild(el('button', { type: 'button', class: 'btn-sm',
+            onclick: () => { kg.items.forEach(u => { pending[u.qname] = 'exclude'; }); renderAll(); } },
+            '✗ Exclude all ' + kg.items.length));
+          bulk.appendChild(el('button', { type: 'button', class: 'btn-sm',
+            onclick: () => { kg.items.forEach(u => { if (pending[u.qname] === 'exclude') delete pending[u.qname]; }); renderAll(); } },
+            '↻ Include all'));
+          sec.appendChild(bulk);
+          kg.items.forEach(uc => sec.appendChild(describeCard(uc)));
+        } else {
+          sec.appendChild(kindSubhead(kg.label, kg.items, g.bulk));
+          kg.items.forEach(it => sec.appendChild(reviewCard(it)));
+        }
+      });
 
-      if (!g.items.length && !(isEyes && unknown.length)) {
+      if (!renderedCount) {
         sec.appendChild(el('div', { class: 'empty-state',
           text: isEyes ? 'Nothing needs your eyes.' : 'Nothing in “' + g.label + '”.' }));
       }
@@ -2081,7 +2283,7 @@
       const qTa = textarea('', 2); qTa.setAttribute('placeholder', 'e.g. How many active vehicles are deployed by zone?'); body.appendChild(qTa);
       body.appendChild(labelLine('SQL (the full query that answers it)'));
       body.appendChild(hintLine('A complete SELECT for this question — examples are whole queries (unlike a metric, which is just an aggregate expression).'));
-      const sTa = textarea('', 5); sTa.setAttribute('placeholder', 'SELECT zone, COUNT(*) FROM powerbi.sm_vehicles WHERE ... GROUP BY zone'); body.appendChild(sTa);
+      const sTa = textarea('', 5); sTa.setAttribute('placeholder', 'SELECT region, COUNT(*) FROM sales.orders WHERE ... GROUP BY region'); body.appendChild(sTa);
       const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
       body.appendChild(errLine);
       const submit = () => {
@@ -2469,6 +2671,7 @@
         case 'review':   return reviewQueue().length + unknownColumns().length;
         case 'areas':    return (manifest.subject_areas || []).length;
         case 'tables':   return t.tables || 0;
+        case 'pii':      return piiRows().suspected.length;  // suspected = needs a human call
         case 'metrics':  return (manifest.metrics || []).length + newMetrics.length;
         case 'entities': return (manifest.entities || []).length;
         case 'joins':    return (manifest.relationships || []).length + (manifest.cross_relationships || []).length;
@@ -2492,6 +2695,8 @@
       });
       // status filter only relevant on entity tabs
       document.getElementById('filter-chips').style.display = FILTERABLE_TABS.has(activeTab) ? 'flex' : 'none';
+      // the In-schema/Cross-schema bar is Joins-tab only; renderJoinsTab decides whether to show it
+      if (activeTab !== 'joins') document.getElementById('join-type-bar').style.display = 'none';
       // search placeholder per tab
       const ph = { organization: 'Search ORGANIZATION.md…', review: 'Search the review queue…',
                    areas: 'Search subject areas…',
@@ -2627,6 +2832,9 @@
       if (termEdits !== null) lines.push('key-terminology: ' + JSON.stringify(termEdits));
       // Sign-off identity header (first line) — the skill applies approvals with this as --signer/--role.
       if (hasQueuedApprovals() && validEmail(signOff.email)) lines.unshift(`signed-off-by: ${signOff.email} / ${signOffRole()}`);
+      // Pin the TARGET MODEL so the apply step never guesses the profile (it otherwise falls back
+      // to the active_profile in .config, which may be a different model than this dashboard).
+      if (lines.length) lines.unshift('profile: ' + (manifest.profile || ''));
       if (lines.length) lines.push('done');
 
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
@@ -2681,15 +2889,14 @@
         case 'review': renderReviewTab(root); break;
         case 'areas': renderAreasTab(root); break;
         case 'tables': renderTablesTab(root); break;
+        case 'pii': renderPiiTab(root); break;
         case 'metrics':
           if (addMetricOpen) { root.appendChild(renderAddMetricForm()); }
           else { const a = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
                  a.appendChild(el('button', { type: 'button', class: 'add-metric-open', onclick: () => { addMetricOpen = true; renderAll(); } }, '+ Add a metric'));
                  root.appendChild(a); }
           newMetrics.forEach((m, i) => root.appendChild(renderNewMetricCard(m, i)));
-          renderFlatTab(root, manifest.metrics, 'metric',
-            m => `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`,
-            renderMetricCard, 'metric');
+          renderMetricsGrouped(root);   // by-table, collapsed, per-table + global bulk approve
           break;
         case 'entities':
           renderFlatTab(root, manifest.entities, 'entity',

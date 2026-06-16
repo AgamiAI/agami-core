@@ -18,6 +18,7 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
+from catalog_helpers import col as _col, make_catalog_runner  # noqa: E402
 from semantic_model import build  # noqa: E402
 from semantic_model import curate as C  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
@@ -71,22 +72,16 @@ def test_invalid_aggregation_value_rejected():
 
 # --- introspection stamps the class ----------------------------------------
 
-def _catalog_runner(sql):
-    s = " ".join(sql.split())
-    if "information_schema.schemata" in s:
-        return [{"schema_name": "public"}]
-    if "information_schema.tables" in s and "table_type" in s:
-        return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
-        return [
-            {"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
-            {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
-            {"column_name": "amount", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "3", "numeric_scale": "2"},
-            {"column_name": "discount_rate", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "4", "numeric_scale": "4"},
-        ]
-    if "PRIMARY KEY" in s:
-        return [{"column_name": "id"}]
-    return []
+_catalog_runner = make_catalog_runner(
+    tables=["orders"],
+    columns={"orders": [
+        _col("id", "integer", nullable=False),
+        _col("customer_id", "integer"),
+        _col("amount", "numeric", scale=2),
+        _col("discount_rate", "numeric", scale=4),
+    ]},
+    estimate=None,
+)
 
 
 def test_introspect_stamps_aggregation(tmp_path):
@@ -128,3 +123,105 @@ def test_curator_edit_rejects_bad_value(tmp_path):
     }])
     # strict schema rejects the batch (reverted); the model on disk is unchanged
     assert res.errors
+
+
+def test_suggest_metrics_gated_on_aggregation():
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True, aggregation="dimension"),
+                    m.Column(name="amount", type="decimal", aggregation="additive"),
+                    m.Column(name="discount_rate", type="decimal", aggregation="averageable"),
+                    m.Column(name="status", type="string", aggregation="dimension"),
+                    m.Column(name="weird", type="decimal", aggregation="unknown")])
+    mets = build.suggest_metrics(t, D.get_dialect("postgresql"))
+    names = {x["name"] for x in mets}
+    assert "orders_count" in names
+    assert "orders_total_amount" in names           # additive → SUM
+    assert "orders_avg_discount_rate" in names      # averageable → AVG
+    assert not any("status" in n or "weird" in n for n in names)  # dimension/unknown skipped
+    # COUNT(*)/SUM(col)/AVG(col) are mechanically trivial -> auto-approved with a system sign-off
+    assert all(x["confidence"] == "confirmed" and x["review_state"] == "approved" for x in mets)
+    assert all(x["signed_off_by"] == "agami_suggest" and x["signed_off_role"] == "system" for x in mets)
+    # every suggested metric is single-table -> anchored to that table for the explorer view
+    assert all(x["primary_table"] == "orders" for x in mets)
+    amt = next(x for x in mets if x["name"] == "orders_total_amount")
+    assert amt["bindings"] == {"PostgreSQL": "SUM(amount)"} and amt["source_tables"] == ["orders"]
+
+
+def test_suggest_metrics_rate_and_duration_patterns():
+    from semantic_model import dialects as D
+    t = m.Table(name="incident", schema="public", storage_connection="c", grain=["id"],
+                description="i", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="made_sla", type="boolean"),
+                    m.Column(name="is_active", type="integer"),       # int flag → rate
+                    m.Column(name="opened_at", type="timestamp"),
+                    m.Column(name="resolved_at", type="timestamp")])
+    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("redshift"))}
+    assert mets["incident_made_sla_rate"]["bindings"]["Redshift"] == \
+        "AVG(CASE WHEN made_sla THEN 1.0 ELSE 0.0 END)"
+    assert mets["incident_is_active_rate"]["bindings"]["Redshift"] == \
+        "AVG(CASE WHEN is_active <> 0 THEN 1.0 ELSE 0.0 END)"
+    dur = mets["incident_avg_duration_days"]   # start+end timestamp pair → dialect DATEDIFF
+    assert dur["bindings"]["Redshift"] == "AVG(DATEDIFF('day', opened_at, resolved_at))"
+    assert dur["unit"] == "days"
+    # auto-approve policy: COUNT(*) is judgment-free → approved; flag RATES (CASE) and the
+    # DURATION pair (heuristic start/end) carry a choice the engine could miss → stay proposed.
+    assert mets["incident_count"]["review_state"] == "approved"
+    assert mets["incident_count"]["confidence"] == "confirmed"
+    assert mets["incident_made_sla_rate"]["review_state"] == "unreviewed"
+    assert mets["incident_is_active_rate"]["review_state"] == "unreviewed"
+    assert dur["review_state"] == "unreviewed" and dur["confidence"] == "proposed"
+
+
+def test_suggest_metrics_skips_opaque_columns_until_described():
+    from semantic_model import dialects as D
+    # active_to is a boolean agami couldn't read; cost is a described additive column.
+    cols = [
+        m.Column(name="id", type="integer", primary_key=True),
+        m.Column(name="active_to", type="boolean", description_source="ai_unknown"),
+        m.Column(name="cost", type="decimal", aggregation="additive", description="acquisition cost"),
+    ]
+    t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],
+                description="a", columns=cols)
+    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert "alm_asset_active_to_rate" not in names   # opaque column → no metric proposed
+    assert "alm_asset_total_cost" in names           # described column → metric proposed
+    assert "alm_asset_count" in names                # COUNT(*) is column-independent, always kept
+
+    # once the column is described, the SAME call now proposes its metric (the re-pass).
+    cols[1].description_source = "ai"
+    cols[1].description = "whether the asset is still within its active period"
+    names2 = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert "alm_asset_active_to_rate" in names2
+
+
+def test_suggest_metrics_inherits_column_unit():
+    from semantic_model import dialects as D
+    t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],
+                description="a", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="cost", type="decimal", aggregation="additive", unit="USD"),
+                    m.Column(name="quantity", type="integer", aggregation="additive"),          # no unit
+                    m.Column(name="margin_pct", type="decimal", aggregation="averageable", unit="percent")])
+    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert mets["alm_asset_total_cost"]["unit"] == "USD"          # SUM(cost) inherits USD
+    assert mets["alm_asset_avg_margin_pct"]["unit"] == "percent"  # AVG inherits percent
+    assert "unit" not in mets["alm_asset_total_quantity"]         # column has no unit → metric has none
+    assert "unit" not in mets["alm_asset_count"]                  # COUNT(*) is unitless
+
+
+def test_suggest_metrics_auto_approve_stamps_signoff_timestamp():
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive")])
+    mets = {x["name"]: x for x in build.suggest_metrics(
+        t, D.get_dialect("postgresql"), now="2026-06-16T00:00:00Z")}
+    # the trivial COUNT/SUM carry the full sign-off block (Rule-1 trust parity)
+    for nm in ("orders_count", "orders_total_amount"):
+        assert mets[nm]["review_state"] == "approved"
+        assert mets[nm]["signed_off_at"] == "2026-06-16T00:00:00Z"
+        assert mets[nm]["signed_off_by"] == "agami_suggest"

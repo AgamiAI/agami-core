@@ -93,3 +93,19 @@ def test_migrate_legacy_home_survives_cross_device(monkeypatch, tmp_path):
     # (the tombstone write uses mkdir + write_text, not rename, so it's unaffected)
     assert (legacy / "MOVED.txt").exists()
     monkeypatch.setattr(Path, "rename", orig_rename)
+
+
+def test_migrate_sweeps_resurrected_legacy_config(monkeypatch, tmp_path):
+    # After consolidation, a stale/cached process can rewrite ~/.agami/.config. migrate should
+    # leave the consolidated state alone but sweep that stale shadow back to a tombstone.
+    legacy = tmp_path / "legacy_agami"
+    art = tmp_path / "art"
+    monkeypatch.setattr(P, "LEGACY_HOME", legacy)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    (art / "local").mkdir(parents=True)            # already consolidated
+    legacy.mkdir()
+    (legacy / ".config").write_text('{"active_profile":"x"}')  # resurrected shadow
+    (legacy / "MOVED.txt").write_text("moved")
+    assert P.migrate_legacy_home() is False         # consolidated → no re-migration
+    assert not (legacy / ".config").exists()        # ...but the stale shadow is swept
+    assert (legacy / "MOVED.txt").exists()          # tombstone preserved

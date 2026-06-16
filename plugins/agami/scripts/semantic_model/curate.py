@@ -31,8 +31,8 @@ from typing import Any, Optional
 import yaml
 
 from . import validator as V
-from .loader import load_organization
-from .models import Entity, Metric, Organization
+from .loader import load_organization, _read_yaml as _load
+from .models import CrossSubjectAreaRelationship, Entity, Metric, Organization, Relationship
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ _MIN_GATE_COLS = 2  # below this a table is too small to confidently call "skipp
 # is what makes the gate able to tell "intentionally blank" from "the pass didn't finish".
 _SELF_EVIDENT_NAME_RE = re.compile(
     r"^(id|.*_id|.*_no|.*_uuid|.*_guid|.*_key|created.*|modified.*|updated.*|deleted.*|"
-    r".*_at|.*_by|.*_date|.*_ts|.*_time|.*timestamp|is_.*|has_.*|.*_flag)$",
+    r".*_at|.*_on|.*_by|.*_date|.*_ts|.*_time|.*timestamp|.*_count|is_.*|has_.*|.*_flag)$",
     re.IGNORECASE,
 )
 # More than this many skipped-meaningful columns in one table ⇒ under-enriched. A couple of
@@ -178,6 +178,17 @@ def column_coverage(org: Organization) -> dict:
     tot = {"columns": 0, "described": 0, "ai_unknown": 0, "blank": 0, "meaningful_blank": 0}
     unenriched: list[str] = []
     under_enriched: list[str] = []
+    # A detected platform (e.g. ServiceNow) may declare extra self-evident column conventions
+    # (its `sys_` system columns) in the PRESET config — union them with the universal regex so
+    # the gate doesn't force "name → the name" descriptions on a platform's bookkeeping columns.
+    from . import metadata_sources as _MS
+    _preset = _MS.detect_preset([t.name for s in org.subject_areas for t in s.tables_defined])
+    _preset_self_evident = _MS.self_evident_pattern(_preset)
+
+    def _self_evident(name: str) -> bool:
+        return bool(_SELF_EVIDENT_NAME_RE.match(name)
+                    or (_preset_self_evident and _preset_self_evident.match(name)))
+
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             if getattr(t, "review_state", "approved") == "rejected":
@@ -195,7 +206,7 @@ def column_coverage(org: Organization) -> dict:
                     ai_unknown += 1
                 else:                                  # blank + no source: self-evident OR skipped
                     blank += 1
-                    if not _SELF_EVIDENT_NAME_RE.match(c.name):
+                    if not _self_evident(c.name):
                         meaningful_blank += 1
                         blank_meaningful_names.append(c.name)
             n = described + ai_unknown + blank
@@ -268,6 +279,24 @@ def sensitive_columns(org: Organization) -> dict:
             for c in t.columns:
                 if c.sensitive and getattr(c, "review_state", "approved") != "rejected":
                     cols.append({"area": sa.name, "table": t.name, "column": c.name})
+    return {"count": len(cols), "columns": cols}
+
+
+def suspected_sensitive_columns(org: Organization) -> dict:
+    """Columns the strict flag may have MISSED — `build.suspected_pii` matches the name but the
+    column isn't marked `sensitive` (e.g. `first_name` in a non-PII-named table). Surfaced so a
+    PII review catches false NEGATIVES, not just confirms hits. Excludes already-sensitive and
+    rejected columns. A review aid — never auto-marks."""
+    from . import build as B
+    cols: list[dict] = []
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if getattr(t, "review_state", "approved") == "rejected":
+                continue
+            for c in t.columns:
+                if (not c.sensitive and B.suspected_pii(c.name)
+                        and getattr(c, "review_state", "approved") != "rejected"):
+                    cols.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type})
     return {"count": len(cols), "columns": cols}
 
 
@@ -362,11 +391,6 @@ class ApplyResult:
 
 def _area_dir(root: Path, area: str) -> Path:
     return root / "subject_areas" / area
-
-
-def _load(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
 
 
 def _dump(path: Path, obj: Any) -> None:
@@ -569,6 +593,24 @@ def _apply_one(root: Path, op: dict, signer, role,
         _dump(path, doc)
         return path
 
+    if kind == "subject_area":
+        # edit-only (e.g. set the area's `description`) — a subject area carries no trust block,
+        # so approve/reject/exclude don't apply. Lets the enrichment pass replace the auto-proposed
+        # boilerplate with a real business description through the validated curate path.
+        if op.get("op") != "edit":
+            raise ValueError("subject_area supports only edit ops (e.g. field=description)")
+        fld, val = op.get("field"), op.get("value")
+        if not fld:
+            raise ValueError("edit op needs field")
+        path = _area_dir(root, area) / "subject_area.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"no subject area {area!r}")
+        _snapshot(backups, path)
+        doc = _load(path)
+        doc[fld] = val
+        _dump(path, doc)
+        return path
+
     if kind == "relationship":
         frm, _, to = name.partition("->")
         path = _area_dir(root, area) / "relationships.yaml"
@@ -638,14 +680,19 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         # and columns carry `description_source`; relationships / metrics / entities have a
         # `description` but no source field, so stamping it there would fail `extra=forbid`.
         # An edit that sets a table/column `description` also stamps `description_source`:
-        #   source:"ai" → ai_unvalidated (agami-connect generation)
-        #   otherwise   → human (a person edited it, so it's trusted)
+        #   source:"ai"       → ai_unvalidated (agami-connect LLM generation; earns trust via use)
+        #   source:"metadata" → metadata (read from the DB's own data dictionary — authoritative,
+        #                       trusted, NOT validated-through-use; see metadata_sources.py)
+        #   otherwise         → human (a person edited it, so it's trusted)
         #   empty value → clear it. A direct edit of `description_source` itself
         #   (e.g. confirm → "ai_validated") falls through the generic `doc[fld]=val`.
         if fld == "description" and desc_source:
+            src = op.get("source")
             doc["description_source"] = (
                 None if not (val or "").strip()
-                else ("ai_unvalidated" if op.get("source") == "ai" else "human")
+                else "ai_unvalidated" if src == "ai"
+                else "metadata" if src == "metadata"
+                else "human"
             )
         return
     if new_state:
@@ -744,6 +791,72 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
         root, [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]}
                for a in res.applied], signer, role)
     res.committed = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
+    return res
+
+
+def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]] = None,
+                      cross: Optional[list[dict]] = None,
+                      signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
+    """Append inferred relationships — intra-area into <area>/relationships.yaml, cross-area into
+    cross_subject_area_relationships.yaml — as ONE validated, revertable batch. The packaged
+    writer so a skill/command never hand-edits relationship YAML or scripts a loop over it.
+    Each edge is structurally validated; the whole model is validated and the batch reverted on
+    any failure. Callers pre-route by area and pre-resolve to_column/cardinality."""
+    root = Path(root)
+    res = ApplyResult()
+    intra, cross = intra or {}, cross or []
+    backups: list[tuple[Path, Optional[str]]] = []
+
+    for area, rels in intra.items():
+        if not rels:
+            continue
+        path = _area_dir(root, area) / "relationships.yaml"
+        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+        doc = _load(path) if path.exists() else None
+        lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
+        for r in rels:
+            try:
+                Relationship(**r)
+            except Exception as e:
+                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
+                continue
+            lst.append(r)
+            res.applied.append(f"rel {area}/{r['from_table']}.{r['from_column']}→{r['to_table']}")
+        _dump(path, {"relationships": lst})
+
+    if cross:
+        path = root / "cross_subject_area_relationships.yaml"
+        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+        doc = _load(path) if path.exists() else None
+        edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
+        for r in cross:
+            try:
+                CrossSubjectAreaRelationship(**r)
+            except Exception as e:
+                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
+                continue
+            edges.append(r)
+            res.applied.append(f"xrel {r['from_table']}.{r['from_column']}→{r['to_table']}")
+        _dump(path, {"edges": edges})
+
+    if not res.applied:
+        return res
+    try:
+        vres = V.validate(load_organization(root, include_rejected=True))
+        res.validated = vres.ok
+        if not vres.ok:
+            res.errors = vres.errors
+            _restore(backups)
+            res.applied = []
+            return res
+    except Exception as e:
+        res.errors.append(f"validation failed to run: {e}")
+        _restore(backups)
+        res.applied = []
+        return res
+    _append_curation_log(
+        root, [{"op": "add", "kind": "relationship", "name": a} for a in res.applied], signer, role)
+    res.committed = _git_commit(root, f"enrich: +{len(res.applied)} relationship(s) from metadata")
     return res
 
 

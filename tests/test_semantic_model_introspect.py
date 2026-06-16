@@ -15,6 +15,7 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
+from catalog_helpers import col, make_catalog_runner  # noqa: E402
 from semantic_model import build  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
 from semantic_model import models as m  # noqa: E402
@@ -26,27 +27,15 @@ from semantic_model import validator as V  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _catalog_runner(sql):
-    s = " ".join(sql.split())
-    if "information_schema.schemata" in s:
-        return [{"schema_name": "public"}]
-    if "information_schema.tables" in s and "table_type" in s:
-        return [{"schema_name": "public", "table_name": "customers", "table_type": "BASE TABLE"},
-                {"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
-        if "'customers'" in s:
-            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
-                    {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
-        return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
-                {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
-                {"column_name": "total", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "3", "numeric_scale": "2"}]
-    if "PRIMARY KEY" in s:
-        return [{"column_name": "id"}]
-    if "FOREIGN KEY" in s:
-        return [{"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id"}]
-    if "reltuples" in s:
-        return [{"estimated_rows": "1000"}]
-    return []
+_catalog_runner = make_catalog_runner(
+    tables=["customers", "orders"],
+    columns={
+        "customers": [col("id", "integer", nullable=False), col("email", "varchar")],
+        "orders": [col("id", "integer", nullable=False), col("customer_id", "integer"),
+                   col("total", "numeric", scale=2)],
+    },
+    fks=[{"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id"}],
+)
 
 
 def _probe_runner(sql):
@@ -268,6 +257,68 @@ def test_deep_table_column_groups_no_orphans():
     assert groups  # deep table -> groups derived
     grouped = {c for g in groups.values() for c in g}
     assert grouped == {c.name for c in cols}  # every column covered
+
+
+def test_column_groups_are_role_aware_and_shrink_misc():
+    # A wide table where most columns have a UNIQUE prefix — the old prefix-only grouping
+    # dumped all of them into `misc`. Role grouping (FK / choice / flag / audit / measure /
+    # date from structural signals) should absorb them, leaving misc tiny.
+    cols = [
+        m.Column(name="sys_id", type="string", primary_key=True),
+        m.Column(name="caller_id", type="string",
+                 foreign_key=m.ForeignKey(table="sys_user", column="sys_id")),
+        m.Column(name="assignment_group", type="string",
+                 foreign_key=m.ForeignKey(table="sys_user_group", column="sys_id")),
+        m.Column(name="priority", type="string", choice_field={"1": "Critical", "2": "High"}),
+        m.Column(name="state", type="string", choice_field={"1": "New", "6": "Resolved"}),
+        m.Column(name="active", type="boolean"),
+        m.Column(name="made_sla", type="boolean"),
+        m.Column(name="created_at", type="timestamp"),
+        m.Column(name="closed_by", type="string"),     # audit by-suffix
+        m.Column(name="reassignment_count", type="integer", aggregation="additive"),
+        m.Column(name="business_duration", type="decimal", aggregation="additive"),
+        m.Column(name="due_date", type="date"),         # date role (not audit)
+        m.Column(name="short_description", type="string"),   # unique prefix -> misc
+        m.Column(name="urgency_reason", type="string"),      # unique prefix -> misc
+    ]
+    g = build.derive_column_groups(cols)
+    assert g["identity"] == ["sys_id"]
+    assert set(g["references"]) == {"caller_id", "assignment_group"}
+    assert set(g["codes"]) == {"priority", "state"}
+    assert set(g["flags"]) == {"active", "made_sla"}
+    assert set(g["audit"]) == {"created_at", "closed_by"}
+    assert set(g["measures"]) == {"reassignment_count", "business_duration"}
+    assert g["dates"] == ["due_date"]
+    # only the two genuinely-singleton, role-less columns land in misc
+    assert set(g["misc"]) == {"short_description", "urgency_reason"}
+    # still exactly one group per column, no orphans
+    grouped = [c for cols_ in g.values() for c in cols_]
+    assert sorted(grouped) == sorted(c.name for c in cols)
+    assert len(grouped) == len(set(grouped))
+
+
+def test_references_grouped_from_relationship_not_just_foreign_key():
+    # The introspection pipeline records joins as Relationships, never on column.foreign_key,
+    # so references must be classifiable from the relationship's FROM columns. caller_id has no
+    # foreign_key set, but passing it as a reference column should file it under `references`.
+    cols = [m.Column(name=f"sys_id", type="string", primary_key=True)] + \
+           [m.Column(name="caller_id", type="string")] + \
+           [m.Column(name=f"f_{i}", type="decimal") for i in range(35)]
+    g_no = build.derive_column_groups(cols)
+    assert "caller_id" in g_no.get("misc", [])                      # singleton -> misc without ref info
+    g_ref = build.derive_column_groups(cols, reference_columns={"caller_id"})
+    assert g_ref["references"] == ["caller_id"]                     # known FROM column -> references
+    assert "caller_id" not in g_ref.get("misc", [])
+
+
+def test_column_group_descriptions_role_and_prefix():
+    groups = {"references": ["caller_id"], "measures": ["amount"], "discount": ["a", "b"]}
+    d = build.column_group_descriptions(groups)
+    assert d["references"] == build._ROLE_GROUP_DESCRIPTIONS["references"]
+    assert d["measures"] == build._ROLE_GROUP_DESCRIPTIONS["measures"]
+    # a prefix-token group (not a known role) gets a generated gloss
+    assert "discount" in d["discount"].lower()
+    assert set(d) == set(groups)
 
 
 def test_sniff_date_detects_epoch_yyyymmdd_iso_and_rejects_ids():
@@ -582,3 +633,186 @@ def test_same_named_tables_in_two_schemas_both_survive(tmp_path):
     bil = next(sa for sa in reloaded.subject_areas if sa.name == "billing")
     inv_join = [r for r in bil.relationships if r.from_table == "invoices"]
     assert inv_join and inv_join[0].to_table == "products" and inv_join[0].cross_schema is False
+
+
+def _redshift_fk_runner(overlap_matches: bool):
+    """A single-schema Redshift catalog: orders.customer_id is a DECLARED (but unenforced)
+    FK to customers.id. Redshift's catalog records the FK; the data may or may not honour it,
+    which is what the value-overlap probe decides."""
+    def run(sql):
+        s = " ".join(sql.split())
+        if "information_schema.schemata" in s:
+            return [{"schema_name": "public"}]
+        if "information_schema.tables" in s and "table_type" in s:
+            return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"},
+                    {"schema_name": "public", "table_name": "customers", "table_type": "BASE TABLE"}]
+        if "information_schema.columns" in s:
+            if "'orders'" in s:
+                return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                        {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        if "PRIMARY KEY" in s:
+            return [{"column_name": "id"}]
+        if "FOREIGN KEY" in s:
+            return [{"from_table": "orders", "from_column": "customer_id", "from_schema": "public",
+                     "to_table": "customers", "to_column": "id", "to_schema": "public"}]
+        if "matched" in s:                       # _overlaps EXISTS probe
+            return [{"matched": "5"}] if overlap_matches else [{"matched": "0"}]
+        if "reltuples" in s:
+            return [{"estimated_rows": "1000"}]
+        return []
+    return run
+
+
+def test_unenforced_fk_confirmed_by_overlap_auto_approves(tmp_path):
+    """Redshift declares but does not enforce FKs. A declared FK whose child values actually
+    live in the parent key is sound structure -> confirmed + auto-approved (kept OUT of the
+    review queue), exactly like an enforced Postgres FK. This is what stops inheritance-heavy
+    Redshift schemas from flooding the trust queue with already-valid joins."""
+    org, _ = I.introspect("shop", "redshift", runner=_redshift_fk_runner(True),
+                          artifacts_dir=tmp_path, dry_run=True)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    match = [r for r in rels if r.from_table == "orders" and r.to_table == "customers"]
+    assert len(match) == 1, rels
+    r = match[0]
+    assert r.confidence == "confirmed"
+    assert r.review_state == "approved"
+    assert r.signed_off_by == "agami_introspect" and r.signed_off_role == "system"
+
+
+def test_unenforced_fk_without_overlap_stays_unreviewed(tmp_path):
+    """The same declared FK, but the data does NOT back it (no value overlap) -> we can't
+    confirm it, so it stays inferred/unreviewed for a human glance rather than being asserted."""
+    org, _ = I.introspect("shop", "redshift", runner=_redshift_fk_runner(False),
+                          artifacts_dir=tmp_path, dry_run=True)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    match = [r for r in rels if r.from_table == "orders" and r.to_table == "customers"]
+    assert len(match) == 1, rels
+    r = match[0]
+    assert r.confidence == "inferred"
+    assert r.review_state == "unreviewed" and r.signed_off_by is None
+
+
+def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
+    """A schema that declares MANY FKs on an unenforced dialect must not fire one sequential
+    overlap COUNT per FK without bound. Past FK_OVERLAP_PROBE_CAP we stop probing and leave the
+    rest unreviewed — the run stays bounded on inheritance-heavy Redshift/ServiceNow schemas."""
+    monkeypatch.setattr(I, "FK_OVERLAP_PROBE_CAP", 3)
+    N = 8
+    probes = {"n": 0}
+
+    def runner(sql):
+        s = " ".join(sql.split())
+        if "information_schema.schemata" in s:
+            return [{"schema_name": "public"}]
+        if "information_schema.tables" in s and "table_type" in s:
+            rows = [{"schema_name": "public", "table_name": "parent", "table_type": "BASE TABLE"}]
+            rows += [{"schema_name": "public", "table_name": f"child{i}", "table_type": "BASE TABLE"} for i in range(N)]
+            return rows
+        if "information_schema.columns" in s:
+            if "'parent'" in s:
+                return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""}]
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "parent_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        if "PRIMARY KEY" in s:
+            return [{"column_name": "id"}]
+        if "FOREIGN KEY" in s:
+            return [{"from_table": f"child{i}", "from_column": "parent_id", "from_schema": "public",
+                     "to_table": "parent", "to_column": "id", "to_schema": "public"} for i in range(N)]
+        if "matched" in s:
+            probes["n"] += 1
+            return [{"matched": "5"}]
+        if "reltuples" in s:
+            return [{"estimated_rows": "1000"}]
+        return []
+
+    org, rep = I.introspect("shop", "redshift", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    # never probed more than the cap, even though there are N=8 declared FKs
+    assert probes["n"] <= 3
+    assert any("capped" in n for n in rep.notes), rep.notes
+    # all FKs still modeled (the uncapped ones simply stay unreviewed rather than vanishing)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    assert len([r for r in rels if r.to_table == "parent"]) == N
+
+
+def test_introspect_writes_progress_log(tmp_path):
+    """A long introspection must emit a flushed heartbeat so a tailing skill doesn't read 'stuck'."""
+    pp = tmp_path / "progress.log"
+    I.introspect("shop", "postgres", runner=_catalog_runner,
+                 artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
+    lines = pp.read_text().splitlines()
+    assert any("discovered" in ln for ln in lines)
+    assert any(ln.startswith("columns+grain 1/") for ln in lines)
+    assert lines[-1].startswith("done:")
+
+
+def test_normalize_table_list_splits_zsh_blob():
+    from semantic_model import cli
+    assert cli._normalize_table_list(["a", "b"]) == ["a", "b"]          # clean list untouched
+    assert cli._normalize_table_list(["incident orders customers"]) == ["incident", "orders", "customers"]
+    assert cli._normalize_table_list(["a,b, c"]) == ["a", "b", "c"]     # comma/space mix
+    assert cli._normalize_table_list(None) is None
+
+
+def test_introspect_fails_fast_on_bogus_allowlist(tmp_path):
+    """A bogus allowlist entry (mis-joined names) describes nothing — introspect must raise, not
+    persist a garbage zero-column table."""
+    with pytest.raises(RuntimeError):
+        I.introspect("shop", "postgres", runner=lambda sql: [],
+                     artifacts_dir=tmp_path, tables=["public.nonexistent_blob"], dry_run=True)
+
+
+def _append_runner(sql):
+    s = " ".join(sql.split())
+    if "information_schema.columns" in s:
+        if "'orders'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "total", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": "2"}]
+        if "'customers'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "email", "data_type": "varchar", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        if "'order_items'" in s:
+            return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+                    {"column_name": "order_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
+        return []
+    if "PRIMARY KEY" in s:
+        return [{"column_name": "id"}]
+    if "FOREIGN KEY" in s:
+        return [{"from_table": "order_items", "from_column": "order_id", "to_table": "orders",
+                 "to_column": "id", "from_schema": "public", "to_schema": "public"}]
+    if "reltuples" in s:
+        return [{"estimated_rows": "100"}]
+    if "matched" in s:
+        return [{"matched": "5"}]
+    return []
+
+
+def test_introspect_append_merges_batches(tmp_path):
+    from semantic_model import loader as L
+    # batch 1 → orders, customers
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.orders", "public.customers"])
+    # batch 2 (append) → order_items, which FK-references orders (a CROSS-batch edge)
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.order_items"], append=True)
+
+    org = L.load_organization(tmp_path / "shop")
+    tnames = {t.name for sa in org.subject_areas for t in sa.tables_defined}
+    assert tnames == {"orders", "customers", "order_items"}   # union — nothing lost, no re-query
+    allrels = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
+    oi = [r for r in allrels if r.from_table == "order_items" and r.to_table == "orders"]
+    assert len(oi) == 1   # the cross-batch FK was built once (not lost, not duplicated)
+
+
+def test_introspect_append_relisting_table_no_duplicate(tmp_path):
+    """Re-listing a batch-1 table in a later --append batch must not duplicate it or its grain."""
+    from semantic_model import loader as L
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.orders", "public.customers"])
+    # batch 2 re-lists orders (already built) + adds order_items
+    I.introspect("shop", "postgres", runner=_append_runner, artifacts_dir=tmp_path,
+                 tables=["public.orders", "public.order_items"], append=True)
+    org = L.load_organization(tmp_path / "shop")
+    names = [t.name for sa in org.subject_areas for t in sa.tables_defined]
+    assert sorted(names) == ["customers", "order_items", "orders"]   # each table exactly once

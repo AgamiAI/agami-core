@@ -25,6 +25,7 @@ from .models import (
     SubjectArea,
     Table,
     TableRef,
+    bare_name,
 )
 from .models import DEEP_TABLE_COLUMN_THRESHOLD
 
@@ -37,6 +38,21 @@ STRONG_PII_RE = re.compile(
 # Weakly-PII patterns — only sensitive inside a PII-ish table (a "name" column on
 # a product table is not PII; on a person table it is).
 WEAK_PII_RE = re.compile(r"(\bname\b|first_?name|last_?name|full_?name|surname)", re.IGNORECASE)
+# Broader "might be PII" tokens for the SUSPECTED tier — a review aid only, never auto-flags.
+# General privacy concepts (not a customer's schema): identity, contact, location, demographics.
+_EXTRA_PII_RE = re.compile(
+    r"(gender|\bsex\b|ip_?address|\bip\b|latitude|longitude|\bgeo\b|national_?id|tax_?id|"
+    r"licen[cs]e|user_?name|nationality|ethnicit|religion|marital|emergency_?contact|"
+    r"next_?of_kin|date_?of_?birth|maiden)", re.IGNORECASE)
+
+
+def suspected_pii(column_name: str) -> bool:
+    """A BROADER 'might be PII' heuristic than `detect_sensitive` — surfaces columns the strict
+    flag may have MISSED (e.g. `first_name` in a non-PII-named table like `sys_user`, which the
+    table-gated weak rule skips), so a reviewer can confirm. A review aid; never auto-marks
+    sensitive. General privacy vocabulary, not vendor-specific."""
+    return bool(STRONG_PII_RE.search(column_name) or WEAK_PII_RE.search(column_name)
+                or _EXTRA_PII_RE.search(column_name))
 # Back-compat alias (some callers import SENSITIVE_RE).
 SENSITIVE_RE = STRONG_PII_RE
 
@@ -133,36 +149,105 @@ def detect_sensitive(table_name: str, column_name: str) -> bool:
     return bool(WEAK_PII_RE.search(column_name)) and table_pii
 
 
-def derive_column_groups(columns: list[Column]) -> dict[str, list[str]]:
-    """Group deep-table columns by name prefix; every column lands in exactly one
-    group (no orphans — the validator enforces this on deep tables)."""
-    groups: dict[str, list[str]] = defaultdict(list)
+# Role groups — assigned from STRUCTURAL column signals (PK, foreign_key, choice_field,
+# aggregation class, type) plus a couple of universal name patterns. General, not vendor-
+# specific. A wide table's columns are mostly references / coded values / flags / measures /
+# timestamps, so naming those roles collapses the long tail of single-prefix columns that the
+# old prefix-only grouping dumped into `misc`. Order = priority; each column lands in exactly
+# ONE group (the explorer relies on one-group-per-column). Roles that match nothing fall
+# through to prefix-token grouping, then to `misc`.
+_FLAG_COL_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.IGNORECASE)
+# Audit / lifecycle bookkeeping: who/when a row was touched. Suffix-anchored on `_at/_on/_by`
+# (and the created/updated/modified/deleted prefixes) so it catches `created_at`/`opened_by`/
+# `closed_on` WITHOUT grabbing business dates like `due_date`/`order_date` (those fall to the
+# `dates` role instead).
+_AUDIT_COL_RE = re.compile(r"_(at|on|by)$|^(created|updated|modified|deleted)(_|$)", re.IGNORECASE)
+
+# One-line gloss per RECOGNIZED role group. Prefix-token groups (and any unknown key) get a
+# generated line from `column_group_descriptions`. No vendor specifics — these describe a role.
+_ROLE_GROUP_DESCRIPTIONS: dict[str, str] = {
+    "identity": "Primary keys and unique identifiers for this table.",
+    "references": "Foreign-key columns that link to other tables.",
+    "codes": "Coded / enumerated values drawn from a fixed set of choices.",
+    "flags": "Boolean indicator columns (true/false conditions).",
+    "audit": "Bookkeeping of when a row was created or changed, and by whom.",
+    "measures": "Numeric columns that can be aggregated (summed or averaged).",
+    "dates": "Date / time columns other than audit timestamps.",
+    "misc": "Columns with no shared prefix or recognized role.",
+}
+
+
+def _role_of(c: Column, reference_columns: set[str]) -> Optional[str]:
+    """The role group for a column from its structural signals, or None to defer to prefix
+    grouping. First match wins (so a coded FK files under `references`, a boolean flag under
+    `flags`, etc.) — keeps every column in exactly one group. `reference_columns` (column names
+    that are the FROM side of a join) lets the caller mark references even though the join lives
+    on a Relationship, not on `column.foreign_key` — which the introspection pipeline never sets."""
+    if c.primary_key or c.name.upper() == "ID":
+        return "identity"
+    if c.foreign_key is not None or c.name in reference_columns:
+        return "references"
+    if c.choice_field:
+        return "codes"
+    if c.type == "boolean" or _FLAG_COL_RE.match(c.name):
+        return "flags"
+    if _AUDIT_COL_RE.search(c.name):
+        return "audit"
+    if c.aggregation in ("additive", "averageable"):
+        return "measures"
+    if c.type in ("timestamp", "date"):
+        return "dates"
+    return None
+
+
+def derive_column_groups(
+    columns: list[Column], *, reference_columns: Optional[set[str]] = None
+) -> dict[str, list[str]]:
+    """Group deep-table columns ROLE-FIRST (references / codes / flags / audit / measures /
+    dates / identity from structural signals), then by name prefix for whatever's left, then
+    fold remaining single-prefix columns into `misc`. Every column lands in exactly one group
+    (no orphans — the validator enforces this on deep tables). General, not vendor-specific.
+
+    `reference_columns` (optional) names the columns that are the FROM side of a join — passed
+    in once relationships are known so FK columns group under `references` instead of scattering
+    through `misc` (joins live on Relationship objects, not on `column.foreign_key`)."""
+    ref_cols = reference_columns or set()
+    role_groups: dict[str, list[str]] = defaultdict(list)
+    prefix_groups: dict[str, list[str]] = defaultdict(list)
     for c in columns:
-        name = c.name
-        if c.primary_key or name.upper() == "ID":
-            groups["identity"].append(name)
-            continue
-        token = name.split("_")[0].lower()
-        if name.upper().startswith("TOTAL"):
-            groups["totals"].append(name)
+        role = _role_of(c, ref_cols)
+        if role is not None:
+            role_groups[role].append(c.name)
         else:
-            groups[token].append(name)
-    final: dict[str, list[str]] = {}
+            prefix_groups[c.name.split("_")[0].lower()].append(c.name)
+    final: dict[str, list[str]] = dict(role_groups)
     misc: list[str] = []
-    for g, cols in groups.items():
-        if g != "identity" and len(cols) == 1:
+    for g, cols in prefix_groups.items():
+        if len(cols) == 1:
             misc.extend(cols)
         else:
             final[g] = cols
     if misc:
         final.setdefault("misc", []).extend(misc)
-    return dict(final)
+    return final
 
 
-def maybe_column_groups(columns: list[Column]) -> dict[str, list[str]]:
+def column_group_descriptions(groups: dict[str, list[str]]) -> dict[str, str]:
+    """One-line gloss per group name: recognized role groups get a fixed description, prefix-
+    token groups get a generated 'Columns named <token>…' line. General; the result is stored
+    on the table so the explorer/MCP can explain a group instead of showing a bare key."""
+    out: dict[str, str] = {}
+    for g in groups:
+        out[g] = _ROLE_GROUP_DESCRIPTIONS.get(g) or f"Columns named {g}* (grouped by prefix)."
+    return out
+
+
+def maybe_column_groups(
+    columns: list[Column], *, reference_columns: Optional[set[str]] = None
+) -> dict[str, list[str]]:
     """column_groups only on deep tables; narrow tables get none."""
     if len(columns) >= DEEP_TABLE_COLUMN_THRESHOLD:
-        return derive_column_groups(columns)
+        return derive_column_groups(columns, reference_columns=reference_columns)
     return {}
 
 
@@ -209,7 +294,7 @@ def cluster_by_family(names: list[str]) -> dict[str, str]:
     then merging prefix-families (one key being a prefix of another)."""
     raw_key: dict[str, str] = {}
     for name in names:
-        bare = name.split(".")[-1]
+        bare = bare_name(name)
         token = _singularize(re.split(r"[_\s]", bare)[0].lower())
         raw_key[name] = token or "misc"
 
@@ -254,8 +339,8 @@ def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
     relationships (SQLite / legacy) fall back to bare-name membership."""
     def here(table: str, schema) -> bool:
         return (schema, table) in keys if schema is not None else table in bare
-    return (here(r.from_table.split(".")[-1], r.from_schema)
-            and here(r.to_table.split(".")[-1], r.to_schema))
+    return (here(bare_name(r.from_table), r.from_schema)
+            and here(bare_name(r.to_table), r.to_schema))
 
 
 def make_area(name: str, tables: list[Table], rels: list[Relationship], conn: str) -> SubjectArea:
@@ -325,7 +410,7 @@ def extract_cross_area_relationships(
     for r in rels:
         if id(r) in intra_ids:
             continue
-        ft, tt = r.from_table.split(".")[-1], r.to_table.split(".")[-1]
+        ft, tt = bare_name(r.from_table), bare_name(r.to_table)
         fa = area_of.get((r.from_schema, ft)) or bare_of.get(ft)
         ta = area_of.get((r.to_schema, tt)) or bare_of.get(tt)
         if fa and ta and fa != ta:
@@ -415,10 +500,115 @@ def write_tree(
     return rep
 
 
+# Structural patterns for DERIVED metrics — general (English start/end + flag vocabulary), not
+# vendor-specific. A flag is a flag and two timestamps are two timestamps on any schema.
+_START_NAME_RE = re.compile(
+    r"(^|_)(opened|created|started|start|begin|requested|received|logged|reported)(_|$)", re.I)
+_END_NAME_RE = re.compile(
+    r"(^|_)(closed|resolved|ended|end|finished|completed|fulfilled|approved|delivered)(_|$)", re.I)
+_FLAG_NAME_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.I)
+_TS_TYPES = {"timestamp", "date"}
+
+
+# A "trivial" measure is a single bare aggregate over ONE column (or COUNT(*)) — there's no
+# interpretive choice in it, so it's as trustworthy as the column's aggregation class (which is
+# already confirmed structure). These auto-approve with a system sign-off, like an enforced FK
+# join, instead of cluttering the review queue. Anything with a CASE (a flag RATE) or a
+# multi-column / function expression (a DURATION's start/end pairing) is NOT trivial — that
+# involves a heuristic the engine could get wrong, so it stays proposed for a human glance.
+_TRIVIAL_BINDING_RE = re.compile(
+    r"^\s*(COUNT\(\s*\*\s*\)|(?:SUM|AVG)\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\))\s*$", re.IGNORECASE)
+
+
+def _is_trivial_measure(binding_sql: str) -> bool:
+    """True for COUNT(*) / SUM(col) / AVG(col) — a single bare aggregate, no CASE/arithmetic/
+    function. These carry no judgment beyond the column's (already-confirmed) aggregation class."""
+    return bool(_TRIVIAL_BINDING_RE.match(binding_sql or ""))
+
+
+def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
+                    now: Optional[str] = None) -> list[dict]:
+    """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
+      • count of rows;
+      • SUM of `additive` columns, AVG of `averageable` columns (gated on aggregation class —
+        never SUM an id, never AVG a status code);
+      • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
+        pattern — fraction true);
+      • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
+        pattern — `AVG(end − start)` via the dialect's day-difference form).
+    Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
+    bulk in the explorer. Count is always kept; the rest are capped at max_per_table.
+
+    Columns agami couldn't read (`description_source == "ai_unknown"`) are SKIPPED — we don't
+    propose a metric on a column we can't explain (its prose would just restate opaque SQL).
+    Re-run after such a column is described and it becomes eligible (write_items is incremental,
+    so no duplicates)."""
+    t = table.name
+    st = dialect.name
+    out: list[dict] = [{"name": f"{t}_count", "calculation": f"Number of {t} records",
+                        "bindings": {st: "COUNT(*)"}, "source_tables": [t]}]
+    ts_cols: list[str] = []
+    for c in table.columns:
+        if c.primary_key:
+            continue
+        if c.description_source == "ai_unknown":  # opaque column → don't propose a metric on it
+            continue
+        is_bool = c.type == "boolean"
+        is_int_flag = c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))
+        if is_bool or is_int_flag:
+            cond = c.name if is_bool else f"{c.name} <> 0"
+            out.append({"name": f"{t}_{c.name}_rate",
+                        "calculation": f"Fraction of {t} where {c.name} is true",
+                        "bindings": {st: f"AVG(CASE WHEN {cond} THEN 1.0 ELSE 0.0 END)"},
+                        "source_tables": [t]})
+            continue
+        if c.aggregation == "additive":
+            m = {"name": f"{t}_total_{c.name}", "calculation": f"Total {c.name} across {t}",
+                 "bindings": {st: f"SUM({c.name})"}, "source_tables": [t]}
+            if c.unit:  # SUM(col) carries the column's unit — USD column → USD total
+                m["unit"] = c.unit
+            out.append(m)
+        elif c.aggregation == "averageable":
+            m = {"name": f"{t}_avg_{c.name}", "calculation": f"Average {c.name} in {t}",
+                 "bindings": {st: f"AVG({c.name})"}, "source_tables": [t]}
+            if c.unit:  # AVG(col) is in the same unit as the column
+                m["unit"] = c.unit
+            out.append(m)
+        if c.type in _TS_TYPES:
+            ts_cols.append(c.name)
+    starts = [c for c in ts_cols if _START_NAME_RE.search(c)]
+    ends = [c for c in ts_cols if _END_NAME_RE.search(c)]
+    if starts and ends and starts[0] != ends[0]:
+        s, e = starts[0], ends[0]
+        out.append({"name": f"{t}_avg_duration_days",
+                    "calculation": f"Average days from {s} to {e} in {t}",
+                    "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
+                    "source_tables": [t], "unit": "days"})
+    out = out[: max(1, max_per_table)]
+    for m in out:
+        binding = next(iter(m.get("bindings", {}).values()), "")
+        if _is_trivial_measure(binding):
+            # mechanically sound (COUNT(*) / SUM(col) / AVG(col)) — auto-approve with a system
+            # sign-off so it skips the review queue, exactly like an enforced FK join.
+            m["confidence"] = "confirmed"
+            m["review_state"] = "approved"
+            m["signed_off_by"] = "agami_suggest"
+            m["signed_off_role"] = "system"
+            if now:
+                m["signed_off_at"] = now
+        else:
+            # a flag RATE or a DURATION pair — heuristic choice the engine could get wrong.
+            m["confidence"] = "proposed"
+            m["review_state"] = "unreviewed"
+        m["primary_table"] = t  # every suggested metric is single-table — anchor it there
+    return out
+
+
 __all__ = [
     "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
-    "derive_column_groups", "maybe_column_groups",
+    "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
+    "suggest_metrics", "suspected_pii",
     "write_tree", "WriteReport",
 ]

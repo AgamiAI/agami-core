@@ -64,6 +64,7 @@ from .models import (
     Relationship,
     StorageConnection,
     Table,
+    bare_name,
 )
 
 Runner = Callable[[str], list[dict]]
@@ -99,6 +100,30 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent  # plugins/agami/scripts
 SAMPLE_ROWS = 500
 ENUM_MAX_DISTINCT = 25
 PROBE_TABLE_CAP = 200  # cap value-overlap probing work
+# Safety valve for confirming DECLARED-but-unenforced catalog FKs (Redshift/Databricks/Trino)
+# by value-overlap: each confirmation is one sequential COUNT probe, so a schema that declares
+# hundreds of FKs could otherwise fire hundreds of round-trips. Past the budget we stop probing
+# and leave the remaining declared FKs inferred/unreviewed (they still surface for sign-off).
+FK_OVERLAP_PROBE_CAP = 300
+# Above this FROM-table row estimate we SKIP the value-overlap scan and leave the join
+# unverified (inferred/unreviewed) rather than scan millions of rows over the network — the
+# guard that stops a 50-table Redshift introspect from crawling for half an hour on big fact
+# tables (incident/task/metric_instance). Mirrors the grain-probe size guard.
+_OVERLAP_PROBE_MAX_ROWS = 3_000_000
+
+
+def _progress(path: Optional[Path], msg: str) -> None:
+    """Append a FLUSHED progress line so a tailing skill can surface a heartbeat during a long
+    introspection (the engine is otherwise silent until it returns — which reads as 'stuck' on a
+    big Redshift schema). Best-effort; never raises."""
+    if path is None:
+        return
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(msg.rstrip("\n") + "\n")
+            fh.flush()
+    except Exception:
+        pass
 
 
 @dataclass
@@ -172,6 +197,8 @@ def introspect(
     exclude_columns: Optional[list[str]] = None,
     dry_run: bool = False,
     bigquery_region: str = "region-us",
+    progress_path: Optional[str | Path] = None,
+    append: bool = False,
 ) -> tuple[Organization, IntrospectReport]:
     """Introspect a live DB into the semantic model and (unless dry_run) write the
     canonical tree. `tables` (optional) is the allowlist of `schema.table` to build —
@@ -188,6 +215,14 @@ def introspect(
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir=str(out), dry_run=dry_run)
 
+    pp = Path(progress_path) if progress_path else None
+    if pp is not None:
+        try:
+            pp.parent.mkdir(parents=True, exist_ok=True)
+            pp.write_text("", encoding="utf-8")  # fresh log per run
+        except Exception:
+            pp = None
+
     # 1. discover (schema, table) pairs
     pairs = _discover_tables(dialect, runner, tables, report)
     if not pairs:
@@ -195,14 +230,35 @@ def introspect(
             "no tables discovered. If the catalog is locked down, pass an explicit "
             "table allowlist (schema.table) so probe mode can describe them."
         )
+    _progress(pp, f"discovered {len(pairs)} tables — reading columns, grain, keys")
 
     # 2. per-table columns + grain
     built: list[Table] = []
     grain_by_table: dict[str, set[str]] = {}
-    for schema, table in pairs:
+    _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
+    for i, (schema, table) in enumerate(pairs, 1):
         t = _build_table(dialect, runner, schema, table, conn_name, report)
         built.append(t)
         grain_by_table[t.name] = set(t.grain)
+        if i % _step == 0 or i == len(pairs):
+            _progress(pp, f"columns+grain {i}/{len(pairs)}")
+
+    # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
+    # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
+    # a garbage table. Drop them with a clear note; if that leaves nothing, raise rather than
+    # write an empty model.
+    empty = [t.name for t in built if not t.columns]
+    if empty:
+        built = [t for t in built if t.columns]
+        grain_by_table = {t.name: set(t.grain) for t in built}
+        report.notes.append(
+            f"dropped {len(empty)} table(s) with no readable columns (not found / bad allowlist): "
+            + ", ".join(empty[:8]) + (" …" if len(empty) > 8 else ""))
+    if not built:
+        raise RuntimeError(
+            "no allowlisted table could be described — every name yielded zero columns. "
+            "Check the --tables list (a shell-quoting issue can mis-join all names into one); "
+            "or pass --tables-file with one schema.table per line.")
 
     # 2b. apply prune-step column exclusions (the user dropped these in the prune
     # view). Match on schema.table.column, with a schema-less table.column fallback.
@@ -216,10 +272,46 @@ def introspect(
                         or f"{t.name}.{c.name}" in ex):
                     c.review_state = "rejected"
 
-    # 3. relationships (catalog FKs, else probe by name+type+overlap)
-    rels = _build_relationships(dialect, runner, pairs, built, grain_by_table, report)
+    # 2c. APPEND (batched introspection): fold the EXISTING model's tables back in — loaded from
+    # disk, never re-queried — so each batch call builds only its own tables but writes the full
+    # union. Lets the skill introspect ~10 tables per quick foreground call (natural progress, no
+    # background monitor) and still end with a complete model. Safe during onboarding (no hand-
+    # edits to lose); the relationship pass below rebuilds across the union, prior edges kept.
+    prev_rels: list[Relationship] = []
+    skip_keys: set = set()
+    if append and not dry_run and (out / "org.yaml").exists():
+        from .loader import load_organization
+        prev = load_organization(out, include_rejected=True)
+        batch_names = {t.name for t in built}
+        for sa in prev.subject_areas:
+            for t in sa.tables_defined:
+                if t.name not in batch_names:        # keep prior tables (don't re-query)
+                    built.append(t)
+                    grain_by_table.setdefault(t.name, set(t.grain))
+        for sa in prev.subject_areas:
+            prev_rels.extend(sa.relationships)
+        prev_rels.extend(prev.cross_subject_area_relationships)
+        skip_keys = {(r.from_table.lower(), r.from_column.lower(), r.to_table.lower()) for r in prev_rels}
+        report.notes.append(f"append: merged {len(batch_names)} new table(s) into {len(built)} total")
+
+    # 3. relationships (catalog FKs, else probe by name+type+overlap). Use the FULL built set's
+    # (schema, table) pairs so an --append batch builds relationships across the whole union, not
+    # just its own batch (covers every schema present).
+    _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
+    rel_pairs = [(t.schema_name, t.name) for t in built]
+    rels = _build_relationships(dialect, runner, rel_pairs, built, grain_by_table, report, pp=pp)
+    if prev_rels:   # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
+        rels = list(prev_rels) + [
+            r for r in rels
+            if (r.from_table.lower(), r.from_column.lower(), r.to_table.lower()) not in skip_keys]
     report.table_count = len(built)
     report.relationship_count = len(rels)
+    _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
+
+    # 3b. now that joins are known, re-derive deep-table column_groups so FK (reference) columns
+    # group under `references` instead of scattering through `misc` — references live on the
+    # Relationship, not on the column, so the initial per-table grouping couldn't see them.
+    _regroup_columns_with_references(built, rels)
 
     # 4. propose subject areas + cross-area edges
     areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
@@ -436,6 +528,7 @@ def _build_table(
     _enrich_from_sample(dialect, runner, schema, table, cols)
 
     column_groups = build.maybe_column_groups(cols)
+    column_group_descriptions = build.column_group_descriptions(column_groups) if column_groups else {}
     if column_groups:
         report.deep_tables.append(table)
 
@@ -462,6 +555,7 @@ def _build_table(
         grain=grain,
         description="",  # LLM enrichment fills this in
         column_groups=column_groups,
+        column_group_descriptions=column_group_descriptions,
         performance_hints=perf,
         columns=cols,
     )
@@ -557,6 +651,7 @@ def _grain(
 def _build_relationships(
     dialect: D.Dialect, runner: Runner, pairs: list[tuple[Optional[str], str]],
     tables: list[Table], grain_by_table: dict[str, set[str]], report: IntrospectReport,
+    pp: Optional[Path] = None,
 ) -> list[Relationship]:
     # catalog FKs per schema
     schemas = {s for s, _ in pairs if s}
@@ -580,9 +675,13 @@ def _build_relationships(
         tables_by_name.setdefault(t.name, []).append(t)
 
     rels: list[Relationship] = []
+    overlap_probes = 0   # budget guard for declared-FK overlap confirmation (see FK_OVERLAP_PROBE_CAP)
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
-        for fk in catalog_fks:
+        _fk_step = max(1, len(catalog_fks) // 10)   # ~10 heartbeat lines over the (slow) FK pass
+        for _fi, fk in enumerate(catalog_fks, 1):
+            if _fi % _fk_step == 0 or _fi == len(catalog_fks):
+                _progress(pp, f"relationships: declared FK {_fi}/{len(catalog_fks)}")
             ft, fc, tt, tc = fk.get("from_table"), fk.get("from_column"), fk.get("to_table"), fk.get("to_column")
             if not (ft and fc and tt and tc):
                 continue
@@ -592,16 +691,35 @@ def _build_relationships(
             to_schema = fk.get("to_schema") or _schema_of(tt, tables_by_name, prefer=from_schema, report=report)
             cross = bool(from_schema and to_schema and from_schema != to_schema)
             card = build.infer_cardinality(ft, tt, [fc], [tc], grain_by_table)
-            # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap
+            # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap.
+            # The catalog's FK is a *declaration*, not a guarantee, so probe the data: if the
+            # child values actually live in the parent key, treat it like an enforced FK
+            # (confirmed + auto-approved) instead of dumping it in the review queue. Only FKs we
+            # can't confirm against the data stay inferred/unreviewed for a human glance. This is
+            # what keeps inheritance-heavy schemas (ServiceNow on Redshift) from flooding review.
             confidence = "confirmed" if dialect.fk_enforced else "inferred"
-            # enforced-FK joins are trustworthy structure -> auto-approve with a system
-            # sign-off (don't flood the review queue); unenforced/probed ones need a glance.
+            overlap_confirmed = False
+            if not dialect.fk_enforced and overlap_probes < FK_OVERLAP_PROBE_CAP:
+                fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
+                tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
+                # Skip the scan on huge FROM tables (the slow case on Redshift fact tables) —
+                # leave the declared FK inferred/unreviewed rather than full-scan to confirm it.
+                if fobj is not None and tobj is not None and not _too_big_to_probe(fobj):
+                    overlap_probes += 1
+                    if _overlaps(dialect, runner, fobj, fc, tobj, tc):
+                        confidence = "confirmed"
+                        overlap_confirmed = True
+            trusted = dialect.fk_enforced or overlap_confirmed
+            # trusted joins are sound structure -> auto-approve with a system sign-off (don't
+            # flood the review queue); unconfirmed ones need a glance.
             # EXCEPTION: a join that spans two schemas is an architectural claim — the model now
-            # reaches across namespaces — so surface it for review even when the FK is enforced.
+            # reaches across namespaces — so surface it for review even when the FK is trusted.
             desc = ""
-            if dialect.fk_enforced and not cross:
+            if trusted and not cross:
                 kw: dict = {"review_state": "approved", "signed_off_by": "agami_introspect",
                             "signed_off_role": "system", "signed_off_at": _NOW}
+                if overlap_confirmed:
+                    desc = "declared FK, confirmed by value-overlap probe"
             else:
                 kw = {"review_state": "unreviewed"}
             if cross:
@@ -612,6 +730,10 @@ def _build_relationships(
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
             ))
+        if overlap_probes >= FK_OVERLAP_PROBE_CAP:
+            report.notes.append(
+                f"declared-FK overlap confirmation capped at {FK_OVERLAP_PROBE_CAP} probes — "
+                "remaining declared FKs left unreviewed for sign-off on /agami-model")
     else:
         # probe: infer FKs from name+type match, confirm by value-overlap
         report.mode_per_capability["relationships"] = "probe"
@@ -624,6 +746,26 @@ def _build_relationships(
     # through use). This is what lifts a sparse demo from ~9 joins toward the real graph.
     rels.extend(_promote_reference_fields(tables, grain_by_table, rels, report))
     return rels
+
+
+def _regroup_columns_with_references(tables: list[Table], rels: list[Relationship]) -> None:
+    """Re-derive column_groups (+ descriptions) for deep tables now that relationships exist, so
+    each table's FK (FROM-side) columns land in the `references` group. Mutates `tables` in place;
+    a no-op for narrow tables (no groups) and tables with no outgoing simple-FK joins. Schema-aware
+    so a same-named table in another schema doesn't borrow the wrong references."""
+    ref_by_table: dict[tuple, set[str]] = {}
+    for r in rels:
+        if not r.from_column:   # skip on:-expression joins (no single FROM column)
+            continue
+        ref_by_table.setdefault((r.from_schema, bare_name(r.from_table)), set()).add(r.from_column)
+    for t in tables:
+        if not t.column_groups:   # only deep tables carry groups
+            continue
+        ref_cols = ref_by_table.get((t.schema_name, t.name)) or ref_by_table.get((None, t.name)) or set()
+        if not ref_cols:
+            continue
+        t.column_groups = build.maybe_column_groups(t.columns, reference_columns=ref_cols)
+        t.column_group_descriptions = build.column_group_descriptions(t.column_groups)
 
 
 _REF_ID_RE = re.compile(r"^(.+?)_id$", re.IGNORECASE)
@@ -763,6 +905,14 @@ def _probe_relationships(
                         ))
                         break
     return rels
+
+
+def _too_big_to_probe(t: Table) -> bool:
+    """True when a table's estimated row count is above the overlap-probe guard — scanning it to
+    confirm a join would crawl, so we skip the scan and leave the join unverified."""
+    perf = getattr(t, "performance_hints", None)
+    rows = getattr(perf, "estimated_row_count", None) if perf else None
+    return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
 def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:

@@ -33,6 +33,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 
 - **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `<artifacts_dir>/local/model/<profile>/<ts>.html`.)"* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
+  - **A pasted feedback block names its own target.** When applying a block from the dashboard's "Generate feedback for Claude", its first line is `profile: <name>` — that dashboard was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one dashboard's approvals to whatever happens to be the active profile (a *different* model). If `<artifacts_dir>/<profile>/org.yaml` exists for the named profile, target it directly — don't fall back to `active_profile` or hunt with `find`.
 - **If `<artifacts_dir>/<profile>/org.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
 - **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
 

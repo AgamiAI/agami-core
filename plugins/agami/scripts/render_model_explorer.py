@@ -54,6 +54,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     _scripts = str(Path(__file__).resolve().parent)
     if _scripts not in _sys.path:
         _sys.path.insert(0, _scripts)
+    from semantic_model import build as _B
     from semantic_model import loader as _L
 
     org = _L.load_organization(profile_dir, include_rejected=True)
@@ -108,7 +109,11 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "aggregation": c.aggregation,
                     "review_state": c.review_state,
                     "origin": "", "confidence": c.confidence, "excluded": f_excluded,
-                    "sensitive": c.sensitive, "unit": c.unit, "caveats": c.caveats,
+                    "sensitive": c.sensitive,
+                    # broader "might be PII" the strict flag missed — drives the PII tab's
+                    # suspected tier (review aid; never auto-marks).
+                    "suspected_pii": (not c.sensitive) and _B.suspected_pii(c.name),
+                    "unit": c.unit, "caveats": c.caveats,
                     "date_format": c.date_format, "timezone": c.timezone,
                     "group": col_group.get(c.name, ""),
                 })
@@ -124,6 +129,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 # ordered group names for the wide-table grouped field view (empty on
                 # narrow tables — the UI then just lists fields flat)
                 "column_groups": list((t.column_groups or {}).keys()),
+                "column_group_descriptions": t.column_group_descriptions or {},
                 "fields": fields_out,
             })
 
@@ -132,6 +138,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "name": e.name, "qname": f"{sa.name}.{e.name}", "plural": e.plural,
                 "other_names": e.other_names, "value_pattern": e.value_pattern,
                 "maps_to": [f"{m.table}.{m.column}" for m in e.maps_to],
+                "primary_table": e.resolved_primary_table,
                 "description": e.description, "review_state": e.review_state,
                 "confidence": e.confidence, "excluded": e.review_state == "rejected",
                 "signed_off_by": e.signed_off_by, "signed_off_role": e.signed_off_role,
@@ -144,7 +151,8 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "bindings": mm.bindings, "unit": mm.unit, "other_names": mm.other_names,
                 "non_additive_dimensions": mm.non_additive_dimensions,
                 "semi_additive_agg": mm.semi_additive_agg,
-                "source_tables": mm.source_tables, "description": mm.description,
+                "source_tables": mm.source_tables, "primary_table": mm.primary_table,
+                "description": mm.description,
                 "review_state": mm.review_state, "confidence": mm.confidence,
                 "excluded": mm.review_state == "rejected",
                 "signed_off_by": mm.signed_off_by, "signed_off_role": mm.signed_off_role,
@@ -241,6 +249,7 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
     template = TEMPLATE_PATH.read_text()
     logo_dark = LOGO_DARK_PATH.read_text() if LOGO_DARK_PATH.exists() else ""
     logo_light = LOGO_LIGHT_PATH.read_text() if LOGO_LIGHT_PATH.exists() else ""
+    theme_css = (SHARED_DIR / "theme.css").read_text()
 
     # The manifest embeds arbitrary model text (descriptions, ORGANIZATION.md, SQL).
     # Escape `</` so a `</script>` in that text can't terminate the <script> block that
@@ -261,6 +270,7 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
         .replace("{{MANIFEST_JSON}}", manifest_json)
         .replace("{{AGAMI_LOGO_DARK_TEXT}}", logo_dark)
         .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", logo_light)
+        .replace("{{THEME_CSS}}", theme_css)
     )
     return out
 
