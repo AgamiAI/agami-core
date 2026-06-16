@@ -2831,6 +2831,9 @@
       if (termEdits !== null) lines.push('key-terminology: ' + JSON.stringify(termEdits));
       // Sign-off identity header (first line) — the skill applies approvals with this as --signer/--role.
       if (hasQueuedApprovals() && validEmail(signOff.email)) lines.unshift(`signed-off-by: ${signOff.email} / ${signOffRole()}`);
+      // Pin the TARGET MODEL so the apply step never guesses the profile (it otherwise falls back
+      // to the active_profile in .config, which may be a different model than this dashboard).
+      if (lines.length) lines.unshift('profile: ' + (manifest.profile || ''));
       if (lines.length) lines.push('done');
 
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
