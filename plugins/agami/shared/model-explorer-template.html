@@ -332,6 +332,9 @@
       background: transparent; color: var(--accent); border: 1px dashed var(--accent); white-space: nowrap;
     }
     .field-actions button.btn-propagate:hover { background: var(--ok-bg); }
+    /* the PII-toggle button also renders in the PII tab OUTSIDE .field-actions, so give it a
+       pointer cursor of its own (the .field-actions button rule doesn't reach it there) */
+    button.btn-pii { cursor: pointer; }
     .field-actions button.btn-pii.on { background: var(--bad-bg); color: var(--bad-fg); border-color: var(--bad-border); }
     .field-actions button.btn-pii.on:hover { color: var(--bad-fg); border-color: var(--bad-fg); }
     .field-actions button.btn-pii.queued { box-shadow: inset 2px 0 0 var(--accent); }
@@ -521,6 +524,11 @@
       background: var(--code-bg); color: var(--muted); min-width: 18px; text-align: center;
     }
     .subtab-bar button.active .subtab-count { background: var(--accent); color: #fff; }
+    /* second-layer kind pills sit just under the sub-tab bar — smaller + tighter so the
+       hierarchy reads (sub-tab = which pile state, kind-bar = which kind within it) */
+    .subtab-bar.kind-bar { margin: -8px 0 16px; gap: 6px; }
+    .subtab-bar.kind-bar button { font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 7px; border-style: dashed; }
+    .subtab-bar.kind-bar button.active { border-style: solid; }
 
     /* Reliable CSS hover tooltip (native title= is flaky on file://) — element needs
        class "tip" + a data-tip="..." attribute. */
@@ -691,6 +699,8 @@
     let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
     let activeFilter = 'all';
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
+    let piiSubTab = 'all';       // PII tab sub-view: all | flagged | suspected
+    let reviewKind = 'all';      // Review tab: which kind-pile within the sub-tab (all | a REVIEW_GROUPS label | __unknown)
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
 
     // Sign-off identity (stamped on every Approve). Persisted to localStorage so it's
@@ -1492,17 +1502,36 @@
       const { flagged, suspected } = piiRows();
       const fl = flagged.filter(match), su = suspected.filter(match);
       setSearchCounts(`${fl.length} flagged · ${su.length} suspected`);
+
+      // sub-tab pills — make the two groups (and the often-missed "suspected" one) discoverable
+      // and jump-to-able without scrolling. 'all' shows both; the others scope to one group.
+      const pills = [
+        { k: 'all', label: 'All', cnt: fl.length + su.length },
+        { k: 'flagged', label: 'Flagged PII', cnt: fl.length },
+        { k: 'suspected', label: 'Suspected PII', cnt: su.length },
+      ];
+      const bar = el('div', { class: 'subtab-bar' });
+      pills.forEach(p => {
+        const b = el('button', { type: 'button', class: piiSubTab === p.k ? 'active' : '',
+          onclick: () => { piiSubTab = p.k; renderBody(); } }, p.label);
+        b.appendChild(el('span', { class: 'subtab-count', text: String(p.cnt) }));
+        bar.appendChild(b);
+      });
+      root.appendChild(bar);
+
       const sec = el('div', { class: 'schema-section' });
-
-      sec.appendChild(piiSubhead('Flagged as PII', fl.length,
-        'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive.'));
-      if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
-      fl.forEach(r => sec.appendChild(piiRowCard(r)));
-
-      sec.appendChild(piiSubhead('Suspected — confirm or leave', su.length,
-        'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.'));
-      if (!su.length) sec.appendChild(el('div', { class: 'empty-state', text: 'None suspected.' }));
-      su.forEach(r => sec.appendChild(piiRowCard(r)));
+      if (piiSubTab !== 'suspected') {
+        sec.appendChild(piiSubhead('Flagged as PII', fl.length,
+          'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive.'));
+        if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
+        fl.forEach(r => sec.appendChild(piiRowCard(r)));
+      }
+      if (piiSubTab !== 'flagged') {
+        sec.appendChild(piiSubhead('Suspected — confirm or leave', su.length,
+          'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.'));
+        if (!su.length) sec.appendChild(el('div', { class: 'empty-state', text: 'None suspected.' }));
+        su.forEach(r => sec.appendChild(piiRowCard(r)));
+      }
 
       root.appendChild(sec);
     }
@@ -1835,22 +1864,20 @@
       }
       return h;
     }
-    function appendGroupedCards(sec, items, bulk) {
+    // Split a sub-tab's items into kind-piles (Metrics / Joins / Cross-schema joins / Entities /
+    // Other) in REVIEW_GROUPS order. Returns [{key,label,items}] for the kind-pill bar + scoped
+    // rendering, so a reviewer can knock out the 21-item pile before the 285-item one.
+    function reviewKindGroups(items) {
       const used = new Set();
       const groups = [];
       REVIEW_GROUPS.forEach(gd => {
         const gi = items.filter(it => gd.match(it));
         gi.forEach(it => used.add(it));
-        if (gi.length) groups.push({ label: gd.label, items: gi });
+        if (gi.length) groups.push({ key: gd.label, label: gd.label, items: gi });
       });
       const other = items.filter(it => !used.has(it));
-      if (other.length) groups.push({ label: 'Other', items: other });
-      // ALWAYS show the kind header — even for a single group — so "Cross-schema joins"
-      // stays labelled when it's the only pile left, instead of looking like plain joins.
-      groups.forEach(g => {
-        sec.appendChild(kindSubhead(g.label, g.items, bulk));
-        g.items.forEach(it => sec.appendChild(reviewCard(it)));
-      });
+      if (other.length) groups.push({ key: 'Other', label: 'Other', items: other });
+      return groups;
     }
     function needsEyes(it) {
       // Rule 1 (metrics — block runtime), low-confidence guesses, and drifted entries
@@ -1996,7 +2023,7 @@
       order.forEach(k => {
         const cnt = k === 'eyes' ? eyesCount : groups[k].items.length;
         const b = el('button', { type: 'button', class: reviewSubTab === k ? 'active' : '',
-          onclick: () => { reviewSubTab = k; renderBody(); } }, groups[k].label);
+          onclick: () => { reviewSubTab = k; reviewKind = 'all'; renderBody(); } }, groups[k].label);
         b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
         bar.appendChild(b);
       });
@@ -2004,23 +2031,53 @@
 
       const g = groups[reviewSubTab] || groups.eyes;
       const isEyes = reviewSubTab === 'eyes' || !groups[reviewSubTab];
-      setSearchCounts(`${isEyes ? eyesCount : g.items.length} ${g.label.toLowerCase()}`);
+
+      // Second-layer KIND pills: within this sub-tab, split the pile by kind (Metrics / Joins /
+      // Cross-schema joins / Entities / couldn't-read columns) with counts, so the reviewer can
+      // jump straight to — and knock out — the small pile before the big one, instead of scrolling.
+      const kindGroups = reviewKindGroups(g.items);
+      if (isEyes && unknown.length) {
+        kindGroups.push({ key: '__unknown', label: "Couldn't read", items: unknown, special: 'unknown' });
+      }
+      const totalItems = kindGroups.reduce((n, kg) => n + kg.items.length, 0);
+      if (reviewKind !== 'all' && !kindGroups.some(kg => kg.key === reviewKind)) reviewKind = 'all';
+      if (kindGroups.length > 1) {
+        const kbar = el('div', { class: 'subtab-bar kind-bar' });
+        const mkPill = (key, label, cnt) => {
+          const b = el('button', { type: 'button', class: reviewKind === key ? 'active' : '',
+            onclick: () => { reviewKind = key; renderBody(); } }, label);
+          b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
+          return b;
+        };
+        kbar.appendChild(mkPill('all', 'All', totalItems));
+        kindGroups.forEach(kg => kbar.appendChild(mkPill(kg.key, kg.label, kg.items.length)));
+        root.appendChild(kbar);
+      }
+
+      const shown = reviewKind === 'all' ? kindGroups : kindGroups.filter(kg => kg.key === reviewKind);
+      const renderedCount = shown.reduce((n, kg) => n + kg.items.length, 0);
+      const shownLabel = (reviewKind === 'all' || !shown.length) ? g.label.toLowerCase() : shown[0].label.toLowerCase();
+      setSearchCounts(`${renderedCount} ${shownLabel}`);
 
       const sec = el('div', { class: 'schema-section' });
       // No blanket "Approve all" — each kind sub-header carries its own scoped "✓ Approve N",
       // so approving metrics can't silently approve the joins too (that was the footgun).
       if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
-      if (g.items.length) appendGroupedCards(sec, g.items, g.bulk);
 
-      // The couldn't-read columns, as their own sub-group at the bottom of "Needs your eyes".
-      if (isEyes && unknown.length) {
-        sec.appendChild(kindSubhead("Columns agami couldn't read", unknown, false));
-        sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
-          text: "Opaque names with no clue in the data. Describe one in a line if you know it — or leave it; agami asks again the first time a query actually uses it." }));
-        unknown.forEach(uc => sec.appendChild(describeCard(uc)));
-      }
+      shown.forEach(kg => {
+        if (kg.special === 'unknown') {
+          // The couldn't-read columns — opaque names, described via a one-line text edit (not approve/reject).
+          sec.appendChild(kindSubhead("Columns agami couldn't read", kg.items, false));
+          sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
+            text: "Opaque names with no clue in the data. Describe one in a line if you know it — or leave it; agami asks again the first time a query actually uses it." }));
+          kg.items.forEach(uc => sec.appendChild(describeCard(uc)));
+        } else {
+          sec.appendChild(kindSubhead(kg.label, kg.items, g.bulk));
+          kg.items.forEach(it => sec.appendChild(reviewCard(it)));
+        }
+      });
 
-      if (!g.items.length && !(isEyes && unknown.length)) {
+      if (!renderedCount) {
         sec.appendChild(el('div', { class: 'empty-state',
           text: isEyes ? 'Nothing needs your eyes.' : 'Nothing in “' + g.label + '”.' }));
       }
