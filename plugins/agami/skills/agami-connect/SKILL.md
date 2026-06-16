@@ -389,6 +389,13 @@ For non-SQLite/DuckDB with multiple schemas, **AskUserQuestion** multi-select: "
 
 This is the union-rescan that makes Case 2 work: adding `billing` to a model that already has `public` must scan `public` ∪ `billing` together — scanning only `billing` would build the new schema's internal joins but **miss every join back to `public`** (a cross-schema edge needs both endpoints in one introspection pass). Never silently re-scan just the delta.
 
+**Reconcile what you'll scan vs what's actually there — NEVER silently shrink the scope.** When the user picks `All schemas` (or you narrow the set yourself), do NOT quietly hand the engine a smaller list. Count what the catalog holds (schemas + tables) and **state plainly what you're INCLUDING and what you're LEAVING OUT, with a reason for each exclusion**, then confirm. Three kinds get excluded and each must be named, not dropped silently:
+- **System/internal schemas** — `pg_auto_copy`, `pg_*`, `information_schema`, Supabase `auth`/`storage`/… (the engine already drops these; still *report* them).
+- **A schema that looks like a DIFFERENT dataset** — e.g. a `public` full of Salesforce objects (`accounts`, `opportunities`, `leads`, `contacts`, `pricebooks`) sitting next to ServiceNow module schemas. Don't fold a foreign domain into this model; **name it and offer it as its own profile**.
+- **Tables you allowlist away** — any explicit `--tables`/`--tables-file` subset.
+
+Example to say BEFORE introspecting: *"Found 70 tables across 18 schemas. I'll model the **52** in the 16 ServiceNow module schemas. **Excluding:** `public` (17 — `accounts`/`opportunities`/`leads`… looks like a separate Salesforce dataset; onboard it as its own profile if you want it) and `pg_auto_copy` (1 — Redshift system). Good?"* A user who said "all" must SEE the delta up front — never discover later that 19 tables never made it in. This is mandatory whenever discovered-count ≠ scanned-count.
+
 ### 1.4 — Organization context (MANDATORY — ALWAYS ASK)
 
 This runs on **every** invocation. The user's yes/skip is theirs; the skill never decides for them. "don't ask clarifying questions" does NOT cancel this — it's required state-gathering, not a clarifying question. **Only conditional skip:** `ORGANIZATION.md` exists and has been edited beyond the template.
@@ -494,6 +501,8 @@ It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: st
 The validator gates the write — **if it fails, the model is not persisted.** Surface the errors verbatim and stop (this should be rare; the engine emits valid models).
 
 Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe> mode); <R> relationships, <D> deep tables, <S> sensitive columns flagged.`
+
+**Backstop reconciliation — if `<N>` is fewer than the catalog held, say what's NOT in the model and why** (the 1.3 guard should have covered this up front; repeat it here so it can't slip). E.g. *"Modeled 52 of 70 tables — left out `public` (17, separate Salesforce dataset) and `pg_auto_copy` (1, system). Say the word if you want any of them."* A user who picked "all" should never have to diff the catalog themselves to notice a schema is missing.
 
 ---
 
