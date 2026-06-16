@@ -297,6 +297,20 @@ def test_column_groups_are_role_aware_and_shrink_misc():
     assert len(grouped) == len(set(grouped))
 
 
+def test_references_grouped_from_relationship_not_just_foreign_key():
+    # The introspection pipeline records joins as Relationships, never on column.foreign_key,
+    # so references must be classifiable from the relationship's FROM columns. caller_id has no
+    # foreign_key set, but passing it as a reference column should file it under `references`.
+    cols = [m.Column(name=f"sys_id", type="string", primary_key=True)] + \
+           [m.Column(name="caller_id", type="string")] + \
+           [m.Column(name=f"f_{i}", type="decimal") for i in range(35)]
+    g_no = build.derive_column_groups(cols)
+    assert "caller_id" in g_no.get("misc", [])                      # singleton -> misc without ref info
+    g_ref = build.derive_column_groups(cols, reference_columns={"caller_id"})
+    assert g_ref["references"] == ["caller_id"]                     # known FROM column -> references
+    assert "caller_id" not in g_ref.get("misc", [])
+
+
 def test_column_group_descriptions_role_and_prefix():
     groups = {"references": ["caller_id"], "measures": ["amount"], "discount": ["a", "b"]}
     d = build.column_group_descriptions(groups)

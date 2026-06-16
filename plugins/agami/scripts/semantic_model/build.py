@@ -177,13 +177,15 @@ _ROLE_GROUP_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-def _role_of(c: Column) -> Optional[str]:
+def _role_of(c: Column, reference_columns: set[str]) -> Optional[str]:
     """The role group for a column from its structural signals, or None to defer to prefix
     grouping. First match wins (so a coded FK files under `references`, a boolean flag under
-    `flags`, etc.) — keeps every column in exactly one group."""
+    `flags`, etc.) — keeps every column in exactly one group. `reference_columns` (column names
+    that are the FROM side of a join) lets the caller mark references even though the join lives
+    on a Relationship, not on `column.foreign_key` — which the introspection pipeline never sets."""
     if c.primary_key or c.name.upper() == "ID":
         return "identity"
-    if c.foreign_key is not None:
+    if c.foreign_key is not None or c.name in reference_columns:
         return "references"
     if c.choice_field:
         return "codes"
@@ -198,15 +200,22 @@ def _role_of(c: Column) -> Optional[str]:
     return None
 
 
-def derive_column_groups(columns: list[Column]) -> dict[str, list[str]]:
+def derive_column_groups(
+    columns: list[Column], *, reference_columns: Optional[set[str]] = None
+) -> dict[str, list[str]]:
     """Group deep-table columns ROLE-FIRST (references / codes / flags / audit / measures /
     dates / identity from structural signals), then by name prefix for whatever's left, then
     fold remaining single-prefix columns into `misc`. Every column lands in exactly one group
-    (no orphans — the validator enforces this on deep tables). General, not vendor-specific."""
+    (no orphans — the validator enforces this on deep tables). General, not vendor-specific.
+
+    `reference_columns` (optional) names the columns that are the FROM side of a join — passed
+    in once relationships are known so FK columns group under `references` instead of scattering
+    through `misc` (joins live on Relationship objects, not on `column.foreign_key`)."""
+    ref_cols = reference_columns or set()
     role_groups: dict[str, list[str]] = defaultdict(list)
     prefix_groups: dict[str, list[str]] = defaultdict(list)
     for c in columns:
-        role = _role_of(c)
+        role = _role_of(c, ref_cols)
         if role is not None:
             role_groups[role].append(c.name)
         else:
@@ -233,10 +242,12 @@ def column_group_descriptions(groups: dict[str, list[str]]) -> dict[str, str]:
     return out
 
 
-def maybe_column_groups(columns: list[Column]) -> dict[str, list[str]]:
+def maybe_column_groups(
+    columns: list[Column], *, reference_columns: Optional[set[str]] = None
+) -> dict[str, list[str]]:
     """column_groups only on deep tables; narrow tables get none."""
     if len(columns) >= DEEP_TABLE_COLUMN_THRESHOLD:
-        return derive_column_groups(columns)
+        return derive_column_groups(columns, reference_columns=reference_columns)
     return {}
 
 

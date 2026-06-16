@@ -64,6 +64,7 @@ from .models import (
     Relationship,
     StorageConnection,
     Table,
+    bare_name,
 )
 
 Runner = Callable[[str], list[dict]]
@@ -306,6 +307,11 @@ def introspect(
     report.table_count = len(built)
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
+
+    # 3b. now that joins are known, re-derive deep-table column_groups so FK (reference) columns
+    # group under `references` instead of scattering through `misc` — references live on the
+    # Relationship, not on the column, so the initial per-table grouping couldn't see them.
+    _regroup_columns_with_references(built, rels)
 
     # 4. propose subject areas + cross-area edges
     areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
@@ -740,6 +746,26 @@ def _build_relationships(
     # through use). This is what lifts a sparse demo from ~9 joins toward the real graph.
     rels.extend(_promote_reference_fields(tables, grain_by_table, rels, report))
     return rels
+
+
+def _regroup_columns_with_references(tables: list[Table], rels: list[Relationship]) -> None:
+    """Re-derive column_groups (+ descriptions) for deep tables now that relationships exist, so
+    each table's FK (FROM-side) columns land in the `references` group. Mutates `tables` in place;
+    a no-op for narrow tables (no groups) and tables with no outgoing simple-FK joins. Schema-aware
+    so a same-named table in another schema doesn't borrow the wrong references."""
+    ref_by_table: dict[tuple, set[str]] = {}
+    for r in rels:
+        if not r.from_column:   # skip on:-expression joins (no single FROM column)
+            continue
+        ref_by_table.setdefault((r.from_schema, bare_name(r.from_table)), set()).add(r.from_column)
+    for t in tables:
+        if not t.column_groups:   # only deep tables carry groups
+            continue
+        ref_cols = ref_by_table.get((t.schema_name, t.name)) or ref_by_table.get((None, t.name)) or set()
+        if not ref_cols:
+            continue
+        t.column_groups = build.maybe_column_groups(t.columns, reference_columns=ref_cols)
+        t.column_group_descriptions = build.column_group_descriptions(t.column_groups)
 
 
 _REF_ID_RE = re.compile(r"^(.+?)_id$", re.IGNORECASE)
