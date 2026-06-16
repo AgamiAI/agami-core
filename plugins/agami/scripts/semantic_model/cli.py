@@ -347,7 +347,7 @@ def cmd_suggest_metrics(args) -> int:
                 _dcache[st] = D.get_dialect("postgresql")
         return _dcache[st]
 
-    suggested = written = auto = 0
+    suggested = written = auto = skipped_opaque = 0
     errors: list[str] = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
@@ -355,6 +355,12 @@ def cmd_suggest_metrics(args) -> int:
         existing = {m.name for m in sa.metrics}
         items: list[dict] = []
         for t in sa.tables_defined:
+            # columns agami couldn't read yield no metric until described — count them so the
+            # user knows describing the "couldn't read" pile unlocks more metrics on a re-run.
+            skipped_opaque += sum(
+                1 for c in t.columns
+                if c.description_source == "ai_unknown" and not c.primary_key
+                and (c.type == "boolean" or c.aggregation in ("additive", "averageable")))
             st = conn_type.get(t.storage_connection, default_type)
             for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table,
                                          now=INTRO._NOW):
@@ -369,9 +375,13 @@ def cmd_suggest_metrics(args) -> int:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    _print_json({"suggested": suggested, "written": written, "auto_approved": auto, "errors": errors,
-                 "note": "basic COUNT/SUM/AVG auto-approved (system-signed); flag rates & "
-                         "durations left proposed — review & sign off in the explorer (/agami-model)"})
+    note = ("basic COUNT/SUM/AVG auto-approved (system-signed); flag rates & durations left "
+            "proposed — review & sign off in the explorer (/agami-model)")
+    if skipped_opaque:
+        note += (f". {skipped_opaque} column(s) skipped as un-described (ai_unknown) — describe "
+                 "them, then re-run suggest-metrics to pick up their metrics (incremental, no dupes)")
+    _print_json({"suggested": suggested, "written": written, "auto_approved": auto,
+                 "skipped_opaque": skipped_opaque, "errors": errors, "note": note})
     return 0 if not errors else 1
 
 

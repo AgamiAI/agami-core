@@ -175,6 +175,28 @@ def test_suggest_metrics_rate_and_duration_patterns():
     assert dur["review_state"] == "unreviewed" and dur["confidence"] == "proposed"
 
 
+def test_suggest_metrics_skips_opaque_columns_until_described():
+    from semantic_model import dialects as D
+    # active_to is a boolean agami couldn't read; cost is a described additive column.
+    cols = [
+        m.Column(name="id", type="integer", primary_key=True),
+        m.Column(name="active_to", type="boolean", description_source="ai_unknown"),
+        m.Column(name="cost", type="decimal", aggregation="additive", description="acquisition cost"),
+    ]
+    t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],
+                description="a", columns=cols)
+    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert "alm_asset_active_to_rate" not in names   # opaque column → no metric proposed
+    assert "alm_asset_total_cost" in names           # described column → metric proposed
+    assert "alm_asset_count" in names                # COUNT(*) is column-independent, always kept
+
+    # once the column is described, the SAME call now proposes its metric (the re-pass).
+    cols[1].description_source = "ai"
+    cols[1].description = "whether the asset is still within its active period"
+    names2 = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert "alm_asset_active_to_rate" in names2
+
+
 def test_suggest_metrics_inherits_column_unit():
     from semantic_model import dialects as D
     t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],

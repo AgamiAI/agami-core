@@ -537,7 +537,12 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
       • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
         pattern — `AVG(end − start)` via the dialect's day-difference form).
     Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
-    bulk in the explorer. Count is always kept; the rest are capped at max_per_table."""
+    bulk in the explorer. Count is always kept; the rest are capped at max_per_table.
+
+    Columns agami couldn't read (`description_source == "ai_unknown"`) are SKIPPED — we don't
+    propose a metric on a column we can't explain (its prose would just restate opaque SQL).
+    Re-run after such a column is described and it becomes eligible (write_items is incremental,
+    so no duplicates)."""
     t = table.name
     st = dialect.name
     out: list[dict] = [{"name": f"{t}_count", "calculation": f"Number of {t} records",
@@ -545,6 +550,8 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     ts_cols: list[str] = []
     for c in table.columns:
         if c.primary_key:
+            continue
+        if c.description_source == "ai_unknown":  # opaque column → don't propose a metric on it
             continue
         is_bool = c.type == "boolean"
         is_int_flag = c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))
