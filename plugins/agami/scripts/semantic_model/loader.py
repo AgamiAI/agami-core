@@ -277,6 +277,13 @@ def _find_table(org: Organization, table_name: str, area: Optional[str] = None) 
         for t in sa.tables_defined:
             if t.name == table_name or t.name == bare:
                 return t
+    # Multi-area membership: a table is DEFINED in exactly one area but may be REFERENCED from
+    # others via a TableRef (a shared dimension like `sys_user`). When the named area lists it
+    # among its `tables`, fall back to the org-wide definition instead of reporting "not found".
+    if area:
+        sa = org.subject_area(area)
+        if sa and any(ref.table == table_name or ref.table == bare for ref in sa.tables):
+            return _find_table(org, table_name, area=None)
     return None
 
 
@@ -475,6 +482,13 @@ def get_subject_area_bundle(org: Organization, area: str) -> dict[str, Any]:
     if sa is None:
         raise KeyError(f"no subject area {area!r}")
     table_names = [t.name for t in sa.tables_defined]
+    # multi-area membership: also include tables this area REFERENCES (TableRef) but that are
+    # defined in another area — they resolve via _find_table's org-wide fallback.
+    defined = set(table_names)
+    for ref in sa.tables:
+        if ref.table not in defined:
+            table_names.append(ref.table)
+            defined.add(ref.table)
     bundle = get_table_context(
         org,
         table_names,
