@@ -522,6 +522,7 @@ def _build_table(
     _enrich_from_sample(dialect, runner, schema, table, cols)
 
     column_groups = build.maybe_column_groups(cols)
+    column_group_descriptions = build.column_group_descriptions(column_groups) if column_groups else {}
     if column_groups:
         report.deep_tables.append(table)
 
@@ -548,6 +549,7 @@ def _build_table(
         grain=grain,
         description="",  # LLM enrichment fills this in
         column_groups=column_groups,
+        column_group_descriptions=column_group_descriptions,
         performance_hints=perf,
         columns=cols,
     )

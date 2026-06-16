@@ -259,6 +259,54 @@ def test_deep_table_column_groups_no_orphans():
     assert grouped == {c.name for c in cols}  # every column covered
 
 
+def test_column_groups_are_role_aware_and_shrink_misc():
+    # A wide table where most columns have a UNIQUE prefix — the old prefix-only grouping
+    # dumped all of them into `misc`. Role grouping (FK / choice / flag / audit / measure /
+    # date from structural signals) should absorb them, leaving misc tiny.
+    cols = [
+        m.Column(name="sys_id", type="string", primary_key=True),
+        m.Column(name="caller_id", type="string",
+                 foreign_key=m.ForeignKey(table="sys_user", column="sys_id")),
+        m.Column(name="assignment_group", type="string",
+                 foreign_key=m.ForeignKey(table="sys_user_group", column="sys_id")),
+        m.Column(name="priority", type="string", choice_field={"1": "Critical", "2": "High"}),
+        m.Column(name="state", type="string", choice_field={"1": "New", "6": "Resolved"}),
+        m.Column(name="active", type="boolean"),
+        m.Column(name="made_sla", type="boolean"),
+        m.Column(name="created_at", type="timestamp"),
+        m.Column(name="closed_by", type="string"),     # audit by-suffix
+        m.Column(name="reassignment_count", type="integer", aggregation="additive"),
+        m.Column(name="business_duration", type="decimal", aggregation="additive"),
+        m.Column(name="due_date", type="date"),         # date role (not audit)
+        m.Column(name="short_description", type="string"),   # unique prefix -> misc
+        m.Column(name="urgency_reason", type="string"),      # unique prefix -> misc
+    ]
+    g = build.derive_column_groups(cols)
+    assert g["identity"] == ["sys_id"]
+    assert set(g["references"]) == {"caller_id", "assignment_group"}
+    assert set(g["codes"]) == {"priority", "state"}
+    assert set(g["flags"]) == {"active", "made_sla"}
+    assert set(g["audit"]) == {"created_at", "closed_by"}
+    assert set(g["measures"]) == {"reassignment_count", "business_duration"}
+    assert g["dates"] == ["due_date"]
+    # only the two genuinely-singleton, role-less columns land in misc
+    assert set(g["misc"]) == {"short_description", "urgency_reason"}
+    # still exactly one group per column, no orphans
+    grouped = [c for cols_ in g.values() for c in cols_]
+    assert sorted(grouped) == sorted(c.name for c in cols)
+    assert len(grouped) == len(set(grouped))
+
+
+def test_column_group_descriptions_role_and_prefix():
+    groups = {"references": ["caller_id"], "measures": ["amount"], "discount": ["a", "b"]}
+    d = build.column_group_descriptions(groups)
+    assert d["references"] == build._ROLE_GROUP_DESCRIPTIONS["references"]
+    assert d["measures"] == build._ROLE_GROUP_DESCRIPTIONS["measures"]
+    # a prefix-token group (not a known role) gets a generated gloss
+    assert "discount" in d["discount"].lower()
+    assert set(d) == set(groups)
+
+
 def test_sniff_date_detects_epoch_yyyymmdd_iso_and_rejects_ids():
     # epoch + yyyymmdd only when the column is time-named AND values fit the shape
     assert I._sniff_date("created_ts", "integer", [1704067200, 1709000000]) == ("epoch_s", "UTC")

@@ -149,30 +149,88 @@ def detect_sensitive(table_name: str, column_name: str) -> bool:
     return bool(WEAK_PII_RE.search(column_name)) and table_pii
 
 
+# Role groups — assigned from STRUCTURAL column signals (PK, foreign_key, choice_field,
+# aggregation class, type) plus a couple of universal name patterns. General, not vendor-
+# specific. A wide table's columns are mostly references / coded values / flags / measures /
+# timestamps, so naming those roles collapses the long tail of single-prefix columns that the
+# old prefix-only grouping dumped into `misc`. Order = priority; each column lands in exactly
+# ONE group (the explorer relies on one-group-per-column). Roles that match nothing fall
+# through to prefix-token grouping, then to `misc`.
+_FLAG_COL_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.IGNORECASE)
+# Audit / lifecycle bookkeeping: who/when a row was touched. Suffix-anchored on `_at/_on/_by`
+# (and the created/updated/modified/deleted prefixes) so it catches `created_at`/`opened_by`/
+# `closed_on` WITHOUT grabbing business dates like `due_date`/`order_date` (those fall to the
+# `dates` role instead).
+_AUDIT_COL_RE = re.compile(r"_(at|on|by)$|^(created|updated|modified|deleted)(_|$)", re.IGNORECASE)
+
+# One-line gloss per RECOGNIZED role group. Prefix-token groups (and any unknown key) get a
+# generated line from `column_group_descriptions`. No vendor specifics — these describe a role.
+_ROLE_GROUP_DESCRIPTIONS: dict[str, str] = {
+    "identity": "Primary keys and unique identifiers for this table.",
+    "references": "Foreign-key columns that link to other tables.",
+    "codes": "Coded / enumerated values drawn from a fixed set of choices.",
+    "flags": "Boolean indicator columns (true/false conditions).",
+    "audit": "Bookkeeping of when a row was created or changed, and by whom.",
+    "measures": "Numeric columns that can be aggregated (summed or averaged).",
+    "dates": "Date / time columns other than audit timestamps.",
+    "misc": "Columns with no shared prefix or recognized role.",
+}
+
+
+def _role_of(c: Column) -> Optional[str]:
+    """The role group for a column from its structural signals, or None to defer to prefix
+    grouping. First match wins (so a coded FK files under `references`, a boolean flag under
+    `flags`, etc.) — keeps every column in exactly one group."""
+    if c.primary_key or c.name.upper() == "ID":
+        return "identity"
+    if c.foreign_key is not None:
+        return "references"
+    if c.choice_field:
+        return "codes"
+    if c.type == "boolean" or _FLAG_COL_RE.match(c.name):
+        return "flags"
+    if _AUDIT_COL_RE.search(c.name):
+        return "audit"
+    if c.aggregation in ("additive", "averageable"):
+        return "measures"
+    if c.type in ("timestamp", "date"):
+        return "dates"
+    return None
+
+
 def derive_column_groups(columns: list[Column]) -> dict[str, list[str]]:
-    """Group deep-table columns by name prefix; every column lands in exactly one
-    group (no orphans — the validator enforces this on deep tables)."""
-    groups: dict[str, list[str]] = defaultdict(list)
+    """Group deep-table columns ROLE-FIRST (references / codes / flags / audit / measures /
+    dates / identity from structural signals), then by name prefix for whatever's left, then
+    fold remaining single-prefix columns into `misc`. Every column lands in exactly one group
+    (no orphans — the validator enforces this on deep tables). General, not vendor-specific."""
+    role_groups: dict[str, list[str]] = defaultdict(list)
+    prefix_groups: dict[str, list[str]] = defaultdict(list)
     for c in columns:
-        name = c.name
-        if c.primary_key or name.upper() == "ID":
-            groups["identity"].append(name)
-            continue
-        token = name.split("_")[0].lower()
-        if name.upper().startswith("TOTAL"):
-            groups["totals"].append(name)
+        role = _role_of(c)
+        if role is not None:
+            role_groups[role].append(c.name)
         else:
-            groups[token].append(name)
-    final: dict[str, list[str]] = {}
+            prefix_groups[c.name.split("_")[0].lower()].append(c.name)
+    final: dict[str, list[str]] = dict(role_groups)
     misc: list[str] = []
-    for g, cols in groups.items():
-        if g != "identity" and len(cols) == 1:
+    for g, cols in prefix_groups.items():
+        if len(cols) == 1:
             misc.extend(cols)
         else:
             final[g] = cols
     if misc:
         final.setdefault("misc", []).extend(misc)
-    return dict(final)
+    return final
+
+
+def column_group_descriptions(groups: dict[str, list[str]]) -> dict[str, str]:
+    """One-line gloss per group name: recognized role groups get a fixed description, prefix-
+    token groups get a generated 'Columns named <token>…' line. General; the result is stored
+    on the table so the explorer/MCP can explain a group instead of showing a bare key."""
+    out: dict[str, str] = {}
+    for g in groups:
+        out[g] = _ROLE_GROUP_DESCRIPTIONS.get(g) or f"Columns named {g}* (grouped by prefix)."
+    return out
 
 
 def maybe_column_groups(columns: list[Column]) -> dict[str, list[str]]:
@@ -489,12 +547,13 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
     for m in out:
         m["confidence"] = "proposed"
         m["review_state"] = "unreviewed"
+        m["primary_table"] = t  # every suggested metric is single-table — anchor it there
     return out
 
 
 __all__ = [
     "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
-    "derive_column_groups", "maybe_column_groups",
+    "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
     "suggest_metrics", "suspected_pii",

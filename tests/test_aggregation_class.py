@@ -141,6 +141,8 @@ def test_suggest_metrics_gated_on_aggregation():
     assert "orders_avg_discount_rate" in names      # averageable → AVG
     assert not any("status" in n or "weird" in n for n in names)  # dimension/unknown skipped
     assert all(x["confidence"] == "proposed" and x["review_state"] == "unreviewed" for x in mets)
+    # every suggested metric is single-table -> anchored to that table for the explorer view
+    assert all(x["primary_table"] == "orders" for x in mets)
     amt = next(x for x in mets if x["name"] == "orders_total_amount")
     assert amt["bindings"] == {"PostgreSQL": "SUM(amount)"} and amt["source_tables"] == ["orders"]
 

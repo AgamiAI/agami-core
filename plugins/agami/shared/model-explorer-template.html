@@ -278,7 +278,9 @@
     .col-group-header:hover { filter: brightness(0.97); }
     .col-group-caret { width: 0.9em; opacity: 0.6; }
     .col-group-name { text-transform: capitalize; }
-    .col-group-count { margin-left: auto; opacity: 0.55; font-weight: 400; }
+    .col-group-desc { margin-left: 10px; opacity: 0.55; font-weight: 400; font-style: italic;
+                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46ch; }
+    .col-group-count { margin-left: auto; opacity: 0.55; font-weight: 400; white-space: nowrap; }
     .glossary-row { display: flex; align-items: center; gap: 12px; padding: 8px 18px;
       border-bottom: 1px solid var(--border); font-size: 13px; }
     .glossary-row:hover { background: var(--row-zebra); }
@@ -1243,6 +1245,7 @@
     // of one endless list. Narrow tables (no groups) fall through to a flat field list.
     function renderFieldsGrouped(body, table) {
       const groups = table.column_groups || [];
+      const groupDescs = table.column_group_descriptions || {};
       const fields = table.fields || [];
       if (!groups.length) { fields.forEach(f => body.appendChild(renderField(f, table))); return; }
       const wide = fields.length > 40;            // default-collapse only genuinely wide tables
@@ -1263,10 +1266,13 @@
           : colGroupClosed.has(gid) ? false
           : colGroupOpen.has(gid) ? true
           : !wide;                                                   // default: open unless wide
+        const desc = g ? (groupDescs[g] || '') : '';
         const wrap = el('div', { class: 'col-group' + (visible ? '' : ' hidden') });
         const head = el('div', { class: 'col-group-header' });
+        if (desc) head.setAttribute('title', desc);                 // hover tooltip explains the group
         head.appendChild(el('span', { class: 'col-group-caret', text: open ? '▾' : '▸' }));
         head.appendChild(el('span', { class: 'col-group-name', text: (g || 'other').replace(/_/g, ' ') }));
+        if (desc) head.appendChild(el('span', { class: 'col-group-desc', text: desc }));
         const countTxt = searchQ && visible !== gf.length ? (visible + '/' + gf.length) : String(gf.length);
         head.appendChild(el('span', { class: 'col-group-count', text: countTxt + ' fields' }));
         head.addEventListener('click', () => {
@@ -1733,7 +1739,9 @@
     // whole table's measures at once; or approve every proposed metric in one click. This is the
     // "comprehensive but not overwhelming" review for the suggest-metrics output.
     let metricGroupsOpen = new Set();
-    function metricGroupKey(m) { return (m.area || '?') + '.' + ((m.source_tables || [])[0] || '?'); }
+    // Group a metric under its table: prefer the explicit `primary_table` anchor, fall back to
+    // the first source table (legacy models carry no anchor).
+    function metricGroupKey(m) { return (m.area || '?') + '.' + (m.primary_table || (m.source_tables || [])[0] || '?'); }
     function renderMetricsGrouped(root) {
       const all = (manifest.metrics || []).filter(m =>
         (!searchQ || `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`.toLowerCase().includes(searchQ))

@@ -323,6 +323,11 @@ class Table(_Base):
 
     # logical column groupings; REQUIRED on deep tables (enforced in validator).
     column_groups: dict[str, list[str]] = Field(default_factory=dict)
+    # OPTIONAL one-line gloss per column-group name (e.g. {"references": "FK columns linking
+    # to other tables"}). Lets the explorer/MCP explain a group instead of showing a bare key.
+    # Keys SHOULD be a subset of column_groups; extras are ignored, missing ones just render
+    # without a description.
+    column_group_descriptions: dict[str, str] = Field(default_factory=dict)
 
     # importer composition hook (v2; nothing consumes it in v1).
     inherits_columns_from: Optional[str] = None
@@ -412,6 +417,10 @@ class Entity(_Base):
     other_names: list[str] = Field(default_factory=list)
     description: str = ""
     maps_to: list[EntityMapping] = Field(default_factory=list)
+    # OPTIONAL display anchor — the single table to file this entity under in the explorer/MCP.
+    # An entity maps to many tables by design (`maps_to`); this just names the one a reader
+    # would consider its home (usually the primary mapping's table). None = list it un-anchored.
+    primary_table: Optional[str] = None
     # declarative opaque-literal identification (provider-neutral regex)
     value_pattern: Optional[str] = None
     value_format_hint: Optional[str] = None
@@ -458,6 +467,12 @@ class Metric(_Base):
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)
     subject_areas: list[str] = Field(default_factory=list)
+    # OPTIONAL display anchor — the single table this metric is primarily "about", so the
+    # explorer/MCP can present it under that table. NOT ownership and NOT a scope change: a
+    # metric still lives in its subject area and may join several `source_tables`; this just
+    # picks the one a reader would file it under (usually source_tables[0]). None = no single
+    # home (a genuinely cross-table metric); the UI then lists it un-anchored.
+    primary_table: Optional[str] = None
     # Additivity (scorecard #3). A SEMI-ADDITIVE measure (account balance, inventory,
     # headcount, point-in-time subscribers) is summable across some dimensions but NOT
     # across others — almost always time. `non_additive_dimensions` names those (a column

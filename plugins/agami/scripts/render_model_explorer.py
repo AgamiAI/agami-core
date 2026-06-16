@@ -129,6 +129,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 # ordered group names for the wide-table grouped field view (empty on
                 # narrow tables — the UI then just lists fields flat)
                 "column_groups": list((t.column_groups or {}).keys()),
+                "column_group_descriptions": t.column_group_descriptions or {},
                 "fields": fields_out,
             })
 
@@ -137,6 +138,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "name": e.name, "qname": f"{sa.name}.{e.name}", "plural": e.plural,
                 "other_names": e.other_names, "value_pattern": e.value_pattern,
                 "maps_to": [f"{m.table}.{m.column}" for m in e.maps_to],
+                "primary_table": e.primary_table,
                 "description": e.description, "review_state": e.review_state,
                 "confidence": e.confidence, "excluded": e.review_state == "rejected",
                 "signed_off_by": e.signed_off_by, "signed_off_role": e.signed_off_role,
@@ -149,7 +151,8 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "bindings": mm.bindings, "unit": mm.unit, "other_names": mm.other_names,
                 "non_additive_dimensions": mm.non_additive_dimensions,
                 "semi_additive_agg": mm.semi_additive_agg,
-                "source_tables": mm.source_tables, "description": mm.description,
+                "source_tables": mm.source_tables, "primary_table": mm.primary_table,
+                "description": mm.description,
                 "review_state": mm.review_state, "confidence": mm.confidence,
                 "excluded": mm.review_state == "rejected",
                 "signed_off_by": mm.signed_off_by, "signed_off_role": mm.signed_off_role,
