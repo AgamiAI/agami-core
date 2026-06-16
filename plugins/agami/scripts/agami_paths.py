@@ -141,6 +141,16 @@ def migrate_legacy_home(art: Path | None = None) -> bool:
         art = _legacy_artifacts_dir() or artifacts_dir()
     dest = local_dir(art)
     if dest.exists():
+        # Already consolidated. But a stale/cached process (e.g. an old pre-consolidation Desktop
+        # MCP copy) can RESURRECT `~/.agami/.config` — the live config lives in `dest`, nothing
+        # reads the legacy one, so sweep it back to an inert tombstone instead of letting it linger
+        # and look authoritative.
+        stale = LEGACY_HOME / ".config"
+        if stale.exists():
+            try:
+                stale.unlink()
+            except OSError:
+                pass
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
