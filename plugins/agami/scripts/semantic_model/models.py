@@ -436,6 +436,18 @@ class Entity(_Base):
     signed_off_at: Optional[str] = None
     signed_off_role: Optional[str] = None
 
+    @property
+    def resolved_primary_table(self) -> Optional[str]:
+        """Display anchor for the explorer/MCP: the explicit `primary_table` if set, else the
+        primary `maps_to` table (or the first mapping). None only when it maps to nothing — so an
+        entity gets filed under a table without anyone having to set `primary_table` by hand."""
+        if self.primary_table:
+            return self.primary_table
+        for m in self.maps_to:
+            if m.primary:
+                return m.table
+        return self.maps_to[0].table if self.maps_to else None
+
     @model_validator(mode="after")
     def _one_primary(self) -> "Entity":
         if self.maps_to:

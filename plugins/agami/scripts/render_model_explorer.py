@@ -138,7 +138,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "name": e.name, "qname": f"{sa.name}.{e.name}", "plural": e.plural,
                 "other_names": e.other_names, "value_pattern": e.value_pattern,
                 "maps_to": [f"{m.table}.{m.column}" for m in e.maps_to],
-                "primary_table": e.primary_table,
+                "primary_table": e.resolved_primary_table,
                 "description": e.description, "review_state": e.review_state,
                 "confidence": e.confidence, "excluded": e.review_state == "rejected",
                 "signed_off_by": e.signed_off_by, "signed_off_role": e.signed_off_role,

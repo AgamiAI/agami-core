@@ -582,6 +582,24 @@ def _apply_one(root: Path, op: dict, signer, role,
         _dump(path, doc)
         return path
 
+    if kind == "subject_area":
+        # edit-only (e.g. set the area's `description`) — a subject area carries no trust block,
+        # so approve/reject/exclude don't apply. Lets the enrichment pass replace the auto-proposed
+        # boilerplate with a real business description through the validated curate path.
+        if op.get("op") != "edit":
+            raise ValueError("subject_area supports only edit ops (e.g. field=description)")
+        fld, val = op.get("field"), op.get("value")
+        if not fld:
+            raise ValueError("edit op needs field")
+        path = _area_dir(root, area) / "subject_area.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"no subject area {area!r}")
+        _snapshot(backups, path)
+        doc = _load(path)
+        doc[fld] = val
+        _dump(path, doc)
+        return path
+
     if kind == "relationship":
         frm, _, to = name.partition("->")
         path = _area_dir(root, area) / "relationships.yaml"

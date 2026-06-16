@@ -692,6 +692,12 @@ I split <N> tables into <A> subject areas:
 
 If they adjust, edit the `subject_areas/` tree accordingly and re-validate (sizing warns at 25 tables, errors at 30).
 
+**Replace each area's auto-proposed description with a real one** — the engine seeds `"Auto-proposed subject area covering: <tables>"`, which is boilerplate, but the **subject-area description is load-bearing**: it's what the MCP shows in its first pass so the LLM can ROUTE a question to the right area (`get_datasource_schema` returns name + description per area). A blank/boilerplate description means the router is guessing. So write one business line per area — what domain it covers and when you'd query it — grounded in its tables/columns (NOT product memory). Apply through the validated path, one batch (no generator script):
+```bash
+# one {op:edit, kind:subject_area, area:<name>, name:<name>, field:description, value:"<line>"} per area
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-area-desc.json
+```
+
 ---
 
 ## Phase 4: Curate before examples — exclude + sign off what seeds depend on
