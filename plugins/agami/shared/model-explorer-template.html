@@ -1649,6 +1649,7 @@
       card.appendChild(flatCardHeader(m.name, m, eff));
       const body = el('div', { class: 'table-body' });
       body.appendChild(labelLine('What it measures (click to edit)'));
+      body.appendChild(hintLine('The plain-language definition — this is what agami matches a question against. The SQL below is how it’s computed.'));
       body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
         field: 'calculation', original: m.calculation, placeholder: '(click to add the calculation)' }));
       // SQL bindings — click-to-edit (per dialect). When a metric has no binding yet, still
@@ -1656,8 +1657,13 @@
       // fixable here, not via the description.
       const bindings = m.bindings || {};
       const dialects = Object.keys(bindings).length ? Object.keys(bindings) : (STORAGE_TYPE ? [STORAGE_TYPE] : ['SQL']);
-      dialects.forEach(d => {
-        body.appendChild(labelLine(d + ' SQL (click to edit)'));
+      dialects.forEach((d, i) => {
+        body.appendChild(labelLine(d + ' SQL expression (click to edit)'));
+        // SQL is hand-edited with no autocomplete, and agami doesn't verify column names here —
+        // a typo'd column slips through to query time. Say so once, under the first binding.
+        if (i === 0) body.appendChild(hintLine(
+          'Just the aggregate expression — e.g. SUM(cost) or COUNT(DISTINCT user_id) — not a full ' +
+          'SELECT (no FROM/WHERE). agami doesn’t check the column names here, so make sure they exist on the source table.'));
         body.appendChild(inlineBindingBlock(m, d));
       });
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
@@ -1665,8 +1671,10 @@
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
       body.appendChild(flatCardActions('metric', m));
       if (editOpen.has(m.qname)) body.appendChild(renderEditForm(m, 'metric', [
-        { field: 'unit', label: 'Unit (e.g. INR, percent)', current: m.unit, rows: 1 },
-        { field: 'description', label: 'Description', current: m.description, rows: 2 },
+        { field: 'unit', label: 'Unit', current: m.unit, rows: 1,
+          hint: 'What the result is measured in, so answers format nicely — a currency like USD/INR, or "percent" / "days". For a SUM/AVG, agami inherits the source column’s unit automatically; set it here only if it’s missing or wrong. Leave blank for a plain count.' },
+        { field: 'description', label: 'Notes (optional)', current: m.description, rows: 2,
+          hint: 'Extra business context beyond the definition above — when to use it, caveats, how it differs from a similar metric. The definition itself goes in “What it measures”; leave this blank if there’s nothing to add.' },
         { field: 'other_names', label: 'Also called', type: 'list', current: m.other_names, rows: 2 },
       ]));
       card.appendChild(body);
