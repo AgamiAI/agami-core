@@ -140,7 +140,9 @@ def test_suggest_metrics_gated_on_aggregation():
     assert "orders_total_amount" in names           # additive → SUM
     assert "orders_avg_discount_rate" in names      # averageable → AVG
     assert not any("status" in n or "weird" in n for n in names)  # dimension/unknown skipped
-    assert all(x["confidence"] == "proposed" and x["review_state"] == "unreviewed" for x in mets)
+    # COUNT(*)/SUM(col)/AVG(col) are mechanically trivial -> auto-approved with a system sign-off
+    assert all(x["confidence"] == "confirmed" and x["review_state"] == "approved" for x in mets)
+    assert all(x["signed_off_by"] == "agami_suggest" and x["signed_off_role"] == "system" for x in mets)
     # every suggested metric is single-table -> anchored to that table for the explorer view
     assert all(x["primary_table"] == "orders" for x in mets)
     amt = next(x for x in mets if x["name"] == "orders_total_amount")
@@ -164,3 +166,25 @@ def test_suggest_metrics_rate_and_duration_patterns():
     dur = mets["incident_avg_duration_days"]   # start+end timestamp pair → dialect DATEDIFF
     assert dur["bindings"]["Redshift"] == "AVG(DATEDIFF('day', opened_at, resolved_at))"
     assert dur["unit"] == "days"
+    # auto-approve policy: COUNT(*) is judgment-free → approved; flag RATES (CASE) and the
+    # DURATION pair (heuristic start/end) carry a choice the engine could miss → stay proposed.
+    assert mets["incident_count"]["review_state"] == "approved"
+    assert mets["incident_count"]["confidence"] == "confirmed"
+    assert mets["incident_made_sla_rate"]["review_state"] == "unreviewed"
+    assert mets["incident_is_active_rate"]["review_state"] == "unreviewed"
+    assert dur["review_state"] == "unreviewed" and dur["confidence"] == "proposed"
+
+
+def test_suggest_metrics_auto_approve_stamps_signoff_timestamp():
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive")])
+    mets = {x["name"]: x for x in build.suggest_metrics(
+        t, D.get_dialect("postgresql"), now="2026-06-16T00:00:00Z")}
+    # the trivial COUNT/SUM carry the full sign-off block (Rule-1 trust parity)
+    for nm in ("orders_count", "orders_total_amount"):
+        assert mets[nm]["review_state"] == "approved"
+        assert mets[nm]["signed_off_at"] == "2026-06-16T00:00:00Z"
+        assert mets[nm]["signed_off_by"] == "agami_suggest"

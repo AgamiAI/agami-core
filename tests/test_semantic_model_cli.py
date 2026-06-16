@@ -94,15 +94,19 @@ def test_set_units_is_idempotent(tmp_path):
     assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] == 0
 
 
-def test_suggest_metrics_writes_proposed(tmp_path):
+def test_suggest_metrics_writes_and_auto_approves_trivial(tmp_path):
     _model(tmp_path)
     rc, out = _run(["suggest-metrics", str(tmp_path)])
     d = json.loads(out)
     assert rc == 0 and d["written"] >= 2, d   # at least orders_count + order_items_count
+    assert d["auto_approved"] >= 1, d         # the COUNT(*) measures auto-approve
     f = tmp_path / "subject_areas" / "s" / "metrics" / "orders_count.yaml"
     assert f.exists()
     met = yaml.safe_load(f.read_text())
-    assert met["confidence"] == "proposed" and met["review_state"] == "unreviewed"
+    # COUNT(*) is judgment-free → auto-approved with a system sign-off (incl. timestamp)
+    assert met["confidence"] == "confirmed" and met["review_state"] == "approved"
+    assert met["signed_off_by"] == "agami_suggest" and met["signed_off_role"] == "system"
+    assert met.get("signed_off_at")
     assert met["bindings"] == {"PostgreSQL": "COUNT(*)"}
 
 

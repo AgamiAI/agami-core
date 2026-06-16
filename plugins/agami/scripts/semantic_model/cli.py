@@ -333,6 +333,7 @@ def cmd_suggest_metrics(args) -> int:
     from . import build as B
     from . import curate
     from . import dialects as D
+    from . import introspect as INTRO
     org = L.load_organization(args.root)
     conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
     default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
@@ -346,7 +347,7 @@ def cmd_suggest_metrics(args) -> int:
                 _dcache[st] = D.get_dialect("postgresql")
         return _dcache[st]
 
-    suggested = written = 0
+    suggested = written = auto = 0
     errors: list[str] = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
@@ -355,18 +356,22 @@ def cmd_suggest_metrics(args) -> int:
         items: list[dict] = []
         for t in sa.tables_defined:
             st = conn_type.get(t.storage_connection, default_type)
-            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
+            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table,
+                                         now=INTRO._NOW):
                 if met["name"] in existing:
                     continue
                 existing.add(met["name"])
                 items.append(met)
                 suggested += 1
+                if met.get("review_state") == "approved":
+                    auto += 1
         if items:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    _print_json({"suggested": suggested, "written": written, "errors": errors,
-                 "note": "proposed/unreviewed — review & sign off in the model explorer (/agami-model)"})
+    _print_json({"suggested": suggested, "written": written, "auto_approved": auto, "errors": errors,
+                 "note": "basic COUNT/SUM/AVG auto-approved (system-signed); flag rates & "
+                         "durations left proposed — review & sign off in the explorer (/agami-model)"})
     return 0 if not errors else 1
 
 

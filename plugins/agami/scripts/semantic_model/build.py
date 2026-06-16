@@ -510,7 +510,24 @@ _FLAG_NAME_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.I)
 _TS_TYPES = {"timestamp", "date"}
 
 
-def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[dict]:
+# A "trivial" measure is a single bare aggregate over ONE column (or COUNT(*)) — there's no
+# interpretive choice in it, so it's as trustworthy as the column's aggregation class (which is
+# already confirmed structure). These auto-approve with a system sign-off, like an enforced FK
+# join, instead of cluttering the review queue. Anything with a CASE (a flag RATE) or a
+# multi-column / function expression (a DURATION's start/end pairing) is NOT trivial — that
+# involves a heuristic the engine could get wrong, so it stays proposed for a human glance.
+_TRIVIAL_BINDING_RE = re.compile(
+    r"^\s*(COUNT\(\s*\*\s*\)|(?:SUM|AVG)\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\))\s*$", re.IGNORECASE)
+
+
+def _is_trivial_measure(binding_sql: str) -> bool:
+    """True for COUNT(*) / SUM(col) / AVG(col) — a single bare aggregate, no CASE/arithmetic/
+    function. These carry no judgment beyond the column's (already-confirmed) aggregation class."""
+    return bool(_TRIVIAL_BINDING_RE.match(binding_sql or ""))
+
+
+def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
+                    now: Optional[str] = None) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
       • count of rows;
       • SUM of `additive` columns, AVG of `averageable` columns (gated on aggregation class —
@@ -556,8 +573,20 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
                     "source_tables": [t], "unit": "days"})
     out = out[: max(1, max_per_table)]
     for m in out:
-        m["confidence"] = "proposed"
-        m["review_state"] = "unreviewed"
+        binding = next(iter(m.get("bindings", {}).values()), "")
+        if _is_trivial_measure(binding):
+            # mechanically sound (COUNT(*) / SUM(col) / AVG(col)) — auto-approve with a system
+            # sign-off so it skips the review queue, exactly like an enforced FK join.
+            m["confidence"] = "confirmed"
+            m["review_state"] = "approved"
+            m["signed_off_by"] = "agami_suggest"
+            m["signed_off_role"] = "system"
+            if now:
+                m["signed_off_at"] = now
+        else:
+            # a flag RATE or a DURATION pair — heuristic choice the engine could get wrong.
+            m["confidence"] = "proposed"
+            m["review_state"] = "unreviewed"
         m["primary_table"] = t  # every suggested metric is single-table — anchor it there
     return out
 
