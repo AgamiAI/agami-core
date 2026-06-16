@@ -146,7 +146,7 @@ _MIN_GATE_COLS = 2  # below this a table is too small to confidently call "skipp
 # is what makes the gate able to tell "intentionally blank" from "the pass didn't finish".
 _SELF_EVIDENT_NAME_RE = re.compile(
     r"^(id|.*_id|.*_no|.*_uuid|.*_guid|.*_key|created.*|modified.*|updated.*|deleted.*|"
-    r".*_at|.*_by|.*_date|.*_ts|.*_time|.*timestamp|is_.*|has_.*|.*_flag)$",
+    r".*_at|.*_on|.*_by|.*_date|.*_ts|.*_time|.*timestamp|.*_count|is_.*|has_.*|.*_flag)$",
     re.IGNORECASE,
 )
 # More than this many skipped-meaningful columns in one table ⇒ under-enriched. A couple of
@@ -178,6 +178,17 @@ def column_coverage(org: Organization) -> dict:
     tot = {"columns": 0, "described": 0, "ai_unknown": 0, "blank": 0, "meaningful_blank": 0}
     unenriched: list[str] = []
     under_enriched: list[str] = []
+    # A detected platform (e.g. ServiceNow) may declare extra self-evident column conventions
+    # (its `sys_` system columns) in the PRESET config — union them with the universal regex so
+    # the gate doesn't force "name → the name" descriptions on a platform's bookkeeping columns.
+    from . import metadata_sources as _MS
+    _preset = _MS.detect_preset([t.name for s in org.subject_areas for t in s.tables_defined])
+    _preset_self_evident = _MS.self_evident_pattern(_preset)
+
+    def _self_evident(name: str) -> bool:
+        return bool(_SELF_EVIDENT_NAME_RE.match(name)
+                    or (_preset_self_evident and _preset_self_evident.match(name)))
+
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             if getattr(t, "review_state", "approved") == "rejected":
@@ -195,7 +206,7 @@ def column_coverage(org: Organization) -> dict:
                     ai_unknown += 1
                 else:                                  # blank + no source: self-evident OR skipped
                     blank += 1
-                    if not _SELF_EVIDENT_NAME_RE.match(c.name):
+                    if not _self_evident(c.name):
                         meaningful_blank += 1
                         blank_meaningful_names.append(c.name)
             n = described + ai_unknown + blank

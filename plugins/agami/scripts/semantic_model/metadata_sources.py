@@ -19,6 +19,7 @@ job — this module never touches the DB or disk.
 
 from __future__ import annotations
 
+import re
 from typing import Iterable, Optional
 
 # A (table, column) pair, lower-cased, used to filter source rows down to columns the model
@@ -66,6 +67,11 @@ PRESETS: dict[str, dict] = {
             "parent": "task", "problem_id": "problem", "rfc": "change_request",
             "request": "sc_request", "request_item": "sc_req_item", "cat_item": "sc_cat_item",
         },
+        # Platform SYSTEM-COLUMN convention: ServiceNow prefixes its bookkeeping columns `sys_`
+        # (sys_domain, sys_class_name, sys_tags, sys_created_on, …). Their name IS their meaning,
+        # so the coverage gate treats them as self-evident and doesn't force a "name → the name"
+        # description. A platform convention → config (NOT the universal self-evident regex).
+        "self_evident": r"^sys_",
     },
 }
 
@@ -76,13 +82,26 @@ def known_reference_graph(preset: Optional[str]) -> dict[str, str]:
     return dict(PRESETS.get(preset or "", {}).get("reference_graph", {}))
 
 
+def self_evident_pattern(preset: Optional[str]):
+    """Compiled regex of ADDITIONAL self-evident column-name conventions for a preset (system /
+    bookkeeping columns whose name is its own meaning), or None. Lets the coverage gate skip a
+    platform's system columns without forcing anti-pattern descriptions — and without baking the
+    platform's names into the universal self-evident regex. Config, not engine logic."""
+    pat = PRESETS.get(preset or "", {}).get("self_evident")
+    return re.compile(pat, re.IGNORECASE) if pat else None
+
+
+# A preset value carries the platform's facts as dicts ("choice"/"dictionary"/"reference_graph")
+# OR scalars ("self_evident" is a regex string). Only the dict roles name a source TABLE, so the
+# detection/usability helpers consider dict values only.
 def detect_preset(table_names: Iterable[str]) -> Optional[str]:
     """The preset whose source table(s) are present in the model, else None. Matches if ANY of a
     preset's sources exist (a model might carry `sys_dictionary` but not `sys_choice`, or vice
     versa) — the caller then uses whichever roles are actually available via `usable_sources`."""
     have = {t.lower() for t in table_names}
     for key, spec in PRESETS.items():
-        if any(role.get("source", "").lower() in have for role in spec.values()):
+        if any(isinstance(role, dict) and role.get("source", "").lower() in have
+               for role in spec.values()):
             return key
     return None
 
@@ -91,7 +110,7 @@ def usable_sources(preset: str, table_names: Iterable[str]) -> dict[str, dict]:
     """The preset's roles whose source table is actually present in the model."""
     have = {t.lower() for t in table_names}
     return {role: cfg for role, cfg in PRESETS.get(preset, {}).items()
-            if cfg.get("source", "").lower() in have}
+            if isinstance(cfg, dict) and cfg.get("source", "").lower() in have}
 
 
 # ---------------------------------------------------------------------------
