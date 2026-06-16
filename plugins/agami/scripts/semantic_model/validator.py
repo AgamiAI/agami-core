@@ -143,6 +143,7 @@ def validate(org: Organization) -> ValidationResult:
     _check_cross_area_entity_collisions(org, res)
     _check_metric_backend_neutrality(org, res)
     _check_derived_metrics(org, res)
+    _check_metric_binding_columns(org, res)
 
     return res
 
@@ -525,6 +526,58 @@ def _check_derived_metrics(org: Organization, res: ValidationResult) -> None:
                         "table — verify they're at the same grain (cross-grain composition "
                         "needs the grain-attributed planner, #4)",
                     )
+
+
+def _binding_column_refs(sql: str) -> set[str]:
+    """Best-effort set of bare column names referenced in a binding expression (lower-cased).
+    sqlglot-based; returns empty on parse failure or no sqlglot (never block on unparseable)."""
+    try:
+        import sqlglot
+        from sqlglot import expressions as exp
+    except Exception:
+        return set()
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return set()
+    if tree is None:
+        return set()
+    return {c.name.lower() for c in tree.find_all(exp.Column) if c.name}
+
+
+def _check_metric_binding_columns(org: Organization, res: ValidationResult) -> None:
+    """WARN when a metric's binding references a column that exists on NONE of its source_tables —
+    catches a typo'd or renamed column (e.g. `SUM(cst)`) before it fails at query time, which is
+    the one thing the hand-edited SQL snippet otherwise has no safety net for.
+
+    Deliberately a warning, not a gate: it's a best-effort static check (sqlglot-parsed, skips
+    derived metrics and unparseable bindings) and a denormalized / not-yet-listed source table
+    could produce a false positive — so it surfaces the suspicion without blocking the write."""
+    from . import derived as D
+    cols_by_table: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            cols_by_table.setdefault(t.name.lower(), set()).update(c.name.lower() for c in t.columns)
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or not met.source_tables:
+            continue  # derived: columns live in the base; no source_tables: a different check
+        allowed: set[str] = set()
+        for tn in met.source_tables:
+            allowed |= cols_by_table.get(tn.lower(), set())
+        if not allowed:
+            continue  # source tables aren't in the model (its own check) — don't double-flag
+        for stype, sql in (met.bindings or {}).items():
+            missing = sorted(r for r in _binding_column_refs(sql) if r not in allowed)
+            if missing:
+                res.warn(
+                    "metric_binding_unknown_column",
+                    f"metric {met.name!r} ({stype}) binding references column(s) {missing} not "
+                    f"found on its source table(s) {met.source_tables} — check for a typo or a "
+                    "missing source_table",
+                )
 
 
 # ---------------------------------------------------------------------------

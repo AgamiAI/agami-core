@@ -1668,7 +1668,8 @@
         // a typo'd column slips through to query time. Say so once, under the first binding.
         if (i === 0) body.appendChild(hintLine(
           'Just the aggregate expression — e.g. SUM(cost) or COUNT(DISTINCT user_id) — not a full ' +
-          'SELECT (no FROM/WHERE). agami doesn’t check the column names here, so make sure they exist on the source table.'));
+          'SELECT (no FROM/WHERE). When you submit, agami flags any column it can’t find on the source ' +
+          'table(s) — it catches typos, but double-check anyway.'));
         body.appendChild(inlineBindingBlock(m, d));
       });
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }

@@ -121,6 +121,38 @@ def _rejected(obj) -> bool:
     return getattr(obj, "review_state", None) == "rejected"
 
 
+def _prune_column_groups(t: Table) -> None:
+    """Drop excluded/missing columns from a table's `column_groups` (and its descriptions),
+    removing any group left empty. Keeps a loaded model self-consistent after per-column
+    exclusions — without this, a group still listing a dropped column fails validation."""
+    if not t.column_groups:
+        return
+    live = {c.name for c in t.columns}
+    pruned = {g: [c for c in cols if c in live] for g, cols in t.column_groups.items()}
+    pruned = {g: cols for g, cols in pruned.items() if cols}
+    t.column_groups = pruned
+    if t.column_group_descriptions:
+        t.column_group_descriptions = {g: d for g, d in t.column_group_descriptions.items() if g in pruned}
+
+
+def _reconcile_table_ref_exposes(refs: "list[TableRef]", tables_defined: "list[Table]") -> None:
+    """Drop `expose_column_groups` names that no longer exist on the table (a group emptied by
+    column exclusion). Mirrors curate._reconcile_expose_groups: clear the field entirely when it
+    would expose every surviving group (or nothing). Keeps a loaded model self-consistent."""
+    groups_by_table = {t.name: set(t.column_groups.keys()) for t in tables_defined}
+    for r in refs:
+        if not r.expose_column_groups:
+            continue
+        valid = groups_by_table.get(r.table)
+        if valid is None:
+            continue
+        kept = [g for g in r.expose_column_groups if g in valid]
+        if not kept or set(kept) == valid:
+            r.expose_column_groups = None
+        elif kept != r.expose_column_groups:
+            r.expose_column_groups = kept
+
+
 def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectArea:
     sa_doc: dict[str, Any] = _read_yaml(sa_dir / "subject_area.yaml") or {}
 
@@ -134,6 +166,10 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectA
                     continue  # whole table excluded by the curator
                 # drop per-column exclusions
                 t.columns = [c for c in t.columns if not _rejected(c)]
+                # ...and prune those dropped columns out of column_groups, else a group still
+                # naming an excluded column fails the column_group_missing_column check on load
+                # (excluding a deep table's column would otherwise break the whole model).
+                _prune_column_groups(t)
             tables_defined.append(t)
 
     live_tables = {t.name for t in tables_defined}
@@ -176,6 +212,10 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectA
     # TableRefs are kept as-is — they resolve org-wide (multi-membership), and a
     # ref to a rejected table simply won't resolve at runtime.
     table_refs = [TableRef(**t) for t in (sa_doc.get("tables", []) or [])]
+    if not include_rejected:
+        # a column-group that lost all its columns to exclusion was pruned above; drop any
+        # TableRef.expose_column_groups still naming it, else `unknown_column_group` fails load.
+        _reconcile_table_ref_exposes(table_refs, tables_defined)
 
     return SubjectArea(
         name=sa_doc.get("name", sa_dir.name),
