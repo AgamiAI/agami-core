@@ -1942,20 +1942,34 @@
     }
     function unknownColumns() {
       const out = [];
-      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => (t.fields || []).forEach(f => {
-        const qn = s.name + '.' + t.name + '.' + f.name;
-        if (f.description_source === 'ai_unknown' && !f.excluded && !describedInQueue(qn)) {
-          out.push({ qname: qn, area: s.name, table: t.name, col: f.name, type: f.type, db_schema: t.db_schema });
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => {
+        // an opaque TABLE itself (agami couldn't describe the table) — rarer than a column, but
+        // surface it in the same pile so it's not silently un-actioned.
+        if (t.description_source === 'ai_unknown' && !t.excluded && !describedInQueue(t.qname)) {
+          out.push({ qname: t.qname, area: s.name, table: t.name, col: null, kind: 'table', db_schema: t.db_schema });
         }
-      })));
+        (t.fields || []).forEach(f => {
+          const qn = s.name + '.' + t.name + '.' + f.name;
+          if (f.description_source === 'ai_unknown' && !f.excluded && !describedInQueue(qn)) {
+            out.push({ qname: qn, area: s.name, table: t.name, col: f.name, kind: 'column', type: f.type, db_schema: t.db_schema });
+          }
+        });
+      }));
       return out;
     }
     function describeCard(uc) {
-      const card = el('div', { class: 'table-card' });
+      const isTable = uc.kind === 'table';
+      const card = el('div', { class: 'table-card' + (effExcluded(uc) ? ' excluded' : '') });
       const h = el('div', { class: 'table-header static' });
       const nameEl = el('div', { class: 'table-name' });
-      nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
-      nameEl.appendChild(highlight(uc.col, searchQ));
+      if (isTable) {
+        nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' }));
+        nameEl.appendChild(highlight(uc.table, searchQ));
+        nameEl.appendChild(el('span', { class: 'pii-tag', text: 'whole table', style: 'margin-left:8px;' }));
+      } else {
+        nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
+        nameEl.appendChild(highlight(uc.col, searchQ));
+      }
       h.appendChild(nameEl);
       if (uc.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: uc.type }));
       card.appendChild(h);
@@ -1963,11 +1977,13 @@
       // section header above carries the explanation, so the cards stay tight).
       const body = el('div', { class: 'table-body', style: 'padding:10px 18px 12px;' });
       const ta = el('textarea', { class: 'inline-edit-ta', rows: '2',
-        placeholder: 'Describe this column in one line (optional)…' });
+        placeholder: isTable ? 'Describe this table in one line (optional)…' : 'Describe this column in one line (optional)…' });
       ta.value = (edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '';
       const save = () => {
         const v = ta.value.trim();
-        const cur = edits[uc.qname] || { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
+        const base = isTable ? { kind: 'table', area: uc.area, name: uc.table, fields: {} }
+                             : { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
+        const cur = edits[uc.qname] || base;
         if (v) cur.fields.description = v; else delete cur.fields.description;
         if (Object.keys(cur.fields).length) edits[uc.qname] = cur; else delete edits[uc.qname];
         renderAll();
@@ -1978,6 +1994,9 @@
       body.appendChild(ta);
       const bar = el('div', { class: 'inline-edit-bar' });
       bar.appendChild(btnSm('Save description', save, 'primary'));
+      // Keep it actionable: if you can't read it and won't describe it, exclude it so agami
+      // stops considering it (the column on the Tables tab, the whole table from the model).
+      bar.appendChild(excludeToggleBtn(isTable ? 'table' : 'field', uc, 'btn-sm'));
       bar.appendChild(el('span', { class: 'hint', text: '⌘/Ctrl+Enter saves' }));
       body.appendChild(bar);
       card.appendChild(body);
@@ -2018,7 +2037,7 @@
       // Columns agami couldn't read fold INTO "Needs your eyes" — one review queue, not a
       // separate "Couldn't read" sub-tab. They're describe-or-leave (no approve/reject).
       const unknown = unknownColumns().filter(uc => !searchQ
-        || (uc.col + ' ' + uc.table).toLowerCase().includes(searchQ));
+        || ((uc.col || '') + ' ' + uc.table).toLowerCase().includes(searchQ));
 
       // sub-tab bar with counts ("Edited" appears only when non-empty)
       const order = ['eyes', 'looks'];
@@ -2074,10 +2093,21 @@
 
       shown.forEach(kg => {
         if (kg.special === 'unknown') {
-          // The couldn't-read columns — opaque names, described via a one-line text edit (not approve/reject).
-          sec.appendChild(kindSubhead("Columns agami couldn't read", kg.items, false));
+          // Opaque tables/columns — described via a one-line edit, or excluded so agami stops
+          // considering them. Not approve/reject (there's no proposal to sign off on).
+          const nTab = kg.items.filter(u => u.kind === 'table').length;
+          sec.appendChild(kindSubhead(nTab ? "Tables & columns agami couldn't read" : "Columns agami couldn't read", kg.items, false));
           sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
-            text: "Opaque names with no clue in the data. Describe one in a line if you know it — or leave it; agami asks again the first time a query actually uses it." }));
+            text: "Opaque names with no clue in the data. Describe one in a line if you know it, or exclude it so agami stops considering it — otherwise agami asks again the first time a query uses it." }));
+          // bulk: take the whole pile out of consideration (or put it back) in one click
+          const bulk = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+          bulk.appendChild(el('button', { type: 'button', class: 'btn-sm',
+            onclick: () => { kg.items.forEach(u => { pending[u.qname] = 'exclude'; }); renderAll(); } },
+            '✗ Exclude all ' + kg.items.length));
+          bulk.appendChild(el('button', { type: 'button', class: 'btn-sm',
+            onclick: () => { kg.items.forEach(u => { if (pending[u.qname] === 'exclude') delete pending[u.qname]; }); renderAll(); } },
+            '↻ Include all'));
+          sec.appendChild(bulk);
           kg.items.forEach(uc => sec.appendChild(describeCard(uc)));
         } else {
           sec.appendChild(kindSubhead(kg.label, kg.items, g.bulk));
