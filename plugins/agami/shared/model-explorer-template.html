@@ -529,6 +529,8 @@
     .subtab-bar.kind-bar { margin: -8px 0 16px; gap: 6px; }
     .subtab-bar.kind-bar button { font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 7px; border-style: dashed; }
     .subtab-bar.kind-bar button.active { border-style: solid; }
+    /* Joins-tab In-schema/Cross-schema bar — sits in the toolbar above the Status chips */
+    .subtab-bar.join-type-bar { margin: 4px 0 8px; }
 
     /* Reliable CSS hover tooltip (native title= is flaky on file://) — element needs
        class "tip" + a data-tip="..." attribute. */
@@ -616,6 +618,8 @@
         <span class="search-counts" id="search-counts"></span>
       </div>
       <div class="tab-bar" id="tab-bar"></div>
+      <!-- Joins-tab only: split the list by In-schema / Cross-schema, above the Status filter. -->
+      <div class="subtab-bar join-type-bar" id="join-type-bar" style="display:none"></div>
       <div class="filter-chips" id="filter-chips">
         <span class="filter-label">Status</span>
         <button type="button" data-filter="all" class="active">All</button>
@@ -701,6 +705,7 @@
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
     let piiSubTab = 'all';       // PII tab sub-view: all | flagged | suspected
     let reviewKind = 'all';      // Review tab: which kind-pile within the sub-tab (all | a REVIEW_GROUPS label | __unknown)
+    let joinTypeFilter = 'all';  // Joins tab: all | in | cross
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
 
     // Sign-off identity (stamped on every Approve). Persisted to localStorage so it's
@@ -1818,27 +1823,55 @@
     // The Joins tab: one tab, but split into "In-schema joins" and "Cross-schema joins"
     // sections so the cross-schema (cross-area) edges read distinctly. Split only when
     // cross-schema joins exist — a single-schema DB just renders one flat list as before.
+    // The In-schema / Cross-schema pill bar (above the Status filter). Shown only when the join
+    // set actually has cross-schema edges — otherwise there's nothing to split. Populated here
+    // because it lives in the toolbar, OUTSIDE #tab-content.
+    function renderJoinTypeBar(inCount, crossCount) {
+      const bar = document.getElementById('join-type-bar');
+      if (!bar) return;
+      bar.innerHTML = '';
+      if (!crossCount) { bar.style.display = 'none'; return; }   // no cross-schema joins → no split
+      bar.style.display = 'flex';
+      const mk = (key, label, cnt) => {
+        const b = el('button', { type: 'button', class: joinTypeFilter === key ? 'active' : '',
+          onclick: () => { joinTypeFilter = key; renderBody(); } }, label);
+        b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
+        return b;
+      };
+      bar.appendChild(mk('all', 'All', inCount + crossCount));
+      bar.appendChild(mk('in', 'In-schema', inCount));
+      bar.appendChild(mk('cross', 'Cross-schema', crossCount));
+    }
+
     function renderJoinsTab(root) {
       const all = [...(manifest.relationships || []), ...(manifest.cross_relationships || [])];
       const hay = r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area || ''} ${r.from_schema || ''} ${r.to_schema || ''}`;
       const matched = all.filter(it => (!searchQ || hay(it).toLowerCase().includes(searchQ)) && passesFilter(it, 'relationship'));
-      setSearchCounts(`${matched.length} of ${all.length} join${all.length === 1 ? '' : 's'} shown`);
-      if (!matched.length) {
+      const inSchema = matched.filter(r => !r.cross_schema);
+      const crossSchema = matched.filter(r => r.cross_schema);
+      // keep the pill selection valid for the current (search/status-filtered) set
+      if (!crossSchema.length) joinTypeFilter = 'all';
+      else if (joinTypeFilter === 'in' && !inSchema.length) joinTypeFilter = 'all';
+      renderJoinTypeBar(inSchema.length, crossSchema.length);
+
+      const shown = joinTypeFilter === 'in' ? inSchema : joinTypeFilter === 'cross' ? crossSchema : matched;
+      setSearchCounts(`${shown.length} of ${all.length} join${all.length === 1 ? '' : 's'} shown`);
+      if (!shown.length) {
         root.appendChild(el('div', { class: 'empty-state',
           text: all.length === 0 ? 'No joins defined yet.' : 'No joins match the current search / filter.' }));
         return;
       }
       const sec = el('div', { class: 'schema-section' });
-      const inSchema = matched.filter(r => !r.cross_schema);
-      const crossSchema = matched.filter(r => r.cross_schema);
-      if (crossSchema.length) {
+      // When showing "All" and both kinds exist, keep the labelled sections; a focused pill
+      // (In-schema / Cross-schema) renders a single flat list of just that kind.
+      if (joinTypeFilter === 'all' && crossSchema.length) {
         [['In-schema joins', inSchema], ['Cross-schema joins', crossSchema]].forEach(([label, items]) => {
           if (!items.length) return;
           sec.appendChild(kindSubhead(label, items, false));
           items.forEach(r => sec.appendChild(renderRelCard(r)));
         });
       } else {
-        matched.forEach(r => sec.appendChild(renderRelCard(r)));
+        shown.forEach(r => sec.appendChild(renderRelCard(r)));
       }
       root.appendChild(sec);
     }
@@ -2068,16 +2101,19 @@
       }
       const totalItems = kindGroups.reduce((n, kg) => n + kg.items.length, 0);
       if (reviewKind !== 'all' && !kindGroups.some(kg => kg.key === reviewKind)) reviewKind = 'all';
-      if (kindGroups.length > 1) {
+      // Kind pills on EVERY sub-tab (Needs eyes / Looks right / Approved / Rejected) so each pile
+      // breaks down by type. Single-kind piles show just the one labelled pill (no redundant "All").
+      if (kindGroups.length) {
         const kbar = el('div', { class: 'subtab-bar kind-bar' });
-        const mkPill = (key, label, cnt) => {
-          const b = el('button', { type: 'button', class: reviewKind === key ? 'active' : '',
+        const mkPill = (key, label, cnt, forceActive) => {
+          const b = el('button', { type: 'button', class: (reviewKind === key || forceActive) ? 'active' : '',
             onclick: () => { reviewKind = key; renderBody(); } }, label);
           b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
           return b;
         };
-        kbar.appendChild(mkPill('all', 'All', totalItems));
-        kindGroups.forEach(kg => kbar.appendChild(mkPill(kg.key, kg.label, kg.items.length)));
+        if (kindGroups.length > 1) kbar.appendChild(mkPill('all', 'All', totalItems));
+        kindGroups.forEach(kg => kbar.appendChild(
+          mkPill(kg.key, kg.label, kg.items.length, kindGroups.length === 1 && reviewKind === 'all')));
         root.appendChild(kbar);
       }
 
@@ -2658,6 +2694,8 @@
       });
       // status filter only relevant on entity tabs
       document.getElementById('filter-chips').style.display = FILTERABLE_TABS.has(activeTab) ? 'flex' : 'none';
+      // the In-schema/Cross-schema bar is Joins-tab only; renderJoinsTab decides whether to show it
+      if (activeTab !== 'joins') document.getElementById('join-type-bar').style.display = 'none';
       // search placeholder per tab
       const ph = { organization: 'Search ORGANIZATION.md…', review: 'Search the review queue…',
                    areas: 'Search subject areas…',
