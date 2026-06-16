@@ -2283,7 +2283,7 @@
       const qTa = textarea('', 2); qTa.setAttribute('placeholder', 'e.g. How many active vehicles are deployed by zone?'); body.appendChild(qTa);
       body.appendChild(labelLine('SQL (the full query that answers it)'));
       body.appendChild(hintLine('A complete SELECT for this question — examples are whole queries (unlike a metric, which is just an aggregate expression).'));
-      const sTa = textarea('', 5); sTa.setAttribute('placeholder', 'SELECT zone, COUNT(*) FROM powerbi.sm_vehicles WHERE ... GROUP BY zone'); body.appendChild(sTa);
+      const sTa = textarea('', 5); sTa.setAttribute('placeholder', 'SELECT region, COUNT(*) FROM sales.orders WHERE ... GROUP BY region'); body.appendChild(sTa);
       const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
       body.appendChild(errLine);
       const submit = () => {

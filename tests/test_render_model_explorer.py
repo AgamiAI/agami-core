@@ -151,3 +151,26 @@ def test_sensitive_column_surfaced(profile_dir):
     orders = next(t for t in m["schemas"][0]["tables"] if t["name"] == "orders")
     ssn = next(f for f in orders["fields"] if f["name"] == "ssn")
     assert ssn["sensitive"] is True
+
+
+def test_manifest_carries_table_description_source_ai_unknown(tmp_path):
+    # an opaque TABLE (agami couldn't describe it) must surface description_source in the manifest
+    # so the explorer's "couldn't read" pile can include whole tables, not just columns.
+    root = tmp_path / "p"
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "subject_areas" / "s" / "tables").mkdir(parents=True)
+    (root / "org.yaml").write_text(yaml.safe_dump({
+        "organization": "p", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/s"]}))
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    (root / "subject_areas" / "s" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "s", "tables": [{"storage_connection": "c", "schema": "public", "table": "xyz"}]}))
+    (root / "subject_areas" / "s" / "tables" / "xyz.yaml").write_text(yaml.safe_dump({
+        "name": "xyz", "schema": "public", "storage_connection": "c", "grain": ["id"],
+        "description": "", "description_source": "ai_unknown",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True}]}))
+    m = build_manifest(root, "p")
+    t = m["schemas"][0]["tables"][0]
+    assert t["description_source"] == "ai_unknown"
