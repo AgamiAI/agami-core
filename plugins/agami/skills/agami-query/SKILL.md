@@ -143,7 +143,7 @@ Look up the cached connection method from `<artifacts_dir>/local/.config`. Run a
 | `cli` (postgres) | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
 | `cli` (mysql) | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
 | `cli` (snowflake) | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
-| `cli` (sqlite) | `sqlite3 -csv "<path>" 'SELECT 1'` |
+| `cli` (sqlite) | `sqlite3 -header -csv "<path>" 'SELECT 1'` — **always `-header`**, or result CSVs lose column names and `format-table` treats the first data row as the header (a wasteful re-export). |
 | `duckdb` (any) | `duckdb -init "$init_file" -c 'SELECT 1' --csv` (see `build_duckdb_attach.py` for `$init_file`) |
 | `python` (all DBs) | `AGAMI_PROFILE="<profile>" "$PY" "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` |
 
