@@ -207,6 +207,30 @@ def test_high_cardinality_not_choice_field():
     assert I._maybe_choice([str(i) for i in range(100)]) is None
 
 
+def test_guid_valued_column_not_choice_field():
+    # a low-cardinality FK column (few distinct sys_id GUIDs) must NOT become an enum — this is
+    # the choice-field-pollution regression (resolved_by / child_incidents filled with GUIDs).
+    sys_ids = ["a" * 32, "b" * 32, "c" * 32]
+    vals = (sys_ids * 6)
+    assert I._maybe_choice(vals) is None
+    # dashed UUIDs too
+    uuids = ["12345678-1234-1234-1234-123456789abc", "abcdef00-0000-0000-0000-000000000000"]
+    assert I._maybe_choice(uuids * 8) is None
+    # a genuine small-int enum is still detected
+    assert I._maybe_choice([str(i % 3 + 1) for i in range(30)]) == {"1": "", "2": "", "3": ""}
+
+
+@pytest.mark.parametrize("name,is_choice_candidate", [
+    ("severity", True), ("state", True), ("priority", True),   # real enums
+    ("resolved_by", False), ("opened_by", False),              # reference actors (FK, GUID)
+    ("reopen_count", False), ("reassignment_count", False),    # counts (measures)
+    ("caller_id", False), ("record_seq", False),               # id / sequence
+])
+def test_choice_candidate_name_exclusions(name, is_choice_candidate):
+    excluded = bool(I._NOT_CHOICE_NAME_RE.search(name))
+    assert excluded == (not is_choice_candidate)
+
+
 # ---------------------------------------------------------------------------
 # Writing + legacy backup
 # ---------------------------------------------------------------------------

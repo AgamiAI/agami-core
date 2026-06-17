@@ -708,6 +708,31 @@ def cmd_enrich_metadata(args) -> int:
                                       valid=valid)
             dict_rows, dict_cfg = rows, cfg
 
+    # Inheritance: ServiceNow (and any table-inheritance platform) declares a shared field's
+    # description ONCE under the parent table (`task`), but the column physically lives on every
+    # child (`incident`/`problem`/…). description_ops keys on the declaring table, so the children
+    # stay blank. Propagate the unambiguous element→description to any modeled column that's still
+    # blank and didn't get a table-specific description above.
+    inherited = 0
+    if dict_rows and ("label_col" in dict_cfg or "comment_col" in dict_cfg):
+        by_el = MS.descriptions_by_element(
+            dict_rows, column_col=dict_cfg["column_col"],
+            label_col=dict_cfg.get("label_col"), comment_col=dict_cfg.get("comment_col"))
+        direct = {(o["name"].lower(), (o.get("column") or "").lower()) for o in ops
+                  if o.get("kind") == "table" and o.get("column") and o.get("field") == "description"}
+        for sa in org.subject_areas:
+            for t in sa.tables_defined:
+                for c in t.columns:
+                    if (c.description or "").strip():
+                        continue  # don't override an existing description
+                    if (t.name.lower(), c.name.lower()) in direct:
+                        continue  # already got a table-specific dictionary description
+                    d = by_el.get(c.name.lower())
+                    if d:
+                        ops.append({"op": "edit", "kind": "table", "name": t.name, "column": c.name,
+                                    "field": "description", "value": d, "source": "metadata"})
+                        inherited += 1
+
     # 1) descriptions + choice_field — one validated curate batch
     cols_applied = 0
     errors: list[str] = []
@@ -745,7 +770,8 @@ def cmd_enrich_metadata(args) -> int:
                      "reason": "nothing applicable for modelled columns", "errors": errors})
         return 0
     _print_json({"enriched": not errors, "preset": preset, "fetched": fetched,
-                 "columns_enriched": cols_applied, "relationships_added": refs_added,
+                 "columns_enriched": cols_applied, "descriptions_inherited": inherited,
+                 "relationships_added": refs_added,
                  "relationships_added_unverified": refs_unverified,
                  "reference_fields_known": refs_declared,
                  "relationships_skipped_target_not_modelled": refs_skipped_target,

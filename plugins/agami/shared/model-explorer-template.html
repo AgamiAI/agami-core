@@ -531,6 +531,11 @@
     .subtab-bar.kind-bar button.active { border-style: solid; }
     /* Joins-tab In-schema/Cross-schema bar — sits in the toolbar above the Status chips */
     .subtab-bar.join-type-bar { margin: 4px 0 8px; }
+    /* "Couldn't read" triage: a column a join/metric actually uses is worth describing */
+    .used-badge { margin-left: 8px; font-size: 11px; font-weight: 600; padding: 1px 7px;
+                  border-radius: 999px; background: var(--info-bg); color: var(--accent);
+                  border: 1px solid var(--info-border); }
+    .table-card.worth-describing { box-shadow: inset 3px 0 0 var(--accent); }
 
     /* Reliable CSS hover tooltip (native title= is flaky on file://) — element needs
        class "tip" + a data-tip="..." attribute. */
@@ -1974,8 +1979,30 @@
       const e = edits[qname];
       return !!(e && e.fields && (e.fields.description || '').trim());
     }
+    // Triage signal: which (table.column) the model actually USES — a join key or a metric's SQL.
+    // Among a big "couldn't read" pile these are the few genuinely worth describing; the rest can
+    // be bulk-excluded with confidence. Returns (table, col) -> 'join' | 'metric' | null.
+    function columnUsageLookup() {
+      const joinCols = new Set();
+      (manifest.relationships || []).concat(manifest.cross_relationships || []).forEach(r => {
+        if (r.from_column) joinCols.add((r.from_table + '.' + r.from_column).toLowerCase());
+        if (r.to_column) joinCols.add((r.to_table + '.' + r.to_column).toLowerCase());
+      });
+      const metrics = (manifest.metrics || []).map(m => ({
+        tables: (m.source_tables || []).map(x => x.toLowerCase()),
+        sql: Object.values(m.bindings || {}).join(' ').toLowerCase(),
+      }));
+      return (table, col) => {
+        if (joinCols.has((table + '.' + col).toLowerCase())) return 'join';
+        const t = table.toLowerCase();
+        const re = new RegExp('\\b' + col.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b');
+        if (metrics.some(m => m.tables.includes(t) && re.test(m.sql))) return 'metric';
+        return null;
+      };
+    }
     function unknownColumns() {
       const out = [];
+      const usage = columnUsageLookup();
       (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => {
         // an opaque TABLE itself (agami couldn't describe the table) — rarer than a column, but
         // surface it in the same pile so it's not silently un-actioned.
@@ -1985,10 +2012,14 @@
         (t.fields || []).forEach(f => {
           const qn = s.name + '.' + t.name + '.' + f.name;
           if (f.description_source === 'ai_unknown' && !f.excluded && !describedInQueue(qn)) {
-            out.push({ qname: qn, area: s.name, table: t.name, col: f.name, kind: 'column', type: f.type, db_schema: t.db_schema });
+            out.push({ qname: qn, area: s.name, table: t.name, col: f.name, kind: 'column', type: f.type,
+                       db_schema: t.db_schema, usedBy: usage(t.name, f.name) });
           }
         });
       }));
+      // worth-describing first: join keys, then metric columns, then the rest
+      const rank = u => u.usedBy === 'join' ? 0 : u.usedBy === 'metric' ? 1 : 2;
+      out.sort((a, b) => rank(a) - rank(b));
       return out;
     }
     function describeCard(uc) {
@@ -2003,6 +2034,12 @@
       } else {
         nameEl.appendChild(el('span', { class: 'schema-prefix', text: (uc.db_schema || uc.area) + '.' + uc.table + '.' }));
         nameEl.appendChild(highlight(uc.col, searchQ));
+      }
+      // Triage badge: this opaque column is actually USED by a join/metric → worth describing.
+      if (uc.usedBy) {
+        card.classList.add('worth-describing');
+        nameEl.appendChild(el('span', { class: 'used-badge', text: 'used by ' + uc.usedBy,
+          title: 'A ' + uc.usedBy + ' references this column — describing it helps NL→SQL. The rest can be excluded.' }));
       }
       h.appendChild(nameEl);
       if (uc.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: uc.type }));
@@ -2133,11 +2170,22 @@
           // Opaque tables/columns — described via a one-line edit, or excluded so agami stops
           // considering them. Not approve/reject (there's no proposal to sign off on).
           const nTab = kg.items.filter(u => u.kind === 'table').length;
+          const used = kg.items.filter(u => u.usedBy);
+          const unused = kg.items.filter(u => !u.usedBy);
           sec.appendChild(kindSubhead(nTab ? "Tables & columns agami couldn't read" : "Columns agami couldn't read", kg.items, false));
-          sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;',
-            text: "Opaque names with no clue in the data. Describe one in a line if you know it, or exclude it so agami stops considering it — otherwise agami asks again the first time a query uses it." }));
-          // bulk: take the whole pile out of consideration (or put it back) in one click
+          sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;', html:
+            "Opaque names with no clue in the data. " + (used.length
+              ? "<strong>" + used.length + "</strong> are actually used by a join or metric (flagged <em>“used by …”</em>, listed first) — describe those; the rest are safe to exclude. "
+              : "") +
+            "Describe a column in a line, or exclude it so agami stops considering it." }));
+          // bulk: triage in one click — exclude only the UNUSED ones (keep the worth-describing few),
+          // or exclude everything / put it all back.
           const bulk = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+          if (used.length && unused.length) {
+            bulk.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
+              onclick: () => { unused.forEach(u => { pending[u.qname] = 'exclude'; }); renderAll(); } },
+              '✗ Exclude the ' + unused.length + ' unused (keep ' + used.length + ' used)'));
+          }
           bulk.appendChild(el('button', { type: 'button', class: 'btn-sm',
             onclick: () => { kg.items.forEach(u => { pending[u.qname] = 'exclude'; }); renderAll(); } },
             '✗ Exclude all ' + kg.items.length));

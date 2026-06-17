@@ -93,6 +93,20 @@ def test_reference_declarations_drops_conflicting_targets():
     assert decls == {"company": "core_company"}   # ambiguous `owner` dropped
 
 
+def test_descriptions_by_element_propagates_parent_declarations():
+    # ServiceNow declares shared fields under the PARENT table (task); the description must be
+    # keyed by element so it reaches the inheriting children (incident/problem).
+    rows = [
+        {"element": "priority", "name": "task", "column_label": "Priority", "comments": ""},
+        {"element": "business_impact", "name": "task", "column_label": "Business impact", "comments": ""},
+        {"element": "state", "name": "task", "column_label": "State", "comments": ""},
+        {"element": "state", "name": "sys_user", "column_label": "Active flag", "comments": ""},  # conflict
+    ]
+    by_el = M.descriptions_by_element(rows, column_col="element",
+                                      label_col="column_label", comment_col="comments")
+    assert by_el == {"priority": "Priority", "business_impact": "Business impact"}  # `state` dropped (conflict)
+
+
 def test_detect_preset_and_usable_sources():
     assert M.detect_preset(["incident", "sys_choice", "sys_user"]) == "servicenow"
     assert M.detect_preset(["orders", "customers"]) is None
