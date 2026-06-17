@@ -197,3 +197,79 @@ def test_correct_revenue_by_category(db):
     assert len(rows) == 8
     assert rows[0][0] == "Home & Kitchen"
     assert round(rows[0][1]) == 1360276
+
+
+# ---------------------------------------------------------------------------
+# Sensitive-column (PII) projection guard — enforced in execute_sql's shared
+# safety pass, so the skill, the MCP server, and cron all protect PII identically.
+# ---------------------------------------------------------------------------
+
+def test_sensitive_projection_refuses_raw():
+    """Projecting a raw sensitive value (bare, aliased, via *, or via MIN/MAX) is refused."""
+    org = L.load_organization(MODEL_DIR)
+    for sql in [
+        "SELECT email FROM customers",
+        "SELECT * FROM customers",
+        "SELECT c.email FROM customers c JOIN orders o ON o.customer_id = c.id",
+        "SELECT MIN(email) FROM customers",
+        "SELECT email AS contact FROM customers",
+    ]:
+        assert RT.check_sensitive_projection(sql, org).action == "refuse", sql
+
+
+def test_sensitive_projection_allows_aggregate_filter_and_nonsensitive():
+    """COUNT/COUNT(DISTINCT), WHERE-only use, and non-sensitive columns are allowed."""
+    org = L.load_organization(MODEL_DIR)
+    for sql in [
+        "SELECT COUNT(DISTINCT email) FROM customers",
+        "SELECT COUNT(email) FROM customers",
+        "SELECT id, full_name FROM customers",
+        "SELECT country, COUNT(*) FROM customers WHERE email LIKE '%@x.com' GROUP BY country",
+        "SELECT * FROM (SELECT id, full_name FROM customers)",
+    ]:
+        assert RT.check_sensitive_projection(sql, org).action == "allow", sql
+
+
+@pytest.fixture
+def wired_artifacts(tmp_path):
+    """A temp artifacts dir wired to the sample exactly as Phase 0s does."""
+    import json
+    import os
+    import shutil
+    art = tmp_path / "artifacts"
+    (art / "local" / "samples").mkdir(parents=True)
+    db_path = art / "local" / "samples" / "store.db"
+    build_sample.build(db_path, prefer_cli=False)
+    creds = art / "local" / "credentials"
+    creds.write_text(f"[agami-example]\ntype = sqlite\npath = {db_path}\n", encoding="utf-8")
+    os.chmod(creds, 0o600)  # execute_sql refuses world-readable credentials
+    (art / "local" / ".config").write_text(
+        json.dumps({"active_profile": "agami-example", "artifacts_dir": str(art)}), encoding="utf-8")
+    shutil.copytree(MODEL_DIR, art / "agami-example")
+    return art
+
+
+def _run_execute_sql(art, sql):
+    import os
+    import subprocess
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "plugins" / "agami" / "scripts" / "execute_sql.py"),
+         "--profile", "agami-example", "--area", "agami-example", "--sql", sql],
+        capture_output=True, text=True, env={**os.environ, "AGAMI_ARTIFACTS_DIR": str(art)})
+
+
+def test_execute_sql_refuses_raw_pii_both_paths(wired_artifacts):
+    """End-to-end through execute_sql.py — the path BOTH the skill and the MCP server
+    use — a raw PII projection is refused with a structured error, not leaked."""
+    proc = _run_execute_sql(wired_artifacts, "SELECT full_name, email FROM customers LIMIT 5")
+    assert proc.returncode == 1, proc.stderr
+    assert "sensitive_columns" in proc.stderr
+    assert "@example.com" not in proc.stdout  # no raw email leaked
+    assert "Traceback" not in proc.stderr
+
+
+def test_execute_sql_allows_pii_aggregate(wired_artifacts):
+    """COUNT(DISTINCT email) runs and returns the count — sensitive cols restrict output, not the query."""
+    proc = _run_execute_sql(wired_artifacts, "SELECT COUNT(DISTINCT email) AS n FROM customers")
+    assert proc.returncode == 0, proc.stderr
+    assert "500" in proc.stdout
