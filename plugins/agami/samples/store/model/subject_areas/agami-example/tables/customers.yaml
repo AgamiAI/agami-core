@@ -39,14 +39,15 @@ columns:
   description_source: ai_unvalidated
 - name: full_name
   type: string
-  description: ''
+  description: Customer's full name — the display label for a customer in results.
   primary_key: false
   choice_field: null
   aggregation: dimension
-  sensitive: true
+  sensitive: false
   caveats: []
   confidence: confirmed
   review_state: approved
+  description_source: ai_unvalidated
 - name: phone
   type: string
   description: ''

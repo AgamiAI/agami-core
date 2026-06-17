@@ -208,11 +208,14 @@ JOIN noun no     ON no.i = (n * 5) % 8;
 WITH RECURSIVE seq(n) AS (
     SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 500
 ),
+-- 25 first names × 20 last names, indexed as a bijection of (n-1) below, so all
+-- 500 customers get a DISTINCT full name (no collisions). 25 * 20 = 500.
 firsts(i, w) AS (
     VALUES (0,'Avery'),(1,'Blake'),(2,'Casey'),(3,'Devon'),(4,'Emery'),
            (5,'Finley'),(6,'Gray'),(7,'Harper'),(8,'Indra'),(9,'Jules'),
            (10,'Kai'),(11,'Logan'),(12,'Morgan'),(13,'Noor'),(14,'Oakley'),
-           (15,'Parker'),(16,'Quinn'),(17,'Riley'),(18,'Sage'),(19,'Tatum')
+           (15,'Parker'),(16,'Quinn'),(17,'Riley'),(18,'Sage'),(19,'Tatum'),
+           (20,'Uma'),(21,'Vihaan'),(22,'Wren'),(23,'Xiomara'),(24,'Yael')
 ),
 lasts(i, w) AS (
     VALUES (0,'Adams'),(1,'Bauer'),(2,'Cruz'),(3,'Diaz'),(4,'Evans'),
@@ -234,8 +237,10 @@ SELECT
     date('2022-01-01', '+' || ((n * 211) % 900) || ' days'),
     CASE WHEN n % 11 = 0 THEN 0 ELSE 1 END
 FROM seq
-JOIN firsts    f ON f.i = (n * 7)  % 20
-JOIN lasts     l ON l.i = (n * 13) % 20
+-- base-25 decomposition of (n-1): unique (first,last) pair per customer, and the
+-- first name cycles every row (not blocky) so consecutive customers look distinct.
+JOIN firsts    f ON f.i = (n - 1) % 25
+JOIN lasts     l ON l.i = (n - 1) / 25
 JOIN countries c ON c.i = n % 8;
 
 -- ---------------------------------------------------------------------------

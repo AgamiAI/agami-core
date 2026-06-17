@@ -71,6 +71,24 @@ def test_row_counts(db, table, expected):
     assert db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == expected
 
 
+def test_customer_names_are_unique(db):
+    """Every customer has a distinct full_name (regression guard: an earlier seed
+    indexed first+last both on n%20, yielding only ~20 names across 500 customers,
+    which made 'top customers' show repeated names)."""
+    distinct = db.execute("SELECT COUNT(DISTINCT full_name) FROM customers").fetchone()[0]
+    assert distinct == 500
+
+
+def test_full_name_is_not_sensitive():
+    """full_name is the display label for a customer — it must be queryable; only
+    email/phone are sensitive."""
+    org = L.load_organization(MODEL_DIR)
+    cols = {c.name: c for area in org.subject_areas for t in area.tables_defined for c in t.columns if t.name == "customers"}
+    assert cols["full_name"].sensitive is False
+    assert cols["email"].sensitive is True
+    assert cols["phone"].sensitive is True
+
+
 def test_model_validates():
     org = L.load_organization(MODEL_DIR)
     res = V.validate(org)

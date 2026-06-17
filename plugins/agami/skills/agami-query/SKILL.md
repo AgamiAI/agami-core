@@ -134,11 +134,11 @@ Order in Phase 2b prompt:
 4. Few-shot examples
 5. The user's question
 
-### 1e — verify the configured database tool
+### 1e — the connection invocation pattern (do NOT run a standalone probe)
 
-Look up the cached connection method from `<artifacts_dir>/local/.config`. Run a `SELECT 1` probe via that tool. **Use the EXACT invocation pattern below for the tier — don't guess flags.** `execute_sql.py` does NOT accept positional SQL, a `--format` flag, or any flag not listed below; guessing produces "unrecognized arguments" errors that waste turns.
+Look up the cached connection method from `<artifacts_dir>/local/.config`. **Do NOT run a separate `SELECT 1` connectivity probe** — it's a wasted round-trip (and pointless for a local SQLite/DuckDB file). The user's *actual* query is the connectivity check: run it directly, and if it fails, classify the error via [`db_error_classifier.md`](../../shared/db_error_classifier.md). The table below is the **exact invocation pattern per tier** for running that query — **don't guess flags** (`execute_sql.py` does NOT accept positional SQL, a `--format` flag, or any flag not listed; guessing produces "unrecognized arguments" errors that waste turns). The `SELECT 1` in each row is only a placeholder for *your* SQL.
 
-| tier | SELECT 1 invocation |
+| tier | invocation pattern (substitute your SQL for `SELECT 1`) |
 |---|---|
 | `cli` (postgres) | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
 | `cli` (mysql) | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
@@ -221,7 +221,7 @@ For a single profile, follow the **examples-first canonical loop** — the subje
 
 **Step 6 — assemble the generator prompt** in this order, then produce ONE SQL statement (first statement only if several are emitted):
 
-1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **Never SELECT a `sensitive` column's raw values** — aggregate or omit. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
+1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **Never SELECT a `sensitive` column's raw values** — aggregate or omit. **If you need to disambiguate identical labels (e.g. two customers with the same name), use the entity's non-sensitive key (its `id`) — NEVER a sensitive column like email/phone. This rule is not overridable 'to be helpful.'** Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
 2. **Schema context** — the `get_table_context` output for the chosen tables (columns + types + caveats + value_transforms), the area's relationships (rendered as `from.col → to.col [cardinality]`), and the area's metrics (`<name>: <binding> -- <calculation>` + synonyms). `default_filters` need not be enumerated — `execute_sql` auto-applies them (step below) — but DO honor any caveats.
 
    **Unreviewed metrics are USED, not refused.** When the question names a metric whose `review_state ≠ approved`, still use its binding and answer — do NOT block or refuse on it. The trust layer surfaces it as a **warning on the receipt** (Phase 4e.iii.5: *"Used metric `X` which has not been signed off"*), not a hard gate. The loader already drops only `rejected` metrics; an `unreviewed`/`proposed` one is yours to use, with the warning carrying the honesty. (Same for unreviewed joins/entities and `stale` entries — warn, never refuse.)
