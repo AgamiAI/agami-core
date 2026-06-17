@@ -1,0 +1,81 @@
+name: products
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Sellable products in the catalog — each belongs to one category and has a list price.
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 64
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: sku
+  type: string
+  description: Stock-keeping unit — unique product code.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: name
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: category_id
+  type: integer
+  description: FK to categories.id (each product is in exactly one category).
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: unit_price
+  type: float
+  description: List price per unit, in USD.
+  primary_key: false
+  aggregation: averageable
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+  unit: USD
+- name: is_active
+  type: integer
+  description: ''
+  primary_key: false
+  choice_field:
+    '0': 'No'
+    '1': 'Yes'
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+description_source: ai_unvalidated

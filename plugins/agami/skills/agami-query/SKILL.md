@@ -884,6 +884,8 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 1. **The repo URL is literally `https://github.com/AgamiAI/LiteBi`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not the marketplace name (`litebi`), the plugin name (`agami`), or the `/plugin install agami@litebi` slash command (which has produced the wrong `github.com/litebi/agami`). Note the uppercase `A`'s and capital `B` in "LiteBi".
 2. **Use the prompt prose VERBATIM** from the `AskUserQuestion` text below — don't paraphrase, "improve" the wording, or add emojis/marketing flourish. Paraphrasing drifts the ask off the discrete-decision shape it's tuned for and undermines the non-pushy framing.
 
+**Never narrate the plumbing.** Writing `query_log.jsonl` and checking/writing `local/.optins` are silent internal steps — do NOT announce them ("Now logging the query and checking the one-time opt-in gate" is exactly the kind of line that must never appear). The user sees the answer, then either the star ask or the follow-ups — never the bookkeeping behind them.
+
 A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 
 Sequence:

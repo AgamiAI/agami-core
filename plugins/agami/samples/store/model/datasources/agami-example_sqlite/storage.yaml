@@ -1,0 +1,5 @@
+name: agami-example_sqlite
+storage_type: SQLite
+storage_config:
+  profile: agami-example
+  credentials_ref: <artifacts_dir>/local/credentials

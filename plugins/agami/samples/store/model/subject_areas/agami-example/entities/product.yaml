@@ -1,0 +1,19 @@
+name: product
+plural: products
+other_names:
+- item
+- sku
+- catalog item
+description: A sellable product in the catalog.
+maps_to:
+- table: products
+  column: id
+  primary: true
+- table: order_items
+  column: product_id
+  primary: false
+primary_table: products
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved

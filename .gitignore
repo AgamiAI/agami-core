@@ -30,6 +30,10 @@ tests/integration/*.log
 # .db is built locally by the smoke-test harness.
 tests/integration/fixtures/*.db
 
+# Sample database — seed.sql + the prebuilt model/ are committed; the binary
+# .db is built locally (build_sample.py) and never committed.
+plugins/agami/samples/store/*.db
+
 # Dotenv (only for local dev, never committed)
 .env
 .env.local

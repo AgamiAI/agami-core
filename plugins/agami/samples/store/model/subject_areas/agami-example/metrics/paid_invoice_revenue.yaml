@@ -1,0 +1,21 @@
+name: paid invoice revenue
+description: Sum of paid invoice amounts.
+other_names:
+- billed revenue
+- subscription revenue
+calculation: Revenue collected from paid subscription invoices.
+bindings:
+  SQLite: SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END)
+unit: USD
+source_tables:
+- invoices
+base_metrics: []
+subject_areas: []
+primary_table: invoices
+non_additive_dimensions: []
+inner_grain: []
+confidence: confirmed
+review_state: approved
+signed_off_by: agami-team@agami.ai
+signed_off_at: '2026-06-15T00:00:00Z'
+signed_off_role: maintainer

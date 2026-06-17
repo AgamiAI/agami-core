@@ -1,0 +1,10 @@
+organization: agami-example
+version: 1
+description: ''
+fiscal_year_start_month: 1
+storage_connections:
+- name: agami-example_sqlite
+  ref: datasources/agami-example_sqlite/storage.yaml
+subject_areas:
+- subject_areas/agami-example
+cross_subject_area_relationships: []

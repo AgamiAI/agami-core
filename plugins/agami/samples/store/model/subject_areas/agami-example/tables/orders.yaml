@@ -1,0 +1,104 @@
+name: orders
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Customer orders — one row per order. total_amount is the order-grain total (sum of its line
+  items).
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 4000
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: customer_id
+  type: integer
+  description: FK to customers.id; one customer has many orders.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: status
+  type: string
+  description: ''
+  primary_key: false
+  choice_field:
+    pending: Pending
+    paid: Paid
+    shipped: Shipped
+    delivered: Delivered
+    cancelled: Cancelled
+    refunded: Refunded
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: channel
+  type: string
+  description: ''
+  primary_key: false
+  choice_field:
+    web: Web
+    mobile: Mobile
+    store: In-store
+    partner: Partner
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: total_amount
+  type: float
+  description: Order total in USD (sum of the order's line items). Pre-aggregate before joining to order_items/products,
+    or the total double-counts per line item.
+  primary_key: false
+  aggregation: additive
+  sensitive: false
+  caveats:
+  - Order-grain measure. Summing it across a join to order_items (line-item grain) inflates revenue —
+    pre-aggregate in a CTE first.
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+  unit: USD
+- name: placed_at
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: shipped_at
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+description_source: ai_unvalidated

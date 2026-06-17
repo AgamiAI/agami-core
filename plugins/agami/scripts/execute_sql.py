@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import csv
+import json
 import os
 import stat
 import sys

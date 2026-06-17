@@ -1,0 +1,24 @@
+name: customer
+plural: customers
+other_names:
+- buyer
+- account
+- user
+- member
+- shopper
+description: A person who signed up with the store; may place orders, hold a subscription, or both.
+maps_to:
+- table: customers
+  column: id
+  primary: true
+- table: orders
+  column: customer_id
+  primary: false
+- table: subscriptions
+  column: customer_id
+  primary: false
+primary_table: customers
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved

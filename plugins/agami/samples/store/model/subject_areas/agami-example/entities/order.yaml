@@ -1,0 +1,22 @@
+name: order
+plural: orders
+other_names:
+- purchase
+- sale
+- transaction
+description: A customer order; one row per order in the orders table.
+maps_to:
+- table: orders
+  column: id
+  primary: true
+- table: order_items
+  column: order_id
+  primary: false
+- table: payments
+  column: order_id
+  primary: false
+primary_table: orders
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved

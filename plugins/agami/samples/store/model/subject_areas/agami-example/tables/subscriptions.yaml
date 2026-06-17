@@ -1,0 +1,86 @@
+name: subscriptions
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Customer subscriptions to a plan — the recurring-revenue side of the business. One customer
+  may hold a subscription and also place orders.
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 400
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: customer_id
+  type: integer
+  description: FK to customers.id; the subscribing customer.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: plan_id
+  type: integer
+  description: FK to plans.id; the plan currently subscribed to.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: status
+  type: string
+  description: ''
+  primary_key: false
+  choice_field:
+    trialing: Trialing
+    active: Active
+    paused: Paused
+    canceled: Canceled
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: started_at
+  type: string
+  description: When the subscription began.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: canceled_at
+  type: string
+  description: When the subscription was canceled; NULL if still active.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+description_source: ai_unvalidated

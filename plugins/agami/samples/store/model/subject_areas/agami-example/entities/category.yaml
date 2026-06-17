@@ -1,0 +1,18 @@
+name: category
+plural: categories
+other_names:
+- product category
+- department
+description: A grouping of products in the catalog.
+maps_to:
+- table: categories
+  column: id
+  primary: true
+- table: products
+  column: category_id
+  primary: false
+primary_table: categories
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved

@@ -1,0 +1,14 @@
+name: invoice
+plural: invoices
+other_names:
+- bill
+description: A monthly invoice issued for a subscription.
+maps_to:
+- table: invoices
+  column: id
+  primary: true
+primary_table: invoices
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved
