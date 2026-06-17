@@ -404,12 +404,7 @@ If `<artifacts_dir>/agami-example/org.yaml` already exists, the sample is alread
      ```
      (Questions 1 and 2 are the multi-table joins. All six are backed by EXPLAIN-validated seed examples in the shipped model, so they answer reliably.)
    - Then **stop and wait.** Nothing about agami-serve / agami-model / corrections yet — let them experience one real query in Claude Code first. When the user picks a number or asks anything, hand to [agami-query](../agami-query/SKILL.md) — it answers AND runs its own first-query flow (the one-time GitHub-star ask + `/agami-serve` pointer, gated by `local/.optins`). **Do NOT pre-narrate fan/chasm traps or "what agami caught."** If their question hits a trap (questions 1–3 can), agami-query surfaces it in the answer's receipt — let it happen on a real question instead of scripting it.
-8. **After the FIRST answer — and only then — a short "where to go deeper" footer (once).** Once the user has seen one query answered, append a brief plain-prose footer (not an `AskUserQuestion`, not before the answer):
-   - *"If an answer ever looks off, say 'save this as a correction' or paste the right SQL — I'll teach the model."*
-   - *"`/agami-model` — browse the semantic model: tables, metrics, joins, and what's been signed off."*
-   - *"Using the Claude Desktop app? `/agami-serve` wires this model into it so you can ask from there too."*
-
-   If agami-query already surfaced the `/agami-serve` pointer this same turn (the `.optins`-new-user path), don't repeat it. Keep the whole footer to ~3 lines; it's a signpost, not a sales pitch.
+8. **The "where to go deeper" footer (corrections / `/agami-model` / `/agami-serve`) fires from agami-query, not here.** When the user asks their first sample question, agami-query owns the turn — so its Phase 4f surfaces a one-time orientation footer for the `agami-example` profile (see [agami-query SKILL.md → Phase 4f](../agami-query/SKILL.md)). Don't try to print it from Phase 0s — a footer placed here never executes once agami-query has taken over. Phase 0s ends at step 7 (describe + questions + stop).
 
 ---
 

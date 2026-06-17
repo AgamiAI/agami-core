@@ -757,12 +757,25 @@ When the user responds to that nudge:
 test -f <artifacts_dir>/local/.optins
 ```
 
+**Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead. Continue to 4f.
+
 - **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
 - **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/LiteBi`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la <artifacts_dir>/local/.optins` will show whether the file exists, and `rm <artifacts_dir>/local/.optins` re-arms the prompt for the next query.
 
 ### 4f — Numbered follow-up suggestions (always 5)
+
+**Sample-profile orientation footer (once, before the follow-ups).** If `active_profile` is `agami-example` AND `<artifacts_dir>/local/.agami-example-intro` does **not** exist, then — after the answer, before the "What next?" bullets — print this plain-prose footer ONCE, then create the marker (`touch <artifacts_dir>/local/.agami-example-intro`) so it never repeats. This is ungated by `.optins` (the sample is a guided demo). Keep it to these ~4 lines, plain, no hype:
+
+```
+If a number ever looks off, say "save this as a correction" (or paste the right SQL) — I'll teach the model so next time is right.
+/agami-model — browse the semantic model: tables, metrics, joins, and what's signed off.
+Using the Claude Desktop app? /agami-serve wires this model into it so you can ask from there too.
+Liked it? A GitHub star helps a lot — github.com/AgamiAI/LiteBi
+```
+
+Why here, not in agami-connect: when the user asks their first sample question, agami-query owns the turn — a footer placed in agami-connect's Phase 0s never executes. This is the reliable home. (For non-sample profiles this block is skipped; the generic star/serve in 4e.5 + Phase 6 covers them.)
 
 End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list. Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
 
