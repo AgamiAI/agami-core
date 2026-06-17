@@ -770,6 +770,17 @@ def _regroup_columns_with_references(tables: list[Table], rels: list[Relationshi
 
 _REF_ID_RE = re.compile(r"^(.+?)_id$", re.IGNORECASE)
 
+# Columns that are NEVER an enum to decode, regardless of cardinality: join keys / reference
+# actors (`*_id`, `*_by` — usually GUID-valued FKs) and counts / quantities (`*_count`, `*_qty`,
+# … — measures, not codes). General naming conventions, not vendor-specific. A low-cardinality
+# `resolved_by` (few users) or `reopen_count` (0/1/2) would otherwise be mis-seeded as a choice.
+_NOT_CHOICE_NAME_RE = re.compile(
+    r"^(id|guid|uuid)$|_(id|guid|uuid|by|count|cnt|qty|quantity|seq|num|no)$", re.IGNORECASE)
+# A value that looks like an identifier (32-hex ServiceNow sys_id, or a dashed UUID) — its column
+# is a join key, never an enum. One such distinct value is enough to disqualify the whole column.
+_GUID_VALUE_RE = re.compile(
+    r"^[0-9a-f]{32}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
 
 def _infer_reference_target(stem: str, by_name: dict, from_table: Table) -> Optional[Table]:
     """Find the table a `<stem>_id` column points at — by exact name, plural, or singular.
@@ -1020,7 +1031,7 @@ def _enrich_from_sample(
     choice_cands = [c for c in cols
                     if c.choice_field is None and not c.primary_key and c.foreign_key is None
                     and c.type in ("integer", "string") and not _looks_time_named(c.name)
-                    and not _REF_ID_RE.match(c.name)]
+                    and not _NOT_CHOICE_NAME_RE.search(c.name)]
     if not date_cands and not choice_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
@@ -1059,10 +1070,14 @@ def _infer_value_type(values: list) -> str:
 def _maybe_choice(values: list) -> Optional[dict[str, str]]:
     vals = [str(v).strip() for v in values if str(v).strip() != ""]
     distinct = sorted(set(vals))
-    if 0 < len(distinct) <= ENUM_MAX_DISTINCT and len(vals) >= max(10, 2 * len(distinct)):
-        # low-cardinality relative to sample size -> likely an enum
-        return {d: "" for d in distinct}  # labels filled in by LLM enrichment
-    return None
+    if not (0 < len(distinct) <= ENUM_MAX_DISTINCT and len(vals) >= max(10, 2 * len(distinct))):
+        return None
+    # GUID/UUID-valued columns are join keys, not enums — a real enum (severity 1/2/3, status
+    # open/closed) never holds identifier values. One such distinct value disqualifies the column.
+    if any(_GUID_VALUE_RE.match(d) for d in distinct):
+        return None
+    # low-cardinality, non-identifier values -> likely an enum
+    return {d: "" for d in distinct}  # labels filled in by LLM enrichment
 
 
 def _backup_legacy_model(profile_root: Path) -> None:
