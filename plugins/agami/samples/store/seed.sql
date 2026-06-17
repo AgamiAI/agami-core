@@ -247,6 +247,14 @@ JOIN countries c ON c.i = n % 8;
 -- Orders — 4000 rows over 2024-06-01 .. 2026-05-31 (~24 months).
 -- customer_id spans 1..500 (overlaps subscription customers → chasm trap).
 -- status/channel are deterministic enum distributions.
+--
+-- customer_id uses a SKEWED (long-tail) assignment so total spend per customer
+-- varies realistically — a few heavy buyers, many light — instead of every
+-- customer getting ~8 orders (which made "top customers" a near-tie). A non-
+-- periodic multiplicative hash of n gives a pseudo-uniform u∈[0,1); squaring it
+-- (×3000) concentrates orders onto fewer customers (≈ Pareto head ~79/35/29/…);
+-- ×251 (coprime to 500) scatters the heavy buyers across the id space so they
+-- aren't ids 1,2,3. Deterministic — no random().
 -- ---------------------------------------------------------------------------
 WITH RECURSIVE seq(n) AS (
     SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 4000
@@ -254,7 +262,9 @@ WITH RECURSIVE seq(n) AS (
 INSERT INTO orders (id, customer_id, status, channel, placed_at, shipped_at)
 SELECT
     n,
-    1 + ((n * 109) % 500),
+    1 + ((CAST(
+            (((n * 2654435761) % 100000) / 100000.0)
+          * (((n * 2654435761) % 100000) / 100000.0) * 3000 AS INTEGER) * 251) % 500),
     CASE
         WHEN n % 20 < 10 THEN 'delivered'
         WHEN n % 20 < 14 THEN 'shipped'

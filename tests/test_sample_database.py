@@ -273,3 +273,18 @@ def test_execute_sql_allows_pii_aggregate(wired_artifacts):
     proc = _run_execute_sql(wired_artifacts, "SELECT COUNT(DISTINCT email) AS n FROM customers")
     assert proc.returncode == 0, proc.stderr
     assert "500" in proc.stdout
+
+
+def test_customer_spend_is_skewed(db):
+    """Total spend per customer follows a long tail — the #1 customer clearly
+    outspends the 5th — so 'top customers' isn't a near-tie (regression guard:
+    a uniform order assignment gave every customer ~8 orders and near-identical
+    spend, e.g. three customers tied to the cent)."""
+    rows = db.execute(
+        "SELECT ROUND(SUM(o.total_amount), 2) AS spend "
+        "FROM customers c JOIN orders o ON o.customer_id = c.id "
+        "GROUP BY c.id ORDER BY spend DESC LIMIT 5"
+    ).fetchall()
+    spends = [r[0] for r in rows]
+    assert len(set(spends)) == 5, f"top-5 spends should be distinct, got {spends}"
+    assert spends[0] >= 2 * spends[4], f"expected a clear long tail, got {spends}"
