@@ -534,6 +534,10 @@ def write_tree(
         if sa.name in examples_by_area:
             write(f"prompt_examples/{sa.name}/examples.yaml",
                   _dump({"examples": examples_by_area[sa.name]}))
+    if not dry_run:
+        # Stamp the model_version pin for the freshly-written model (best-effort).
+        from . import snapshot
+        snapshot.write_snapshot(out)
     return rep
 
 
