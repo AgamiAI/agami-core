@@ -138,6 +138,43 @@ def classify_aggregation(column_name: str, column_type: str, is_key: bool = Fals
     return "unknown"
 
 
+# Universal coded-FORMAT columns whose meaning is an objective standard, not a guess — recognized
+# from NAME signal + VALUE shape together (both required, so it's confident, never inferred from a
+# name alone). Deterministic; fills a description the LLM would otherwise leave `ai_unknown`, on
+# ANY database (no platform assumptions). General world facts, not vendor-specific.
+_CCY_NAME_RE = re.compile(r"(^|_)(currency|ccy|curr)(_|$)", re.IGNORECASE)
+_COUNTRY_NAME_RE = re.compile(r"(^|_)(country|nation)(_code)?(_|$)", re.IGNORECASE)
+_LOCALE_NAME_RE = re.compile(r"(^|_)(locale|lang|language)(_|$)", re.IGNORECASE)
+_TZ_NAME_RE = re.compile(r"(^|_)(timezone|tz|time_?zone)(_|$)", re.IGNORECASE)
+_3UP_RE = re.compile(r"^[A-Z]{3}$")
+_2UP_RE = re.compile(r"^[A-Z]{2}$")
+_IANA_TZ_RE = re.compile(r"^[A-Za-z]+/[A-Za-z_]+")
+_LOCALE_VAL_RE = re.compile(r"^[a-z]{2}([_-][A-Za-z]{2,4})?$")
+
+
+def canonical_description(column_name: str, values: list) -> Optional[str]:
+    """A deterministic description for a UNIVERSAL coded format (currency / country / timezone /
+    locale), recognized from the column NAME plus the SHAPE of its sampled values — both required,
+    so it never guesses from a name alone. Returns None when there's no confident match. General
+    world standards, applicable to any database."""
+    vals = [str(v).strip() for v in values if str(v).strip() != ""][:50]
+    if not vals:
+        return None
+
+    def most(rx) -> bool:  # ≥80% of sampled values fit the shape (tolerate a few odd rows)
+        return sum(1 for v in vals if rx.match(v)) >= max(1, int(0.8 * len(vals)))
+
+    if _CCY_NAME_RE.search(column_name) and most(_3UP_RE):
+        return "ISO 4217 currency code (3-letter, e.g. USD, EUR, INR)."
+    if _COUNTRY_NAME_RE.search(column_name) and most(_2UP_RE):
+        return "ISO 3166-1 alpha-2 country code (2-letter, e.g. US, IN, GB)."
+    if _TZ_NAME_RE.search(column_name) and most(_IANA_TZ_RE):
+        return "IANA time-zone identifier (e.g. America/New_York, Asia/Kolkata)."
+    if _LOCALE_NAME_RE.search(column_name) and most(_LOCALE_VAL_RE):
+        return "Language / locale code (e.g. en, en_US, pt-BR)."
+    return None
+
+
 def detect_sensitive(table_name: str, column_name: str) -> bool:
     """Strongly-PII column names (email/phone/dob/ssn/address/…) are sensitive
     regardless of table. Weakly-PII names (name/first_name/…) are sensitive only
@@ -609,6 +646,6 @@ __all__ = [
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
-    "suggest_metrics", "suspected_pii",
+    "suggest_metrics", "suspected_pii", "canonical_description",
     "write_tree", "WriteReport",
 ]

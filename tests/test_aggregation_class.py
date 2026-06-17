@@ -197,6 +197,25 @@ def test_suggest_metrics_skips_opaque_columns_until_described():
     assert "alm_asset_active_to_rate" in names2
 
 
+@pytest.mark.parametrize("name,values,expected_substr", [
+    ("currency", ["USD", "EUR", "INR", "USD"], "ISO 4217"),
+    ("ccy_code", ["USD", "GBP"], "ISO 4217"),
+    ("country", ["US", "IN", "GB"], "ISO 3166"),
+    ("user_timezone", ["America/New_York", "Asia/Kolkata"], "IANA"),
+    ("locale", ["en", "en_US", "pt-BR"], "locale"),
+    # name signal but wrong value shape → no false description
+    ("currency", ["dollars", "euros"], None),
+    # value shape but no name signal → no guess
+    ("status", ["USD", "EUR"], None),
+])
+def test_canonical_description(name, values, expected_substr):
+    out = build.canonical_description(name, values)
+    if expected_substr is None:
+        assert out is None
+    else:
+        assert out and expected_substr in out
+
+
 def test_suggest_metrics_inherits_column_unit():
     from semantic_model import dialects as D
     t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],

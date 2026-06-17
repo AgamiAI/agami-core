@@ -173,6 +173,34 @@ def description_ops(
     return ops
 
 
+def descriptions_by_element(
+    rows: Iterable[dict], *, column_col: str,
+    label_col: Optional[str] = None, comment_col: Optional[str] = None,
+) -> dict[str, str]:
+    """Map a column NAME (element) → its dictionary description, keyed by element NOT the declaring
+    table — so a description declared once under a PARENT table (ServiceNow declares shared fields
+    under `sys_dictionary.name='task'`) PROPAGATES to the inheriting children that physically have
+    the column (`incident`/`problem`/`change`), which the table-keyed `description_ops` misses.
+    Prefers the longer comment, falls back to the short label. Elements whose description CONFLICTS
+    across declarations are dropped as ambiguous (same guard as `reference_declarations`), so an
+    unrelated `state`/`name` collision never propagates the wrong meaning."""
+    desc: dict[str, str] = {}
+    conflict: set[str] = set()
+    for r in rows:
+        el = _norm(r.get(column_col)).lower()
+        d = (_norm(r.get(comment_col)) if comment_col else "") or \
+            (_norm(r.get(label_col)) if label_col else "")
+        if not (el and d):
+            continue
+        if el in desc and desc[el] != d:
+            conflict.add(el)
+        else:
+            desc[el] = d
+    for el in conflict:
+        desc.pop(el, None)
+    return desc
+
+
 def reference_declarations(
     rows: Iterable[dict], *, column_col: str, type_col: str, reference_col: str,
     reference_type: str = "reference",

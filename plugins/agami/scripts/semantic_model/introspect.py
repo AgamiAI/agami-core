@@ -1048,6 +1048,15 @@ def _enrich_from_sample(
         # only genuinely code-like: skip long free-text values (names, descriptions, ids).
         if ch and all(len(str(k)) <= 40 for k in ch):
             c.choice_field = ch
+    # Deterministic descriptions for universal coded formats (currency/country/timezone/locale) —
+    # fills a column the LLM would otherwise leave `ai_unknown`, on any database. Only when blank.
+    for c in cols:
+        if (c.description or "").strip() or c.primary_key:
+            continue
+        cd = build.canonical_description(c.name, [row.get(c.name) for row in sample])
+        if cd:
+            c.description = cd
+            c.description_source = "metadata"  # authoritative deterministic fact (not an LLM guess)
 
 
 def _infer_value_type(values: list) -> str:
