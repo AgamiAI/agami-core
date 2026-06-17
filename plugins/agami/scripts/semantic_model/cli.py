@@ -56,6 +56,17 @@ def cmd_validate(args) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_snapshot(args) -> int:
+    """Stamp the model_version snapshot for a profile tree. Introspect/curate do this
+    automatically; this command is for paths that write a model WITHOUT going through
+    them — e.g. agami-connect's sample copy (6A) drops the prebuilt model into place,
+    then calls this so the answer receipt has a real model_version."""
+    from . import snapshot as SN
+    h = SN.write_snapshot(args.root)
+    print(h or "(no model to snapshot)")
+    return 0 if h else 1
+
+
 def cmd_context(args) -> int:
     org = L.load_organization(args.root)
     out = L.get_table_context(
@@ -933,6 +944,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("validate", help="validate a profile tree")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_validate)
+
+    sp = sub.add_parser("snapshot", help="stamp the model_version snapshot for a profile (e.g. after copying a model)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_snapshot)
 
     sp = sub.add_parser("context", help="assemble get_table_context")
     sp.add_argument("root")
