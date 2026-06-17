@@ -43,3 +43,6 @@ plugins/agami/samples/store/*.db
 
 # Scratch blog drafts (authored in other sessions; not part of the plugin)
 blog/
+
+# curate op-log written when editing the committed sample model in place — never commit
+plugins/agami/samples/store/model/curation_log.jsonl

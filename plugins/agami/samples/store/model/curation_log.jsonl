@@ -1,2 +1,0 @@
-{"op": "edit", "kind": "table", "name": "customers", "column": "full_name", "field": "sensitive", "value": false, "signer": null, "role": null}
-{"op": "edit", "kind": "table", "name": "customers", "column": "full_name", "field": "description", "value": "Customer's full name \u2014 the display label for a customer in results.", "source": "ai", "signer": null, "role": null}
