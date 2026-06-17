@@ -108,7 +108,10 @@ grep -qxF 'local/' "<artifacts_dir>/.gitignore" 2>/dev/null || printf 'local/\n'
 
 ### 0a.2 — Ask the database type
 
-**AskUserQuestion** (no `(Recommended)` — fact-of-environment). The **first** option is always the no-database sample path; cap the rest at 4 visible + Other:
+**AskUserQuestion** (no `(Recommended)` — fact-of-environment). The **first** option is always the no-database sample path; cap the rest at 4 visible + Other.
+
+**Name the Other-only engines in the QUESTION PROMPT** so they're visibly supported — the auto-provided "Other" field can't carry its own description/examples, so the examples must live in the prompt. End the prompt with a line like:
+> *Something else — BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, or SQLite? Choose **Other** and type it (a name or a full DSN).*
 
 | label | description |
 |---|---|
