@@ -163,6 +163,41 @@ def cmd_prepare(args) -> int:
     return 0
 
 
+def _newest_model_version(root) -> Optional[str]:
+    """model_version pin = newest dir name under <root>/.snapshots (same reader as
+    mcp_server._model_version + the skill). None if no snapshots yet."""
+    try:
+        snaps = Path(root) / ".snapshots"
+        dirs = sorted((p for p in snaps.iterdir() if p.is_dir()),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+        return dirs[0].name if dirs else None
+    except Exception:
+        return None
+
+
+def cmd_receipt(args) -> int:
+    """Assemble the trust receipt for an executed query — deterministically, from the
+    SQL + the model. Replaces the LLM hand-building the receipt JSON in prose: tables,
+    relationships, metrics, unreviewed-warnings, and model_version all come from
+    parsing the SQL against the model (the SAME `runtime.assemble_receipt` the MCP
+    server uses). The LLM may still append ad-hoc metrics + assumptions afterward."""
+    sql = args.sql
+    if args.sql_file:
+        sql = Path(args.sql_file).read_text()
+    org = L.load_organization(args.root)
+    pf = RT.pre_flight_check(sql, org)
+    applied = json.loads(args.applied_filters) if args.applied_filters else None
+    receipt = RT.assemble_receipt(
+        org, sql,
+        model_version=_newest_model_version(args.root),
+        applied_filters=applied,
+        pre_flight=pf,
+        freshness=args.freshness,
+    )
+    _print_json(receipt)
+    return 0
+
+
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_organization(args.root)
@@ -996,6 +1031,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--sql", default=None)
     sp.add_argument("--sql-file", default=None, dest="sql_file")
     sp.set_defaults(func=cmd_prepare)
+
+    sp = sub.add_parser("receipt", help="assemble the trust receipt for a query (deterministic, from SQL + model) — replaces hand-building it")
+    sp.add_argument("root")
+    sp.add_argument("--sql", default=None)
+    sp.add_argument("--sql-file", default=None, dest="sql_file")
+    sp.add_argument("--applied-filters", default=None, dest="applied_filters",
+                    help="JSON list of default_filters applied (from `sm prepare`)")
+    sp.add_argument("--freshness", default=None, help="optional freshness timestamp for tables_used")
+    sp.set_defaults(func=cmd_receipt)
 
     sp = sub.add_parser("review-queue", help="trust-review items needing sign-off (Rule 1/2)")
     sp.add_argument("root")

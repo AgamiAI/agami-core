@@ -554,99 +554,53 @@ For each section's SQL result, read `agami.type` for each result column and pick
 
 If the user override-says `--chart pie|line|...` for the **whole** report, apply it to every section that supports a chart.
 
-#### 4e.iii — build the SECTIONS_JSON
+#### 4e.iii — build the SECTIONS file via `csv_to_sections.py` (do NOT hand-write the numbers)
 
-For each section, build an object:
+**You do NOT transcribe result numbers into JSON.** `csv_to_sections.py` reads each section's result CSV + the `units` map (from `sm prepare`) and builds the section's `labels`, `table_rows` (formatted exactly via `units.py`), and `datasets[].data` (raw numbers) — so the chart can never disagree with the table, and a miscopy is impossible. You supply only the **presentation spec**.
 
-```json
-{
-  "title":         "<sub-question or short heading>",
-  "insights":      "<1-3 sentence plain-English insight for this section>",
-  "chart_type":    "bar | line | pie | doughnut | scatter | null",
-  "labels":        ["<x-axis or pie labels>"],
-  "datasets":      [{"label": "<header>", "data": [<numeric values>]}],
-  "table_headers": ["<col1>", "<col2>", ...],
-  "table_rows":    [[<v>, <v>, ...], ...],
-  "sql":           "<the EXACT, COMPLETE SQL that produced this section's data — verbatim>"
-}
-```
-
-**`sql` is the exact, complete, runnable query — never a paraphrase.** Paste the *verbatim* SQL string you executed for this section (the text you passed to `sm prepare` / the executor — keep each section's query around for this). It must be:
-- **Complete** — every CTE, column, JOIN, WHERE, GROUP BY. The receipt exists so a data engineer can re-run it and defend the number; a partial query defeats that.
-- **Literal SQL, not prose** — no `...`/`…`, no `-- net revenue = (line_total - gst) - ...`, no "ON paid book lines". If you find yourself writing English where SQL goes, you're summarizing — stop and paste the real query.
-- **Never empty when the section has data.** Every section that ran a query has its query. A section with no `sql` only makes sense for a hand-built/derived table with no underlying SQL — and that is rare; double-check before omitting.
-
-Do NOT HTML-escape it — the template handles escaping. Do NOT shorten it to save tokens; the renderer reads it from a file, so length is free.
-
-When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). The template skips the chart card cleanly.
-
-**Use the formatted values from Phase 3c — not the raw CSV strings.** Specifically:
-
-- `labels` for time-series line charts must be human-readable date labels (`May 2026`, `Q2 2026`, `May 7`, `May 7, 2026`) — NOT raw ISO timestamps like `2026-05-07T15:14:00.000Z` and NOT epoch numbers. The granularity follows the SQL grouping (monthly bucket → `MMM YYYY`, daily → `MMM D` or `MMM D, YYYY`).
-- `labels` for categorical charts use the choice-field display label (e.g. `Closed Won`, not the stored value `closed_won`).
-- `table_rows` cells use the formatted values across the board: `$148.95` not `148.95`, `May 7, 2026 3:14 PM` not `2026-05-07T15:14:00Z`, `Yes` not `true`.
-
-`datasets[].data` is the **only** place raw numeric values belong (Chart.js needs numbers, not formatted strings, to draw the chart). Currency / percent formatting on the chart itself happens via the template's tooltip callbacks, not by passing pre-formatted strings.
-
-The whole report's `SECTIONS_JSON` is a JSON array of these objects.
-
-#### 4e.iii.5 — build the trust receipt
-
-Every answer ships with a **trust receipt** that documents provenance: tables touched, relationships used, metric definitions invoked, named filters applied, source-data freshness, and the model version pin. This is the single most important UX element for a data engineer — it lets them defend any number to a CxO with one click.
-
-Build the receipt as a single JSON object. Schema (see [`shared/chart-template.html` → `RECEIPT_JSON`](../../shared/chart-template.html) for the canonical version):
+Write a spec file `/tmp/agami-spec-<ts>.json` — a JSON array, one object per section:
 
 ```json
-{
-  "model_version": "<short hash — the .snapshots/<hash>/ dir the answer pinned>",
-  "tables_used": [
-    {"qname": "public.orders", "rows": <integer or null>, "freshness": "<ISO8601 + cadence note, or null>"}
-  ],
-  "relationships": [
-    {"name": "<rel name>", "from_to": "<from> → <to>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "fk|...",
-     "signed_off_by": "<email or 'agami_introspect_v1'>", "signed_off_role": "<enum>",
-     "signed_off_at": "<ISO>"}
-  ],
-  "metrics": [
-    {"name": "<metric>", "area": "<subject area>", "definition_prose": "<plain English>",
-     "expression": "<the SQL fragment / binding>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum | ad_hoc>",
-     "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
-  ],
-  "named_filters": [
-    {"name": "<filter>", "expression": "<predicate>", "definition_prose": "<plain English>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum>",
-     "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
-  ],
-  "assumptions": [
-    {"column": "<schema>.<table>.<column>", "meaning": "<the AI-written description>", "source": "ai_unvalidated"}
-  ],
-  "warnings": ["<one-liner per unreviewed entry that the answer used>"]
-}
+[{
+  "title":       "<sub-question / heading>",
+  "insights":    "<1-3 sentence plain-English insight>",
+  "chart_type":  "bar|line|pie|doughnut|scatter|null",
+  "csv_file":    "/tmp/agami-result-<n>.csv",
+  "units":       { },
+  "sql_file":    "/tmp/agami-q-<n>.sql",
+  "label_col":   0,
+  "value_cols":  [1],
+  "header_relabels": {"total_amount": "Total Spend"}
+}]
 ```
 
-How to populate each field:
+Your fields: `title` + `insights` (prose), `chart_type`, `label_col` (which column is the x-axis/label, default 0), `value_cols` (chart value columns, default: all non-label), and optional cosmetic `header_relabels`. Everything numeric is the script's job — keep each section's result CSV (Phase 3) and its `sql_file` so the spec can point at them. `units` is the object `sm prepare` returned. When `chart_type` is `null` the chart card is skipped; `table_rows` still render.
 
-- **`model_version`** — derive from the **newest directory** under `<artifacts_dir>/<profile>/.snapshots/`. The directory name itself IS the version (a 12-char content hash). Lookup:
-  ```bash
-  model_version=$(ls -t "$artifacts_dir/$profile/.snapshots/" 2>/dev/null | head -n1)
-  ```
-  If `.snapshots/` doesn't exist or is empty (legacy v1.2 model that pre-dates trust-layer), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."* **Do not look for `model_version` inside `index.yaml`** — it's not stored there; the snapshot directory is the source of truth.
-- **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the **table's size** — pass the table's `performance_hints.estimated_row_count` from the model (the *same* value Phase 3 reads for the scan-risk check, e.g. `12000000`). This is "how big is this dataset," not the query's result-row count. Also pass **`rows_as_of`** = the table's `performance_hints.estimated_row_count_at` (when that estimate was last measured at introspection) — the receipt renders "≈N rows (estimated as of <date>)" so the reader knows it's a point-in-time estimate, not a live count. Only pass `null` for `rows` if the table genuinely has no `estimated_row_count` in the model — don't default to `null` out of caution when the model has it.
-  **`freshness`** — pass the **raw ISO timestamp** from `agami.introspect_meta.introspected_at` (e.g., `"2026-05-10T11:57:13Z"`). The chart template prettifies it to `"introspected May 10, 2026, 11:57 AM"` automatically. Don't prefix with "introspected" yourself or you'll double-prefix. If the upstream load cadence is known (e.g., daily ETL at 2am UTC), pass a pre-formatted string instead — e.g., `"2026-05-10T02:00:00Z (daily 2am UTC ETL)"` — and the template passes it through unchanged. Pass `null` when freshness is unknowable.
-- **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the model (from `get_table_context`). **Pull EVERY trust field** carried on the relationship: `relationship` (cardinality), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state` (enum), `signed_off_by`, `signed_off_role`, `signed_off_at`, plus `on:` if it's a CAST/compound join. The template's `approvalPhrase` reads all of them to render "confirmed (FK declared)" vs "approved by jane@x.com (cfo), Mar 15" vs "proposed (inferred join — confirm)". For composite or multi-hop joins, list each edge. Also surface any **auto-rewrite** the pre-flight applied (fan/chasm) and the **default_filters** that were applied (from execute_sql's stderr notes).
-- **`metrics`** — TWO kinds of entry, both go here:
-  1. **Model metrics** whose `bindings` SQL matches a fragment in the generated SQL. **Pull EVERY trust field:** `calculation` → `definition_prose`, `confidence`, `review_state`, `signed_off_by`, `signed_off_role`, `signed_off_at`, `source`/`origin`, and the metric's `area`. If a metric is genuinely unreviewed, that's fine — the receipt shows it honestly. Don't half-populate (it renders a meaningless "unreviewed (?)").
-  2. **On-the-fly metrics you calculated for this answer** — any non-trivial aggregation/ratio you composed that ISN'T an approved model metric (e.g. you wrote `(SUM(net_revenue) - SUM(cogs)) / SUM(net_revenue)` for "gross margin" because no `gross_margin` metric exists). Emit one entry per such calc with `review_state: "unreviewed"`, **`origin: "ad_hoc"`**, a snake_case `name` (your suggested metric name), the `area` it belongs to, `definition_prose` (the calculation in plain English), and `expression` (the SQL fragment). This is what feeds the **top-of-report "metrics you haven't approved" banner**, where the user can Approve it (→ saved as a real model metric, signed off) or Change the definition — both routed back to you as feedback. **Don't flag trivial primitives** (a bare `COUNT(*)`, `SUM(amount)` with no logic) as ad-hoc metrics — only genuine, reusable definitions. When in doubt, include it; an over-flag is a one-click dismiss, a miss means an unapproved number ships silently.
-- **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING. **Pull EVERY trust field** from the filter's entry: `expression`, `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships and metrics.
-- **`assumptions`** — the AI-derived column meanings this answer **leaned on**, so a wrong/unknown one is caught in context instead of via an upfront review of hundreds of descriptions (see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). For each column the SQL used in a **load-bearing** way — SELECT / WHERE / GROUP BY / ORDER BY / a metric binding, **not** pure join plumbing — look it up in `get_table_context` and surface two cases:
-  - `description_source == "ai_unvalidated"` (a guess) AND `description` non-empty → `{column, meaning: <description>, source: "ai_unvalidated"}`.
-  - `description_source == "ai_unknown"` (agami couldn't read it) → `{column, meaning: null, source: "ai_unknown"}` — agami used a column it doesn't understand; flag it loudly.
-  Columns with `description_source` of `human`, `ai_validated`, or `null` are NOT surfaced. **Cap at 3**, ranked by load-bearing-ness (filter/group-by > select > order-by) and putting `ai_unknown` first (an unknown the query relied on is the riskiest). Pass `[]` when none qualify. Advisory — never blocks or warns; it's a "here's what I assumed / didn't know" so the user can correct, confirm, or describe.
-- **`warnings`** — for every **non-metric** entry above whose `review_state ≠ approved` (joins, rewrites, applied filters), push a one-line warning naming the entry and its confidence. Example: `"Used 1 unreviewed join (orders → customers, conf inferred)."`. **Do NOT add a warning line for unreviewed/ad-hoc metrics** — they get their own actionable **"metrics you haven't approved" banner** (from `receipt.metrics`) with Approve / Change controls, so a warning line would just duplicate it. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-model review to walk these items, or say 'open the review queue'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely. (Assumptions and metric-approvals are NOT warnings — keep them separate.)
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/csv_to_sections.py" \
+  --spec /tmp/agami-spec-<ts>.json --out /tmp/agami-sections-<ts>.json
+```
 
-Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
+It prints `{ok, data:{section_count}, anomalies}`. **Read `anomalies`** and mention/act on them if they matter (e.g. a value column that isn't numeric → left out of the chart; a query that returned 0 rows) — they're not fatal. The `--out` sections file is what `render_chart.py` reads (4e.iv).
+
+Notes the script handles for you: a time-bucket `label_col` is formatted from its unit/date encoding; a categorical label uses the value as-is; the section's chart-axis `unit` is set automatically only when **all** value columns share one unit (so a currency col plotted next to a count never mis-formats); the `sql` is read verbatim from `sql_file` (no paraphrase, no `...`).
+
+#### 4e.iii.5 — build the trust receipt via `sm receipt` (do NOT hand-build it)
+
+The receipt documents provenance: tables touched, relationships + metrics used, unreviewed-warnings, assumptions, and the model-version pin. **It is assembled deterministically from the SQL + the model** by `runtime.assemble_receipt` — the SAME builder the MCP server uses — so it never depends on you extracting fields by hand:
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" receipt "$ROOT" \
+  --sql-file /tmp/agami-q-<n>.sql \
+  --applied-filters "$APPLIED_FILTERS_JSON" \
+  > /tmp/agami-receipt-<ts>.json
+```
+
+It emits the full receipt object — `model_version`, `tables_used` (with each table's `estimated_row_count` + `rows_as_of`), `relationships` (every trust field), `metrics` (model metrics whose binding appears in the SQL), `named_filters`, `assumptions` (the load-bearing columns whose description is `ai_unvalidated`/`ai_unknown`), and `warnings` (one per unreviewed join/filter the SQL used). It parses the FROM/JOIN scope and matches model entries itself. `--applied-filters` is the `applied_filters` list from `sm prepare` (optional). `model_version` comes from the newest `.snapshots/<hash>/` dir (null on a pre-trust-layer model — renders gracefully).
+
+**The ONE thing you add by hand — an ad-hoc metric.** If you composed a non-trivial metric for THIS answer that isn't a model metric (e.g. `(SUM(net_revenue) - SUM(cogs)) / SUM(net_revenue)` for "gross margin", with no such model metric), the script can't know it. Append one entry to the receipt's `metrics` array: `{name: "<snake_case>", area: "<area>", origin: "ad_hoc", review_state: "unreviewed", definition_prose: "<plain English>", expression: "<SQL fragment>"}`. This feeds the "metrics you haven't approved" banner. **Don't flag trivial primitives** (a bare `COUNT(*)` / `SUM(amount)`). For a multi-section report, run `sm receipt` per section's SQL and merge `tables_used`/`relationships`/`metrics` (dedup by name), or pass the dominant query's SQL.
+
+For a 1×1 scalar answer with no chart (Phase 4e skips the report), still run `sm receipt` so you can surface any `warnings` inline in the chat answer ("Note: this used 1 unreviewed join").
 
 #### 4e.iv — render via `render_chart.py` (do NOT inline-substitute through the Write tool)
 
@@ -654,9 +608,9 @@ The HTML report is produced by a Python helper that reads the template + SVG log
 
 Instead:
 
-1. Build the sections JSON file at `/tmp/agami-sections-<ts>.json`. The shape is the JSON array built in 4e.iii — a list of section objects (`title`, `insights`, `chart_type`, `labels`, `datasets`, `table_headers`, `table_rows`, `sql`).
+1. The sections JSON file `/tmp/agami-sections-<ts>.json` is produced by `csv_to_sections.py` (4e.iii) — you don't hand-build it; you wrote the spec, the script wrote the numbers.
 
-2. Build the receipt JSON file at `/tmp/agami-receipt-<ts>.json` per Phase 4e.iii.5.
+2. The receipt JSON file `/tmp/agami-receipt-<ts>.json` is produced by `sm receipt` (4e.iii.5) — plus any ad-hoc metric you appended.
 
 3. Run the renderer:
 
