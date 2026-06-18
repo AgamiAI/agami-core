@@ -43,14 +43,27 @@ answer — with a full receipt — in under a minute, and nothing leaves your ma
 # 2. Try the sample — no connection needed:
 /agami-connect sample      # or just say "I don't have a database" / "try the sample"
 
-# 3. Ask a question:
+# 3. Ask a question — see governance ENFORCED:
 who are the top 5 customers by total spend?
+
+# 4. Now watch the model get BUILT — see governance MADE:
+/agami-connect reintrospect
 ```
 
-That question deliberately crosses a **fan trap** (orders → line items →
-payments), where a naive agent silently double-counts. agami's pre-flight catches
-it and returns the correct number *with the join receipt* — the whole point of the
-trust layer, on your first query. Then follow the guided tour it suggests.
+**Step 3** deliberately crosses a **fan trap** (orders → line items → payments),
+where a naive agent silently double-counts. agami's pre-flight catches it and
+returns the correct number *with the join receipt* — the trust layer, enforced on
+your first query.
+
+**Step 4 is the real point.** Natural-language querying is everywhere; what's rare
+is *where the trust comes from*. `reintrospect` re-derives the sample's model from
+the live schema — introspect → infer + confidence-score every join → gate metric
+sign-off → re-validate examples — so you watch the governed model take shape rather
+than just consuming it. To see it built **from a blank slate** (full LLM
+enrichment, descriptions and all), run `/agami-connect sample` and pick **"build
+the model from scratch so I can see it work"** the first time. Either way it takes
+a few minutes — it's the demo of *how* the receipts you saw in step 3 are earned.
+Full flow: [docs/usage.md](docs/usage.md).
 
 ### Real database
 
