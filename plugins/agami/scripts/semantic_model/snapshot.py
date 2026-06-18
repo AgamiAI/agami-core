@@ -71,10 +71,24 @@ def compute_model_hash(root: str | os.PathLike) -> str:
     return h.hexdigest()[:12]
 
 
-def _prune(snaps: Path, keep: int) -> None:
-    dirs = sorted((p for p in snaps.iterdir() if p.is_dir()),
+def _snapshot_dirs_newest_first(snaps: Path) -> list[Path]:
+    return sorted((p for p in snaps.iterdir() if p.is_dir()),
                   key=lambda p: p.stat().st_mtime, reverse=True)
-    for old in dirs[keep:]:
+
+
+def newest_version(root: str | os.PathLike) -> str | None:
+    """The `model_version` pin = newest dir name under <root>/.snapshots (the content
+    hash). Single reader for the CLI, the MCP server, and the skill. None if there are
+    no snapshots yet / on any error (a legacy model that was never stamped)."""
+    try:
+        dirs = _snapshot_dirs_newest_first(Path(root) / SNAPSHOT_DIR)
+        return dirs[0].name if dirs else None
+    except Exception:
+        return None
+
+
+def _prune(snaps: Path, keep: int) -> None:
+    for old in _snapshot_dirs_newest_first(snaps)[keep:]:
         shutil.rmtree(old, ignore_errors=True)
 
 

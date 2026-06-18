@@ -246,12 +246,11 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
 
 def _model_version(profile: str) -> str | None:
     """The model-version pin = the newest snapshot dir name (a content hash), same as
-    the skill reads. None if there's no .snapshots/ (legacy model)."""
+    the skill reads. None if there's no .snapshots/ (legacy model) or model deps are
+    unavailable (execute_sql stays usable)."""
     try:
-        snaps = resolve_artifacts_dir() / profile / ".snapshots"
-        dirs = sorted((p for p in snaps.iterdir() if p.is_dir()),
-                      key=lambda p: p.stat().st_mtime, reverse=True)
-        return dirs[0].name if dirs else None
+        from semantic_model import snapshot as SN
+        return SN.newest_version(resolve_artifacts_dir() / profile)
     except Exception:
         return None
 

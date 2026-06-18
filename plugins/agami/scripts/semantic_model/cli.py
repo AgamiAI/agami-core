@@ -163,24 +163,13 @@ def cmd_prepare(args) -> int:
     return 0
 
 
-def _newest_model_version(root) -> Optional[str]:
-    """model_version pin = newest dir name under <root>/.snapshots (same reader as
-    mcp_server._model_version + the skill). None if no snapshots yet."""
-    try:
-        snaps = Path(root) / ".snapshots"
-        dirs = sorted((p for p in snaps.iterdir() if p.is_dir()),
-                      key=lambda p: p.stat().st_mtime, reverse=True)
-        return dirs[0].name if dirs else None
-    except Exception:
-        return None
-
-
 def cmd_receipt(args) -> int:
     """Assemble the trust receipt for an executed query — deterministically, from the
     SQL + the model. Replaces the LLM hand-building the receipt JSON in prose: tables,
     relationships, metrics, unreviewed-warnings, and model_version all come from
     parsing the SQL against the model (the SAME `runtime.assemble_receipt` the MCP
     server uses). The LLM may still append ad-hoc metrics + assumptions afterward."""
+    from . import snapshot as SN
     sql = args.sql
     if args.sql_file:
         sql = Path(args.sql_file).read_text()
@@ -189,7 +178,7 @@ def cmd_receipt(args) -> int:
     applied = json.loads(args.applied_filters) if args.applied_filters else None
     receipt = RT.assemble_receipt(
         org, sql,
-        model_version=_newest_model_version(args.root),
+        model_version=SN.newest_version(args.root),
         applied_filters=applied,
         pre_flight=pf,
         freshness=args.freshness,
@@ -1006,7 +995,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--include",
         nargs="*",
-        default=["default_filters", "relationships", "caveats", "value_transforms", "performance_hints"],
+        default=list(L.DEFAULT_CONTEXT_INCLUDE),
     )
     sp.set_defaults(func=cmd_context)
 
