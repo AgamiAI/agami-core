@@ -85,7 +85,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 ## Phase 0a: First-time credential bootstrap
 
-**Runs only when preflight step 2 failed (credentials missing).** If `<artifacts_dir>/local/credentials` already has the `[<profile>]` section, **skip Phase 0a entirely.**
+**Runs only when preflight step 1 returns `next: bootstrap` (no credentials for the profile).** If `<artifacts_dir>/local/credentials` already has the `[<profile>]` section, **skip Phase 0a entirely.**
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
 ```bash
