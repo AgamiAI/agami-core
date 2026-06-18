@@ -427,10 +427,11 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 - Tell the user: *"I listed all `<N>` tables and their columns. Uncheck any you don't need (staging, backups, snapshots); you can also expand a table and drop irrelevant columns. Then click **Generate for Claude** and paste the block back here."*
 - **End the turn. Do NOT introspect yet.**
 
-**On re-entry — the user pastes an `AGAMI PRUNE …` block.** Parse it:
-- Lines under `keep tables: <k> of <n>` (one `schema.table` per line, until a blank line / `exclude columns:` / `done`) = the **kept allowlist**. **Write them to a file (one `schema.table` per line) and pass `--tables-file <path>` — do NOT pass them as an unquoted shell variable.** Under zsh (the Bash tool's shell) an unquoted `$list` does *not* word-split, so all N names arrive as one giant argument and the engine builds a single garbage table. The file path sidesteps shell quoting entirely. (`--tables` still works if you list them inline, and a single mis-joined blob is now split defensively — but the file is the safe default.)
-- Lines under `exclude columns: <c>` (one `schema.table.column` per line) = columns to drop → pass as `--exclude-columns` (same zsh caveat — write to a file or list inline, don't pass an unquoted variable).
-- If the user kept everything (`<k>` == `<n>`, no excluded columns), just run 1.7 with no `--tables`/`--exclude-columns`.
+**On re-entry — the user pastes an `AGAMI PRUNE …` block.** Don't hand-parse it — pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
+```bash
+parse_prune_block.py --block-file <pasted> --tables-out /tmp/agami-keep.txt
+```
+It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything}, anomalies}`. Pass `--tables-file "$tables_file"` and `--exclude-columns <excluded_columns…>` to 1.7. **`kept_everything: true`** → run 1.7 with neither flag. Surface `anomalies` (a `bad_table_line`, a `keep_count_mismatch`) rather than silently dropping a line.
 
 If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
 
@@ -675,16 +676,14 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-area-d
 
 Seeds reference **columns, tables, metrics, and entities** — so settle those *before* generating examples (a seed that uses a column you'd later exclude breaks at query time, and a seed built on an unreviewed metric bakes in a guessed definition). **Relationships are NOT gated here** — they stay lazy: FK joins are already auto-approved by the engine (the DB declared them), and inferred joins self-approve as you query / surface as receipt warnings. So you're not asked to rubber-stamp database-declared foreign keys.
 
-**4a — The curate gate: open the explorer whenever there's anything to curate.** Compute two deterministic counts (both turn-boundary-safe, so this is identical on a fresh run or a resume):
+**4a — The curate gate: open the explorer whenever there's anything to curate.** One call returns the decision (turn-boundary-safe — same answer on a fresh run or a resume):
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" sensitive "$ROOT"               # → .count  (columns flagged PII)
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed   # length = sign-off count
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate-gate "$ROOT"
 ```
-- **PII count** — columns introspection (or a curator) flagged `sensitive` **that are still queryable** (already-excluded columns, and any column under an excluded table, are not counted — so once the user excludes the flagged columns this drops to 0 and the gate stops re-opening).
-- **Sign-off count** — metrics + named-filters + entities needing review (relationships are NOT gated — they stay lazy: FK joins are engine-approved, inferred joins self-approve as you query).
+→ `{pii_count, preseed_count, should_open_explorer}`. **PII count** = columns flagged `sensitive` still queryable (an excluded column, or any column under an excluded table, isn't counted — so once the user excludes them it drops to 0 and the gate stops re-opening). **preseed count** = metrics + named-filters + entities needing sign-off (relationships are NOT gated — FK joins are engine-approved, inferred joins self-approve as you query).
 
-**If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
+**If `should_open_explorer` is true → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
 - the **PII tab** — every flagged column *and* every suspected-but-unflagged one (e.g. `first_name` in `sys_user`) in one list, each with a confirm/clear toggle. This is where the user reviews PII without hunting through tables.
 - the **Metrics tab** — the proposed measures grouped by table and collapsed (`incident · 9 [✓ Approve 9]`), with per-table and "approve all proposed" bulk buttons, so a few-hundred-metric set signs off fast.
 - the **Review** tab — metrics/entities/joins under "Needs your eyes" for anything needing a closer look; per-column **Exclude** toggles live on **Tables**.
