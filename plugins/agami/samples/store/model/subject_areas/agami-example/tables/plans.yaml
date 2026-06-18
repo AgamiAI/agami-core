@@ -1,0 +1,75 @@
+name: plans
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Subscription plans and their monthly price, by tier.
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 5
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: name
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: tier
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  choice_field:
+    free: Free
+    pro: Pro
+    business: Business
+    enterprise: Enterprise
+- name: monthly_price
+  type: float
+  description: Plan list price per month, in USD.
+  primary_key: false
+  aggregation: averageable
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+  unit: USD
+- name: is_active
+  type: integer
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  choice_field:
+    '0': 'No'
+    '1': 'Yes'
+description_source: ai_unvalidated

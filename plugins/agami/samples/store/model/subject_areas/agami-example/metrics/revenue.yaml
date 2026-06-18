@@ -1,0 +1,24 @@
+name: revenue
+description: Total sales revenue across orders.
+other_names:
+- total revenue
+- sales
+- gross revenue
+- total spend
+calculation: Total order revenue — the sum of order totals (order grain). Pre-aggregate before joining
+  to line items so it isn't double-counted.
+bindings:
+  SQLite: SUM(orders.total_amount)
+unit: USD
+source_tables:
+- orders
+base_metrics: []
+subject_areas: []
+primary_table: orders
+non_additive_dimensions: []
+inner_grain: []
+confidence: confirmed
+review_state: approved
+signed_off_by: agami-team@agami.ai
+signed_off_at: '2026-06-15T00:00:00Z'
+signed_off_role: maintainer

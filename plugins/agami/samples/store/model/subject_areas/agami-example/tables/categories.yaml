@@ -1,0 +1,49 @@
+name: categories
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Product categories used to group the catalog (Electronics, Apparel, …).
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 8
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: name
+  type: string
+  description: Human-readable category name shown in the catalog.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: slug
+  type: string
+  description: URL-friendly category identifier.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+description_source: ai_unvalidated

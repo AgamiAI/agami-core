@@ -1,0 +1,21 @@
+name: total refunds
+description: Sum of refund amounts.
+other_names:
+- refund amount
+- refunds
+calculation: Total amount refunded to customers.
+bindings:
+  SQLite: SUM(refunds.amount)
+unit: USD
+source_tables:
+- refunds
+base_metrics: []
+subject_areas: []
+primary_table: refunds
+non_additive_dimensions: []
+inner_grain: []
+confidence: confirmed
+review_state: approved
+signed_off_by: agami-team@agami.ai
+signed_off_at: '2026-06-15T00:00:00Z'
+signed_off_role: maintainer

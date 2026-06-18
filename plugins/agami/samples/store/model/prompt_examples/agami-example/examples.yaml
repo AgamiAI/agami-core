@@ -1,0 +1,119 @@
+- question: How many orders have been placed?
+  sql: SELECT COUNT(*) AS order_count FROM orders
+  tables:
+  - orders
+  metric: order count
+  source: seed
+  status: confirmed
+- question: What is our total revenue?
+  sql: SELECT ROUND(SUM(total_amount), 2) AS revenue FROM orders
+  tables:
+  - orders
+  columns:
+  - total_amount
+  metric: revenue
+  source: seed
+  status: confirmed
+- question: What is the average order value?
+  sql: SELECT ROUND(SUM(total_amount) / COUNT(*), 2) AS average_order_value FROM orders
+  tables:
+  - orders
+  metric: average order value
+  source: seed
+  status: confirmed
+- question: Who are the top 5 customers by total spend?
+  sql: SELECT c.full_name, ROUND(SUM(o.total_amount), 2) AS total_spend FROM customers c JOIN orders o
+    ON o.customer_id = c.id GROUP BY c.id, c.full_name ORDER BY total_spend DESC LIMIT 5
+  tables:
+  - customers
+  - orders
+  metric: revenue
+  source: seed
+  status: confirmed
+- question: What is revenue by product category?
+  sql: SELECT cat.name AS category, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue FROM order_items
+    oi JOIN products p ON p.id = oi.product_id JOIN categories cat ON cat.id = p.category_id GROUP BY
+    cat.name ORDER BY revenue DESC
+  tables:
+  - order_items
+  - products
+  - categories
+  source: seed
+  status: confirmed
+- question: Show the monthly revenue trend over the last 12 months.
+  sql: SELECT substr(placed_at, 1, 7) AS month, ROUND(SUM(total_amount), 2) AS revenue FROM orders WHERE
+    placed_at >= date((SELECT MAX(placed_at) FROM orders), '-12 months') GROUP BY month ORDER BY month
+  tables:
+  - orders
+  metric: revenue
+  source: seed
+  status: confirmed
+- question: Break down orders by status.
+  sql: SELECT status, COUNT(*) AS orders FROM orders GROUP BY status ORDER BY orders DESC
+  tables:
+  - orders
+  columns:
+  - status
+  source: seed
+  status: confirmed
+- question: How many orders come from each channel?
+  sql: SELECT channel, COUNT(*) AS orders FROM orders GROUP BY channel ORDER BY orders DESC
+  tables:
+  - orders
+  columns:
+  - channel
+  source: seed
+  status: confirmed
+- question: What are the top 10 products by units sold?
+  sql: SELECT p.name AS product, SUM(oi.quantity) AS units_sold FROM order_items oi JOIN products p ON
+    p.id = oi.product_id GROUP BY p.id, p.name ORDER BY units_sold DESC LIMIT 10
+  tables:
+  - order_items
+  - products
+  metric: units sold
+  source: seed
+  status: confirmed
+- question: What is the total amount refunded and how many refunds were issued?
+  sql: SELECT ROUND(SUM(amount), 2) AS total_refunded, COUNT(*) AS refund_count FROM refunds
+  tables:
+  - refunds
+  metric: total refunds
+  source: seed
+  status: confirmed
+- question: How many active subscriptions do we have?
+  sql: SELECT COUNT(*) AS active_subscriptions FROM subscriptions WHERE status = 'active'
+  tables:
+  - subscriptions
+  metric: active subscriptions
+  source: seed
+  status: confirmed
+- question: What is monthly recurring revenue by plan tier?
+  sql: SELECT tier, ROUND(SUM(monthly_price), 2) AS mrr FROM (SELECT s.id, pl.tier, pl.monthly_price FROM
+    subscriptions s JOIN plans pl ON pl.id = s.plan_id WHERE s.status = 'active') GROUP BY tier ORDER
+    BY mrr DESC
+  tables:
+  - subscriptions
+  - plans
+  metric: monthly recurring revenue
+  source: seed
+  status: confirmed
+- question: How many customers have both placed an order and hold a subscription?
+  sql: SELECT COUNT(*) AS customers_both FROM (SELECT customer_id FROM orders INTERSECT SELECT customer_id
+    FROM subscriptions)
+  tables:
+  - orders
+  - subscriptions
+  - customers
+  source: seed
+  status: confirmed
+- question: Which product categories drive the most revenue in each sales channel?
+  sql: SELECT cat.name AS category, o.channel, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue FROM
+    order_items oi JOIN orders o ON o.id = oi.order_id JOIN products p ON p.id = oi.product_id JOIN categories
+    cat ON cat.id = p.category_id GROUP BY cat.name, o.channel ORDER BY revenue DESC
+  tables:
+  - order_items
+  - orders
+  - products
+  - categories
+  source: seed
+  status: confirmed

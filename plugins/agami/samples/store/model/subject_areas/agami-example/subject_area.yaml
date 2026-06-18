@@ -1,0 +1,40 @@
+name: agami-example
+description: 'Acme Store — a small example online retailer with two sides: one-time commerce (customers,
+  products, orders, line items, payments, refunds) and recurring subscriptions (plans, subscriptions,
+  subscription events, invoices). Query it for sales and revenue, product/category performance, refunds,
+  channel and order-status breakdowns, and subscription metrics like active subscriptions and MRR.'
+default_time_window: null
+tables:
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: categories
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: customers
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: invoices
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: order_items
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: orders
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: payments
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: plans
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: products
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: refunds
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: subscription_events
+- storage_connection: agami-example_sqlite
+  schema: main
+  table: subscriptions

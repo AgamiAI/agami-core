@@ -376,7 +376,12 @@ def get_table_context(
     expose_column_groups), plus any of: default_filters, relationships, caveats,
     value_transforms, metrics.
     """
-    include = include or ["default_filters", "relationships", "caveats", "value_transforms"]
+    # performance_hints is in the default set so estimated_row_count reaches the
+    # answer receipt (the "≈N rows" provenance) and the scan-risk check — without it
+    # the receipt falls back to "rows unknown" even when the model has the count.
+    include = include or [
+        "default_filters", "relationships", "caveats", "value_transforms", "performance_hints",
+    ]
     sa = org.subject_area(area) if area else None
     result: dict[str, Any] = {"tables": {}}
 
@@ -493,7 +498,7 @@ def get_subject_area_bundle(org: Organization, area: str) -> dict[str, Any]:
         org,
         table_names,
         area=area,
-        include=["default_filters", "relationships", "caveats", "value_transforms", "metrics"],
+        include=["default_filters", "relationships", "caveats", "value_transforms", "metrics", "performance_hints"],
     )
     bundle["subject_area"] = {
         "name": sa.name,

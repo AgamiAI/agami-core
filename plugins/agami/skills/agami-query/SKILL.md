@@ -134,16 +134,16 @@ Order in Phase 2b prompt:
 4. Few-shot examples
 5. The user's question
 
-### 1e — verify the configured database tool
+### 1e — the connection invocation pattern (do NOT run a standalone probe)
 
-Look up the cached connection method from `<artifacts_dir>/local/.config`. Run a `SELECT 1` probe via that tool. **Use the EXACT invocation pattern below for the tier — don't guess flags.** `execute_sql.py` does NOT accept positional SQL, a `--format` flag, or any flag not listed below; guessing produces "unrecognized arguments" errors that waste turns.
+Look up the cached connection method from `<artifacts_dir>/local/.config`. **Do NOT run a separate `SELECT 1` connectivity probe** — it's a wasted round-trip (and pointless for a local SQLite/DuckDB file). The user's *actual* query is the connectivity check: run it directly, and if it fails, classify the error via [`db_error_classifier.md`](../../shared/db_error_classifier.md). The table below is the **exact invocation pattern per tier** for running that query — **don't guess flags** (`execute_sql.py` does NOT accept positional SQL, a `--format` flag, or any flag not listed; guessing produces "unrecognized arguments" errors that waste turns). The `SELECT 1` in each row is only a placeholder for *your* SQL.
 
-| tier | SELECT 1 invocation |
+| tier | invocation pattern (substitute your SQL for `SELECT 1`) |
 |---|---|
 | `cli` (postgres) | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
 | `cli` (mysql) | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
 | `cli` (snowflake) | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
-| `cli` (sqlite) | `sqlite3 -csv "<path>" 'SELECT 1'` |
+| `cli` (sqlite) | `sqlite3 -header -csv "<path>" 'SELECT 1'` — **always `-header`**, or result CSVs lose column names and `format-table` treats the first data row as the header (a wasteful re-export). |
 | `duckdb` (any) | `duckdb -init "$init_file" -c 'SELECT 1' --csv` (see `build_duckdb_attach.py` for `$init_file`) |
 | `python` (all DBs) | `AGAMI_PROFILE="<profile>" "$PY" "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` |
 
@@ -221,7 +221,7 @@ For a single profile, follow the **examples-first canonical loop** — the subje
 
 **Step 6 — assemble the generator prompt** in this order, then produce ONE SQL statement (first statement only if several are emitted):
 
-1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **Never SELECT a `sensitive` column's raw values** — aggregate or omit. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
+1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **A `sensitive` column is restricted at the OUTPUT layer, not the query layer.** You MAY use it in `COUNT`/`COUNT(DISTINCT …)`, `GROUP BY`, `WHERE`, and `JOIN`; you must NOT put its **raw per-row values** in the result. So: (a) a question *about* a sensitive column still RUNS — answer with an aggregate, never a refusal or an empty result: 'how many unique customer emails?' → `SELECT COUNT(DISTINCT email)` and report the count; 'list customer emails' → return that distinct count and note the raw addresses are withheld. (b) To disambiguate identical display labels (two customers with the same name), put the entity's **non-sensitive key (`id`)** in the output — never the raw email/phone. Neither rule is overridable 'to be helpful.' **This is also enforced deterministically** in `execute_sql.py`'s safety pass (`runtime.check_sensitive_projection`) — a raw sensitive projection is refused with a `{"error":{"kind":"sensitive_columns",…}}` result regardless of tier or host (skill, MCP server, cron). Generate the aggregate up front so you don't eat the refusal round-trip. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
 2. **Schema context** — the `get_table_context` output for the chosen tables (columns + types + caveats + value_transforms), the area's relationships (rendered as `from.col → to.col [cardinality]`), and the area's metrics (`<name>: <binding> -- <calculation>` + synonyms). `default_filters` need not be enumerated — `execute_sql` auto-applies them (step below) — but DO honor any caveats.
 
    **Unreviewed metrics are USED, not refused.** When the question names a metric whose `review_state ≠ approved`, still use its binding and answer — do NOT block or refuse on it. The trust layer surfaces it as a **warning on the receipt** (Phase 4e.iii.5: *"Used metric `X` which has not been signed off"*), not a hard gate. The loader already drops only `rejected` metrics; an `unreviewed`/`proposed` one is yours to use, with the warning carrying the honesty. (Same for unreviewed joins/entities and `stale` entries — warn, never refuse.)
@@ -757,12 +757,25 @@ When the user responds to that nudge:
 test -f <artifacts_dir>/local/.optins
 ```
 
+**Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead. Continue to 4f.
+
 - **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
 - **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/LiteBi`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la <artifacts_dir>/local/.optins` will show whether the file exists, and `rm <artifacts_dir>/local/.optins` re-arms the prompt for the next query.
 
 ### 4f — Numbered follow-up suggestions (always 5)
+
+**Sample-profile orientation footer (once, before the follow-ups).** If `active_profile` is `agami-example` AND `<artifacts_dir>/local/.agami-example-intro` does **not** exist, then — after the answer, before the "What next?" bullets — print this plain-prose footer ONCE, then create the marker (`touch <artifacts_dir>/local/.agami-example-intro`) so it never repeats. This is ungated by `.optins` (the sample is a guided demo). Keep it to these ~4 lines, plain, no hype:
+
+```
+If a number ever looks off, say "save this as a correction" (or paste the right SQL) — I'll teach the model so next time is right.
+/agami-model — browse the semantic model: tables, metrics, joins, and what's signed off.
+Using the Claude Desktop app? /agami-serve wires this model into it so you can ask from there too.
+Liked it? A GitHub star helps a lot — github.com/AgamiAI/LiteBi
+```
+
+Why here, not in agami-connect: when the user asks their first sample question, agami-query owns the turn — a footer placed in agami-connect's Phase 0s never executes. This is the reliable home. (For non-sample profiles this block is skipped; the generic star/serve in 4e.5 + Phase 6 covers them.)
 
 End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list. Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
 
@@ -883,6 +896,8 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 1. **The repo URL is literally `https://github.com/AgamiAI/LiteBi`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not the marketplace name (`litebi`), the plugin name (`agami`), or the `/plugin install agami@litebi` slash command (which has produced the wrong `github.com/litebi/agami`). Note the uppercase `A`'s and capital `B` in "LiteBi".
 2. **Use the prompt prose VERBATIM** from the `AskUserQuestion` text below — don't paraphrase, "improve" the wording, or add emojis/marketing flourish. Paraphrasing drifts the ask off the discrete-decision shape it's tuned for and undermines the non-pushy framing.
+
+**Never narrate the plumbing.** Writing `query_log.jsonl` and checking/writing `local/.optins` are silent internal steps — do NOT announce them ("Now logging the query and checking the one-time opt-in gate" is exactly the kind of line that must never appear). The user sees the answer, then either the star ask or the follow-ups — never the bookkeeping behind them.
 
 A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 

@@ -1,0 +1,83 @@
+name: subscription_events
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Lifecycle events for a subscription — created, upgrades, downgrades, and cancellations.
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 573
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: subscription_id
+  type: integer
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: event_type
+  type: string
+  description: ''
+  primary_key: false
+  choice_field:
+    created: Created
+    upgraded: Upgraded
+    downgraded: Downgraded
+    renewed: Renewed
+    canceled: Canceled
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: from_plan_id
+  type: integer
+  description: Plan moved from on an upgrade/downgrade; NULL on the initial 'created' event.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: to_plan_id
+  type: integer
+  description: Plan moved to; the plan set on a 'created' event.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: occurred_at
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+description_source: ai_unvalidated

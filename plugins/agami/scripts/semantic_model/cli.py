@@ -957,7 +957,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--include",
         nargs="*",
-        default=["default_filters", "relationships", "caveats", "value_transforms"],
+        default=["default_filters", "relationships", "caveats", "value_transforms", "performance_hints"],
     )
     sp.set_defaults(func=cmd_context)
 

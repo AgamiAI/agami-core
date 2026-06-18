@@ -1,0 +1,76 @@
+name: order_items
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Line items within an order — one row per product on an order. The line-item grain.
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 10000
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: order_id
+  type: integer
+  description: FK to orders.id; one order has many line items.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: product_id
+  type: integer
+  description: FK to products.id.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: quantity
+  type: integer
+  description: Units of the product on this line.
+  primary_key: false
+  choice_field:
+    '1': ''
+    '2': ''
+    '3': ''
+    '4': ''
+    '5': ''
+  aggregation: additive
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: unit_price
+  type: float
+  description: Price per unit captured at order time, in USD.
+  primary_key: false
+  aggregation: averageable
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+  unit: USD
+description_source: ai_unvalidated

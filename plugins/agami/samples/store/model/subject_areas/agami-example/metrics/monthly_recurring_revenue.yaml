@@ -1,0 +1,22 @@
+name: monthly recurring revenue
+description: Sum of monthly plan price across active subscriptions.
+other_names:
+- MRR
+- recurring revenue
+calculation: MRR — the monthly price of all currently-active subscriptions.
+bindings:
+  SQLite: SUM(CASE WHEN subscriptions.status = 'active' THEN plans.monthly_price ELSE 0 END)
+unit: USD
+source_tables:
+- subscriptions
+- plans
+base_metrics: []
+subject_areas: []
+primary_table: subscriptions
+non_additive_dimensions: []
+inner_grain: []
+confidence: confirmed
+review_state: approved
+signed_off_by: agami-team@agami.ai
+signed_off_at: '2026-06-15T00:00:00Z'
+signed_off_role: maintainer

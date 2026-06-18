@@ -1,0 +1,82 @@
+name: invoices
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: Monthly invoices issued for a subscription.
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 2899
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: subscription_id
+  type: integer
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: amount
+  type: float
+  description: Invoice amount in USD.
+  primary_key: false
+  aggregation: additive
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+  unit: USD
+- name: status
+  type: string
+  description: ''
+  primary_key: false
+  choice_field:
+    paid: Paid
+    open: Open
+    void: Void
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: issued_at
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: paid_at
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+description_source: ai_unvalidated

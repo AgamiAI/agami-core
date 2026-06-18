@@ -998,7 +998,13 @@ def _handle_initialize(req_id: Any, params: dict[str, Any]) -> None:
             "hide them. Don't refuse on an unreviewed metric — answer and warn. (5) If the answer "
             "was wrong or the user approves an item, call save_correction. Model edits (its `ops`) "
             "apply only with confirmed:true — preview the exact change, get the user's OK, then "
-            "re-call confirmed. Saving a corrected example needs no confirmation."
+            "re-call confirmed. Saving a corrected example needs no confirmation.\n"
+            "PII: a column marked `sensitive: true` in the schema restricts OUTPUT, not the "
+            "query — you MAY COUNT/COUNT(DISTINCT)/filter/GROUP BY/JOIN on it, but never SELECT "
+            "its raw per-row values. A question about it still runs: 'unique emails' → "
+            "COUNT(DISTINCT email). To disambiguate identical labels, project the non-sensitive "
+            "id, not email/phone. (execute_sql enforces this and returns a `sensitive_columns` "
+            "error if you project a raw sensitive value — so do it right the first time.)"
         ),
     })
 

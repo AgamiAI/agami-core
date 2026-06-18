@@ -1,8 +1,8 @@
 ---
 name: agami-connect
 description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes <artifacts_dir>/local/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by scripts/semantic_model (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
-when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query."
-argument-hint: "[reintrospect | profile NAME]"
+when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and lands a queryable model in under a minute."
+argument-hint: "[sample | reintrospect | profile NAME]"
 ---
 
 # agami connect
@@ -24,6 +24,7 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 - **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Use `(Recommended)` only when there's a genuine recommendation. For fact-of-environment questions ("which database type?", "which schemas?"), don't mark any option Recommended — the user picks what they have.
 - **Every multiSelect needs an explicit "none / continue" option** — `AskUserQuestion` cannot be submitted with zero boxes checked, so any multiSelect where "pick nothing" is a valid answer MUST offer a selectable "Nothing — continue" (or "Keep everything") option. Never phrase the prompt as "leave all unchecked" — that's unsubmittable and traps the user.
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
+- **Plain voice — state what happened, never how impressive it is.** Progress markers, todo labels, and narration describe the action and the result; they do NOT editorialize. Banned: "wow moment", "magic", "watch this", "the exciting part", "you'll love this", exclamation hype. The reader is a data professional — a query running correctly speaks for itself. Say *"Running the first query"*, not *"Now the wow moment"*.
 
 ## Progress tracking — set up a todo list at the very start
 
@@ -77,6 +78,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 ### Preflight steps
 
+0. **Sample-path short-circuit (check FIRST, before resolving any profile).** If the user explicitly asked for the sample — `$ARGUMENTS` is `sample`, or they said *"try the sample"* / *"I don't have a database"* / *"use the sample (or example) data"* / *"demo data"* — then bind `$PROFILE_NAME = agami-example`, `$DB_TYPE = sample`, and **go straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)**. Do this **regardless of any existing `active_profile` or onboarded profiles** — the sample is a deliberate, explicit choice and must not be intercepted by another profile's credential/existing-model checks. (This is why the option in 0a.2 isn't enough on its own: a returning user with an onboarded profile never reaches 0a.) If `agami-example` is already set up, Phase 0s sends them to the demo. Only fall through to step 1 when there's **no** sample signal.
 1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `<artifacts_dir>/local/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
 2. **Credentials check (binding).** Read `<artifacts_dir>/local/credentials`; look for `[<profile>]`.
    - The `[<profile>]` section is present → apply the chmod check (refuse if world-readable), continue.
@@ -106,22 +108,26 @@ grep -qxF 'local/' "<artifacts_dir>/.gitignore" 2>/dev/null || printf 'local/\n'
 
 ### 0a.2 — Ask the database type
 
-**AskUserQuestion** (no `(Recommended)` — fact-of-environment). Cap at 4 visible + Other:
+**AskUserQuestion** (no `(Recommended)` — fact-of-environment). The **first** option is always the no-database sample path; cap the rest at 4 visible + Other.
+
+**Name the Other-only engines in the QUESTION PROMPT** so they're visibly supported — the auto-provided "Other" field can't carry its own description/examples, so the examples must live in the prompt. End the prompt with a line like:
+> *Something else — BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, or SQLite? Choose **Other** and type it (a name or a full DSN).*
 
 | label | description |
 |---|---|
+| `Try a sample database — no connection needed` | Don't have a database handy (or not ready to connect one)? agami ships a small **Acme Store** SQLite dataset (commerce + subscriptions) with a ready-made model — query it in under a minute, nothing leaves your machine. |
 | `PostgreSQL` | Postgres + compatible: Supabase, Neon, RDS, Aurora, Cloud SQL, Timescale, and **Amazon Redshift** (port 5439, SSL by default). |
 | `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
 | `Snowflake` | Snowflake. Account identifier instead of host. |
-| `BigQuery` | Google BigQuery. Auth via service-account JSON or ADC. |
-| `Other (Other field)` | **SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite**, or paste any DSN. |
+| `Other (Other field)` | **BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite**, or paste any DSN. |
 
-Bind `$DB_TYPE` ∈ `postgres | mysql | snowflake | bigquery | sqlserver | oracle | databricks | trino | duckdb | sqlite | dsn`.
+Bind `$DB_TYPE` ∈ `sample | postgres | mysql | snowflake | bigquery | sqlserver | oracle | databricks | trino | duckdb | sqlite | dsn`.
 
 **Routing:**
+- **`Try a sample database`** (or the user says *"I don't have a database"* / *"try the sample"* / runs `agami-connect sample`) → bind `$DB_TYPE = sample`, set `$PROFILE_NAME = agami-example`, and **jump straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)** — skip the rest of 0a (no credential template, no hand-off turn; the connection is known).
 - `PostgreSQL` → `postgres`; if the user later enters port `5439` or a `*.redshift.*.amazonaws.com` host, transparently re-bind to `redshift`. A `*.pooler.supabase.com` host stays `postgres` (Supabase is hosted Postgres).
-- `MySQL`/`Snowflake`/`BigQuery` → pass-through.
-- `Other` → parse the free-form input: a DSN scheme → derive `db_type`; `.db`/`.sqlite`/`.duckdb` suffix or absolute file path → SQLite or DuckDB; a named DB (`sqlserver`/`mssql`, `oracle`, `databricks`, `trino`/`presto`, `duckdb`) → that dialect. Only refuse with "not supported yet" for engines outside the supported set above (e.g. MongoDB, Cassandra, ClickHouse).
+- `MySQL`/`Snowflake` → pass-through. `BigQuery` lives under **Other** now (or the user types it) → `bigquery`.
+- `Other` → parse the free-form input: a DSN scheme → derive `db_type`; `.db`/`.sqlite`/`.duckdb` suffix or absolute file path → SQLite or DuckDB; a named DB (`bigquery`, `sqlserver`/`mssql`, `oracle`, `databricks`, `trino`/`presto`, `duckdb`) → that dialect. Only refuse with "not supported yet" for engines outside the supported set above (e.g. MongoDB, Cassandra, ClickHouse).
 
 ### 0a.3 — Name the database profile (the user's choice)
 
@@ -339,6 +345,69 @@ Read the first token of stdout and act:
 
 ---
 
+## Phase 0s: Sample-database bootstrap (no connection)
+
+**Runs only when the user chose `Try a sample database` in 0a.2** (or said "I don't have a database" / "try the sample" / ran `agami-connect sample`). This **replaces Phases 0a, 1, and 2** with a short deterministic wire-up — no credential template, no hand-off turn, no live introspection on the fast path. The committed sample dataset + its prebuilt model live at **`$AGAMI_PLUGIN_ROOT/samples/store/`** (`seed.sql`, `build_sample.py`, `model/`). Profile is always **`agami-example`**.
+
+If `<artifacts_dir>/agami-example/org.yaml` already exists, the sample is already set up → skip to the demo query (step 7), or treat `reintrospect` as the 6B rebuild.
+
+**Todo seed (use these instead of the 9-phase introspect seed — the sample path skips introspect/enrich/seed).** Keep labels plain and user-facing — describe the action, not how good it is; no "wow"/"magic"/sales framing:
+
+```
+1. Set up the sample database
+2. Build the local database file
+3. Configure the sample profile
+4. Load the semantic model
+5. Run a first query
+```
+
+1. **Set up `local/`** (same as 0a.1): `mkdir -p "<artifacts_dir>/local" && chmod 700 "<artifacts_dir>/local"`. Ensure `<artifacts_dir>/.gitignore` ignores `local/`. Resolve `<artifacts_dir>` per Phase 0 (first run: ask via 0a.6, default `~/agami-artifacts`).
+2. **Resolve `$PY` + model deps** (trimmed 0a.5/0a.5b): SQLite needs **no DB driver** (stdlib), so only ensure `pydantic`+`sqlglot`+`pyyaml` are importable in `$PY` — confirm via AskUserQuestion, then `"$PY" -m pip install --user -r "$AGAMI_PLUGIN_ROOT/scripts/semantic_model/requirements.txt"` (the one, one-time install). Detect the `sqlite3` CLI with `which sqlite3` → `tier = cli` if present else `python`.
+3. **Build the `.db`** into the gitignored `local/` (it's regenerable machine state, not committed):
+   ```bash
+   "$PY" "$AGAMI_PLUGIN_ROOT/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
+   ```
+   Uses the `sqlite3` CLI if present, else the stdlib builder. ~seconds; prints the size.
+4. **Write the `[agami-example]` credential by reusing the deterministic promoter** — don't hand-roll the INI. Write a `credentials.example` whose `[agami-example]` section has the **resolved absolute** path from step 3, then promote it:
+   ```ini
+   [agami-example]
+   type = sqlite
+   path = <resolved abs path to local/samples/store.db>
+   ```
+   ```bash
+   python3 "$AGAMI_PLUGIN_ROOT/scripts/promote_credentials.py"
+   ```
+   `SECURED`/`APPENDED` → chmod 600, collision-safe. (No placeholders → never trips `PLACEHOLDERS_REMAIN`.)
+5. **Write `<artifacts_dir>/local/.config`** (same shape as 0a.7): `active_profile: agami-example`, `artifacts_dir`, `tool_paths.python3 = $PY` (+ `sqlite3` if found), `tier`. `chmod 600`.
+6. **Fork — copy the ready-made model, or rebuild it live? (AskUserQuestion).** Ask once, before touching `<artifacts_dir>/agami-example/`:
+   > The sample comes with a ready-made semantic model. Want to query it right away, or watch agami build that model from the data first?
+
+   | option | branch |
+   |---|---|
+   | `Just let me query it (Recommended)` | **6A — copy** |
+   | `Build the model from scratch so I can see it work` | **6B — rebuild live (~5–10 min)** |
+
+   - **6A (copy, < 1 min):** `mkdir -p "<artifacts_dir>/agami-example"` then `cp -R "$AGAMI_PLUGIN_ROOT/samples/store/model/." "<artifacts_dir>/agami-example/"`. **Validate it loads here**: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" validate "<artifacts_dir>/agami-example"`. If it fails, surface the errors and stop — never leave a half-wired profile. Then **stamp a model_version** (a *copy* doesn't go through introspect/curate, so nothing auto-stamps it): `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" snapshot "<artifacts_dir>/agami-example"` — best-effort, so the answer receipt shows a version rather than `null`. (We stamp at copy time instead of committing a static `.snapshots/` so it always matches the model's actual content; 6B gets one automatically from introspect.)
+   - **6B (rebuild live):** ignore the committed `model/` and run the **normal Phases 1→2** against the `agami-example` profile (`--db-type sqlite`) — the same introspect → enrich → seed pipeline a real onboarding uses, just pointed at the sample SQLite file. This is the faithful "watch it work" demo; it takes a few minutes, which is why it's the non-default option. **Don't mention tokens, cost, or billing in the option text** — it's a local model build; surface time (~5–10 min), not scary money words.
+
+   Both branches end with a validated `<artifacts_dir>/agami-example/` model → continue to step 7.
+7. **Wrap up — describe the dataset, offer questions, then STOP. Do NOT auto-run a query.** This is the entire closing for the sample path: **skip Phases 3–8** (no introspect summary, no "re-introspect `<profile>`" / "when you want the real thing" framing — that pushes the user off the sample they just picked and can surface another profile's name). The user asked to *query* the sample, not watch a scripted demo — so hand them the keys, don't drive.
+   - **Short description (2–3 lines, plain):** what the dataset is, drawn from `<artifacts_dir>/agami-example/ORGANIZATION.md` — Acme Store, a retailer with one-time **commerce** (customers, products by category, orders, line items, payments, refunds) and recurring **subscriptions** (plans, subscriptions, invoices). ~500 customers, ~4,000 orders over ~2 years. State it; don't sell it.
+   - **A numbered list of ~6 starter questions — and DO NOT answer any of them.** The user picks. **Include at least two genuinely complex multi-table joins** so they see agami handle real joins, not just single-table counts (a flat list of trivial questions undersells it). A good set:
+     ```
+     1. What's our revenue by product category?                          (line items → products → categories)
+     2. Which product categories drive the most revenue in each sales channel?  (line items → products → categories + orders)
+     3. Who are the top 5 customers by total spend?                      (customers → orders)
+     4. Show the monthly revenue trend over the last 12 months.
+     5. How many customers have both an order and a subscription?        (commerce ↔ subscriptions)
+     6. How many active subscriptions do we have, and what's MRR?
+     ```
+     (Questions 1 and 2 are the multi-table joins. All six are backed by EXPLAIN-validated seed examples in the shipped model, so they answer reliably.)
+   - Then **stop and wait.** Nothing about agami-serve / agami-model / corrections yet — let them experience one real query in Claude Code first. When the user picks a number or asks anything, hand to [agami-query](../agami-query/SKILL.md) — it answers AND runs its own first-query flow (the one-time GitHub-star ask + `/agami-serve` pointer, gated by `local/.optins`). **Do NOT pre-narrate fan/chasm traps or "what agami caught."** If their question hits a trap (questions 1–3 can), agami-query surfaces it in the answer's receipt — let it happen on a real question instead of scripting it.
+8. **The "where to go deeper" footer (corrections / `/agami-model` / `/agami-serve`) fires from agami-query, not here.** When the user asks their first sample question, agami-query owns the turn — so its Phase 4f surfaces a one-time orientation footer for the `agami-example` profile (see [agami-query SKILL.md → Phase 4f](../agami-query/SKILL.md)). Don't try to print it from Phase 0s — a footer placed here never executes once agami-query has taken over. Phase 0s ends at step 7 (describe + questions + stop).
+
+---
+
 ## Phase 1: Introspect → semantic model
 
 ### 1.0 — Set expectations before kicking off
@@ -362,7 +431,9 @@ If `<artifacts_dir>/<profile>/org.yaml` exists and `$ARGUMENTS != reintrospect`:
 - **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path).
 - **Open model explorer** — browse + curate the existing model and review/sign off the trust layer (`/agami-model`).
 - **Onboard another database** — set up a **different** database (a different connection) under a **new** profile, leaving `<profile>` untouched. On this choice, **start a fresh onboarding for a new profile**: jump to the profile-naming step (Phase 0a's naming question) → have the user name the new profile (must differ from `<profile>` and any existing `[section]` in `<artifacts_dir>/local/credentials`) and pick its DB type → write that profile's `credentials.example` → run the full flow for it. Never reuse or overwrite the current profile's credentials or model.
-- **Cancel** — do nothing; the model is ready to query.
+- **Try the sample database** — explore agami's bundled **`agami-example`** sample (retail + subscriptions, no connection needed), leaving `<profile>` untouched. Routes to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection). This MUST be a real selectable option here (not a prose aside) — a returning user with an onboarded profile has no other visible path to the sample, since plain `/agami-connect` resolves their active profile and lands on this menu.
+
+(Cancel isn't a listed option — the modal's Esc / "Other" covers "do nothing"; the four real choices are the actions above. Keep the list at exactly these four.)
 
 **Same DB, another *schema*? That's the Re-introspect path, not "Onboard another database."** If the user wants to add a schema that lives in the **same database** they already onboarded (e.g. they did `public`, now they want `billing` too), choose **Re-introspect** and **expand the schema selection** in Phase 1.3 to include both the old and the new schemas. The engine scans them together in one pass, so any relationship between the original and the new schema is detected as a first-class **cross-schema** join (Case 1) and surfaced for review. Picking "Onboard another database" instead would split the two schemas into separate models and demote any link between them to manual cross-profile glue (Phase 2b federation) — wrong for one DB. If you're unsure which the user means, ask: *"Is `billing` in the same database connection as `<profile>`, or a different server/database?"* — same connection → Re-introspect + expand schemas; different → new profile.
 

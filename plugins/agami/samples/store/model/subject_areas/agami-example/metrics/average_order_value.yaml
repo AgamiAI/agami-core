@@ -1,0 +1,23 @@
+name: average order value
+description: Average value of an order.
+other_names:
+- AOV
+- avg order value
+calculation: Revenue per order — total revenue divided by the number of orders.
+bindings:
+  SQLite: '{revenue} / {order count}'
+unit: USD
+source_tables:
+- orders
+base_metrics:
+- revenue
+- order count
+subject_areas: []
+primary_table: orders
+non_additive_dimensions: []
+inner_grain: []
+confidence: confirmed
+review_state: approved
+signed_off_by: agami-team@agami.ai
+signed_off_at: '2026-06-15T00:00:00Z'
+signed_off_role: maintainer
