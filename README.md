@@ -1,14 +1,17 @@
 # agami
 
-> **The trust layer between AI agents and your data warehouse. Local. Private. Yours.**
+> **The trust layer between AI and your data. Local. Private. Yours.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Version](https://img.shields.io/badge/version-0.2.2-blue)
 ![Status](https://img.shields.io/badge/status-pre--public-orange)
+[![Try the sample](https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen)](#quickstart-under-5-minutes)
 
-Ask plain-English questions of your **Postgres / MySQL / Snowflake / BigQuery / Redshift / SQLite** database, with a trust layer wrapped around every answer. Your credentials, schema, and query results never leave your machine — `agami` runs entirely inside Claude Code via the built-in Bash / Read / Write tools.
+Point an AI agent at a database and it answers by **guessing** — at the join, at what *"revenue"* means, at which rows it's allowed to read. **agami** is the governed layer between the agent and your data: it turns your schema into a semantic model where every join is FK-derived or human-approved, every metric is **signed off** by name and role, and every answer ships a **receipt** — the exact SQL, the model version it pinned, and who vouched for each definition. The rules live in the model, **not the prompt**. And it all runs on your machine — credentials, schema, and results never leave it.
 
-- **No Agami backend.** Nothing you do touches a server we operate. The plugin runs inside Claude Code; an *optional* local MCP server (`agami serve`) lets other AI clients (e.g. Claude Desktop) use the same local model and execution — still entirely on your machine. No `pip install` if you have a native CLI for your DB. See [docs/mcp-server.md](docs/mcp-server.md).
+> Curious in 60 seconds? The [Quickstart](#quickstart-under-5-minutes) ships a built-in **sample database** — try a governed answer with **no connection, no credentials, nothing leaving your laptop**.
+
+- **No agami backend.** Nothing you do touches a server we operate. The plugin runs inside Claude Code; an *optional* local MCP server (`agami serve`) lets other AI clients (e.g. Claude Desktop) use the same local model and execution — still entirely on your machine. No `pip install` if you have a native CLI for your DB. See [docs/mcp-server.md](docs/mcp-server.md).
 - **Every join is FK-derived or human-approved.** Every metric is signed off with a name, role, and timestamp. The dashboard tells you which, with the source signal.
 - **Every answer ships a receipt** — the literal SQL that ran, the model version it pinned, the relationships used, and the freshness of the source tables.
 - **Corrections persist with attribution.** Save a fix once → every subsequent query loads it as a few-shot example, with the original author and date surfaced when it influences a future answer.
@@ -49,7 +52,7 @@ Most NL→SQL tools either send your data through a hosted backend (Snowflake-fl
 
 ## The trust layer
 
-Most "AI BI" tools quietly pick a join, quietly pick a definition of "revenue", and quietly return a number. `agami` makes every one of those decisions auditable — with one knob per workspace and one queue per curator.
+Most AI data agents quietly pick a join, quietly pick a definition of "revenue", and quietly return a number. `agami` makes every one of those decisions auditable — with one knob per workspace and one queue per curator.
 
 ### Every entry carries a confidence + a review state
 
@@ -119,33 +122,57 @@ Phase 5 of `agami-connect` generates 10–12 NL→SQL seed examples that each sa
 
 ## Quickstart (under 5 minutes)
 
-```bash
-# 1. Install the plugin — see the Install section below for the exact steps
-#    per host. CLI uses /plugin marketplace add; VS Code and Cursor use the
-#    "Manage Plugins" dialog.
+### Fastest path — the built-in sample (no database, no credentials)
 
-# 2. Run connect — picks your DB type, writes <artifacts_dir>/local/credentials.example
+Not ready to point agami at a real database? It ships with **Acme Store**, a small
+local SQLite dataset (commerce + subscriptions) and a ready-made, signed-off
+semantic model. Nothing leaves your machine, and you get a governed answer — with a
+full receipt — in under a minute.
+
+```bash
+# 1. Install the plugin (see the Install section below for the per-host steps).
+
+# 2. Try the sample — no connection needed:
+/agami-connect sample      # or just say "I don't have a database" / "try the sample"
+
+# 3. Ask a question:
+who are the top 5 customers by total spend?
+```
+
+That question deliberately crosses a **fan trap** (orders → line items → payments),
+where a naive agent silently double-counts. agami's pre-flight catches it and returns
+the correct number *with the join receipt* — the whole point of the trust layer, on
+your first query. Then follow the guided tour it suggests (revenue trends, refunds,
+cross-area subscription questions).
+
+### Real database
+
+When you're ready to connect your own **Postgres / MySQL / Snowflake / BigQuery /
+Redshift / SQL Server / Oracle / Databricks / Trino / DuckDB / SQLite** database:
+
+```bash
+# 1. Run connect — picks your DB type, writes <artifacts_dir>/local/credentials.example
 #    (first time only; subsequent runs introspect directly)
 /agami-connect
 
-# 3. Edit the template with your DB connection details
+# 2. Edit the template with your DB connection details
 $EDITOR <artifacts_dir>/local/credentials.example
 mv <artifacts_dir>/local/credentials.example <artifacts_dir>/local/credentials
 chmod 600 <artifacts_dir>/local/credentials
 
-# 4. Re-run connect to introspect: build the semantic model + seed examples
+# 3. Re-run connect to introspect: build the semantic model + seed examples
 /agami-connect
 # (mid-flow: signs off any metrics in a Rule 1 sign-off gate, then generates
 #  seed examples and opens the examples-validation dashboard)
 
-# 5. (Optional) walk the Rule 2 polish queue when you have time
+# 4. (Optional) walk the Rule 2 polish queue when you have time
 /agami-model review
 
-# 6. Ask a question
+# 5. Ask a question
 how many orders did we ship last month?
 ```
 
-`/agami-connect` is one-stop: it picks up missing credentials on first run, introspects the live DB, computes confidence on every entity, auto-approves the high-signal ones (FK joins, DBA-commented fields, structural column-name patterns), gates a Rule 1 sign-off *before* generating seeds (so the seeds inherit approved metric definitions), renders the examples-validation dashboard, and leaves the Rule 2 long tail in an optional collapsed panel that self-approves as you query. By step 6 you're answering questions with the receipt panel showing exactly which entries each answer touched.
+`/agami-connect` is one-stop: it picks up missing credentials on first run, introspects the live DB, computes confidence on every entity, auto-approves the high-signal ones (FK joins, DBA-commented fields, structural column-name patterns), gates a Rule 1 sign-off *before* generating seeds (so the seeds inherit approved metric definitions), renders the examples-validation dashboard, and leaves the Rule 2 long tail in an optional collapsed panel that self-approves as you query. By the final step you're answering questions with the receipt panel showing exactly which entries each answer touched.
 
 ---
 
@@ -663,7 +690,9 @@ If the slash commands `/agami-connect`, `/agami-query`, etc. still appear after 
 
 ## Contributing
 
-Issues + PRs welcome at [github.com/AgamiAI/LiteBi](https://github.com/AgamiAI/LiteBi). See [CONTRIBUTING.md](CONTRIBUTING.md) for the test commands and the **version-bump discipline** — every user-visible change needs a version bump in `.claude-plugin/marketplace.json` (twice) and `plugins/agami/.claude-plugin/plugin.json`, otherwise existing installs stay on the cached old version forever.
+Issues + PRs welcome at [github.com/AgamiAI/LiteBi](https://github.com/AgamiAI/LiteBi). See [CONTRIBUTING.md](CONTRIBUTING.md) for the test commands and the **version-bump discipline** — every user-visible change needs a version bump in `.claude-plugin/marketplace.json` (twice) and `plugins/agami/.claude-plugin/plugin.json`, otherwise existing installs stay on the cached old version forever. Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+If agami is useful to you, a ⭐ on the repo genuinely helps others find it.
 
 ### Local dev iteration
 

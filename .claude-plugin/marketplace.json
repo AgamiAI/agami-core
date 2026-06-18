@@ -6,10 +6,10 @@
     "url": "https://agami.ai"
   },
   "metadata": {
-    "description": "Lightweight BI for Claude. Local-first natural-language SQL on your own database — no infra, no servers, no data leaves your machine.",
+    "description": "The trust layer between AI and your data. A governed semantic model for AI-to-database access — every join approved, every metric signed off, every answer with a receipt. Local-first: no infra, no servers, no data leaves your machine.",
     "version": "0.2.2",
     "pluginRoot": "./plugins",
-    "tags": ["data", "sql", "natural-language", "bi", "local-first", "open-source"],
+    "tags": ["data", "sql", "governance", "trust-layer", "semantic-model", "local-first", "open-source"],
     "repository": "https://github.com/AgamiAI/LiteBi",
     "license": "Apache-2.0"
   },
@@ -17,9 +17,9 @@
     {
       "name": "agami",
       "source": "./plugins/agami",
-      "description": "Connect a database, ask questions in natural language, save corrections, render charts. Runs entirely on your machine via Claude's Bash / Read / Write tools — no MCP server or Python required if you have psql/mysql or DuckDB (an optional local MCP server is available for use from Claude Desktop).",
+      "description": "A governed trust layer between AI and your database: every join FK-derived or human-approved, every metric signed off, every answer with a receipt (the SQL, the model version, who vouched for each definition). Runs entirely on your machine via Claude's Bash / Read / Write tools — no MCP server or Python required if you have psql/mysql or DuckDB (an optional local MCP server is available for use from Claude Desktop).",
       "version": "0.2.2",
-      "keywords": ["database", "query", "sql", "natural-language", "chart", "postgres", "mysql"],
+      "keywords": ["database", "governance", "trust-layer", "semantic-model", "sql", "postgres", "snowflake"],
       "category": "data"
     }
   ]
