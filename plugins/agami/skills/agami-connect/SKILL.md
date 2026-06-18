@@ -77,16 +77,9 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 ### Preflight steps
 
-1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `<artifacts_dir>/local/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
-2. **Credentials check (binding).** Read `<artifacts_dir>/local/credentials`; look for `[<profile>]`.
-   - The `[<profile>]` section is present → apply the chmod check (refuse if world-readable), continue.
-   - The `[<profile>]` section is **absent** (whether or not the file exists) **but `<artifacts_dir>/local/credentials.example` exists** → the user filled in the template; **run 0a.10 to promote it** (don't re-run 0a.4 — that would overwrite their edits). This is the *second-profile* path too: the file exists with other profiles but not this one — 0a.10's helper appends deterministically.
-   - Neither the section nor the template present → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."*
-3. **Resolve connection fields** from the `[<profile>]` section. Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
-4. **Tool detection.** Read cached tool paths from `<artifacts_dir>/local/.config`; if absent, run detection per Phase 0a.
-5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → the one-line pointer at `~/.config/agami/path` → `$HOME/agami-artifacts` (per [`shared/file-layout.md`](../../shared/file-layout.md)). The model lives in `<artifacts_dir>/<profile>/`; secrets + config in `<artifacts_dir>/local/`. Create lazily (`mkdir -p … && chmod 755 …`).
-6. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
-7. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
+1. **Resolve the environment** — `python3 "$AGAMI_PLUGIN_ROOT/scripts/connect_resolve.py" [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → continue (Phase 1 / existing-model check); **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → run Phase 0a and stop (*"No credentials yet for profile `<profile>` — running setup."*). Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`); never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
+2. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
+3. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
 
 ---
 
@@ -209,35 +202,11 @@ For BigQuery / Databricks / any key-or-token file: remind the user to `chmod 600
 
 ### 0a.5 — Resolve the agami interpreter + detect tools
 
-**First resolve the ONE Python agami uses for everything** — the model *and* DB connections. Call it `$PY`. This matters: **introspection always runs `scripts/execute_sql.py` under this interpreter** (via `sm`/`sys.executable`), on *every* tier — even when `psql` is installed. So the DB driver must live in `$PY`. The `sm` wrapper and the engine both read this interpreter from `<artifacts_dir>/local/.config`, so resolving it once here removes all interpreter guessing — **no environment variables, the user sets nothing.**
+**`$PY` = `data.interpreter.python3` from the Phase-0 `connect_resolve.py` call** — the ONE Python agami uses for the model *and* DB connections (introspection always runs `execute_sql.py` under it on *every* tier, so the DB driver must live in it). It's already the **scored** pick — the candidate that has `pydantic`+`sqlglot`+`pyyaml` AND the `$DB_TYPE` driver — so there's no guessing and the user sets nothing. **Re-run `connect_resolve.py --db-type $DB_TYPE` now** that the DB type is known, so the interpreter is scored against the right driver and native tools are refreshed. It records as `tool_paths.python3` in 0a.7. (`AGAMI_PYTHON` is honored as a first-priority override but is never required.)
 
-**Discover it automatically — prefer an interpreter that already has the DB driver** (so a user whose driver lives in a venv / framework / Homebrew Python is used as-is, with zero install). Probe a bounded candidate list for the `$DB_TYPE` driver + the model deps; first full match wins:
+Native CLIs (optional fast path for *queries* — introspection doesn't use them) are in `data.tools` (`psql`/`mysql`/`snowsql`/`sqlite3`/`duckdb`/`bq`, `null` if absent), detected with `which` only. **Forbidden** elsewhere: `pgrep`/`ps`/`lsof`/`find /`/`ls /Applications`/port scans.
 
-```bash
-DRIVER_MOD="<import module for $DB_TYPE — see the table below; sqlite/duckdb skip the driver>"
-CANDIDATES="$(command -v python3) $(command -v python) ${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python} \
-  $(ls /opt/homebrew/bin/python3.* /usr/local/bin/python3.* 2>/dev/null) \
-  $(ls /Library/Frameworks/Python.framework/Versions/*/bin/python3 2>/dev/null) \
-  $(ls "$HOME"/.pyenv/versions/*/bin/python3 2>/dev/null)"
-PY=""
-for c in $CANDIDATES; do
-  [ -x "$c" ] || continue
-  "$c" -c "import ${DRIVER_MOD:-sys}, pydantic, sqlglot, yaml" 2>/dev/null && { PY="$c"; break; }
-done
-# Nothing fully equipped yet → take the first working base interpreter; 0a.5b + the
-# driver step below install what's missing INTO it.
-[ -z "$PY" ] && PY="$(command -v python3 || command -v python)"
-PY="$("$PY" -c 'import sys; print(sys.executable)')"   # canonical absolute path
-```
-Record `$PY` — it becomes `tool_paths.python3` in 0a.7. (`AGAMI_PYTHON`, if the user happens to have it set, is honored as a first-priority override — but it is **never required** and the skill never asks the user to set it.)
-
-**Detect native CLIs** (optional fast path for *queries* — introspection doesn't use them) with `which` only:
-```bash
-for t in psql mysql snowsql sqlite3 duckdb bq; do which $t 2>/dev/null; done
-```
-If `which psql` is empty, try the Homebrew libpq glob once. **Forbidden:** `pgrep`/`ps`/`lsof`/`find /`/`ls /Applications`/port scans.
-
-**Ensure the DB driver for `$DB_TYPE` is importable in `$PY`** (probe in `$PY`, NOT bare `python3` — they may differ):
+**If `data.interpreter.has_driver` is `false`** the `$DB_TYPE` driver isn't in `$PY` yet — confirm via AskUserQuestion, then `"$PY" -m pip install --user <package>` from the table (probe was already done in `$PY` by `connect_resolve.py`):
 
 | `$DB_TYPE` | probe (`"$PY" -c '…'`) | pip package |
 |---|---|---|
