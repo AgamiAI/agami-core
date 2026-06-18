@@ -107,64 +107,30 @@ End the turn. Wait for the user.
 
 ## Phase 2: Parse the chat back-channel
 
-The user replies with a block like:
+The user pastes the dashboard's "Generate feedback" block. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `organization-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
-```
-exclude tables: sales.STG_LEADS, sales.STG_RAW
-exclude columns: sales.CUSTOMERS.SSN, sales.CUSTOMERS.EMAIL
-include tables: sales.PAYMENTS
-done
+```bash
+parse_model_feedback.py --block-file <pasted>
 ```
 
-Grammar:
+It prints `{data, anomalies, needs_judgment}`:
+- `data.profile` — the dashboard's target model. **Use it, overriding the active-profile default** (a block was rendered for THAT model; never apply it to whatever's active).
+- `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit verbatim). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
+- `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area.
+- `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
+- `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
+- `data.organization_md` — the full ORGANIZATION.md text (already decoded) → **Write** it to `<artifacts_dir>/<profile>/ORGANIZATION.md` (overwrite; human narrative only).
+- `data.signer` / `data.role` — the curator identity for `--signer`/`--role` on every approve. **Persist** them into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the Phase 0 ask.
 
-```
-signed-off-by: you@company.com / data_lead
-exclude tables:  <qname-list>
-include tables:  <qname-list>
-exclude columns: <qname-list>
-include columns: <qname-list>
-curate-ops:
-[{"op":"approve","kind":"metric","area":"...","name":"...","at":"<UTC ISO>"}, {"op":"exclude","kind":"metric","area":"...","name":"..."}, {"op":"edit","kind":"table","area":"...","name":"orders","column":"amount","field":"description","value":"..."}, ...]
-example-edits:
-[{"area":"sales","question":"...","sql":"...","source":"correction","status":"confirmed"}]
-new-metrics:
-[{"area":"sales","name":"repeat_rate","description":"...","calculation":"...","bindings":{"Snowflake":"..."},"source_tables":["orders"],"other_names":["repeat purchase rate"],"unit":"percent","confidence":"proposed"}]
-new-examples:
-[{"area":"sales","question":"How many active vehicles by zone?","sql":"SELECT zone, COUNT(*) ...","source":"human","status":"confirmed"}]
-organization-md: "<full new ORGANIZATION.md text, JSON-encoded>"
-key-terminology: {"gold tier": "lifetime spend > $10k", "churned": "no order in 90 days"}
-done
-```
+**If `needs_judgment` is set, stop and ask** — `malformed_targets` (a table without its `<area>.` prefix → *"Tables need a schema prefix — `sales.STG_LEADS`, not `STG_LEADS`. Did you mean that?"*) or `unparseable_json` (re-copy that block from the dashboard). Don't apply a partial block.
 
-Where `<qname-list>` is comma-separated, whitespace-tolerant:
-- Table qname: `<area>.<table>` (e.g., `sales.STG_LEADS`)
-- Column qname: `<area>.<table>.<column>` (e.g., `sales.CUSTOMERS.EMAIL`)
-
-A header line + several optional blocks may follow (the dashboard emits whichever applies — `curate-ops`, `example-edits`, `new-metrics`, `new-examples`, `organization-md`, `key-terminology`):
-- **`signed-off-by: <email> / <role>`** (header, present only when the batch has approvals) — the curator's sign-off identity, entered at the top of the dashboard's Review tab. **Use it for `--signer`/`--role`** when applying, and **persist** `reviewer_email`/`reviewer_role` into `<artifacts_dir>/local/.config` (preserve other keys; `chmod 600`) so future sessions don't re-ask. If a batch contains approvals but this line is **absent**, fall back to `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`), then to the Phase 0 ask. Validate the email against `\S+@\S+\.\S+`; the role is a short free-text string (the picker offers CFO / CTO / Data Lead / Engineer / Analyst, but "Other" lets the user type their own — accept any non-empty value ≤ 40 chars; don't reject a custom role).
-- **`curate-ops:`** — the unified ops array. Holds **approve / reject(exclude) / include** on metrics/entities/relationships AND field **edits** (`op:"edit"` with `field`/`value`). Already a valid curate ops array; merge it verbatim with the table/column ops below and apply via one `sm curate` call. **`approve` ops carry an `at` timestamp** (the dashboard stamps it) and require the curator's `--signer`/`--role` from the `signed-off-by:` line — the validator rejects an approved entry with no sign-off stamp. **Rule 1 guard:** before applying an `approve` on a metric, confirm its `calculation` is non-empty (the dashboard always has one for user-authored metrics; for an introspected metric with an empty calculation, ask the user to fill it via an `edit` first).
-- **`example-edits:`** — edited prompt examples `[{area, question, sql, source, status}]`. Group by `area` and apply each group with `sm add-example "$ROOT" --area <area> --file <json>` (it dedups by `question`, so an edit replaces the prior example). Write the per-area JSON with the **Write tool**.
-- **`new-metrics:`** — metrics the user authored in the dashboard's "Add metric" form `[{area, name, description, calculation, bindings, source_tables, other_names, unit?, confidence}]`. Group by `area` and create each group with `sm add "$ROOT" --kind metric --area <area> --file <json>` (validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, reverts the batch on failure). Write the per-area JSON with the **Write tool** — it's already in the `sm add` shape, so pass it through verbatim. A user-authored metric is `confidence: proposed` and still needs sign-off (approve it on the Review tab).
-- **`new-examples:`** — NL→SQL examples the user authored in the dashboard's "Add an example" form `[{area, question, sql, source, status}]` (`source: human`, `status: confirmed`). Same shape + apply path as `example-edits:` — group by `area` and apply each group with `sm add-example "$ROOT" --area <area> --file <json>` (Write the per-area JSON with the **Write tool**; it dedups by `question`, appending new ones to `prompt_examples/<area>/examples.yaml`). A human-authored example is trusted (`status: confirmed`) — no sign-off needed.
-- **`organization-md:`** — a JSON-encoded string of the full new `ORGANIZATION.md`. JSON-decode it and **Write** it to `<artifacts_dir>/<profile>/ORGANIZATION.md` (overwrite; free-form Markdown, no validator). This is the human **narrative only** — it never carries the glossary or model facts.
-- **`key-terminology:`** — a JSON object `{term: definition, …}`: the curated domain glossary the user edited in the Organization tab. It's the **complete** intended glossary (adds, edits, and removals already applied), so write it to a temp file and apply with **`--replace`** (it's validated + committed, reverts on failure):
-  ```bash
-  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file /tmp/agami-terminology.json --replace
-  ```
-  Write the JSON with the **Write tool**. This lands in the structured `key_terminology` field (not ORGANIZATION.md) and surfaces in the derived domain context automatically.
-
-Show the user a one-line summary of what each block changed before applying.
-
-Tolerate trailing commas, mixed-case schema/table/column names (the YAMLs typically preserve the DB's casing — pass them through verbatim).
-
-**Reject malformed targets in chat, not by silently dropping them.** If a user types `exclude tables: STG_LEADS` without the schema prefix, surface: *"Tables need a schema prefix — `sales.STG_LEADS` not just `STG_LEADS`. Did you mean that?"* and stop.
+**Rule 1 guard (judgment):** before applying an `approve` on a metric, confirm its `calculation` is non-empty — for an introspected metric with an empty calculation, ask the user to fill it via an `edit` first (the dashboard always has one for user-authored metrics). Show the user a one-line summary of what each block changed before applying.
 
 ---
 
 ## Phase 3: Apply via the curation engine
 
-Translate the parsed table/column exclude/include commands into curation ops, **then merge in the `curate-ops:` JSON array verbatim** (it already holds the approve / reject / include / edit ops for metrics, entities, and joins). Table targets are `<area>.<table>`, column targets `<area>.<table>.<column>`. `exclude` → `op: exclude` (engine treats it as reject), `include` → `op: include`, `approve` → `op: approve` (+ `at`):
+`data.ops` from the parser is already the merged curation ops array — exclude/include translated + the `curate-ops` approve/reject/edit verbatim. Apply it in one `sm curate` call (shape, for reference):
 
 ```json
 [
