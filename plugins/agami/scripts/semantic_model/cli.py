@@ -212,6 +212,20 @@ def cmd_review_items(args) -> int:
     return 0
 
 
+def cmd_curate_gate(args) -> int:
+    """The Phase-4 curate gate decision in ONE call: count still-queryable PII columns
+    + pending pre-seed sign-offs, and say whether to open the explorer. Replaces the
+    skill running `sm sensitive` + `sm review-items --scope preseed` and branching by
+    hand. Turn-boundary-safe (same answer on a fresh run or a resume)."""
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    pii = curate.sensitive_columns(org).get("count", 0)
+    preseed = len(curate.all_items(org, scope="preseed"))
+    _print_json({"pii_count": pii, "preseed_count": preseed,
+                 "should_open_explorer": pii > 0 or preseed > 0})
+    return 0
+
+
 def cmd_model_tree(args) -> int:
     from . import curate
     org = L.load_organization(args.root, include_rejected=True)
@@ -1050,6 +1064,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--scope", default="all", choices=["all", "rule1", "rule2", "preseed"],
                     help="all | rule1 (metrics/named-filters) | rule2 | preseed (metrics+entities seeds depend on)")
     sp.set_defaults(func=cmd_review_items)
+
+    sp = sub.add_parser("curate-gate", help="Phase-4 gate decision: PII + pre-seed sign-off counts → should the explorer open?")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_curate_gate)
 
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")

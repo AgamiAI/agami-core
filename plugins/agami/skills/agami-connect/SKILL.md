@@ -79,16 +79,9 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 ### Preflight steps
 
 0. **Sample-path short-circuit (check FIRST, before resolving any profile).** If the user explicitly asked for the sample — `$ARGUMENTS` is `sample`, or they said *"try the sample"* / *"I don't have a database"* / *"use the sample (or example) data"* / *"demo data"* — then bind `$PROFILE_NAME = agami-example`, `$DB_TYPE = sample`, and **go straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)**. Do this **regardless of any existing `active_profile` or onboarded profiles** — the sample is a deliberate, explicit choice and must not be intercepted by another profile's credential/existing-model checks. (This is why the option in 0a.2 isn't enough on its own: a returning user with an onboarded profile never reaches 0a.) If `agami-example` is already set up, Phase 0s sends them to the demo. Only fall through to step 1 when there's **no** sample signal.
-1. **Resolve `<profile>`**: `AGAMI_PROFILE` → `active_profile` in `<artifacts_dir>/local/.config` → `"main"` (older installs may have `"default"`). The model's `organization` equals `<profile>`.
-2. **Credentials check (binding).** Read `<artifacts_dir>/local/credentials`; look for `[<profile>]`.
-   - The `[<profile>]` section is present → apply the chmod check (refuse if world-readable), continue.
-   - The `[<profile>]` section is **absent** (whether or not the file exists) **but `<artifacts_dir>/local/credentials.example` exists** → the user filled in the template; **run 0a.10 to promote it** (don't re-run 0a.4 — that would overwrite their edits). This is the *second-profile* path too: the file exists with other profiles but not this one — 0a.10's helper appends deterministically.
-   - Neither the section nor the template present → **run Phase 0a and stop.** Surface: *"No credentials yet for profile `<profile>` — running setup."*
-3. **Resolve connection fields** from the `[<profile>]` section. Field shapes per dialect are in [`shared/credentials-format.md`](../../shared/credentials-format.md). Never substitute a missing value — surface "missing field X for profile Y" and stop.
-4. **Tool detection.** Read cached tool paths from `<artifacts_dir>/local/.config`; if absent, run detection per Phase 0a.
-5. **Resolve `<artifacts_dir>`**: `AGAMI_ARTIFACTS_DIR` → the one-line pointer at `~/.config/agami/path` → `$HOME/agami-artifacts` (per [`shared/file-layout.md`](../../shared/file-layout.md)). The model lives in `<artifacts_dir>/<profile>/`; secrets + config in `<artifacts_dir>/local/`. Create lazily (`mkdir -p … && chmod 755 …`).
-6. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
-7. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
+1. **Resolve the environment** — `python3 "$AGAMI_PLUGIN_ROOT/scripts/connect_resolve.py" [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → continue (Phase 1 / existing-model check); **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → run Phase 0a and stop (*"No credentials yet for profile `<profile>` — running setup."*). Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`); never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
+2. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
+3. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
 
 ---
 
@@ -215,35 +208,11 @@ For BigQuery / Databricks / any key-or-token file: remind the user to `chmod 600
 
 ### 0a.5 — Resolve the agami interpreter + detect tools
 
-**First resolve the ONE Python agami uses for everything** — the model *and* DB connections. Call it `$PY`. This matters: **introspection always runs `scripts/execute_sql.py` under this interpreter** (via `sm`/`sys.executable`), on *every* tier — even when `psql` is installed. So the DB driver must live in `$PY`. The `sm` wrapper and the engine both read this interpreter from `<artifacts_dir>/local/.config`, so resolving it once here removes all interpreter guessing — **no environment variables, the user sets nothing.**
+**`$PY` = `data.interpreter.python3` from the Phase-0 `connect_resolve.py` call** — the ONE Python agami uses for the model *and* DB connections (introspection always runs `execute_sql.py` under it on *every* tier, so the DB driver must live in it). It's already the **scored** pick — the candidate that has `pydantic`+`sqlglot`+`pyyaml` AND the `$DB_TYPE` driver — so there's no guessing and the user sets nothing. **Re-run `connect_resolve.py --db-type $DB_TYPE` now** that the DB type is known, so the interpreter is scored against the right driver and native tools are refreshed. It records as `tool_paths.python3` in 0a.7. (`AGAMI_PYTHON` is honored as a first-priority override but is never required.)
 
-**Discover it automatically — prefer an interpreter that already has the DB driver** (so a user whose driver lives in a venv / framework / Homebrew Python is used as-is, with zero install). Probe a bounded candidate list for the `$DB_TYPE` driver + the model deps; first full match wins:
+Native CLIs (optional fast path for *queries* — introspection doesn't use them) are in `data.tools` (`psql`/`mysql`/`snowsql`/`sqlite3`/`duckdb`/`bq`, `null` if absent), detected with `which` only. **Forbidden** elsewhere: `pgrep`/`ps`/`lsof`/`find /`/`ls /Applications`/port scans.
 
-```bash
-DRIVER_MOD="<import module for $DB_TYPE — see the table below; sqlite/duckdb skip the driver>"
-CANDIDATES="$(command -v python3) $(command -v python) ${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python} \
-  $(ls /opt/homebrew/bin/python3.* /usr/local/bin/python3.* 2>/dev/null) \
-  $(ls /Library/Frameworks/Python.framework/Versions/*/bin/python3 2>/dev/null) \
-  $(ls "$HOME"/.pyenv/versions/*/bin/python3 2>/dev/null)"
-PY=""
-for c in $CANDIDATES; do
-  [ -x "$c" ] || continue
-  "$c" -c "import ${DRIVER_MOD:-sys}, pydantic, sqlglot, yaml" 2>/dev/null && { PY="$c"; break; }
-done
-# Nothing fully equipped yet → take the first working base interpreter; 0a.5b + the
-# driver step below install what's missing INTO it.
-[ -z "$PY" ] && PY="$(command -v python3 || command -v python)"
-PY="$("$PY" -c 'import sys; print(sys.executable)')"   # canonical absolute path
-```
-Record `$PY` — it becomes `tool_paths.python3` in 0a.7. (`AGAMI_PYTHON`, if the user happens to have it set, is honored as a first-priority override — but it is **never required** and the skill never asks the user to set it.)
-
-**Detect native CLIs** (optional fast path for *queries* — introspection doesn't use them) with `which` only:
-```bash
-for t in psql mysql snowsql sqlite3 duckdb bq; do which $t 2>/dev/null; done
-```
-If `which psql` is empty, try the Homebrew libpq glob once. **Forbidden:** `pgrep`/`ps`/`lsof`/`find /`/`ls /Applications`/port scans.
-
-**Ensure the DB driver for `$DB_TYPE` is importable in `$PY`** (probe in `$PY`, NOT bare `python3` — they may differ):
+**If `data.interpreter.has_driver` is `false`** the `$DB_TYPE` driver isn't in `$PY` yet — confirm via AskUserQuestion, then `"$PY" -m pip install --user <package>` from the table (probe was already done in `$PY` by `connect_resolve.py`):
 
 | `$DB_TYPE` | probe (`"$PY" -c '…'`) | pip package |
 |---|---|---|
@@ -529,10 +498,11 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 - Tell the user: *"I listed all `<N>` tables and their columns. Uncheck any you don't need (staging, backups, snapshots); you can also expand a table and drop irrelevant columns. Then click **Generate for Claude** and paste the block back here."*
 - **End the turn. Do NOT introspect yet.**
 
-**On re-entry — the user pastes an `AGAMI PRUNE …` block.** Parse it:
-- Lines under `keep tables: <k> of <n>` (one `schema.table` per line, until a blank line / `exclude columns:` / `done`) = the **kept allowlist**. **Write them to a file (one `schema.table` per line) and pass `--tables-file <path>` — do NOT pass them as an unquoted shell variable.** Under zsh (the Bash tool's shell) an unquoted `$list` does *not* word-split, so all N names arrive as one giant argument and the engine builds a single garbage table. The file path sidesteps shell quoting entirely. (`--tables` still works if you list them inline, and a single mis-joined blob is now split defensively — but the file is the safe default.)
-- Lines under `exclude columns: <c>` (one `schema.table.column` per line) = columns to drop → pass as `--exclude-columns` (same zsh caveat — write to a file or list inline, don't pass an unquoted variable).
-- If the user kept everything (`<k>` == `<n>`, no excluded columns), just run 1.7 with no `--tables`/`--exclude-columns`.
+**On re-entry — the user pastes an `AGAMI PRUNE …` block.** Don't hand-parse it — pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
+```bash
+parse_prune_block.py --block-file <pasted> --tables-out /tmp/agami-keep.txt
+```
+It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything}, anomalies}`. Pass `--tables-file "$tables_file"` and `--exclude-columns <excluded_columns…>` to 1.7. **`kept_everything: true`** → run 1.7 with neither flag. Surface `anomalies` (a `bad_table_line`, a `keep_count_mismatch`) rather than silently dropping a line.
 
 If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
 
@@ -777,16 +747,14 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-area-d
 
 Seeds reference **columns, tables, metrics, and entities** — so settle those *before* generating examples (a seed that uses a column you'd later exclude breaks at query time, and a seed built on an unreviewed metric bakes in a guessed definition). **Relationships are NOT gated here** — they stay lazy: FK joins are already auto-approved by the engine (the DB declared them), and inferred joins self-approve as you query / surface as receipt warnings. So you're not asked to rubber-stamp database-declared foreign keys.
 
-**4a — The curate gate: open the explorer whenever there's anything to curate.** Compute two deterministic counts (both turn-boundary-safe, so this is identical on a fresh run or a resume):
+**4a — The curate gate: open the explorer whenever there's anything to curate.** One call returns the decision (turn-boundary-safe — same answer on a fresh run or a resume):
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" sensitive "$ROOT"               # → .count  (columns flagged PII)
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed   # length = sign-off count
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate-gate "$ROOT"
 ```
-- **PII count** — columns introspection (or a curator) flagged `sensitive` **that are still queryable** (already-excluded columns, and any column under an excluded table, are not counted — so once the user excludes the flagged columns this drops to 0 and the gate stops re-opening).
-- **Sign-off count** — metrics + named-filters + entities needing review (relationships are NOT gated — they stay lazy: FK joins are engine-approved, inferred joins self-approve as you query).
+→ `{pii_count, preseed_count, should_open_explorer}`. **PII count** = columns flagged `sensitive` still queryable (an excluded column, or any column under an excluded table, isn't counted — so once the user excludes them it drops to 0 and the gate stops re-opening). **preseed count** = metrics + named-filters + entities needing sign-off (relationships are NOT gated — FK joins are engine-approved, inferred joins self-approve as you query).
 
-**If EITHER count is > 0 → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
+**If `should_open_explorer` is true → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
 - the **PII tab** — every flagged column *and* every suspected-but-unflagged one (e.g. `first_name` in `sys_user`) in one list, each with a confirm/clear toggle. This is where the user reviews PII without hunting through tables.
 - the **Metrics tab** — the proposed measures grouped by table and collapsed (`incident · 9 [✓ Approve 9]`), with per-table and "approve all proposed" bulk buttons, so a few-hundred-metric set signs off fast.
 - the **Review** tab — metrics/entities/joins under "Needs your eyes" for anything needing a closer look; per-column **Exclude** toggles live on **Tables**.
