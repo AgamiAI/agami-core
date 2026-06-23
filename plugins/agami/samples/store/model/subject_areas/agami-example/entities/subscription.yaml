@@ -1,0 +1,22 @@
+name: subscription
+plural: subscriptions
+other_names:
+- plan subscription
+- recurring plan
+- membership
+description: A customer's subscription to a plan — the recurring-revenue relationship.
+maps_to:
+- table: subscriptions
+  column: id
+  primary: true
+- table: invoices
+  column: subscription_id
+  primary: false
+- table: subscription_events
+  column: subscription_id
+  primary: false
+primary_table: subscriptions
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved

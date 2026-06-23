@@ -1,0 +1,100 @@
+name: customers
+schema: main
+storage_connection: agami-example_sqlite
+source_type: table
+grain:
+- id
+description: People who signed up with the store. A customer may place orders, hold a subscription, or
+  both.
+default_filters: []
+caveats: []
+performance_hints:
+  estimated_row_count: 500
+  estimated_row_count_at: '2026-06-17T09:54:43Z'
+  recommended_filters: []
+  indexes: []
+column_groups: {}
+column_group_descriptions: {}
+confidence: confirmed
+review_state: approved
+columns:
+- name: id
+  type: integer
+  description: ''
+  primary_key: true
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: email
+  type: string
+  description: Customer email — unique login and contact address.
+  primary_key: false
+  aggregation: dimension
+  sensitive: true
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: full_name
+  type: string
+  description: Customer's full name — the display label for a customer in results.
+  primary_key: false
+  choice_field: null
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: phone
+  type: string
+  description: ''
+  primary_key: false
+  aggregation: dimension
+  sensitive: true
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: country
+  type: string
+  description: ISO 3166-1 alpha-2 country code (2-letter, e.g. US, IN, GB).
+  description_source: metadata
+  primary_key: false
+  choice_field:
+    US: United States
+    UK: United Kingdom
+    DE: Germany
+    FR: France
+    CA: Canada
+    AU: Australia
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+- name: signup_date
+  type: string
+  description: Date the customer first signed up.
+  primary_key: false
+  aggregation: dimension
+  sensitive: false
+  date_format: iso8601
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+  description_source: ai_unvalidated
+- name: is_active
+  type: integer
+  description: ''
+  primary_key: false
+  choice_field:
+    '0': 'No'
+    '1': 'Yes'
+  aggregation: dimension
+  sensitive: false
+  caveats: []
+  confidence: confirmed
+  review_state: approved
+description_source: ai_unvalidated

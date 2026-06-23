@@ -1,6 +1,6 @@
 {
   "name": "agami",
-  "description": "Ask plain-English questions of your Postgres / MySQL / Snowflake / BigQuery / Redshift / SQLite database, with a trust layer so the answers are defensible. Every join, metric, and named filter is confidence-scored and either FK-derived or human-approved via a review dashboard. Every answer ships a SQL receipt showing what ran and which model version it used. Local-first: credentials, schema, results never leave your machine.",
+  "description": "The trust layer between AI and your database, so an agent's answers are defensible. Every join, metric, and named filter is confidence-scored and either FK-derived or human-approved via a review dashboard. Every answer ships a SQL receipt showing what ran and which model version it used. Works across Postgres / MySQL / Snowflake / BigQuery / Redshift / SQL Server / Oracle / Databricks / Trino / DuckDB / SQLite. Local-first: credentials, schema, results never leave your machine.",
   "version": "0.2.2",
   "author": {
     "name": "Agami AI",

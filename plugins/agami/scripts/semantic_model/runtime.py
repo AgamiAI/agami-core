@@ -361,6 +361,124 @@ class PreFlightResult:
         }
 
 
+# ---------------------------------------------------------------------------
+# Sensitive-column projection guard (PII)
+#
+# Enforced in the SAME shared safety pass as the fan/chasm pre-flight
+# (execute_sql.py:_model_safety), so EVERY entry point that runs SQL through the
+# engine — the agami-query skill, the local MCP server, cron — protects PII
+# identically, by construction rather than by each LLM obeying prose. `sensitive`
+# restricts the OUTPUT: a sensitive column may appear in COUNT/COUNT(DISTINCT),
+# WHERE, GROUP BY, and JOIN, but its raw per-row value must never be projected.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SensitiveCheckResult:
+    action: str  # "allow" | "refuse"
+    columns: list[str] = field(default_factory=list)  # offending "table.column" / "column"
+    reason: str = ""
+    suggestion: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "columns": self.columns,
+                "reason": self.reason, "suggestion": self.suggestion}
+
+
+def _sensitive_by_table(org: Organization) -> tuple[dict[str, set[str]], set[str]]:
+    """(table name -> {sensitive column names}, union of all sensitive column names)."""
+    by_table: dict[str, set[str]] = {}
+    allnames: set[str] = set()
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for c in t.columns:
+                if getattr(c, "sensitive", False):
+                    by_table.setdefault(t.name, set()).add(c.name)
+                    allnames.add(c.name)
+    return by_table, allnames
+
+
+def _count_protects(col: "exp.Column") -> bool:
+    """True iff `col` sits inside a COUNT(...) (incl. COUNT(DISTINCT ...)) before any
+    other aggregate. COUNT returns a NUMBER so it doesn't leak a raw value; MIN/MAX/
+    GROUP_CONCAT/etc. of a sensitive column return/expose an actual value → NOT safe."""
+    node = col.parent
+    while node is not None:
+        if isinstance(node, exp.Count):
+            return True
+        if isinstance(node, exp.AggFunc):
+            return False
+        node = node.parent
+    return False
+
+
+def _direct_from_tables(tree: "exp.Select") -> set[str]:
+    """Bare names of tables in this SELECT's own FROM/JOINs (NOT inside a nested
+    subquery) — the tables a bare `*` would expand. A table is "direct" iff its
+    nearest enclosing SELECT is `tree` itself."""
+    names: set[str] = set()
+    for tbl in tree.find_all(exp.Table):
+        anc = tbl.parent
+        while anc is not None and not isinstance(anc, exp.Select):
+            anc = anc.parent
+        if anc is tree:
+            names.add(tbl.name)
+    return names
+
+
+def check_sensitive_projection(sql: str, org: Organization) -> SensitiveCheckResult:
+    """Refuse a query that PROJECTS a `sensitive` column's raw values; allow the
+    column in COUNT, filters, GROUP BY, and joins. Degrades to allow when sqlglot
+    is unavailable or the SQL doesn't parse (same posture as the fan/chasm pass)."""
+    if not _HAVE_SQLGLOT:
+        return SensitiveCheckResult("allow")
+    by_table, allnames = _sensitive_by_table(org)
+    if not allnames:
+        return SensitiveCheckResult("allow")
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return SensitiveCheckResult("allow")
+    if tree is None or not isinstance(tree, exp.Select):
+        return SensitiveCheckResult("allow")
+
+    scope = _tables_in_scope(tree)
+    direct = _direct_from_tables(tree)
+    offending: set[str] = set()
+
+    for proj in tree.expressions:
+        # (a) a raw projection of a sensitive column, not protected by COUNT
+        for col in proj.find_all(exp.Column):
+            if col.name not in allnames or _count_protects(col):
+                continue
+            tbl = _resolve_col_table(col, scope)
+            if tbl is None:
+                offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
+            elif tbl in by_table and col.name in by_table[tbl]:
+                offending.add(f"{tbl}.{col.name}")
+            # same-named column on a non-sensitive table → not offending
+        # (b) `*` / `t.*` that would expand a directly-FROM'd table holding sensitive cols
+        is_star = isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
+        if is_star:
+            qualifier = proj.table if isinstance(proj, exp.Column) else None
+            tables = {scope.get(qualifier, qualifier)} if qualifier else direct
+            for tbl in tables:
+                for c in sorted(by_table.get(tbl, set())):
+                    offending.add(f"{tbl}.{c}")
+
+    if not offending:
+        return SensitiveCheckResult("allow")
+    cols = sorted(offending)
+    return SensitiveCheckResult(
+        "refuse",
+        columns=cols,
+        reason="query projects raw values of sensitive column(s): " + ", ".join(cols)
+               + " — sensitive columns may be counted or filtered, not output raw.",
+        suggestion="Aggregate it (e.g. COUNT(DISTINCT <col>)) for a count, or omit it and "
+                   "select the entity's non-sensitive key (e.g. id) instead.",
+    )
+
+
 def _cardinality_index(org: Organization) -> list[Relationship]:
     rels: list[Relationship] = []
     for sa in org.subject_areas:

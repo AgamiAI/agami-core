@@ -1,0 +1,18 @@
+name: payment
+plural: payments
+other_names:
+- charge
+- transaction
+description: A payment captured against an order.
+maps_to:
+- table: payments
+  column: id
+  primary: true
+- table: refunds
+  column: payment_id
+  primary: false
+primary_table: payments
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved

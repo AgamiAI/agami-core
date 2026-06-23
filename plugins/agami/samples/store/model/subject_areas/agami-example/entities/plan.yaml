@@ -1,0 +1,19 @@
+name: plan
+plural: plans
+other_names:
+- tier
+- subscription plan
+- pricing plan
+description: A subscription plan and its monthly price.
+maps_to:
+- table: plans
+  column: id
+  primary: true
+- table: subscriptions
+  column: plan_id
+  primary: false
+primary_table: plans
+key_components: []
+caveats: []
+confidence: confirmed
+review_state: approved

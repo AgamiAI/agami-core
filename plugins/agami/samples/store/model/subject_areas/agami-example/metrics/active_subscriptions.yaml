@@ -1,0 +1,20 @@
+name: active subscriptions
+description: Count of active subscriptions.
+other_names:
+- active subs
+- live subscriptions
+calculation: Number of subscriptions currently in the active state.
+bindings:
+  SQLite: SUM(CASE WHEN subscriptions.status = 'active' THEN 1 ELSE 0 END)
+source_tables:
+- subscriptions
+base_metrics: []
+subject_areas: []
+primary_table: subscriptions
+non_additive_dimensions: []
+inner_grain: []
+confidence: confirmed
+review_state: approved
+signed_off_by: agami-team@agami.ai
+signed_off_at: '2026-06-15T00:00:00Z'
+signed_off_role: maintainer

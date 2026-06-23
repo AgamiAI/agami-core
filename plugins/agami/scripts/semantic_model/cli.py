@@ -56,6 +56,17 @@ def cmd_validate(args) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_snapshot(args) -> int:
+    """Stamp the model_version snapshot for a profile tree. Introspect/curate do this
+    automatically; this command is for paths that write a model WITHOUT going through
+    them — e.g. agami-connect's sample copy (6A) drops the prebuilt model into place,
+    then calls this so the answer receipt has a real model_version."""
+    from . import snapshot as SN
+    h = SN.write_snapshot(args.root)
+    print(h or "(no model to snapshot)")
+    return 0 if h else 1
+
+
 def cmd_context(args) -> int:
     org = L.load_organization(args.root)
     out = L.get_table_context(
@@ -152,6 +163,30 @@ def cmd_prepare(args) -> int:
     return 0
 
 
+def cmd_receipt(args) -> int:
+    """Assemble the trust receipt for an executed query — deterministically, from the
+    SQL + the model. Replaces the LLM hand-building the receipt JSON in prose: tables,
+    relationships, metrics, unreviewed-warnings, and model_version all come from
+    parsing the SQL against the model (the SAME `runtime.assemble_receipt` the MCP
+    server uses). The LLM may still append ad-hoc metrics + assumptions afterward."""
+    from . import snapshot as SN
+    sql = args.sql
+    if args.sql_file:
+        sql = Path(args.sql_file).read_text()
+    org = L.load_organization(args.root)
+    pf = RT.pre_flight_check(sql, org)
+    applied = json.loads(args.applied_filters) if args.applied_filters else None
+    receipt = RT.assemble_receipt(
+        org, sql,
+        model_version=SN.newest_version(args.root),
+        applied_filters=applied,
+        pre_flight=pf,
+        freshness=args.freshness,
+    )
+    _print_json(receipt)
+    return 0
+
+
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_organization(args.root)
@@ -163,6 +198,20 @@ def cmd_review_items(args) -> int:
     from . import curate
     org = L.load_organization(args.root, include_rejected=True)
     _print_json(curate.all_items(org, scope=args.scope))
+    return 0
+
+
+def cmd_curate_gate(args) -> int:
+    """The Phase-4 curate gate decision in ONE call: count still-queryable PII columns
+    + pending pre-seed sign-offs, and say whether to open the explorer. Replaces the
+    skill running `sm sensitive` + `sm review-items --scope preseed` and branching by
+    hand. Turn-boundary-safe (same answer on a fresh run or a resume)."""
+    from . import curate
+    org = L.load_organization(args.root, include_rejected=True)
+    pii = curate.sensitive_columns(org).get("count", 0)
+    preseed = len(curate.all_items(org, scope="preseed"))
+    _print_json({"pii_count": pii, "preseed_count": preseed,
+                 "should_open_explorer": pii > 0 or preseed > 0})
     return 0
 
 
@@ -934,6 +983,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.set_defaults(func=cmd_validate)
 
+    sp = sub.add_parser("snapshot", help="stamp the model_version snapshot for a profile (e.g. after copying a model)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_snapshot)
+
     sp = sub.add_parser("context", help="assemble get_table_context")
     sp.add_argument("root")
     sp.add_argument("--area", default=None)
@@ -942,7 +995,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--include",
         nargs="*",
-        default=["default_filters", "relationships", "caveats", "value_transforms"],
+        default=list(L.DEFAULT_CONTEXT_INCLUDE),
     )
     sp.set_defaults(func=cmd_context)
 
@@ -982,6 +1035,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--sql-file", default=None, dest="sql_file")
     sp.set_defaults(func=cmd_prepare)
 
+    sp = sub.add_parser("receipt", help="assemble the trust receipt for a query (deterministic, from SQL + model) — replaces hand-building it")
+    sp.add_argument("root")
+    sp.add_argument("--sql", default=None)
+    sp.add_argument("--sql-file", default=None, dest="sql_file")
+    sp.add_argument("--applied-filters", default=None, dest="applied_filters",
+                    help="JSON list of default_filters applied (from `sm prepare`)")
+    sp.add_argument("--freshness", default=None, help="optional freshness timestamp for tables_used")
+    sp.set_defaults(func=cmd_receipt)
+
     sp = sub.add_parser("review-queue", help="trust-review items needing sign-off (Rule 1/2)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_review_queue)
@@ -991,6 +1053,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--scope", default="all", choices=["all", "rule1", "rule2", "preseed"],
                     help="all | rule1 (metrics/named-filters) | rule2 | preseed (metrics+entities seeds depend on)")
     sp.set_defaults(func=cmd_review_items)
+
+    sp = sub.add_parser("curate-gate", help="Phase-4 gate decision: PII + pre-seed sign-off counts → should the explorer open?")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_curate_gate)
 
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")

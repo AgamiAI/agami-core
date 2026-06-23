@@ -134,16 +134,16 @@ Order in Phase 2b prompt:
 4. Few-shot examples
 5. The user's question
 
-### 1e — verify the configured database tool
+### 1e — the connection invocation pattern (do NOT run a standalone probe)
 
-Look up the cached connection method from `<artifacts_dir>/local/.config`. Run a `SELECT 1` probe via that tool. **Use the EXACT invocation pattern below for the tier — don't guess flags.** `execute_sql.py` does NOT accept positional SQL, a `--format` flag, or any flag not listed below; guessing produces "unrecognized arguments" errors that waste turns.
+Look up the cached connection method from `<artifacts_dir>/local/.config`. **Do NOT run a separate `SELECT 1` connectivity probe** — it's a wasted round-trip (and pointless for a local SQLite/DuckDB file). The user's *actual* query is the connectivity check: run it directly, and if it fails, classify the error via [`db_error_classifier.md`](../../shared/db_error_classifier.md). The table below is the **exact invocation pattern per tier** for running that query — **don't guess flags** (`execute_sql.py` does NOT accept positional SQL, a `--format` flag, or any flag not listed; guessing produces "unrecognized arguments" errors that waste turns). The `SELECT 1` in each row is only a placeholder for *your* SQL.
 
-| tier | SELECT 1 invocation |
+| tier | invocation pattern (substitute your SQL for `SELECT 1`) |
 |---|---|
 | `cli` (postgres) | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
 | `cli` (mysql) | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
 | `cli` (snowflake) | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
-| `cli` (sqlite) | `sqlite3 -csv "<path>" 'SELECT 1'` |
+| `cli` (sqlite) | `sqlite3 -header -csv "<path>" 'SELECT 1'` — **always `-header`**, or result CSVs lose column names and `format-table` treats the first data row as the header (a wasteful re-export). |
 | `duckdb` (any) | `duckdb -init "$init_file" -c 'SELECT 1' --csv` (see `build_duckdb_attach.py` for `$init_file`) |
 | `python` (all DBs) | `AGAMI_PROFILE="<profile>" "$PY" "$AGAMI_PLUGIN_ROOT/scripts/execute_sql.py" --sql 'SELECT 1'` |
 
@@ -221,7 +221,7 @@ For a single profile, follow the **examples-first canonical loop** — the subje
 
 **Step 6 — assemble the generator prompt** in this order, then produce ONE SQL statement (first statement only if several are emitted):
 
-1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **Never SELECT a `sensitive` column's raw values** — aggregate or omit. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
+1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **A `sensitive` column is restricted at the OUTPUT layer, not the query layer.** You MAY use it in `COUNT`/`COUNT(DISTINCT …)`, `GROUP BY`, `WHERE`, and `JOIN`; you must NOT put its **raw per-row values** in the result. So: (a) a question *about* a sensitive column still RUNS — answer with an aggregate, never a refusal or an empty result: 'how many unique customer emails?' → `SELECT COUNT(DISTINCT email)` and report the count; 'list customer emails' → return that distinct count and note the raw addresses are withheld. (b) To disambiguate identical display labels (two customers with the same name), put the entity's **non-sensitive key (`id`)** in the output — never the raw email/phone. Neither rule is overridable 'to be helpful.' **This is also enforced deterministically** in `execute_sql.py`'s safety pass (`runtime.check_sensitive_projection`) — a raw sensitive projection is refused with a `{"error":{"kind":"sensitive_columns",…}}` result regardless of tier or host (skill, MCP server, cron). Generate the aggregate up front so you don't eat the refusal round-trip. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
 2. **Schema context** — the `get_table_context` output for the chosen tables (columns + types + caveats + value_transforms), the area's relationships (rendered as `from.col → to.col [cardinality]`), and the area's metrics (`<name>: <binding> -- <calculation>` + synonyms). `default_filters` need not be enumerated — `execute_sql` auto-applies them (step below) — but DO honor any caveats.
 
    **Unreviewed metrics are USED, not refused.** When the question names a metric whose `review_state ≠ approved`, still use its binding and answer — do NOT block or refuse on it. The trust layer surfaces it as a **warning on the receipt** (Phase 4e.iii.5: *"Used metric `X` which has not been signed off"*), not a hard gate. The loader already drops only `rejected` metrics; an `unreviewed`/`proposed` one is yours to use, with the warning carrying the honesty. (Same for unreviewed joins/entities and `stale` entries — warn, never refuse.)
@@ -554,99 +554,53 @@ For each section's SQL result, read `agami.type` for each result column and pick
 
 If the user override-says `--chart pie|line|...` for the **whole** report, apply it to every section that supports a chart.
 
-#### 4e.iii — build the SECTIONS_JSON
+#### 4e.iii — build the SECTIONS file via `csv_to_sections.py` (do NOT hand-write the numbers)
 
-For each section, build an object:
+**You do NOT transcribe result numbers into JSON.** `csv_to_sections.py` reads each section's result CSV + the `units` map (from `sm prepare`) and builds the section's `labels`, `table_rows` (formatted exactly via `units.py`), and `datasets[].data` (raw numbers) — so the chart can never disagree with the table, and a miscopy is impossible. You supply only the **presentation spec**.
 
-```json
-{
-  "title":         "<sub-question or short heading>",
-  "insights":      "<1-3 sentence plain-English insight for this section>",
-  "chart_type":    "bar | line | pie | doughnut | scatter | null",
-  "labels":        ["<x-axis or pie labels>"],
-  "datasets":      [{"label": "<header>", "data": [<numeric values>]}],
-  "table_headers": ["<col1>", "<col2>", ...],
-  "table_rows":    [[<v>, <v>, ...], ...],
-  "sql":           "<the EXACT, COMPLETE SQL that produced this section's data — verbatim>"
-}
-```
-
-**`sql` is the exact, complete, runnable query — never a paraphrase.** Paste the *verbatim* SQL string you executed for this section (the text you passed to `sm prepare` / the executor — keep each section's query around for this). It must be:
-- **Complete** — every CTE, column, JOIN, WHERE, GROUP BY. The receipt exists so a data engineer can re-run it and defend the number; a partial query defeats that.
-- **Literal SQL, not prose** — no `...`/`…`, no `-- net revenue = (line_total - gst) - ...`, no "ON paid book lines". If you find yourself writing English where SQL goes, you're summarizing — stop and paste the real query.
-- **Never empty when the section has data.** Every section that ran a query has its query. A section with no `sql` only makes sense for a hand-built/derived table with no underlying SQL — and that is rare; double-check before omitting.
-
-Do NOT HTML-escape it — the template handles escaping. Do NOT shorten it to save tokens; the renderer reads it from a file, so length is free.
-
-When `chart_type` is `null`, set `labels` and `datasets` to `null` (or omit). The template skips the chart card cleanly.
-
-**Use the formatted values from Phase 3c — not the raw CSV strings.** Specifically:
-
-- `labels` for time-series line charts must be human-readable date labels (`May 2026`, `Q2 2026`, `May 7`, `May 7, 2026`) — NOT raw ISO timestamps like `2026-05-07T15:14:00.000Z` and NOT epoch numbers. The granularity follows the SQL grouping (monthly bucket → `MMM YYYY`, daily → `MMM D` or `MMM D, YYYY`).
-- `labels` for categorical charts use the choice-field display label (e.g. `Closed Won`, not the stored value `closed_won`).
-- `table_rows` cells use the formatted values across the board: `$148.95` not `148.95`, `May 7, 2026 3:14 PM` not `2026-05-07T15:14:00Z`, `Yes` not `true`.
-
-`datasets[].data` is the **only** place raw numeric values belong (Chart.js needs numbers, not formatted strings, to draw the chart). Currency / percent formatting on the chart itself happens via the template's tooltip callbacks, not by passing pre-formatted strings.
-
-The whole report's `SECTIONS_JSON` is a JSON array of these objects.
-
-#### 4e.iii.5 — build the trust receipt
-
-Every answer ships with a **trust receipt** that documents provenance: tables touched, relationships used, metric definitions invoked, named filters applied, source-data freshness, and the model version pin. This is the single most important UX element for a data engineer — it lets them defend any number to a CxO with one click.
-
-Build the receipt as a single JSON object. Schema (see [`shared/chart-template.html` → `RECEIPT_JSON`](../../shared/chart-template.html) for the canonical version):
+Write a spec file `/tmp/agami-spec-<ts>.json` — a JSON array, one object per section:
 
 ```json
-{
-  "model_version": "<short hash — the .snapshots/<hash>/ dir the answer pinned>",
-  "tables_used": [
-    {"qname": "public.orders", "rows": <integer or null>, "freshness": "<ISO8601 + cadence note, or null>"}
-  ],
-  "relationships": [
-    {"name": "<rel name>", "from_to": "<from> → <to>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "fk|...",
-     "signed_off_by": "<email or 'agami_introspect_v1'>", "signed_off_role": "<enum>",
-     "signed_off_at": "<ISO>"}
-  ],
-  "metrics": [
-    {"name": "<metric>", "area": "<subject area>", "definition_prose": "<plain English>",
-     "expression": "<the SQL fragment / binding>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum | ad_hoc>",
-     "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
-  ],
-  "named_filters": [
-    {"name": "<filter>", "expression": "<predicate>", "definition_prose": "<plain English>",
-     "confidence": <float in [0,1]>, "review_state": "approved|unreviewed|...", "origin": "<enum>",
-     "signed_off_by": "<email>", "signed_off_role": "<enum>", "signed_off_at": "<ISO>"}
-  ],
-  "assumptions": [
-    {"column": "<schema>.<table>.<column>", "meaning": "<the AI-written description>", "source": "ai_unvalidated"}
-  ],
-  "warnings": ["<one-liner per unreviewed entry that the answer used>"]
-}
+[{
+  "title":       "<sub-question / heading>",
+  "insights":    "<1-3 sentence plain-English insight>",
+  "chart_type":  "bar|line|pie|doughnut|scatter|null",
+  "csv_file":    "/tmp/agami-result-<n>.csv",
+  "units":       { },
+  "sql_file":    "/tmp/agami-q-<n>.sql",
+  "label_col":   0,
+  "value_cols":  [1],
+  "header_relabels": {"total_amount": "Total Spend"}
+}]
 ```
 
-How to populate each field:
+Your fields: `title` + `insights` (prose), `chart_type`, `label_col` (which column is the x-axis/label, default 0), `value_cols` (chart value columns, default: all non-label), and optional cosmetic `header_relabels`. Everything numeric is the script's job — keep each section's result CSV (Phase 3) and its `sql_file` so the spec can point at them. `units` is the object `sm prepare` returned. When `chart_type` is `null` the chart card is skipped; `table_rows` still render.
 
-- **`model_version`** — derive from the **newest directory** under `<artifacts_dir>/<profile>/.snapshots/`. The directory name itself IS the version (a 12-char content hash). Lookup:
-  ```bash
-  model_version=$(ls -t "$artifacts_dir/$profile/.snapshots/" 2>/dev/null | head -n1)
-  ```
-  If `.snapshots/` doesn't exist or is empty (legacy v1.2 model that pre-dates trust-layer), pass `null` and surface a one-liner: *"this model pre-dates the trust-layer launch; reintrospect to enable receipts."* **Do not look for `model_version` inside `index.yaml`** — it's not stored there; the snapshot directory is the source of truth.
-- **`tables_used`** — every distinct `<schema>.<table>` referenced in the SQL's FROM/JOIN clauses. `rows` is the **table's size** — pass the table's `performance_hints.estimated_row_count` from the model (the *same* value Phase 3 reads for the scan-risk check, e.g. `12000000`). This is "how big is this dataset," not the query's result-row count. Also pass **`rows_as_of`** = the table's `performance_hints.estimated_row_count_at` (when that estimate was last measured at introspection) — the receipt renders "≈N rows (estimated as of <date>)" so the reader knows it's a point-in-time estimate, not a live count. Only pass `null` for `rows` if the table genuinely has no `estimated_row_count` in the model — don't default to `null` out of caution when the model has it.
-  **`freshness`** — pass the **raw ISO timestamp** from `agami.introspect_meta.introspected_at` (e.g., `"2026-05-10T11:57:13Z"`). The chart template prettifies it to `"introspected May 10, 2026, 11:57 AM"` automatically. Don't prefix with "introspected" yourself or you'll double-prefix. If the upstream load cadence is known (e.g., daily ETL at 2am UTC), pass a pre-formatted string instead — e.g., `"2026-05-10T02:00:00Z (daily 2am UTC ETL)"` — and the template passes it through unchanged. Pass `null` when freshness is unknowable.
-- **`relationships`** — for every JOIN edge in the SQL, look up the relationship in the model (from `get_table_context`). **Pull EVERY trust field** carried on the relationship: `relationship` (cardinality), `confidence` (`confirmed`/`inferred`/`proposed`), `review_state` (enum), `signed_off_by`, `signed_off_role`, `signed_off_at`, plus `on:` if it's a CAST/compound join. The template's `approvalPhrase` reads all of them to render "confirmed (FK declared)" vs "approved by jane@x.com (cfo), Mar 15" vs "proposed (inferred join — confirm)". For composite or multi-hop joins, list each edge. Also surface any **auto-rewrite** the pre-flight applied (fan/chasm) and the **default_filters** that were applied (from execute_sql's stderr notes).
-- **`metrics`** — TWO kinds of entry, both go here:
-  1. **Model metrics** whose `bindings` SQL matches a fragment in the generated SQL. **Pull EVERY trust field:** `calculation` → `definition_prose`, `confidence`, `review_state`, `signed_off_by`, `signed_off_role`, `signed_off_at`, `source`/`origin`, and the metric's `area`. If a metric is genuinely unreviewed, that's fine — the receipt shows it honestly. Don't half-populate (it renders a meaningless "unreviewed (?)").
-  2. **On-the-fly metrics you calculated for this answer** — any non-trivial aggregation/ratio you composed that ISN'T an approved model metric (e.g. you wrote `(SUM(net_revenue) - SUM(cogs)) / SUM(net_revenue)` for "gross margin" because no `gross_margin` metric exists). Emit one entry per such calc with `review_state: "unreviewed"`, **`origin: "ad_hoc"`**, a snake_case `name` (your suggested metric name), the `area` it belongs to, `definition_prose` (the calculation in plain English), and `expression` (the SQL fragment). This is what feeds the **top-of-report "metrics you haven't approved" banner**, where the user can Approve it (→ saved as a real model metric, signed off) or Change the definition — both routed back to you as feedback. **Don't flag trivial primitives** (a bare `COUNT(*)`, `SUM(amount)` with no logic) as ad-hoc metrics — only genuine, reusable definitions. When in doubt, include it; an over-flag is a one-click dismiss, a miss means an unapproved number ships silently.
-- **`named_filters`** — every filter from `agami.named_filters[]` (model-level) whose `expression` appears in the SQL's WHERE / HAVING. **Pull EVERY trust field** from the filter's entry: `expression`, `definition_prose`, `confidence`, `review_state`, `origin`, `signed_off_by`, `signed_off_role`, `signed_off_at`. Same rationale as relationships and metrics.
-- **`assumptions`** — the AI-derived column meanings this answer **leaned on**, so a wrong/unknown one is caught in context instead of via an upfront review of hundreds of descriptions (see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). For each column the SQL used in a **load-bearing** way — SELECT / WHERE / GROUP BY / ORDER BY / a metric binding, **not** pure join plumbing — look it up in `get_table_context` and surface two cases:
-  - `description_source == "ai_unvalidated"` (a guess) AND `description` non-empty → `{column, meaning: <description>, source: "ai_unvalidated"}`.
-  - `description_source == "ai_unknown"` (agami couldn't read it) → `{column, meaning: null, source: "ai_unknown"}` — agami used a column it doesn't understand; flag it loudly.
-  Columns with `description_source` of `human`, `ai_validated`, or `null` are NOT surfaced. **Cap at 3**, ranked by load-bearing-ness (filter/group-by > select > order-by) and putting `ai_unknown` first (an unknown the query relied on is the riskiest). Pass `[]` when none qualify. Advisory — never blocks or warns; it's a "here's what I assumed / didn't know" so the user can correct, confirm, or describe.
-- **`warnings`** — for every **non-metric** entry above whose `review_state ≠ approved` (joins, rewrites, applied filters), push a one-line warning naming the entry and its confidence. Example: `"Used 1 unreviewed join (orders → customers, conf inferred)."`. **Do NOT add a warning line for unreviewed/ad-hoc metrics** — they get their own actionable **"metrics you haven't approved" banner** (from `receipt.metrics`) with Approve / Change controls, so a warning line would just duplicate it. If the receipt has any warnings, **append a final action line as the last warning**: `"Run /agami-model review to walk these items, or say 'open the review queue'."` This gives the user a clickable next step (the slash command renders as readable text in the warning banner). If the receipt has zero warnings, pass `[]` and the banner suppresses entirely. (Assumptions and metric-approvals are NOT warnings — keep them separate.)
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/csv_to_sections.py" \
+  --spec /tmp/agami-spec-<ts>.json --out /tmp/agami-sections-<ts>.json
+```
 
-Build the receipt at `/tmp/agami-receipt-<ts>.json` and pass it to `render_chart.py` via `--receipt-file` (see 4e.iv below). For a 1×1 scalar answer with no chart (Phase 4e skips the report), still construct the receipt mentally so you can surface warnings inline in the chat answer ("Note: this used 1 unreviewed join").
+It prints `{ok, data:{section_count}, anomalies}`. **Read `anomalies`** and mention/act on them if they matter (e.g. a value column that isn't numeric → left out of the chart; a query that returned 0 rows) — they're not fatal. The `--out` sections file is what `render_chart.py` reads (4e.iv).
+
+Notes the script handles for you: a time-bucket `label_col` is formatted from its unit/date encoding; a categorical label uses the value as-is; the section's chart-axis `unit` is set automatically only when **all** value columns share one unit (so a currency col plotted next to a count never mis-formats); the `sql` is read verbatim from `sql_file` (no paraphrase, no `...`).
+
+#### 4e.iii.5 — build the trust receipt via `sm receipt` (do NOT hand-build it)
+
+The receipt documents provenance: tables touched, relationships + metrics used, unreviewed-warnings, assumptions, and the model-version pin. **It is assembled deterministically from the SQL + the model** by `runtime.assemble_receipt` — the SAME builder the MCP server uses — so it never depends on you extracting fields by hand:
+
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" receipt "$ROOT" \
+  --sql-file /tmp/agami-q-<n>.sql \
+  --applied-filters "$APPLIED_FILTERS_JSON" \
+  > /tmp/agami-receipt-<ts>.json
+```
+
+It emits the full receipt object — `model_version`, `tables_used` (with each table's `estimated_row_count` + `rows_as_of`), `relationships` (every trust field), `metrics` (model metrics whose binding appears in the SQL), `named_filters`, `assumptions` (the load-bearing columns whose description is `ai_unvalidated`/`ai_unknown`), and `warnings` (one per unreviewed join/filter the SQL used). It parses the FROM/JOIN scope and matches model entries itself. `--applied-filters` is the `applied_filters` list from `sm prepare` (optional). `model_version` comes from the newest `.snapshots/<hash>/` dir (null on a pre-trust-layer model — renders gracefully).
+
+**The ONE thing you add by hand — an ad-hoc metric.** If you composed a non-trivial metric for THIS answer that isn't a model metric (e.g. `(SUM(net_revenue) - SUM(cogs)) / SUM(net_revenue)` for "gross margin", with no such model metric), the script can't know it. Append one entry to the receipt's `metrics` array: `{name: "<snake_case>", area: "<area>", origin: "ad_hoc", review_state: "unreviewed", definition_prose: "<plain English>", expression: "<SQL fragment>"}`. This feeds the "metrics you haven't approved" banner. **Don't flag trivial primitives** (a bare `COUNT(*)` / `SUM(amount)`). For a multi-section report, run `sm receipt` per section's SQL and merge `tables_used`/`relationships`/`metrics` (dedup by name), or pass the dominant query's SQL.
+
+For a 1×1 scalar answer with no chart (Phase 4e skips the report), still run `sm receipt` so you can surface any `warnings` inline in the chat answer ("Note: this used 1 unreviewed join").
 
 #### 4e.iv — render via `render_chart.py` (do NOT inline-substitute through the Write tool)
 
@@ -654,9 +608,9 @@ The HTML report is produced by a Python helper that reads the template + SVG log
 
 Instead:
 
-1. Build the sections JSON file at `/tmp/agami-sections-<ts>.json`. The shape is the JSON array built in 4e.iii — a list of section objects (`title`, `insights`, `chart_type`, `labels`, `datasets`, `table_headers`, `table_rows`, `sql`).
+1. The sections JSON file `/tmp/agami-sections-<ts>.json` is produced by `csv_to_sections.py` (4e.iii) — you don't hand-build it; you wrote the spec, the script wrote the numbers.
 
-2. Build the receipt JSON file at `/tmp/agami-receipt-<ts>.json` per Phase 4e.iii.5.
+2. The receipt JSON file `/tmp/agami-receipt-<ts>.json` is produced by `sm receipt` (4e.iii.5) — plus any ad-hoc metric you appended.
 
 3. Run the renderer:
 
@@ -757,12 +711,25 @@ When the user responds to that nudge:
 test -f <artifacts_dir>/local/.optins
 ```
 
+**Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead. Continue to 4f.
+
 - **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
 - **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/LiteBi`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la <artifacts_dir>/local/.optins` will show whether the file exists, and `rm <artifacts_dir>/local/.optins` re-arms the prompt for the next query.
 
 ### 4f — Numbered follow-up suggestions (always 5)
+
+**Sample-profile orientation footer (once, before the follow-ups).** If `active_profile` is `agami-example` AND `<artifacts_dir>/local/.agami-example-intro` does **not** exist, then — after the answer, before the "What next?" bullets — print this plain-prose footer ONCE, then create the marker (`touch <artifacts_dir>/local/.agami-example-intro`) so it never repeats. This is ungated by `.optins` (the sample is a guided demo). Keep it to these ~4 lines, plain, no hype:
+
+```
+If a number ever looks off, say "save this as a correction" (or paste the right SQL) — I'll teach the model so next time is right.
+/agami-model — browse the semantic model: tables, metrics, joins, and what's signed off.
+Using the Claude Desktop app? /agami-serve wires this model into it so you can ask from there too.
+Liked it? A GitHub star helps a lot — github.com/AgamiAI/LiteBi
+```
+
+Why here, not in agami-connect: when the user asks their first sample question, agami-query owns the turn — a footer placed in agami-connect's Phase 0s never executes. This is the reliable home. (For non-sample profiles this block is skipped; the generic star/serve in 4e.5 + Phase 6 covers them.)
 
 End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list. Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
 
@@ -883,6 +850,8 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 1. **The repo URL is literally `https://github.com/AgamiAI/LiteBi`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not the marketplace name (`litebi`), the plugin name (`agami`), or the `/plugin install agami@litebi` slash command (which has produced the wrong `github.com/litebi/agami`). Note the uppercase `A`'s and capital `B` in "LiteBi".
 2. **Use the prompt prose VERBATIM** from the `AskUserQuestion` text below — don't paraphrase, "improve" the wording, or add emojis/marketing flourish. Paraphrasing drifts the ask off the discrete-decision shape it's tuned for and undermines the non-pushy framing.
+
+**Never narrate the plumbing.** Writing `query_log.jsonl` and checking/writing `local/.optins` are silent internal steps — do NOT announce them ("Now logging the query and checking the one-time opt-in gate" is exactly the kind of line that must never appear). The user sees the answer, then either the star ask or the follow-ups — never the bookkeeping behind them.
 
 A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
 

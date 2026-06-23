@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import csv
+import json
 import os
 import stat
 import sys
@@ -688,6 +689,17 @@ def _model_safety(sql: str, profile: str, area: str | None):
     if pf.risk and pf.action == "auto_rewrite" and pf.rewritten_sql:
         sys.stderr.write(f"[agami] auto-corrected {pf.risk}: ran rewritten SQL. {pf.reason}\n")
         sql = pf.rewritten_sql
+
+    # Sensitive-column (PII) guard — refuse to PROJECT raw sensitive values. Same
+    # deterministic chokepoint as the fan/chasm pre-flight, so the agami-query skill,
+    # the local MCP server, and cron all protect PII identically (not just whichever
+    # path happened to read a prose rule). Aggregates / filters / joins are allowed.
+    sens = RT.check_sensitive_projection(sql, org)
+    if sens.action == "refuse":
+        json.dump({"error": {"kind": "sensitive_columns", "columns": sens.columns,
+                             "reason": sens.reason, "suggestion": sens.suggestion}}, sys.stderr)
+        sys.stderr.write("\n")
+        return sql, 1
 
     new_sql, applied = RT.apply_default_filters(sql, org, area=area)
     if applied:

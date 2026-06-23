@@ -1,0 +1,20 @@
+name: units sold
+description: Sum of line-item quantities.
+other_names:
+- quantity sold
+- units
+calculation: Total quantity of product units sold across order line items.
+bindings:
+  SQLite: SUM(order_items.quantity)
+source_tables:
+- order_items
+base_metrics: []
+subject_areas: []
+primary_table: order_items
+non_additive_dimensions: []
+inner_grain: []
+confidence: confirmed
+review_state: approved
+signed_off_by: agami-team@agami.ai
+signed_off_at: '2026-06-15T00:00:00Z'
+signed_off_role: maintainer

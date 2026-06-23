@@ -975,6 +975,12 @@ def _restore(backups: list[tuple[Path, Optional[str]]]) -> None:
 
 
 def _git_commit(root: Path, msg: str) -> bool:
+    # Model-write finalization point for every curation path (apply / write_items /
+    # terminology / examples / metadata relationships). Stamp the model_version
+    # snapshot here FIRST — unconditionally, before the git check — so it happens
+    # whether or not the artifacts dir is a git repo (it usually isn't).
+    from . import snapshot
+    snapshot.write_snapshot(root)
     if not (root / ".git").exists():
         return False
     try:

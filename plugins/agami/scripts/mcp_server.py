@@ -246,12 +246,11 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
 
 def _model_version(profile: str) -> str | None:
     """The model-version pin = the newest snapshot dir name (a content hash), same as
-    the skill reads. None if there's no .snapshots/ (legacy model)."""
+    the skill reads. None if there's no .snapshots/ (legacy model) or model deps are
+    unavailable (execute_sql stays usable)."""
     try:
-        snaps = resolve_artifacts_dir() / profile / ".snapshots"
-        dirs = sorted((p for p in snaps.iterdir() if p.is_dir()),
-                      key=lambda p: p.stat().st_mtime, reverse=True)
-        return dirs[0].name if dirs else None
+        from semantic_model import snapshot as SN
+        return SN.newest_version(resolve_artifacts_dir() / profile)
     except Exception:
         return None
 
@@ -998,7 +997,13 @@ def _handle_initialize(req_id: Any, params: dict[str, Any]) -> None:
             "hide them. Don't refuse on an unreviewed metric — answer and warn. (5) If the answer "
             "was wrong or the user approves an item, call save_correction. Model edits (its `ops`) "
             "apply only with confirmed:true — preview the exact change, get the user's OK, then "
-            "re-call confirmed. Saving a corrected example needs no confirmation."
+            "re-call confirmed. Saving a corrected example needs no confirmation.\n"
+            "PII: a column marked `sensitive: true` in the schema restricts OUTPUT, not the "
+            "query — you MAY COUNT/COUNT(DISTINCT)/filter/GROUP BY/JOIN on it, but never SELECT "
+            "its raw per-row values. A question about it still runs: 'unique emails' → "
+            "COUNT(DISTINCT email). To disambiguate identical labels, project the non-sensitive "
+            "id, not email/phone. (execute_sql enforces this and returns a `sensitive_columns` "
+            "error if you project a raw sensitive value — so do it right the first time.)"
         ),
     })
 
