@@ -11,7 +11,7 @@
     "pluginRoot": "./plugins",
     "tags": ["data", "sql", "governance", "trust-layer", "semantic-model", "local-first", "open-source"],
     "repository": "https://github.com/AgamiAI/agami-core",
-    "license": "Apache-2.0"
+    "license": "LicenseRef-Agami-FUL"
   },
   "plugins": [
     {
