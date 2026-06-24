@@ -68,6 +68,8 @@ def check() -> int:
 
 def cover() -> int:
     """Coverage of the lines THIS branch changed (fails on untested changed lines)."""
+    # Make sure origin/main exists locally (fresh clones / worktrees may not have it).
+    run(["git", "fetch", "--quiet", "origin", "main"], allow_fail=True)
     rc = run(["uvx", *TEST_DEPS, "pytest", "tests/", "-q", "--cov=plugins", "--cov-report=xml"])
     return rc or run(["uvx", "diff-cover", "coverage.xml", "--compare-branch=origin/main"])
 
@@ -97,4 +99,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Normalize to a clean 0/1 (a signal-killed child returns a negative code).
+    raise SystemExit(0 if main() == 0 else 1)

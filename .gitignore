@@ -49,6 +49,6 @@ plugins/agami/samples/store/model/curation_log.jsonl
 
 # Python tooling artifacts
 .coverage
+coverage.xml
 htmlcov/
-.pytest_cache/
 .ruff_cache/
