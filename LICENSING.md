@@ -52,7 +52,7 @@ SaaS for someone else to resell.)
 
 The moat is the hosted/enterprise product, not a legal fence around the basics. The license has
 one job: keep someone from taking the free tier and reselling it as a competing service. If
-you're a team using agami on your own data for your own people, you're in the free lane and you
-always will be.
+you're a team using agami on your own data for your own people, you're in the free lane — that's
+the whole point of the boundary.
 
 Questions about which lane you're in? Reach out at [agami.ai](https://agami.ai).
