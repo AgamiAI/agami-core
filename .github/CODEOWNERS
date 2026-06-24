@@ -1,0 +1,21 @@
+# Code owners for agami-core (OCR-025).
+#
+# With branch protection's "require review from Code Owners" on, a PR touching any
+# path below needs approval from one of the listed maintainers. The point is that the
+# gate can't be weakened (CI workflow, branch-governance config, license/CLA) without a
+# maintainer signing off — and that every PR gets at least one maintainer review.
+
+# Default: every change requests a maintainer review.
+*                       @ashwin-agami @sandeep-agami
+
+# The gate itself — must not be changed without maintainer approval.
+/.github/               @ashwin-agami @sandeep-agami
+/.github/workflows/     @ashwin-agami @sandeep-agami
+/.github/CODEOWNERS     @ashwin-agami @sandeep-agami
+/pyproject.toml         @ashwin-agami @sandeep-agami
+
+# Legal / licensing surface.
+/LICENSE                @ashwin-agami @sandeep-agami
+/NOTICE                 @ashwin-agami @sandeep-agami
+/LICENSING.md           @ashwin-agami @sandeep-agami
+/CLA.md                 @ashwin-agami @sandeep-agami
