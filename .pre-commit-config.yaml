@@ -35,6 +35,6 @@ repos:
         name: pytest (full suite)
         entry: uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot pytest tests/ -q
         language: system
-        types: [python]
+        always_run: true
         pass_filenames: false
         stages: [pre-push]
