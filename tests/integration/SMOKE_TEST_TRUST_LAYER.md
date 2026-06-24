@@ -2,7 +2,7 @@
 
 A 10-minute manual walkthrough that exercises every May 18 deliverable end-to-end.
 Run this on a clean machine after installing the `trust-layer` branch in Claude
-Code (`/plugin marketplace add AgamiAI/LiteBi#trust-layer && /plugin install agami@litebi`).
+Code (`/plugin marketplace add AgamiAI/agami-core#trust-layer && /plugin install agami-core@agami`).
 
 The fixture is SQLite. The trust layer's worst-case substrate (no column
 comments, sparse FK metadata) — if it works here, it works everywhere.

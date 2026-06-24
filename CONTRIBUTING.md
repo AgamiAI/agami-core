@@ -1,6 +1,6 @@
 # Contributing to LiteBi
 
-Issues and PRs welcome at [github.com/AgamiAI/LiteBi](https://github.com/AgamiAI/LiteBi).
+Issues and PRs welcome at [github.com/AgamiAI/agami-core](https://github.com/AgamiAI/agami-core).
 
 ## Running tests
 

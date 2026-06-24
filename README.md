@@ -104,14 +104,14 @@ The same plugin works across Claude Code CLI, VS Code, and Cursor.
 
 **Claude Code CLI** — in the Claude Code prompt:
 ```
-/plugin marketplace add AgamiAI/LiteBi
-/plugin install agami@litebi
+/plugin marketplace add AgamiAI/agami-core
+/plugin install agami-core@agami
 ```
-Verify with `/plugin list` → you should see `agami@litebi v0.2.2`.
+Verify with `/plugin list` → you should see `agami-core@agami v0.3.0`.
 
 **VS Code / Cursor** — install the **Claude Code** extension, type `/plugin` in the
-chat to open **Manage Plugins**, add the `AgamiAI/LiteBi` marketplace, then install
-`agami` from the Plugins tab.
+chat to open **Manage Plugins**, add the `AgamiAI/agami-core` marketplace, then install
+`agami-core` from the Plugins tab.
 
 Per-host walkthroughs: [docs/install/](docs/install/).
 
@@ -185,7 +185,7 @@ evals) is the hosted business. The boundary, stated plainly:
 ## Contributing
 
 Issues + PRs welcome at
-[github.com/AgamiAI/LiteBi](https://github.com/AgamiAI/LiteBi). See
+[github.com/AgamiAI/agami-core](https://github.com/AgamiAI/agami-core). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for test commands and the **version-bump
 discipline** — every user-visible change needs a version bump in
 `.claude-plugin/marketplace.json` (twice) and

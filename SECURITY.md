@@ -5,7 +5,7 @@
 Please report security vulnerabilities **privately** rather than opening a public issue.
 
 - Email: [security@agami.ai](mailto:security@agami.ai)
-- Or use GitHub Security Advisories: <https://github.com/AgamiAI/LiteBi/security/advisories/new>
+- Or use GitHub Security Advisories: <https://github.com/AgamiAI/agami-core/security/advisories/new>
 
 We will acknowledge receipt within **3 business days** and aim to provide a fix or mitigation timeline within **14 days** for confirmed vulnerabilities. Please give us a reasonable window to respond before any public disclosure.
 

@@ -4,7 +4,7 @@ A best-effort, non-blocking check that surfaces "agami X.Y.Z is available" when 
 
 ## Why it exists
 
-Claude Code plugins don't auto-update — users have to run `/plugin marketplace update litebi && /reload-plugins`. They mostly forget. The probe surfaces the nudge once per `agami-connect` invocation so users don't sit on stale code without knowing.
+Claude Code plugins don't auto-update — users have to run `/plugin marketplace update agami && /reload-plugins`. They mostly forget. The probe surfaces the nudge once per `agami-connect` invocation so users don't sit on stale code without knowing.
 
 ## Behavior contract
 
@@ -27,7 +27,7 @@ local_v=$(
 # Fetch the remote version from main on GitHub (3-second timeout).
 remote_v=$(
   curl -fsS --max-time 3 \
-    https://raw.githubusercontent.com/AgamiAI/LiteBi/main/.claude-plugin/marketplace.json \
+    https://raw.githubusercontent.com/AgamiAI/agami-core/main/.claude-plugin/marketplace.json \
     2>/dev/null \
     | grep -m1 '"version"' \
     | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
@@ -39,7 +39,7 @@ if [ -n "$local_v" ] && [ -n "$remote_v" ] && [ "$local_v" != "$remote_v" ]; the
   newer=$(printf '%s\n%s\n' "$local_v" "$remote_v" | sort -V | tail -n1)
   if [ "$newer" = "$remote_v" ]; then
     echo "agami $remote_v is available (you have $local_v)."
-    echo "Update: /plugin marketplace update litebi && /reload-plugins"
+    echo "Update: /plugin marketplace update agami && /reload-plugins"
   fi
 fi
 ```

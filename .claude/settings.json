@@ -33,7 +33,7 @@
       "Bash(open ~/.agami/review/*/*.html)",
       "Bash(open ~/.agami/model/*/*.html)",
       "Bash(open ~/.agami/examples-validation/*/*.html)",
-      "Bash(open https://github.com/AgamiAI/LiteBi)",
+      "Bash(open https://github.com/AgamiAI/agami-core)",
       "Bash(date -u)",
       "Bash(date +%s)",
       "Bash(uuidgen)",

@@ -26,8 +26,8 @@ In the Claude pane's chat input, type `/plugin`. This surfaces a **Manage Plugin
 
 The plugins dialog opens. From here:
 
-1. **Add the marketplace.** In the marketplace input, paste `AgamiAI/LiteBi` and click **Add**.
-2. **Install the plugin.** Switch to the **Plugins** tab in the dialog. Find `agami` in the list and click **Install**.
+1. **Add the marketplace.** In the marketplace input, paste `AgamiAI/agami-core` and click **Add**.
+2. **Install the plugin.** Switch to the **Plugins** tab in the dialog. Find `agami-core` in the list and click **Install**.
 
 The dialog confirms the install; agami's skills become available immediately.
 
@@ -56,14 +56,14 @@ The terminal-side `chmod` works identically — the skill's `init` flow walks yo
 ## Updating
 
 ```
-/plugin update agami@litebi
+/plugin update agami-core@agami
 ```
 
 ## Uninstalling
 
 ```
-/plugin uninstall agami
-/plugin marketplace remove litebi
+/plugin uninstall agami-core
+/plugin marketplace remove agami
 ```
 
 ## Troubleshooting

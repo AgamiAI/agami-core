@@ -51,7 +51,7 @@ the schema + examples these tools return) — exactly as with the hosted connect
 ## Connect it to Claude Code
 
 ```bash
-claude mcp add agami -- python3 /ABS/PATH/to/LiteBi/plugins/agami/scripts/mcp_server.py
+claude mcp add agami -- python3 /ABS/PATH/to/agami-core/plugins/agami/scripts/mcp_server.py
 ```
 
 Optionally pin a profile/artifacts dir for this server with env vars:
@@ -60,7 +60,7 @@ Optionally pin a profile/artifacts dir for this server with env vars:
 claude mcp add agami \
   --env AGAMI_PROFILE=main \
   --env AGAMI_ARTIFACTS_DIR=$HOME/agami-artifacts \
-  -- python3 /ABS/PATH/to/LiteBi/plugins/agami/scripts/mcp_server.py
+  -- python3 /ABS/PATH/to/agami-core/plugins/agami/scripts/mcp_server.py
 ```
 
 ## Connect it to Claude Desktop (macOS and Windows)

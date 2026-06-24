@@ -33,26 +33,26 @@ You should see the Claude Code prompt.
 ## 3. Add the agami marketplace
 
 ```
-/plugin marketplace add AgamiAI/LiteBi
+/plugin marketplace add AgamiAI/agami-core
 ```
 
 Expected output:
 
 ```
-Added marketplace: litebi (AgamiAI)
-1 plugin available: agami
+Added marketplace: agami (AgamiAI)
+1 plugin available: agami-core
 ```
 
 ## 4. Install the agami plugin
 
 ```
-/plugin install agami@litebi
+/plugin install agami-core@agami
 ```
 
 Expected output:
 
 ```
-Installed agami v0.1.0 (from litebi)
+Installed agami-core v0.3.0 (from agami)
 5 skills available: agami-connect, agami-query, agami-model, agami-save-correction, agami-reconcile
 ```
 
@@ -62,7 +62,7 @@ Installed agami v0.1.0 (from litebi)
 /plugin list
 ```
 
-You should see `agami v0.1.0` in the active list.
+You should see `agami-core v0.3.0` in the active list.
 
 Try invoking it:
 
@@ -79,14 +79,14 @@ On first run, the skill detects there are no credentials and walks you through t
 ## Updating
 
 ```
-/plugin update agami@litebi
+/plugin update agami-core@agami
 ```
 
 ## Uninstalling
 
 ```
-/plugin uninstall agami
-/plugin marketplace remove litebi
+/plugin uninstall agami-core
+/plugin marketplace remove agami
 ```
 
 Your `<artifacts_dir>/local/` directory and its contents are not touched by uninstall — delete it manually if you want to clean up.

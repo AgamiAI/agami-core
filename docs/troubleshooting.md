@@ -19,7 +19,7 @@
 | Want to switch profiles | `AGAMI_PROFILE=staging` then re-ask the question. |
 
 If you hit a case not in the table, file an issue at
-[github.com/AgamiAI/LiteBi/issues](https://github.com/AgamiAI/LiteBi/issues) with
+[github.com/AgamiAI/agami-core/issues](https://github.com/AgamiAI/agami-core/issues) with
 the exact error, your DB type, and what the validator says
 (`python3 -m semantic_model.cli validate ~/agami-artifacts/<profile>`).
 
