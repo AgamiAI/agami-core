@@ -25,7 +25,7 @@ docker compose down -v
 
 ## Version-bump discipline (read this before any release-shaped commit)
 
-Claude Code's plugin marketplace caches each plugin **by version number**. The cache key for any user who installed `agami@1.1.0` is pinned to that version — Claude Code does not re-fetch source files until the version changes, even if the upstream `main` branch has moved on.
+Claude Code's plugin marketplace caches each plugin **by version number**. The cache key for any user who installed `agami-core@1.1.0` is pinned to that version — Claude Code does not re-fetch source files until the version changes, even if the upstream `main` branch has moved on.
 
 This has a real consequence: if we rename a skill, change file layouts, or remove a Bash invocation pattern from `.claude/settings.json` and **don't bump the version**, every user who installed an earlier version stays on the old code forever. They'll see stale slash commands, hit broken file paths, and have no obvious way to invalidate their cache short of deleting `~/.claude/plugins/cache/agami/agami-core/<old-version>/` by hand.
 
