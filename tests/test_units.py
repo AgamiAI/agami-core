@@ -66,7 +66,7 @@ def test_format_table_markdown_exact():
 
 def test_units_module_has_no_heavy_deps():
     # units.py must stay import-light so the pure-stdlib MCP path can use it
-    import importlib, sys as _sys
+    import sys as _sys
     assert "pydantic" not in _sys.modules or True  # informational
     src = (SCRIPTS / "semantic_model" / "units.py").read_text()
     assert "import pydantic" not in src and "import sqlglot" not in src
@@ -186,7 +186,7 @@ def test_format_table_applies_units_by_position():
 
 def test_unit_round_trips_on_column_and_surfaces_in_context(tmp_path):
     import yaml
-    from semantic_model.loader import load_organization, get_table_context
+    from semantic_model.loader import get_table_context, load_organization
     root = tmp_path
     (root / "datasources" / "c").mkdir(parents=True)
     (root / "subject_areas" / "s" / "tables").mkdir(parents=True)

@@ -41,13 +41,12 @@ import argparse
 import os
 import secrets
 import sys
-import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from setup_pgauth import _atomic_write, _load_section, _resolve_default_profile  # noqa: E402
 import agami_paths  # noqa: E402
+from setup_pgauth import _atomic_write, _load_section  # noqa: E402
 
 AGAMI_HOME = agami_paths.local_dir()
 

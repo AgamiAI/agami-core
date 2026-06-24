@@ -17,8 +17,8 @@ pytest.importorskip("pydantic")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-from semantic_model import models as m  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
+from semantic_model import models as m  # noqa: E402
 
 
 def _col(name, type="integer", **kw):

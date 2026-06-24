@@ -25,8 +25,8 @@ def _run(monkeypatch, art: Path, **env) -> dict:
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    import io
     import contextlib
+    import io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         CR.main([])

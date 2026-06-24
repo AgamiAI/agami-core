@@ -50,8 +50,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from execute_sql import _parse_dsn  # reuse DSN parsing logic  # noqa: E402
 import agami_paths  # noqa: E402
+from execute_sql import _parse_dsn  # reuse DSN parsing logic  # noqa: E402
 
 # NOTE: never bootstrap() at import — this module is imported by build_duckdb_attach and
 # tests. The one-shot legacy migration runs only from main() (and the other entry points).

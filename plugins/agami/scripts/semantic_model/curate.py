@@ -31,9 +31,9 @@ from typing import Any, Optional
 import yaml
 
 from . import validator as V
-from .loader import load_organization, _read_yaml as _load
+from .loader import _read_yaml as _load
+from .loader import load_organization
 from .models import CrossSubjectAreaRelationship, Entity, Metric, Organization, Relationship
-
 
 # ---------------------------------------------------------------------------
 # Read views

@@ -53,7 +53,6 @@ import os
 import sys
 from pathlib import Path
 
-
 VALID_TYPES = {"bar", "line", "pie", "doughnut", "scatter"}
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"

@@ -34,7 +34,6 @@ Nothing here imports Pydantic-free; the whole module is v2-only.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -53,7 +52,6 @@ from .models import (
     TableRef,
     bare_name,
 )
-
 
 # The default `include` set for get_table_context / `sm context`. performance_hints
 # is in it so estimated_row_count reaches the answer receipt (the "≈N rows"

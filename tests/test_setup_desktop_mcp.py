@@ -22,7 +22,6 @@ sys.path.insert(0, str(SCRIPTS))
 
 import setup_desktop_mcp as sd  # noqa: E402
 
-
 # --- merge safety -----------------------------------------------------------
 
 def test_merge_preserves_other_keys_and_servers(tmp_path):

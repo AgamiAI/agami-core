@@ -331,7 +331,8 @@ def test_mcp_receipt_equals_shared_assembler(monkeypatch, tmp_path):
     pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
     art, profile, root = _write_rich_model(tmp_path)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-    from semantic_model import loader as L, runtime as RT
+    from semantic_model import loader as L
+    from semantic_model import runtime as RT
     shared = RT.assemble_receipt(L.load_organization(root), SQL)
     mcp = _resolve_receipt(profile, SQL)
     for key in ("tables_used", "relationships", "metrics", "assumptions", "warnings"):

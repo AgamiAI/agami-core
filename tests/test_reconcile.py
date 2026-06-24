@@ -20,7 +20,6 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
 from reconcile import diff, parse_csv, parse_value  # noqa: E402
 
-
 # --- parse_value ---------------------------------------------------------
 
 class TestParseValue:

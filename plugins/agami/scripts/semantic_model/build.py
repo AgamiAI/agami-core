@@ -18,6 +18,7 @@ from typing import Any, Optional
 import yaml
 
 from .models import (
+    DEEP_TABLE_COLUMN_THRESHOLD,
     Column,
     CrossSubjectAreaRelationship,
     Organization,
@@ -27,7 +28,6 @@ from .models import (
     TableRef,
     bare_name,
 )
-from .models import DEEP_TABLE_COLUMN_THRESHOLD
 
 # Strongly-PII column-name patterns — sensitive regardless of table.
 STRONG_PII_RE = re.compile(

@@ -15,12 +15,12 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-from catalog_helpers import col, make_catalog_runner  # noqa: E402
 from semantic_model import build  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
 from semantic_model import models as m  # noqa: E402
 from semantic_model import validator as V  # noqa: E402
 
+from catalog_helpers import col, make_catalog_runner  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Canned runners
@@ -325,7 +325,7 @@ def test_references_grouped_from_relationship_not_just_foreign_key():
     # The introspection pipeline records joins as Relationships, never on column.foreign_key,
     # so references must be classifiable from the relationship's FROM columns. caller_id has no
     # foreign_key set, but passing it as a reference column should file it under `references`.
-    cols = [m.Column(name=f"sys_id", type="string", primary_key=True)] + \
+    cols = [m.Column(name="sys_id", type="string", primary_key=True)] + \
            [m.Column(name="caller_id", type="string")] + \
            [m.Column(name=f"f_{i}", type="decimal") for i in range(35)]
     g_no = build.derive_column_groups(cols)
