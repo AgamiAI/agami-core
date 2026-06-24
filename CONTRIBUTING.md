@@ -18,17 +18,48 @@ The bot records your signature (stored in this repo) and flips the **CLA** statu
 
 Maintainers and first-party (Agami AI) authors are allowlisted, so internal commits aren't gated; the CLA is for contributions from outside the organization.
 
-## Running tests
+## Running the checks locally
 
-Privacy-invariant + unit tests (no DB required):
+The same gate runs in CI on every PR — **ruff** (lint + format), the **test suite**, and
+**gitleaks** (secret scan). To catch problems before you push, install the local hooks once:
 
 ```bash
-python3 -m pytest tests/ -q
+uvx pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
-The privacy test (`tests/test_privacy_no_network.py`) is a contract: no shipped script may make a network call — adding a network-egress primitive fails the build.
+Now `ruff` + `gitleaks` run automatically on every **commit**, and the test suite runs on every
+**push**. (Hooks are a convenience and bypassable with `git commit --no-verify`; CI is the real,
+unbypassable gate.) To run them by hand anytime:
 
-End-to-end integration tests (Postgres + MySQL fixtures):
+```bash
+uvx pre-commit run --all-files                        # ruff + gitleaks on the whole tree
+uvx pre-commit run --hook-stage pre-push --all-files  # + the full test suite
+```
+
+### Tests on their own
+
+The suite needs `pydantic`, `pyyaml`, and `sqlglot` to import the semantic-model code (DB-driver
+tests skip cleanly without a database). `uvx` pulls them in for the run:
+
+```bash
+uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot pytest tests/ -q
+```
+
+The privacy test (`tests/test_privacy_no_network.py`) is a contract: no shipped script may make a
+network call — adding a network-egress primitive fails the build.
+
+### Did I test the code I changed?
+
+Coverage of **the lines your PR touched** (fails on changed lines that no test exercises) — the
+quickest way to confirm a change is tested, regardless of overall coverage:
+
+```bash
+uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot \
+  pytest tests/ -q --cov=plugins --cov-report=xml
+uvx diff-cover coverage.xml --compare-branch=origin/main
+```
+
+### End-to-end integration tests (Postgres + MySQL fixtures)
 
 ```bash
 cd tests/integration
