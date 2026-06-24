@@ -2,6 +2,22 @@
 
 Issues and PRs welcome at [github.com/AgamiAI/agami-core](https://github.com/AgamiAI/agami-core).
 
+## Contributor License Agreement (CLA)
+
+This project is **fair-code** (source-available) and is offered under a dual-license model: the [Agami Functional Use License](LICENSE) for the community, and a separate commercial license. For that model to hold, every external contribution has to come in with the rights that let us ship it under **both** licenses.
+
+So before your first contribution can be merged, you sign a short **Contributor License Agreement** ([CLA.md](CLA.md)). In one sentence: you give Agami AI permission to license your contribution **on any terms — including the fair-code FUL and a commercial license** — and your contribution comes as is, without warranty or liability on your part. The full text is short; please read it — it includes a warranty/liability disclaimer.
+
+**How to sign — no separate account, no form.** The first time you open a PR, our CLA bot comments on it with a link to the agreement and asks you to sign. You sign by replying with a single comment:
+
+```
+I have read the CLA Document and I hereby sign the CLA
+```
+
+The bot records your signature (stored in this repo) and flips the **CLA** status check to green; it stays green for all your future PRs. Until it's signed, the check blocks merge — that's the only thing it gates.
+
+Maintainers and first-party (Agami AI) authors are allowlisted, so internal commits aren't gated; the CLA is for contributions from outside the organization.
+
 ## Running tests
 
 Privacy-invariant + unit tests (no DB required):

@@ -1,0 +1,61 @@
+name: CLA Assistant
+
+# Gates external pull requests on a signed Contributor License Agreement (CLA.md),
+# so contributions arrive with the rights the dual-license model needs (fair-code +
+# commercial). Self-hosted: signatures are stored in this repo (no third-party SaaS),
+# on the `cla-signatures` branch. See CONTRIBUTING.md.
+#
+# Manual prerequisite: a `PERSONAL_ACCESS_TOKEN` repo secret (a PAT with `repo` scope)
+# must exist so the Action can write the signatures file. The published "CLA Assistant"
+# status check is what branch protection should require (F13 / OCR-025).
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, reopened, closed, synchronize]
+
+# These write scopes are required by contributor-assistant: `contents` to store the
+# signatures file on the cla-signatures branch, `pull-requests`/`statuses` to comment and
+# set the check. This is safe under `pull_request_target` because the job never checks out
+# or executes the PR's head code — it only acts on PR metadata via the GitHub API.
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla-assistant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA Assistant
+        if: >-
+          (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+           (github.event.comment.body == 'recheck' ||
+            github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+          || github.event_name == 'pull_request_target'
+        # Pinned to the v2.6.1 commit SHA (not the mutable tag): this runs under
+        # pull_request_target with write scopes + a PAT, so a moved tag must not be able to
+        # swap in new code. Bump the SHA + the trailing comment together when upgrading.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          path-to-signatures: signatures/version1/cla.json
+          path-to-document: https://github.com/AgamiAI/agami-core/blob/main/CLA.md
+          branch: cla-signatures
+          # First-party maintainers are not gated. Add specific bot logins
+          # (e.g. dependabot[bot]) here explicitly if/when bots open PRs — a
+          # leading-wildcard like *[bot] is not reliably matched by the action.
+          allowlist: ashwin-agami,sandeep-agami
+          custom-pr-sign-comment: I have read the CLA Document and I hereby sign the CLA
+          custom-notsigned-prcomment: >-
+            Thank you for your contribution. Before we can merge it, please read our
+            [Contributor License Agreement](https://github.com/AgamiAI/agami-core/blob/main/CLA.md)
+            and sign it by posting the comment below. It grants Agami AI the right to license
+            your contribution under both the fair-code and a commercial license — the
+            dual-license model the project relies on.
+          custom-allsigned-prcomment: >-
+            All contributors have signed the CLA. Thank you!
