@@ -7,10 +7,10 @@
 
 <p align="center"><strong>The trust layer between AI and your data. Local. Private. Yours.</strong></p>
 
-<p align="center"><sub><strong>agami-core</strong> — the open-source core of <a href="https://agami.ai">Agami</a>.</sub></p>
+<p align="center"><sub><strong>agami-core</strong> — the fair-code core of <a href="https://agami.ai">Agami</a>.</sub></p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-fair--code-blue.svg" alt="License: fair-code"></a>
   <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/status-pre--public-orange" alt="Status">
   <a href="#quickstart-under-5-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
@@ -165,13 +165,14 @@ exports, and dashboards all live under `~/agami-artifacts/`, and the skill never
 reads files outside those paths (except your DB tool's auth config, set up on first
 connect with your permission). Details: [docs/privacy.md](docs/privacy.md).
 
-## Open source vs hosted
+## Fair-code vs hosted
 
-agami is **open core**, Apache-2.0. The laptop plugin — introspection, the portable
-semantic model, NL→SQL + local execution, the trust layer, corrections, and the
-local MCP server — is fully open and always will be. The team cloud (a multi-tenant
-model registry served over a remote MCP endpoint, shared governed context, always-on
-evals) is the hosted business. The boundary, stated plainly:
+agami is **fair-code** (source-available). Running it on your own machine —
+introspection, the portable semantic model, NL→SQL + local execution, the trust layer,
+corrections, and the local MCP server — is **free to self-host for your own team**.
+Exposing data or the MCP to people outside your organization is the paid line — the team
+cloud (a multi-tenant model registry over a remote MCP endpoint, shared governed context,
+always-on evals). The boundary, stated plainly:
 [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
 ## Documentation
@@ -182,7 +183,7 @@ evals) is the hosted business. The boundary, stated plainly:
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop
 - [Troubleshooting & uninstall](docs/troubleshooting.md)
-- [Open vs hosted](docs/open-vs-hosted.md) · [Privacy](docs/privacy.md)
+- [Fair-code vs hosted](docs/open-vs-hosted.md) · [Privacy](docs/privacy.md)
 
 ## Contributing
 
@@ -202,7 +203,7 @@ LLM round-trip).
 
 ## License
 
-Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+**fair-code** (source-available) — the Agami Functional Use License. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 What's free vs. paid (internal use vs. external exposure): [LICENSING.md](LICENSING.md).
 

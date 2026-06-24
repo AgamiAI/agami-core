@@ -9,7 +9,7 @@
     "description": "The trust layer between AI and your data. A governed semantic model for AI-to-database access — every join approved, every metric signed off, every answer with a receipt. Local-first: no infra, no servers, no data leaves your machine.",
     "version": "0.3.0",
     "pluginRoot": "./plugins",
-    "tags": ["data", "sql", "governance", "trust-layer", "semantic-model", "local-first", "open-source"],
+    "tags": ["data", "sql", "governance", "trust-layer", "semantic-model", "local-first", "fair-code"],
     "repository": "https://github.com/AgamiAI/agami-core",
     "license": "LicenseRef-Agami-FUL"
   },

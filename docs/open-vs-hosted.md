@@ -1,61 +1,31 @@
-# What's open source, what's hosted
+# What's free, what's hosted
 
-agami is **open core**. This page states the boundary plainly so you can build on
-the open pieces without worrying we'll move the line under you.
+agami is **fair-code** (source-available): **free to self-host for your own
+organization**, paid when you expose it to people **outside** it. The short version
+of the license is in [LICENSING.md](../LICENSING.md); the binding terms are in
+[LICENSE](../LICENSE).
 
-## The principle
+## Free — self-host for your own team
 
-> **The laptop plugin is fully open (Apache-2.0) and always will be. The team
-> cloud is our business.**
+Run agami on your own machines, for your own people (multi-user included):
 
-Concretely, the line falls where value stops being single-player and starts
-requiring *more than one person* — which is also where self-hosting stops being
-a weekend project and starts being real infrastructure.
-
-## Open source (this repo, Apache-2.0 — single developer, local)
-
-Everything you need to get value as one developer, on your own machine:
-
-- Schema introspection → a **provider-portable semantic model** (subject areas,
-  tables, entities, metrics, relationships with join cardinality — plain YAML you
-  own, never locked in).
-- NL→SQL generation and **local execution** against your DB (Postgres / Supabase /
-  Redshift / MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks /
-  Trino / DuckDB / SQLite).
-- The **trust layer**: confidence scoring, single-reviewer sign-off, receipts,
-  snapshots, git-native model history.
+- Schema introspection → a provider-portable **semantic model** (plain YAML you own).
+- **NL→SQL + local execution** against your DB (Postgres / Supabase / Redshift /
+  MySQL / Snowflake / BigQuery / SQL Server / Oracle / Databricks / Trino / DuckDB /
+  SQLite).
+- The **trust layer**: confidence, sign-off, receipts, snapshots, git-native history.
 - **Corrections** + the `examples.yaml` few-shot library.
-- The **local MCP server** (`agami serve`) — use agami from Claude Code / Claude
-  Desktop. stdio, no auth, no network. See [mcp-server.md](mcp-server.md).
-- You can run your own evals in CI (run `examples.yaml` against the model on a PR)
-  and serve a shared model to your team via git + a server you operate. We won't
-  obstruct that — it's a feature.
+- The **local MCP server** (`agami serve`) — stdio, no auth, no network.
+  See [mcp-server.md](mcp-server.md).
 
-## Hosted (the Agami cloud — teams, governed, always-on)
+## Paid — the hosted cloud
 
-The pieces whose value needs a team, and that are a genuine pain to self-host:
+For teams that need it served, and for serving people **outside** your organization:
 
-- A **multi-tenant semantic-model registry** served to many users/agents over a
-  stable remote MCP endpoint (reachable from Claude/Cowork/web/mobile and ChatGPT).
-- **Shared, governed** examples + memory/context across a team.
-- **Continuous / real-time evals**: scheduled runs, regression alerting,
-  dashboards, **golden-dataset management** + the cross-customer golden-set
-  network effect.
-- **CI-gated deploys**: gate a model change on eval-pass, versioned deploy + rollback.
-- **Governance at team scale**: OAuth/SSO, RBAC, per-tool permissions, org-wide audit.
+- A **multi-tenant model registry** over a remote MCP endpoint.
+- **Shared, governed** examples + context across a team.
+- **Continuous evals**: scheduled runs, regression alerting, golden-dataset management.
+- **CI-gated deploys** and org-scale governance (SSO, RBAC, audit).
 
-## Why this split (and why we won't relicense the core)
-
-The defensive reason companies adopt source-available licenses (BSL/SSPL) is to
-stop a competitor from re-hosting their open core as a competing SaaS. That threat
-doesn't apply here: the open core is **single-player and file-based** — there's
-nothing to re-SaaS without rebuilding the entire (closed) team backend. So we keep
-the core permissive Apache-2.0, like dbt Core and the LlamaIndex library.
-
-## The upgrade path is a backend swap
-
-Because the local MCP server and the hosted connector expose the **same tool
-surface**, moving a team from local to hosted means pointing at a different
-backend — not learning a new product. You self-host the flat, commoditized part
-for free; you pay for the part that compounds (evals, the golden-set network
-effect, governance) the day it's worth more than running it yourself.
+Moving from local to hosted is a **backend swap** — the local server and the hosted
+connector expose the same tools, so you point at a different backend, not a new product.
