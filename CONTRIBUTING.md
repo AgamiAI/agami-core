@@ -21,7 +21,18 @@ Maintainers and first-party (Agami AI) authors are allowlisted, so internal comm
 ## Running the checks locally
 
 The same gate runs in CI on every PR — **ruff** (lint + format), the **test suite**, and
-**gitleaks** (secret scan). To catch problems before you push, install the local hooks once:
+**gitleaks** (secret scan). To catch problems before you push, install the local hooks once.
+
+**Prerequisite — install `uv` (the only thing you need globally):**
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh      # macOS / Linux
+# or: brew install uv   ·   docs: https://docs.astral.sh/uv/getting-started/installation/
+```
+
+Every command below is `uvx …`, which uses [`uv`](https://docs.astral.sh/uv/) to fetch ruff /
+pre-commit / pytest **on demand** — so there's nothing else to install globally. Then wire the
+hooks once:
 
 ```bash
 uvx pre-commit install --hook-type pre-commit --hook-type pre-push
