@@ -138,7 +138,7 @@ When opening a PR that warrants a version bump, the checklist is:
 2. `plugins/agami/.claude-plugin/plugin.json` — bump `version`.
 3. Add a note to the PR description summarizing the user-visible change and which version it lands in.
 
-We don't keep a `CHANGELOG.md` yet. The git log + version bumps are the changelog.
+Record notable user-visible changes in [`CHANGELOG.md`](CHANGELOG.md) (Keep a Changelog format) under the version that ships them.
 
 ## A community Discord will land soon
 
