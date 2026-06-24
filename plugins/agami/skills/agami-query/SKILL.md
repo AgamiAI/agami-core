@@ -714,7 +714,7 @@ test -f <artifacts_dir>/local/.optins
 **Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead. Continue to 4f.
 
 - **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
-- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/LiteBi`) before emitting.**
+- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/agami-core`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la <artifacts_dir>/local/.optins` will show whether the file exists, and `rm <artifacts_dir>/local/.optins` re-arms the prompt for the next query.
 
@@ -726,7 +726,7 @@ The `.optins` file is the never-re-prompt gate. Once it's written (with any of t
 If a number ever looks off, say "save this as a correction" (or paste the right SQL) — I'll teach the model so next time is right.
 /agami-model — browse the semantic model: tables, metrics, joins, and what's signed off.
 Using the Claude Desktop app? /agami-serve wires this model into it so you can ask from there too.
-Liked it? A GitHub star helps a lot — github.com/AgamiAI/LiteBi
+Liked it? A GitHub star helps a lot — github.com/AgamiAI/agami-core
 ```
 
 Why here, not in agami-connect: when the user asks their first sample question, agami-query owns the turn — a footer placed in agami-connect's Phase 0s never executes. This is the reliable home. (For non-sample profiles this block is skipped; the generic star/serve in 4e.5 + Phase 6 covers them.)
@@ -848,7 +848,7 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 **HARD RULES — read before emitting the ask (the LLM has hallucinated both of these):**
 
-1. **The repo URL is literally `https://github.com/AgamiAI/LiteBi`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not the marketplace name (`litebi`), the plugin name (`agami`), or the `/plugin install agami@litebi` slash command (which has produced the wrong `github.com/litebi/agami`). Note the uppercase `A`'s and capital `B` in "LiteBi".
+1. **The repo URL is literally `https://github.com/AgamiAI/agami-core`.** Copy it byte-for-byte from this SKILL. **Never construct it from any other source** — not the marketplace name (`agami`), the plugin name (`agami-core`), or the `/plugin install agami-core@agami` slash command (which has produced the wrong `github.com/agami/agami-core`). The org is `AgamiAI` (camelCase); the repo is `agami-core` — all lowercase, hyphenated.
 2. **Use the prompt prose VERBATIM** from the `AskUserQuestion` text below — don't paraphrase, "improve" the wording, or add emojis/marketing flourish. Paraphrasing drifts the ask off the discrete-decision shape it's tuned for and undermines the non-pushy framing.
 
 **Never narrate the plumbing.** Writing `query_log.jsonl` and checking/writing `local/.optins` are silent internal steps — do NOT announce them ("Now logging the query and checking the one-time opt-in gate" is exactly the kind of line that must never appear). The user sees the answer, then either the star ask or the follow-ups — never the bookkeeping behind them.
@@ -862,11 +862,11 @@ Sequence:
 
    > Quick one — first query worked. **If this was useful, would you star us on GitHub?**
    >
-   > It's the only signal we have that we're on the right track. No email, no list, no follow-up — just a click. github.com/AgamiAI/LiteBi
+   > It's the only signal we have that we're on the right track. No email, no list, no follow-up — just a click. github.com/AgamiAI/agami-core
 
    Options:
-   - `Yes — open GitHub now` — runs `open https://github.com/AgamiAI/LiteBi` (macOS), `xdg-open` (Linux), `start` (Windows) and surfaces a one-line "Thanks — opening GitHub. Star is in the top-right when you get there." (Failure-tolerant: if the open command fails, fall through with the URL printed in chat.)
-   - `Maybe later` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/LiteBi if you change your mind." (No `(Recommended)` marker — we'd genuinely prefer "Yes" if the user found it useful, but no marker on any of the three options keeps the ask non-pushy.)
+   - `Yes — open GitHub now` — runs `open https://github.com/AgamiAI/agami-core` (macOS), `xdg-open` (Linux), `start` (Windows) and surfaces a one-line "Thanks — opening GitHub. Star is in the top-right when you get there." (Failure-tolerant: if the open command fails, fall through with the URL printed in chat.)
+   - `Maybe later` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/agami-core if you change your mind." (No `(Recommended)` marker — we'd genuinely prefer "Yes" if the user found it useful, but no marker on any of the three options keeps the ask non-pushy.)
    - `Already starred — thank you!` — surface "🙏 thanks for the early support" and write `.optins`.
 3. **Wait for the user to answer the modal.** That's the end of this turn. Do NOT emit the 5 follow-up bullets yet.
 4. Next turn: process the decision (write `<artifacts_dir>/local/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below). After it, show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.
@@ -921,4 +921,4 @@ End with:
 | Auto-retry exhausted (2 tries) | Stop. Show all 3 attempts and their error kinds. |
 | HIGH-risk query without filter | Block, AskUserQuestion |
 | Chart for empty result | Skip the chart, just show empty-result message |
-| Browser open fails for the GitHub-star ask | Tell user "Couldn't open the browser — the link is github.com/AgamiAI/LiteBi". Save the response anyway. |
+| Browser open fails for the GitHub-star ask | Tell user "Couldn't open the browser — the link is github.com/AgamiAI/agami-core". Save the response anyway. |
