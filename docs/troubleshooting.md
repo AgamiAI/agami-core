@@ -19,7 +19,7 @@
 | Want to switch profiles | `AGAMI_PROFILE=staging` then re-ask the question. |
 
 If you hit a case not in the table, file an issue at
-[github.com/AgamiAI/LiteBi/issues](https://github.com/AgamiAI/LiteBi/issues) with
+[github.com/AgamiAI/agami-core/issues](https://github.com/AgamiAI/agami-core/issues) with
 the exact error, your DB type, and what the validator says
 (`python3 -m semantic_model.cli validate ~/agami-artifacts/<profile>`).
 
@@ -53,7 +53,7 @@ fully clean up:
 tar czf ~/agami-backup-$(date +%Y%m%d).tar.gz ~/agami-artifacts   # model + local/ (credentials, config) — all in one folder now
 
 # 2. Remove the plugin's on-disk cache (Claude Code doesn't auto-purge this)
-rm -rf ~/.claude/plugins/cache/litebi
+rm -rf ~/.claude/plugins/cache/agami/agami-core
 rm -rf ~/.claude/plugins/cache/agami-skills   # only if you also installed our earlier marketplace
 
 # 3. Remove your data (only if you're sure you don't want it back)
@@ -67,4 +67,4 @@ rm -rf <artifacts_dir>/local                  # credentials, .config, charts, ex
 
 If the slash commands `/agami-connect`, `/agami-query`, etc. still appear after
 step 4, you have another cached copy at a different path.
-`find ~/.claude -type d -name "litebi*"` will show every copy.
+`find ~/.claude -type d -name "agami-core"` will show every copy.

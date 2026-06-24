@@ -4,8 +4,8 @@
 
 Please report security vulnerabilities **privately** rather than opening a public issue.
 
-- Email: [security@agami.ai](mailto:security@agami.ai)
-- Or use GitHub Security Advisories: <https://github.com/AgamiAI/LiteBi/security/advisories/new>
+- Email: [contact@agami.ai](mailto:contact@agami.ai)
+- Or use GitHub Security Advisories: <https://github.com/AgamiAI/agami-core/security/advisories/new>
 
 We will acknowledge receipt within **3 business days** and aim to provide a fix or mitigation timeline within **14 days** for confirmed vulnerabilities. Please give us a reasonable window to respond before any public disclosure.
 
@@ -18,19 +18,19 @@ When reporting, include where possible:
 
 ## Supported Versions
 
-LiteBi is in early development. We only support the **latest released version**; older releases will not receive security backports.
+agami-core is in early development. We only support the **latest released version**; older releases will not receive security backports.
 
 ## Scope
 
 In scope:
 
-- The LiteBi Claude Code plugin (`plugins/agami/`) and the SQL execution pipelines it ships.
+- The agami-core Claude Code plugin (`plugins/agami/`) and the SQL execution pipelines it ships.
 - The plugin marketplace manifests (`.claude-plugin/marketplace.json`, `plugins/agami/.claude-plugin/plugin.json`).
 
 Out of scope:
 
-- Third-party databases, drivers, or services LiteBi connects to.
+- Third-party databases, drivers, or services agami-core connects to.
 - Vulnerabilities in Claude Code itself (report those to Anthropic).
 - Issues that require physical access to a user's machine or already-compromised credentials.
 
-Thank you for helping keep LiteBi and its users safe.
+Thank you for helping keep agami-core and its users safe.

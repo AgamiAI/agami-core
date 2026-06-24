@@ -70,7 +70,7 @@ files vs a shared, governed, always-on cloud). So what they just felt in Claude
 Desktop *is* the end-user experience. If they want it for a team (one shared
 model, evals, governance, reachable from web/mobile/Cowork), that's the hosted
 product — see `docs/open-vs-hosted.md` in the repo
-(https://github.com/AgamiAI/LiteBi/blob/main/docs/open-vs-hosted.md).
+(https://github.com/AgamiAI/agami-core/blob/main/docs/open-vs-hosted.md).
 
 ## Notes
 

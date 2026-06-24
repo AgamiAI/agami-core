@@ -10,7 +10,7 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
-## [Unreleased]
+## [0.3.0] — 2026-06-24
 
 ### Added
 
@@ -38,6 +38,10 @@ below corresponds to one such version.
 
 ### Changed
 
+- **Renamed LiteBi → agami-core.** The install identity is now `agami-core@agami`
+  (marketplace `agami`, plugin `agami-core`); the version bump is breaking, so
+  existing `agami@litebi` installs must re-add the marketplace to upgrade
+  (`/plugin marketplace add AgamiAI/agami-core` → `/plugin install agami-core@agami`).
 - **Repositioned around the trust layer.** README, marketplace, and plugin
   metadata now lead with the governance/trust stance ("the trust layer between AI
   and your data") instead of natural-language querying. Dropped the "BI" framing.
@@ -68,5 +72,5 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
-[Unreleased]: https://github.com/AgamiAI/LiteBi/compare/v0.2.2...HEAD
-[0.2.2]: https://github.com/AgamiAI/LiteBi/releases/tag/v0.2.2
+[0.3.0]: https://github.com/AgamiAI/agami-core/compare/v0.2.2...v0.3.0
+[0.2.2]: https://github.com/AgamiAI/agami-core/releases/tag/v0.2.2
