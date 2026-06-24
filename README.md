@@ -167,12 +167,13 @@ connect with your permission). Details: [docs/privacy.md](docs/privacy.md).
 
 ## Fair-code vs hosted
 
-agami is **fair-code** (source-available). The laptop plugin — introspection, the portable
-semantic model, NL→SQL + local execution, the trust layer, corrections, and the
-local MCP server — is **free to self-host for your own team**. Exposing data or the MCP to
-people outside your organization is the paid line — the team cloud (a multi-tenant model
-registry served over a remote MCP endpoint, shared governed context, always-on evals). The
-boundary, stated plainly: [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
+agami is **fair-code** (source-available). Running it on your own machine —
+introspection, the portable semantic model, NL→SQL + local execution, the trust layer,
+corrections, and the local MCP server — is **free to self-host for your own team**.
+Exposing data or the MCP to people outside your organization is the paid line — the team
+cloud (a multi-tenant model registry over a remote MCP endpoint, shared governed context,
+always-on evals). The boundary, stated plainly:
+[docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
 ## Documentation
 
