@@ -29,5 +29,16 @@
       "Edit(/Users/*/agami-artifacts/**)"
     ]
   },
-  "enabledPlugins": {}
+  "extraKnownMarketplaces": {
+    "astral": {
+      "source": { "source": "github", "repo": "astral-sh/claude-code-plugins" }
+    },
+    "claude-plugins-official": {
+      "source": { "source": "github", "repo": "anthropics/claude-code" }
+    }
+  },
+  "enabledPlugins": {
+    "astral@astral": true,
+    "code-review@claude-plugins-official": true
+  }
 }
