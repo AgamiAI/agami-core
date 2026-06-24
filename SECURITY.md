@@ -18,19 +18,19 @@ When reporting, include where possible:
 
 ## Supported Versions
 
-LiteBi is in early development. We only support the **latest released version**; older releases will not receive security backports.
+agami-core is in early development. We only support the **latest released version**; older releases will not receive security backports.
 
 ## Scope
 
 In scope:
 
-- The LiteBi Claude Code plugin (`plugins/agami/`) and the SQL execution pipelines it ships.
+- The agami-core Claude Code plugin (`plugins/agami/`) and the SQL execution pipelines it ships.
 - The plugin marketplace manifests (`.claude-plugin/marketplace.json`, `plugins/agami/.claude-plugin/plugin.json`).
 
 Out of scope:
 
-- Third-party databases, drivers, or services LiteBi connects to.
+- Third-party databases, drivers, or services agami-core connects to.
 - Vulnerabilities in Claude Code itself (report those to Anthropic).
 - Issues that require physical access to a user's machine or already-compromised credentials.
 
-Thank you for helping keep LiteBi and its users safe.
+Thank you for helping keep agami-core and its users safe.

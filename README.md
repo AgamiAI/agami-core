@@ -7,9 +7,11 @@
 
 <p align="center"><strong>The trust layer between AI and your data. Local. Private. Yours.</strong></p>
 
+<p align="center"><sub><strong>agami-core</strong> — the open-source core of <a href="https://agami.ai">Agami</a>.</sub></p>
+
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
-  <img src="https://img.shields.io/badge/version-0.2.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/status-pre--public-orange" alt="Status">
   <a href="#quickstart-under-5-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
 </p>
@@ -18,7 +20,7 @@
      See docs/assets/README.md for what to capture. A visual is the highest-leverage addition here. -->
 <!-- <p align="center"><img src="docs/assets/demo.gif" alt="agami: a governed answer with its provenance receipt" width="760"></p> -->
 
-Point an AI agent at a database and it answers by **guessing** — at the join, at what *"revenue"* means, at which rows it's allowed to read. **agami** is the governed layer between the agent and your data: it turns your schema into a semantic model where every join is FK-derived or human-approved, every metric is **signed off** by name and role, and every answer ships a **receipt** — the exact SQL, the model version it pinned, and who vouched for each definition. The rules live in the model, **not the prompt**. And it all runs on your machine — credentials, schema, and results never leave it.
+Point an AI agent at a database and it answers by **guessing** — at the join, at what *"revenue"* means, at which rows it's allowed to read. **agami-core** is the governed layer between the agent and your data: it turns your schema into a semantic model where every join is FK-derived or human-approved, every metric is **signed off** by name and role, and every answer ships a **receipt** — the exact SQL, the model version it pinned, and who vouched for each definition. The rules live in the model, **not the prompt**. And it all runs on your machine — credentials, schema, and results never leave it.
 
 ## What you get
 

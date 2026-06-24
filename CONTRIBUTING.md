@@ -1,4 +1,4 @@
-# Contributing to LiteBi
+# Contributing to agami-core
 
 Issues and PRs welcome at [github.com/AgamiAI/agami-core](https://github.com/AgamiAI/agami-core).
 
