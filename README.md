@@ -204,4 +204,6 @@ LLM round-trip).
 
 Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
+What's free vs. paid (internal use vs. external exposure): [LICENSING.md](LICENSING.md).
+
 Built by [Agami AI](https://agami.ai).
