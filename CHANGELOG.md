@@ -42,6 +42,10 @@ below corresponds to one such version.
   (marketplace `agami`, plugin `agami-core`); the version bump is breaking, so
   existing `agami@litebi` installs must re-add the marketplace to upgrade
   (`/plugin marketplace add AgamiAI/agami-core` → `/plugin install agami-core@agami`).
+- **Relicensed Apache-2.0 → fair-code (the Agami Functional Use License / FUL).**
+  Internal/team use stays free; exposing the data or the MCP to people outside your
+  organization now requires a commercial license. See [LICENSE](LICENSE) and
+  [LICENSING.md](LICENSING.md).
 - **Repositioned around the trust layer.** README, marketplace, and plugin
   metadata now lead with the governance/trust stance ("the trust layer between AI
   and your data") instead of natural-language querying. Dropped the "BI" framing.
