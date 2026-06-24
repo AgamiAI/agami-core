@@ -37,18 +37,15 @@ jobs:
         run: uvx ruff@0.15.19 format --check plugins tests
         continue-on-error: true
 
-      # pydantic/pyyaml are needed to import the semantic-model code; DB drivers are
-      # intentionally omitted (those tests skip without a database). The three
-      # --deselect'd tests are PRE-EXISTING failures on main (not introduced here),
-      # tracked for a fix — deselecting keeps the gate green and honest, not hidden.
+      # pydantic/pyyaml/sqlglot are the import deps the suite needs — sqlglot backs the
+      # binding-validation and unit-resolution code paths (without it ~287 tests skip and
+      # a few assert empty results). DB drivers are intentionally omitted: those tests skip
+      # cleanly without a database.
       - name: pytest --cov
         run: >-
           uvx --python ${{ matrix.python-version }}
-          --with pytest --with pytest-cov --with pydantic --with pyyaml
+          --with pytest --with pytest-cov --with pydantic --with pyyaml --with sqlglot
           pytest tests/ -q
-          --deselect tests/test_mcp_server.py::test_resolve_units_maps_result_columns
-          --deselect tests/test_metric_binding_and_prune.py::test_binding_column_check_flags_unknown_column
-          --deselect tests/test_metric_binding_and_prune.py::test_binding_column_check_catches_excluded_column_metric
 
   gitleaks:
     name: gitleaks (secret scan)
