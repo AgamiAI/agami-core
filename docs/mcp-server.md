@@ -112,7 +112,7 @@ If you'd rather edit by hand, mind these two gotchas — both silently produce
    `C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe`.
 2. **Use an absolute path to `mcp_server.py`.** If you installed via the Claude
    Code marketplace, the script lives in the version-pinned plugin cache, e.g.
-   `~/.claude/plugins/cache/litebi/agami/<version>/scripts/mcp_server.py` — note
+   `~/.claude/plugins/cache/agami/agami-core/<version>/scripts/mcp_server.py` — note
    that path changes on every plugin update. If you cloned the repo, point at your
    checkout instead.
 

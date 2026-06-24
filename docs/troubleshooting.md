@@ -53,7 +53,7 @@ fully clean up:
 tar czf ~/agami-backup-$(date +%Y%m%d).tar.gz ~/agami-artifacts   # model + local/ (credentials, config) — all in one folder now
 
 # 2. Remove the plugin's on-disk cache (Claude Code doesn't auto-purge this)
-rm -rf ~/.claude/plugins/cache/litebi
+rm -rf ~/.claude/plugins/cache/agami/agami-core
 rm -rf ~/.claude/plugins/cache/agami-skills   # only if you also installed our earlier marketplace
 
 # 3. Remove your data (only if you're sure you don't want it back)
@@ -67,4 +67,4 @@ rm -rf <artifacts_dir>/local                  # credentials, .config, charts, ex
 
 If the slash commands `/agami-connect`, `/agami-query`, etc. still appear after
 step 4, you have another cached copy at a different path.
-`find ~/.claude -type d -name "litebi*"` will show every copy.
+`find ~/.claude -type d -name "agami-core"` will show every copy.
