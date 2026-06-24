@@ -35,22 +35,21 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 # docs: https://docs.astral.sh/uv/getting-started/installation/
 ```
 
-Every command below is `uvx …`, which uses [`uv`](https://docs.astral.sh/uv/) to fetch ruff /
-pre-commit / pytest **on demand** — these all run the same on macOS, Linux, and Windows, so there's
-nothing else to install globally. Then wire the hooks once:
+Everything else rides on `uv` — there's nothing else to install globally. From the repo root, a
+tiny cross-platform task runner (`dev.py`) wraps it all:
 
 ```bash
-uvx pre-commit install --hook-type pre-commit --hook-type pre-push
+uv run dev.py setup     # once: wire the pre-commit hooks (ruff + gitleaks on commit, tests on push)
+uv run dev.py check     # the whole gate locally — ruff + tests + gitleaks (same as CI)
+uv run dev.py cover     # did the lines I changed get tested? (patch coverage)
 ```
 
-Now `ruff` + `gitleaks` run automatically on every **commit**, and the test suite runs on every
-**push**. (Hooks are a convenience and bypassable with `git commit --no-verify`; CI is the real,
-unbypassable gate.) To run them by hand anytime:
+`dev.py` shells out to `uvx` (which fetches ruff / pre-commit / pytest on demand), so it runs the
+same on macOS, Linux, and Windows. Other tasks: `test`, `lint`, `fmt`. After `setup`, the hooks run
+automatically — `ruff` + `gitleaks` on every **commit**, the test suite on every **push**. They're a
+convenience (bypassable with `git commit --no-verify`); **CI is the real, unbypassable gate.**
 
-```bash
-uvx pre-commit run --all-files                        # ruff + gitleaks on the whole tree
-uvx pre-commit run --hook-stage pre-push --all-files  # + the full test suite
-```
+Prefer the raw tools? `dev.py` is only a wrapper — the equivalents are below.
 
 ### Tests on their own
 
@@ -66,8 +65,9 @@ network call — adding a network-egress primitive fails the build.
 
 ### Did I test the code I changed?
 
-Coverage of **the lines your PR touched** (fails on changed lines that no test exercises) — the
-quickest way to confirm a change is tested, regardless of overall coverage:
+`uv run dev.py cover` reports coverage of **the lines your PR touched** (fails on changed lines that
+no test exercises) — the quickest way to confirm a change is tested, regardless of overall coverage.
+Under the hood that's:
 
 ```bash
 uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot \
