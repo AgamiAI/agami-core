@@ -159,3 +159,42 @@ def test_auth_middleware_attaches_resolved_org_after_auth(monkeypatch):
     resp = asyncio.run(mw.dispatch(Request(scope), call_next))
     assert resp.status_code == 200
     assert isinstance(captured["org"], Org) and captured["org"].id == "acme"
+
+
+# --- 4. No local-disk state required to serve (stateless-platform-safe) -------
+
+
+def test_db_backed_serve_needs_no_artifacts_dir(tmp_path, monkeypatch):
+    # A fresh instance on a stateless platform has no local model files — only AGAMI_DB_URL. The
+    # serving path must answer from the DB alone. (ACE-002 delivers this; ACE-003 re-owns the
+    # criterion so cloud-neutrality is self-checked, not inherited.)
+    pytest.importorskip("pydantic")
+    import json
+
+    import model_store
+    import tools
+    from semantic_model.models import Organization
+    from store import Store
+
+    db_url = "sqlite://" + str(tmp_path / "agami.db")
+    s = Store.connect(db_url)
+    s.run_migrations()
+    model_store.write_organization(
+        s,
+        "main",
+        Organization.model_validate(
+            {
+                "organization": "acme",
+                "version": 1,
+                "subject_areas": [
+                    {"name": "sales", "metrics": [{"name": "revenue", "calculation": "sum"}]}
+                ],
+            }
+        ),
+    )
+    s.close()
+
+    monkeypatch.setenv("AGAMI_DB_URL", db_url)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "does-not-exist"))  # no disk state
+    head = json.JSONDecoder().raw_decode(tools.tool_get_datasource_schema({"datasource": "main"}))[0]
+    assert head["subject_areas"] and head["subject_areas"][0]["name"] == "sales"

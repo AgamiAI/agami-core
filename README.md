@@ -175,6 +175,24 @@ cloud (a multi-tenant model registry over a remote MCP endpoint, shared governed
 always-on evals). The boundary, stated plainly:
 [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
+## Self-hosting the HTTP server (any cloud)
+
+The HTTP MCP server (the `[server]` extra) is **cloud-neutral** — a VM + Postgres, or a stateless
+platform (Cloud Run / Container Apps) + managed Postgres. No GCP service is required to boot: no
+Cloud SQL connector, no Secret Manager, no Cloud Logging (a regression test enforces this). Config
+is entirely environment variables:
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `AGAMI_DB_URL` | yes (server) | The store: `postgresql://…` in prod, `sqlite://…` for a small/local run. `APP_DATABASE_URL` is accepted as an alias for the cloud-platform convention (`AGAMI_DB_URL` wins if both are set). Unset ⇒ the local file path. |
+| `PUBLIC_BASE_URL` | yes (server) | Backs OAuth/MCP discovery + the `WWW-Authenticate` resource URL. Set it explicitly — it can't be auto-detected behind a proxy/LB; the server fails fast at startup if it's missing. |
+| `AGAMI_ORG_ID` | no | The single configured org id (default `local`). The server is single-tenant by default. |
+
+All serving state lives in Postgres — a fresh instance with only `AGAMI_DB_URL` serves identically,
+so the server survives restarts and stateless platforms. The serving path is **LLM-free and
+zero-egress by default**: the client is the brain, `execute_sql` runs SQL against your own database,
+and the other tools just read the model. Nothing leaves your environment.
+
 ## Documentation
 
 - [Quickstart & usage](docs/usage.md) — first-run walkthrough + common workflows
