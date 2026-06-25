@@ -17,7 +17,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
 from semantic_model import curate, loader  # noqa: E402
-from semantic_model import models as m  # noqa: E402
 
 
 def _write_model(root: Path, *, git: bool = True) -> None:

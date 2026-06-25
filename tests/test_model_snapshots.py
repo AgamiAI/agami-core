@@ -21,9 +21,10 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-from catalog_helpers import col, make_catalog_runner  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
 from semantic_model import snapshot as S  # noqa: E402
+
+from catalog_helpers import col, make_catalog_runner  # noqa: E402
 
 
 def _mini_model(root: Path) -> None:

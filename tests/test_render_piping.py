@@ -101,9 +101,10 @@ def test_main_multi_section_writes_array(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_receipt_from_sql(tmp_path, capsys):
-    from catalog_helpers import col, make_catalog_runner
     from semantic_model import cli
     from semantic_model import introspect as I
+
+    from catalog_helpers import col, make_catalog_runner
 
     runner = make_catalog_runner(
         tables=["customers", "orders"],

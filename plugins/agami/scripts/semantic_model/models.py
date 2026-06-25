@@ -35,7 +35,7 @@ validator gives via `additionalProperties: false`.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Any, Literal, Optional
 
 from pydantic import (
     BaseModel,

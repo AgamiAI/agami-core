@@ -32,12 +32,8 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import _interp  # noqa: F401 — re-exec under agami's configured interpreter if PyYAML is missing
-
-import yaml
-
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "model-explorer-template.html"
@@ -72,8 +68,9 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
 
     org_md_path = profile_dir / "ORGANIZATION.md"
     organization_md = org_md_path.read_text(encoding="utf-8") if org_md_path.exists() else ""
-    from semantic_model import org_draft as _OD
     import re as _re
+
+    from semantic_model import org_draft as _OD
     # `organization_md` is the human's narrative ONLY — this is what the edit box writes back,
     # so model facts must never be folded in here (or saving would persist them). If blank,
     # offer the starter prompt. The model-derived summary (subject areas, conventions, decoded

@@ -21,7 +21,6 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
 from execute_sql import _parse_dsn  # noqa: E402
 
-
 # --- Postgres family -------------------------------------------------------
 
 def test_plain_postgresql_scheme():

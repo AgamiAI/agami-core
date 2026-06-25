@@ -27,7 +27,6 @@ import os
 import sys
 from pathlib import Path
 
-
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "examples-validation-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"

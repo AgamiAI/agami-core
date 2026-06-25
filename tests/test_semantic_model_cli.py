@@ -500,6 +500,7 @@ def test_seed_validate_runs_through_safety_and_shapes_items(tmp_path, monkeypatc
     row_headers, row_preview, row_count, state}; (3) a failing seed surfaces its `error`
     instead of faking a result. The live-DB call is mocked so the test needs no DB."""
     import subprocess
+
     from semantic_model import curate
     _model(tmp_path)
     curate.add_examples(tmp_path, "s", [
@@ -549,7 +550,9 @@ def test_seed_validate_formats_numbers_with_model_units(tmp_path, monkeypatch):
     path uses — a column with a currency unit shows its symbol + grouping here too, not a
     bare number (the gap that made users re-type 'format as currency' on every example)."""
     import subprocess
-    from semantic_model import curate, runtime as RT
+
+    from semantic_model import curate
+    from semantic_model import runtime as RT
     _model(tmp_path)
     curate.add_examples(tmp_path, "s", [{"question": "total billed?", "sql": "SELECT SUM(total) AS total FROM orders"}])
 

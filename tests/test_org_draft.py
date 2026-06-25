@@ -45,8 +45,8 @@ def _model(root):
 
 
 def test_derived_context_is_pure_summary(tmp_path):
-    from semantic_model.loader import load_organization
     from semantic_model import org_draft
+    from semantic_model.loader import load_organization
     _model(tmp_path)
     d = org_draft.derived_context(load_organization(tmp_path))
     # SUMMARY shape: counts + subject areas + conventions + glossary — NOT a model dump
@@ -62,8 +62,8 @@ def test_derived_context_is_pure_summary(tmp_path):
 def test_derived_context_can_exclude_curated_glossary(tmp_path):
     # the explorer renders the curated glossary as an EDITABLE panel, so it asks derived_context
     # to omit those terms — but the derived ENUM legends (from choice_field) still show read-only.
+    from semantic_model import curate, org_draft
     from semantic_model.loader import load_organization
-    from semantic_model import org_draft, curate
     _model(tmp_path)
     p = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
     d = yaml.safe_load(p.read_text())
@@ -89,8 +89,8 @@ def test_explorer_exposes_glossary_as_editable_field(tmp_path):
 
 
 def test_compose_keeps_human_narrative_and_derived_facts_separate(tmp_path):
-    from semantic_model.loader import load_organization
     from semantic_model import org_draft
+    from semantic_model.loader import load_organization
     _model(tmp_path)
     human = "# About this database\n\nWe are a lending startup. MRR = monthly recurring revenue.\n"
     md = org_draft.compose_context(human, load_organization(tmp_path))
@@ -106,8 +106,8 @@ def test_compose_keeps_human_narrative_and_derived_facts_separate(tmp_path):
 def test_key_terminology_seeded_from_glossary_and_enums(tmp_path):
     # the section is no longer a bare prompt: curated glossary terms + auto-derived enum
     # legends from choice_field columns both render.
+    from semantic_model import curate, org_draft
     from semantic_model.loader import load_organization
-    from semantic_model import org_draft, curate
     _model(tmp_path)
     p = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
     doc = yaml.safe_load(p.read_text())
@@ -124,8 +124,8 @@ def test_key_terminology_seeded_from_glossary_and_enums(tmp_path):
 
 
 def test_set_key_terminology_merges_then_replaces(tmp_path):
-    from semantic_model.loader import load_organization
     from semantic_model import curate
+    from semantic_model.loader import load_organization
     _model(tmp_path)
     assert curate.set_key_terminology(tmp_path, {"MRR": "monthly recurring revenue"}).validated
     curate.set_key_terminology(tmp_path, {"churn": "no order in 90 days"})             # merge (default)

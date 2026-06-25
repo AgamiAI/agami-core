@@ -14,7 +14,6 @@ mysql_scanner. The init file must:
 
 from __future__ import annotations
 
-import io
 import stat
 import sys
 from pathlib import Path
@@ -35,6 +34,7 @@ def tmp_agami_home(tmp_path, monkeypatch):
 
     # Re-import so all module-level paths re-resolve to <art>/local.
     import importlib
+
     import setup_pgauth
     importlib.reload(setup_pgauth)
     import build_duckdb_attach

@@ -31,7 +31,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 # Introspection-run timestamp for system sign-offs on auto-approved structure.
 _NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -58,7 +58,6 @@ from . import build
 from . import dialects as D
 from .models import (
     Column,
-    ForeignKey,
     Organization,
     PerformanceHints,
     Relationship,

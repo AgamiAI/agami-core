@@ -30,7 +30,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 # --- Number parsing -------------------------------------------------------
 
 # Currency symbols and their codes that we strip from the front of a number.

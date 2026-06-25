@@ -49,7 +49,8 @@ from .models import (
     Metric,
     Organization,
     Relationship,
-    SubjectArea,
+)
+from .models import (
     bare_name as _bare,
 )
 

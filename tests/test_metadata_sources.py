@@ -22,7 +22,6 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 from semantic_model import curate, loader  # noqa: E402
 from semantic_model import metadata_sources as M  # noqa: E402
 
-
 # --- canned ServiceNow-shaped source rows -----------------------------------
 
 SYS_CHOICE = [
@@ -164,7 +163,8 @@ def test_generated_ops_apply_and_stamp_metadata(tmp_path):
 def test_inheritance_inherited_reference_applies_to_all_children():
     # THE fix: `assignment_group → sys_user_group` is declared ONCE (as on base `task`), but the
     # COLUMN exists on both children — so both incident AND problem must get the join.
-    from semantic_model import cli, models as mm
+    from semantic_model import cli
+    from semantic_model import models as mm
     decls = M.reference_declarations(
         [{"element": "assignment_group", "internal_type": "reference", "reference": "sys_user_group"}],
         column_col="element", type_col="internal_type", reference_col="reference")
@@ -187,7 +187,8 @@ def test_inheritance_inherited_reference_applies_to_all_children():
 
 
 def test_route_references_intra_cross_and_skips_unmodelled():
-    from semantic_model import cli, models as mm
+    from semantic_model import cli
+    from semantic_model import models as mm
 
     def tbl(name):
         return mm.Table(name=name, schema="public", storage_connection="c", grain=["id"],
@@ -328,7 +329,10 @@ def test_enrich_metadata_drops_unverified_preset_reference(tmp_path, monkeypatch
 def test_verified_references_unverified_when_table_too_big():
     # the #7 guard: a FROM table above the row threshold must NOT be overlap-scanned — the ref is
     # kept UNVERIFIED (inferred/unreviewed), not dropped, not probed.
-    from semantic_model import cli, introspect as INTRO, models as mm, dialects as D
+    from semantic_model import cli
+    from semantic_model import dialects as D
+    from semantic_model import introspect as INTRO
+    from semantic_model import models as mm
     big = mm.PerformanceHints(estimated_row_count=INTRO._OVERLAP_PROBE_MAX_ROWS + 1)
 
     def tbl(name, cols, perf=None):

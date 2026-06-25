@@ -19,9 +19,8 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-from semantic_model import introspect as I  # noqa: E402
 import render_prune  # noqa: E402
-
+from semantic_model import introspect as I  # noqa: E402
 
 # --- canned runners ---------------------------------------------------------
 

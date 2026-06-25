@@ -32,11 +32,9 @@ NOT live-verified — treat them as such until exercised against a real instance
 
 from __future__ import annotations
 
-import re
 from typing import Callable, Optional
 
 from .models import ColumnType, StorageType
-
 
 # ---------------------------------------------------------------------------
 # Shared native-type → ColumnType normalizer

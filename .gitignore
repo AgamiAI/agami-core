@@ -46,3 +46,9 @@ blog/
 
 # curate op-log written when editing the committed sample model in place — never commit
 plugins/agami/samples/store/model/curation_log.jsonl
+
+# Python tooling artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/

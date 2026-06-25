@@ -13,8 +13,6 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
@@ -58,8 +56,8 @@ def test_prune_malformed_line_is_anomaly_not_dropped():
 def test_prune_kept_everything_flag(tmp_path):
     out = tmp_path / "k.txt"
     block = "keep tables: 2 of 2\na.x\na.y\ndone\n"
-    import io
     import contextlib
+    import io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         P.main(["--block-file", _write(tmp_path / "b.txt", block), "--tables-out", str(out)])
@@ -67,9 +65,10 @@ def test_prune_kept_everything_flag(tmp_path):
 
 
 def test_curate_gate_counts_pii(tmp_path, capsys):
-    from catalog_helpers import col, make_catalog_runner
     from semantic_model import cli
     from semantic_model import introspect as I
+
+    from catalog_helpers import col, make_catalog_runner
     runner = make_catalog_runner(
         tables=["customers"],
         columns={"customers": [col("id", "integer", nullable=False), col("email", "varchar")]}, fks=[])

@@ -468,6 +468,7 @@ def cmd_format_table(args) -> int:
     grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
     this verbatim so verification numbers don't depend on the LLM's formatting."""
     import csv as _csv
+
     from . import units
     text = Path(args.csv_file).read_text() if args.csv_file else sys.stdin.read()
     reader = list(_csv.reader(io.StringIO(text)))
@@ -590,9 +591,10 @@ def cmd_seed_validate(args) -> int:
     so the fan/chasm pre-flight + default_filters always apply — a raw driver could skip
     that and let a fan-out scan the whole table. A refused/errored seed is surfaced with
     its `error`, not faked. Replaces ad-hoc 'run all the seeds' scripts."""
+    import csv as _csv
     import os
     import subprocess
-    import csv as _csv
+
     from . import units
 
     seeds = L.list_prompt_examples(args.root, args.area)

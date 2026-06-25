@@ -38,7 +38,7 @@ list[str] contract while adding structured findings for the review dashboard.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Optional
 
 try:
     import sqlglot
@@ -49,14 +49,12 @@ except ImportError:  # pragma: no cover - sqlglot is in requirements
     _HAVE_SQLGLOT = False
 
 from .models import (
-    Column,
     CrossSubjectAreaRelationship,
     Entity,
     Organization,
     Relationship,
     SubjectArea,
     Table,
-    TableRef,
     bare_name,
 )
 
