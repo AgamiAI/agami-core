@@ -46,7 +46,7 @@ jobs:
         run: >-
           uvx --python ${{ matrix.python-version }}
           --with pytest --with pytest-cov
-          --with-editable "packages/agami-core[model]"
+          --with-editable "packages/agami-core[model,server]"
           pytest tests/ -q --cov=plugins --cov=packages/agami-core/src --cov-report=term-missing
 
   gitleaks:

@@ -80,19 +80,19 @@ def test_prune_keeps_last_N(tmp_path):
 
 
 def test_model_version_reader_contract(tmp_path, monkeypatch):
-    """mcp_harness._model_version returns the newest snapshot hash — and after a
+    """tools._model_version returns the newest snapshot hash — and after a
     model change, the NEW hash (newest-by-mtime wins)."""
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     r = tmp_path / "prof"
     _mini_model(r)
     h1 = S.write_snapshot(r)
-    import mcp_harness
-    assert mcp_harness._model_version("prof") == h1
+    import tools
+    assert tools._model_version("prof") == h1
     time.sleep(0.02)
     (r / "org.yaml").write_text("organization: t\nversion: 99\n", encoding="utf-8")
     h2 = S.write_snapshot(r)
     assert h2 != h1
-    assert mcp_harness._model_version("prof") == h2
+    assert tools._model_version("prof") == h2
 
 
 def test_introspect_stamps_a_snapshot(tmp_path):

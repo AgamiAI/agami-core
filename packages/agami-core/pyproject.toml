@@ -28,12 +28,18 @@ model = [
   "PyYAML>=6",
   "sqlglot>=20",
 ]
+# The HTTP MCP transport (mcp_http): the official MCP SDK + an ASGI server. Kept out of the base
+# install so the local executor/skill stay stdlib-lean — only a hosted deployment installs it.
+server = [
+  "mcp>=1.2",
+  "uvicorn>=0.30",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 # Flat top-level modules (not under a parent package) — listed explicitly so the import
 # names stay flat regardless of disk layout.
-py-modules = ["agami_paths", "execute_sql", "mcp_harness", "ports", "contracts", "oss_adapters"]
+py-modules = ["agami_paths", "execute_sql", "mcp_harness", "mcp_http", "tools", "ports", "contracts", "oss_adapters"]
 packages = ["semantic_model"]
 
 [tool.setuptools.package-data]
