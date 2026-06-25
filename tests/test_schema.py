@@ -37,14 +37,16 @@ def test_real_migrations_create_all_tables_on_empty_db():
 
 
 def test_users_table_is_flat_no_role_column():
-    # ACE-004: the users table exists with the identity columns and, crucially, NO role/permission
-    # column — flat access is the open-core contract (roles are paid).
+    # The users table exists with the identity columns and, crucially, NO role/permission column —
+    # flat access is the open-core contract (roles are paid).
     s = Store.connect("sqlite://")
     s.run_migrations()
     assert "users" in _tables(s)
     cols = {r["name"] for r in s.query("PRAGMA table_info(users)")}
     assert {"id", "username", "password_hash", "email", "status", "created"} <= cols
-    assert not (cols & {"role", "roles", "permission", "permissions"}), "flat access — no role column"
+    assert not (cols & {"role", "roles", "permission", "permissions"}), (
+        "flat access — no role column"
+    )
     s.close()
 
 
