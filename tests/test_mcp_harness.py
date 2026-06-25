@@ -29,7 +29,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # SERVER is the on-disk module file, used only for the source-level no-network scan.
 SERVER = REPO_ROOT / "packages" / "agami-core" / "src" / "mcp_harness.py"
 
-from mcp_harness import (
+# The tool impls + helpers live in the shared registry module (tools); mcp_harness is the
+# thin stdio adapter, exercised over the protocol via subprocess below.
+from tools import (
     _classify_exit,
     _distill_for_llm,
     _resolve_receipt,
@@ -37,7 +39,6 @@ from mcp_harness import (
     check_read_only,
     resolve_artifacts_dir,
     resolve_profile,
-    tool_save_correction,
 )
 
 
@@ -222,19 +223,17 @@ def test_initialize_and_tools_list():
     # The lean playbook signposts the trust flow so a Desktop client surfaces it (soft layer;
     # the hard guarantees are enforced in code). Don't let these silently drop out.
     instr = init["instructions"].lower()
-    for token in ("examples-first", "receipt", "review_state", "save_correction", "confirmed"):
+    for token in ("examples-first", "receipt", "review_state"):
         assert token in instr, token
 
+    # The MCP surface is exactly the 5 product tools on stdio (mirrored by HTTP). The granular
+    # traversal tools / identify_entity / pre_flight_check / save_correction are deliberately NOT
+    # MCP tools (subsumed / folded / skill-operations) — asserted here so the omission can't
+    # silently regress. See tests/test_tools_registry.py for the cross-transport assertion.
     tools = {t["name"] for t in by_id[2]["result"]["tools"]}
     assert tools == {
-        # core Ask-Agami-parity surface
         "list_datasources", "get_datasource_schema",
         "get_prompt_examples", "execute_sql", "log_feedback",
-        # semantic-model traversal tools
-        "list_subject_areas", "get_subject_area_bundle", "get_table_context",
-        "identify_entity", "pre_flight_check",
-        # write-back: corrections land through the same engine as the skill
-        "save_correction",
     }
 
 
@@ -339,55 +338,5 @@ def test_mcp_receipt_equals_shared_assembler(monkeypatch, tmp_path):
         assert mcp[key] == shared[key], key
 
 
-def test_mcp_save_correction_approves_through_engine(monkeypatch, tmp_path):
-    import pytest
-    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
-    art, profile, root = _write_rich_model(tmp_path)
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-    out = json.loads(tool_save_correction({
-        "datasource": profile,
-        "ops": [{"op": "approve", "kind": "metric", "area": "s", "name": "revenue",
-                 "at": "2026-06-12T00:00:00Z"}],
-        "confirmed": True,
-        "signer": "reviewer@example.com", "role": "cfo",
-    }))
-    assert out["ops"][0]["validated"] and out["ops"][0]["applied"]
-    # the metric is now approved on disk — corrections land through the curate engine
-    from semantic_model import loader as L
-    org = L.load_organization(root)
-    met = next(m for sa in org.subject_areas for m in sa.metrics if m.name == "revenue")
-    assert met.review_state == "approved" and met.signed_off_by == "reviewer@example.com"
-
-
-def test_mcp_save_correction_gates_unconfirmed_model_edits(monkeypatch, tmp_path):
-    """Enforced (not advisory): ops WITHOUT confirmed:true must NOT mutate the model."""
-    import pytest
-    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
-    art, profile, root = _write_rich_model(tmp_path)
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-    out = json.loads(tool_save_correction({
-        "datasource": profile,
-        "ops": [{"op": "approve", "kind": "metric", "area": "s", "name": "revenue"}],
-        # no confirmed
-    }))
-    assert out.get("requires_confirmation") is True and out["pending_ops"]
-    assert "ops" not in out  # nothing applied
-    # the metric is UNTOUCHED on disk
-    from semantic_model import loader as L
-    org = L.load_organization(root)
-    met = next(m for sa in org.subject_areas for m in sa.metrics if m.name == "revenue")
-    assert met.review_state == "unreviewed" and met.signed_off_by is None
-
-
-def test_mcp_save_correction_example_is_not_gated(monkeypatch, tmp_path):
-    """The safe floor: saving a corrected example needs no confirmation."""
-    import pytest
-    pytest.importorskip("pydantic"); pytest.importorskip("sqlglot")
-    art, profile, _ = _write_rich_model(tmp_path)
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-    out = json.loads(tool_save_correction({
-        "datasource": profile,
-        "example": {"area": "s", "question": "total orders?", "sql": "SELECT COUNT(*) FROM orders"},
-    }))
-    assert out.get("example") and out["example"]["validated"]
-    assert "requires_confirmation" not in out
+# save_correction is no longer an MCP tool (it's a skill operation, off both transports), so its
+# MCP-tool tests were removed. The curate engine it used is still covered by tests/test_semantic_model_curate.py.
