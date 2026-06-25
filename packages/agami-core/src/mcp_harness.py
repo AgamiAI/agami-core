@@ -41,8 +41,9 @@ from tools import (
     server_version,
 )
 
-# The protocol version we fall back to if the client doesn't pin one. We echo the client's
-# requested version when present (see _handle_initialize).
+# MCP negotiates a protocol version during `initialize`: the client names the version it wants and
+# the server echoes it back to accept it (see _handle_initialize). This is the value we assume only
+# when a client connects without naming one (older clients) — it's a fallback, not a pin.
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 

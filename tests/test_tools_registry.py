@@ -48,3 +48,21 @@ def test_every_tool_has_handler_and_input_schema():
         assert (
             isinstance(meta["inputSchema"], dict) and meta["inputSchema"].get("type") == "object"
         ), name
+
+
+def test_db_type_label_covers_advertised_databases():
+    # The `database_type` shown by list_datasources maps a DSN scheme → label for every DB agami
+    # advertises; an unknown scheme passes through verbatim (execution is execute_sql's job).
+    cases = {
+        "postgresql://h/db": "postgres",
+        "mysql://h/db": "mysql",
+        "snowflake://acct": "snowflake",
+        "mssql://h/db": "sqlserver",
+        "oracle://h/db": "oracle",
+        "databricks://h": "databricks",
+        "trino://h": "trino",
+        "duckdb:///tmp/f.db": "duckdb",
+        "exotic://h": "exotic",  # unknown → passthrough
+    }
+    for url, expected in cases.items():
+        assert tools._db_type_for("p", {"p": {"url": url}}) == expected, url

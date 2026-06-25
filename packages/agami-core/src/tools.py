@@ -80,8 +80,11 @@ SERVER_INSTRUCTIONS = (
 
 
 def bootstrap_paths() -> None:
-    """Run the one-shot ~/.agami migration, then re-resolve the module-level paths (the migration
-    may point the artifacts dir at a custom location). Every entrypoint calls this at startup."""
+    """Re-resolve the module-level paths at startup. agami_paths.bootstrap() also runs a one-time
+    migration of any *legacy* ~/.agami install into the current <artifacts_dir>/local layout — new
+    installs never create ~/.agami, so the migration is a no-op once there's nothing to move (it's
+    a backward-compat shim, safe to drop in a later cleanup). Every entrypoint calls this so the
+    paths reflect the resolved (possibly migrated) artifacts dir."""
     global AGAMI_LOCAL, CREDENTIALS_PATH, CONFIG_PATH, QUERY_LOG, FEEDBACK_LOG
     agami_paths.bootstrap()
     AGAMI_LOCAL = agami_paths.local_dir()
@@ -143,6 +146,8 @@ def _db_type_for(profile: str, creds: dict[str, dict[str, str]]) -> str:
     sect = creds.get(profile, {})
     t = sect.get("type", "")
     if not t and sect.get("url"):
+        # Map a DSN scheme → the datasource `type` label (display only; execution is execute_sql's
+        # job). Covers the DBs agami advertises; an unknown scheme passes through verbatim.
         scheme = sect["url"].split("://", 1)[0].split("+", 1)[0].lower()
         t = {
             "postgresql": "postgres",
@@ -154,6 +159,13 @@ def _db_type_for(profile: str, creds: dict[str, dict[str, str]]) -> str:
             "bigquery": "bigquery",
             "bq": "bigquery",
             "sqlite": "sqlite",
+            "mssql": "sqlserver",
+            "sqlserver": "sqlserver",
+            "oracle": "oracle",
+            "databricks": "databricks",
+            "trino": "trino",
+            "presto": "trino",
+            "duckdb": "duckdb",
         }.get(scheme, scheme)
     return t
 
@@ -327,7 +339,11 @@ _SCHEMA_MODE_DOWNGRADE = {"full": "summary", "summary": "index", "index": None}
 _LARGE_TABLE_ROWS = 1_000_000  # tables at/above this surface in `large_tables` in every mode
 
 # Metric ranking (lexical, no embeddings): exact/substring hits ("strong") are always kept; the
-# weak token-overlap tail needs >= this coverage and is capped at top-K.
+# weak token-overlap tail needs >= this coverage and is capped at top-K. This only decides which
+# metrics get FULL detail inline — `get_datasource_schema` ALWAYS returns `metric_index` (every
+# metric's name + one-liner), so a metric that matches nothing is never hidden: the client sees it
+# exists and can pull it by name via `metric_names`. The stopwords carry no metric-identity signal,
+# so they're dropped from the weak token-overlap path only (exact/substring still match them).
 _METRIC_MATCH_TOP_K = 10
 _METRIC_MATCH_MIN_COVERAGE = 0.6
 _METRIC_MATCH_STOPWORDS = frozenset(
