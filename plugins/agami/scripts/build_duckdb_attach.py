@@ -26,8 +26,7 @@ Usage:
     python3 build_duckdb_attach.py --profiles itsm finance
     # Writes <artifacts_dir>/local/.duckdb_init_<ts>_<rand>.sql, prints the path on stdout.
 
-The script depends on configparser (stdlib) and reuses `_parse_dsn` /
-`_load_section` from setup_pgauth.py.
+The script reuses `_atomic_write` / `_load_section` from setup_pgauth.py.
 
 Exit codes:
     0  success (init file path printed to stdout)

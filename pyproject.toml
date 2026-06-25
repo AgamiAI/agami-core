@@ -23,6 +23,6 @@ ignore = ["E402", "E702", "E731", "E741", "F841"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Coverage is measured but not yet enforced. Add --cov-fail-under=<baseline> in a later
-# pass once the number is known, so the first CI run is green (REQ-017 calibration).
-addopts = "--cov=plugins --cov-report=term-missing"
+# No --cov in addopts on purpose: a bare `pytest` then works without pytest-cov installed
+# (IDE runners, quick local runs). The CI gate and `dev.py cover` pass --cov explicitly;
+# a --cov-fail-under floor will be added once the baseline is locked (REQ-017 calibration).
