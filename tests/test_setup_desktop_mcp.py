@@ -1,5 +1,5 @@
 """
-Tests for plugins/agami/scripts/setup_desktop_mcp.py.
+Tests for plugins/agami/scripts/setup_desktop_mcp.py (OCR-028: pip-install model).
 
 The load-bearing contract is **merge safety**: wiring agami into
 `claude_desktop_config.json` must never lose a user's other keys or other MCP
@@ -30,7 +30,7 @@ def test_merge_preserves_other_keys_and_servers(tmp_path):
         "coworkUserFilesPath": "/Users/me/Claude",
         "mcpServers": {"other": {"command": "/bin/echo", "args": ["hi"]}},
     }))
-    entry = {"command": "/py", "args": ["/serve/mcp_server.py"], "env": {"AGAMI_PROFILE": "main"}}
+    entry = {"command": "/py", "args": ["-m", "mcp_harness"], "env": {"AGAMI_PROFILE": "main"}}
     new, backup = sd.merge_into_config(cfg, "agami", entry, dry_run=False)
 
     assert new["coworkUserFilesPath"] == "/Users/me/Claude"   # unrelated key kept
@@ -43,7 +43,7 @@ def test_merge_preserves_other_keys_and_servers(tmp_path):
 
 def test_merge_creates_file_when_absent(tmp_path):
     cfg = tmp_path / "sub" / "claude_desktop_config.json"  # parent doesn't exist
-    entry = {"command": "/py", "args": ["/serve/mcp_server.py"], "env": {}}
+    entry = {"command": "/py", "args": ["-m", "mcp_harness"], "env": {}}
     new, backup = sd.merge_into_config(cfg, "agami", entry, dry_run=False)
     assert cfg.exists()
     assert backup is None                                      # nothing to back up
@@ -53,7 +53,7 @@ def test_merge_creates_file_when_absent(tmp_path):
 def test_merge_is_idempotent_update(tmp_path):
     cfg = tmp_path / "c.json"
     cfg.write_text(json.dumps({"mcpServers": {"agami": {"command": "/old", "args": [], "env": {}}}}))
-    entry = {"command": "/new", "args": ["/serve/mcp_server.py"], "env": {"AGAMI_PROFILE": "x"}}
+    entry = {"command": "/new", "args": ["-m", "mcp_harness"], "env": {"AGAMI_PROFILE": "x"}}
     new, _ = sd.merge_into_config(cfg, "agami", entry, dry_run=False)
     assert new["mcpServers"]["agami"]["command"] == "/new"     # replaced, not duplicated
     assert len(new["mcpServers"]) == 1
@@ -99,10 +99,11 @@ def test_resolve_profile_env(monkeypatch):
     assert sd.resolve_profile("explicit") == "explicit"
 
 
-def test_build_server_entry_shape(tmp_path):
-    entry = sd.build_server_entry("/py", tmp_path, "main", "1.2.3")
+def test_build_server_entry_shape():
+    # The Desktop entry runs the installed package as a module (OCR-028), not a file path.
+    entry = sd.build_server_entry("/py", "main", "1.2.3")
     assert entry["command"] == "/py"
-    assert entry["args"] == [str(tmp_path / "mcp_server.py")]
+    assert entry["args"] == ["-m", "mcp_harness"]
     assert entry["env"] == {"AGAMI_PROFILE": "main", "AGAMI_VERSION": "1.2.3"}
 
 
@@ -124,22 +125,45 @@ def test_desktop_config_path_linux(monkeypatch):
     assert p.parts[-3:] == (".config", "Claude", "claude_desktop_config.json")
 
 
-# --- staging (copy) ---------------------------------------------------------
+# --- package install (replaces the old copy-to-serve-dir staging) -----------
 
-def test_stage_in_place_returns_scripts_dir(tmp_path):
-    assert sd.stage_serve_files(tmp_path, in_place=True) == tmp_path
+def test_ensure_package_installed_dry_run_runs_no_pip(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: calls.append(a))
+    sd.ensure_package_installed("/py", Path("/pkg"), editable=False, dry_run=True)
+    assert calls == []                                   # nothing executed in dry-run
+    assert "would install" in capsys.readouterr().out
 
 
-def test_stage_copies_self_contained_files(tmp_path, monkeypatch):
-    # Redirect the stable serve dir into tmp so we don't touch the real artifacts dir.
-    stable = tmp_path / "serve"
-    monkeypatch.setattr(sd, "STABLE_SERVE_DIR", stable)
-    # real scripts dir has mcp_server.py + execute_sql.py
-    out = sd.stage_serve_files(SCRIPTS, in_place=False)
-    assert out == stable
-    for name in sd.SERVE_FILES:
-        assert (stable / name).exists(), name
-    # the semantic_model package is staged too (model-backed tools need it),
-    # minus caches
-    assert (stable / "semantic_model" / "loader.py").exists()
-    assert not (stable / "semantic_model" / "__pycache__").exists()
+def test_ensure_package_installed_builds_pip_command(monkeypatch):
+    seen = {}
+
+    class _OK:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, *a, **k):
+        seen["cmd"] = cmd
+        return _OK()
+
+    monkeypatch.setattr(sd.subprocess, "run", fake_run)
+    sd.ensure_package_installed("/py", Path("/pkg"), editable=True, dry_run=False)
+    assert seen["cmd"][:4] == ["/py", "-m", "pip", "install"]
+    assert "-e" in seen["cmd"]                            # editable for dev mode
+    assert seen["cmd"][-1] == "/pkg[model]"               # the [model] extra
+
+
+def test_ensure_package_installed_raises_on_failure(monkeypatch):
+    class _Fail:
+        returncode = 1
+        stderr = "boom"
+
+    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: _Fail())
+    with pytest.raises(RuntimeError):
+        sd.ensure_package_installed("/py", Path("/pkg"), editable=False, dry_run=False)
+
+
+def test_read_version_from_pyproject():
+    # Reads the real agami-core version from the package's pyproject (single source).
+    v = sd.read_version(REPO_ROOT / "packages" / "agami-core")
+    assert v and v[0].isdigit()
