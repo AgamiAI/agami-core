@@ -26,7 +26,7 @@ import sys
 RUFF = ["uvx", "ruff@0.15.19"]
 # The suite imports the agami-core library, so install it editable with the [model]
 # extra (pydantic/pyyaml/sqlglot). DB drivers are omitted on purpose — those tests skip without a DB.
-TEST_DEPS = ["--with", "pytest-cov", "--with-editable", "packages/agami-core[model]"]
+TEST_DEPS = ["--with", "pytest-cov", "--with-editable", "packages/agami-core[model,server]"]
 TARGETS = ["plugins", "packages", "tests", "dev.py"]
 
 

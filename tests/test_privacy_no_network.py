@@ -32,6 +32,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "plugins" / "agami" / "scripts"
+PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
+# The local serving path — skill scripts + the agami-core library (executor, stdio harness, the
+# shared tool registry, the semantic model) — must stay network-free. `mcp_http` is the ONE
+# deliberate network surface (the HTTP product: it binds a port and speaks HTTP), excluded by design.
+NETWORK_MODULE = "mcp_http.py"
 
 # Regexes for network-egress primitives. Deliberately precise: `urllib.request`
 # is forbidden but `urllib.parse` is not; DB-driver imports are not matched.
@@ -53,7 +58,11 @@ FORBIDDEN = [
 ]
 _FORBIDDEN_RE = [re.compile(p) for p in FORBIDDEN]
 
-SCRIPTS = sorted(SCRIPTS_DIR.glob("*.py"))
+SCRIPTS = (
+    sorted(SCRIPTS_DIR.glob("*.py"))
+    + sorted(p for p in PKG_SRC.glob("*.py") if p.name != NETWORK_MODULE)
+    + sorted((PKG_SRC / "semantic_model").glob("*.py"))
+)
 
 
 def test_there_are_scripts_to_scan():
