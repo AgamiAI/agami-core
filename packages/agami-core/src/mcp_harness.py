@@ -19,7 +19,7 @@ Design constraints (match the rest of agami):
   - **No network call, no auth, no telemetry.** The MCP stdio protocol is
     newline-delimited JSON-RPC 2.0, spoken by hand. Grep the source.
   - The execute_sql + log_feedback tools are pure-stdlib. The model-backed tools
-    (schema / traversal) import `scripts/semantic_model` (Pydantic) lazily and
+    (schema / traversal) import the `semantic_model` package (Pydantic) lazily and
     surface a clear "install the model deps" error if it's absent — so execution
     still works on a bare install.
   - **No data leaves the machine.** SQL is executed locally by shelling out to
@@ -38,16 +38,16 @@ driver tier), so the relevant driver must be importable for non-SQLite DBs
 (`psycopg2-binary` / `pymysql` / `snowflake-connector-python` /
 `google-cloud-bigquery`). SQLite needs nothing (stdlib).
 
-Wire it up:
+Wire it up (the agami-core package must be installed in the chosen python — OCR-028):
     # Claude Code
-    claude mcp add agami -- python3 /ABS/PATH/plugins/agami/scripts/mcp_server.py
+    claude mcp add agami -- /ABS/PATH/python3 -m mcp_harness
 
     # Claude Desktop — claude_desktop_config.json
     {
       "mcpServers": {
         "agami": {
-          "command": "python3",
-          "args": ["/ABS/PATH/plugins/agami/scripts/mcp_server.py"],
+          "command": "/ABS/PATH/python3",
+          "args": ["-m", "mcp_harness"],
           "env": { "AGAMI_PROFILE": "main" }
         }
       }
@@ -70,7 +70,6 @@ from typing import Any, Callable
 # ---------------------------------------------------------------------------
 # Paths & config resolution (mirrors execute_sql.py / file-layout.md exactly)
 # ---------------------------------------------------------------------------
-
 import agami_paths
 
 # Secrets + per-user state live under <artifacts_dir>/local/ (the consolidated,

@@ -1,14 +1,15 @@
-# Tooling-only configuration for agami-core.
+# Tooling-only configuration for agami-core (the repo root).
 #
-# This repo is a Claude Code *plugin* (skills + scripts), not a installable Python
-# package — so there is intentionally NO [build-system] table. This file is the single
-# source of truth for ruff + pytest config; CI (.github/workflows/ci.yml) reads it so
-# the same rules run locally and in the gate, with nothing duplicated.
+# This root has NO [build-system] table on purpose — it is not itself an installable
+# package; it's the Claude Code plugin (skills + scripts) plus tooling config. The
+# importable library lives in its own package at packages/agami-core/ (OCR-028), which
+# has its own pyproject. This file is the single source of truth for ruff + pytest config;
+# CI (.github/workflows/ci.yml) reads it so the same rules run locally and in the gate.
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-src = ["plugins", "tests"]
+src = ["plugins", "packages", "tests"]
 
 [tool.ruff.lint]
 # Calibrated starting set — green day one, ratchet up later (REQ-017). E4/E7/E9 + F are

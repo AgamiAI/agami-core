@@ -24,9 +24,10 @@ import subprocess
 import sys
 
 RUFF = ["uvx", "ruff@0.15.19"]
-# The suite's import deps (DB drivers are omitted on purpose — those tests skip without a DB).
-TEST_DEPS = ["--with", "pytest-cov", "--with", "pydantic", "--with", "pyyaml", "--with", "sqlglot"]
-TARGETS = ["plugins", "tests", "dev.py"]
+# The suite imports the relocated agami-core library, so install it editable with the [model]
+# extra (pydantic/pyyaml/sqlglot). DB drivers are omitted on purpose — those tests skip without a DB.
+TEST_DEPS = ["--with", "pytest-cov", "--with-editable", "packages/agami-core[model]"]
+TARGETS = ["plugins", "packages", "tests", "dev.py"]
 
 
 def run(cmd: list[str], *, allow_fail: bool = False) -> int:
@@ -70,7 +71,8 @@ def cover() -> int:
     """Coverage of the lines THIS branch changed (fails on untested changed lines)."""
     # Make sure origin/main exists locally (fresh clones / worktrees may not have it).
     run(["git", "fetch", "--quiet", "origin", "main"], allow_fail=True)
-    rc = run(["uvx", *TEST_DEPS, "pytest", "tests/", "-q", "--cov=plugins", "--cov-report=xml"])
+    rc = run(["uvx", *TEST_DEPS, "pytest", "tests/", "-q",
+              "--cov=plugins", "--cov=packages/agami-core/src", "--cov-report=xml"])
     return rc or run(["uvx", "diff-cover", "coverage.xml", "--compare-branch=origin/main"])
 
 

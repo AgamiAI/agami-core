@@ -22,10 +22,9 @@ def test_flat_modules_import_without_syspath():
     """from mcp_harness import TOOLS / import execute_sql / import agami_paths — flat, no sys.path."""
     before = list(sys.path)
 
-    from mcp_harness import TOOLS
-
     import agami_paths  # noqa: F401
     import execute_sql  # noqa: F401
+    from mcp_harness import TOOLS
 
     # The relocation must not smuggle in a sys.path hack at import time.
     assert sys.path == before, "importing the package mutated sys.path"
