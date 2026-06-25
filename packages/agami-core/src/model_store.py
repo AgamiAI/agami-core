@@ -135,6 +135,60 @@ def load_organization(store: Store, datasource: str) -> Organization | None:
 
 
 # ---------------------------------------------------------------------------
+# Memory (ORGANIZATION.md / USER_MEMORY.md) + model_version — served from the DB too, so a DB-only
+# deploy reads NO files at runtime (get_datasource_schema's domain context + the receipt's version
+# pin come from these tables, not disk).
+# ---------------------------------------------------------------------------
+
+
+def write_memory(
+    store: Store, datasource: str, *, organization: str | None = None, user: str | None = None
+) -> None:
+    """Seed the domain-context docs for a datasource. Pass either/both; each replaces its row."""
+    for kind, content in (("organization", organization), ("user", user)):
+        if content is None:
+            continue
+        store.execute("DELETE FROM memory WHERE datasource = ? AND kind = ?", (datasource, kind))
+        store.execute(
+            "INSERT INTO memory (datasource, kind, content) VALUES (?, ?, ?)",
+            (datasource, kind, content),
+        )
+    store.commit()
+
+
+def load_memory(store: Store, datasource: str) -> dict[str, str]:
+    """{'organization': <ORGANIZATION.md text>, 'user': <USER_MEMORY.md text>} — missing keys absent."""
+    return {
+        r["kind"]: r["content"]
+        for r in store.query("SELECT kind, content FROM memory WHERE datasource = ?", (datasource,))
+    }
+
+
+def write_model_version(
+    store: Store, datasource: str, version: str, created_at: str | None = None
+) -> None:
+    """Record a model version (the snapshot content hash the receipt pins). Idempotent per version."""
+    store.execute(
+        "DELETE FROM model_version WHERE datasource = ? AND version = ?", (datasource, version)
+    )
+    store.execute(
+        "INSERT INTO model_version (datasource, version, created_at) VALUES (?, ?, ?)",
+        (datasource, version, created_at),
+    )
+    store.commit()
+
+
+def newest_model_version(store: Store, datasource: str) -> str | None:
+    """The newest recorded version for a datasource (what the receipt pins), or None."""
+    rows = store.query(
+        "SELECT version FROM model_version WHERE datasource = ? "
+        "ORDER BY created_at DESC, version DESC",
+        (datasource,),
+    )
+    return rows[0]["version"] if rows else None
+
+
+# ---------------------------------------------------------------------------
 # Prompt examples — write at deploy; serve scoped + ranked + capped at query time.
 # ---------------------------------------------------------------------------
 
@@ -151,9 +205,12 @@ def write_examples(store: Store, datasource: str, examples: list[dict[str, Any]]
     area None ⇒ the org-level cross-datasource bucket."""
     store.execute("DELETE FROM prompt_example WHERE datasource = ?", (datasource,))
     for ex in examples:
+        # Keep a stable id across re-seeds when the example carries one (so per-example identity
+        # survives a redeploy); mint one only when absent.
+        ex_id = str(ex.get("id") or uuid4().hex)
         store.execute(
             "INSERT INTO prompt_example (datasource, area, id, question, doc) VALUES (?, ?, ?, ?, ?)",
-            (datasource, ex.get("area"), uuid4().hex, ex.get("question", ""), json.dumps(ex)),
+            (datasource, ex.get("area"), ex_id, ex.get("question", ""), json.dumps(ex)),
         )
     store.commit()
 

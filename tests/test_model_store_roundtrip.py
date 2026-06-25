@@ -188,3 +188,37 @@ def test_file_model_seeds_to_db_and_tools_serve_from_it(tmp_path, monkeypatch):
     assert db_head["mode"] == file_head["mode"]
     assert db_head["subject_areas"] == file_head["subject_areas"]
     assert db_head["metric_index"] == file_head["metric_index"]
+
+
+def test_memory_and_model_version_round_trip():
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    model_store.write_memory(
+        s, "main", organization="# About\nAcme sells widgets.", user="prefer USD"
+    )
+    model_store.write_model_version(s, "main", "v-abc123", created_at="2026-06-25T00:00:00Z")
+    assert model_store.load_memory(s, "main") == {
+        "organization": "# About\nAcme sells widgets.",
+        "user": "prefer USD",
+    }
+    assert model_store.newest_model_version(s, "main") == "v-abc123"
+    s.close()
+
+
+def test_tools_serve_memory_and_version_from_db_no_files(tmp_path, monkeypatch):
+    # The spec's "no tool reads a file at runtime": domain context + the receipt version pin come
+    # from the DB, with NO artifacts dir on disk.
+    db_url = "sqlite://" + str(tmp_path / "agami.db")
+    s = Store.connect(db_url)
+    s.run_migrations()
+    model_store.write_memory(
+        s, "main", organization="# Acme\nWidgets co.", user="exclude test users"
+    )
+    model_store.write_model_version(s, "main", "v-deadbeef")
+    s.close()
+
+    monkeypatch.setenv("AGAMI_DB_URL", db_url)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "does-not-exist"))
+    assert tools._model_version("main") == "v-deadbeef"
+    org_md, user_md = tools._domain_memory("main")
+    assert "Widgets co." in org_md and user_md == "exclude test users"

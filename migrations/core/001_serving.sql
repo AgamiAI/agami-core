@@ -45,9 +45,13 @@ CREATE TABLE model_table (
     PRIMARY KEY (datasource, area, name)
 );
 
+-- NOTE: `area` is part of the PK and is NOT NULL. Postgres forbids NULL in any PK column (SQLite
+-- would allow it), so org-level (cross-subject-area) metrics/entities/relationships are NOT stored
+-- as area-NULL rows here — they ride inside organization.doc and are rebuilt from there. These
+-- tables hold per-subject-area objects only (area = the subject-area name).
 CREATE TABLE metric (
     datasource TEXT NOT NULL,
-    area       TEXT,               -- NULL = org-level (cross-subject-area) metric
+    area       TEXT NOT NULL,
     name       TEXT NOT NULL,
     doc        TEXT NOT NULL,
     PRIMARY KEY (datasource, area, name)
@@ -55,7 +59,7 @@ CREATE TABLE metric (
 
 CREATE TABLE entity (
     datasource    TEXT NOT NULL,
-    area          TEXT,            -- NULL = org-level (cross-subject-area) entity
+    area          TEXT NOT NULL,
     name          TEXT NOT NULL,
     value_pattern TEXT,            -- feeds the folded identify_entity matching
     doc           TEXT NOT NULL,
@@ -64,7 +68,7 @@ CREATE TABLE entity (
 
 CREATE TABLE relationship (
     datasource TEXT NOT NULL,
-    area       TEXT,               -- NULL = cross-subject-area / cross-datasource relationship
+    area       TEXT NOT NULL,
     name       TEXT NOT NULL,      -- "from->to"
     doc        TEXT NOT NULL,
     PRIMARY KEY (datasource, area, name)

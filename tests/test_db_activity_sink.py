@@ -73,6 +73,24 @@ def test_log_feedback_writes_to_db(tmp_path, monkeypatch):
     assert rows == [{"datasource": "main", "question": "how many?", "rating": "Good"}]
 
 
+def test_record_query_is_best_effort_on_db_error(tmp_path, monkeypatch):
+    # AGAMI_DB_URL points at a DB with NO migrations applied, so the INSERT into query_executions
+    # fails. _record_query must swallow it — a logging failure can't break a successful query.
+    url = "sqlite://" + str(tmp_path / "empty.db")
+    Store.connect(url).close()  # create the file; no tables
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    tools._record_query(
+        {  # must NOT raise
+            "ts": "2026-06-25T00:00:00Z",
+            "profile": "main",
+            "question": "q",
+            "sql": "SELECT 1",
+            "row_count": 1,
+            "source": "mcp_server",
+        }
+    )
+
+
 def test_local_jsonl_path_unchanged_when_db_unset(tmp_path, monkeypatch):
     monkeypatch.delenv("AGAMI_DB_URL", raising=False)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))

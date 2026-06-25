@@ -223,7 +223,10 @@ def _load_org(profile: str):
     if store is not None:
         from model_store import load_organization as _load_db
 
-        org = _load_db(store, profile)
+        try:
+            org = _load_db(store, profile)
+        finally:
+            store.close()
         if org is None:
             raise FileNotFoundError(
                 f"No semantic model in the database for datasource {profile!r}. Load it from YAML "
@@ -257,15 +260,47 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
 
 
 def _model_version(profile: str) -> str | None:
-    """The model-version pin = the newest snapshot dir name (a content hash), same as
-    the skill reads. None if there's no .snapshots/ (legacy model) or model deps are
-    unavailable (execute_sql stays usable)."""
+    """The model-version pin the receipt records — the newest model version. Served from the DB
+    when AGAMI_DB_URL is set (no file read), else the newest snapshot dir name (a content hash, what
+    the local skill reads). None if absent/unavailable (execute_sql stays usable)."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is not None:
+        from model_store import newest_model_version
+
+        try:
+            return newest_model_version(store, profile)
+        except Exception:
+            return None
+        finally:
+            store.close()
     try:
         from semantic_model import snapshot as SN
 
         return SN.newest_version(resolve_artifacts_dir() / profile)
     except Exception:
         return None
+
+
+def _domain_memory(profile: str) -> tuple[str, str | None]:
+    """(ORGANIZATION.md text, USER_MEMORY.md text) for the domain-context block — from the DB when
+    AGAMI_DB_URL is set (no file read at runtime), else from disk."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is not None:
+        from model_store import load_memory
+
+        try:
+            mem = load_memory(store, profile)
+        finally:
+            store.close()
+        return mem.get("organization") or "", mem.get("user")
+    artifacts = resolve_artifacts_dir()
+    return (_read_text(artifacts / profile / "ORGANIZATION.md") or ""), _read_text(
+        artifacts / "USER_MEMORY.md"
+    )
 
 
 def _resolve_receipt(profile: str, sql: str) -> dict | None:
@@ -562,7 +597,6 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     Plus ORGANIZATION.md / USER_MEMORY.md domain context.
     """
     profile = resolve_profile(args.get("datasource"))
-    artifacts = resolve_artifacts_dir()
     try:
         org = _load_org(profile)
     except FileNotFoundError as e:
@@ -624,16 +658,16 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
 
     parts = [json.dumps(result, indent=2, default=str)]
     # Domain context = the human's ORGANIZATION.md narrative + the model-DERIVED summary
-    # (subject areas, conventions, decoded glossary) assembled fresh from the structured
-    # model. The glossary thus always reaches the LLM — it no longer depends on a file
-    # having been re-rendered, and the human's prose is never mixed with auto content.
+    # (subject areas, conventions, decoded glossary) assembled fresh from the structured model.
+    # Source (ORGANIZATION.md / USER_MEMORY.md text) comes from the DB under the DB backend, files
+    # otherwise — so a DB-only deploy reads no files at runtime.
     from semantic_model import org_draft as _OD
 
-    org_md_raw = _read_text(artifacts / profile / "ORGANIZATION.md") or ""
+    org_md_raw, user_md_raw = _domain_memory(profile)
     domain_context = _OD.compose_context(org_md_raw, org)
     if domain_context:
         parts.append(f"\n## Domain context\n{domain_context}")
-    user_mem = _distill_for_llm(_read_text(artifacts / "USER_MEMORY.md"))
+    user_mem = _distill_for_llm(user_md_raw)
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
     return "\n".join(parts)
@@ -655,10 +689,15 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     if store is not None:
         from model_store import select_examples
 
-        top_k = args.get("top_k") or 10
-        examples = select_examples(
-            store, profile, query=args.get("query"), area=args.get("area"), top_k=top_k
-        )
+        # honour an explicit top_k=0 (caller wants none); only default when absent/None
+        top_k = args.get("top_k")
+        top_k = 10 if top_k is None else int(top_k)
+        try:
+            examples = select_examples(
+                store, profile, query=args.get("query"), area=args.get("area"), top_k=top_k
+            )
+        finally:
+            store.close()
         return json.dumps(
             {"datasource": profile, "examples": examples, "count": len(examples)},
             indent=2,
@@ -866,41 +905,46 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> bool:
         return False
 
 
-def _db_sink():
-    """The DB-backed ActivitySink when AGAMI_DB_URL is set, else None (local jsonl path). Opening
-    per call is fine for correctness; a long-lived server can pool the connection later."""
+def _record_query(rec: dict[str, Any]) -> None:
+    """Log a query execution through the DB sink (AGAMI_DB_URL) or the local jsonl. **Best-effort:**
+    a logging failure must never break an otherwise-successful query — so the DB path swallows
+    errors exactly like the jsonl path, and always closes its connection."""
     from store import Store
 
     store = Store.from_env()
     if store is None:
-        return None
-    from model_store import DbActivitySink
-
-    return DbActivitySink(store)
-
-
-def _record_query(rec: dict[str, Any]) -> None:
-    """Log a query execution through the configured sink (DB) or the local jsonl. Best-effort: a
-    logging failure never breaks the query (the skill's contract)."""
-    sink = _db_sink()
-    if sink is None:
         _append_jsonl(QUERY_LOG, rec)
         return
-    from contracts import QueryExecutionRecord
+    try:
+        from contracts import QueryExecutionRecord
+        from model_store import DbActivitySink
 
-    sink.record_query_execution(QueryExecutionRecord(**rec))
+        DbActivitySink(store).record_query_execution(QueryExecutionRecord(**rec))
+    except Exception:
+        pass  # best-effort: never fail the query because logging failed
+    finally:
+        store.close()
 
 
 def _record_feedback(rec: dict[str, Any]) -> str | None:
-    """Record feedback through the configured sink (DB) or the local jsonl. Returns where it landed
-    ('database' or the file path), or None if the local write failed."""
-    sink = _db_sink()
-    if sink is None:
-        return str(FEEDBACK_LOG) if _append_jsonl(FEEDBACK_LOG, rec) else None
-    from contracts import FeedbackRecord
+    """Record feedback through the DB sink (AGAMI_DB_URL) or the local jsonl. Returns where it
+    landed ('database' or the file path), or None if the write failed (feedback is the user's
+    explicit action, so a failure surfaces — unlike incidental query logging). Closes the store."""
+    from store import Store
 
-    sink.record_feedback(FeedbackRecord(**rec))
-    return "database"
+    store = Store.from_env()
+    if store is None:
+        return str(FEEDBACK_LOG) if _append_jsonl(FEEDBACK_LOG, rec) else None
+    try:
+        from contracts import FeedbackRecord
+        from model_store import DbActivitySink
+
+        DbActivitySink(store).record_feedback(FeedbackRecord(**rec))
+        return "database"
+    except Exception:
+        return None
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------

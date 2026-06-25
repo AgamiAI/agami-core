@@ -9,8 +9,15 @@ from __future__ import annotations
 from store import Store
 
 SERVING_TABLES = {
-    "organization", "subject_area", "model_table", "metric", "entity",
-    "relationship", "prompt_example", "memory", "model_version",
+    "organization",
+    "subject_area",
+    "model_table",
+    "metric",
+    "entity",
+    "relationship",
+    "prompt_example",
+    "memory",
+    "model_version",
 }
 RUNTIME_TABLES = {"query_executions", "feedback"}
 
@@ -45,4 +52,15 @@ def test_sizing_metadata_columns_present():
     assert "table_count" in sa_cols
     tbl_cols = {r["name"] for r in s.query("PRAGMA table_info(model_table)")}
     assert "est_row_count" in tbl_cols
+    s.close()
+
+
+def test_pk_area_columns_are_not_null_for_postgres_portability():
+    # Postgres forbids NULL in a PRIMARY KEY column; SQLite would allow it. `area` is in the PK of
+    # metric/entity/relationship, so it must be NOT NULL or the schema isn't Postgres-portable.
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    for table in ("metric", "entity", "relationship"):
+        area = next(r for r in s.query(f"PRAGMA table_info({table})") if r["name"] == "area")
+        assert area["notnull"] == 1, f"{table}.area must be NOT NULL (it's in the PK)"
     s.close()
