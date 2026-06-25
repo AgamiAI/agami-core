@@ -213,12 +213,24 @@ def check_read_only(sql: str) -> str | None:
 
 
 def _load_org(profile: str):
-    """Lazily load the semantic model for a profile. Raises a clear error if the
-    model package (pydantic) isn't importable or there's no model on disk.
+    """Lazily load the semantic model for a profile, producing an `Organization`. Two backends
+    behind one seam: when AGAMI_DB_URL is set the hosted server reads it from the DB; otherwise the
+    local skill reads the YAML files (unchanged). Raises a clear error if the model deps (pydantic)
+    aren't importable or there's no model for the profile."""
+    from store import Store  # stdlib-light; psycopg2/sqlite imported lazily inside
 
-    The schema/traversal tools need the model; the execute_sql + log_feedback tools
-    stay pure-stdlib so the server runs for execution even without the model deps.
-    """
+    store = Store.from_env()
+    if store is not None:
+        from model_store import load_organization as _load_db
+
+        org = _load_db(store, profile)
+        if org is None:
+            raise FileNotFoundError(
+                f"No semantic model in the database for datasource {profile!r}. Load it from YAML "
+                f"with the deploy's model loader."
+            )
+        return org
+
     from semantic_model import loader as L  # may raise ImportError (pydantic)
 
     root = resolve_artifacts_dir() / profile
