@@ -24,8 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# The repo's migration home (OCR-028 created the skeleton); resolved relative to this file so it
-# works from an installed package or a checkout.
+# The repo's migration home; resolved relative to this file so it works from an installed package
+# or a checkout.
 MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "core"
 
 

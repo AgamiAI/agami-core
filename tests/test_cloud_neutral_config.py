@@ -143,7 +143,9 @@ def test_auth_middleware_attaches_resolved_org_after_auth(monkeypatch):
     from starlette.requests import Request
     from starlette.responses import Response
 
-    mw = mcp_http._AuthMiddleware(app=None, resolver=mcp_http.SingleTenantOrgResolver(Org(id="acme")))
+    mw = mcp_http._AuthMiddleware(
+        app=None, resolver=mcp_http.SingleTenantOrgResolver(Org(id="acme"))
+    )
     captured: dict[str, object] = {}
 
     async def call_next(request):
@@ -166,8 +168,8 @@ def test_auth_middleware_attaches_resolved_org_after_auth(monkeypatch):
 
 def test_db_backed_serve_needs_no_artifacts_dir(tmp_path, monkeypatch):
     # A fresh instance on a stateless platform has no local model files — only AGAMI_DB_URL. The
-    # serving path must answer from the DB alone. (ACE-002 delivers this; ACE-003 re-owns the
-    # criterion so cloud-neutrality is self-checked, not inherited.)
+    # serving path must answer from the DB alone, so cloud-neutrality is self-checked here rather
+    # than relying on the DB-serving tests elsewhere.
     pytest.importorskip("pydantic")
     import json
 
@@ -196,5 +198,7 @@ def test_db_backed_serve_needs_no_artifacts_dir(tmp_path, monkeypatch):
 
     monkeypatch.setenv("AGAMI_DB_URL", db_url)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "does-not-exist"))  # no disk state
-    head = json.JSONDecoder().raw_decode(tools.tool_get_datasource_schema({"datasource": "main"}))[0]
+    head = json.JSONDecoder().raw_decode(tools.tool_get_datasource_schema({"datasource": "main"}))[
+        0
+    ]
     assert head["subject_areas"] and head["subject_areas"][0]["name"] == "sales"
