@@ -45,7 +45,7 @@ jobs:
         run: >-
           uvx --python ${{ matrix.python-version }}
           --with pytest --with pytest-cov --with pydantic --with pyyaml --with sqlglot
-          pytest tests/ -q
+          pytest tests/ -q --cov=plugins --cov-report=term-missing
 
   gitleaks:
     name: gitleaks (secret scan)
@@ -62,7 +62,8 @@ jobs:
           base="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
           curl -sSfL -O "${base}/gitleaks_${V}_linux_x64.tar.gz"
           curl -sSfL -O "${base}/gitleaks_${V}_checksums.txt"
-          # Verify the download before extracting/running it (third-party binary).
-          sha256sum --check --ignore-missing "gitleaks_${V}_checksums.txt"
+          # Verify the download: pull the exact checksum line for our artifact and check it,
+          # failing if that line is absent (so a renamed/missing entry can't skip verification).
+          grep "gitleaks_${V}_linux_x64.tar.gz$" "gitleaks_${V}_checksums.txt" | sha256sum -c -
           tar -xzf "gitleaks_${V}_linux_x64.tar.gz" gitleaks
           ./gitleaks detect --source . --redact --no-banner
