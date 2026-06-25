@@ -640,14 +640,31 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
 
 
 def tool_get_prompt_examples(args: dict[str, Any]) -> str:
-    """Local analog of Ask Agami `get_prompt_examples`: the few-shot library.
+    """Ask Agami `get_prompt_examples`: the few-shot library.
 
-    Returns the curated examples.yaml verbatim as text. Local serving has no
-    embedding store, so `query`/`top_k` are accepted for interface-parity with
-    the hosted connector but do not rank or cap — the full curated library is
-    returned (it is small; the client reads YAML directly).
+    DB serving (hosted, AGAMI_DB_URL set): scope to the datasource, rank by word-overlap on
+    `query`, and cap to `top_k` within a char budget — so a large library (e.g. accumulated
+    corrections) never floods the context. Local serving (files): returns the curated examples.yaml
+    verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
     profile = resolve_profile(args.get("datasource"))
+
+    from store import Store
+
+    store = Store.from_env()
+    if store is not None:
+        from model_store import select_examples
+
+        top_k = args.get("top_k") or 10
+        examples = select_examples(
+            store, profile, query=args.get("query"), area=args.get("area"), top_k=top_k
+        )
+        return json.dumps(
+            {"datasource": profile, "examples": examples, "count": len(examples)},
+            indent=2,
+            default=str,
+        )
+
     artifacts = resolve_artifacts_dir()
     ex_dir = artifacts / profile / "prompt_examples"
     blocks: list[str] = []
@@ -787,9 +804,9 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
         "receipt": _resolve_receipt(profile, sql),
     }
 
-    # Append to the personal query log (same file the skills use), best-effort.
-    _append_jsonl(
-        QUERY_LOG,
+    # Log the execution through the single chokepoint: the DB sink when AGAMI_DB_URL is set (one
+    # query_executions row), else the local jsonl the skills use. Best-effort either way.
+    _record_query(
         {
             "ts": _now_iso(),
             "profile": profile,
@@ -797,7 +814,7 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
             "sql": sql,
             "row_count": len(data_rows),
             "source": "mcp_server",
-        },
+        }
     )
     return json.dumps(result, indent=2, default=str)
 
@@ -814,8 +831,7 @@ def tool_log_feedback(args: dict[str, Any]) -> str:
     good = {"good", "positive", "thumbs_up", "👍", "up", "yes"}
     bad = {"bad", "negative", "thumbs_down", "👎", "down", "no"}
     rating_value = "Good" if norm in good else "Bad" if norm in bad else str(rating)
-    ok = _append_jsonl(
-        FEEDBACK_LOG,
+    logged = _record_feedback(
         {
             "ts": _now_iso(),
             "profile": resolve_profile(args.get("datasource")),
@@ -823,13 +839,13 @@ def tool_log_feedback(args: dict[str, Any]) -> str:
             "rating": rating_value,
             "notes": args.get("notes"),
             "source": "mcp_server",
-        },
+        }
     )
-    if not ok:
+    if logged is None:
         return json.dumps(
             {"error": {"kind": "other", "remediation": f"Could not write {FEEDBACK_LOG}."}}
         )
-    return json.dumps({"ok": True, "rating": rating_value, "logged_to": str(FEEDBACK_LOG)})
+    return json.dumps({"ok": True, "rating": rating_value, "logged_to": logged})
 
 
 def _now_iso() -> str:
@@ -848,6 +864,43 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> bool:
         return True
     except OSError:
         return False
+
+
+def _db_sink():
+    """The DB-backed ActivitySink when AGAMI_DB_URL is set, else None (local jsonl path). Opening
+    per call is fine for correctness; a long-lived server can pool the connection later."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is None:
+        return None
+    from model_store import DbActivitySink
+
+    return DbActivitySink(store)
+
+
+def _record_query(rec: dict[str, Any]) -> None:
+    """Log a query execution through the configured sink (DB) or the local jsonl. Best-effort: a
+    logging failure never breaks the query (the skill's contract)."""
+    sink = _db_sink()
+    if sink is None:
+        _append_jsonl(QUERY_LOG, rec)
+        return
+    from contracts import QueryExecutionRecord
+
+    sink.record_query_execution(QueryExecutionRecord(**rec))
+
+
+def _record_feedback(rec: dict[str, Any]) -> str | None:
+    """Record feedback through the configured sink (DB) or the local jsonl. Returns where it landed
+    ('database' or the file path), or None if the local write failed."""
+    sink = _db_sink()
+    if sink is None:
+        return str(FEEDBACK_LOG) if _append_jsonl(FEEDBACK_LOG, rec) else None
+    from contracts import FeedbackRecord
+
+    sink.record_feedback(FeedbackRecord(**rec))
+    return "database"
 
 
 # ---------------------------------------------------------------------------

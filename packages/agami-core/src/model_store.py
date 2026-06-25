@@ -14,7 +14,9 @@ collections (those are their own rows); load re-attaches them.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+from uuid import uuid4
 
 from semantic_model.models import Organization
 from store import Store
@@ -130,3 +132,109 @@ def load_organization(store: Store, datasource: str) -> Organization | None:
 
     org_doc["subject_areas"] = subject_areas
     return Organization.model_validate(org_doc)
+
+
+# ---------------------------------------------------------------------------
+# Prompt examples — write at deploy; serve scoped + ranked + capped at query time.
+# ---------------------------------------------------------------------------
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+_EXAMPLES_CHAR_BUDGET = 20_000
+
+
+def _tokens(s: str | None) -> set[str]:
+    return set(_WORD_RE.findall((s or "").lower()))
+
+
+def write_examples(store: Store, datasource: str, examples: list[dict[str, Any]]) -> None:
+    """(Re)seed the prompt-example rows for a datasource. Each example is {area, question, sql, …};
+    area None ⇒ the org-level cross-datasource bucket."""
+    store.execute("DELETE FROM prompt_example WHERE datasource = ?", (datasource,))
+    for ex in examples:
+        store.execute(
+            "INSERT INTO prompt_example (datasource, area, id, question, doc) VALUES (?, ?, ?, ?, ?)",
+            (datasource, ex.get("area"), uuid4().hex, ex.get("question", ""), json.dumps(ex)),
+        )
+    store.commit()
+
+
+def select_examples(
+    store: Store,
+    datasource: str,
+    query: str | None = None,
+    area: str | None = None,
+    top_k: int = 10,
+    char_budget: int = _EXAMPLES_CHAR_BUDGET,
+) -> list[dict[str, Any]]:
+    """Scope to the datasource (+ area, plus the org-level bucket), rank by word-overlap on the
+    question, and cap to top-K within a char budget — so a large library never floods the context.
+    No embeddings (that tier is deploy-time + off by default)."""
+    if area:
+        rows = store.query(
+            "SELECT question, doc FROM prompt_example WHERE datasource = ? "
+            "AND (area = ? OR area IS NULL)",
+            (datasource, area),
+        )
+    else:
+        rows = store.query(
+            "SELECT question, doc FROM prompt_example WHERE datasource = ?", (datasource,)
+        )
+    q = _tokens(query)
+    if q:
+        rows = sorted(rows, key=lambda r: len(q & _tokens(r["question"])), reverse=True)
+    out: list[dict[str, Any]] = []
+    used = 0
+    for r in rows[:top_k]:
+        doc = json.loads(r["doc"])
+        size = len(json.dumps(doc))
+        if out and used + size > char_budget:
+            break
+        out.append(doc)
+        used += size
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Runtime write path — the DB-backed ActivitySink (conforms to ports.ActivitySink by shape).
+# ---------------------------------------------------------------------------
+
+
+class DbActivitySink:
+    """Write `query_executions` + `feedback` to the DB (one class, any backend the Store opens —
+    not a Postgres/SQLite pair). Conforms structurally to the `ports.ActivitySink` Protocol; the
+    server's single execute_sql chokepoint logs one row per query through it."""
+
+    def __init__(self, store: Store) -> None:
+        self._store = store
+
+    def record_query_execution(self, record: Any) -> None:
+        self._store.execute(
+            "INSERT INTO query_executions (id, ts, datasource, question, sql, row_count, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                uuid4().hex,
+                record.ts,
+                record.profile,
+                record.question,
+                record.sql,
+                record.row_count,
+                record.source,
+            ),
+        )
+        self._store.commit()
+
+    def record_feedback(self, record: Any) -> None:
+        self._store.execute(
+            "INSERT INTO feedback (id, ts, datasource, question, rating, notes, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                uuid4().hex,
+                record.ts,
+                record.profile,
+                record.question,
+                record.rating,
+                record.notes,
+                record.source,
+            ),
+        )
+        self._store.commit()
