@@ -71,12 +71,20 @@ _PUBLIC_PREFIXES = (
 )
 
 
+def _is_public_path(path: str) -> bool:
+    """True for the discovery routes and their path-suffixed variants only. We match on a path
+    *boundary* (exact, or prefix + '/'), not a bare `startswith` — otherwise a sibling like
+    `/.well-known/oauth-protected-resource-x` would skip auth too. Today such a path only 404s, but
+    boundary-matching keeps the open surface == the routes we serve even if a route is added later."""
+    return any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES)
+
+
 class _AuthMiddleware(BaseHTTPMiddleware):
     """Require a bearer token's presence; the OAuth-discovery endpoints stay open. Everything else
     401s without a token."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path.startswith(_PUBLIC_PREFIXES):
+        if _is_public_path(request.url.path):
             return await call_next(request)
         authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
         # Require the Bearer scheme specifically (not just any Authorization header), then a

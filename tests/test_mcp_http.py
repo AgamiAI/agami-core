@@ -51,9 +51,13 @@ def test_auth_skip_is_scoped_to_discovery_routes_only(base_url):
     # auth (no blanket "/.well-known/" bypass).
     c = TestClient(mcp_http.build_app())
     assert c.get("/.well-known/openid-configuration").status_code == 401
+    # A sibling that merely shares the prefix (no path boundary) must NOT skip auth either — the
+    # skip matches on a boundary (exact or prefix + "/"), not a bare startswith.
+    assert c.get("/.well-known/oauth-protected-resource-evil").status_code == 401
+    assert c.get("/.well-known/oauth-protected-resource").status_code == 200  # exact route open
     assert (
-        c.get("/.well-known/oauth-protected-resource").status_code == 200
-    )  # real route still open
+        c.get("/.well-known/oauth-protected-resource/mcp").status_code == 200
+    )  # suffixed variant open
 
 
 def test_discovery_advertises_public_base_url(base_url):
