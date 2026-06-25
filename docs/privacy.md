@@ -64,12 +64,12 @@ That's the entire outbound surface: opening one well-known URL in your browser w
 
 ## The optional local MCP server keeps the same guarantee
 
-`agami serve` (`plugins/agami/scripts/mcp_server.py`) lets you use agami from
-Claude Code / Claude Desktop. It changes nothing about this privacy posture:
+`agami serve` (`python -m mcp_harness`, in `packages/agami-core/src/mcp_harness.py`) lets you
+use agami from Claude Code / Claude Desktop. It changes nothing about this privacy posture:
 
 - It speaks the MCP **stdio** transport — a child process of your AI client,
   reading/writing OS pipes. It **never binds a network port** and makes **no
-  network call**. `tests/test_mcp_server.py` enforces this (the source is
+  network call**. `tests/test_mcp_harness.py` enforces this (the source is
   asserted to contain no socket/http/urllib/requests primitives).
 - It reads only the same local paths listed above and executes SQL locally via
   `execute_sql.py`. Only the rows you'd see anyway are returned to your client.

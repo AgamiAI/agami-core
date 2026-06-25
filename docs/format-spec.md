@@ -81,9 +81,9 @@ Organization (org.yaml)
 └─ cross_subject_area_relationships[]   (org-level edges spanning areas)
 ```
 
-The Pydantic models in [`plugins/agami/scripts/semantic_model/models.py`](../plugins/agami/scripts/semantic_model/models.py) **are** the spec (they `forbid` unknown keys). Provider-portable declarative fields — `default_filters`, `value_transform`, `caveats`, `value_pattern`, `sensitive`, `default_time_window`, join `cardinality` — are applied generically by the MCP/runtime, so behavior is identical across LLMs.
+The Pydantic models in [`packages/agami-core/src/semantic_model/models.py`](../packages/agami-core/src/semantic_model/models.py) **are** the spec (they `forbid` unknown keys). Provider-portable declarative fields — `default_filters`, `value_transform`, `caveats`, `value_pattern`, `sensitive`, `default_time_window`, join `cardinality` — are applied generically by the MCP/runtime, so behavior is identical across LLMs.
 
-Every write is gated by the validator at [`plugins/agami/scripts/semantic_model/validator.py`](../plugins/agami/scripts/semantic_model/validator.py) (driven via `python3 -m semantic_model.cli validate <root>`). **No model that fails validation is ever persisted.**
+Every write is gated by the validator at [`packages/agami-core/src/semantic_model/validator.py`](../packages/agami-core/src/semantic_model/validator.py) (driven via `python3 -m semantic_model.cli validate <root>`). **No model that fails validation is ever persisted.**
 
 ### Worked example — a minimal model on disk
 

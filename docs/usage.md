@@ -233,7 +233,7 @@ relationship or metric, also set `signed_off_by`, `signed_off_at`, and
 `signed_off_role` — the validator will reject the file otherwise.
 
 Format reference: [`docs/format-spec.md`](format-spec.md) and the Pydantic models
-at [`plugins/agami/scripts/semantic_model/models.py`](../plugins/agami/scripts/semantic_model/models.py).
+at [`packages/agami-core/src/semantic_model/models.py`](../packages/agami-core/src/semantic_model/models.py).
 
 ### When the database schema changes (new tables / new columns / dropped columns)
 

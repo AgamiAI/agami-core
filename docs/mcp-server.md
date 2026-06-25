@@ -12,10 +12,10 @@ of a cloud registry. Going from this local server → the hosted team product is
 *backend swap*, not a new product.
 
 ```
-your AI client  ──spawns──▶  python3 mcp_server.py   (stdio child process)
+your AI client  ──spawns──▶  python3 -m mcp_harness   (stdio child process)
    (Claude Code /                      │
     Claude Desktop)                    ├─ reads  <artifacts_dir>/<profile>/  (the semantic model + examples)
-                                       └─ runs   execute_sql.py  ──▶  your local DB
+                                       └─ runs   python -m execute_sql  ──▶  your local DB
 ```
 
 ## What it exposes
@@ -37,8 +37,15 @@ the schema + examples these tools return) — exactly as with the hosted connect
 
 - You've already run `agami-connect` (so `<artifacts_dir>/local/credentials` and a model under
   `<artifacts_dir>/<profile>/` exist).
+- The **agami-core package** installed in the Python you'll point the server at
+  (it provides `mcp_harness` + `execute_sql`):
+
+  ```bash
+  pip install -e "packages/agami-core[model]"
+  ```
+
 - A **Python driver** for your database, because the server executes via
-  `execute_sql.py` (the Tier-3 Python path):
+  `execute_sql` (the Tier-3 Python path):
 
   ```bash
   pip install psycopg2-binary             # Postgres / Redshift
@@ -51,16 +58,17 @@ the schema + examples these tools return) — exactly as with the hosted connect
 ## Connect it to Claude Code
 
 ```bash
-claude mcp add agami -- python3 /ABS/PATH/to/agami-core/plugins/agami/scripts/mcp_server.py
+claude mcp add agami -- /ABS/PATH/to/python3 -m mcp_harness
 ```
 
+(where `/ABS/PATH/to/python3` is the interpreter that has agami-core installed — see Prerequisites.)
 Optionally pin a profile/artifacts dir for this server with env vars:
 
 ```bash
 claude mcp add agami \
   --env AGAMI_PROFILE=main \
   --env AGAMI_ARTIFACTS_DIR=$HOME/agami-artifacts \
-  -- python3 /ABS/PATH/to/agami-core/plugins/agami/scripts/mcp_server.py
+  -- /ABS/PATH/to/python3 -m mcp_harness
 ```
 
 ## Connect it to Claude Desktop (macOS and Windows)
@@ -86,17 +94,17 @@ It removes all three sharp edges of hand-editing:
 
 - **auto-detects the right Python** — the interpreter that can actually import your
   DB driver (the GUI-PATH gotcha, solved);
-- **copies the two self-contained files** (`mcp_server.py` + `execute_sql.py`) to a
-  stable `<artifacts_dir>/local/serve/`, so the Desktop config survives plugin updates and keeps
-  working even if the plugin is uninstalled;
+- **installs the agami-core package** into that interpreter (non-editable, so the
+  code lands in site-packages) and registers `python -m mcp_harness`, so the Desktop
+  config survives plugin updates and keeps working even if the plugin is uninstalled;
 - **safely merges** the entry into `claude_desktop_config.json` — timestamped
   backup, atomic write, every other key and MCP server preserved.
 
 Then **fully quit** the app (Cmd+Q on macOS; quit from the system tray on Windows)
-and reopen. Flags: `--profile NAME` (pin a profile), `--in-place` (point at a
-checkout instead of copying — for devs iterating on the server), `--config PATH`
-(target a different client's config file). Re-run after a plugin update to refresh
-the copied files. The helper auto-resolves the macOS vs Windows config path for you.
+and reopen. Flags: `--profile NAME` (pin a profile), `--in-place` (editable install
+from a checkout — for devs iterating on the server), `--config PATH`
+(target a different client's config file). Re-run after a plugin update to reinstall.
+The helper auto-resolves the macOS vs Windows config path for you.
 
 ### Manual (what the helper does under the hood)
 
@@ -110,11 +118,11 @@ If you'd rather edit by hand, mind these two gotchas — both silently produce
    `python -c "import sys,psycopg2; print(sys.executable)"`). Example paths — macOS:
    `/Library/Frameworks/Python.framework/Versions/3.12/bin/python3`; Windows:
    `C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe`.
-2. **Use an absolute path to `mcp_server.py`.** If you installed via the Claude
-   Code marketplace, the script lives in the version-pinned plugin cache, e.g.
-   `~/.claude/plugins/cache/agami/agami-core/<version>/scripts/mcp_server.py` — note
-   that path changes on every plugin update. If you cloned the repo, point at your
-   checkout instead.
+2. **Install agami-core into that Python and run it as a module.** The server is
+   `python -m mcp_harness`, which needs the agami-core package importable in the
+   interpreter from gotcha #1: `"/abs/python3" -m pip install -e "/path/to/agami-core/packages/agami-core[model]"`.
+   This is what the helper automates — and why it survives the plugin cache dir moving
+   on each update (the code is installed, not referenced by a moving path).
 
 Edit `claude_desktop_config.json` (Settings → Developer → Edit Config). Its path is
 `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS and
@@ -126,7 +134,7 @@ Edit `claude_desktop_config.json` (Settings → Developer → Edit Config). Its 
   "mcpServers": {
     "agami": {
       "command": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
-      "args": ["/ABSOLUTE/PATH/to/scripts/mcp_server.py"],
+      "args": ["-m", "mcp_harness"],
       "env": { "AGAMI_PROFILE": "main" }
     }
   }
