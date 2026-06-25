@@ -24,8 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# The repo's migration home (OCR-028 created the skeleton); resolved relative to this file so it
-# works from an installed package or a checkout.
+# The repo's migration home; resolved relative to this file so it works from an installed package
+# or a checkout.
 MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "core"
 
 
@@ -67,10 +67,17 @@ class Store:
 
     @classmethod
     def from_env(cls) -> Store | None:
-        """Open the store named by AGAMI_DB_URL, or None when unset (the local file path is used)."""
+        """Open the store named by the DB env var, or None when unset (the local file path is used).
+
+        `AGAMI_DB_URL` is canonical; `APP_DATABASE_URL` is accepted as an alias for the common
+        cloud-platform convention (Cloud Run/ACA/Heroku-style `*_DATABASE_URL`). Canonical wins if
+        both are set, so a deliberate override is unambiguous."""
         import os
 
-        url = os.environ.get("AGAMI_DB_URL", "").strip()
+        url = (
+            os.environ.get("AGAMI_DB_URL", "").strip()
+            or os.environ.get("APP_DATABASE_URL", "").strip()
+        )
         return cls.connect(url) if url else None
 
     # --- portable SQL -------------------------------------------------------
