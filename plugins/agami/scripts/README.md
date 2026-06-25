@@ -1,9 +1,8 @@
 # Python helpers (skill-only)
 
 The agami **library** — the unified executor (`execute_sql`), the MCP `TOOLS` harness
-(`mcp_harness`), the `semantic_model` package, and `agami_paths` — was relocated into an
-installable package at [`packages/agami-core/`](../../../packages/agami-core) (**OCR-028**).
-Install it once:
+(`mcp_harness`), the `semantic_model` package, and `agami_paths` — lives in an installable
+package at [`packages/agami-core/`](../../../packages/agami-core). Install it once:
 
 ```bash
 pip install -e "packages/agami-core[model]"   # [model] pulls pydantic/sqlglot/pyyaml

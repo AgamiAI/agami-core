@@ -11,11 +11,9 @@ removes:
      PATH, so a bare `python3` isn't found — and it must be the interpreter that
      can import your DB driver (psycopg2 / pymysql / …). We auto-detect it.
   2. **The install-path gotcha.** A marketplace-installed plugin lives in a
-     version-pinned cache dir that moves on every update. We `pip install` the
-     agami-core package into the chosen interpreter (non-editable by default, so the
-     code lands in site-packages, not a path that moves) and register
-     `python -m mcp_harness`, so the Desktop config keeps working after a plugin
-     update — and even if the plugin is later uninstalled.
+     cache dir that moves on every update. We `pip install` the agami-core package
+     into the chosen interpreter and register `python -m mcp_harness`, so the config
+     survives plugin updates (the code is in site-packages, not a moving path).
   3. **The merge gotcha.** `mcpServers` is a top-level key; a stray comma breaks
      the whole file. We back up, merge (preserving every other key), write
      atomically, and validate.
@@ -47,9 +45,9 @@ import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# agami-core was relocated to packages/agami-core/ (OCR-028). This installer can run before
-# the package is pip-installed, so bootstrap the package source onto sys.path to import
-# agami_paths; the Desktop entry it writes runs the *installed* package via `-m mcp_harness`.
+# This installer can run before the package is pip-installed, so bootstrap the package source
+# onto sys.path to import agami_paths; the Desktop entry it writes runs the installed package
+# via `-m mcp_harness`.
 PACKAGE_DIR = (SCRIPT_DIR.parent.parent.parent / "packages" / "agami-core").resolve()
 _sys = sys
 _sys.path.insert(0, str(PACKAGE_DIR / "src"))

@@ -25,8 +25,8 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# mcp_harness now lives in the installed agami-core package (OCR-028) — import it directly,
-# no sys.path. SERVER is the on-disk module file, used only for the source-level no-network scan.
+# mcp_harness lives in the installed agami-core package — import it directly, no sys.path.
+# SERVER is the on-disk module file, used only for the source-level no-network scan.
 SERVER = REPO_ROOT / "packages" / "agami-core" / "src" / "mcp_harness.py"
 
 from mcp_harness import (

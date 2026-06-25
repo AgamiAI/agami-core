@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pydantic")
-# semantic_model now ships in the installed agami-core package (OCR-028); PKG_SRC is only
-# used for the source-level "stays import-light" scan below.
+# semantic_model ships in the installed agami-core package; PKG_SRC is only used for the
+# source-level "stays import-light" scan below.
 PKG_SRC = Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"
 
 from semantic_model import units

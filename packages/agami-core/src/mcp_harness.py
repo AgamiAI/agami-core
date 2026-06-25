@@ -38,7 +38,7 @@ driver tier), so the relevant driver must be importable for non-SQLite DBs
 (`psycopg2-binary` / `pymysql` / `snowflake-connector-python` /
 `google-cloud-bigquery`). SQLite needs nothing (stdlib).
 
-Wire it up (the agami-core package must be installed in the chosen python — OCR-028):
+Wire it up (the agami-core package must be installed in the chosen python):
     # Claude Code
     claude mcp add agami -- /ABS/PATH/python3 -m mcp_harness
 
@@ -72,8 +72,7 @@ from typing import Any, Callable
 # ---------------------------------------------------------------------------
 import agami_paths
 
-# Secrets + per-user state live under <artifacts_dir>/local/ (the consolidated,
-# gitignored replacement for ~/.agami). Re-resolved after bootstrap() in main().
+# Secrets + per-user state live under <artifacts_dir>/local/. Re-resolved after bootstrap() in main().
 AGAMI_LOCAL = agami_paths.local_dir()
 CREDENTIALS_PATH = agami_paths.credentials_path()
 CONFIG_PATH = agami_paths.config_path()
@@ -87,12 +86,7 @@ DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 
 def _server_version() -> str:
-    """Best-effort agami-core version.
-
-    Prefer the AGAMI_VERSION env var (an explicit override the launcher may set), then
-    fall back to the installed package's metadata version (the relocated library is now a
-    real distribution — no fragile relative path to a plugin manifest).
-    """
+    """Best-effort version: the AGAMI_VERSION env override, else the installed package metadata."""
     env_v = os.environ.get("AGAMI_VERSION")
     if env_v:
         return env_v

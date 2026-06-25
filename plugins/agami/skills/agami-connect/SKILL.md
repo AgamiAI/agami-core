@@ -240,7 +240,7 @@ The model (introspection, validation, traversal, curation — everything the `sm
 If they're present, continue. If missing, **confirm via AskUserQuestion before installing** (same convention as the DB-driver install above — agami never installs silently):
 > agami needs the **agami-core** package (which pulls `pydantic`, `sqlglot`, `pyyaml`) to build and read the semantic model. Install it now? (one-time, user-site — `pip install --user`)
 
-On **Yes**: `"$PY" -m pip install --user -e "$AGAMI_PLUGIN_ROOT/../../packages/agami-core[model]"` (fall back to a plain `pip install` if `--user` is rejected). This installs the relocated library (OCR-028) so `python -m execute_sql` / `python -m semantic_model.cli` and the `sm` launcher all resolve it. On **No**: stop with *"Can't build the model without it — re-run when you're ready to install."* — don't proceed to introspect.
+On **Yes**: `"$PY" -m pip install --user -e "$AGAMI_PLUGIN_ROOT/../../packages/agami-core[model]"` (fall back to a plain `pip install` if `--user` is rejected). This installs the agami-core library so `python -m execute_sql` / `python -m semantic_model.cli` and the `sm` launcher all resolve it. On **No**: stop with *"Can't build the model without it — re-run when you're ready to install."* — don't proceed to introspect.
 
 (The `sm` wrapper also self-installs these on first use as a safety net, but doing it here makes it explicit, confirmed, and at a predictable moment rather than mid-introspection.)
 

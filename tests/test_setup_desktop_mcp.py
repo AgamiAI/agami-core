@@ -1,5 +1,5 @@
 """
-Tests for plugins/agami/scripts/setup_desktop_mcp.py (OCR-028: pip-install model).
+Tests for plugins/agami/scripts/setup_desktop_mcp.py (the pip-install model).
 
 The load-bearing contract is **merge safety**: wiring agami into
 `claude_desktop_config.json` must never lose a user's other keys or other MCP
@@ -100,7 +100,7 @@ def test_resolve_profile_env(monkeypatch):
 
 
 def test_build_server_entry_shape():
-    # The Desktop entry runs the installed package as a module (OCR-028), not a file path.
+    # The Desktop entry runs the installed package as a module, not a file path.
     entry = sd.build_server_entry("/py", "main", "1.2.3")
     assert entry["command"] == "/py"
     assert entry["args"] == ["-m", "mcp_harness"]

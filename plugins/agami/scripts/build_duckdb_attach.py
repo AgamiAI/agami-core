@@ -42,8 +42,8 @@ import secrets
 import sys
 from pathlib import Path
 
-# setup_pgauth stays a skill-side helper (scripts/); agami_paths moved into the agami-core
-# package (OCR-028). Add both: the scripts dir (for setup_pgauth) and the package src.
+# setup_pgauth stays a skill-side helper (scripts/); agami_paths lives in the agami-core
+# package. Add both: the scripts dir (for setup_pgauth) and the package src.
 _SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS))
 sys.path.insert(0, str(_SCRIPTS.parents[2] / "packages" / "agami-core" / "src"))

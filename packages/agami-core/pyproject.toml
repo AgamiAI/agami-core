@@ -1,10 +1,9 @@
-# agami-core — the importable library behind the agami skill, the hosted MCP server
-# (ACE-001), and the future private consumer (agami, F6). Relocated out of
-# plugins/agami/scripts/ by OCR-028 so all three import ONE package.
+# agami-core — the importable library behind the agami skill and the MCP server: the semantic
+# model, the shared MCP TOOLS harness, and the unified local query executor.
 #
-# Flat top-level module names (semantic_model, mcp_harness, execute_sql, agami_paths)
-# are an invariant: the consumer's imports must resolve unchanged (REQ-003). src/ layout
-# keeps the importable names flat while keeping the move out of an accidental-import top level.
+# Flat top-level module names (semantic_model, mcp_harness, execute_sql, agami_paths) are an
+# invariant: a consumer's imports must resolve unchanged. The src/ layout keeps the importable
+# names flat while keeping them out of an accidental-import top level.
 
 [build-system]
 requires = ["setuptools>=68"]

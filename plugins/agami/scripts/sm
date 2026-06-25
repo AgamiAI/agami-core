@@ -22,9 +22,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# agami-core was relocated into an installable package (OCR-028). The CLI runs as
-# `python -m semantic_model.cli` against the *installed* package; we install it (with the
-# model extra, which brings pydantic/sqlglot/pyyaml) on demand below.
+# The CLI runs as `python -m semantic_model.cli` against the installed agami-core package;
+# we install it (with the model extra, which brings pydantic/sqlglot/pyyaml) on demand below.
 PKG_DIR="$(cd "$SCRIPT_DIR/../../../packages/agami-core" && pwd)"
 
 resolve_python() {

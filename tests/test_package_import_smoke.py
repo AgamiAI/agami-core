@@ -1,10 +1,8 @@
-"""OCR-028 acceptance: agami-core is an importable package with flat module names.
+"""agami-core is an importable package with flat module names.
 
-The whole point of the relocation is that consumers (the local skill, the ACE-001 HTTP
-server, the future private `agami`) import ONE package with **flat top-level names** and
-**no `sys.path` manipulation**. This test is the executable form of that success criterion:
-it imports the four library surfaces without touching `sys.path` at all. If it passes, the
-package is installed and the names resolve the way the consumers depend on.
+Consumers import ONE package with **flat top-level names** and **no `sys.path` manipulation**.
+This test imports the four library surfaces without touching `sys.path` at all — if it passes,
+the package is installed and the names resolve the way consumers depend on.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ def test_flat_modules_import_without_syspath():
     import execute_sql  # noqa: F401
     from mcp_harness import TOOLS
 
-    # The relocation must not smuggle in a sys.path hack at import time.
+    # Importing the package must not smuggle in a sys.path hack.
     assert sys.path == before, "importing the package mutated sys.path"
 
     assert isinstance(TOOLS, dict) and TOOLS, "TOOLS registry should be a non-empty map"

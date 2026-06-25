@@ -4,11 +4,8 @@ The importable core behind agami: the governed **semantic model**, the shared **
 harness** (stdio entrypoint), and the **unified local query executor** (`execute_sql` + the
 read-only safety pass + unit formatting).
 
-Relocated here from `plugins/agami/scripts/` by **OCR-028** so one package serves all consumers:
-
-- the local **Claude Code skill** (`plugins/agami/`) — runs the tools via `python -m`,
-- the hosted **HTTP MCP server** (ACE-001) — imports the `TOOLS` registry + the executor,
-- the future private **`agami`** consumer (F6) — imports the same flat module names, unchanged.
+One package serves every consumer — the local Claude Code skill, the MCP server, and any
+downstream that imports the same flat module names.
 
 ## Install
 
