@@ -14,7 +14,7 @@ Tasks:
   test    just the test suite
   lint    just ruff (lint + format check)
   fmt     apply ruff's auto-formatter to the tree
-  cover   patch coverage — did the lines this branch changed get tested?
+  cover   patch coverage — are the lines you changed covered by a test?
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import sys
 RUFF = ["uvx", "ruff@0.15.19"]
 # The suite's import deps (DB drivers are omitted on purpose — those tests skip without a DB).
 TEST_DEPS = ["--with", "pytest-cov", "--with", "pydantic", "--with", "pyyaml", "--with", "sqlglot"]
-TARGETS = ["plugins", "tests"]
+TARGETS = ["plugins", "tests", "dev.py"]
 
 
 def run(cmd: list[str], *, allow_fail: bool = False) -> int:
@@ -76,7 +76,9 @@ def cover() -> int:
 
 def setup() -> int:
     """Install the local pre-commit hooks (convenience; CI is the real gate)."""
-    return run(["uvx", "pre-commit", "install", "--hook-type", "pre-commit", "--hook-type", "pre-push"])
+    return run(
+        ["uvx", "pre-commit", "install", "--hook-type", "pre-commit", "--hook-type", "pre-push"]
+    )
 
 
 TASKS = {"setup": setup, "check": check, "test": test, "lint": lint, "fmt": fmt, "cover": cover}
