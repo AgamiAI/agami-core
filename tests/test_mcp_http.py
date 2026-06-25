@@ -59,6 +59,15 @@ def test_unauthenticated_request_gets_401_challenge(base_url):
     assert f'resource_metadata="{BASE}/.well-known/oauth-protected-resource"' in www
 
 
+def test_non_bearer_and_empty_tokens_are_rejected(base_url):
+    c = TestClient(mcp_http.build_app())
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    # Only the Bearer scheme with a non-empty token counts as present.
+    for authz in ("", "Bearer ", "Bearer    ", "Basic abc123", "token xyz"):
+        r = c.post("/mcp", headers={"Authorization": authz}, json=body)
+        assert r.status_code == 401, authz
+
+
 def test_http_tools_list_is_the_same_five(base_url):
     """Authed end-to-end: initialize → tools/list over HTTP returns exactly the 5 product tools —
     the same surface stdio advertises (mirrored, not forked)."""

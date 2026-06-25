@@ -70,8 +70,11 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         if request.url.path.startswith("/.well-known/"):
             return await call_next(request)
         authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-        token = authz[7:].strip() if authz.lower().startswith("bearer ") else authz.strip()
-        if _AUTH.validate_token(token) is None:
+        # Require the Bearer scheme specifically (not just any Authorization header), then a
+        # non-empty token. Real token validation is a later feature; this is presence-only.
+        if not authz.lower().startswith("bearer "):
+            return _unauthenticated(public_base_url())
+        if _AUTH.validate_token(authz[7:].strip()) is None:
             return _unauthenticated(public_base_url())
         return await call_next(request)
 
