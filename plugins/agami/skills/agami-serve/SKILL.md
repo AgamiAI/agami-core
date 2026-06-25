@@ -1,6 +1,6 @@
 ---
 name: agami-serve
-description: "Wires the local agami MCP server (mcp_server.py) into the Claude Desktop app in one step, so you can ask your database questions from Claude Desktop — not just inside Claude Code. Auto-detects the right Python interpreter (the one with your DB driver), copies the two self-contained server files to a stable <artifacts_dir>/local/serve/ so the config survives plugin updates, and safely merges the entry into claude_desktop_config.json (backup + atomic write, preserving every other key). The local server is the mirror of the hosted Agami connector — same tools, local backend — so this is also how a developer feels the exact experience their business end-users would get."
+description: "Wires the local agami MCP server (python -m mcp_harness) into the Claude Desktop app in one step, so you can ask your database questions from Claude Desktop — not just inside Claude Code. Auto-detects the right Python interpreter (the one with your DB driver), installs the agami-core package into it so the registration survives plugin updates, and safely merges the entry into claude_desktop_config.json (backup + atomic write, preserving every other key). The local server is the mirror of the hosted Agami connector — same tools, local backend — so this is also how a developer feels the exact experience their business end-users would get."
 when_to_use: "Use when the user says 'set up agami for Claude Desktop', 'use agami in the Claude app', 'hook up the MCP server', 'let me test what my end users would see', '/agami-serve', or otherwise wants agami available outside Claude Code. Requires agami-connect to have run first (needs credentials + a semantic model). NOT needed to use agami inside Claude Code — the skills already work there."
 ---
 
@@ -28,7 +28,7 @@ a missing DB driver, and the app restart.
 
 ## Phase −1: Plan-mode preflight
 
-Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash (to run the helper, which writes files). If plan mode is active, refuse with: *"I can't wire up Claude Desktop in plan mode — it writes files (the serve dir + your desktop config). Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me."* **DO NOT write a plan file. DO NOT call `ExitPlanMode`.**
+Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash (to run the helper, which writes files). If plan mode is active, refuse with: *"I can't wire up Claude Desktop in plan mode — it installs the agami-core package and writes your desktop config. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me."* **DO NOT write a plan file. DO NOT call `ExitPlanMode`.**
 
 ## Phase 0: Preflight
 
@@ -49,8 +49,8 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py"
 ```
 
 Pass `--profile <name>` if the user named one. (For a developer iterating on the
-server from a checkout, `--in-place` points the config at the checkout instead of
-copying to `<artifacts_dir>/local/serve` — mention this only if they ask.)
+server from a checkout, `--in-place` does an **editable** install from the checkout
+so code edits take effect without reinstalling — mention this only if they ask.)
 
 ## Phase 2: Handle the two human cases
 
@@ -75,7 +75,7 @@ product — see `docs/open-vs-hosted.md` in the repo
 ## Notes
 
 - The setup is **idempotent** — re-running updates the `agami` entry in place and
-  re-copies the server files. Re-run after a plugin update to refresh the copy.
+  re-installs the agami-core package. Re-run after a plugin update to refresh it.
 - It **never** clobbers other config: every other key and MCP server is preserved,
   and the previous config is backed up to a timestamped `.bak-<epoch>` file.
 - It does **not** touch credentials and adds **no** network surface (see
