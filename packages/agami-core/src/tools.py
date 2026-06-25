@@ -133,7 +133,9 @@ def _credentials_sections() -> dict[str, dict[str, str]]:
         return {}
     out: dict[str, dict[str, str]] = {}
     for section in cfg.sections():
-        out[section] = {k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[section].items()}
+        out[section] = {
+            k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[section].items()
+        }
     return out
 
 
@@ -142,9 +144,17 @@ def _db_type_for(profile: str, creds: dict[str, dict[str, str]]) -> str:
     t = sect.get("type", "")
     if not t and sect.get("url"):
         scheme = sect["url"].split("://", 1)[0].split("+", 1)[0].lower()
-        t = {"postgresql": "postgres", "postgres": "postgres", "mysql": "mysql",
-              "mariadb": "mysql", "redshift": "redshift", "snowflake": "snowflake",
-              "bigquery": "bigquery", "bq": "bigquery", "sqlite": "sqlite"}.get(scheme, scheme)
+        t = {
+            "postgresql": "postgres",
+            "postgres": "postgres",
+            "mysql": "mysql",
+            "mariadb": "mysql",
+            "redshift": "redshift",
+            "snowflake": "snowflake",
+            "bigquery": "bigquery",
+            "bq": "bigquery",
+            "sqlite": "sqlite",
+        }.get(scheme, scheme)
     return t
 
 
@@ -216,6 +226,7 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
     try:
         org = _load_org(profile)
         from semantic_model import runtime as RT
+
         return RT.resolve_result_units(org, sql)
     except Exception:
         return {}
@@ -227,6 +238,7 @@ def _model_version(profile: str) -> str | None:
     unavailable (execute_sql stays usable)."""
     try:
         from semantic_model import snapshot as SN
+
         return SN.newest_version(resolve_artifacts_dir() / profile)
     except Exception:
         return None
@@ -240,6 +252,7 @@ def _resolve_receipt(profile: str, sql: str) -> dict | None:
     try:
         org = _load_org(profile)
         from semantic_model import runtime as RT
+
         return RT.assemble_receipt(org, sql, model_version=_model_version(profile))
     except Exception:
         return None
@@ -255,20 +268,28 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
         pdir = artifacts / profile
         table_count = 0
         if pdir.is_dir():
-            table_count = sum(1 for _ in (pdir / "subject_areas").glob("*/tables/*.yaml")) \
-                if (pdir / "subject_areas").is_dir() else 0
-        out.append({
-            "datasource": profile,
-            "database_type": _db_type_for(profile, creds),
-            "table_count": table_count,
-            "model_present": (pdir / "org.yaml").exists(),
-            "is_active": profile == active,
-        })
+            table_count = (
+                sum(1 for _ in (pdir / "subject_areas").glob("*/tables/*.yaml"))
+                if (pdir / "subject_areas").is_dir()
+                else 0
+            )
+        out.append(
+            {
+                "datasource": profile,
+                "database_type": _db_type_for(profile, creds),
+                "table_count": table_count,
+                "model_present": (pdir / "org.yaml").exists(),
+                "is_active": profile == active,
+            }
+        )
     if not out:
-        return json.dumps({
-            "datasources": [],
-            "note": "No profiles found in your credentials file. Run the agami-connect skill first.",
-        }, indent=2)
+        return json.dumps(
+            {
+                "datasources": [],
+                "note": "No profiles found in your credentials file. Run the agami-connect skill first.",
+            },
+            indent=2,
+        )
     return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
 
 
@@ -294,13 +315,222 @@ def _distill_for_llm(text: str | None) -> str:
     return out.strip()
 
 
-def tool_get_datasource_schema(args: dict[str, Any]) -> str:
-    """Local analog of Ask Agami `get_datasource_schema`, backed by the semantic model.
+# --- get_datasource_schema adaptive sizing ---------------------------------
+# A full semantic model can be enormous and overwhelm the client's context. `mode="auto"` picks
+# an initial verbosity by **subject-area count** (agami-core's primary unit); the char budget is
+# the hard backstop that downgrades one rung at a time (full→summary→index) even for an explicit
+# `mode="full"`, so a single tool result can't blow the context window.
+_AUTO_FULL_MAX_AREAS = 12  # <= this -> full
+_AUTO_SUMMARY_MAX_AREAS = 50  # <= this -> summary; above -> index
+_SCHEMA_CHAR_BUDGET = 60_000  # decoded len(json.dumps(...)) ceiling (~15K tokens)
+_SCHEMA_MODE_DOWNGRADE = {"full": "summary", "summary": "index", "index": None}
+_LARGE_TABLE_ROWS = 1_000_000  # tables at/above this surface in `large_tables` in every mode
 
-    Pass 1 (no `dataset_names`): the subject-area index — each area's name +
-    description + table list (compact). Pass 2 (`dataset_names: [...]`): the full
-    `get_table_context` for those tables (columns scoped by the area's
-    expose_column_groups, default_filters, relationships, caveats, value_transforms).
+# Metric ranking (lexical, no embeddings): exact/substring hits ("strong") are always kept; the
+# weak token-overlap tail needs >= this coverage and is capped at top-K.
+_METRIC_MATCH_TOP_K = 10
+_METRIC_MATCH_MIN_COVERAGE = 0.6
+_METRIC_MATCH_STOPWORDS = frozenset(
+    {
+        "per",
+        "to",
+        "by",
+        "of",
+        "the",
+        "a",
+        "an",
+        "and",
+        "in",
+        "for",
+        "on",
+        "vs",
+        "average",
+        "avg",
+        "mean",
+        "rate",
+        "ratio",
+        "total",
+        "number",
+        "num",
+        "count",
+        "percentage",
+        "percent",
+        "pct",
+    }
+)
+_METRIC_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _auto_mode_for(area_count: int) -> str:
+    """Pick the initial verbosity for mode='auto' by subject-area count."""
+    if area_count <= _AUTO_FULL_MAX_AREAS:
+        return "full"
+    if area_count <= _AUTO_SUMMARY_MAX_AREAS:
+        return "summary"
+    return "index"
+
+
+def _norm_phrase(s: str | None) -> str:
+    """Lowercase + word-tokenize + single-space join (case/underscore/punct collapse away)."""
+    return " ".join(_METRIC_WORD_RE.findall((s or "").lower()))
+
+
+def _content_tokens(s: str | None) -> set[str]:
+    """Non-stopword tokens with naive plural folding — the token-overlap path only."""
+    out: set[str] = set()
+    for t in _METRIC_WORD_RE.findall((s or "").lower()):
+        if t in _METRIC_MATCH_STOPWORDS:
+            continue
+        out.add(t[:-1] if len(t) > 3 and t.endswith("s") else t)
+    return out
+
+
+def _all_metrics(org) -> dict[str, tuple[Any, str | None]]:
+    """Every metric name -> (metric, area). Subject-area metrics + cross-area metrics."""
+    out: dict[str, tuple[Any, str | None]] = {}
+    for sa in org.subject_areas:
+        for m in sa.metrics:
+            out[m.name] = (m, sa.name)
+    for m in getattr(org, "cross_subject_area_metrics", []):
+        out[m.name] = (m, None)
+    return out
+
+
+def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]) -> list[str]:
+    """Lexically rank metrics against `query` -> matched names. Strong (exact/substring) hits are
+    never dropped by the cap; the cap bounds only the weak token-overlap tail. [] if no match."""
+    q_norm = _norm_phrase(query)
+    if not q_norm:
+        return []
+    q_tokens = _content_tokens(query)
+    scored: list[tuple[float, bool, str]] = []
+    for name, (m, _area) in metrics.items():
+        cand_phrases = [name.replace("_", " "), m.description or ""] + list(m.other_names or [])
+        cand_norms = [c for c in (_norm_phrase(p) for p in cand_phrases) if c]
+        score, strong = 0.0, False
+        for cn in cand_norms:
+            if cn == q_norm:
+                score, strong = max(score, 100.0), True
+            elif cn in q_norm or q_norm in cn:
+                score, strong = max(score, 60.0), True
+        if q_tokens:
+            cand_tokens: set[str] = set()
+            for cn in cand_norms:
+                cand_tokens |= _content_tokens(cn)
+            if cand_tokens:
+                coverage = len(q_tokens & cand_tokens) / len(q_tokens)
+                if coverage >= _METRIC_MATCH_MIN_COVERAGE:
+                    score = max(score, 20.0 * coverage)
+        if score > 0:
+            scored.append((score, strong, name))
+    if not scored:
+        return []
+    scored.sort(key=lambda t: (-t[0], t[2]))
+    strong_hits = [n for _, st, n in scored if st]
+    result = list(dict.fromkeys(strong_hits + [n for _, _, n in scored]))
+    return result[: max(_METRIC_MATCH_TOP_K, len(strong_hits))]
+
+
+def _metric_full(m, area: str | None) -> dict[str, Any]:
+    return {
+        "name": m.name,
+        "area": area,
+        "description": m.description,
+        "calculation": m.calculation,
+        "other_names": list(m.other_names or []),
+        "review_state": m.review_state,
+    }
+
+
+def _large_tables(org) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            ph = t.performance_hints
+            rc = ph.estimated_row_count if ph else None
+            if rc and rc >= _LARGE_TABLE_ROWS:
+                out[t.name] = rc
+    return out
+
+
+def _table_contexts(org, table_names: list[str], L) -> dict[str, Any]:
+    """Full get_table_context for the named tables, grouped back into a {name: ctx} map."""
+    area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+    by_area: dict[str | None, list[str]] = {}
+    for t in table_names:
+        by_area.setdefault(area_of.get(t), []).append(t)
+    contexts: dict[str, Any] = {}
+    for area, tbls in by_area.items():
+        ctx = L.get_table_context(
+            org,
+            tbls,
+            area=area,
+            include=["default_filters", "relationships", "caveats", "value_transforms", "metrics"],
+        )
+        contexts.update(ctx.get("tables", {}))
+    return contexts
+
+
+def _schema_payload(
+    org, profile: str, mode: str, matched: list[str], metrics: dict[str, tuple[Any, str | None]], L
+) -> dict[str, Any]:
+    """Build the structured schema payload at the given verbosity. `metric_index` + `large_tables`
+    are always present (the never-hide net); `metrics` carries FULL detail for the matched set, or
+    every metric in `full` with no query."""
+    result: dict[str, Any] = {
+        "datasource": profile,
+        "organization": org.description or None,
+        "mode": mode,
+        "cross_area_relationships": [
+            {
+                "from": r.from_subject_area,
+                "to": r.to_subject_area,
+                "for_questions_about": r.for_questions_about,
+            }
+            for r in org.cross_subject_area_relationships
+        ],
+        "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
+        "large_tables": _large_tables(org),
+    }
+    if mode == "index":
+        result["subject_areas"] = [
+            {"name": sa.name, "description": sa.description, "table_count": len(sa.tables)}
+            for sa in org.subject_areas
+        ]
+    else:  # summary or full — areas carry their table list (name + one-line description)
+        result["subject_areas"] = [
+            {
+                "name": sa.name,
+                "description": sa.description,
+                "default_time_window": sa.default_time_window,
+                "tables": [
+                    {"name": t.name, "description": t.description} for t in sa.tables_defined
+                ],
+            }
+            for sa in org.subject_areas
+        ]
+    if mode == "full":
+        result["tables"] = _table_contexts(
+            org, [t.name for sa in org.subject_areas for t in sa.tables_defined], L
+        )
+    # metrics in full: the matched set (a query/metric_names limits them); else every metric in
+    # full mode (back-compat); else none (rely on metric_index).
+    selected = matched if matched else (list(metrics) if mode == "full" else [])
+    result["metrics"] = [
+        _metric_full(metrics[n][0], metrics[n][1]) for n in selected if n in metrics
+    ]
+    return result
+
+
+def tool_get_datasource_schema(args: dict[str, Any]) -> str:
+    """Return the semantic model for a datasource, **sized to fit the client's context**.
+
+    `mode="auto"` (default) picks verbosity by subject-area count (full <=12, summary <=50, index
+    51+); a hard ~60K-char budget then downgrades one rung at a time (full→summary→index) even for
+    an explicit `mode="full"`, setting `truncated=true`. `dataset_names=[...]` returns full
+    `get_table_context` for the named tables (an explicit scope is respected — no downgrade).
+    `query="<question>"` lexically ranks metrics so the client never ingests the whole catalog;
+    `metric_index` (name->description for EVERY metric) + `large_tables` are always present.
     Plus ORGANIZATION.md / USER_MEMORY.md domain context.
     """
     profile = resolve_profile(args.get("datasource"))
@@ -310,47 +540,59 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     except FileNotFoundError as e:
         return json.dumps({"error": {"kind": "not_found", "remediation": str(e)}}, indent=2)
     except ImportError:
-        return json.dumps({"error": {"kind": "driver_missing", "remediation":
-            "semantic model deps not installed. Run: pip install -r "
-            "plugins/agami/scripts/semantic_model/requirements.txt"}}, indent=2)
+        return json.dumps(
+            {
+                "error": {
+                    "kind": "driver_missing",
+                    "remediation": "semantic model deps not installed. Run: pip install -r "
+                    "plugins/agami/scripts/semantic_model/requirements.txt",
+                }
+            },
+            indent=2,
+        )
 
     from semantic_model import loader as L
 
     requested = args.get("dataset_names") or []
-    result: dict[str, Any] = {"datasource": profile, "organization": org.description or None}
+    requested_mode = (args.get("mode") or "auto").lower()
+    metrics = _all_metrics(org)
 
-    if not requested:
-        result["subject_areas"] = [{
-            "name": sa.name,
-            "description": sa.description,
-            "default_time_window": sa.default_time_window,
-            "tables": [tr.table for tr in sa.tables],
-        } for sa in org.subject_areas]
-        result["cross_area_relationships"] = [
-            {"from": r.from_subject_area, "to": r.to_subject_area,
-             "for_questions_about": r.for_questions_about}
-            for r in org.cross_subject_area_relationships
-        ]
-        result["note"] = ("Per-table detail is lazy-loaded. Call again with "
-                          "`dataset_names: [...]` for full columns + relationships.")
-    else:
+    if requested:
+        # Explicit table scope — full detail for the named tables, no budget downgrade.
         wanted = [str(n).split(".")[-1] for n in requested]
-        # find the area each table belongs to (for expose_column_groups scoping)
-        area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
-        by_area: dict[str, list[str]] = {}
-        for t in wanted:
-            by_area.setdefault(area_of.get(t), []).append(t)
-        contexts = {}
-        for area, tbls in by_area.items():
-            ctx = L.get_table_context(org, tbls, area=area,
-                                      include=["default_filters", "relationships",
-                                               "caveats", "value_transforms", "metrics"])
-            contexts.update(ctx.get("tables", {}))
-            if ctx.get("relationships"):
-                result.setdefault("relationships", []).extend(ctx["relationships"])
-            if ctx.get("metrics"):
-                result.setdefault("metrics", []).extend(ctx["metrics"])
-        result["tables"] = contexts
+        result: dict[str, Any] = {
+            "datasource": profile,
+            "organization": org.description or None,
+            "mode": "full",
+            "requested_mode": requested_mode,
+            "tables": _table_contexts(org, wanted, L),
+            "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
+            "large_tables": _large_tables(org),
+        }
+    else:
+        explicit = [n for n in (args.get("metric_names") or []) if n in metrics]
+        matched = list(dict.fromkeys(explicit + _match_metrics(args.get("query"), metrics)))
+        mode = (
+            _auto_mode_for(len(org.subject_areas)) if requested_mode == "auto" else requested_mode
+        )
+        if mode not in _SCHEMA_MODE_DOWNGRADE:
+            mode = "summary"
+        truncated = False
+        while True:
+            result = _schema_payload(org, profile, mode, matched, metrics, L)
+            if len(json.dumps(result, default=str)) <= _SCHEMA_CHAR_BUDGET:
+                break
+            nxt = _SCHEMA_MODE_DOWNGRADE[mode]
+            if nxt is None:
+                break
+            mode, truncated = nxt, True
+        result["requested_mode"] = requested_mode
+        if truncated:
+            result["truncated"] = True
+            result["next_action"] = (
+                "Response was downgraded to fit the context budget. Request "
+                "specific tables via `dataset_names` or focus metrics with `query`."
+            )
 
     parts = [json.dumps(result, indent=2, default=str)]
     # Domain context = the human's ORGANIZATION.md narrative + the model-DERIVED summary
@@ -358,6 +600,7 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # model. The glossary thus always reaches the LLM — it no longer depends on a file
     # having been re-rendered, and the human's prose is never mixed with auto content.
     from semantic_model import org_draft as _OD
+
     org_md_raw = _read_text(artifacts / profile / "ORGANIZATION.md") or ""
     domain_context = _OD.compose_context(org_md_raw, org)
     if domain_context:
@@ -387,11 +630,14 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 area = ex_file.parent.name
                 blocks.append(f"## subject area: {area}\n```yaml\n{text}\n```")
     if not blocks:
-        return json.dumps({
-            "examples": [],
-            "note": f"No examples under {ex_dir}/<area>/examples.yaml. "
-                    f"Corrections saved via agami-save-correction will appear here.",
-        }, indent=2)
+        return json.dumps(
+            {
+                "examples": [],
+                "note": f"No examples under {ex_dir}/<area>/examples.yaml. "
+                f"Corrections saved via agami-save-correction will appear here.",
+            },
+            indent=2,
+        )
     header = (
         f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {ex_dir})\n"
         f"# Each block is one subject area's curated library. Match on the question, "
@@ -402,10 +648,10 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
 
 def _classify_exit(code: int) -> str:
     return {
-        2: "dsn",            # config / missing credentials / bad profile
+        2: "dsn",  # config / missing credentials / bad profile
         3: "driver_missing",
-        4: "auth",           # connect / auth failed (also network)
-        5: "syntax",         # SQL execution error
+        4: "auth",  # connect / auth failed (also network)
+        5: "syntax",  # SQL execution error
     }.get(code, "other")
 
 
@@ -418,14 +664,19 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     """
     sql = args.get("sql")
     if not isinstance(sql, str) or not sql.strip():
-        return json.dumps({"error": {"kind": "other", "remediation": "Pass a non-empty `sql` string."}})
+        return json.dumps(
+            {"error": {"kind": "other", "remediation": "Pass a non-empty `sql` string."}}
+        )
 
     reason = check_read_only(sql)
     if reason is not None:
-        return json.dumps({
-            "error": {"kind": "permission", "remediation": reason},
-            "sql": sql,
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": {"kind": "permission", "remediation": reason},
+                "sql": sql,
+            },
+            indent=2,
+        )
 
     profile = resolve_profile(args.get("datasource"))
     max_rows = args.get("max_rows")
@@ -453,18 +704,23 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
             timeout=240,
         )
     except subprocess.TimeoutExpired:
-        return json.dumps({"error": {"kind": "timeout", "remediation": "Query exceeded 240s."}, "sql": sql})
+        return json.dumps(
+            {"error": {"kind": "timeout", "remediation": "Query exceeded 240s."}, "sql": sql}
+        )
     execution_ms = int((time.monotonic() - started) * 1000)
 
     if proc.returncode != 0:
-        return json.dumps({
-            "error": {
-                "kind": _classify_exit(proc.returncode),
-                "remediation": (proc.stderr or "").strip() or "execute_sql.py failed",
+        return json.dumps(
+            {
+                "error": {
+                    "kind": _classify_exit(proc.returncode),
+                    "remediation": (proc.stderr or "").strip() or "execute_sql.py failed",
+                },
+                "sql": sql,
+                "execution_ms": execution_ms,
             },
-            "sql": sql,
-            "execution_ms": execution_ms,
-        }, indent=2)
+            indent=2,
+        )
 
     # Parse the RFC-4180 CSV emitted on stdout.
     reader = csv.reader(io.StringIO(proc.stdout))
@@ -482,6 +738,7 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     unit_map = _resolve_units(profile, sql)
     try:
         from semantic_model import units  # stdlib-only; safe even without model deps
+
         markdown = units.format_table(columns, data_rows, unit_map)
     except Exception:
         markdown = None
@@ -503,14 +760,17 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     }
 
     # Append to the personal query log (same file the skills use), best-effort.
-    _append_jsonl(QUERY_LOG, {
-        "ts": _now_iso(),
-        "profile": profile,
-        "question": args.get("raw_query"),
-        "sql": sql,
-        "row_count": len(data_rows),
-        "source": "mcp_server",
-    })
+    _append_jsonl(
+        QUERY_LOG,
+        {
+            "ts": _now_iso(),
+            "profile": profile,
+            "question": args.get("raw_query"),
+            "sql": sql,
+            "row_count": len(data_rows),
+            "source": "mcp_server",
+        },
+    )
     return json.dumps(result, indent=2, default=str)
 
 
@@ -519,21 +779,28 @@ def tool_log_feedback(args: dict[str, Any]) -> str:
     raw_query = args.get("raw_query")
     rating = args.get("rating")
     if not raw_query or not rating:
-        return json.dumps({"error": {"kind": "other", "remediation": "raw_query and rating are required."}})
+        return json.dumps(
+            {"error": {"kind": "other", "remediation": "raw_query and rating are required."}}
+        )
     norm = str(rating).strip().lower()
     good = {"good", "positive", "thumbs_up", "👍", "up", "yes"}
     bad = {"bad", "negative", "thumbs_down", "👎", "down", "no"}
     rating_value = "Good" if norm in good else "Bad" if norm in bad else str(rating)
-    ok = _append_jsonl(FEEDBACK_LOG, {
-        "ts": _now_iso(),
-        "profile": resolve_profile(args.get("datasource")),
-        "question": raw_query,
-        "rating": rating_value,
-        "notes": args.get("notes"),
-        "source": "mcp_server",
-    })
+    ok = _append_jsonl(
+        FEEDBACK_LOG,
+        {
+            "ts": _now_iso(),
+            "profile": resolve_profile(args.get("datasource")),
+            "question": raw_query,
+            "rating": rating_value,
+            "notes": args.get("notes"),
+            "source": "mcp_server",
+        },
+    )
     if not ok:
-        return json.dumps({"error": {"kind": "other", "remediation": f"Could not write {FEEDBACK_LOG}."}})
+        return json.dumps(
+            {"error": {"kind": "other", "remediation": f"Could not write {FEEDBACK_LOG}."}}
+        )
     return json.dumps({"ok": True, "rating": rating_value, "logged_to": str(FEEDBACK_LOG)})
 
 
@@ -572,22 +839,40 @@ TOOLS: dict[str, dict[str, Any]] = {
     "get_datasource_schema": {
         "handler": tool_get_datasource_schema,
         "description": (
-            "Fetch the local semantic model for a datasource: the subject-area index (Pass 1 — "
-            "each area's name + description + table list), plus full get_table_context (columns "
-            "scoped by expose_column_groups, default_filters, relationships, caveats, "
-            "value_transforms, metrics) for any `dataset_names` you pass (Pass 2 lazy-load), plus "
-            "ORGANIZATION.md / USER_MEMORY.md context. Use metric `calculation`/`bindings` VERBATIM."
+            "Fetch the local semantic model for a datasource, sized to fit context. `mode=auto` "
+            "(default) picks verbosity by subject-area count (full/summary/index) under a char "
+            "budget; `dataset_names=[...]` returns full get_table_context (columns scoped by "
+            "expose_column_groups, default_filters, relationships, caveats, value_transforms, "
+            "metrics) for the named tables; `query` ranks metrics so you don't ingest the whole "
+            "catalog (`metric_index` lists every metric regardless). Plus ORGANIZATION.md / "
+            "USER_MEMORY.md context. Use metric `calculation`/`bindings` VERBATIM."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "datasource": {"type": "string", "description": "Profile name; defaults to the active profile."},
+                "datasource": {
+                    "type": "string",
+                    "description": "Profile name; defaults to the active profile.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "full", "summary", "index"],
+                    "description": "Verbosity; default auto (sized by subject-area count + char budget).",
+                },
                 "dataset_names": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Tables to pull full field-level detail for (Pass 2).",
+                    "description": "Tables to pull full field-level detail for (an explicit scope, no downgrade).",
                 },
-                "query": {"type": "string", "description": "The user's NL question (context only; not used for ranking locally)."},
+                "query": {
+                    "type": "string",
+                    "description": "The user's NL question — lexically ranks metrics.",
+                },
+                "metric_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Return full detail for these named metrics.",
+                },
             },
             "additionalProperties": False,
         },
@@ -602,9 +887,18 @@ TOOLS: dict[str, dict[str, Any]] = {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "datasource": {"type": "string", "description": "Profile name; defaults to the active profile."},
-                "query": {"type": "string", "description": "The user's NL question (context only)."},
-                "top_k": {"type": "integer", "description": "Accepted for hosted-parity; not applied locally."},
+                "datasource": {
+                    "type": "string",
+                    "description": "Profile name; defaults to the active profile.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "The user's NL question (context only).",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Accepted for hosted-parity; not applied locally.",
+                },
             },
             "additionalProperties": False,
         },
@@ -621,9 +915,18 @@ TOOLS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "sql": {"type": "string", "description": "One SELECT or WITH...SELECT statement."},
-                "datasource": {"type": "string", "description": "Profile name; defaults to the active profile."},
-                "area": {"type": "string", "description": "Subject area — scopes the fan/chasm pre-flight + default_filters safety pass."},
-                "raw_query": {"type": "string", "description": "The user's NL question (recorded in the query log)."},
+                "datasource": {
+                    "type": "string",
+                    "description": "Profile name; defaults to the active profile.",
+                },
+                "area": {
+                    "type": "string",
+                    "description": "Subject area — scopes the fan/chasm pre-flight + default_filters safety pass.",
+                },
+                "raw_query": {
+                    "type": "string",
+                    "description": "The user's NL question (recorded in the query log).",
+                },
                 "max_rows": {"type": "integer", "description": "Row cap (clamped 1–10000)."},
             },
             "required": ["sql"],
@@ -640,14 +943,18 @@ TOOLS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "raw_query": {"type": "string", "description": "The NL question the user asked."},
-                "rating": {"type": "string", "description": "good/bad (also accepts positive/negative/👍/👎)."},
+                "rating": {
+                    "type": "string",
+                    "description": "good/bad (also accepts positive/negative/👍/👎).",
+                },
                 "notes": {"type": "string", "description": "Optional free-text comment."},
-                "datasource": {"type": "string", "description": "Profile name; defaults to the active profile."},
+                "datasource": {
+                    "type": "string",
+                    "description": "Profile name; defaults to the active profile.",
+                },
             },
             "required": ["raw_query", "rating"],
             "additionalProperties": False,
         },
     },
 }
-
-
