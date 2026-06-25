@@ -449,13 +449,22 @@ def _content_tokens(s: str | None) -> set[str]:
 
 
 def _all_metrics(org) -> dict[str, tuple[Any, str | None]]:
-    """Every metric name -> (metric, area). Subject-area metrics + cross-area metrics."""
+    """Map a unique key -> (metric, area) for every metric (subject-area + cross-area). The key is
+    the metric name, disambiguated by area on a collision so two areas sharing a metric name are
+    BOTH kept (the never-hide contract: every metric must appear in metric_index)."""
     out: dict[str, tuple[Any, str | None]] = {}
+
+    def _add(m, area: str | None) -> None:
+        key = m.name
+        if key in out:  # name collision across areas — disambiguate, keep both
+            key = f"{m.name} ({area})" if area else f"{m.name} (cross-area)"
+        out[key] = (m, area)
+
     for sa in org.subject_areas:
         for m in sa.metrics:
-            out[m.name] = (m, sa.name)
+            _add(m, sa.name)
     for m in getattr(org, "cross_subject_area_metrics", []):
-        out[m.name] = (m, None)
+        _add(m, None)
     return out
 
 
@@ -468,7 +477,8 @@ def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]
     q_tokens = _content_tokens(query)
     scored: list[tuple[float, bool, str]] = []
     for name, (m, _area) in metrics.items():
-        cand_phrases = [name.replace("_", " "), m.description or ""] + list(m.other_names or [])
+        # Match on the metric's real name (not the possibly area-disambiguated dict key).
+        cand_phrases = [m.name.replace("_", " "), m.description or ""] + list(m.other_names or [])
         cand_norms = [c for c in (_norm_phrase(p) for p in cand_phrases) if c]
         score, strong = 0.0, False
         for cn in cand_norms:
@@ -646,6 +656,13 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
                 break
             nxt = _SCHEMA_MODE_DOWNGRADE[mode]
             if nxt is None:
+                # At the floor (index) and STILL over budget — the inline `metrics` (full detail
+                # for matched/all metrics) is the remaining bulk. Shed it; `metric_index` still
+                # lists every metric by name, so nothing is hidden — the client requests specifics
+                # via `metric_names`. Flag truncated so the overflow is never silent (C1/C3).
+                truncated = True
+                if result.get("metrics"):
+                    result["metrics"] = []
                 break
             mode, truncated = nxt, True
         result["requested_mode"] = requested_mode

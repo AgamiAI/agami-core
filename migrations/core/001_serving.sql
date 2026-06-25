@@ -66,6 +66,9 @@ CREATE TABLE entity (
     PRIMARY KEY (datasource, area, name)
 );
 
+-- WITHIN-subject-area relationships only. Cross-subject-area / cross-datasource relationships are
+-- org-level (Organization.cross_subject_area_relationships) and ride inside organization.doc — they
+-- are rebuilt from there, not stored as rows here (which would need a null area, see the NOTE above).
 CREATE TABLE relationship (
     datasource TEXT NOT NULL,
     area       TEXT NOT NULL,
@@ -84,9 +87,12 @@ CREATE TABLE prompt_example (
     PRIMARY KEY (datasource, id)
 );
 
+-- Domain-context docs. kind='organization' (ORGANIZATION.md) is per-datasource; kind='user'
+-- (USER_MEMORY.md) is install-global and stored once under datasource='' (the empty sentinel),
+-- mirroring the file layout (<artifacts_dir>/<profile>/ORGANIZATION.md vs <artifacts_dir>/USER_MEMORY.md).
 CREATE TABLE memory (
-    datasource TEXT NOT NULL,
-    kind       TEXT NOT NULL,      -- 'organization' (ORGANIZATION.md) | 'user' (USER_MEMORY.md)
+    datasource TEXT NOT NULL,      -- '' for the global user-memory row
+    kind       TEXT NOT NULL,      -- 'organization' (per-datasource) | 'user' (global)
     content    TEXT,
     PRIMARY KEY (datasource, kind)
 );

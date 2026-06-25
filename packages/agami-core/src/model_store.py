@@ -21,7 +21,10 @@ from uuid import uuid4
 from semantic_model.models import Organization
 from store import Store
 
-# subject-area model tables this module owns (cleared + re-seeded together).
+# The per-datasource model tables write_organization clears before a re-seed (so a redeploy
+# reproduces the served model rather than appending duplicates / hitting PK conflicts). Must stay in
+# sync with migrations/core/001_serving.sql's serving tables; examples/memory/model_version are
+# re-seeded by their own writers, so they're not in this list.
 _MODEL_TABLES = ("relationship", "entity", "metric", "model_table", "subject_area", "organization")
 
 
@@ -141,27 +144,51 @@ def load_organization(store: Store, datasource: str) -> Organization | None:
 # ---------------------------------------------------------------------------
 
 
+# ORGANIZATION.md is per-datasource; USER_MEMORY.md is install-global (cross-datasource, mirroring
+# the file layout: <artifacts_dir>/<profile>/ORGANIZATION.md vs <artifacts_dir>/USER_MEMORY.md). So
+# user memory is stored once under this sentinel datasource, not duplicated per datasource.
+_GLOBAL_DATASOURCE = ""
+
+
 def write_memory(
     store: Store, datasource: str, *, organization: str | None = None, user: str | None = None
 ) -> None:
-    """Seed the domain-context docs for a datasource. Pass either/both; each replaces its row."""
-    for kind, content in (("organization", organization), ("user", user)):
-        if content is None:
-            continue
-        store.execute("DELETE FROM memory WHERE datasource = ? AND kind = ?", (datasource, kind))
+    """Seed the domain-context docs. `organization` is per-datasource; `user` is install-global
+    (one row, shared across datasources). Pass either/both; each replaces its row."""
+    if organization is not None:
         store.execute(
-            "INSERT INTO memory (datasource, kind, content) VALUES (?, ?, ?)",
-            (datasource, kind, content),
+            "DELETE FROM memory WHERE datasource = ? AND kind = 'organization'", (datasource,)
+        )
+        store.execute(
+            "INSERT INTO memory (datasource, kind, content) VALUES (?, 'organization', ?)",
+            (datasource, organization),
+        )
+    if user is not None:
+        store.execute(
+            "DELETE FROM memory WHERE datasource = ? AND kind = 'user'", (_GLOBAL_DATASOURCE,)
+        )
+        store.execute(
+            "INSERT INTO memory (datasource, kind, content) VALUES (?, 'user', ?)",
+            (_GLOBAL_DATASOURCE, user),
         )
     store.commit()
 
 
 def load_memory(store: Store, datasource: str) -> dict[str, str]:
-    """{'organization': <ORGANIZATION.md text>, 'user': <USER_MEMORY.md text>} — missing keys absent."""
-    return {
-        r["kind"]: r["content"]
-        for r in store.query("SELECT kind, content FROM memory WHERE datasource = ?", (datasource,))
-    }
+    """{'organization': <per-datasource ORGANIZATION.md>, 'user': <global USER_MEMORY.md>} —
+    missing keys absent."""
+    out: dict[str, str] = {}
+    org = store.query(
+        "SELECT content FROM memory WHERE datasource = ? AND kind = 'organization'", (datasource,)
+    )
+    if org:
+        out["organization"] = org[0]["content"]
+    usr = store.query(
+        "SELECT content FROM memory WHERE datasource = ? AND kind = 'user'", (_GLOBAL_DATASOURCE,)
+    )
+    if usr:
+        out["user"] = usr[0]["content"]
+    return out
 
 
 def write_model_version(

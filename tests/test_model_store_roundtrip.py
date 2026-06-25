@@ -222,3 +222,59 @@ def test_tools_serve_memory_and_version_from_db_no_files(tmp_path, monkeypatch):
     assert tools._model_version("main") == "v-deadbeef"
     org_md, user_md = tools._domain_memory("main")
     assert "Widgets co." in org_md and user_md == "exclude test users"
+
+
+def _seed_org(tmp_path, monkeypatch, org_dict) -> None:
+    db_url = "sqlite://" + str(tmp_path / "agami.db")
+    s = Store.connect(db_url)
+    s.run_migrations()
+    model_store.write_organization(s, "main", Organization.model_validate(org_dict))
+    s.close()
+    monkeypatch.setenv("AGAMI_DB_URL", db_url)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "none"))
+
+
+def _schema_head(**args) -> dict:
+    out = tools.tool_get_datasource_schema({"datasource": "main", **args})
+    return json.JSONDecoder().raw_decode(out)[0]
+
+
+def test_metric_name_collision_keeps_both_metrics(tmp_path, monkeypatch):
+    # C2: two subject areas with a metric of the same name — both must survive in metric_index
+    # (the never-hide contract), not silently collapse to one.
+    _seed_org(
+        tmp_path,
+        monkeypatch,
+        {
+            "organization": "acme",
+            "version": 1,
+            "subject_areas": [
+                {"name": "sales", "metrics": [{"name": "revenue", "calculation": "gross"}]},
+                {"name": "finance", "metrics": [{"name": "revenue", "calculation": "net"}]},
+            ],
+        },
+    )
+    idx = _schema_head(mode="index")["metric_index"]
+    assert sum(1 for k in idx if k == "revenue" or k.startswith("revenue (")) == 2
+
+
+def test_index_floor_sheds_full_metrics_and_flags_truncated(tmp_path, monkeypatch):
+    # C1/C3: when even `index` + the inline matched metrics blow the 60K budget, the full `metrics`
+    # list is shed (metric_index still lists every metric) and `truncated` is set — never silent.
+    metrics = [
+        {"name": f"m{i}", "calculation": "c" * 500, "description": "short"} for i in range(200)
+    ]
+    _seed_org(
+        tmp_path,
+        monkeypatch,
+        {
+            "organization": "acme",
+            "version": 1,
+            "subject_areas": [{"name": "a", "metrics": metrics}],
+        },
+    )
+    head = _schema_head(mode="full", query="m")  # "m" substring-matches every m<i> → all "strong"
+    assert head["truncated"] is True
+    assert head["metrics"] == []  # full detail shed at the floor
+    assert len(head["metric_index"]) == 200  # but every metric is still listed by name
+    assert len(json.dumps(head)) <= tools._SCHEMA_CHAR_BUDGET  # shedding brought it under budget
