@@ -1,8 +1,8 @@
 name: CI
 
 # The unbypassable quality + secret gate on every PR (local hooks can be skipped;
-# CI can't). Config lives in pyproject.toml (OCR-022) so nothing is duplicated here.
-# Branch protection (OCR-025) is what makes these checks *required* to merge.
+# CI can't). Config lives in pyproject.toml so nothing is duplicated here.
+# Branch protection is what makes these checks *required* to merge.
 
 on:
   pull_request:
@@ -27,25 +27,27 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       # Lint + import sorting — blocking. Rules come from pyproject.toml.
+      # packages/ holds the agami-core library.
       - name: ruff check
-        run: uvx ruff@0.15.19 check plugins tests
+        run: uvx ruff@0.15.19 check plugins packages tests
 
       # Format check is informational for now: the tree has a large unformatted
       # backlog (~74 files). Flip `continue-on-error` off after a dedicated
       # `ruff format` pass makes the tree clean.
       - name: ruff format --check (informational)
-        run: uvx ruff@0.15.19 format --check plugins tests
+        run: uvx ruff@0.15.19 format --check plugins packages tests
         continue-on-error: true
 
-      # pydantic/pyyaml/sqlglot are the import deps the suite needs — sqlglot backs the
-      # binding-validation and unit-resolution code paths (without it ~287 tests skip and
-      # a few assert empty results). DB drivers are intentionally omitted: those tests skip
-      # cleanly without a database.
+      # The suite imports the agami-core library, so install it editable with the
+      # [model] extra (pydantic/pyyaml/sqlglot — sqlglot backs the binding-validation and
+      # unit-resolution paths; without it ~287 tests skip). DB drivers are intentionally
+      # omitted: those tests skip cleanly without a database.
       - name: pytest --cov
         run: >-
           uvx --python ${{ matrix.python-version }}
-          --with pytest --with pytest-cov --with pydantic --with pyyaml --with sqlglot
-          pytest tests/ -q --cov=plugins --cov-report=term-missing
+          --with pytest --with pytest-cov
+          --with-editable "packages/agami-core[model]"
+          pytest tests/ -q --cov=plugins --cov=packages/agami-core/src --cov-report=term-missing
 
   gitleaks:
     name: gitleaks (secret scan)

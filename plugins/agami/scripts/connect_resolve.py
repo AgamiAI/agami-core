@@ -49,7 +49,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# agami_paths lives in the agami-core package; add its src so this resolves whether or not
+# the package is pip-installed yet.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "agami-core" / "src"))
 import agami_paths  # noqa: E402
 
 # import module to probe per DB type (sqlite/duckdb need no external driver)

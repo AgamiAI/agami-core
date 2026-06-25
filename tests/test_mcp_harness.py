@@ -1,5 +1,5 @@
 """
-Tests for plugins/agami/scripts/mcp_server.py — the local stdio MCP server.
+Tests for mcp_harness (packages/agami-core/src/mcp_harness.py) — the local stdio MCP server.
 
 Two contracts anchor this file:
 
@@ -25,11 +25,11 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO_ROOT / "plugins" / "agami" / "scripts"
-SERVER = SCRIPTS / "mcp_server.py"
-sys.path.insert(0, str(SCRIPTS))
+# mcp_harness lives in the installed agami-core package — import it directly, no sys.path.
+# SERVER is the on-disk module file, used only for the source-level no-network scan.
+SERVER = REPO_ROOT / "packages" / "agami-core" / "src" / "mcp_harness.py"
 
-from mcp_server import (  # noqa: E402
+from mcp_harness import (
     _classify_exit,
     _distill_for_llm,
     _resolve_receipt,
@@ -189,7 +189,7 @@ def test_server_makes_no_network_calls():
     forbidden = ("import socket", "import http", "import urllib", "urllib.request",
                  "requests.", "httpx", "import ftplib", "smtplib", "websocket")
     hits = [tok for tok in forbidden if tok in src]
-    assert not hits, f"mcp_server.py must stay network-free; found: {hits}"
+    assert not hits, f"mcp_harness.py must stay network-free; found: {hits}"
 
 
 # --- Protocol handshake (no DB required) ------------------------------------
@@ -197,7 +197,7 @@ def test_server_makes_no_network_calls():
 def _rpc_exchange(messages: list[dict]) -> list[dict]:
     stdin = "".join(json.dumps(m) + "\n" for m in messages)
     proc = subprocess.run(
-        [sys.executable, str(SERVER)],
+        [sys.executable, "-m", "mcp_harness"],
         input=stdin,
         capture_output=True,
         text=True,

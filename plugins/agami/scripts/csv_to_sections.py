@@ -44,7 +44,8 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# semantic_model lives in the agami-core package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "agami-core" / "src"))
 from semantic_model import units  # noqa: E402  (stdlib-only module)
 
 

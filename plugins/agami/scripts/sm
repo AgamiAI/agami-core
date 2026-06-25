@@ -22,7 +22,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REQ="$SCRIPT_DIR/semantic_model/requirements.txt"
+# The CLI runs as `python -m semantic_model.cli` against the installed agami-core package;
+# we install it (with the model extra, which brings pydantic/sqlglot/pyyaml) on demand below.
+PKG_DIR="$(cd "$SCRIPT_DIR/../../../packages/agami-core" && pwd)"
 
 resolve_python() {
   if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
@@ -59,17 +61,19 @@ if [ -z "$PY" ]; then
   exit 3
 fi
 
-# Ensure the model deps are importable in $PY; install once if not.
-if ! "$PY" -c 'import pydantic, sqlglot, yaml' 2>/dev/null; then
-  echo "agami: installing semantic-model deps (pydantic, sqlglot, pyyaml) into $PY …" >&2
-  if ! "$PY" -m pip install --user -q -r "$REQ" >&2 2>/dev/null; then
-    if ! "$PY" -m pip install -q -r "$REQ" >&2; then
-      echo "agami: couldn't install the model deps into $PY." >&2
-      echo "       Run:  $PY -m pip install -r $REQ" >&2
-      echo "       Or point agami at a Python that has them:  export AGAMI_PYTHON=/path/to/python" >&2
+# Ensure the agami-core package + its model deps are importable in $PY; install once if not.
+# (A broken/moved editable install fails this import and self-heals via the reinstall — which
+# matters because the plugin's cache dir is version-pinned and moves on every update.)
+if ! "$PY" -c 'import semantic_model, pydantic, sqlglot, yaml' 2>/dev/null; then
+  echo "agami: installing agami-core (semantic model) into $PY …" >&2
+  if ! "$PY" -m pip install --user -q -e "$PKG_DIR[model]" >&2 2>/dev/null; then
+    if ! "$PY" -m pip install -q -e "$PKG_DIR[model]" >&2; then
+      echo "agami: couldn't install agami-core into $PY." >&2
+      echo "       Run:  $PY -m pip install -e \"$PKG_DIR[model]\"" >&2
+      echo "       Or point agami at a Python that has it:  export AGAMI_PYTHON=/path/to/python" >&2
       exit 3
     fi
   fi
 fi
 
-exec env PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m semantic_model.cli "$@"
+exec "$PY" -m semantic_model.cli "$@"

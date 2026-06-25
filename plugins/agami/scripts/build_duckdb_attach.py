@@ -42,8 +42,11 @@ import secrets
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+# setup_pgauth stays a skill-side helper (scripts/); agami_paths lives in the agami-core
+# package. Add both: the scripts dir (for setup_pgauth) and the package src.
+_SCRIPTS = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPTS))
+sys.path.insert(0, str(_SCRIPTS.parents[2] / "packages" / "agami-core" / "src"))
 import agami_paths  # noqa: E402
 from setup_pgauth import _atomic_write, _load_section  # noqa: E402
 

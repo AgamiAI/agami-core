@@ -19,7 +19,7 @@ Design constraints (match the rest of agami):
   - **No network call, no auth, no telemetry.** The MCP stdio protocol is
     newline-delimited JSON-RPC 2.0, spoken by hand. Grep the source.
   - The execute_sql + log_feedback tools are pure-stdlib. The model-backed tools
-    (schema / traversal) import `scripts/semantic_model` (Pydantic) lazily and
+    (schema / traversal) import the `semantic_model` package (Pydantic) lazily and
     surface a clear "install the model deps" error if it's absent — so execution
     still works on a bare install.
   - **No data leaves the machine.** SQL is executed locally by shelling out to
@@ -38,16 +38,16 @@ driver tier), so the relevant driver must be importable for non-SQLite DBs
 (`psycopg2-binary` / `pymysql` / `snowflake-connector-python` /
 `google-cloud-bigquery`). SQLite needs nothing (stdlib).
 
-Wire it up:
+Wire it up (the agami-core package must be installed in the chosen python):
     # Claude Code
-    claude mcp add agami -- python3 /ABS/PATH/plugins/agami/scripts/mcp_server.py
+    claude mcp add agami -- /ABS/PATH/python3 -m mcp_harness
 
     # Claude Desktop — claude_desktop_config.json
     {
       "mcpServers": {
         "agami": {
-          "command": "python3",
-          "args": ["/ABS/PATH/plugins/agami/scripts/mcp_server.py"],
+          "command": "/ABS/PATH/python3",
+          "args": ["-m", "mcp_harness"],
           "env": { "AGAMI_PROFILE": "main" }
         }
       }
@@ -70,14 +70,9 @@ from typing import Any, Callable
 # ---------------------------------------------------------------------------
 # Paths & config resolution (mirrors execute_sql.py / file-layout.md exactly)
 # ---------------------------------------------------------------------------
+import agami_paths
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPT_DIR))
-import agami_paths  # noqa: E402  (copied alongside this server into local/serve/ by setup_desktop_mcp)
-
-EXECUTE_SQL = SCRIPT_DIR / "execute_sql.py"
-# Secrets + per-user state live under <artifacts_dir>/local/ (the consolidated,
-# gitignored replacement for ~/.agami). Re-resolved after bootstrap() in main().
+# Secrets + per-user state live under <artifacts_dir>/local/. Re-resolved after bootstrap() in main().
 AGAMI_LOCAL = agami_paths.local_dir()
 CREDENTIALS_PATH = agami_paths.credentials_path()
 CONFIG_PATH = agami_paths.config_path()
@@ -91,25 +86,16 @@ DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 
 def _server_version() -> str:
-    """Best-effort plugin version.
-
-    Prefer the AGAMI_VERSION env var (set by setup_desktop_mcp.py when the server
-    is copied to a standalone <artifacts_dir>/local/serve dir, where the marketplace.json
-    isn't reachable), then fall back to reading the shipped manifest.
-    """
+    """Best-effort version: the AGAMI_VERSION env override, else the installed package metadata."""
     env_v = os.environ.get("AGAMI_VERSION")
     if env_v:
         return env_v
-    for rel in ("../../.claude-plugin/marketplace.json", "../.claude-plugin/plugin.json"):
-        p = (SCRIPT_DIR / rel).resolve()
-        try:
-            text = p.read_text()
-        except OSError:
-            continue
-        m = re.search(r'"version"\s*:\s*"([^"]+)"', text)
-        if m:
-            return m.group(1)
-    return "0.0.0"
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("agami-core")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 def _load_config() -> dict[str, Any]:
@@ -218,8 +204,6 @@ def _load_org(profile: str):
     The schema/traversal tools need the model; the execute_sql + log_feedback tools
     stay pure-stdlib so the server runs for execution even without the model deps.
     """
-    if str(SCRIPT_DIR) not in sys.path:
-        sys.path.insert(0, str(SCRIPT_DIR))
     from semantic_model import loader as L  # may raise ImportError (pydantic)
 
     root = resolve_artifacts_dir() / profile
@@ -461,7 +445,9 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
 
     # The model safety pass (fan/chasm pre-flight + default_filters) runs inside
     # execute_sql.py; pass the subject area so default_filters scope correctly.
-    cmd = [sys.executable, str(EXECUTE_SQL), "--profile", profile, "--sql", sql]
+    # Route through the unified executor as a module (the package is installed alongside
+    # this harness), so the read-only safety pass + default_filters + logging run once.
+    cmd = [sys.executable, "-m", "execute_sql", "--profile", profile, "--sql", sql]
     if args.get("area"):
         cmd += ["--area", str(args["area"])]
 

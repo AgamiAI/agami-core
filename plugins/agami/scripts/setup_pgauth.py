@@ -48,8 +48,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+# agami_paths + the executor live in the agami-core package; add its src so this resolves
+# them whether or not the package is pip-installed yet.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "agami-core" / "src"))
 import agami_paths  # noqa: E402
 from execute_sql import _parse_dsn  # reuse DSN parsing logic  # noqa: E402
 

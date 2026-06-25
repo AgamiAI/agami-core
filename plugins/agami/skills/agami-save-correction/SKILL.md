@@ -16,7 +16,7 @@ This skill does two things, in this order:
 1. **Always**: append the `(question, corrected_sql)` pair to the subject area's example library at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`.
 2. **When applicable**: surgically update the semantic model at `<artifacts_dir>/<profile>/` (a relationship/column/table edit, or a new metric) with the knowledge implied by the correction, **via the curation engine** (`semantic_model.cli curate`), which **validates** before write and reverts on failure. If the user's correction would break the model, refuse the model update (the example still gets saved).
 
-For the model format: [`scripts/semantic_model/__init__.py`](../../scripts/semantic_model/__init__.py) (layout) + `scripts/semantic_model/models.py`. The curation engine is `scripts/semantic_model/curate.py`.
+For the model format: [`semantic_model/__init__.py`](../../../../packages/agami-core/src/semantic_model/__init__.py) (layout) + `packages/agami-core/src/semantic_model/models.py`. The curation engine is `packages/agami-core/src/semantic_model/curate.py`.
 For SQL safety: [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md).
 For dialect rules: [`shared/dialect-rules.md`](../../shared/dialect-rules.md).
 For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
@@ -404,5 +404,5 @@ Next time someone asks "<question>" or anything similar, I'll use the corrected 
 
 1. **Phase 2 (examples append) always runs.** Even if the user later changes their mind on the model edit, the example is already saved.
 2. **Phase 5 model writes are gated by the validator.** `cli curate` (edits existing entries) and `cli add` (creates a new metric/entity) are the only ways to write inside `<artifacts_dir>/<profile>/`, and both refuse / revert on a validation failure. No exceptions. ORGANIZATION.md and USER_MEMORY.md edits skip the validator (free-form Markdown).
-3. **Edits stay valid against the model.** Don't invent fields — the Pydantic models (`scripts/semantic_model/models.py`) forbid unknown keys, so an invalid edit is rejected by the validator. When you can't express a correction within the model shape, fall back to `sql_fix` (example only) and tell the user "I can save this as a few-shot example but it doesn't fit a model edit."
+3. **Edits stay valid against the model.** Don't invent fields — the Pydantic models (`packages/agami-core/src/semantic_model/models.py`) forbid unknown keys, so an invalid edit is rejected by the validator. When you can't express a correction within the model shape, fall back to `sql_fix` (example only) and tell the user "I can save this as a few-shot example but it doesn't fit a model edit."
 4. **Show the diff before mutating the model.** The user always gets to see and approve the proposed change.

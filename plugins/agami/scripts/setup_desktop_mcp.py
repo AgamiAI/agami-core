@@ -11,10 +11,9 @@ removes:
      PATH, so a bare `python3` isn't found — and it must be the interpreter that
      can import your DB driver (psycopg2 / pymysql / …). We auto-detect it.
   2. **The install-path gotcha.** A marketplace-installed plugin lives in a
-     version-pinned cache dir that moves on every update. We copy the server
-     files (`mcp_server.py` + `execute_sql.py` + the `semantic_model/` package)
-     to a STABLE `<artifacts_dir>/local/serve/` so the Desktop config never needs to change
-     again — and keeps working even if the plugin is later uninstalled.
+     cache dir that moves on every update. We `pip install` the agami-core package
+     into the chosen interpreter and register `python -m mcp_harness`, so the config
+     survives plugin updates (the code is in site-packages, not a moving path).
   3. **The merge gotcha.** `mcpServers` is a top-level key; a stray comma breaks
      the whole file. We back up, merge (preserving every other key), write
      atomically, and validate.
@@ -23,13 +22,14 @@ Usage:
     python3 setup_desktop_mcp.py                 # wire active profile into Desktop
     python3 setup_desktop_mcp.py --profile main  # pin a specific profile
     python3 setup_desktop_mcp.py --dry-run       # show the plan, write nothing
-    python3 setup_desktop_mcp.py --in-place      # point at this checkout (dev mode; no copy)
+    python3 setup_desktop_mcp.py --in-place      # editable install from this checkout (dev mode)
     python3 setup_desktop_mcp.py --python /abs/python3   # force an interpreter
     python3 setup_desktop_mcp.py --config /path/to/config.json  # override target file
 
-Stdlib only. Reads nothing secret beyond the credentials file (to learn the
-active profile's db type → which driver to require). Writes only the stable
-serve dir + the desktop config (with a timestamped backup).
+Stdlib only (shells out to pip). Reads nothing secret beyond the credentials file
+(to learn the active profile's db type → which driver to require). Installs the
+agami-core package into the chosen interpreter and writes the desktop config (with a
+timestamped backup).
 """
 
 from __future__ import annotations
@@ -44,19 +44,19 @@ import sys
 import time
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+# This installer can run before the package is pip-installed, so bootstrap the package source
+# onto sys.path to import agami_paths; the Desktop entry it writes runs the installed package
+# via `-m mcp_harness`.
+PACKAGE_DIR = (SCRIPT_DIR.parent.parent.parent / "packages" / "agami-core").resolve()
 _sys = sys
-_sys.path.insert(0, str(Path(__file__).resolve().parent))
+_sys.path.insert(0, str(PACKAGE_DIR / "src"))
 import agami_paths  # noqa: E402
 
 # Never bootstrap() at import (tests import this module); main() does it.
 AGAMI_HOME = agami_paths.local_dir()
 CREDENTIALS_PATH = AGAMI_HOME / "credentials"
 CONFIG_PATH = AGAMI_HOME / ".config"
-STABLE_SERVE_DIR = AGAMI_HOME / "serve"
-SCRIPT_DIR = Path(__file__).resolve().parent
-
-# Files the server needs at runtime (both are self-contained stdlib modules).
-SERVE_FILES = ("mcp_server.py", "execute_sql.py", "agami_paths.py")
 
 # db_type → the Python module that must be importable to execute against it.
 DB_DRIVER_MODULE = {
@@ -173,61 +173,49 @@ def desktop_config_path(override: str | None) -> Path:
     return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
 
-def stage_serve_files(scripts_dir: Path, in_place: bool) -> Path:
-    """Return the directory the server will run from.
+def ensure_package_installed(python: str, package_dir: Path, editable: bool, dry_run: bool) -> None:
+    """Install agami-core[model] into `python` so it can run `python -m mcp_harness`.
 
-    Default: copy the server files to a stable <artifacts_dir>/local/serve/ so the Desktop
-    config is update-proof. --in-place: run straight from scripts_dir.
-
-    Besides the two entry scripts, we also copy the `semantic_model/` package so
-    the model-backed tools (get_datasource_schema / traversal) work from the
-    serve dir — mcp_server.py adds its own dir to sys.path and imports it. Those
-    tools additionally need `pydantic` + `sqlglot` in the Python the Desktop app
-    launches; if they're absent the tool returns a clear "install the model deps"
-    error and the stdlib execute_sql path keeps working regardless.
+    Non-editable by default so the Desktop registration survives the plugin's
+    version-pinned cache dir moving on update (the code lands in site-packages, not a path
+    that moves); --in-place uses an editable install for development. The [model] extra
+    pulls pydantic/sqlglot/pyyaml so the model-backed tools work; the stdlib execute_sql
+    path works regardless. Idempotent. Raises RuntimeError on failure.
     """
-    if in_place:
-        return scripts_dir
-    STABLE_SERVE_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(STABLE_SERVE_DIR, 0o700)
-    except OSError:
-        pass
-    for name in SERVE_FILES:
-        src = scripts_dir / name
-        if not src.exists():
-            raise FileNotFoundError(f"missing {src} — run from the plugin's scripts dir or pass --scripts-dir")
-        shutil.copy2(src, STABLE_SERVE_DIR / name)
-    # Copy the semantic_model package (skip caches), replacing any prior copy.
-    pkg_src = scripts_dir / "semantic_model"
-    if pkg_src.is_dir():
-        pkg_dst = STABLE_SERVE_DIR / "semantic_model"
-        if pkg_dst.exists():
-            shutil.rmtree(pkg_dst)
-        shutil.copytree(pkg_src, pkg_dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    return STABLE_SERVE_DIR
+    spec = f"{package_dir}[model]"
+    base = [python, "-m", "pip", "install"]
+    if editable:
+        base.append("-e")
+    if dry_run:
+        print(f"• would install  : {' '.join(base + [spec])}")
+        return
+    # Plain install first, then --user (system pythons whose site-packages aren't
+    # writable). Mirrors the `sm` launcher's strategy.
+    proc = None
+    for extra in ([], ["--user"]):
+        proc = subprocess.run(base + extra + [spec], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return
+    raise RuntimeError((proc.stderr or "").strip() or "pip install agami-core failed")
 
 
-def build_server_entry(python: str, serve_dir: Path, profile: str, version: str) -> dict:
+def build_server_entry(python: str, profile: str, version: str) -> dict:
     return {
         "command": python,
-        "args": [str(serve_dir / "mcp_server.py")],
+        "args": ["-m", "mcp_harness"],
         "env": {"AGAMI_PROFILE": profile, "AGAMI_VERSION": version},
     }
 
 
-def read_version(scripts_dir: Path) -> str:
-    for rel in ("../../.claude-plugin/marketplace.json", "../.claude-plugin/plugin.json"):
-        p = (scripts_dir / rel).resolve()
-        try:
-            text = p.read_text()
-        except OSError:
-            continue
-        import re
-        m = re.search(r'"version"\s*:\s*"([^"]+)"', text)
-        if m:
-            return m.group(1)
-    return "0.0.0"
+def read_version(package_dir: Path) -> str:
+    """The agami-core version, read from the package's pyproject (single source)."""
+    import re
+    try:
+        text = (package_dir / "pyproject.toml").read_text()
+    except OSError:
+        return "0.0.0"
+    m = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else "0.0.0"
 
 
 def merge_into_config(cfg_path: Path, server_name: str, entry: dict, dry_run: bool) -> tuple[dict, Path | None]:
@@ -267,23 +255,20 @@ def merge_into_config(cfg_path: Path, server_name: str, entry: dict, dry_run: bo
 
 
 def main() -> int:
-    global AGAMI_HOME, CREDENTIALS_PATH, CONFIG_PATH, STABLE_SERVE_DIR
+    global AGAMI_HOME, CREDENTIALS_PATH, CONFIG_PATH
     agami_paths.bootstrap()
     AGAMI_HOME = agami_paths.local_dir()
     CREDENTIALS_PATH = AGAMI_HOME / "credentials"
     CONFIG_PATH = AGAMI_HOME / ".config"
-    STABLE_SERVE_DIR = AGAMI_HOME / "serve"
     p = argparse.ArgumentParser(description="Wire `agami serve` into the Claude Desktop app.")
     p.add_argument("--profile", default=None, help="agami profile to serve (default: active profile).")
     p.add_argument("--server-name", default="agami", help="Name of the MCP server entry (default: agami).")
     p.add_argument("--python", default=None, help="Force a specific python interpreter (absolute path).")
-    p.add_argument("--scripts-dir", default=None, help="Where mcp_server.py lives (default: this script's dir).")
     p.add_argument("--config", default=None, help="Override the desktop config path (for testing / other clients).")
-    p.add_argument("--in-place", action="store_true", help="Point at the scripts dir directly instead of copying to <artifacts_dir>/local/serve.")
+    p.add_argument("--in-place", action="store_true", help="Editable install from this checkout (dev mode) instead of a stable site-packages install.")
     p.add_argument("--dry-run", action="store_true", help="Print the plan; write nothing.")
     args = p.parse_args()
 
-    scripts_dir = Path(args.scripts_dir).expanduser().resolve() if args.scripts_dir else SCRIPT_DIR
     profile = resolve_profile(args.profile)
     db_type = db_type_for_profile(profile)
     module = DB_DRIVER_MODULE.get(db_type or "", "psycopg2")  # default-guess postgres if unknown
@@ -304,15 +289,15 @@ def main() -> int:
     print(f"• interpreter    : {python}")
 
     try:
-        serve_dir = stage_serve_files(scripts_dir, args.in_place)
-    except FileNotFoundError as e:
-        print(f"\nERROR: {e}", file=sys.stderr)
+        ensure_package_installed(python, PACKAGE_DIR, editable=args.in_place, dry_run=args.dry_run)
+    except RuntimeError as e:
+        print(f"\nERROR: couldn't install agami-core into {python}:\n  {e}", file=sys.stderr)
         return 2
-    mode = "in-place (dev)" if args.in_place else f"copied to {serve_dir}"
-    print(f"• server files   : {mode}")
+    if not args.dry_run:
+        print(f"• agami-core     : {'editable (dev)' if args.in_place else 'installed'} into the interpreter")
 
-    version = read_version(scripts_dir)
-    entry = build_server_entry(python, serve_dir, profile, version)
+    version = read_version(PACKAGE_DIR)
+    entry = build_server_entry(python, profile, version)
     cfg_path = desktop_config_path(args.config)
     print(f"• desktop config : {cfg_path}")
 

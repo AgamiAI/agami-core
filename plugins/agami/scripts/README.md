@@ -1,35 +1,43 @@
-# Python helpers
+# Python helpers (skill-only)
 
-Two categories of Python scripts ship with agami:
+The agami **library** — the unified executor (`execute_sql`), the MCP `TOOLS` harness
+(`mcp_harness`), the `semantic_model` package, and `agami_paths` — lives in an installable
+package at [`packages/agami-core/`](../../../packages/agami-core). Install it once:
 
-- **Runtime helpers** (used by the skill): `execute_sql.py`. The agami skill itself runs this when tier 3 (Python driver) is selected — that's when the user has Python + a driver but no native CLI and no DuckDB. Bundled in every Desktop zip and on the marketplace install path.
-- **Optional samples** (`sample_*.py`): one-off reference scripts you can copy into your own toolchain. Not required for the skill to work.
+```bash
+pip install -e "packages/agami-core[model]"   # [model] pulls pydantic/sqlglot/pyyaml
+```
 
-## Runtime helpers
+This `scripts/` directory now holds **skill-only** helpers (rendering, setup/connect, reconcile,
+parsing, the `sm` launcher) — they *import* the package; they are not library code.
 
-| Script | What it does | Requires |
-|---|---|---|
-| `execute_sql.py` | Reads `<artifacts_dir>/local/credentials`, opens a connection, runs ONE SQL statement, emits RFC 4180 CSV on stdout. Supports postgres / mysql / sqlite. Hard-exits with a clear message if credentials are missing — never asks in chat. | One of: `psycopg2-binary` (postgres), `pymysql` (mysql); sqlite uses stdlib |
-| `mcp_server.py` | **Optional** local stdio MCP server (`agami serve`) — exposes the local semantic model + read-only local SQL execution over the Model Context Protocol, so agami can be used from Claude Code / Claude Desktop and not just inside the plugin. Pure stdlib; routes execution through `execute_sql.py`; no network, no auth, no telemetry. See [`docs/mcp-server.md`](../../../docs/mcp-server.md). | stdlib only (plus the relevant `execute_sql.py` driver for non-SQLite DBs) |
-| `setup_desktop_mcp.py` | One-command wiring of `mcp_server.py` into the Claude Desktop app (used by the `agami-serve` skill). Auto-detects the right Python interpreter, copies the two self-contained server files to a stable `<artifacts_dir>/local/serve/`, and safely merges the entry into `claude_desktop_config.json` (timestamped backup + atomic write, preserving every other key). `--dry-run` previews; `--in-place` skips the copy for dev checkouts. | stdlib only |
+## The runtime executor (now in the package)
 
-The agami skill calls `execute_sql.py` via:
+The agami skill runs the Python-driver tier as a module against the installed package:
 
 ```bash
 # Single-line SQL via --sql
-python3 scripts/execute_sql.py --profile default --sql "SELECT COUNT(*) FROM orders"
+python3 -m execute_sql --profile default --sql "SELECT COUNT(*) FROM orders"
 
 # Multi-line / quote-heavy SQL via --sql-file (preferred for anything non-trivial)
-python3 scripts/execute_sql.py --profile default --sql-file /tmp/agami-query.sql
+python3 -m execute_sql --profile default --sql-file /tmp/agami-query.sql
 ```
 
-Exit codes are documented in `execute_sql.py`'s docstring. The skill routes non-zero exits through the DB error classifier in `../shared/db_error_classifier.md`.
+It reads `<artifacts_dir>/local/credentials`, runs ONE SQL statement, and emits RFC 4180 CSV on
+stdout (postgres / mysql / sqlite / …). Exit codes are documented in the module docstring; the
+skill routes non-zero exits through the DB error classifier in `../shared/db_error_classifier.md`.
 
-## Other helpers
+The local stdio MCP server (`agami serve`) is `python3 -m mcp_harness` — wired into Claude Desktop
+by `setup_desktop_mcp.py` (below), which installs the package into the chosen interpreter and
+registers `python -m mcp_harness`. See [`docs/mcp-server.md`](../../../docs/mcp-server.md).
+
+## Skill-only helpers
 
 | Script | What it does | Requires |
 |---|---|---|
+| `setup_desktop_mcp.py` | One-command wiring of the local MCP server into the Claude Desktop app (used by the `agami-serve` skill). Auto-detects the right Python interpreter, `pip install`s agami-core into it, and safely merges the entry into `claude_desktop_config.json` (timestamped backup + atomic write, preserving every other key). `--dry-run` previews; `--in-place` does an editable install for dev checkouts. | stdlib (shells out to pip) |
 | `render_chart.py` | Substitutes `chart-template.html` placeholders programmatically. Used by the agami-query SKILL to produce HTML reports (Phase 4e). | stdlib only |
+| `connect_resolve.py` · `setup_pgauth.py` · `promote_credentials.py` · `reconcile.py` · `parse_*.py` · `csv_to_sections.py` · `sm` (CLI launcher) · `build_duckdb_attach.py` (retired) | Connect/auth, model reconcile, parsing, and the `sm` launcher for `python -m semantic_model.cli`. | stdlib; some import the agami-core package |
 
 ## Install dependencies (only if you want the Python driver path)
 
