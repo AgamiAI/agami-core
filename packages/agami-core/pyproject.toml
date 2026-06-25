@@ -33,7 +33,7 @@ model = [
 package-dir = { "" = "src" }
 # Flat top-level modules (not under a parent package) — listed explicitly so the import
 # names stay flat regardless of disk layout.
-py-modules = ["agami_paths", "execute_sql", "mcp_harness"]
+py-modules = ["agami_paths", "execute_sql", "mcp_harness", "ports", "contracts", "oss_adapters"]
 packages = ["semantic_model"]
 
 [tool.setuptools.package-data]
