@@ -43,6 +43,28 @@ def test_wrong_password_fails():
     s.close()
 
 
+def test_empty_password_is_rejected_at_create():
+    s = _store()
+    with pytest.raises(ValueError):
+        user_store.create_user(s, "admin", "")
+    assert user_store.list_users(s) == []  # nothing created
+    s.close()
+
+
+def test_authenticate_runs_a_verify_even_for_unknown_user(monkeypatch):
+    # The anti-enumeration guard: a missing username still runs a verify (against the dummy hash),
+    # so the call can't be distinguished by "did verify run". We assert the spy fired.
+    s = _store()
+    calls: list[str] = []
+    real = user_store.verify_password
+    monkeypatch.setattr(
+        user_store, "verify_password", lambda h, p: (calls.append(h), real(h, p))[1]
+    )
+    assert user_store.authenticate(s, "ghost", "whatever") is None
+    assert calls == [user_store._DUMMY_HASH]  # verified against the dummy, not skipped
+    s.close()
+
+
 def test_password_is_argon2id_and_never_plaintext():
     s = _store()
     user_store.create_user(s, "admin", "s3cret-pw")

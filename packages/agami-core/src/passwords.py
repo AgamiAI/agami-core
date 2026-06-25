@@ -5,9 +5,10 @@ We never hand-roll the KDF: hashing goes through `argon2-cffi` (the OWASP-first 
 (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`) that encodes the algorithm and every cost parameter
 inline, so it verifies in any language and a future backend can read the same column unchanged.
 
-`verify_password` returns a bool (never raises on a wrong password) and is timing-safe — argon2's
-verify compares in constant time, so a caller can't distinguish "no such user" from "wrong password"
-by timing as long as both paths run a verify (the user store does).
+`verify_password` returns a bool (never raises on a wrong password). Verifying runs the fixed-cost
+argon2 KDF whose runtime is dominated by the (input-independent) memory-hard work, so a caller that
+runs a verify on every path — including a dummy verify when the user is absent — doesn't leak whether
+a username exists by timing. `user_store.authenticate` does exactly that.
 """
 
 from __future__ import annotations

@@ -22,7 +22,11 @@ from ports import Principal
 from store import Store
 
 _ACTIVE = "active"
-_DISABLED = "disabled"
+
+# A throwaway argon2id hash that no password verifies against. `authenticate` verifies against it on
+# the user-absent path so every code path pays the same KDF cost — without it, a missing username
+# returns far faster than a wrong password and leaks which usernames exist (an enumeration oracle).
+_DUMMY_HASH = hash_password(uuid4().hex)
 
 
 def _now_iso() -> str:
@@ -38,6 +42,8 @@ def create_user(
 ) -> str:
     """Create a user with an argon2id-hashed password; returns the minted id. Raises if the username
     already exists (the UNIQUE constraint) — callers that want create-if-absent check first."""
+    if not password:
+        raise ValueError("password must not be empty")
     user_id = uuid4().hex
     store.execute(
         "INSERT INTO users (id, username, password_hash, email, status, created) "
@@ -66,19 +72,26 @@ def set_status(store: Store, username: str, status: str) -> None:
 def authenticate(store: Store, username: str, password: str) -> Principal | None:
     """The credential check: an active user whose password verifies → a `Principal`, else None.
 
-    A disabled user fails even with the right password. On success, opportunistically upgrade the
-    stored hash if the cost profile has risen (the cross-tier cost-bump path)."""
+    A disabled user fails even with the right password. Every path runs exactly one argon2 verify
+    (against a dummy hash when the user is absent/ineligible), so response time never reveals whether
+    a username exists — closing a timing-enumeration oracle. On success, opportunistically upgrade
+    the stored hash if the cost profile has risen (the cross-tier cost-bump path)."""
     user = get_user(store, username)
-    if user is None or user["status"] != _ACTIVE:
-        return None
-    if not verify_password(user["password_hash"], password):
+    stored_hash = user["password_hash"] if user else _DUMMY_HASH
+    verified = verify_password(stored_hash, password)
+    if user is None or user["status"] != _ACTIVE or not verified:
         return None
     if needs_rehash(user["password_hash"]):
-        store.execute(
-            "UPDATE users SET password_hash = ? WHERE username = ?",
-            (hash_password(password), username),
-        )
-        store.commit()
+        try:
+            store.execute(
+                "UPDATE users SET password_hash = ? WHERE username = ?",
+                (hash_password(password), username),
+            )
+            store.commit()
+        except Exception:
+            # Best-effort upgrade — a DB hiccup on the opportunistic rehash must not fail an
+            # otherwise-valid login.
+            pass
     return Principal(subject=username)
 
 
