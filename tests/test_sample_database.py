@@ -176,7 +176,7 @@ def test_execute_sql_refuses_fan_trap_cleanly(tmp_path):
     )
     env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art)}
     proc = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "plugins" / "agami" / "scripts" / "execute_sql.py"),
+        [sys.executable, "-m", "execute_sql",
          "--profile", "agami-example", "--area", "agami-example", "--sql", fan_trap],
         capture_output=True, text=True, env=env,
     )
@@ -253,7 +253,7 @@ def _run_execute_sql(art, sql):
     import os
     import subprocess
     return subprocess.run(
-        [sys.executable, str(REPO_ROOT / "plugins" / "agami" / "scripts" / "execute_sql.py"),
+        [sys.executable, "-m", "execute_sql",
          "--profile", "agami-example", "--area", "agami-example", "--sql", sql],
         capture_output=True, text=True, env={**os.environ, "AGAMI_ARTIFACTS_DIR": str(art)})
 

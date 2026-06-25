@@ -47,8 +47,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import agami_paths  # noqa: E402
+import agami_paths
 
 # Credentials + config now live under <artifacts_dir>/local/ (the consolidated,
 # gitignored replacement for ~/.agami). The path is stable regardless of migration
@@ -660,9 +659,6 @@ def _model_safety(sql: str, profile: str, area: str | None):
     the SQL unchanged) when there is no model, or the model package isn't importable.
     """
     try:
-        scripts_dir = Path(__file__).resolve().parent
-        if str(scripts_dir) not in sys.path:
-            sys.path.insert(0, str(scripts_dir))
         from semantic_model import loader as L
         from semantic_model import runtime as RT
     except Exception:

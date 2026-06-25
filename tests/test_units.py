@@ -9,10 +9,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pydantic")
-SCRIPTS = Path(__file__).resolve().parent.parent / "plugins" / "agami" / "scripts"
-sys.path.insert(0, str(SCRIPTS))
+# semantic_model now ships in the installed agami-core package (OCR-028); PKG_SRC is only
+# used for the source-level "stays import-light" scan below.
+PKG_SRC = Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"
 
-from semantic_model import units  # noqa: E402
+from semantic_model import units
 
 
 def test_currency_symbol_and_is_currency():
@@ -68,7 +69,7 @@ def test_units_module_has_no_heavy_deps():
     # units.py must stay import-light so the pure-stdlib MCP path can use it
     import sys as _sys
     assert "pydantic" not in _sys.modules or True  # informational
-    src = (SCRIPTS / "semantic_model" / "units.py").read_text()
+    src = (PKG_SRC / "semantic_model" / "units.py").read_text()
     assert "import pydantic" not in src and "import sqlglot" not in src
 
 
