@@ -20,7 +20,8 @@ from __future__ import annotations
 import contextlib
 import os
 
-from oss_adapters import PresenceAuthProvider
+from oss_adapters import PresenceAuthProvider, SingleTenantOrgResolver
+from ports import Org
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -31,6 +32,14 @@ from tools import SERVER_INSTRUCTIONS, SERVER_NAME, TOOLS, bootstrap_paths, serv
 
 # Bearer-presence is the OSS default; real identity providers are a later feature.
 _AUTH = PresenceAuthProvider()
+
+
+def _build_org_resolver() -> SingleTenantOrgResolver:
+    """The OSS default tenancy: single-tenant, one configured org (id from AGAMI_ORG_ID, default
+    "local"). Multi-tenant is a future change at the *schema* layer (rows key on datasource, not
+    (org, datasource)) plus an authz check — not a resolver swap, so the seam lives here now."""
+    org_id = os.environ.get("AGAMI_ORG_ID", "").strip() or "local"
+    return SingleTenantOrgResolver(Org(id=org_id))
 
 
 def public_base_url() -> str:
@@ -81,7 +90,12 @@ def _is_public_path(path: str) -> bool:
 
 class _AuthMiddleware(BaseHTTPMiddleware):
     """Require a bearer token's presence; the OAuth-discovery endpoints stay open. Everything else
-    401s without a token."""
+    401s without a token. On a request that passes auth, resolve the single-tenant org and attach
+    it to request.state.org — the explicit single-tenant contract + the multi-tenant seam."""
+
+    def __init__(self, app, resolver: SingleTenantOrgResolver) -> None:
+        super().__init__(app)
+        self._resolver = resolver
 
     async def dispatch(self, request: Request, call_next):
         if _is_public_path(request.url.path):
@@ -93,6 +107,10 @@ class _AuthMiddleware(BaseHTTPMiddleware):
             return _unauthenticated(public_base_url())
         if _AUTH.validate_token(authz[7:].strip()) is None:
             return _unauthenticated(public_base_url())
+        # Resolve the org for this request. Single-tenant returns the one configured org regardless
+        # of context; nothing downstream consumes it yet (tools key on `datasource`), so this asserts
+        # the contract and reserves the seam — it does not add org-scoped behavior.
+        request.state.org = self._resolver.resolve_org(request)
         return await call_next(request)
 
 
@@ -181,7 +199,8 @@ def build_app() -> Starlette:
         Route("/.well-known/oauth-authorization-server/{rest:path}", _auth_server),
         Mount("/mcp", app=handle_mcp),
     ]
-    return Starlette(routes=routes, middleware=[Middleware(_AuthMiddleware)], lifespan=lifespan)
+    middleware = [Middleware(_AuthMiddleware, resolver=_build_org_resolver())]
+    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 
 
 def main() -> int:

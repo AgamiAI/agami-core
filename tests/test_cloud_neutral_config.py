@@ -108,3 +108,54 @@ def test_server_extra_declares_no_gcp_platform_package():
     text = (REPO_ROOT / "packages" / "agami-core" / "pyproject.toml").read_text().lower()
     for pkg in ("google-cloud-logging", "google-cloud-secret", "cloud-sql-python-connector"):
         assert pkg not in text, f"{pkg} must not be a declared dependency (GCP lock-in)"
+
+
+# --- 3. Single-tenant org resolver wired into the HTTP server ----------------
+
+
+def test_org_resolver_defaults_to_local(monkeypatch):
+    pytest.importorskip("starlette")
+    pytest.importorskip("mcp")
+    import mcp_http
+
+    monkeypatch.delenv("AGAMI_ORG_ID", raising=False)
+    assert mcp_http._build_org_resolver().resolve_org().id == "local"
+
+
+def test_org_resolver_reads_agami_org_id(monkeypatch):
+    pytest.importorskip("starlette")
+    pytest.importorskip("mcp")
+    import mcp_http
+
+    monkeypatch.setenv("AGAMI_ORG_ID", "acme")
+    assert mcp_http._build_org_resolver().resolve_org().id == "acme"
+
+
+def test_auth_middleware_attaches_resolved_org_after_auth(monkeypatch):
+    # An authed request gets the resolved org on request.state.org; the seam is live even though
+    # nothing downstream consumes it yet.
+    pytest.importorskip("starlette")
+    pytest.importorskip("mcp")
+    import asyncio
+
+    import mcp_http
+    from ports import Org
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    mw = mcp_http._AuthMiddleware(app=None, resolver=mcp_http.SingleTenantOrgResolver(Org(id="acme")))
+    captured: dict[str, object] = {}
+
+    async def call_next(request):
+        captured["org"] = request.state.org
+        return Response("ok")
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [(b"authorization", b"Bearer present")],
+    }
+    resp = asyncio.run(mw.dispatch(Request(scope), call_next))
+    assert resp.status_code == 200
+    assert isinstance(captured["org"], Org) and captured["org"].id == "acme"
