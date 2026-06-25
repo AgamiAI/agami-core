@@ -195,9 +195,10 @@ discipline** — every user-visible change needs a version bump in
 `plugins/agami/.claude-plugin/plugin.json`, or existing installs stay on the cached
 old version. Notable changes: [CHANGELOG.md](CHANGELOG.md).
 
-Run the suite with `python3 -m pytest tests/ -q` (covers renderers, validator,
-confidence formulas, applier, reconcile parser — everything that doesn't need an
-LLM round-trip).
+Before pushing, run the checks locally with **`uv run dev.py check`** (ruff + the test
+suite + gitleaks — the same gate CI runs on every PR). One-time setup and the full
+command list are in [CONTRIBUTING.md](CONTRIBUTING.md); the coding + customer-safety
+conventions are in [CLAUDE.md](CLAUDE.md). CI gates every PR regardless.
 
 **If agami is useful to you, a ⭐ on the repo genuinely helps others find it.**
 
