@@ -11,8 +11,12 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .venv/
+.venv-*/
 venv/
 *.egg-info/
+# uv writes a lockfile when `uv run`/`uv pip` touches the tree; the repo uses
+# ephemeral uvx (no pinned project), so the lockfile is a local byproduct.
+uv.lock
 
 # User-local agami state should NEVER appear in this repo
 .agami/
