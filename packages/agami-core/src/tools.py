@@ -213,12 +213,27 @@ def check_read_only(sql: str) -> str | None:
 
 
 def _load_org(profile: str):
-    """Lazily load the semantic model for a profile. Raises a clear error if the
-    model package (pydantic) isn't importable or there's no model on disk.
+    """Lazily load the semantic model for a profile, producing an `Organization`. Two backends
+    behind one seam: when AGAMI_DB_URL is set the hosted server reads it from the DB; otherwise the
+    local skill reads the YAML files (unchanged). Raises a clear error if the model deps (pydantic)
+    aren't importable or there's no model for the profile."""
+    from store import Store  # stdlib-light; psycopg2/sqlite imported lazily inside
 
-    The schema/traversal tools need the model; the execute_sql + log_feedback tools
-    stay pure-stdlib so the server runs for execution even without the model deps.
-    """
+    store = Store.from_env()
+    if store is not None:
+        from model_store import load_organization as _load_db
+
+        try:
+            org = _load_db(store, profile)
+        finally:
+            store.close()
+        if org is None:
+            raise FileNotFoundError(
+                f"No semantic model in the database for datasource {profile!r}. Load it from YAML "
+                f"with the deploy's model loader."
+            )
+        return org
+
     from semantic_model import loader as L  # may raise ImportError (pydantic)
 
     root = resolve_artifacts_dir() / profile
@@ -245,15 +260,47 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
 
 
 def _model_version(profile: str) -> str | None:
-    """The model-version pin = the newest snapshot dir name (a content hash), same as
-    the skill reads. None if there's no .snapshots/ (legacy model) or model deps are
-    unavailable (execute_sql stays usable)."""
+    """The model-version pin the receipt records — the newest model version. Served from the DB
+    when AGAMI_DB_URL is set (no file read), else the newest snapshot dir name (a content hash, what
+    the local skill reads). None if absent/unavailable (execute_sql stays usable)."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is not None:
+        from model_store import newest_model_version
+
+        try:
+            return newest_model_version(store, profile)
+        except Exception:
+            return None
+        finally:
+            store.close()
     try:
         from semantic_model import snapshot as SN
 
         return SN.newest_version(resolve_artifacts_dir() / profile)
     except Exception:
         return None
+
+
+def _domain_memory(profile: str) -> tuple[str, str | None]:
+    """(ORGANIZATION.md text, USER_MEMORY.md text) for the domain-context block — from the DB when
+    AGAMI_DB_URL is set (no file read at runtime), else from disk."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is not None:
+        from model_store import load_memory
+
+        try:
+            mem = load_memory(store, profile)
+        finally:
+            store.close()
+        return mem.get("organization") or "", mem.get("user")
+    artifacts = resolve_artifacts_dir()
+    return (_read_text(artifacts / profile / "ORGANIZATION.md") or ""), _read_text(
+        artifacts / "USER_MEMORY.md"
+    )
 
 
 def _resolve_receipt(profile: str, sql: str) -> dict | None:
@@ -402,13 +449,22 @@ def _content_tokens(s: str | None) -> set[str]:
 
 
 def _all_metrics(org) -> dict[str, tuple[Any, str | None]]:
-    """Every metric name -> (metric, area). Subject-area metrics + cross-area metrics."""
+    """Map a unique key -> (metric, area) for every metric (subject-area + cross-area). The key is
+    the metric name, disambiguated by area on a collision so two areas sharing a metric name are
+    BOTH kept (the never-hide contract: every metric must appear in metric_index)."""
     out: dict[str, tuple[Any, str | None]] = {}
+
+    def _add(m, area: str | None) -> None:
+        key = m.name
+        if key in out:  # name collision across areas — disambiguate, keep both
+            key = f"{m.name} ({area})" if area else f"{m.name} (cross-area)"
+        out[key] = (m, area)
+
     for sa in org.subject_areas:
         for m in sa.metrics:
-            out[m.name] = (m, sa.name)
+            _add(m, sa.name)
     for m in getattr(org, "cross_subject_area_metrics", []):
-        out[m.name] = (m, None)
+        _add(m, None)
     return out
 
 
@@ -421,7 +477,8 @@ def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]
     q_tokens = _content_tokens(query)
     scored: list[tuple[float, bool, str]] = []
     for name, (m, _area) in metrics.items():
-        cand_phrases = [name.replace("_", " "), m.description or ""] + list(m.other_names or [])
+        # Match on the metric's real name (not the possibly area-disambiguated dict key).
+        cand_phrases = [m.name.replace("_", " "), m.description or ""] + list(m.other_names or [])
         cand_norms = [c for c in (_norm_phrase(p) for p in cand_phrases) if c]
         score, strong = 0.0, False
         for cn in cand_norms:
@@ -550,7 +607,6 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     Plus ORGANIZATION.md / USER_MEMORY.md domain context.
     """
     profile = resolve_profile(args.get("datasource"))
-    artifacts = resolve_artifacts_dir()
     try:
         org = _load_org(profile)
     except FileNotFoundError as e:
@@ -600,6 +656,13 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
                 break
             nxt = _SCHEMA_MODE_DOWNGRADE[mode]
             if nxt is None:
+                # At the floor (index) and STILL over budget — the inline `metrics` (full detail
+                # for matched/all metrics) is the remaining bulk. Shed it; `metric_index` still
+                # lists every metric by name, so nothing is hidden — the client requests specifics
+                # via `metric_names`. Flag truncated so the overflow is never silent (C1/C3).
+                truncated = True
+                if result.get("metrics"):
+                    result["metrics"] = []
                 break
             mode, truncated = nxt, True
         result["requested_mode"] = requested_mode
@@ -612,30 +675,52 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
 
     parts = [json.dumps(result, indent=2, default=str)]
     # Domain context = the human's ORGANIZATION.md narrative + the model-DERIVED summary
-    # (subject areas, conventions, decoded glossary) assembled fresh from the structured
-    # model. The glossary thus always reaches the LLM — it no longer depends on a file
-    # having been re-rendered, and the human's prose is never mixed with auto content.
+    # (subject areas, conventions, decoded glossary) assembled fresh from the structured model.
+    # Source (ORGANIZATION.md / USER_MEMORY.md text) comes from the DB under the DB backend, files
+    # otherwise — so a DB-only deploy reads no files at runtime.
     from semantic_model import org_draft as _OD
 
-    org_md_raw = _read_text(artifacts / profile / "ORGANIZATION.md") or ""
+    org_md_raw, user_md_raw = _domain_memory(profile)
     domain_context = _OD.compose_context(org_md_raw, org)
     if domain_context:
         parts.append(f"\n## Domain context\n{domain_context}")
-    user_mem = _distill_for_llm(_read_text(artifacts / "USER_MEMORY.md"))
+    user_mem = _distill_for_llm(user_md_raw)
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
     return "\n".join(parts)
 
 
 def tool_get_prompt_examples(args: dict[str, Any]) -> str:
-    """Local analog of Ask Agami `get_prompt_examples`: the few-shot library.
+    """Ask Agami `get_prompt_examples`: the few-shot library.
 
-    Returns the curated examples.yaml verbatim as text. Local serving has no
-    embedding store, so `query`/`top_k` are accepted for interface-parity with
-    the hosted connector but do not rank or cap — the full curated library is
-    returned (it is small; the client reads YAML directly).
+    DB serving (hosted, AGAMI_DB_URL set): scope to the datasource, rank by word-overlap on
+    `query`, and cap to `top_k` within a char budget — so a large library (e.g. accumulated
+    corrections) never floods the context. Local serving (files): returns the curated examples.yaml
+    verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
     profile = resolve_profile(args.get("datasource"))
+
+    from store import Store
+
+    store = Store.from_env()
+    if store is not None:
+        from model_store import select_examples
+
+        # honour an explicit top_k=0 (caller wants none); only default when absent/None
+        top_k = args.get("top_k")
+        top_k = 10 if top_k is None else int(top_k)
+        try:
+            examples = select_examples(
+                store, profile, query=args.get("query"), area=args.get("area"), top_k=top_k
+            )
+        finally:
+            store.close()
+        return json.dumps(
+            {"datasource": profile, "examples": examples, "count": len(examples)},
+            indent=2,
+            default=str,
+        )
+
     artifacts = resolve_artifacts_dir()
     ex_dir = artifacts / profile / "prompt_examples"
     blocks: list[str] = []
@@ -775,9 +860,9 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
         "receipt": _resolve_receipt(profile, sql),
     }
 
-    # Append to the personal query log (same file the skills use), best-effort.
-    _append_jsonl(
-        QUERY_LOG,
+    # Log the execution through the single chokepoint: the DB sink when AGAMI_DB_URL is set (one
+    # query_executions row), else the local jsonl the skills use. Best-effort either way.
+    _record_query(
         {
             "ts": _now_iso(),
             "profile": profile,
@@ -785,7 +870,7 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
             "sql": sql,
             "row_count": len(data_rows),
             "source": "mcp_server",
-        },
+        }
     )
     return json.dumps(result, indent=2, default=str)
 
@@ -802,8 +887,7 @@ def tool_log_feedback(args: dict[str, Any]) -> str:
     good = {"good", "positive", "thumbs_up", "👍", "up", "yes"}
     bad = {"bad", "negative", "thumbs_down", "👎", "down", "no"}
     rating_value = "Good" if norm in good else "Bad" if norm in bad else str(rating)
-    ok = _append_jsonl(
-        FEEDBACK_LOG,
+    logged = _record_feedback(
         {
             "ts": _now_iso(),
             "profile": resolve_profile(args.get("datasource")),
@@ -811,13 +895,13 @@ def tool_log_feedback(args: dict[str, Any]) -> str:
             "rating": rating_value,
             "notes": args.get("notes"),
             "source": "mcp_server",
-        },
+        }
     )
-    if not ok:
+    if logged is None:
         return json.dumps(
             {"error": {"kind": "other", "remediation": f"Could not write {FEEDBACK_LOG}."}}
         )
-    return json.dumps({"ok": True, "rating": rating_value, "logged_to": str(FEEDBACK_LOG)})
+    return json.dumps({"ok": True, "rating": rating_value, "logged_to": logged})
 
 
 def _now_iso() -> str:
@@ -836,6 +920,48 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> bool:
         return True
     except OSError:
         return False
+
+
+def _record_query(rec: dict[str, Any]) -> None:
+    """Log a query execution through the DB sink (AGAMI_DB_URL) or the local jsonl. **Best-effort:**
+    a logging failure must never break an otherwise-successful query — so the DB path swallows
+    errors exactly like the jsonl path, and always closes its connection."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is None:
+        _append_jsonl(QUERY_LOG, rec)
+        return
+    try:
+        from contracts import QueryExecutionRecord
+        from model_store import DbActivitySink
+
+        DbActivitySink(store).record_query_execution(QueryExecutionRecord(**rec))
+    except Exception:
+        pass  # best-effort: never fail the query because logging failed
+    finally:
+        store.close()
+
+
+def _record_feedback(rec: dict[str, Any]) -> str | None:
+    """Record feedback through the DB sink (AGAMI_DB_URL) or the local jsonl. Returns where it
+    landed ('database' or the file path), or None if the write failed (feedback is the user's
+    explicit action, so a failure surfaces — unlike incidental query logging). Closes the store."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is None:
+        return str(FEEDBACK_LOG) if _append_jsonl(FEEDBACK_LOG, rec) else None
+    try:
+        from contracts import FeedbackRecord
+        from model_store import DbActivitySink
+
+        DbActivitySink(store).record_feedback(FeedbackRecord(**rec))
+        return "database"
+    except Exception:
+        return None
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------
