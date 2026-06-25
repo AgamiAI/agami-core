@@ -18,17 +18,64 @@ The bot records your signature (stored in this repo) and flips the **CLA** statu
 
 Maintainers and first-party (Agami AI) authors are allowlisted, so internal commits aren't gated; the CLA is for contributions from outside the organization.
 
-## Running tests
+## Running the checks locally
 
-Privacy-invariant + unit tests (no DB required):
+The same gate runs in CI on every PR — **ruff** (lint + format), the **test suite**, and
+**gitleaks** (secret scan). To catch problems before you push, install the local hooks once.
+
+**Prerequisite — install `uv` (the only thing you need globally):**
 
 ```bash
-python3 -m pytest tests/ -q
+# macOS / Linux:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell):
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+# any platform, if you prefer a package manager:
+#   brew install uv   ·   winget install astral-sh.uv   ·   pipx install uv
+# docs: https://docs.astral.sh/uv/getting-started/installation/
 ```
 
-The privacy test (`tests/test_privacy_no_network.py`) is a contract: no shipped script may make a network call — adding a network-egress primitive fails the build.
+Everything else rides on `uv` — there's nothing else to install globally. From the repo root, a
+tiny cross-platform task runner (`dev.py`) wraps it all:
 
-End-to-end integration tests (Postgres + MySQL fixtures):
+```bash
+uv run dev.py setup     # once: wire the pre-commit hooks (ruff + gitleaks on commit, tests on push)
+uv run dev.py check     # the whole gate locally — ruff + tests + gitleaks (same as CI)
+uv run dev.py cover     # did the lines I changed get tested? (patch coverage)
+```
+
+`dev.py` shells out to `uvx` (which fetches ruff / pre-commit / pytest on demand), so it runs the
+same on macOS, Linux, and Windows. Other tasks: `test`, `lint`, `fmt`. After `setup`, the hooks run
+automatically — `ruff` + `gitleaks` on every **commit**, the test suite on every **push**. They're a
+convenience (bypassable with `git commit --no-verify`); **CI is the real, unbypassable gate.**
+
+Prefer the raw tools? `dev.py` is only a wrapper — the equivalents are below.
+
+### Tests on their own
+
+The suite needs `pydantic`, `pyyaml`, and `sqlglot` to import the semantic-model code (DB-driver
+tests skip cleanly without a database). `uvx` pulls them in for the run:
+
+```bash
+uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot pytest tests/ -q
+```
+
+The privacy test (`tests/test_privacy_no_network.py`) is a contract: no shipped script may make a
+network call — adding a network-egress primitive fails the build.
+
+### Did I test the code I changed?
+
+`uv run dev.py cover` reports coverage of **the lines your PR touched** (fails on changed lines that
+no test exercises) — the quickest way to confirm a change is tested, regardless of overall coverage.
+Under the hood that's:
+
+```bash
+uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot \
+  pytest tests/ -q --cov=plugins --cov-report=xml
+uvx diff-cover coverage.xml --compare-branch=origin/main
+```
+
+### End-to-end integration tests (Postgres + MySQL fixtures)
 
 ```bash
 cd tests/integration
@@ -91,7 +138,7 @@ When opening a PR that warrants a version bump, the checklist is:
 2. `plugins/agami/.claude-plugin/plugin.json` — bump `version`.
 3. Add a note to the PR description summarizing the user-visible change and which version it lands in.
 
-We don't keep a `CHANGELOG.md` yet. The git log + version bumps are the changelog.
+Record notable user-visible changes in [`CHANGELOG.md`](CHANGELOG.md) (Keep a Changelog format) under the version that ships them.
 
 ## A community Discord will land soon
 

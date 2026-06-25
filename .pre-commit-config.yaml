@@ -1,0 +1,40 @@
+# Local pre-commit hooks — fast feedback BEFORE code leaves your machine.
+#
+# These are a convenience, not the gate: they're bypassable (`git commit --no-verify`),
+# and the real, unbypassable check is CI (.github/workflows/ci.yml), which re-runs the
+# same tools. ruff config comes from pyproject.toml — nothing is duplicated here.
+#
+# Install once (both stages):
+#   uvx pre-commit install --hook-type pre-commit --hook-type pre-push
+# Run everything by hand anytime:
+#   uvx pre-commit run --all-files          # ruff + gitleaks on the whole tree
+#   uvx pre-commit run --hook-stage pre-push --all-files   # + the test suite
+
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  # ruff — lint + format, on the files you're committing. Rules live in pyproject.toml.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.19
+    hooks:
+      - id: ruff           # lint (E4/E7/E9/F/I)
+      - id: ruff-format    # auto-format the staged files
+
+  # gitleaks — credential-shaped secret scan (pattern-based, NO denylist). Catches a
+  # pasted key/connection string before it's ever committed.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # Test suite — runs at PRE-PUSH (not on every commit) so commits stay fast but nothing
+  # red leaves your machine. Same deps + command CI uses.
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (full suite)
+        entry: uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot pytest tests/ -q
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
