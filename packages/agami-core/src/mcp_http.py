@@ -62,12 +62,29 @@ def _unauthenticated(base: str) -> JSONResponse:
     )
 
 
+# Only the OAuth-discovery endpoints are reachable unauthenticated (the client probes them before
+# it has a token). Scoped to these exact prefixes — NOT a blanket `/.well-known/` skip — so the
+# open surface is exactly the routes we serve, not "anything starting with /.well-known/".
+_PUBLIC_PREFIXES = (
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+)
+
+
+def _is_public_path(path: str) -> bool:
+    """True for the discovery routes and their path-suffixed variants only. We match on a path
+    *boundary* (exact, or prefix + '/'), not a bare `startswith` — otherwise a sibling like
+    `/.well-known/oauth-protected-resource-x` would skip auth too. Today such a path only 404s, but
+    boundary-matching keeps the open surface == the routes we serve even if a route is added later."""
+    return any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES)
+
+
 class _AuthMiddleware(BaseHTTPMiddleware):
-    """Require a bearer token's presence. The `.well-known/*` discovery endpoints stay open (the
-    client probes them before it has a token); everything else 401s without a token."""
+    """Require a bearer token's presence; the OAuth-discovery endpoints stay open. Everything else
+    401s without a token."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path.startswith("/.well-known/"):
+        if _is_public_path(request.url.path):
             return await call_next(request)
         authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
         # Require the Bearer scheme specifically (not just any Authorization header), then a
@@ -140,6 +157,10 @@ def build_app() -> Starlette:
     behind the bearer-presence auth middleware."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
+    # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
+    # (where the RuntimeError would surface as a 500, leaking a traceback under debug). Anything that
+    # builds the app via --factory / an embedding harness gets a clear error up front.
+    public_base_url()
     bootstrap_paths()
     session_manager = StreamableHTTPSessionManager(
         app=build_server(), json_response=True, stateless=True

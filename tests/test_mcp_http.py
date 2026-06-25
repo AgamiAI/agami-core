@@ -38,6 +38,28 @@ def test_public_base_url_is_required(monkeypatch):
         mcp_http.public_base_url()
 
 
+def test_build_app_fails_fast_without_public_base_url(monkeypatch):
+    # S2: the missing-env error must surface at construction, not as a per-request 500 inside the
+    # auth middleware (which would leak a traceback under debug).
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    with pytest.raises(RuntimeError, match="PUBLIC_BASE_URL"):
+        mcp_http.build_app()
+
+
+def test_auth_skip_is_scoped_to_discovery_routes_only(base_url):
+    # S1: only the OAuth-discovery prefixes are open; any other /.well-known/* path still requires
+    # auth (no blanket "/.well-known/" bypass).
+    c = TestClient(mcp_http.build_app())
+    assert c.get("/.well-known/openid-configuration").status_code == 401
+    # A sibling that merely shares the prefix (no path boundary) must NOT skip auth either — the
+    # skip matches on a boundary (exact or prefix + "/"), not a bare startswith.
+    assert c.get("/.well-known/oauth-protected-resource-evil").status_code == 401
+    assert c.get("/.well-known/oauth-protected-resource").status_code == 200  # exact route open
+    assert (
+        c.get("/.well-known/oauth-protected-resource/mcp").status_code == 200
+    )  # suffixed variant open
+
+
 def test_discovery_advertises_public_base_url(base_url):
     c = TestClient(mcp_http.build_app())
     pr = c.get("/.well-known/oauth-protected-resource")
