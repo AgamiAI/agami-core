@@ -33,25 +33,71 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_email(email: str | None) -> str | None:
+    """Canonical email form for storage + lookup: trimmed + lowercased, or None. Both paths use this
+    so a stray-whitespace or mixed-case address can't dodge the one-to-one (UNIQUE) email identity."""
+    if not email:
+        return None
+    return email.strip().lower() or None
+
+
 def create_user(
     store: Store,
     username: str,
-    password: str,
+    password: str | None = None,
     email: str | None = None,
     status: str = _ACTIVE,
+    oidc_provider: str | None = None,
+    oidc_subject: str | None = None,
 ) -> str:
-    """Create a user with an argon2id-hashed password; returns the minted id. Raises if the username
-    already exists (the UNIQUE constraint) — callers that want create-if-absent check first."""
-    if not password:
-        raise ValueError("password must not be empty")
+    """Create a user; returns the minted id. `password=None` makes a **passwordless** user (OIDC-only —
+    no password login); a non-None password is argon2id-hashed and must be non-empty. `oidc_provider`
+    pins which IdP the user signs in with; `oidc_subject` (the IdP `sub`) is usually bound on first
+    login. Raises if the username/email already exists (the UNIQUE constraints)."""
+    if password is not None and not password.strip():
+        raise ValueError("password must not be empty (pass None for a passwordless OIDC user)")
     user_id = uuid4().hex
+    password_hash = hash_password(password) if password is not None else None
+    # Emails are the OIDC lookup key — store them normalized (trim + lowercase) so the identity
+    # matches regardless of casing/whitespace; the UNIQUE index keeps them one-to-one.
+    normalized_email = _normalize_email(email)
     store.execute(
-        "INSERT INTO users (id, username, password_hash, email, status, created) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, username, hash_password(password), email, status, _now_iso()),
+        "INSERT INTO users (id, username, password_hash, email, status, created, oidc_provider, "
+        "oidc_subject) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            username,
+            password_hash,
+            normalized_email,
+            status,
+            _now_iso(),
+            oidc_provider,
+            oidc_subject,
+        ),
     )
     store.commit()
     return user_id
+
+
+def bind_oidc_subject(store: Store, username: str, subject: str) -> None:
+    """Pin the IdP subject to a user on first OIDC login — only when it isn't already set, so a later
+    login can't silently rebind the account to a different IdP identity (the WHERE guard makes it a
+    one-time, no-clobber bind)."""
+    store.execute(
+        "UPDATE users SET oidc_subject = ? WHERE username = ? AND oidc_subject IS NULL",
+        (subject, username),
+    )
+    store.commit()
+
+
+def get_user_by_email(store: Store, email: str) -> dict[str, Any] | None:
+    """Look up a user by email — the onboarded-only lookup OIDC uses. Case-insensitive (emails are
+    stored lowercased) and one-to-one (the email index is UNIQUE)."""
+    normalized = _normalize_email(email)
+    if normalized is None:
+        return None
+    rows = store.query("SELECT * FROM users WHERE email = ?", (normalized,))
+    return rows[0] if rows else None
 
 
 def get_user(store: Store, username: str) -> dict[str, Any] | None:
@@ -77,9 +123,11 @@ def authenticate(store: Store, username: str, password: str) -> Principal | None
     a username exists — closing a timing-enumeration oracle. On success, opportunistically upgrade
     the stored hash if the cost profile has risen (the cross-tier cost-bump path)."""
     user = get_user(store, username)
-    stored_hash = user["password_hash"] if user else _DUMMY_HASH
+    # A passwordless (OIDC-only) user has a NULL hash and can never password-login; verify against the
+    # dummy hash so the timing is identical to a missing/active-password user.
+    stored_hash = user["password_hash"] if (user and user["password_hash"]) else _DUMMY_HASH
     verified = verify_password(stored_hash, password)
-    if user is None or user["status"] != _ACTIVE or not verified:
+    if user is None or user["status"] != _ACTIVE or user["password_hash"] is None or not verified:
         return None
     if needs_rehash(user["password_hash"]):
         try:

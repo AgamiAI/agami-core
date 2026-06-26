@@ -62,9 +62,28 @@ def test_users_table_is_flat_no_role_column():
     assert "users" in _tables(s)
     cols = {r["name"] for r in s.query("PRAGMA table_info(users)")}
     assert {"id", "username", "password_hash", "email", "status", "created"} <= cols
+    # OIDC identity binding columns (provider + subject) exist; still NO role/permission column.
+    assert {"oidc_provider", "oidc_subject"} <= cols
     assert not (cols & {"role", "roles", "permission", "permissions"}), (
         "flat access — no role column"
     )
+    s.close()
+
+
+def test_users_password_hash_nullable_and_email_indexed():
+    # OIDC users have no password, and we look them up by email — so password_hash is nullable and
+    # email is indexed after the passwordless migration.
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    pw = next(r for r in s.query("PRAGMA table_info(users)") if r["name"] == "password_hash")
+    assert pw["notnull"] == 0, "password_hash must be nullable for OIDC users"
+    # username must STILL be unique (the rebuild preserves the constraint)
+    uname = next(r for r in s.query("PRAGMA table_info(users)") if r["name"] == "username")
+    assert uname["notnull"] == 1
+    email_idx = next(
+        (r for r in s.query("PRAGMA index_list(users)") if r["name"] == "idx_users_email"), None
+    )
+    assert email_idx is not None and email_idx["unique"] == 1, "email must be uniquely indexed"
     s.close()
 
 
