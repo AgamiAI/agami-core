@@ -47,10 +47,13 @@ def create_user(
     password: str | None = None,
     email: str | None = None,
     status: str = _ACTIVE,
+    oidc_provider: str | None = None,
+    oidc_subject: str | None = None,
 ) -> str:
     """Create a user; returns the minted id. `password=None` makes a **passwordless** user (OIDC-only —
-    no password login); a non-None password is argon2id-hashed and must be non-empty. Raises if the
-    username already exists (the UNIQUE constraint) — callers that want create-if-absent check first."""
+    no password login); a non-None password is argon2id-hashed and must be non-empty. `oidc_provider`
+    pins which IdP the user signs in with; `oidc_subject` (the IdP `sub`) is usually bound on first
+    login. Raises if the username/email already exists (the UNIQUE constraints)."""
     if password is not None and not password.strip():
         raise ValueError("password must not be empty (pass None for a passwordless OIDC user)")
     user_id = uuid4().hex
@@ -59,12 +62,32 @@ def create_user(
     # matches regardless of casing/whitespace; the UNIQUE index keeps them one-to-one.
     normalized_email = _normalize_email(email)
     store.execute(
-        "INSERT INTO users (id, username, password_hash, email, status, created) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, username, password_hash, normalized_email, status, _now_iso()),
+        "INSERT INTO users (id, username, password_hash, email, status, created, oidc_provider, "
+        "oidc_subject) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            username,
+            password_hash,
+            normalized_email,
+            status,
+            _now_iso(),
+            oidc_provider,
+            oidc_subject,
+        ),
     )
     store.commit()
     return user_id
+
+
+def bind_oidc_subject(store: Store, username: str, subject: str) -> None:
+    """Pin the IdP subject to a user on first OIDC login — only when it isn't already set, so a later
+    login can't silently rebind the account to a different IdP identity (the WHERE guard makes it a
+    one-time, no-clobber bind)."""
+    store.execute(
+        "UPDATE users SET oidc_subject = ? WHERE username = ? AND oidc_subject IS NULL",
+        (subject, username),
+    )
+    store.commit()
 
 
 def get_user_by_email(store: Store, email: str) -> dict[str, Any] | None:

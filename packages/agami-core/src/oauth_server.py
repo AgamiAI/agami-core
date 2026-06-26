@@ -29,7 +29,7 @@ from ports import Principal
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from store import Store
-from user_store import authenticate, get_user_by_email
+from user_store import authenticate, bind_oidc_subject, create_user, get_user_by_email
 
 _CODE_TTL = timedelta(minutes=10)  # authorization codes are short-lived
 _JWT_TTL = timedelta(hours=1)
@@ -464,33 +464,69 @@ async def oidc_callback(request: Request) -> Response:
         return _oauth_error("invalid_request", "missing code")
     try:
         id_token = oidc.exchange_code(p, code=q.get("code", ""), redirect_uri=_oidc_callback_uri())
-        email = oidc.verify_id_token(p, id_token, nonce=claims.get("nonce", ""))
+        identity = oidc.verify_id_token(p, id_token, nonce=claims.get("nonce", ""))
     except Exception:
-        # Bad signature/aud/iss/nonce/unverified-email/exchange error — all collapse to one verdict.
+        # Bad signature/aud/iss/sub/nonce/unverified-email/exchange error — all collapse to one verdict.
         return _oauth_error("access_denied", "OIDC verification failed", status=403)
 
     store = _open_store()
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
-        user = get_user_by_email(store, email)
-        # Onboarded-only: the verified email must already be an active user (admin-created). An
-        # unknown email is rejected, never auto-provisioned.
-        #
-        # LOAD-BEARING: resolution is by email alone, which is safe ONLY while a single IdP is
-        # enabled. Before enabling a second provider, bind identity to (provider, subject) — else an
-        # attacker with the same email at another IdP would resolve to this user (IdP confusion).
-        if user is None or user["status"] != "active":
+        username = _resolve_oidc_user(store, p.key, identity)
+        if username is None:
             return _oauth_error("access_denied", "this account is not authorized", status=403)
         resp = _issue_authorization_code(
             store,
             client_id=claims.get("client_id", ""),
             redirect_uri=claims.get("redirect_uri", ""),
             code_challenge=claims.get("code_challenge", ""),
-            username=user["username"],
+            username=username,
             client_state=claims.get("client_state", ""),
         )
     finally:
         store.close()
     resp.delete_cookie(_CSRF_COOKIE)
     return resp
+
+
+# Statuses that may complete a login. `demo` is admitted so a public-demo instance works; `disabled`
+# (or anything else) is refused.
+_LOGIN_STATUSES = {"active", "demo"}
+
+
+def _resolve_oidc_user(store: Store, provider_key: str, identity) -> str | None:
+    """Map a verified OIDC identity to a username, or None to reject. Onboarded-only by default; with
+    public signup enabled an unknown email self-provisions a demo user.
+
+    Provider-binding closes IdP confusion: an existing user must be bound to THIS provider, and (once
+    set) THIS subject — so an attacker with the same email at another IdP, or a different account at
+    the same IdP, is refused rather than resolved to the victim."""
+    import oidc
+
+    user = get_user_by_email(store, identity.email)
+    if user is not None:
+        if user["status"] not in _LOGIN_STATUSES:
+            return None
+        if user["oidc_provider"] != provider_key:
+            return None  # bound to a different IdP (or password-only) → not an OIDC login for this provider
+        if user["oidc_subject"] is not None:
+            if user["oidc_subject"] != identity.subject:
+                return None  # same provider, different account → refuse
+        else:
+            bind_oidc_subject(store, user["username"], identity.subject)  # first login pins the subject
+        return user["username"]
+
+    # Unknown email: only a public-demo instance may self-provision (fail-closed default).
+    if not oidc.public_signup_enabled():
+        return None
+    create_user(
+        store,
+        username=identity.email,
+        password=None,
+        email=identity.email,
+        status="demo",
+        oidc_provider=provider_key,
+        oidc_subject=identity.subject,
+    )
+    return identity.email

@@ -33,8 +33,12 @@ import oidc  # noqa: E402
 import user_store  # noqa: E402
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+from oauth_server import _resolve_oidc_user  # noqa: E402
+from oidc import Identity  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 from store import Store  # noqa: E402
+
+MS_TENANT = "00000000-0000-0000-0000-000000000000"  # a fake pinned tenant guid
 
 BASE = "https://your-host.example.com"
 SECRET = "x" * 40  # throwaway HS256 server secret (>=32 bytes); not real
@@ -67,6 +71,7 @@ def _id_token(**overrides) -> str:
         "iss": ISSUER,
         "aud": CLIENT_ID,
         "exp": 9_999_999_999,
+        "sub": "google-sub-123",
         "email": "you@example.com",
         "email_verified": True,
         "nonce": "the-nonce",
@@ -98,8 +103,8 @@ def env(tmp_path, monkeypatch):
     s = Store.connect(db_url)
     s.run_migrations()
     user_store.create_user(
-        s, "alice", password=None, email="you@example.com"
-    )  # onboarded OIDC user
+        s, "alice", password=None, email="you@example.com", oidc_provider="google"
+    )  # onboarded OIDC user, bound to Google
     s.close()
     return db_url
 
@@ -109,7 +114,8 @@ def env(tmp_path, monkeypatch):
 
 def test_verify_id_token_accepts_a_valid_token(env):
     p = oidc.provider("google")
-    assert oidc.verify_id_token(p, _id_token(), nonce="the-nonce") == "you@example.com"
+    identity = oidc.verify_id_token(p, _id_token(), nonce="the-nonce")
+    assert identity.email == "you@example.com" and identity.subject == "google-sub-123"
 
 
 @pytest.mark.parametrize(
@@ -257,3 +263,101 @@ def test_provider_option_hidden_when_unconfigured(monkeypatch, tmp_path):
     assert r.status_code == 200
     assert "Sign in with Google" not in r.text  # hidden when unconfigured
     assert "<form" in r.text  # password login still present
+
+
+# --- Microsoft (tenant-pinned) + provider-binding + demo signup --------------
+
+
+def test_microsoft_requires_a_pinned_tenant(monkeypatch):
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", "ms-client")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    for bad in ("", "common", "organizations", "consumers"):
+        monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", bad)
+        with pytest.raises(ValueError):
+            oidc.provider("microsoft")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", MS_TENANT)
+    p = oidc.provider("microsoft")
+    assert p is not None and p.require_email_verified is False  # tenant pin is the trust
+
+
+def test_microsoft_token_without_email_verified_is_accepted(env, monkeypatch):
+    # MS v2.0 tokens often omit email_verified; with a pinned tenant that's fine.
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", CLIENT_ID)
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", MS_TENANT)
+    p = oidc.provider("microsoft")
+    tok = jwt.encode(
+        {
+            "iss": ISSUER,
+            "aud": CLIENT_ID,
+            "exp": 9_999_999_999,
+            "sub": "ms-sub",
+            "email": "you@example.com",
+            "nonce": "n",
+        },  # no email_verified claim at all
+        _PRIV_PEM,
+        algorithm="RS256",
+        headers={"kid": "test"},
+    )
+    identity = oidc.verify_id_token(p, tok, nonce="n")
+    assert identity.email == "you@example.com" and identity.subject == "ms-sub"
+
+
+def test_google_token_without_email_verified_is_rejected(env):
+    # Google (consumer IdP) MUST prove email_verified.
+    p = oidc.provider("google")
+    tok = jwt.encode(
+        {
+            "iss": ISSUER,
+            "aud": CLIENT_ID,
+            "exp": 9_999_999_999,
+            "sub": "s",
+            "email": "you@example.com",
+            "nonce": "the-nonce",
+        },  # no email_verified
+        _PRIV_PEM,
+        algorithm="RS256",
+        headers={"kid": "test"},
+    )
+    with pytest.raises(Exception):
+        oidc.verify_id_token(p, tok, nonce="the-nonce")
+
+
+def test_provider_mismatch_is_rejected_idp_confusion(env):
+    # alice is bound to Google; a Microsoft identity with her email must NOT resolve to her.
+    s = Store.from_env()
+    assert _resolve_oidc_user(s, "microsoft", Identity("you@example.com", "ms-sub")) is None
+    s.close()
+
+
+def test_subject_tofu_binds_then_enforces(env):
+    s = Store.from_env()
+    # first Google login binds the subject; a different subject at Google is then refused
+    assert _resolve_oidc_user(s, "google", Identity("you@example.com", "sub-1")) == "alice"
+    assert _resolve_oidc_user(s, "google", Identity("you@example.com", "sub-2")) is None
+    assert _resolve_oidc_user(s, "google", Identity("you@example.com", "sub-1")) == "alice"  # bound
+    s.close()
+
+
+def test_demo_signup_off_rejects_unknown_email(env):
+    s = Store.from_env()  # AGAMI_PUBLIC_SIGNUP unset → fail-closed
+    assert _resolve_oidc_user(s, "google", Identity("stranger@example.com", "s")) is None
+    s.close()
+
+
+def test_demo_signup_on_creates_a_demo_user(env, monkeypatch):
+    monkeypatch.setenv("AGAMI_PUBLIC_SIGNUP", "true")
+    s = Store.from_env()
+    uname = _resolve_oidc_user(s, "google", Identity("newbie@example.com", "ns"))
+    assert uname == "newbie@example.com"
+    row = user_store.get_user_by_email(s, "newbie@example.com")
+    assert row["status"] == "demo"
+    assert row["oidc_provider"] == "google" and row["oidc_subject"] == "ns"
+    s.close()
+
+
+def test_disabled_user_cannot_oidc_login(env):
+    s = Store.from_env()
+    user_store.set_status(s, "alice", "disabled")
+    assert _resolve_oidc_user(s, "google", Identity("you@example.com", "sub-1")) is None
+    s.close()
