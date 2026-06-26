@@ -21,6 +21,7 @@ import html
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import uuid4
 
@@ -29,7 +30,16 @@ from ports import Principal
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from store import Store
-from user_store import authenticate, get_user_by_email
+from user_store import (
+    authenticate,
+    bind_oidc_subject,
+    create_user,
+    get_user,
+    get_user_by_email,
+)
+
+if TYPE_CHECKING:
+    from oidc import Identity  # for type hints only — runtime imports oidc lazily (egress module)
 
 _CODE_TTL = timedelta(minutes=10)  # authorization codes are short-lived
 _JWT_TTL = timedelta(hours=1)
@@ -367,6 +377,17 @@ def _oidc_callback_uri() -> str:
     return f"{public_base_url()}/oauth/oidc/callback"
 
 
+def _safe_provider(key: str):
+    """`oidc.provider`, but a misconfigured provider (e.g. an unpinned Microsoft tenant, which raises)
+    resolves to None so the handler answers a clean 400 instead of an unhandled 500."""
+    import oidc
+
+    try:
+        return oidc.provider(key)
+    except ValueError:
+        return None
+
+
 def _mint_oidc_state(payload: dict, csrf: str) -> str:
     """Sign the carried authorize context + a CSRF binding into a short-lived HS256 state JWT."""
     claims = {
@@ -401,7 +422,7 @@ async def oidc_start(request: Request) -> Response:
     import oidc
 
     q = request.query_params
-    p = oidc.provider(q.get("provider", ""))
+    p = _safe_provider(q.get("provider", ""))
     if p is None:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
     redirect_uri = q.get("redirect_uri", "")
@@ -457,40 +478,90 @@ async def oidc_callback(request: Request) -> Response:
     claims = _verify_oidc_state(q.get("state", ""), request.cookies.get(_CSRF_COOKIE))
     if claims is None:
         return _oauth_error("invalid_request", "invalid or expired state")
-    p = oidc.provider(claims.get("provider", ""))
+    p = _safe_provider(claims.get("provider", ""))
     if p is None:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
     if not q.get("code"):
         return _oauth_error("invalid_request", "missing code")
     try:
         id_token = oidc.exchange_code(p, code=q.get("code", ""), redirect_uri=_oidc_callback_uri())
-        email = oidc.verify_id_token(p, id_token, nonce=claims.get("nonce", ""))
+        identity = oidc.verify_id_token(p, id_token, nonce=claims.get("nonce", ""))
     except Exception:
-        # Bad signature/aud/iss/nonce/unverified-email/exchange error — all collapse to one verdict.
+        # Bad signature/aud/iss/sub/nonce/unverified-email/exchange error — all collapse to one verdict.
         return _oauth_error("access_denied", "OIDC verification failed", status=403)
 
     store = _open_store()
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
-        user = get_user_by_email(store, email)
-        # Onboarded-only: the verified email must already be an active user (admin-created). An
-        # unknown email is rejected, never auto-provisioned.
-        #
-        # LOAD-BEARING: resolution is by email alone, which is safe ONLY while a single IdP is
-        # enabled. Before enabling a second provider, bind identity to (provider, subject) — else an
-        # attacker with the same email at another IdP would resolve to this user (IdP confusion).
-        if user is None or user["status"] != "active":
+        username = _resolve_oidc_user(store, p.key, identity)
+        if username is None:
             return _oauth_error("access_denied", "this account is not authorized", status=403)
         resp = _issue_authorization_code(
             store,
             client_id=claims.get("client_id", ""),
             redirect_uri=claims.get("redirect_uri", ""),
             code_challenge=claims.get("code_challenge", ""),
-            username=user["username"],
+            username=username,
             client_state=claims.get("client_state", ""),
         )
     finally:
         store.close()
     resp.delete_cookie(_CSRF_COOKIE)
     return resp
+
+
+# Statuses that may complete a login. `demo` is admitted so a public-demo instance works; `disabled`
+# (or anything else) is refused.
+_LOGIN_STATUSES = {"active", "demo"}
+
+
+def _resolve_oidc_user(store: Store, provider_key: str, identity: Identity) -> str | None:
+    """Map a verified OIDC identity to a username, or None to reject. Onboarded-only by default; with
+    public signup enabled an unknown email self-provisions a demo user.
+
+    Provider-binding closes IdP confusion: an existing user must be bound to THIS provider, and (once
+    set) THIS subject — so an attacker with the same email at another IdP, or a different account at
+    the same IdP, is refused rather than resolved to the victim."""
+    import oidc
+
+    user = get_user_by_email(store, identity.email)
+    if user is not None:
+        if user["status"] not in _LOGIN_STATUSES:
+            return None
+        if user["oidc_provider"] != provider_key:
+            return None  # bound to a different IdP (or password-only) → not an OIDC login for this provider
+        # Bind the subject on first login (a no-clobber UPDATE that only sets it when NULL), then
+        # **re-read and require the stored subject is ours**. The re-read is what closes the
+        # concurrent first-login race: if another subject bound first, our guarded UPDATE is a no-op,
+        # the stored subject won't match, and we reject — rather than logging in against someone
+        # else's binding. It also covers the steady state (an already-bound, mismatched subject).
+        bind_oidc_subject(store, user["username"], identity.subject)
+        bound = get_user(store, user["username"])
+        if bound is None or bound["oidc_subject"] != identity.subject:
+            return None
+        return user["username"]
+
+    # Unknown email: only a public-demo instance may self-provision (fail-closed default).
+    if not oidc.public_signup_enabled():
+        return None
+    try:
+        create_user(
+            store,
+            username=identity.email,
+            password=None,
+            email=identity.email,
+            status="demo",
+            oidc_provider=provider_key,
+            oidc_subject=identity.subject,
+        )
+    except Exception as exc:
+        # A UNIQUE collision (concurrent signup, or the email already used as a username) is not an
+        # authorization → reject cleanly. But a real failure (datastore down, unexpected SQL error)
+        # must surface, not masquerade as a 403 — so only swallow integrity errors. The MRO check is
+        # portable across backends (sqlite3.IntegrityError / psycopg2.errors.UniqueViolation) without
+        # importing psycopg2 here.
+        if any(cls.__name__ == "IntegrityError" for cls in type(exc).__mro__):
+            return None
+        raise
+    return identity.email

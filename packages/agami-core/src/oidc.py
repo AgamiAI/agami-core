@@ -25,9 +25,10 @@ _TIMEOUT = httpx.Timeout(10.0)
 
 # Discovery URLs are fixed per provider (the HTTPS trust anchor); client creds come from env. Google
 # ships first; Microsoft (with tenant pinning) follows.
-_DISCOVERY = {
-    "google": "https://accounts.google.com/.well-known/openid-configuration",
-}
+_PROVIDERS = ("google", "microsoft")
+# Microsoft authorities that admit ANY tenant — refused, so a deployer must pin a single tenant (the
+# tenant pin is Microsoft's trust boundary; without it, any Azure AD account would be accepted).
+_UNPINNED_MS_TENANTS = {"common", "organizations", "consumers"}
 
 _discovery_cache: dict[str, dict] = {}
 _jwks_clients: dict[str, "jwt.PyJWKClient"] = {}
@@ -39,24 +40,72 @@ class Provider:
     discovery_url: str
     client_id: str
     client_secret: str
+    # Google (a consumer IdP serving any email) must prove email_verified. Microsoft is pinned to one
+    # tenant, so the org controls the addresses — its tokens often omit email_verified and that's OK.
+    require_email_verified: bool
+
+
+@dataclass(frozen=True)
+class Identity:
+    """The verified identity from an ID token: the email (the lookup key) + the IdP's immutable
+    subject (`sub`, used to bind the user to one provider account)."""
+
+    email: str
+    subject: str
+
+
+def _discovery_url(key: str) -> str | None:
+    """The provider's OpenID discovery URL. Google is fixed; Microsoft is tenant-specific (and the
+    tenant must be pinned — an any-tenant authority is refused)."""
+    if key == "google":
+        return "https://accounts.google.com/.well-known/openid-configuration"
+    if key == "microsoft":
+        tenant = os.environ.get("AGAMI_OIDC_MICROSOFT_TENANT", "").strip()
+        if not tenant or tenant.lower() in _UNPINNED_MS_TENANTS:
+            raise ValueError(
+                "AGAMI_OIDC_MICROSOFT_TENANT must pin a single tenant id "
+                "(not 'common'/'organizations'/'consumers') — the tenant pin is the trust boundary."
+            )
+        return f"https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration"
+    return None
 
 
 def provider(key: str) -> Provider | None:
     """The configured provider for `key`, or None when its client id/secret env is absent (so the
-    option is simply hidden). Env: AGAMI_OIDC_<KEY>_CLIENT_ID / _CLIENT_SECRET."""
-    discovery_url = _DISCOVERY.get(key)
-    if discovery_url is None:
+    option is simply hidden). Env: AGAMI_OIDC_<KEY>_CLIENT_ID / _CLIENT_SECRET (+ _TENANT for MS).
+    Raises ValueError on a misconfigured Microsoft tenant (an unpinned authority is refused)."""
+    if key not in _PROVIDERS:
         return None
     client_id = os.environ.get(f"AGAMI_OIDC_{key.upper()}_CLIENT_ID", "").strip()
     client_secret = os.environ.get(f"AGAMI_OIDC_{key.upper()}_CLIENT_SECRET", "").strip()
     if not client_id or not client_secret:
         return None
-    return Provider(key, discovery_url, client_id, client_secret)
+    discovery_url = _discovery_url(key)  # may raise for an unpinned MS tenant
+    if discovery_url is None:
+        return None
+    return Provider(
+        key, discovery_url, client_id, client_secret, require_email_verified=key == "google"
+    )
 
 
 def available_providers() -> list[str]:
-    """The provider keys that are configured (have client id/secret) — what the login page offers."""
-    return [k for k in _DISCOVERY if provider(k) is not None]
+    """The provider keys that are configured (have client id/secret) — what the login page offers. A
+    misconfigured Microsoft tenant is skipped here, so its button is simply hidden; if it's invoked
+    directly the handler answers a clean 400 (via `_safe_provider`), not a 500."""
+    out = []
+    for key in _PROVIDERS:
+        try:
+            if provider(key) is not None:
+                out.append(key)
+        except ValueError:
+            continue
+    return out
+
+
+def public_signup_enabled() -> bool:
+    """Whether unknown verified emails may self-provision a demo user. Default OFF (fail-closed) —
+    intended only for a dedicated demo instance whose datasource holds only demo data."""
+    return os.environ.get("AGAMI_PUBLIC_SIGNUP", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _discover(p: Provider) -> dict:
@@ -103,12 +152,14 @@ def exchange_code(p: Provider, *, code: str, redirect_uri: str) -> str:
     return id_token
 
 
-def verify_id_token(p: Provider, id_token: str, *, nonce: str) -> str:
-    """Verify the ID token and return the **verified** email. Raises on any verification failure.
+def verify_id_token(p: Provider, id_token: str, *, nonce: str) -> Identity:
+    """Verify the ID token and return the verified `Identity` (email + subject). Raises on any failure.
 
     Explicit and uniform: RS256 signature against the IdP JWKS, `aud` == our client_id, `iss` == the
-    discovered issuer, `exp` enforced, the `nonce` matches the one we sent (replay defense), and
-    `email_verified` is true (never trust an unverified email as identity)."""
+    discovered issuer, `exp` enforced, `sub` present, and the `nonce` matches the one we sent (replay
+    defense). `email_verified` is required for providers that serve any email (Google); for a
+    tenant-pinned provider (Microsoft) the pin is the trust, so email_verified may be absent.
+    `preferred_username` is never used as identity."""
     meta = _discover(p)
     # Reuse the JWKS client per provider — it keeps its own key cache, so steady-state logins don't
     # re-fetch the IdP's keys on every request (and don't amplify into the IdP under load).
@@ -122,13 +173,18 @@ def verify_id_token(p: Provider, id_token: str, *, nonce: str) -> str:
         algorithms=["RS256"],
         audience=p.client_id,
         issuer=meta["issuer"],
-        options={"require": ["exp", "aud", "iss", "nonce"]},
+        options={"require": ["exp", "aud", "iss", "sub", "nonce"]},
     )
     if claims.get("nonce") != nonce:
         raise ValueError("nonce mismatch")
-    if claims.get("email_verified") is not True:
+    if p.require_email_verified and claims.get("email_verified") is not True:
         raise ValueError("email_verified is not true")
     email = claims.get("email")
     if not email:
         raise ValueError("id token has no email claim")
-    return email
+    subject = claims.get("sub")
+    # sub is the long-term binding key — fail closed on a missing/blank/non-string value rather than
+    # persist an invalid identity binding.
+    if not isinstance(subject, str) or not subject.strip():
+        raise ValueError("id token has no usable sub claim")
+    return Identity(email=email, subject=subject)

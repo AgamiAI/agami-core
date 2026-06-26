@@ -168,3 +168,19 @@ def test_needs_rehash_upgrade_path(monkeypatch):
     # the upgraded hash still verifies the same password
     assert user_store.authenticate(s, "admin", "s3cret-pw") is not None
     s.close()
+
+
+def test_create_with_oidc_fields_and_bind_subject_no_clobber():
+    s = _store()
+    user_store.create_user(
+        s, "alice", password=None, email="you@example.com", oidc_provider="google"
+    )
+    row = user_store.get_user(s, "alice")
+    assert row["oidc_provider"] == "google" and row["oidc_subject"] is None
+    # first bind sets it
+    user_store.bind_oidc_subject(s, "alice", "sub-1")
+    assert user_store.get_user(s, "alice")["oidc_subject"] == "sub-1"
+    # a second bind is a no-op (the WHERE oidc_subject IS NULL guard) — can't rebind
+    user_store.bind_oidc_subject(s, "alice", "sub-2")
+    assert user_store.get_user(s, "alice")["oidc_subject"] == "sub-1"
+    s.close()

@@ -62,6 +62,8 @@ def test_users_table_is_flat_no_role_column():
     assert "users" in _tables(s)
     cols = {r["name"] for r in s.query("PRAGMA table_info(users)")}
     assert {"id", "username", "password_hash", "email", "status", "created"} <= cols
+    # OIDC identity binding columns (provider + subject) exist; still NO role/permission column.
+    assert {"oidc_provider", "oidc_subject"} <= cols
     assert not (cols & {"role", "roles", "permission", "permissions"}), (
         "flat access — no role column"
     )
