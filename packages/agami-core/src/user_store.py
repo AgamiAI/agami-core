@@ -49,11 +49,14 @@ def create_user(
     status: str = _ACTIVE,
     oidc_provider: str | None = None,
     oidc_subject: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
 ) -> str:
     """Create a user; returns the minted id. `password=None` makes a **passwordless** user (OIDC-only —
     no password login); a non-None password is argon2id-hashed and must be non-empty. `oidc_provider`
     pins which IdP the user signs in with; `oidc_subject` (the IdP `sub`) is usually bound on first
-    login. Raises if the username/email already exists (the UNIQUE constraints)."""
+    login. `first_name`/`last_name` are display-only (blank → NULL). Raises if the username/email
+    already exists (the UNIQUE constraints)."""
     if password is not None and not password.strip():
         raise ValueError("password must not be empty (pass None for a passwordless OIDC user)")
     user_id = uuid4().hex
@@ -63,7 +66,7 @@ def create_user(
     normalized_email = _normalize_email(email)
     store.execute(
         "INSERT INTO users (id, username, password_hash, email, status, created, oidc_provider, "
-        "oidc_subject) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "oidc_subject, first_name, last_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id,
             username,
@@ -73,6 +76,8 @@ def create_user(
             _now_iso(),
             oidc_provider,
             oidc_subject,
+            (first_name or "").strip() or None,
+            (last_name or "").strip() or None,
         ),
     )
     store.commit()
@@ -106,13 +111,22 @@ def get_user(store: Store, username: str) -> dict[str, Any] | None:
 
 
 def list_users(store: Store) -> list[dict[str, Any]]:
-    """Identity rows only — never selects `password_hash` (so a listing can't leak the secret)."""
-    return store.query("SELECT id, username, email, status, created FROM users ORDER BY username")
+    """Identity rows only — never selects `password_hash` itself (so a listing can't leak the secret).
+    `has_password` is a derived 0/1 flag (the admin roster needs to show the sign-in method without
+    ever touching the hash)."""
+    return store.query(
+        "SELECT id, username, email, status, created, oidc_provider, first_name, last_name, "
+        "(CASE WHEN password_hash IS NOT NULL THEN 1 ELSE 0 END) AS has_password "
+        "FROM users ORDER BY username"
+    )
 
 
-def set_status(store: Store, username: str, status: str) -> None:
-    store.execute("UPDATE users SET status = ? WHERE username = ?", (status, username))
+def set_status(store: Store, username: str, status: str) -> int:
+    """Set a user's status; returns the number of rows changed (0 ⇒ no such username), so a caller can
+    tell an applied change from a no-op rather than reporting a false success."""
+    cur = store.execute("UPDATE users SET status = ? WHERE username = ?", (status, username))
     store.commit()
+    return cur.rowcount
 
 
 def authenticate(store: Store, username: str, password: str) -> Principal | None:

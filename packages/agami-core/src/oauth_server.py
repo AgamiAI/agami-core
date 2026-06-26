@@ -17,7 +17,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import html
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -26,6 +25,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import uuid4
 
 import jwt
+import ui
 from ports import Principal
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -205,32 +205,57 @@ _OAUTH_CONTEXT_KEYS = ("client_id", "redirect_uri", "code_challenge", "state")
 def _login_form(
     params: dict[str, str], error: str = "", providers: tuple[str, ...] = ()
 ) -> HTMLResponse:
-    """A minimal login form that carries the OAuth params forward as hidden fields, plus a
-    "Sign in with <provider>" link per configured OIDC provider. Neutral placeholders only."""
-    # Escape every interpolated value — these come from attacker-controllable query/body params and
-    # land in HTML attributes on the password-entry page; unescaped, they're a reflected-XSS vector.
+    """The branded sign-in page: optional 'Continue with <provider>' buttons + a username/password
+    form, carrying the OAuth context forward as hidden fields. Every interpolated value is escaped
+    (these are attacker-influenceable query/body params landing in HTML)."""
+    return HTMLResponse(login_body_html(params, error=error, providers=providers, wrap=True))
+
+
+def _client_label(redirect_uri: str) -> str | None:
+    """A friendly name for the connecting client, derived from its callback. claude.ai/.com → 'Claude';
+    otherwise None (we don't store a per-client name, so show a generic sign-in)."""
+    if "claude.ai" in redirect_uri or "claude.com" in redirect_uri:
+        return "Claude"
+    return None
+
+
+def login_body_html(
+    params: dict[str, str], *, error: str = "", providers: tuple[str, ...] = (), wrap: bool = False
+) -> str:
+    """The sign-in page HTML (the inner body, or the full page when `wrap`). Split out so previews can
+    render it with sample values without going through a request."""
+    carried = {k: params.get(k, "") for k in _OAUTH_CONTEXT_KEYS}
     hidden = "".join(
-        f'<input type="hidden" name="{k}" value="{html.escape(params.get(k, ""), quote=True)}">'
+        f'<input type="hidden" name="{k}" value="{ui.esc(params.get(k, ""))}">'
         for k in _OAUTH_CONTEXT_KEYS
     )
-    msg = f'<p role="alert">{html.escape(error)}</p>' if error else ""
-    # OIDC links carry the same OAuth context to /oauth/oidc/start so the flow can resume after the
-    # IdP round-trip. urlencode escapes the values for the query string.
-    carried = {k: params.get(k, "") for k in _OAUTH_CONTEXT_KEYS}
-    oidc_links = "".join(
-        f'<a href="/oauth/oidc/start?{urlencode({**carried, "provider": key})}">'
-        f"Sign in with {html.escape(key.title())}</a>"
+    # OIDC buttons carry the same OAuth context to /oauth/oidc/start so the flow resumes after the IdP.
+    buttons = "".join(
+        ui.provider_button(key, f"/oauth/oidc/start?{urlencode({**carried, 'provider': key})}")
         for key in providers
     )
-    return HTMLResponse(
-        f"""<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title></head>
-<body><h1>Sign in</h1>{msg}
-<form method="post">{hidden}
-<label>Username <input name="username" autocomplete="username" placeholder="admin"></label>
-<label>Password <input name="password" type="password" autocomplete="current-password"></label>
-<button type="submit">Sign in</button></form>
-{oidc_links}</body></html>"""
+    social = f'<div class="providers">{buttons}</div><div class="divider">or</div>' if buttons else ""
+    alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
+    client = _client_label(params.get("redirect_uri", ""))
+    # Consent banner mirrors the web app: a quiet "Allow <client> to access your data". When the
+    # client isn't a recognised AI assistant we just show the logo (no banner) — no filler text.
+    consent = (
+        f'<div class="consent"><p class="small">Allow</p>'
+        f'<p class="who">{ui.esc(client)}</p>'
+        f'<p class="small">to access your data</p></div>'
+        if client
+        else ""
     )
+    body = f"""{consent}
+{alert}{social}
+<form method="post">{hidden}
+<label for="u">Email</label>
+<input id="u" name="username" type="email" autocomplete="email" placeholder="you@example.com">
+<label for="p">Password</label>
+<input id="p" name="password" type="password" autocomplete="current-password" placeholder="••••••••">
+<button class="btn" type="submit" style="margin-top:22px">Sign in</button>
+</form>"""
+    return ui.auth_page("Sign in", body) if wrap else body
 
 
 async def authorize(request: Request) -> Response:
