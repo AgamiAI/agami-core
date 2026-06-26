@@ -14,8 +14,10 @@ CREATE TABLE users_new (
     created       TEXT NOT NULL
 );
 
+-- Normalize existing emails (trim + lowercase) on the way over, matching how the app now stores
+-- them — so the UNIQUE index below can't be tripped by a case/whitespace variant of an existing row.
 INSERT INTO users_new (id, username, password_hash, email, status, created)
-    SELECT id, username, password_hash, email, status, created FROM users;
+    SELECT id, username, password_hash, LOWER(TRIM(email)), status, created FROM users;
 
 DROP TABLE users;
 ALTER TABLE users_new RENAME TO users;

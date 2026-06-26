@@ -61,14 +61,14 @@ def test_passwordless_user_cannot_password_login():
     s.close()
 
 
-def test_get_user_by_email_is_case_insensitive():
+def test_get_user_by_email_normalizes_case_and_whitespace():
     s = _store()
-    user_store.create_user(s, "admin", "s3cret-pw", email="You@Example.com")
-    # stored lowercased; lookup normalizes too, so any casing resolves to the one user
+    user_store.create_user(s, "admin", "s3cret-pw", email="  You@Example.com  ")
+    # stored trimmed + lowercased; lookup normalizes the same, so casing/whitespace all resolve
     assert user_store.get_user_by_email(s, "you@example.com")["username"] == "admin"
-    assert user_store.get_user_by_email(s, "YOU@EXAMPLE.COM")["username"] == "admin"
+    assert user_store.get_user_by_email(s, " YOU@EXAMPLE.COM ")["username"] == "admin"
     assert user_store.get_user_by_email(s, "missing@example.com") is None
-    assert user_store.get_user_by_email(s, "") is None
+    assert user_store.get_user_by_email(s, "   ") is None
     s.close()
 
 

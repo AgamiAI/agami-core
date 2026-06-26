@@ -33,6 +33,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_email(email: str | None) -> str | None:
+    """Canonical email form for storage + lookup: trimmed + lowercased, or None. Both paths use this
+    so a stray-whitespace or mixed-case address can't dodge the one-to-one (UNIQUE) email identity."""
+    if not email:
+        return None
+    return email.strip().lower() or None
+
+
 def create_user(
     store: Store,
     username: str,
@@ -47,9 +55,9 @@ def create_user(
         raise ValueError("password must not be empty (pass None for a passwordless OIDC user)")
     user_id = uuid4().hex
     password_hash = hash_password(password) if password is not None else None
-    # Emails are the OIDC lookup key — store them lowercased so the (case-insensitive) identity
-    # matches regardless of how the IdP cases the address; the UNIQUE index keeps them one-to-one.
-    normalized_email = email.lower() if email else None
+    # Emails are the OIDC lookup key — store them normalized (trim + lowercase) so the identity
+    # matches regardless of casing/whitespace; the UNIQUE index keeps them one-to-one.
+    normalized_email = _normalize_email(email)
     store.execute(
         "INSERT INTO users (id, username, password_hash, email, status, created) "
         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -62,9 +70,10 @@ def create_user(
 def get_user_by_email(store: Store, email: str) -> dict[str, Any] | None:
     """Look up a user by email — the onboarded-only lookup OIDC uses. Case-insensitive (emails are
     stored lowercased) and one-to-one (the email index is UNIQUE)."""
-    if not email:
+    normalized = _normalize_email(email)
+    if normalized is None:
         return None
-    rows = store.query("SELECT * FROM users WHERE email = ?", (email.lower(),))
+    rows = store.query("SELECT * FROM users WHERE email = ?", (normalized,))
     return rows[0] if rows else None
 
 
