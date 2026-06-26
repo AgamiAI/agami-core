@@ -352,6 +352,31 @@ def test_admin_oidc_start_rejects_an_unconfigured_provider(env, monkeypatch):
     assert r.status_code == 400  # microsoft isn't configured → clean 400, no redirect
 
 
+def test_admin_oidc_never_self_provisions_even_with_public_signup(env, monkeypatch):
+    # An admin sign-in attempt by an unknown email must NOT create a user, even on a public-signup
+    # demo instance — the admin route is strictly onboarded-only.
+    _seed_admin(env, monkeypatch)
+    monkeypatch.setenv("AGAMI_PUBLIC_SIGNUP", "1")
+    c = _client()
+    state, nonce = _admin_start(c)
+    monkeypatch.setattr(
+        oidc,
+        "exchange_code",
+        lambda p, *, code, redirect_uri: _id_token(nonce=nonce, email="stranger@example.com", sub="x"),
+    )
+    cb = c.get("/oauth/oidc/callback", params={"code": "x", "state": state}, follow_redirects=False)
+    assert cb.status_code == 403
+    s = Store.connect(env)
+    assert user_store.get_user_by_email(s, "stranger@example.com") is None  # no row created
+    s.close()
+
+
+def test_admin_login_keeps_the_provider_button_after_a_bad_password(env, monkeypatch):
+    _seed_admin(env, monkeypatch)  # pinned google
+    html = _client().post("/admin/login", data={"username": ADMIN_EMAIL, "password": "wrong"}).text
+    assert "Continue with Google" in html  # a failed password attempt doesn't hide the social option
+
+
 def test_provider_option_hidden_when_unconfigured(monkeypatch, tmp_path):
     monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
     monkeypatch.setenv("AGAMI_SIGNING_SECRET", SECRET)

@@ -498,7 +498,7 @@ async def admin_oidc_start(request: Request) -> Response:
     `purpose=admin_login` so the shared callback mints an admin **session** (not a bearer code).
     Carries no OAuth client context (this isn't a connector flow) and reuses the one registered
     callback URI, so a deployer registers a single redirect URI for both flows."""
-    import oidc  # noqa: F401  (lazy: the egress module)
+    import oidc  # lazy: the egress module (server-only), like oidc_start
 
     p = _safe_provider(request.query_params.get("provider", ""))
     if p is None:
@@ -546,12 +546,15 @@ async def oidc_callback(request: Request) -> Response:
     store = _open_store()
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
+    is_admin_login = claims.get("purpose") == "admin_login"
     try:
-        username = _resolve_oidc_user(store, p.key, identity)
-        if claims.get("purpose") == "admin_login":
-            # Admin login: a verified identity that resolves to THE configured admin gets a session;
-            # anyone else (unresolved, or a non-admin user) is refused. The provider-pin + subject bind
-            # are already enforced by `_resolve_oidc_user`, so this only adds the "is it the admin?" gate.
+        # Admin login is strictly onboarded-only — never self-provision a user as a side effect of an
+        # admin sign-in attempt (even on a public-signup demo instance).
+        username = _resolve_oidc_user(store, p.key, identity, allow_signup=not is_admin_login)
+        if is_admin_login:
+            # A verified identity that resolves to THE configured admin gets a session; anyone else
+            # (unresolved, or a non-admin user) is refused. The provider-pin + subject bind are already
+            # enforced by `_resolve_oidc_user`, so this only adds the "is it the admin?" gate.
             import admin
 
             resp = admin.complete_admin_oidc_login(username)
@@ -577,9 +580,13 @@ async def oidc_callback(request: Request) -> Response:
 _LOGIN_STATUSES = {"active", "demo"}
 
 
-def _resolve_oidc_user(store: Store, provider_key: str, identity: Identity) -> str | None:
+def _resolve_oidc_user(
+    store: Store, provider_key: str, identity: Identity, *, allow_signup: bool = True
+) -> str | None:
     """Map a verified OIDC identity to a username, or None to reject. Onboarded-only by default; with
-    public signup enabled an unknown email self-provisions a demo user.
+    public signup enabled (and `allow_signup`) an unknown email self-provisions a demo user.
+    `allow_signup=False` forces strict onboarded-only — the admin-login path passes it so an admin
+    sign-in attempt can never create a user as a side effect.
 
     Provider-binding closes IdP confusion: an existing user must be bound to THIS provider, and (once
     set) THIS subject — so an attacker with the same email at another IdP, or a different account at
@@ -603,8 +610,9 @@ def _resolve_oidc_user(store: Store, provider_key: str, identity: Identity) -> s
             return None
         return user["username"]
 
-    # Unknown email: only a public-demo instance may self-provision (fail-closed default).
-    if not oidc.public_signup_enabled():
+    # Unknown email: only a public-demo instance may self-provision (fail-closed default), and never
+    # on an admin-login attempt (allow_signup=False) — that route must not create users.
+    if not allow_signup or not oidc.public_signup_enabled():
         return None
     try:
         create_user(

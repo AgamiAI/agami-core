@@ -46,7 +46,6 @@ AGAMI_SIGNING_SECRET=$(openssl rand -hex 32) \
 AGAMI_DB_URL=postgresql://… \
 AGAMI_ADMIN_USERNAME=you@example.com \
 AGAMI_ADMIN_FIRST_NAME=Alex AGAMI_ADMIN_LAST_NAME=Kim \
-# the admin's credential — a password and/or a pinned social provider (at least one):
 AGAMI_ADMIN_PASSWORD=… \
 AGAMI_ADMIN_PROVIDER=google \
 AGAMI_OIDC_GOOGLE_CLIENT_ID=… AGAMI_OIDC_GOOGLE_CLIENT_SECRET=… \
@@ -54,10 +53,11 @@ python -m mcp_http
 ```
 
 The admin is identified by **email** (`AGAMI_ADMIN_USERNAME`). Their sign-in method is whatever you
-configure: a password, and/or a **pinned** social provider (`AGAMI_ADMIN_PROVIDER` = `google` |
-`microsoft`, which must also have its `AGAMI_OIDC_<PROVIDER>_CLIENT_ID/SECRET` set). The admin login
-then offers the same Google/Microsoft option as the MCP login. Register **one** OAuth redirect URI
-with the provider — `{base}/oauth/oidc/callback` — it serves both the connector and the admin flows.
+configure — **a password and/or a pinned social provider, at least one**: set `AGAMI_ADMIN_PASSWORD`,
+and/or `AGAMI_ADMIN_PROVIDER` (`google` | `microsoft`, which must also have its
+`AGAMI_OIDC_<PROVIDER>_CLIENT_ID/SECRET` set). The admin login then offers the same Google/Microsoft
+option as the MCP login. Register **one** OAuth redirect URI with the provider —
+`{base}/oauth/oidc/callback` — it serves both the connector and the admin flows.
 
 ### One host, two entry points
 

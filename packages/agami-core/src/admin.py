@@ -421,8 +421,10 @@ async def admin_login(request: Request) -> Response:
             store.close()
     if principal is None:
         # Same generic message for wrong password, unknown user, or disabled — no enumeration oracle.
+        # Keep the social button on the re-render so a failed password attempt doesn't hide it.
         return HTMLResponse(
-            admin_login_body_html(error="Invalid email or password."), status_code=401
+            admin_login_body_html(error="Invalid email or password.", provider=_admin_provider()),
+            status_code=401,
         )
     if principal.subject != _admin_username():
         # Valid credentials, but not THE admin: no session minted; a friendly "use via Claude" page.
