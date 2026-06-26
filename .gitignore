@@ -56,3 +56,6 @@ plugins/agami/samples/store/model/curation_log.jsonl
 coverage.xml
 htmlcov/
 .ruff_cache/
+
+# Generated UI previews (regenerate with render_previews.py)
+previews/

@@ -31,4 +31,59 @@ import execute_sql
 python -m mcp_harness          # the stdio MCP server (Claude Desktop)
 python -m execute_sql --sql …  # the local query executor
 python -m semantic_model.cli   # the semantic-model CLI (driven by the `sm` launcher)
+python -m mcp_http             # the networked HTTP MCP server (see below)
 ```
+
+## HTTP server — networked, with auth (`python -m mcp_http`)
+
+The `[server]` extra (`pip install -e 'packages/agami-core[server]'`) adds a networked MCP
+transport: the same `TOOLS` surface as the stdio server, but over HTTP with OAuth + a small admin
+console. It's the self-host shape of the hosted product.
+
+```bash
+PUBLIC_BASE_URL=https://your-host \
+AGAMI_SIGNING_SECRET=$(openssl rand -hex 32) \
+AGAMI_DB_URL=postgresql://… \
+AGAMI_ADMIN_USERNAME=you@example.com AGAMI_ADMIN_PASSWORD=… \
+python -m mcp_http
+```
+
+### One host, two entry points
+
+A deployment is one host (`PUBLIC_BASE_URL`). Everything lives under it:
+
+| URL | Who | What |
+|---|---|---|
+| `{base}/mcp` | a teammate, in Claude | the **only** URL to add as a custom connector — Claude auto-discovers the OAuth endpoints from it |
+| `{base}/admin` | the admin, in a browser | the console to add/enable/disable users |
+
+### Access model — two separate credentials
+
+- **Query surface (`/mcp`)** — gated by a **Bearer JWT** from the OAuth flow. **Any** onboarded user
+  who signs in can query (that's the product). No token → `401` + `WWW-Authenticate`, which starts
+  Claude's OAuth. Admin-ness does **not** gate `/mcp`.
+- **Admin surface (`/admin`)** — gated by a **session cookie** *and* the admin-gate
+  (`AGAMI_ADMIN_USERNAME`). A valid non-admin is refused; an `/mcp` bearer token is useless here
+  (different credential). Unset `AGAMI_ADMIN_USERNAME` ⇒ the admin console is disabled entirely.
+
+The admin adds a teammate by **email + name**; the teammate then signs in at the connector. (Letting
+that teammate choose their own sign-in method on first login — Google/Microsoft or a self-set
+password — is the next increment.)
+
+### Local end-to-end test (HTTPS via a tunnel)
+
+OAuth and the `Secure` admin cookie need HTTPS, so expose the local server through a tunnel:
+
+```bash
+# terminal 1 — the server
+PUBLIC_BASE_URL=https://<your-subdomain>.trycloudflare.com \
+AGAMI_SIGNING_SECRET=$(openssl rand -hex 32) \
+AGAMI_DB_URL=sqlite:///$PWD/agami.db \
+AGAMI_ADMIN_USERNAME=you@example.com AGAMI_ADMIN_PASSWORD=choose-a-strong-one \
+python -m mcp_http
+
+# terminal 2 — the HTTPS tunnel (prints the https URL to use as PUBLIC_BASE_URL)
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+Open `{base}/admin`, sign in, add a user — then add `{base}/mcp` as a connector in Claude.
