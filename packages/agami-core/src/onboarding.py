@@ -29,6 +29,7 @@ from starlette.responses import HTMLResponse, Response
 _SETUP_TTL = timedelta(days=14)
 _SETUP_PURPOSE = "setup"  # marks this token apart from the OAuth bearer + the admin session JWT
 _MIN_PASSWORD_LEN = 8
+_MAX_PASSWORD_LEN = 256  # cap the input (a sane bound; argon2's cost is fixed, this just rejects junk)
 
 
 def mint_setup_token(username: str) -> str:
@@ -126,7 +127,10 @@ def _pending_user(username: str) -> dict[str, Any] | None:
 async def claim(request: Request) -> Response:
     """GET → the set-password page for a valid link to a still-pending user; POST → set the password.
     Every failure (bad token, already-claimed, weak password, lost race) is a generic page — no
-    credential overwrite of a claimed account, no enumeration."""
+    credential overwrite of a claimed account, no enumeration. Both the token check and the pending
+    re-read run BEFORE any argon2 hash, so an attacker can't drive hashing without a valid (signed,
+    admin-minted) token for a still-pending user. This endpoint is **not** rate-limited in-process —
+    rely on the deployment's proxy/LB for that (a documented gap, like the other public endpoints)."""
     if request.method == "GET":
         username = verify_setup_token(request.query_params.get("token", ""))
         if username is None or _pending_user(username) is None:
@@ -139,7 +143,7 @@ async def claim(request: Request) -> Response:
     if username is None or _pending_user(username) is None:
         return HTMLResponse(setup_invalid_html(), status_code=400)
     password = form.get("password", "")
-    if len(password) < _MIN_PASSWORD_LEN:
+    if not _MIN_PASSWORD_LEN <= len(password) <= _MAX_PASSWORD_LEN:
         return HTMLResponse(
             setup_page_html(token, error=f"Use at least {_MIN_PASSWORD_LEN} characters."),
             status_code=400,

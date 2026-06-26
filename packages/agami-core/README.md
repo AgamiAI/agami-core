@@ -94,6 +94,10 @@ the deployment's **single auth method** — uniform for everyone, set by what yo
 The login surfaces show only the configured method (the admin keeps a password **break-glass** fallback
 on `/admin/login`).
 
+> **Trust note.** OIDC onboarding binds the account to whoever first proves the teammate's email at the
+> configured IdP — so add a teammate by an email the *right* person controls there. The setup link and
+> the other pre-auth endpoints aren't rate-limited in-process; put them behind your proxy/LB if exposed.
+
 ### Local end-to-end test (HTTPS via a tunnel)
 
 OAuth and the `Secure` admin cookie need HTTPS, so expose the local server through a tunnel:

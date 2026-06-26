@@ -226,10 +226,6 @@ def login_body_html(
     """The sign-in page HTML (the inner body, or the full page when `wrap`). Split out so previews can
     render it with sample values without going through a request."""
     carried = {k: params.get(k, "") for k in _OAUTH_CONTEXT_KEYS}
-    hidden = "".join(
-        f'<input type="hidden" name="{k}" value="{ui.esc(params.get(k, ""))}">'
-        for k in _OAUTH_CONTEXT_KEYS
-    )
     alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
     client = _client_label(params.get("redirect_uri", ""))
     # Consent banner mirrors the web app: a quiet "Allow <client> to access your data". When the
@@ -251,6 +247,10 @@ def login_body_html(
         methods = f'<div class="providers">{buttons}</div>'
     else:
         # Password deployment — the email/password form (the OAuth context rides as hidden fields).
+        hidden = "".join(
+            f'<input type="hidden" name="{k}" value="{ui.esc(params.get(k, ""))}">'
+            for k in _OAUTH_CONTEXT_KEYS
+        )
         methods = f"""<form method="post">{hidden}
 <label for="u">Email</label>
 <input id="u" name="username" type="email" autocomplete="email" placeholder="you@example.com">
@@ -290,6 +290,12 @@ async def authorize(request: Request) -> Response:
         code_challenge = form.get("code_challenge", "")
         if not code_challenge:
             return _oauth_error("invalid_request", "code_challenge is required (PKCE)")
+
+        # Deployment-wide method: in an OIDC deployment the connector is provider-only — refuse a
+        # (crafted) password POST server-side, not just by hiding the form. The admin's password
+        # break-glass lives on the separate /admin/login surface, not here.
+        if providers:
+            return _login_form(form, providers=providers)
 
         principal = authenticate(store, form.get("username", ""), form.get("password", ""))
         if principal is None:

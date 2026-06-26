@@ -486,6 +486,30 @@ def test_connector_login_shows_only_the_configured_method(env, monkeypatch):
     assert 'name="password"' in html2 and "Continue with Google" not in html2
 
 
+def test_connector_password_post_is_refused_in_an_oidc_deployment(env):
+    # The method-gating is enforced server-side, not just hidden: a *correct* password POST issues no
+    # code when an OIDC provider is configured (the gate fires before authenticate).
+    s = Store.from_env()
+    user_store.create_user(s, username="pat@example.com", email="pat@example.com", password="pat-pw-123456")
+    s.close()
+    r = _client().post(
+        "/oauth/authorize",
+        data={"username": "pat@example.com", "password": "pat-pw-123456", "redirect_uri": REDIRECT,
+              "client_id": CLIENT_ID, "code_challenge": CHALLENGE, "state": "x"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 200 and "Continue with Google" in r.text  # re-rendered login, no auth code
+
+
+def test_oidc_bound_user_cannot_then_set_a_password(env):
+    # First-claim-locks the other direction: once OIDC-bound, the password claim guard no-ops.
+    s = Store.from_env()
+    user_store.create_user(s, username="newbie@example.com", email="newbie@example.com", password=None)
+    assert _resolve_oidc_user(s, "google", Identity("newbie@example.com", "sub-1")) == "newbie@example.com"
+    assert user_store.claim_pending_password(s, "newbie@example.com", "late-pw-12345") == 0
+    s.close()
+
+
 def test_pending_user_binds_on_first_oidc_login(env):
     # A pending teammate (no password, no provider) adopts the provider + subject on first OIDC login.
     s = Store.from_env()
