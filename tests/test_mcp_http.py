@@ -64,6 +64,41 @@ def test_auth_skip_is_scoped_to_discovery_routes_only(base_url):
     )  # suffixed variant open
 
 
+def test_static_admin_and_root_skip_the_bearer_gate(base_url):
+    # The brand assets, the root landing, and the /admin/* pages are open at the *bearer* layer (admin
+    # pages do their own session auth). Lookalikes that merely share a prefix must NOT skip — the skip
+    # matches on a path boundary, not a bare startswith.
+    assert mcp_http._is_public_path("/static/logo_h.svg")
+    assert mcp_http._is_public_path("/")
+    for p in mcp_http_admin_paths():
+        assert mcp_http._is_public_path(p)
+    assert not mcp_http._is_public_path("/static-evil")
+    assert not mcp_http._is_public_path("/admin-evil")
+    assert not mcp_http._is_public_path("/admin/secret")  # a non-routed /admin path stays gated
+    assert not mcp_http._is_public_path("/mcp")
+
+
+def mcp_http_admin_paths():
+    import admin
+
+    return admin.ADMIN_PATHS
+
+
+def test_browser_hitting_mcp_gets_a_branded_html_401(base_url):
+    # A human who pastes the connector URL into a browser gets a friendly page, not raw JSON — but the
+    # SAME 401 + WWW-Authenticate, so the machine OAuth bootstrap is unchanged.
+    c = TestClient(mcp_http.build_app())
+    r = c.get("/mcp", headers={"accept": "text/html"})
+    assert r.status_code == 401
+    assert "text/html" in r.headers["content-type"]
+    assert "<html" in r.text and "MCP endpoint" in r.text
+    assert r.headers.get("www-authenticate", "").startswith("Bearer ")
+    # claude.ai (JSON / event-stream Accept) still gets the JSON body it expects.
+    j = c.post("/mcp", headers={"accept": "application/json"},
+               json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert j.status_code == 401 and "application/json" in j.headers["content-type"]
+
+
 def test_discovery_advertises_public_base_url(base_url):
     c = TestClient(mcp_http.build_app())
     pr = c.get("/.well-known/oauth-protected-resource")
