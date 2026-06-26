@@ -19,16 +19,22 @@ from __future__ import annotations
 
 import contextlib
 import os
+from pathlib import Path
 
+import admin
 from oss_adapters import PresenceAuthProvider, SingleTenantOrgResolver
 from ports import AuthProvider, Org
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 from tools import SERVER_INSTRUCTIONS, SERVER_NAME, TOOLS, bootstrap_paths, server_version
+
+# The brand assets (logo, provider icons, favicon) served at /static — packaged alongside this module.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def _build_auth_provider() -> AuthProvider:
@@ -68,17 +74,23 @@ def _resource_metadata_url(base: str) -> str:
     return f"{base}/.well-known/oauth-protected-resource"
 
 
-def _unauthenticated(base: str) -> JSONResponse:
-    """401 + WWW-Authenticate pointing at the discovery doc — the challenge that starts OAuth."""
-    return JSONResponse(
-        {"error": "Not authenticated"},
-        status_code=401,
-        headers={
-            "WWW-Authenticate": f'Bearer resource_metadata="{_resource_metadata_url(base)}"',
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Expose-Headers": "WWW-Authenticate",
-        },
-    )
+def _unauthenticated(base: str, request: Request | None = None) -> Response:
+    """401 + WWW-Authenticate pointing at the discovery doc — the challenge that starts OAuth.
+
+    Content-negotiated: a browser (Accept: text/html) gets a branded "this is an MCP endpoint" page so
+    a human who pastes the URL isn't met with raw JSON; claude.ai (JSON / event-stream Accept) gets the
+    JSON body it expects. **Same 401 status + WWW-Authenticate header either way**, so the machine
+    challenge that bootstraps OAuth is unchanged — only the body differs."""
+    headers = {
+        "WWW-Authenticate": f'Bearer resource_metadata="{_resource_metadata_url(base)}"',
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Expose-Headers": "WWW-Authenticate",
+    }
+    if request is not None and "text/html" in (request.headers.get("accept") or ""):
+        return HTMLResponse(
+            admin.mcp_landing_body_html(base), status_code=401, headers=headers
+        )
+    return JSONResponse({"error": "Not authenticated"}, status_code=401, headers=headers)
 
 
 # Only the OAuth-discovery endpoints are reachable unauthenticated (the client probes them before
@@ -103,14 +115,23 @@ _OAUTH_PATHS = (
 
 
 def _is_public_path(path: str) -> bool:
-    """True for the discovery routes and the OAuth-flow endpoints — the surface reachable before a
-    client has a token. Discovery uses boundary matching (it has `{rest:path}` suffix routes, and a
-    bare `startswith` would let `/.well-known/oauth-protected-resource-x` skip auth); the OAuth
-    endpoints are matched *exactly* (only those three paths are routed), so a future
-    `/oauth/token/...` route can't inherit public access by accident."""
+    """True for the surface reachable without an MCP bearer token: the OAuth discovery routes + flow
+    endpoints, the static brand assets, the root landing, and the `/admin/*` pages. Discovery and
+    static use boundary matching (they have suffix/sub-path routes, and a bare `startswith` would let
+    `/.well-known/oauth-protected-resource-x` or `/static-x` slip through); the OAuth + admin
+    endpoints are matched *exactly* (only those exact paths are routed), so a future
+    `/oauth/token/...` or `/admin/...` route can't inherit public access by accident.
+
+    Static + admin are "public" only at the *bearer* layer: assets are genuinely public, and the
+    admin pages run their OWN session-cookie auth (see `admin.current_admin`) — they are not
+    unguarded, just guarded by a different credential than the MCP token."""
     if any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES):
         return True
-    return path in _OAUTH_PATHS
+    if path == "/static" or path.startswith("/static/"):
+        return True
+    if path == "/":
+        return True
+    return path in _OAUTH_PATHS or path in admin.ADMIN_PATHS
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):
@@ -132,9 +153,9 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         # token to the configured provider — a real JWT validator in the hosted OAuth path, or
         # bearer-presence locally.
         if not authz.lower().startswith("bearer "):
-            return _unauthenticated(public_base_url())
+            return _unauthenticated(public_base_url(), request)
         if self._auth.validate_token(authz[7:].strip()) is None:
-            return _unauthenticated(public_base_url())
+            return _unauthenticated(public_base_url(), request)
         # Resolve the org for this request. Single-tenant returns the one configured org regardless
         # of context; nothing downstream consumes it yet (tools key on `datasource`), so this asserts
         # the contract and reserves the seam — it does not add org-scoped behavior.
@@ -222,7 +243,12 @@ def build_app() -> Starlette:
 
     from oauth_server import authorize, oidc_callback, oidc_start, register, token
 
+    async def _root(request: Request) -> Response:
+        """The bare base URL in a browser → a branded landing (connector URL + admin link), not a 404."""
+        return HTMLResponse(admin.landing_body_html(public_base_url()))
+
     routes = [
+        Route("/", _root, methods=["GET"]),
         Route("/.well-known/oauth-protected-resource", _protected_resource),
         Route("/.well-known/oauth-protected-resource/{rest:path}", _protected_resource),
         Route("/.well-known/oauth-authorization-server", _auth_server),
@@ -232,6 +258,8 @@ def build_app() -> Starlette:
         Route("/oauth/register", register, methods=["POST"]),
         Route("/oauth/oidc/start", oidc_start, methods=["GET"]),
         Route("/oauth/oidc/callback", oidc_callback, methods=["GET"]),
+        *admin.routes(),
+        Mount("/static", app=StaticFiles(directory=_STATIC_DIR), name="static"),
         Mount("/mcp", app=handle_mcp),
     ]
     middleware = [

@@ -30,16 +30,16 @@ OAUTH = {
 }
 ADMIN_EMAIL = "you@example.com"
 USERS = [
-    {"first_name": "Alex", "last_name": "Kim", "email": ADMIN_EMAIL, "status": "active",
-     "oidc_provider": None, "has_password": True},
-    {"first_name": "Jordan", "last_name": "Lee", "email": "jordan@example.com", "status": "active",
-     "oidc_provider": "google", "has_password": False},
-    {"first_name": "Sam", "last_name": "Okafor", "email": "sam@example.com", "status": "active",
-     "oidc_provider": "microsoft", "has_password": False},
-    {"first_name": "Riley", "last_name": "Chen", "email": "riley@example.com", "status": "disabled",
-     "oidc_provider": None, "has_password": False},
-    {"first_name": "Morgan", "last_name": "Diaz", "email": "morgan@example.com", "status": "active",
-     "oidc_provider": None, "has_password": False},
+    {"username": ADMIN_EMAIL, "first_name": "Alex", "last_name": "Kim", "email": ADMIN_EMAIL,
+     "status": "active", "oidc_provider": None, "has_password": True},
+    {"username": "jordan@example.com", "first_name": "Jordan", "last_name": "Lee",
+     "email": "jordan@example.com", "status": "active", "oidc_provider": "google", "has_password": False},
+    {"username": "sam@example.com", "first_name": "Sam", "last_name": "Okafor",
+     "email": "sam@example.com", "status": "active", "oidc_provider": "microsoft", "has_password": False},
+    {"username": "riley@example.com", "first_name": "Riley", "last_name": "Chen",
+     "email": "riley@example.com", "status": "disabled", "oidc_provider": None, "has_password": False},
+    {"username": "morgan@example.com", "first_name": "Morgan", "last_name": "Diaz",
+     "email": "morgan@example.com", "status": "active", "oidc_provider": None, "has_password": False},
 ]
 
 
@@ -48,7 +48,8 @@ def write(name: str, html: str) -> None:
     (OUT / name).write_text(html)
 
 
-ADMIN = {"admin_label": "Alex Kim", "admin_email": ADMIN_EMAIL}
+ADMIN = {"admin_username": ADMIN_EMAIL, "admin_label": "Alex Kim", "admin_email": ADMIN_EMAIL}
+CHROME = {"admin_label": "Alex Kim", "admin_email": ADMIN_EMAIL}
 
 write("01-login.html", oauth_server.login_body_html(OAUTH, providers=("google", "microsoft"), wrap=True))
 write("02-login-password-only.html", oauth_server.login_body_html(OAUTH, wrap=True))
@@ -57,9 +58,9 @@ write(
     oauth_server.login_body_html(OAUTH, error="Invalid email or password.", providers=("google", "microsoft"), wrap=True),
 )
 write("04-admin-login.html", admin.admin_login_body_html(providers=("google", "microsoft")))
-write("05-admin-users.html", admin.users_tab_html(USERS, csrf="t0ken", ok="Added jordan@example.com.", **ADMIN))
-write("06-admin-dashboard.html", admin.dashboard_tab_html(**ADMIN))
-write("07-admin-sessions.html", admin.sessions_tab_html(**ADMIN))
+write("05-admin-users.html", admin.users_tab_html(USERS, csrf="t0ken", ok="User added.", **ADMIN))
+write("06-admin-dashboard.html", admin.dashboard_tab_html(**CHROME))
+write("07-admin-sessions.html", admin.sessions_tab_html(**CHROME))
 write("08-not-admin.html", admin.not_admin_body_html(BASE))
 write("09-landing.html", admin.landing_body_html(BASE))
 write("10-mcp-in-browser.html", admin.mcp_landing_body_html(BASE))

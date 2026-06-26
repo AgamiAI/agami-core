@@ -17,7 +17,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import html
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
