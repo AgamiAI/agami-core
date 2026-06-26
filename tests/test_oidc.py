@@ -361,3 +361,24 @@ def test_disabled_user_cannot_oidc_login(env):
     user_store.set_status(s, "alice", "disabled")
     assert _resolve_oidc_user(s, "google", Identity("you@example.com", "sub-1")) is None
     s.close()
+
+
+def test_misconfigured_microsoft_tenant_is_a_clean_400_not_500(env, monkeypatch):
+    # An unpinned MS tenant makes oidc.provider() raise; the handler must answer a clean 400
+    # (a stale/bookmarked ?provider=microsoft link must not 500).
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", "ms-client")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", "common")  # unpinned → provider() raises
+    c = _client()
+    r = c.get(
+        "/oauth/oidc/start",
+        params={
+            "provider": "microsoft",
+            "client_id": CLIENT_ID,
+            "redirect_uri": REDIRECT,
+            "code_challenge": CHALLENGE,
+            "state": "s",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"

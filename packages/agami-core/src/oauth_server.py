@@ -21,6 +21,7 @@ import html
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import uuid4
 
@@ -30,6 +31,9 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from store import Store
 from user_store import authenticate, bind_oidc_subject, create_user, get_user_by_email
+
+if TYPE_CHECKING:
+    from oidc import Identity  # for type hints only — runtime imports oidc lazily (egress module)
 
 _CODE_TTL = timedelta(minutes=10)  # authorization codes are short-lived
 _JWT_TTL = timedelta(hours=1)
@@ -367,6 +371,17 @@ def _oidc_callback_uri() -> str:
     return f"{public_base_url()}/oauth/oidc/callback"
 
 
+def _safe_provider(key: str):
+    """`oidc.provider`, but a misconfigured provider (e.g. an unpinned Microsoft tenant, which raises)
+    resolves to None so the handler answers a clean 400 instead of an unhandled 500."""
+    import oidc
+
+    try:
+        return oidc.provider(key)
+    except ValueError:
+        return None
+
+
 def _mint_oidc_state(payload: dict, csrf: str) -> str:
     """Sign the carried authorize context + a CSRF binding into a short-lived HS256 state JWT."""
     claims = {
@@ -401,7 +416,7 @@ async def oidc_start(request: Request) -> Response:
     import oidc
 
     q = request.query_params
-    p = oidc.provider(q.get("provider", ""))
+    p = _safe_provider(q.get("provider", ""))
     if p is None:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
     redirect_uri = q.get("redirect_uri", "")
@@ -457,7 +472,7 @@ async def oidc_callback(request: Request) -> Response:
     claims = _verify_oidc_state(q.get("state", ""), request.cookies.get(_CSRF_COOKIE))
     if claims is None:
         return _oauth_error("invalid_request", "invalid or expired state")
-    p = oidc.provider(claims.get("provider", ""))
+    p = _safe_provider(claims.get("provider", ""))
     if p is None:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
     if not q.get("code"):
@@ -495,7 +510,7 @@ async def oidc_callback(request: Request) -> Response:
 _LOGIN_STATUSES = {"active", "demo"}
 
 
-def _resolve_oidc_user(store: Store, provider_key: str, identity) -> str | None:
+def _resolve_oidc_user(store: Store, provider_key: str, identity: Identity) -> str | None:
     """Map a verified OIDC identity to a username, or None to reject. Onboarded-only by default; with
     public signup enabled an unknown email self-provisions a demo user.
 
@@ -514,19 +529,26 @@ def _resolve_oidc_user(store: Store, provider_key: str, identity) -> str | None:
             if user["oidc_subject"] != identity.subject:
                 return None  # same provider, different account → refuse
         else:
-            bind_oidc_subject(store, user["username"], identity.subject)  # first login pins the subject
+            bind_oidc_subject(
+                store, user["username"], identity.subject
+            )  # first login pins the subject
         return user["username"]
 
     # Unknown email: only a public-demo instance may self-provision (fail-closed default).
     if not oidc.public_signup_enabled():
         return None
-    create_user(
-        store,
-        username=identity.email,
-        password=None,
-        email=identity.email,
-        status="demo",
-        oidc_provider=provider_key,
-        oidc_subject=identity.subject,
-    )
+    try:
+        create_user(
+            store,
+            username=identity.email,
+            password=None,
+            email=identity.email,
+            status="demo",
+            oidc_provider=provider_key,
+            oidc_subject=identity.subject,
+        )
+    except Exception:
+        # A UNIQUE collision (e.g. a concurrent signup, or the email already used as a username) is
+        # not an authorization — reject cleanly rather than 500.
+        return None
     return identity.email
