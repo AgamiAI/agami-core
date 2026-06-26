@@ -34,6 +34,8 @@ server = [
   "mcp>=1.2",
   "uvicorn>=0.30",
   "psycopg2-binary>=2.9",
+  "argon2-cffi>=23",
+  "PyJWT>=2.8",
 ]
 
 [tool.setuptools]

@@ -29,6 +29,10 @@ PRODUCT_TOOLS = {
 @pytest.fixture
 def base_url(monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
+    # These tests exercise the bearer-presence default — clear any ambient signing secret so the
+    # provider selection is deterministic (a dev with AGAMI_SIGNING_SECRET exported would otherwise
+    # get JWT mode and see "Bearer present" rejected).
+    monkeypatch.delenv("AGAMI_SIGNING_SECRET", raising=False)
     return BASE
 
 

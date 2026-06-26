@@ -36,6 +36,38 @@ def test_real_migrations_create_all_tables_on_empty_db():
     s.close()
 
 
+def test_oauth_tables_exist():
+    # The OAuth provider owns these: oauth_client (registered clients) + oauth_state (authorization
+    # codes bound to their PKCE challenge + redirect + the authenticated username).
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    assert {"oauth_client", "oauth_state"} <= _tables(s)
+    state_cols = {r["name"] for r in s.query("PRAGMA table_info(oauth_state)")}
+    assert {
+        "code",
+        "code_challenge",
+        "redirect_uri",
+        "username",
+        "expires_at",
+        "used",
+    } <= state_cols
+    s.close()
+
+
+def test_users_table_is_flat_no_role_column():
+    # The users table exists with the identity columns and, crucially, NO role/permission column —
+    # flat access is the open-core contract (roles are paid).
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    assert "users" in _tables(s)
+    cols = {r["name"] for r in s.query("PRAGMA table_info(users)")}
+    assert {"id", "username", "password_hash", "email", "status", "created"} <= cols
+    assert not (cols & {"role", "roles", "permission", "permissions"}), (
+        "flat access — no role column"
+    )
+    s.close()
+
+
 def test_migrations_are_idempotent_on_real_dir():
     s = Store.connect("sqlite://")
     s.run_migrations()

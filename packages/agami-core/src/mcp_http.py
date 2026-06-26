@@ -4,9 +4,9 @@
 Advertises the **same** shared `tools.TOOLS` registry as the stdio entrypoint, but over a network
 endpoint a remote client (claude.ai) can reach — plus the OAuth-discovery surface and a bearer
 auth shim. This is the network product: unlike the stdio harness it binds a port, so it carries
-auth — an unauthenticated request gets a `401` + `WWW-Authenticate` challenge, which is what
-triggers the client's OAuth flow. The authorize page + real identity are a later concern; here we
-emit the challenge and require a bearer token's presence (the OSS `AuthProvider` default).
+auth — an unauthenticated request gets a `401` + `WWW-Authenticate` challenge, which triggers the
+client's OAuth flow against the authorize/token endpoints (see `oauth_server`). The issued JWT then
+gates `/mcp`; with no signing secret configured the OSS bearer-presence default applies instead.
 
 Requires the **[server]** extra (the MCP SDK + ASGI stack). `PUBLIC_BASE_URL` must be set
 explicitly — it backs the discovery documents + the `WWW-Authenticate` resource URL and cannot be
@@ -21,7 +21,7 @@ import contextlib
 import os
 
 from oss_adapters import PresenceAuthProvider, SingleTenantOrgResolver
-from ports import Org
+from ports import AuthProvider, Org
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -30,8 +30,18 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from tools import SERVER_INSTRUCTIONS, SERVER_NAME, TOOLS, bootstrap_paths, server_version
 
-# Bearer-presence is the OSS default; real identity providers are a later feature.
-_AUTH = PresenceAuthProvider()
+
+def _build_auth_provider() -> AuthProvider:
+    """Pick the token validator. Presence (any non-empty bearer) is the local OSS default ONLY when
+    no signing secret is configured *at all*. If `AGAMI_SIGNING_SECRET` is present — even empty or
+    too weak — that signals intent to run real JWT auth, so we validate it now (fail fast at
+    construction) rather than silently downgrade a misconfigured hosted deploy to presence."""
+    if "AGAMI_SIGNING_SECRET" in os.environ:
+        from oauth_server import JwtAuthProvider, _signing_secret
+
+        _signing_secret()  # raises on an empty/weak secret — no insecure fallback on misconfig
+        return JwtAuthProvider()
+    return PresenceAuthProvider()
 
 
 def _build_org_resolver() -> SingleTenantOrgResolver:
@@ -80,32 +90,44 @@ _PUBLIC_PREFIXES = (
 )
 
 
+# The OAuth flow endpoints are pre-auth by definition — the user has no bearer token yet (they're
+# obtaining one). They enforce their own validation (credential check, PKCE, single-use codes,
+# redirect allow-listing), so they're public at the transport layer.
+_OAUTH_PATHS = ("/oauth/authorize", "/oauth/token", "/oauth/register")
+
+
 def _is_public_path(path: str) -> bool:
-    """True for the discovery routes and their path-suffixed variants only. We match on a path
-    *boundary* (exact, or prefix + '/'), not a bare `startswith` — otherwise a sibling like
-    `/.well-known/oauth-protected-resource-x` would skip auth too. Today such a path only 404s, but
-    boundary-matching keeps the open surface == the routes we serve even if a route is added later."""
-    return any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES)
+    """True for the discovery routes and the OAuth-flow endpoints — the surface reachable before a
+    client has a token. Discovery uses boundary matching (it has `{rest:path}` suffix routes, and a
+    bare `startswith` would let `/.well-known/oauth-protected-resource-x` skip auth); the OAuth
+    endpoints are matched *exactly* (only those three paths are routed), so a future
+    `/oauth/token/...` route can't inherit public access by accident."""
+    if any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES):
+        return True
+    return path in _OAUTH_PATHS
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):
-    """Require a bearer token's presence; the OAuth-discovery endpoints stay open. Everything else
-    401s without a token. On a request that passes auth, resolve the single-tenant org and attach
-    it to request.state.org — the explicit single-tenant contract + the multi-tenant seam."""
+    """Gate every request on a Bearer token via the configured `AuthProvider` (a real JWT validator
+    in the hosted OAuth path, or bearer-presence locally); the discovery + OAuth-flow endpoints stay
+    open. On a request that passes auth, resolve the single-tenant org and attach it to
+    request.state.org — the explicit single-tenant contract + the multi-tenant seam."""
 
-    def __init__(self, app, resolver: SingleTenantOrgResolver) -> None:
+    def __init__(self, app, resolver: SingleTenantOrgResolver, auth: AuthProvider) -> None:
         super().__init__(app)
         self._resolver = resolver
+        self._auth = auth
 
     async def dispatch(self, request: Request, call_next):
         if _is_public_path(request.url.path):
             return await call_next(request)
         authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-        # Require the Bearer scheme specifically (not just any Authorization header), then a
-        # non-empty token. Real token validation is a later feature; this is presence-only.
+        # Require the Bearer scheme specifically (not just any Authorization header), then hand the
+        # token to the configured provider — a real JWT validator in the hosted OAuth path, or
+        # bearer-presence locally.
         if not authz.lower().startswith("bearer "):
             return _unauthenticated(public_base_url())
-        if _AUTH.validate_token(authz[7:].strip()) is None:
+        if self._auth.validate_token(authz[7:].strip()) is None:
             return _unauthenticated(public_base_url())
         # Resolve the org for this request. Single-tenant returns the one configured org regardless
         # of context; nothing downstream consumes it yet (tools key on `datasource`), so this asserts
@@ -128,8 +150,8 @@ async def _protected_resource(request: Request) -> JSONResponse:
 
 
 async def _auth_server(request: Request) -> JSONResponse:
-    """RFC 8414 — the authorization-server metadata. The authorize/token endpoints it names are a
-    later feature; this transport only advertises them so the client can begin discovery."""
+    """RFC 8414 — the authorization-server metadata advertising the authorize/token/register
+    endpoints (served by `oauth_server`) so the client can run the OAuth flow."""
     base = public_base_url()
     return JSONResponse(
         {
@@ -192,14 +214,21 @@ def build_app() -> Starlette:
         async with session_manager.run():
             yield
 
+    from oauth_server import authorize, register, token
+
     routes = [
         Route("/.well-known/oauth-protected-resource", _protected_resource),
         Route("/.well-known/oauth-protected-resource/{rest:path}", _protected_resource),
         Route("/.well-known/oauth-authorization-server", _auth_server),
         Route("/.well-known/oauth-authorization-server/{rest:path}", _auth_server),
+        Route("/oauth/authorize", authorize, methods=["GET", "POST"]),
+        Route("/oauth/token", token, methods=["POST"]),
+        Route("/oauth/register", register, methods=["POST"]),
         Mount("/mcp", app=handle_mcp),
     ]
-    middleware = [Middleware(_AuthMiddleware, resolver=_build_org_resolver())]
+    middleware = [
+        Middleware(_AuthMiddleware, resolver=_build_org_resolver(), auth=_build_auth_provider())
+    ]
     return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 
 
