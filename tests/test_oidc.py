@@ -474,6 +474,29 @@ def test_subject_tofu_binds_then_enforces(env):
     s.close()
 
 
+def test_pending_user_binds_on_first_oidc_login(env):
+    # A pending teammate (no password, no provider) adopts the provider + subject on first OIDC login.
+    s = Store.from_env()
+    user_store.create_user(s, username="newbie@example.com", email="newbie@example.com", password=None)
+    assert _resolve_oidc_user(s, "google", Identity("newbie@example.com", "sub-1")) == "newbie@example.com"
+    row = user_store.get_user(s, "newbie@example.com")
+    assert row["oidc_provider"] == "google" and row["oidc_subject"] == "sub-1"
+    # bound now: same provider+subject still resolves; a different provider for the email is refused
+    assert _resolve_oidc_user(s, "google", Identity("newbie@example.com", "sub-1")) == "newbie@example.com"
+    assert _resolve_oidc_user(s, "microsoft", Identity("newbie@example.com", "ms-sub")) is None
+    s.close()
+
+
+def test_password_user_is_not_a_pending_oidc_claim(env):
+    # A password user (a password deployment) is NOT pending — an OIDC login for that email is refused,
+    # never silently binds a provider onto a password account.
+    s = Store.from_env()
+    user_store.create_user(s, username="pat@example.com", email="pat@example.com", password="pat-pw-1234")
+    assert _resolve_oidc_user(s, "google", Identity("pat@example.com", "sub-1")) is None
+    assert user_store.get_user(s, "pat@example.com")["oidc_provider"] is None  # unchanged
+    s.close()
+
+
 def test_demo_signup_off_rejects_unknown_email(env):
     s = Store.from_env()  # AGAMI_PUBLIC_SIGNUP unset → fail-closed
     assert _resolve_oidc_user(s, "google", Identity("stranger@example.com", "s")) is None

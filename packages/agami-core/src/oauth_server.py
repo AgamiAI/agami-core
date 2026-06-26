@@ -33,6 +33,7 @@ from store import Store
 from user_store import (
     authenticate,
     bind_oidc_subject,
+    claim_pending_oidc,
     create_user,
     get_user,
     get_user_by_email,
@@ -597,6 +598,20 @@ def _resolve_oidc_user(
     if user is not None:
         if user["status"] not in _LOGIN_STATUSES:
             return None
+        # Pending user (deployment-wide OIDC onboarding, ACE-011): a row with no password and no
+        # provider adopts THIS provider + subject on first login, then we re-read and require both are
+        # ours. The guard makes a concurrent or already-claimed case (e.g. a password set first) a
+        # no-op → we reject rather than log in against an unexpected binding.
+        if user["oidc_provider"] is None and user["password_hash"] is None:
+            claim_pending_oidc(store, user["username"], provider_key, identity.subject)
+            bound = get_user(store, user["username"])
+            if (
+                bound is None
+                or bound["oidc_provider"] != provider_key
+                or bound["oidc_subject"] != identity.subject
+            ):
+                return None
+            return user["username"]
         if user["oidc_provider"] != provider_key:
             return None  # bound to a different IdP (or password-only) → not an OIDC login for this provider
         # Bind the subject on first login (a no-clobber UPDATE that only sets it when NULL), then
