@@ -23,6 +23,10 @@ from store import Store
 
 _ACTIVE = "active"
 
+# The OIDC provider keys a deploy may pin the admin to. Mirrors `oidc._PROVIDERS`, duplicated here on
+# purpose: `oidc` is the one egress module (httpx), and `user_store` must stay import-light + egress-free.
+_KNOWN_OIDC_PROVIDERS = ("google", "microsoft")
+
 # A throwaway argon2id hash that no password verifies against. `authenticate` verifies against it on
 # the user-absent path so every code path pays the same KDF cost — without it, a missing username
 # returns far faster than a wrong password and leaks which usernames exist (an enumeration oracle).
@@ -158,16 +162,38 @@ def authenticate(store: Store, username: str, password: str) -> Principal | None
 
 
 def seed_admin_from_env(store: Store) -> str | None:
-    """Seed the initial admin from AGAMI_ADMIN_USERNAME / AGAMI_ADMIN_PASSWORD if both are set.
+    """Seed the initial admin from the AGAMI_ADMIN_* env. Returns the seeded username (the email), or
+    None if there's nothing to seed / the admin already exists.
 
-    Create-if-absent and idempotent: a redeploy never duplicates the admin or clobbers a
-    password the admin has since changed. Returns the username seeded, or None if unset/already
-    present. (Rotating the seed password is out of scope — that's a later reset path.)"""
-    username = os.environ.get("AGAMI_ADMIN_USERNAME", "").strip()
-    password = os.environ.get("AGAMI_ADMIN_PASSWORD", "")
-    if not username or not password:
+    The admin is keyed by **email** (`AGAMI_ADMIN_USERNAME` = the email; `username` = the normalized
+    email, so login is by the address they know). Auth method is whatever the deploy supplies — a
+    password (`AGAMI_ADMIN_PASSWORD`) and/or a pinned OIDC provider (`AGAMI_ADMIN_PROVIDER`,
+    google|microsoft); **at least one is required**, and both is fine (the provider is the primary path,
+    the password a fallback). `AGAMI_ADMIN_FIRST_NAME`/`LAST_NAME` are display-only.
+
+    Create-if-absent and idempotent: a redeploy never duplicates the admin or clobbers changes the
+    admin has since made. (Switching an existing admin's auth method is a manual re-seed — out of scope.)"""
+    email = _normalize_email(os.environ.get("AGAMI_ADMIN_USERNAME", ""))
+    if email is None:
         return None
-    if get_user(store, username) is not None:
+    password = os.environ.get("AGAMI_ADMIN_PASSWORD", "") or None
+    provider = os.environ.get("AGAMI_ADMIN_PROVIDER", "").strip().lower() or None
+    # An unknown provider key is a misconfig — ignore it (fall back to the password if present) rather
+    # than seed an admin pinned to a provider that can never resolve.
+    if provider is not None and provider not in _KNOWN_OIDC_PROVIDERS:
+        provider = None
+    if password is None and provider is None:
+        return None  # no usable credential → nothing to seed
+    if get_user(store, email) is not None:
         return None
-    create_user(store, username, password, status=_ACTIVE)
-    return username
+    create_user(
+        store,
+        username=email,
+        password=password,
+        email=email,
+        status=_ACTIVE,
+        oidc_provider=provider,
+        first_name=os.environ.get("AGAMI_ADMIN_FIRST_NAME", ""),
+        last_name=os.environ.get("AGAMI_ADMIN_LAST_NAME", ""),
+    )
+    return email

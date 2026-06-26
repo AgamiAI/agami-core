@@ -147,10 +147,58 @@ def test_seed_admin_from_env_creates_and_is_idempotent(monkeypatch):
 
 def test_seed_admin_noop_when_env_unset(monkeypatch):
     s = _store()
-    monkeypatch.delenv("AGAMI_ADMIN_USERNAME", raising=False)
-    monkeypatch.delenv("AGAMI_ADMIN_PASSWORD", raising=False)
+    for var in ("AGAMI_ADMIN_USERNAME", "AGAMI_ADMIN_PASSWORD", "AGAMI_ADMIN_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
     assert user_store.seed_admin_from_env(s) is None
     assert user_store.list_users(s) == []
+    s.close()
+
+
+def test_seed_admin_provider_only_is_passwordless_and_named(monkeypatch):
+    s = _store()
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", "Owner@Example.com")
+    monkeypatch.delenv("AGAMI_ADMIN_PASSWORD", raising=False)
+    monkeypatch.setenv("AGAMI_ADMIN_PROVIDER", "google")
+    monkeypatch.setenv("AGAMI_ADMIN_FIRST_NAME", "Alex")
+    monkeypatch.setenv("AGAMI_ADMIN_LAST_NAME", "Kim")
+    assert user_store.seed_admin_from_env(s) == "owner@example.com"  # email is the identity, normalized
+    row = user_store.get_user(s, "owner@example.com")
+    assert row["oidc_provider"] == "google" and row["password_hash"] is None
+    assert row["first_name"] == "Alex" and row["last_name"] == "Kim"
+    # passwordless ⇒ no password login
+    assert user_store.authenticate(s, "owner@example.com", "anything") is None
+    s.close()
+
+
+def test_seed_admin_requires_at_least_one_credential(monkeypatch):
+    s = _store()
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", "owner@example.com")
+    monkeypatch.delenv("AGAMI_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("AGAMI_ADMIN_PROVIDER", raising=False)
+    assert user_store.seed_admin_from_env(s) is None  # email alone is not a credential
+    assert user_store.list_users(s) == []
+    s.close()
+
+
+def test_seed_admin_ignores_an_unknown_provider(monkeypatch):
+    s = _store()
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", "owner@example.com")
+    monkeypatch.setenv("AGAMI_ADMIN_PASSWORD", "seed-pw")
+    monkeypatch.setenv("AGAMI_ADMIN_PROVIDER", "bogus")  # typo / unsupported → ignored, not pinned
+    assert user_store.seed_admin_from_env(s) == "owner@example.com"
+    assert user_store.get_user(s, "owner@example.com")["oidc_provider"] is None
+    s.close()
+
+
+def test_seed_admin_hybrid_password_and_provider(monkeypatch):
+    s = _store()
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", "owner@example.com")
+    monkeypatch.setenv("AGAMI_ADMIN_PASSWORD", "seed-pw")
+    monkeypatch.setenv("AGAMI_ADMIN_PROVIDER", "microsoft")
+    assert user_store.seed_admin_from_env(s) == "owner@example.com"
+    row = user_store.get_user(s, "owner@example.com")
+    assert row["oidc_provider"] == "microsoft" and row["password_hash"] is not None
+    assert user_store.authenticate(s, "owner@example.com", "seed-pw") is not None  # password still works
     s.close()
 
 

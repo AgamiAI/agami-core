@@ -234,8 +234,10 @@ _SESSION_PURPOSE = "admin_session"
 
 
 def _admin_username() -> str | None:
-    """The single admin's username (the admin-gate). Unset ⇒ the admin UI is disabled entirely."""
-    name = os.environ.get("AGAMI_ADMIN_USERNAME", "").strip()
+    """The single admin's username = the **normalized** admin email (the admin-gate). Lowercased+trimmed
+    to match how the seed stores it + how OIDC resolves it, so the gate is case-insensitive. Unset ⇒ the
+    admin UI is disabled entirely."""
+    name = os.environ.get("AGAMI_ADMIN_USERNAME", "").strip().lower()
     return name or None
 
 
@@ -375,10 +377,13 @@ async def admin_login(request: Request) -> Response:
         return HTMLResponse(admin_login_body_html())
 
     form = await _form(request)
+    # Email is the identity: normalize the typed address (trim + lowercase) so login is
+    # case-insensitive and matches the normalized username the seed stored.
+    typed = form.get("username", "").strip().lower()
     store = _open_store()
     try:
         principal = (
-            user_store.authenticate(store, form.get("username", ""), form.get("password", ""))
+            user_store.authenticate(store, typed, form.get("password", ""))
             if store is not None
             else None
         )

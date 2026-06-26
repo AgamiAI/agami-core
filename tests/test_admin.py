@@ -194,6 +194,16 @@ def test_valid_non_admin_is_refused_with_no_session(client):
     assert client.get("/admin", follow_redirects=False).status_code == 302
 
 
+def test_admin_login_is_case_insensitive_on_the_email(client):
+    # Email is the identity — a differently-cased address still authenticates as the admin.
+    r = client.post(
+        "/admin/login",
+        data={"username": "ADMIN@Example.COM", "password": ADMIN_PW},
+        follow_redirects=False,
+    )
+    assert r.status_code == 302 and r.headers["location"] == "/admin"
+
+
 def test_admin_login_sets_a_hardened_session_cookie(client):
     r = client.post(
         "/admin/login", data={"username": ADMIN_USER, "password": ADMIN_PW}, follow_redirects=False
