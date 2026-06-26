@@ -80,12 +80,21 @@ _PUBLIC_PREFIXES = (
 )
 
 
+# The OAuth flow endpoints are pre-auth by definition — the user has no bearer token yet (they're
+# obtaining one). They enforce their own validation (credential check, PKCE, single-use codes,
+# redirect allow-listing), so they're public at the transport layer.
+_OAUTH_PATHS = ("/oauth/authorize", "/oauth/token", "/oauth/register")
+
+
 def _is_public_path(path: str) -> bool:
-    """True for the discovery routes and their path-suffixed variants only. We match on a path
-    *boundary* (exact, or prefix + '/'), not a bare `startswith` — otherwise a sibling like
-    `/.well-known/oauth-protected-resource-x` would skip auth too. Today such a path only 404s, but
-    boundary-matching keeps the open surface == the routes we serve even if a route is added later."""
-    return any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES)
+    """True for the discovery routes and the OAuth-flow endpoints — the surface reachable before a
+    client has a token. Discovery uses boundary matching (it has `{rest:path}` suffix routes, and a
+    bare `startswith` would let `/.well-known/oauth-protected-resource-x` skip auth); the OAuth
+    endpoints are matched *exactly* (only those three paths are routed), so a future
+    `/oauth/token/...` route can't inherit public access by accident."""
+    if any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES):
+        return True
+    return path in _OAUTH_PATHS
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):
@@ -192,11 +201,16 @@ def build_app() -> Starlette:
         async with session_manager.run():
             yield
 
+    from oauth_server import authorize, register, token
+
     routes = [
         Route("/.well-known/oauth-protected-resource", _protected_resource),
         Route("/.well-known/oauth-protected-resource/{rest:path}", _protected_resource),
         Route("/.well-known/oauth-authorization-server", _auth_server),
         Route("/.well-known/oauth-authorization-server/{rest:path}", _auth_server),
+        Route("/oauth/authorize", authorize, methods=["GET", "POST"]),
+        Route("/oauth/token", token, methods=["POST"]),
+        Route("/oauth/register", register, methods=["POST"]),
         Mount("/mcp", app=handle_mcp),
     ]
     middleware = [Middleware(_AuthMiddleware, resolver=_build_org_resolver())]

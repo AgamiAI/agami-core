@@ -1,9 +1,9 @@
 """The `users` store + the password credential check — per-user identity for the hosted server.
 
-This is the credential authenticator that ACE-005's OAuth authorize page calls: `authenticate`
-turns a username/password into a `Principal` (the identity ACE-005 then mints a JWT for). It is NOT
-the bearer-token `AuthProvider` (that validates the issued token — a later, separate adapter). Flat
-access only: there is no role column (roles are paid).
+This is the credential authenticator the OAuth authorize page calls: `authenticate` turns a
+username/password into a `Principal` (the identity the token endpoint then mints a JWT for). It is
+NOT the bearer-token `AuthProvider` (that validates the issued token — a later, separate adapter).
+Flat access only: there is no role column (roles are paid).
 
 Thin SQL over the portable `Store` (same shape as `model_store.py`), so it runs on SQLite (CI) and
 Postgres (prod) unchanged. Passwords never touch this module in plaintext beyond the moment they're
