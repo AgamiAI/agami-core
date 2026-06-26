@@ -36,6 +36,8 @@ server = [
   "psycopg2-binary>=2.9",
   "argon2-cffi>=23",
   "PyJWT>=2.8",
+  "httpx>=0.27",        # OIDC discovery + token exchange (the server's one outbound egress)
+  "cryptography>=43",   # RS256 backend for PyJWT id-token verification
 ]
 
 [tool.setuptools]

@@ -51,6 +51,39 @@ def test_empty_password_is_rejected_at_create():
     s.close()
 
 
+def test_passwordless_user_cannot_password_login():
+    # An OIDC-only user has no password_hash and must never be loginable via the password path.
+    s = _store()
+    user_store.create_user(s, "oidc-user", password=None, email="you@example.com")
+    assert user_store.get_user(s, "oidc-user")["password_hash"] is None
+    assert user_store.authenticate(s, "oidc-user", "") is None
+    assert user_store.authenticate(s, "oidc-user", "anything") is None
+    s.close()
+
+
+def test_get_user_by_email_normalizes_case_and_whitespace():
+    s = _store()
+    user_store.create_user(s, "admin", "s3cret-pw", email="  You@Example.com  ")
+    # stored trimmed + lowercased; lookup normalizes the same, so casing/whitespace all resolve
+    assert user_store.get_user_by_email(s, "you@example.com")["username"] == "admin"
+    assert user_store.get_user_by_email(s, " YOU@EXAMPLE.COM ")["username"] == "admin"
+    assert user_store.get_user_by_email(s, "missing@example.com") is None
+    assert user_store.get_user_by_email(s, "   ") is None
+    s.close()
+
+
+def test_duplicate_email_is_rejected():
+    # The UNIQUE email index makes OIDC's lookup one-to-one — a second user with the same email
+    # (any casing) can't be created.
+    import sqlite3
+
+    s = _store()
+    user_store.create_user(s, "alice", password=None, email="you@example.com")
+    with pytest.raises(sqlite3.IntegrityError):
+        user_store.create_user(s, "bob", password=None, email="YOU@example.com")
+    s.close()
+
+
 def test_authenticate_runs_a_verify_even_for_unknown_user(monkeypatch):
     # The anti-enumeration guard: a missing username still runs a verify (against the dummy hash),
     # so the call can't be distinguished by "did verify run". We assert the spy fired.
