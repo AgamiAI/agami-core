@@ -248,14 +248,33 @@ def _admin_username() -> str | None:
 
 
 def _admin_provider() -> str | None:
-    """The admin's pinned OIDC provider (`AGAMI_ADMIN_PROVIDER`), or None — only returned when it's a
-    provider that's actually configured, so the login page never shows a button that can't work."""
+    """The admin's pinned OIDC provider (`AGAMI_ADMIN_PROVIDER`), or None — only when it's a provider
+    that's actually configured (client id/secret present)."""
     key = os.environ.get("AGAMI_ADMIN_PROVIDER", "").strip().lower()
     if not key:
         return None
     import oidc  # lazy: the egress module, server-only
 
     return key if key in oidc.available_providers() else None
+
+
+def _admin_login_provider() -> str | None:
+    """The provider button to render on the admin login: the pinned, configured provider, but ONLY
+    when the admin's stored row is actually bound to it. This avoids a dead button — e.g. if
+    `AGAMI_ADMIN_PROVIDER` is set after the admin was seeded password-only (the seed is idempotent and
+    won't backfill `oidc_provider`), the button would otherwise show but dead-end at "not an admin"."""
+    provider = _admin_provider()
+    admin = _admin_username()
+    if provider is None or admin is None:
+        return None
+    store = _open_store()
+    if store is None:
+        return None
+    try:
+        row = user_store.get_user(store, admin)
+    finally:
+        store.close()
+    return provider if row is not None and row.get("oidc_provider") == provider else None
 
 
 def issue_session(username: str) -> str:
@@ -403,7 +422,7 @@ async def admin_login(request: Request) -> Response:
     if request.method == "GET":
         if current_admin(request) is not None:
             return RedirectResponse("/admin", status_code=302)
-        return HTMLResponse(admin_login_body_html(provider=_admin_provider()))
+        return HTMLResponse(admin_login_body_html(provider=_admin_login_provider()))
 
     form = await _form(request)
     # Email is the identity: normalize the typed address (trim + lowercase) so login is
@@ -423,7 +442,7 @@ async def admin_login(request: Request) -> Response:
         # Same generic message for wrong password, unknown user, or disabled — no enumeration oracle.
         # Keep the social button on the re-render so a failed password attempt doesn't hide it.
         return HTMLResponse(
-            admin_login_body_html(error="Invalid email or password.", provider=_admin_provider()),
+            admin_login_body_html(error="Invalid email or password.", provider=_admin_login_provider()),
             status_code=401,
         )
     if principal.subject != _admin_username():

@@ -377,6 +377,18 @@ def test_admin_login_keeps_the_provider_button_after_a_bad_password(env, monkeyp
     assert "Continue with Google" in html  # a failed password attempt doesn't hide the social option
 
 
+def test_admin_login_hides_button_when_admin_row_is_not_pinned_to_the_provider(env, monkeypatch):
+    # Config drift: admin was seeded password-only; AGAMI_ADMIN_PROVIDER added later (the idempotent
+    # seed won't backfill oidc_provider). The button must NOT show — it would dead-end at "not an admin".
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", ADMIN_EMAIL)
+    monkeypatch.setenv("AGAMI_ADMIN_PROVIDER", "google")  # configured, but the admin isn't bound to it
+    s = Store.connect(env)
+    user_store.create_user(s, username=ADMIN_EMAIL, password="admin-pw", email=ADMIN_EMAIL)
+    s.close()
+    html = _client().get("/admin/login").text
+    assert "Continue with Google" not in html
+
+
 def test_provider_option_hidden_when_unconfigured(monkeypatch, tmp_path):
     monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
     monkeypatch.setenv("AGAMI_SIGNING_SECRET", SECRET)

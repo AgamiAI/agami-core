@@ -202,6 +202,31 @@ def test_seed_admin_hybrid_password_and_provider(monkeypatch):
     s.close()
 
 
+def test_seed_admin_whitespace_password_is_treated_as_unset(monkeypatch):
+    s = _store()
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", "owner@example.com")
+    monkeypatch.setenv("AGAMI_ADMIN_PASSWORD", "   ")  # whitespace-only ⇒ unset, must not crash
+    monkeypatch.setenv("AGAMI_ADMIN_PROVIDER", "google")
+    assert user_store.seed_admin_from_env(s) == "owner@example.com"
+    row = user_store.get_user(s, "owner@example.com")
+    assert row["password_hash"] is None and row["oidc_provider"] == "google"
+    s.close()
+
+
+def test_seed_admin_is_idempotent_against_a_prior_mixed_case_username(monkeypatch):
+    s = _store()
+    # Simulate a legacy seed: an admin row created with the verbatim (mixed-case) username.
+    user_store.create_user(
+        s, username="Owner@Example.com", password="old-pw", email="owner@example.com"
+    )
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", "Owner@Example.com")
+    monkeypatch.setenv("AGAMI_ADMIN_PASSWORD", "seed-pw")
+    monkeypatch.delenv("AGAMI_ADMIN_PROVIDER", raising=False)
+    assert user_store.seed_admin_from_env(s) is None  # already present ⇒ no duplicate admin row
+    assert len(user_store.list_users(s)) == 1
+    s.close()
+
+
 def test_needs_rehash_upgrade_path(monkeypatch):
     # Simulate a stored hash made with a weaker profile: authenticate should re-store an upgraded
     # hash in place (the cross-tier cost-bump path) without changing the verified password.

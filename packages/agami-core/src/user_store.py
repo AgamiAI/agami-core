@@ -173,10 +173,14 @@ def seed_admin_from_env(store: Store) -> str | None:
 
     Create-if-absent and idempotent: a redeploy never duplicates the admin or clobbers changes the
     admin has since made. (Switching an existing admin's auth method is a manual re-seed — out of scope.)"""
-    email = _normalize_email(os.environ.get("AGAMI_ADMIN_USERNAME", ""))
+    raw = os.environ.get("AGAMI_ADMIN_USERNAME", "").strip()
+    email = _normalize_email(raw)
     if email is None:
         return None
-    password = os.environ.get("AGAMI_ADMIN_PASSWORD", "") or None
+    # A whitespace-only password is a misconfig — treat it as unset (so it falls back to the provider,
+    # or no-ops) rather than letting create_user raise and crash startup.
+    pw_env = os.environ.get("AGAMI_ADMIN_PASSWORD", "")
+    password = pw_env if pw_env.strip() else None
     provider = os.environ.get("AGAMI_ADMIN_PROVIDER", "").strip().lower() or None
     # An unknown provider key is a misconfig — ignore it (fall back to the password if present) rather
     # than seed an admin pinned to a provider that can never resolve.
@@ -184,7 +188,9 @@ def seed_admin_from_env(store: Store) -> str | None:
         provider = None
     if password is None and provider is None:
         return None  # no usable credential → nothing to seed
-    if get_user(store, email) is not None:
+    # Idempotent across an upgrade: skip if an admin already exists under the normalized email OR under
+    # a pre-existing (possibly mixed-case) raw username — so a redeploy never creates a duplicate row.
+    if get_user(store, email) is not None or (raw != email and get_user(store, raw) is not None):
         return None
     create_user(
         store,
