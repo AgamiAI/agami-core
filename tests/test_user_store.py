@@ -61,12 +61,26 @@ def test_passwordless_user_cannot_password_login():
     s.close()
 
 
-def test_get_user_by_email():
+def test_get_user_by_email_is_case_insensitive():
     s = _store()
-    user_store.create_user(s, "admin", "s3cret-pw", email="you@example.com")
+    user_store.create_user(s, "admin", "s3cret-pw", email="You@Example.com")
+    # stored lowercased; lookup normalizes too, so any casing resolves to the one user
     assert user_store.get_user_by_email(s, "you@example.com")["username"] == "admin"
+    assert user_store.get_user_by_email(s, "YOU@EXAMPLE.COM")["username"] == "admin"
     assert user_store.get_user_by_email(s, "missing@example.com") is None
     assert user_store.get_user_by_email(s, "") is None
+    s.close()
+
+
+def test_duplicate_email_is_rejected():
+    # The UNIQUE email index makes OIDC's lookup one-to-one — a second user with the same email
+    # (any casing) can't be created.
+    import sqlite3
+
+    s = _store()
+    user_store.create_user(s, "alice", password=None, email="you@example.com")
+    with pytest.raises(sqlite3.IntegrityError):
+        user_store.create_user(s, "bob", password=None, email="YOU@example.com")
     s.close()
 
 

@@ -94,6 +94,7 @@ def env(tmp_path, monkeypatch):
     # Point the provider's discovery + JWKS at our in-test IdP, and never touch the network.
     monkeypatch.setattr(oidc, "_discover", lambda p: META)
     monkeypatch.setattr(jwt, "PyJWKClient", _FakeJWKClient)
+    oidc._jwks_clients.clear()  # the JWKS client is cached per process — reset between tests
     s = Store.connect(db_url)
     s.run_migrations()
     user_store.create_user(

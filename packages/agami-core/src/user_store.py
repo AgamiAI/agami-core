@@ -47,21 +47,24 @@ def create_user(
         raise ValueError("password must not be empty (pass None for a passwordless OIDC user)")
     user_id = uuid4().hex
     password_hash = hash_password(password) if password is not None else None
+    # Emails are the OIDC lookup key — store them lowercased so the (case-insensitive) identity
+    # matches regardless of how the IdP cases the address; the UNIQUE index keeps them one-to-one.
+    normalized_email = email.lower() if email else None
     store.execute(
         "INSERT INTO users (id, username, password_hash, email, status, created) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, username, password_hash, email, status, _now_iso()),
+        (user_id, username, password_hash, normalized_email, status, _now_iso()),
     )
     store.commit()
     return user_id
 
 
 def get_user_by_email(store: Store, email: str) -> dict[str, Any] | None:
-    """Look up a user by email — the onboarded-only lookup OIDC uses. Returns the first match (email
-    is indexed; uniqueness is enforced by how users are onboarded, not the schema)."""
+    """Look up a user by email — the onboarded-only lookup OIDC uses. Case-insensitive (emails are
+    stored lowercased) and one-to-one (the email index is UNIQUE)."""
     if not email:
         return None
-    rows = store.query("SELECT * FROM users WHERE email = ?", (email,))
+    rows = store.query("SELECT * FROM users WHERE email = ?", (email.lower(),))
     return rows[0] if rows else None
 
 

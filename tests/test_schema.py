@@ -78,8 +78,10 @@ def test_users_password_hash_nullable_and_email_indexed():
     # username must STILL be unique (the rebuild preserves the constraint)
     uname = next(r for r in s.query("PRAGMA table_info(users)") if r["name"] == "username")
     assert uname["notnull"] == 1
-    indexes = {r["name"] for r in s.query("PRAGMA index_list(users)")}
-    assert "idx_users_email" in indexes
+    email_idx = next(
+        (r for r in s.query("PRAGMA index_list(users)") if r["name"] == "idx_users_email"), None
+    )
+    assert email_idx is not None and email_idx["unique"] == 1, "email must be uniquely indexed"
     s.close()
 
 

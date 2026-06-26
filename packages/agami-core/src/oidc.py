@@ -30,6 +30,7 @@ _DISCOVERY = {
 }
 
 _discovery_cache: dict[str, dict] = {}
+_jwks_clients: dict[str, "jwt.PyJWKClient"] = {}
 
 
 @dataclass(frozen=True)
@@ -109,7 +110,12 @@ def verify_id_token(p: Provider, id_token: str, *, nonce: str) -> str:
     discovered issuer, `exp` enforced, the `nonce` matches the one we sent (replay defense), and
     `email_verified` is true (never trust an unverified email as identity)."""
     meta = _discover(p)
-    signing_key = jwt.PyJWKClient(meta["jwks_uri"]).get_signing_key_from_jwt(id_token).key
+    # Reuse the JWKS client per provider — it keeps its own key cache, so steady-state logins don't
+    # re-fetch the IdP's keys on every request (and don't amplify into the IdP under load).
+    jwks_uri = meta["jwks_uri"]
+    if jwks_uri not in _jwks_clients:
+        _jwks_clients[jwks_uri] = jwt.PyJWKClient(jwks_uri)
+    signing_key = _jwks_clients[jwks_uri].get_signing_key_from_jwt(id_token).key
     claims = jwt.decode(
         id_token,
         signing_key,

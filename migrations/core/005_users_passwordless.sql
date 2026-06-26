@@ -20,4 +20,6 @@ INSERT INTO users_new (id, username, password_hash, email, status, created)
 DROP TABLE users;
 ALTER TABLE users_new RENAME TO users;
 
-CREATE INDEX idx_users_email ON users (email);
+-- UNIQUE so OIDC's email lookup resolves to exactly one user (NULLs stay distinct on both SQLite and
+-- Postgres, so multiple password-only users with no email are fine). Emails are stored lowercased.
+CREATE UNIQUE INDEX idx_users_email ON users (email);

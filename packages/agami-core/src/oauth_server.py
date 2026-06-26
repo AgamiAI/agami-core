@@ -476,6 +476,10 @@ async def oidc_callback(request: Request) -> Response:
         user = get_user_by_email(store, email)
         # Onboarded-only: the verified email must already be an active user (admin-created). An
         # unknown email is rejected, never auto-provisioned.
+        #
+        # LOAD-BEARING: resolution is by email alone, which is safe ONLY while a single IdP is
+        # enabled. Before enabling a second provider, bind identity to (provider, subject) — else an
+        # attacker with the same email at another IdP would resolve to this user (IdP confusion).
         if user is None or user["status"] != "active":
             return _oauth_error("access_denied", "this account is not authorized", status=403)
         resp = _issue_authorization_code(
