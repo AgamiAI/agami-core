@@ -36,22 +36,33 @@ def _now_iso() -> str:
 def create_user(
     store: Store,
     username: str,
-    password: str,
+    password: str | None = None,
     email: str | None = None,
     status: str = _ACTIVE,
 ) -> str:
-    """Create a user with an argon2id-hashed password; returns the minted id. Raises if the username
-    already exists (the UNIQUE constraint) — callers that want create-if-absent check first."""
-    if not password:
-        raise ValueError("password must not be empty")
+    """Create a user; returns the minted id. `password=None` makes a **passwordless** user (OIDC-only —
+    no password login); a non-None password is argon2id-hashed and must be non-empty. Raises if the
+    username already exists (the UNIQUE constraint) — callers that want create-if-absent check first."""
+    if password is not None and not password.strip():
+        raise ValueError("password must not be empty (pass None for a passwordless OIDC user)")
     user_id = uuid4().hex
+    password_hash = hash_password(password) if password is not None else None
     store.execute(
         "INSERT INTO users (id, username, password_hash, email, status, created) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, username, hash_password(password), email, status, _now_iso()),
+        (user_id, username, password_hash, email, status, _now_iso()),
     )
     store.commit()
     return user_id
+
+
+def get_user_by_email(store: Store, email: str) -> dict[str, Any] | None:
+    """Look up a user by email — the onboarded-only lookup OIDC uses. Returns the first match (email
+    is indexed; uniqueness is enforced by how users are onboarded, not the schema)."""
+    if not email:
+        return None
+    rows = store.query("SELECT * FROM users WHERE email = ?", (email,))
+    return rows[0] if rows else None
 
 
 def get_user(store: Store, username: str) -> dict[str, Any] | None:
@@ -77,9 +88,11 @@ def authenticate(store: Store, username: str, password: str) -> Principal | None
     a username exists — closing a timing-enumeration oracle. On success, opportunistically upgrade
     the stored hash if the cost profile has risen (the cross-tier cost-bump path)."""
     user = get_user(store, username)
-    stored_hash = user["password_hash"] if user else _DUMMY_HASH
+    # A passwordless (OIDC-only) user has a NULL hash and can never password-login; verify against the
+    # dummy hash so the timing is identical to a missing/active-password user.
+    stored_hash = user["password_hash"] if (user and user["password_hash"]) else _DUMMY_HASH
     verified = verify_password(stored_hash, password)
-    if user is None or user["status"] != _ACTIVE or not verified:
+    if user is None or user["status"] != _ACTIVE or user["password_hash"] is None or not verified:
         return None
     if needs_rehash(user["password_hash"]):
         try:

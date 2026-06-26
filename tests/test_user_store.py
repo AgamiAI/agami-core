@@ -51,6 +51,25 @@ def test_empty_password_is_rejected_at_create():
     s.close()
 
 
+def test_passwordless_user_cannot_password_login():
+    # An OIDC-only user has no password_hash and must never be loginable via the password path.
+    s = _store()
+    user_store.create_user(s, "oidc-user", password=None, email="you@example.com")
+    assert user_store.get_user(s, "oidc-user")["password_hash"] is None
+    assert user_store.authenticate(s, "oidc-user", "") is None
+    assert user_store.authenticate(s, "oidc-user", "anything") is None
+    s.close()
+
+
+def test_get_user_by_email():
+    s = _store()
+    user_store.create_user(s, "admin", "s3cret-pw", email="you@example.com")
+    assert user_store.get_user_by_email(s, "you@example.com")["username"] == "admin"
+    assert user_store.get_user_by_email(s, "missing@example.com") is None
+    assert user_store.get_user_by_email(s, "") is None
+    s.close()
+
+
 def test_authenticate_runs_a_verify_even_for_unknown_user(monkeypatch):
     # The anti-enumeration guard: a missing username still runs a verify (against the dummy hash),
     # so the call can't be distinguished by "did verify run". We assert the spy fired.
