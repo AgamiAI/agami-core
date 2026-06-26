@@ -1,4 +1,4 @@
-"""User store + password authentication (ACE-004).
+"""User store + password authentication.
 
 SQLite-backed (the portable backend the gate runs on). Proves: argon2id hashing (never plaintext),
 correct/wrong verify, the disabled-status gate, the env-seeded admin (idempotent), the rehash
