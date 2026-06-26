@@ -93,7 +93,13 @@ _PUBLIC_PREFIXES = (
 # The OAuth flow endpoints are pre-auth by definition — the user has no bearer token yet (they're
 # obtaining one). They enforce their own validation (credential check, PKCE, single-use codes,
 # redirect allow-listing), so they're public at the transport layer.
-_OAUTH_PATHS = ("/oauth/authorize", "/oauth/token", "/oauth/register")
+_OAUTH_PATHS = (
+    "/oauth/authorize",
+    "/oauth/token",
+    "/oauth/register",
+    "/oauth/oidc/start",
+    "/oauth/oidc/callback",
+)
 
 
 def _is_public_path(path: str) -> bool:
@@ -214,7 +220,7 @@ def build_app() -> Starlette:
         async with session_manager.run():
             yield
 
-    from oauth_server import authorize, register, token
+    from oauth_server import authorize, oidc_callback, oidc_start, register, token
 
     routes = [
         Route("/.well-known/oauth-protected-resource", _protected_resource),
@@ -224,6 +230,8 @@ def build_app() -> Starlette:
         Route("/oauth/authorize", authorize, methods=["GET", "POST"]),
         Route("/oauth/token", token, methods=["POST"]),
         Route("/oauth/register", register, methods=["POST"]),
+        Route("/oauth/oidc/start", oidc_start, methods=["GET"]),
+        Route("/oauth/oidc/callback", oidc_callback, methods=["GET"]),
         Mount("/mcp", app=handle_mcp),
     ]
     middleware = [
