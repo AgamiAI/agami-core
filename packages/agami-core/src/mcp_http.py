@@ -227,7 +227,13 @@ def build_app() -> Starlette:
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
     # (where the RuntimeError would surface as a 500, leaking a traceback under debug). Anything that
     # builds the app via --factory / an embedding harness gets a clear error up front.
-    public_base_url()
+    base = public_base_url()
+    # TLS is mandatory: claude.ai's OAuth and the Secure admin session cookie both require https. A
+    # plain-http PUBLIC_BASE_URL would silently break the admin login (the browser drops a Secure
+    # cookie), so fail fast with a clear message instead. (Set this to the public https URL even when
+    # TLS terminates at a proxy — the browser↔proxy hop is what must be https.)
+    if not base.startswith("https://"):
+        raise RuntimeError("PUBLIC_BASE_URL must be https:// (OAuth + the Secure admin cookie need TLS).")
     bootstrap_paths()
     session_manager = StreamableHTTPSessionManager(
         app=build_server(), json_response=True, stateless=True

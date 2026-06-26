@@ -64,6 +64,13 @@ def test_auth_skip_is_scoped_to_discovery_routes_only(base_url):
     )  # suffixed variant open
 
 
+def test_build_app_requires_an_https_base(monkeypatch):
+    # The Secure admin cookie + OAuth need TLS — a plain-http base must fail fast at construction.
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://insecure.example.com")
+    with pytest.raises(RuntimeError, match="https"):
+        mcp_http.build_app()
+
+
 def test_static_admin_and_root_skip_the_bearer_gate(base_url):
     # The brand assets, the root landing, and the /admin/* pages are open at the *bearer* layer (admin
     # pages do their own session auth). Lookalikes that merely share a prefix must NOT skip — the skip

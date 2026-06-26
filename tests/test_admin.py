@@ -98,16 +98,20 @@ def test_every_interpolated_value_is_escaped():
     assert "&lt;script&gt;" in html
 
 
-def test_admin_login_has_no_provider_buttons_when_none_configured():
-    html = admin.admin_login_body_html(providers=())
+def test_admin_login_is_password_only_with_no_marketing_copy():
+    html = admin.admin_login_body_html()
     assert 'name="password"' in html and 'name="username"' in html
-    assert "Continue with" not in html  # no social buttons in this slice
+    # Admin social login isn't built — no provider buttons (they'd point at an unrouted path).
+    assert "Continue with" not in html
     # No leftover marketing copy (the deliberately-stripped "Admin sign in" / "Manage who…" headings).
     assert "Manage who" not in html
 
 
-def test_provider_buttons_render_with_icon_and_label():
-    html = admin.admin_login_body_html(providers=("google", "microsoft"))
+def test_oauth_login_renders_provider_buttons_with_icon_and_label():
+    # The OAuth login is the wired social surface (buttons → the real /oauth/oidc/start route).
+    html = oauth_server.login_body_html(
+        {"redirect_uri": "https://claude.ai/cb"}, providers=("google", "microsoft"), wrap=True
+    )
     assert "Continue with Google" in html and "Continue with Microsoft" in html
     assert "/static/google_logo.svg" in html and "/static/microsoft_logo.svg" in html
 
@@ -379,6 +383,23 @@ def test_status_mutation_needs_csrf_and_a_known_status(client, env):
 def test_a_garbage_session_cookie_is_rejected(client):
     r = client.get("/admin", cookies={"agami_admin_session": "not-a-jwt"}, follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"] == "/admin/login"
+
+
+def test_a_foreign_origin_is_rejected_on_mutations(client, env):
+    # A cross-site POST carries the attacker's Origin; the second CSRF gate rejects it even though it
+    # could never have a valid token anyway (defense in depth).
+    _login(client)
+    csrf = _csrf(client)
+    r = client.post(
+        "/admin/users",
+        data={"csrf": csrf, "email": "evil@example.com"},
+        headers={"origin": "https://evil.example.com"},
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == "/admin?err=csrf"
+    s = Store.connect(env)
+    assert user_store.get_user(s, "evil@example.com") is None
+    s.close()
 
 
 def test_a_well_formed_session_for_a_non_admin_subject_is_rejected(client):

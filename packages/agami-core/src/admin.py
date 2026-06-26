@@ -39,13 +39,12 @@ def _full_name(user: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def admin_login_body_html(error: str = "", providers: tuple[str, ...] = ()) -> str:
-    """The admin sign-in page (password + any configured social providers). No banner copy — the
-    logo and the form speak for themselves (this is the admin's own login, not a client consent)."""
-    buttons = "".join(ui.provider_button(k, f"/admin/oidc/start?provider={k}") for k in providers)
-    social = f'<div class="providers">{buttons}</div><div class="divider">or</div>' if buttons else ""
+def admin_login_body_html(error: str = "") -> str:
+    """The admin sign-in page — password only. (Admin social login isn't part of this surface yet;
+    rendering a Google/Microsoft button here would point at a route that doesn't exist.) No banner
+    copy — the logo and the form speak for themselves (this is the admin's own login, not a consent)."""
     alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
-    body = f"""{alert}{social}
+    body = f"""{alert}
 <form method="post">
 <label for="u">Email</label>
 <input id="u" name="username" type="email" autocomplete="email" placeholder="you@example.com">
@@ -200,8 +199,10 @@ def not_admin_body_html(base_url: str) -> str:
 
 
 def not_authorized_body_html(email: str) -> str:
-    """Shown after a successful Google/Microsoft sign-in by someone who hasn't been onboarded — their
-    identity is real, but no admin has added them. No connector hint (they can't use it yet)."""
+    """The branded "your identity is real but no admin has added you" page for an un-onboarded
+    Google/Microsoft sign-in. Not yet wired into the OIDC rejection (which still returns a JSON OAuth
+    error); rendered in previews and ready for the self-onboarding flow to adopt. No connector hint —
+    they can't use it yet."""
     body = f"""<div class="consent"><p class="who">Not set up yet</p>
 <p class="small">{ui.esc(email)} isn't authorized for this agami server.</p></div>
 <p class="foot muted">Ask the administrator to add you, then sign in again.</p>"""
@@ -298,9 +299,27 @@ def _csrf_for(session_token: str) -> str:
     return hmac.new(_signing_secret().encode(), session_token.encode(), hashlib.sha256).hexdigest()
 
 
+def _origin_ok(request: Request) -> bool:
+    """A second, independent CSRF gate: if the browser sent an Origin (or Referer) on this POST, its
+    scheme+host MUST match our own. Browsers always attach Origin to cross-site POSTs, so a forged
+    request from another site is caught here even before the token check. When neither header is
+    present (some same-origin form posts, test clients) we don't fail — the signed CSRF token carries
+    the load — so this only ever *adds* protection."""
+    from urllib.parse import urlsplit
+
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if not origin:
+        return True
+    want = urlsplit(_base_url())
+    got = urlsplit(origin)
+    return (got.scheme, got.hostname, got.port) == (want.scheme, want.hostname, want.port)
+
+
 def _csrf_ok(request: Request, presented: str) -> bool:
     token = request.cookies.get(_SESSION_COOKIE)
     if not token or not presented:
+        return False
+    if not _origin_ok(request):
         return False
     return hmac.compare_digest(_csrf_for(token), presented)
 
@@ -401,7 +420,9 @@ async def admin_home(request: Request) -> Response:
     finally:
         if store is not None:
             store.close()
-    csrf = _csrf_for(request.cookies[_SESSION_COOKIE])
+    # current_admin already proved the cookie is present + valid; .get (not bracket) keeps a malformed
+    # duplicate-cookie header from turning into an unhandled 500.
+    csrf = _csrf_for(request.cookies.get(_SESSION_COOKIE, ""))
     ok = _OK_FLASH.get(request.query_params.get("ok", ""), "")
     err = _ERR_FLASH.get(request.query_params.get("err", ""), "")
     return HTMLResponse(
@@ -470,11 +491,13 @@ async def admin_set_status(request: Request) -> Response:
     if username == admin:
         return RedirectResponse("/admin?err=self", status_code=302)
     store = _open_store()
-    if store is not None:
-        try:
-            user_store.set_status(store, username, status)
-        finally:
-            store.close()
+    if store is None:
+        # Mirror create: a missing datastore is an error, not a silent "done" (no false success flash).
+        return RedirectResponse("/admin?err=bad", status_code=302)
+    try:
+        user_store.set_status(store, username, status)
+    finally:
+        store.close()
     return RedirectResponse(
         f"/admin?ok={'disabled' if status == 'disabled' else 'enabled'}", status_code=302
     )
