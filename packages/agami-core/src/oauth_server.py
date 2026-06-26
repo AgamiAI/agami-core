@@ -100,7 +100,11 @@ class JwtAuthProvider:
             # Invalid signature, expired, wrong issuer, malformed, or no secret → reject.
             return None
         sub = claims.get("sub")
-        return Principal(subject=sub) if sub else None
+        # `Principal.subject` is a str — reject a non-string or blank sub rather than carry a
+        # malformed identity forward.
+        if not isinstance(sub, str) or not sub.strip():
+            return None
+        return Principal(subject=sub)
 
 
 def _b64url_nopad(raw: bytes) -> str:

@@ -21,7 +21,7 @@ import contextlib
 import os
 
 from oss_adapters import PresenceAuthProvider, SingleTenantOrgResolver
-from ports import Org
+from ports import AuthProvider, Org
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -31,13 +31,15 @@ from starlette.routing import Mount, Route
 from tools import SERVER_INSTRUCTIONS, SERVER_NAME, TOOLS, bootstrap_paths, server_version
 
 
-def _build_auth_provider():
-    """Pick the token validator: the JWT provider when a signing secret is configured (the hosted
-    OAuth path — only tokens this server issued are accepted), else bearer-presence (the no-secret
-    local fallback, where any non-empty token passes)."""
-    if os.environ.get("AGAMI_SIGNING_SECRET", "").strip():
-        from oauth_server import JwtAuthProvider
+def _build_auth_provider() -> AuthProvider:
+    """Pick the token validator. Presence (any non-empty bearer) is the local OSS default ONLY when
+    no signing secret is configured *at all*. If `AGAMI_SIGNING_SECRET` is present — even empty or
+    too weak — that signals intent to run real JWT auth, so we validate it now (fail fast at
+    construction) rather than silently downgrade a misconfigured hosted deploy to presence."""
+    if "AGAMI_SIGNING_SECRET" in os.environ:
+        from oauth_server import JwtAuthProvider, _signing_secret
 
+        _signing_secret()  # raises on an empty/weak secret — no insecure fallback on misconfig
         return JwtAuthProvider()
     return PresenceAuthProvider()
 
@@ -111,7 +113,7 @@ class _AuthMiddleware(BaseHTTPMiddleware):
     open. On a request that passes auth, resolve the single-tenant org and attach it to
     request.state.org — the explicit single-tenant contract + the multi-tenant seam."""
 
-    def __init__(self, app, resolver: SingleTenantOrgResolver, auth) -> None:
+    def __init__(self, app, resolver: SingleTenantOrgResolver, auth: AuthProvider) -> None:
         super().__init__(app)
         self._resolver = resolver
         self._auth = auth

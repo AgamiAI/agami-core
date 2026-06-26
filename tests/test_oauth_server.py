@@ -348,6 +348,26 @@ def test_jwt_provider_rejects_token_from_a_different_issuer(env):
     assert JwtAuthProvider().validate_token(forged) is None
 
 
+def test_jwt_provider_rejects_non_string_or_blank_sub(env):
+    from oauth_server import JwtAuthProvider
+
+    provider = JwtAuthProvider()
+    numeric = jwt.encode({"sub": 123, "iss": BASE, "exp": 9_999_999_999}, SECRET, "HS256")
+    blank = jwt.encode({"sub": "   ", "iss": BASE, "exp": 9_999_999_999}, SECRET, "HS256")
+    assert provider.validate_token(numeric) is None
+    assert provider.validate_token(blank) is None
+
+
+def test_build_app_fails_fast_on_present_but_weak_signing_secret(env, monkeypatch):
+    # A configured-but-invalid secret must not silently downgrade to presence auth — build fails.
+    monkeypatch.setenv("AGAMI_SIGNING_SECRET", "")  # present but empty
+    with pytest.raises(RuntimeError, match="AGAMI_SIGNING_SECRET"):
+        mcp_http.build_app()
+    monkeypatch.setenv("AGAMI_SIGNING_SECRET", "too-short")  # present but below 32 bytes
+    with pytest.raises(RuntimeError, match="AGAMI_SIGNING_SECRET"):
+        mcp_http.build_app()
+
+
 def test_end_to_end_oauth_then_mcp_tools_list(env):
     # The whole point: a token minted via the OAuth flow is accepted by the transport, and the
     # tools/list comes back with exactly the 5 product tools.
