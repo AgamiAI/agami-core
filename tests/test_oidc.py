@@ -254,6 +254,104 @@ def test_callback_rejects_tampered_state_or_missing_cookie(env, monkeypatch):
     assert cb.status_code == 400
 
 
+# --- admin social login (OIDC → admin SESSION, provider-pinned) --------------
+
+ADMIN_EMAIL = "admin@example.com"
+
+
+def _seed_admin(db_url, monkeypatch, *, provider="google"):
+    """Make the configured admin a provider-bound user (username == email), as the seed would."""
+    monkeypatch.setenv("AGAMI_ADMIN_USERNAME", ADMIN_EMAIL)
+    monkeypatch.setenv("AGAMI_ADMIN_PROVIDER", provider)
+    s = Store.connect(db_url)
+    user_store.create_user(
+        s, username=ADMIN_EMAIL, password=None, email=ADMIN_EMAIL, oidc_provider=provider
+    )
+    s.close()
+
+
+def _admin_start(c: TestClient, provider: str = "google"):
+    r = c.get("/admin/oidc/start", params={"provider": provider}, follow_redirects=False)
+    assert r.status_code == 302
+    q = parse_qs(urlparse(r.headers["location"]).query)
+    return q["state"][0], q["nonce"][0]
+
+
+def test_admin_oidc_login_mints_a_session(env, monkeypatch):
+    _seed_admin(env, monkeypatch)
+    c = _client()
+    state, nonce = _admin_start(c)
+    monkeypatch.setattr(
+        oidc,
+        "exchange_code",
+        lambda p, *, code, redirect_uri: _id_token(nonce=nonce, email=ADMIN_EMAIL, sub="admin-sub"),
+    )
+    cb = c.get("/oauth/oidc/callback", params={"code": "x", "state": state}, follow_redirects=False)
+    # An admin session (not a bearer code): 302 straight to /admin + a hardened session cookie.
+    assert cb.status_code == 302 and cb.headers["location"] == "/admin"
+    sc = cb.headers["set-cookie"]
+    assert "agami_admin_session=" in sc and "HttpOnly" in sc and "Secure" in sc
+
+
+def test_admin_oidc_refuses_a_non_admin_identity(env, monkeypatch):
+    _seed_admin(env, monkeypatch)
+    c = _client()
+    state, nonce = _admin_start(c)
+    # alice (you@example.com) is an onboarded NON-admin OIDC user (from the env fixture).
+    monkeypatch.setattr(
+        oidc,
+        "exchange_code",
+        lambda p, *, code, redirect_uri: _id_token(nonce=nonce, email="you@example.com"),
+    )
+    cb = c.get("/oauth/oidc/callback", params={"code": "x", "state": state}, follow_redirects=False)
+    assert cb.status_code == 403
+    assert "agami_admin_session" not in cb.headers.get("set-cookie", "")  # no session minted
+
+
+def test_admin_oidc_refuses_an_unknown_identity(env, monkeypatch):
+    _seed_admin(env, monkeypatch)
+    c = _client()
+    state, nonce = _admin_start(c)
+    monkeypatch.setattr(
+        oidc,
+        "exchange_code",
+        lambda p, *, code, redirect_uri: _id_token(nonce=nonce, email="stranger@example.com"),
+    )
+    cb = c.get("/oauth/oidc/callback", params={"code": "x", "state": state}, follow_redirects=False)
+    assert cb.status_code == 403
+
+
+def test_admin_oidc_idp_confusion_is_closed_by_the_pin(env, monkeypatch):
+    # Admin pinned to Google. Configure Microsoft too; an admin-login attempt for the admin email via
+    # Microsoft (an attacker controlling that email at another IdP) must be refused — the pin holds.
+    _seed_admin(env, monkeypatch, provider="google")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", CLIENT_ID)
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", MS_TENANT)
+    c = _client()
+    state, nonce = _admin_start(c, provider="microsoft")
+    monkeypatch.setattr(
+        oidc,
+        "exchange_code",
+        lambda p, *, code, redirect_uri: _id_token(nonce=nonce, email=ADMIN_EMAIL, sub="ms-sub"),
+    )
+    cb = c.get("/oauth/oidc/callback", params={"code": "x", "state": state}, follow_redirects=False)
+    assert cb.status_code == 403  # bound to google ⇒ a microsoft identity for the email is not the admin
+
+
+def test_admin_login_page_shows_only_the_pinned_provider(env, monkeypatch):
+    _seed_admin(env, monkeypatch)  # pinned google; microsoft not configured
+    html = _client().get("/admin/login").text
+    assert "Continue with Google" in html and "/admin/oidc/start?provider=google" in html
+    assert "Continue with Microsoft" not in html
+
+
+def test_admin_oidc_start_rejects_an_unconfigured_provider(env, monkeypatch):
+    _seed_admin(env, monkeypatch)
+    r = _client().get("/admin/oidc/start", params={"provider": "microsoft"}, follow_redirects=False)
+    assert r.status_code == 400  # microsoft isn't configured → clean 400, no redirect
+
+
 def test_provider_option_hidden_when_unconfigured(monkeypatch, tmp_path):
     monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
     monkeypatch.setenv("AGAMI_SIGNING_SECRET", SECRET)

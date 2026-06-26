@@ -493,10 +493,38 @@ async def oidc_start(request: Request) -> Response:
     return resp
 
 
+async def admin_oidc_start(request: Request) -> Response:
+    """Begin an OIDC flow for **admin** login: redirect to the IdP with a signed state marked
+    `purpose=admin_login` so the shared callback mints an admin **session** (not a bearer code).
+    Carries no OAuth client context (this isn't a connector flow) and reuses the one registered
+    callback URI, so a deployer registers a single redirect URI for both flows."""
+    import oidc  # noqa: F401  (lazy: the egress module)
+
+    p = _safe_provider(request.query_params.get("provider", ""))
+    if p is None:
+        return _oauth_error("invalid_request", "unknown or unconfigured provider")
+    nonce = secrets.token_urlsafe(16)
+    csrf = secrets.token_urlsafe(16)
+    state = _mint_oidc_state({"purpose": "admin_login", "provider": p.key, "nonce": nonce}, csrf)
+    url = oidc.authorize_url(p, state=state, nonce=nonce, redirect_uri=_oidc_callback_uri())
+    resp = RedirectResponse(url, status_code=302)
+    resp.set_cookie(
+        _CSRF_COOKIE,
+        csrf,
+        max_age=int(_OIDC_STATE_TTL.total_seconds()),
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return resp
+
+
 async def oidc_callback(request: Request) -> Response:
     """Complete OIDC: verify state + CSRF, exchange the code, verify the ID token, resolve the user
-    **onboarded-only**, then resume the OAuth code mint. Any verification failure is a generic
-    403 — never an auto-created account."""
+    **onboarded-only**, then either mint an **admin session** (when the state's `purpose=admin_login`)
+    or resume the OAuth code mint. Any verification failure is a generic 403 — never an auto-created
+    account. The `purpose` marker keeps the two flows from crossing: an admin-login state can only mint
+    a session, a connector state can only mint a bearer code."""
     import oidc
 
     q = request.query_params
@@ -520,16 +548,24 @@ async def oidc_callback(request: Request) -> Response:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
         username = _resolve_oidc_user(store, p.key, identity)
-        if username is None:
+        if claims.get("purpose") == "admin_login":
+            # Admin login: a verified identity that resolves to THE configured admin gets a session;
+            # anyone else (unresolved, or a non-admin user) is refused. The provider-pin + subject bind
+            # are already enforced by `_resolve_oidc_user`, so this only adds the "is it the admin?" gate.
+            import admin
+
+            resp = admin.complete_admin_oidc_login(username)
+        elif username is None:
             return _oauth_error("access_denied", "this account is not authorized", status=403)
-        resp = _issue_authorization_code(
-            store,
-            client_id=claims.get("client_id", ""),
-            redirect_uri=claims.get("redirect_uri", ""),
-            code_challenge=claims.get("code_challenge", ""),
-            username=username,
-            client_state=claims.get("client_state", ""),
-        )
+        else:
+            resp = _issue_authorization_code(
+                store,
+                client_id=claims.get("client_id", ""),
+                redirect_uri=claims.get("redirect_uri", ""),
+                code_challenge=claims.get("code_challenge", ""),
+                username=username,
+                client_state=claims.get("client_state", ""),
+            )
     finally:
         store.close()
     resp.delete_cookie(_CSRF_COOKIE)

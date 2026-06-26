@@ -21,9 +21,10 @@ import jwt
 import ui
 import user_store
 
-# Reuse the OAuth provider's shared HS256 secret accessor + store opener so the admin surface signs
-# with the same key and reads the same datastore (no second source of truth).
-from oauth_server import _open_store, _signing_secret
+# Reuse the OAuth provider's shared HS256 secret accessor + store opener + the admin OIDC-start handler
+# so the admin surface signs with the same key, reads the same datastore, and runs the same hardened
+# OIDC flow (no second source of truth).
+from oauth_server import _open_store, _signing_secret, admin_oidc_start
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
@@ -39,12 +40,17 @@ def _full_name(user: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def admin_login_body_html(error: str = "") -> str:
-    """The admin sign-in page — password only. (Admin social login isn't part of this surface yet;
-    rendering a Google/Microsoft button here would point at a route that doesn't exist.) No banner
-    copy — the logo and the form speak for themselves (this is the admin's own login, not a consent)."""
+def admin_login_body_html(error: str = "", provider: str | None = None) -> str:
+    """The admin sign-in page: the admin's pinned social provider (when configured) above the password
+    form — matching the MCP login's options. Only the admin's *one* pinned provider is offered, since
+    that's the only one that can resolve to the admin (a second button would just say "not an admin").
+    No banner copy — the logo and the form speak for themselves (this is the admin's own login)."""
+    button = (
+        ui.provider_button(provider, f"/admin/oidc/start?provider={provider}") if provider else ""
+    )
+    social = f'<div class="providers">{button}</div><div class="divider">or</div>' if button else ""
     alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
-    body = f"""{alert}
+    body = f"""{alert}{social}
 <form method="post">
 <label for="u">Email</label>
 <input id="u" name="username" type="email" autocomplete="email" placeholder="you@example.com">
@@ -241,6 +247,17 @@ def _admin_username() -> str | None:
     return name or None
 
 
+def _admin_provider() -> str | None:
+    """The admin's pinned OIDC provider (`AGAMI_ADMIN_PROVIDER`), or None — only returned when it's a
+    provider that's actually configured, so the login page never shows a button that can't work."""
+    key = os.environ.get("AGAMI_ADMIN_PROVIDER", "").strip().lower()
+    if not key:
+        return None
+    import oidc  # lazy: the egress module, server-only
+
+    return key if key in oidc.available_providers() else None
+
+
 def issue_session(username: str) -> str:
     """A short-TTL HS256 session JWT (sub=username, purpose=admin_session) for the cookie."""
     now = datetime.now(timezone.utc)
@@ -369,12 +386,24 @@ def _admin_chrome(store: Any, admin_username: str) -> dict[str, str]:
     }
 
 
+def complete_admin_oidc_login(username: str | None) -> Response:
+    """Finish an admin OIDC login (called by the shared OIDC callback for an `admin_login` state): a
+    verified identity that resolves to THE configured admin gets an admin session; anyone else — an
+    unresolved identity, or a valid but non-admin user — is refused with the branded page, no session.
+    The provider-pin + subject binding were already enforced upstream by `_resolve_oidc_user`."""
+    if username is not None and username == _admin_username():
+        resp: Response = RedirectResponse("/admin", status_code=302)
+        _set_session(resp, issue_session(username))
+        return resp
+    return HTMLResponse(not_admin_body_html(_base_url()), status_code=403)
+
+
 async def admin_login(request: Request) -> Response:
     """GET → the admin sign-in page; POST → authenticate, gate on the admin-username, mint a session."""
     if request.method == "GET":
         if current_admin(request) is not None:
             return RedirectResponse("/admin", status_code=302)
-        return HTMLResponse(admin_login_body_html())
+        return HTMLResponse(admin_login_body_html(provider=_admin_provider()))
 
     form = await _form(request)
     # Email is the identity: normalize the typed address (trim + lowercase) so login is
@@ -521,9 +550,19 @@ def routes() -> list:
         Route("/admin", admin_home, methods=["GET"]),
         Route("/admin/login", admin_login, methods=["GET", "POST"]),
         Route("/admin/logout", admin_logout, methods=["GET"]),
+        # The admin OIDC start (handler lives in oauth_server, with the OIDC machinery). The IdP
+        # redirects back to the shared /oauth/oidc/callback, which branches on the state's purpose.
+        Route("/admin/oidc/start", admin_oidc_start, methods=["GET"]),
         Route("/admin/users", admin_create_user, methods=["POST"]),
         Route("/admin/users/status", admin_set_status, methods=["POST"]),
     ]
 
 
-ADMIN_PATHS = ("/admin", "/admin/login", "/admin/logout", "/admin/users", "/admin/users/status")
+ADMIN_PATHS = (
+    "/admin",
+    "/admin/login",
+    "/admin/logout",
+    "/admin/oidc/start",
+    "/admin/users",
+    "/admin/users/status",
+)
