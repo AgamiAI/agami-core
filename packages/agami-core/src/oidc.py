@@ -83,12 +83,15 @@ def provider(key: str) -> Provider | None:
     discovery_url = _discovery_url(key)  # may raise for an unpinned MS tenant
     if discovery_url is None:
         return None
-    return Provider(key, discovery_url, client_id, client_secret, require_email_verified=key == "google")
+    return Provider(
+        key, discovery_url, client_id, client_secret, require_email_verified=key == "google"
+    )
 
 
 def available_providers() -> list[str]:
     """The provider keys that are configured (have client id/secret) — what the login page offers. A
-    misconfigured Microsoft tenant is skipped here (it surfaces as a config error on actual use)."""
+    misconfigured Microsoft tenant is skipped here, so its button is simply hidden; if it's invoked
+    directly the handler answers a clean 400 (via `_safe_provider`), not a 500."""
     out = []
     for key in _PROVIDERS:
         try:
@@ -179,4 +182,9 @@ def verify_id_token(p: Provider, id_token: str, *, nonce: str) -> Identity:
     email = claims.get("email")
     if not email:
         raise ValueError("id token has no email claim")
-    return Identity(email=email, subject=claims["sub"])
+    subject = claims.get("sub")
+    # sub is the long-term binding key — fail closed on a missing/blank/non-string value rather than
+    # persist an invalid identity binding.
+    if not isinstance(subject, str) or not subject.strip():
+        raise ValueError("id token has no usable sub claim")
+    return Identity(email=email, subject=subject)

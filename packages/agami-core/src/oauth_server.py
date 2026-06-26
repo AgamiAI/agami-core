@@ -555,8 +555,13 @@ def _resolve_oidc_user(store: Store, provider_key: str, identity: Identity) -> s
             oidc_provider=provider_key,
             oidc_subject=identity.subject,
         )
-    except Exception:
-        # A UNIQUE collision (e.g. a concurrent signup, or the email already used as a username) is
-        # not an authorization — reject cleanly rather than 500.
-        return None
+    except Exception as exc:
+        # A UNIQUE collision (concurrent signup, or the email already used as a username) is not an
+        # authorization → reject cleanly. But a real failure (datastore down, unexpected SQL error)
+        # must surface, not masquerade as a 403 — so only swallow integrity errors. The MRO check is
+        # portable across backends (sqlite3.IntegrityError / psycopg2.errors.UniqueViolation) without
+        # importing psycopg2 here.
+        if any(cls.__name__ == "IntegrityError" for cls in type(exc).__mro__):
+            return None
+        raise
     return identity.email

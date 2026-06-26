@@ -6,3 +6,8 @@
 
 ALTER TABLE users ADD COLUMN oidc_provider TEXT;
 ALTER TABLE users ADD COLUMN oidc_subject TEXT;
+
+-- Bind any pre-existing passwordless (OIDC-only) user to Google — the only provider that existed
+-- before this binding — so the new provider-binding gate doesn't lock them out on upgrade. (A
+-- password user has a non-NULL hash and is left untouched.)
+UPDATE users SET oidc_provider = 'google' WHERE oidc_provider IS NULL AND password_hash IS NULL;

@@ -382,3 +382,10 @@ def test_misconfigured_microsoft_tenant_is_a_clean_400_not_500(env, monkeypatch)
         follow_redirects=False,
     )
     assert r.status_code == 400 and r.json()["error"] == "invalid_request"
+
+
+def test_verify_id_token_rejects_blank_sub(env):
+    # `sub` is the binding key — a present-but-blank sub must be rejected (require only checks presence).
+    p = oidc.provider("google")
+    with pytest.raises(Exception):
+        oidc.verify_id_token(p, _id_token(sub="   "), nonce="the-nonce")
