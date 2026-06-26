@@ -9,7 +9,9 @@ deployments don't use this — teammates bind on first OIDC login at the connect
 
 This is a public surface (the teammate has no session yet), so it self-checks: a bad/expired/used
 token, or an already-claimed user, yields a generic page — never a credential-overwrite of a claimed
-account, and no email-enumeration (the token is opaque; we don't echo who it was for).
+account, and no email-enumeration. (The token is a signed JWT — unforgeable, though its `sub` is
+base64url-readable by whoever holds the link; the no-enumeration property comes from the handler
+returning the same generic page regardless, not from the token being secret.)
 """
 
 from __future__ import annotations
