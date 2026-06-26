@@ -30,7 +30,13 @@ from ports import Principal
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from store import Store
-from user_store import authenticate, bind_oidc_subject, create_user, get_user_by_email
+from user_store import (
+    authenticate,
+    bind_oidc_subject,
+    create_user,
+    get_user,
+    get_user_by_email,
+)
 
 if TYPE_CHECKING:
     from oidc import Identity  # for type hints only — runtime imports oidc lazily (egress module)
@@ -525,13 +531,15 @@ def _resolve_oidc_user(store: Store, provider_key: str, identity: Identity) -> s
             return None
         if user["oidc_provider"] != provider_key:
             return None  # bound to a different IdP (or password-only) → not an OIDC login for this provider
-        if user["oidc_subject"] is not None:
-            if user["oidc_subject"] != identity.subject:
-                return None  # same provider, different account → refuse
-        else:
-            bind_oidc_subject(
-                store, user["username"], identity.subject
-            )  # first login pins the subject
+        # Bind the subject on first login (a no-clobber UPDATE that only sets it when NULL), then
+        # **re-read and require the stored subject is ours**. The re-read is what closes the
+        # concurrent first-login race: if another subject bound first, our guarded UPDATE is a no-op,
+        # the stored subject won't match, and we reject — rather than logging in against someone
+        # else's binding. It also covers the steady state (an already-bound, mismatched subject).
+        bind_oidc_subject(store, user["username"], identity.subject)
+        bound = get_user(store, user["username"])
+        if bound is None or bound["oidc_subject"] != identity.subject:
+            return None
         return user["username"]
 
     # Unknown email: only a public-demo instance may self-provision (fail-closed default).
