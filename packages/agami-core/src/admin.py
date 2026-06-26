@@ -337,6 +337,7 @@ _ERR_FLASH = {
     "csrf": "Your session expired — please try again.",
     "self": "You can't change your own status.",
     "bad": "That action isn't allowed.",
+    "notfound": "No such user.",
 }
 
 
@@ -495,9 +496,12 @@ async def admin_set_status(request: Request) -> Response:
         # Mirror create: a missing datastore is an error, not a silent "done" (no false success flash).
         return RedirectResponse("/admin?err=bad", status_code=302)
     try:
-        user_store.set_status(store, username, status)
+        changed = user_store.set_status(store, username, status)
     finally:
         store.close()
+    if not changed:
+        # The username matched no row (e.g. a stale form) — don't flash a success for a no-op.
+        return RedirectResponse("/admin?err=notfound", status_code=302)
     return RedirectResponse(
         f"/admin?ok={'disabled' if status == 'disabled' else 'enabled'}", status_code=302
     )

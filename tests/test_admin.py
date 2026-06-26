@@ -258,6 +258,18 @@ def test_disable_then_enable_round_trip(client, env):
     s.close()
 
 
+def test_status_change_for_an_unknown_user_is_not_a_false_success(client):
+    _login(client)
+    csrf = _csrf(client)
+    r = client.post(
+        "/admin/users/status",
+        data={"csrf": csrf, "username": "ghost@example.com", "status": "disabled"},
+        follow_redirects=False,
+    )
+    # A username that matches no row must not flash "User disabled." (no-op ≠ success).
+    assert r.headers["location"] == "/admin?err=notfound"
+
+
 def test_cannot_disable_self(client):
     _login(client)
     csrf = _csrf(client)

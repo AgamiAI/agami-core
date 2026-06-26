@@ -121,9 +121,12 @@ def list_users(store: Store) -> list[dict[str, Any]]:
     )
 
 
-def set_status(store: Store, username: str, status: str) -> None:
-    store.execute("UPDATE users SET status = ? WHERE username = ?", (status, username))
+def set_status(store: Store, username: str, status: str) -> int:
+    """Set a user's status; returns the number of rows changed (0 ⇒ no such username), so a caller can
+    tell an applied change from a no-op rather than reporting a false success."""
+    cur = store.execute("UPDATE users SET status = ? WHERE username = ?", (status, username))
     store.commit()
+    return cur.rowcount
 
 
 def authenticate(store: Store, username: str, password: str) -> Principal | None:
