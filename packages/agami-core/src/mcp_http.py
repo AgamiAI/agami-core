@@ -88,10 +88,13 @@ _OAUTH_PATHS = ("/oauth/authorize", "/oauth/token", "/oauth/register")
 
 def _is_public_path(path: str) -> bool:
     """True for the discovery routes and the OAuth-flow endpoints — the surface reachable before a
-    client has a token. We match on a path *boundary* (exact, or prefix + '/'), not a bare
-    `startswith`, so a sibling like `/.well-known/oauth-protected-resource-x` doesn't skip auth."""
-    prefixes = _PUBLIC_PREFIXES + _OAUTH_PATHS
-    return any(path == p or path.startswith(p + "/") for p in prefixes)
+    client has a token. Discovery uses boundary matching (it has `{rest:path}` suffix routes, and a
+    bare `startswith` would let `/.well-known/oauth-protected-resource-x` skip auth); the OAuth
+    endpoints are matched *exactly* (only those three paths are routed), so a future
+    `/oauth/token/...` route can't inherit public access by accident."""
+    if any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES):
+        return True
+    return path in _OAUTH_PATHS
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):

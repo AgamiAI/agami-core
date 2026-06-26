@@ -14,8 +14,8 @@ CREATE TABLE oauth_client (
 CREATE TABLE oauth_state (
     code           TEXT PRIMARY KEY,        -- the authorization code (secrets.token_urlsafe)
     client_id      TEXT,
-    redirect_uri   TEXT,
-    code_challenge TEXT,                     -- PKCE S256 challenge; verified at token exchange
+    redirect_uri   TEXT NOT NULL,           -- always validated + present before a code is issued
+    code_challenge TEXT NOT NULL,           -- PKCE S256 challenge (required); verified at token exchange
     username       TEXT NOT NULL,           -- the authenticated principal the code stands in for
     expires_at     TEXT NOT NULL,           -- short-lived; expired codes are rejected
     used           INTEGER NOT NULL DEFAULT 0,  -- single-use: set on first successful exchange

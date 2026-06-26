@@ -137,6 +137,10 @@ async def register(request: Request) -> Response:
         except Exception:
             body = {}
         redirect_uris = body.get("redirect_uris") or []
+        if not isinstance(redirect_uris, list) or not all(
+            isinstance(u, str) for u in redirect_uris
+        ):
+            return _oauth_error("invalid_request", "redirect_uris must be a list of strings")
         client_id = uuid4().hex
         store.execute(
             "INSERT INTO oauth_client (client_id, redirect_uris, created) VALUES (?, ?, ?)",
@@ -195,6 +199,11 @@ async def authorize(request: Request) -> Response:
         # Validate the redirect target BEFORE authenticating — never send a code to an unvetted URL.
         if not _redirect_allowed(redirect_uri, registered):
             return _oauth_error("invalid_request", "redirect_uri not allowed")
+        # PKCE is mandatory: reject a missing challenge now rather than persist a code that could
+        # never be redeemed (the token step requires a verifier that matches it).
+        code_challenge = form.get("code_challenge", "")
+        if not code_challenge:
+            return _oauth_error("invalid_request", "code_challenge is required (PKCE)")
 
         principal = authenticate(store, form.get("username", ""), form.get("password", ""))
         if principal is None:
@@ -208,7 +217,7 @@ async def authorize(request: Request) -> Response:
                 code,
                 client_id,
                 redirect_uri,
-                form.get("code_challenge"),
+                code_challenge,
                 principal.subject,
                 (_now() + _CODE_TTL).isoformat(),
                 _now().isoformat(),
@@ -249,9 +258,15 @@ async def token(request: Request) -> Response:
         except RuntimeError:
             return _oauth_error("server_error", "token signing is not configured", status=500)
 
-        # Single-use: burn the code before issuing, so a replay finds it already used.
-        store.execute("UPDATE oauth_state SET used = 1 WHERE code = ?", (row["code"],))
+        # Single-use, atomically: only the request that flips used 0→1 may issue a token. The
+        # conditional UPDATE + rowcount check closes the read-then-write race two concurrent
+        # exchanges would otherwise win together (double-issued JWTs for one code).
+        burned = store.execute(
+            "UPDATE oauth_state SET used = 1 WHERE code = ? AND used = 0", (row["code"],)
+        )
         store.commit()
+        if burned.rowcount != 1:
+            return _oauth_error("invalid_grant", "code is invalid or already used")
         access_token = issue_jwt(row["username"])
         return JSONResponse(
             {

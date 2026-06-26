@@ -116,10 +116,32 @@ def test_bad_credentials_re_render_form_without_a_code(env):
     c = TestClient(mcp_http.build_app())
     r = c.post(
         "/oauth/authorize",
-        data={"username": "admin", "password": "wrong", "redirect_uri": REDIRECT},
+        data={
+            "username": "admin",
+            "password": "wrong",
+            "redirect_uri": REDIRECT,
+            "code_challenge": _challenge(VERIFIER),  # valid PKCE so we reach the credential check
+        },
         follow_redirects=False,
     )
     assert r.status_code == 200 and "Invalid username or password" in r.text
+
+
+def test_authorize_requires_pkce_challenge(env):
+    # PKCE is mandatory — a submission without a code_challenge is rejected before any code is minted.
+    c = TestClient(mcp_http.build_app())
+    r = c.post(
+        "/oauth/authorize",
+        data={"username": "admin", "password": "s3cret-pw", "redirect_uri": REDIRECT},
+        follow_redirects=False,
+    )
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"
+
+
+def test_register_rejects_malformed_redirect_uris(env):
+    c = TestClient(mcp_http.build_app())
+    r = c.post("/oauth/register", json={"redirect_uris": "not-a-list"})
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"
 
 
 def test_wrong_pkce_verifier_is_rejected(env):
@@ -268,3 +290,6 @@ def test_oauth_endpoints_are_public_but_mcp_still_requires_auth(env):
     assert c.get("/oauth/authorize", params={"redirect_uri": REDIRECT}).status_code == 200
     r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert r.status_code == 401  # the MCP endpoint still demands a bearer
+    # The OAuth skip is EXACT-match: a sibling under /oauth/* that isn't a real route doesn't get a
+    # free pass — it still hits auth (401) rather than being treated as public.
+    assert c.post("/oauth/token/extra").status_code == 401
