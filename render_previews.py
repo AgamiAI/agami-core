@@ -57,7 +57,7 @@ write(
     "03-login-error.html",
     oauth_server.login_body_html(OAUTH, error="Invalid email or password.", providers=("google", "microsoft"), wrap=True),
 )
-write("04-admin-login.html", admin.admin_login_body_html())
+write("04-admin-login.html", admin.admin_login_body_html(provider="google"))
 write("05-admin-users.html", admin.users_tab_html(USERS, csrf="t0ken", ok="User added.", **ADMIN))
 write("06-admin-dashboard.html", admin.dashboard_tab_html(**CHROME))
 write("07-admin-sessions.html", admin.sessions_tab_html(**CHROME))

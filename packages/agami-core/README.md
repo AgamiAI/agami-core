@@ -44,9 +44,20 @@ console. It's the self-host shape of the hosted product.
 PUBLIC_BASE_URL=https://your-host \
 AGAMI_SIGNING_SECRET=$(openssl rand -hex 32) \
 AGAMI_DB_URL=postgresql://… \
-AGAMI_ADMIN_USERNAME=you@example.com AGAMI_ADMIN_PASSWORD=… \
+AGAMI_ADMIN_USERNAME=you@example.com \
+AGAMI_ADMIN_FIRST_NAME=Alex AGAMI_ADMIN_LAST_NAME=Kim \
+AGAMI_ADMIN_PASSWORD=… \
+AGAMI_ADMIN_PROVIDER=google \
+AGAMI_OIDC_GOOGLE_CLIENT_ID=… AGAMI_OIDC_GOOGLE_CLIENT_SECRET=… \
 python -m mcp_http
 ```
+
+The admin is identified by **email** (`AGAMI_ADMIN_USERNAME`). Their sign-in method is whatever you
+configure — **a password and/or a pinned social provider, at least one**: set `AGAMI_ADMIN_PASSWORD`,
+and/or `AGAMI_ADMIN_PROVIDER` (`google` | `microsoft`, which must also have its
+`AGAMI_OIDC_<PROVIDER>_CLIENT_ID/SECRET` set). The admin login then offers the same Google/Microsoft
+option as the MCP login. Register **one** OAuth redirect URI with the provider —
+`{base}/oauth/oidc/callback` — it serves both the connector and the admin flows.
 
 ### One host, two entry points
 
@@ -63,8 +74,10 @@ A deployment is one host (`PUBLIC_BASE_URL`). Everything lives under it:
   who signs in can query (that's the product). No token → `401` + `WWW-Authenticate`, which starts
   Claude's OAuth. Admin-ness does **not** gate `/mcp`.
 - **Admin surface (`/admin`)** — gated by a **session cookie** *and* the admin-gate
-  (`AGAMI_ADMIN_USERNAME`). A valid non-admin is refused; an `/mcp` bearer token is useless here
-  (different credential). Unset `AGAMI_ADMIN_USERNAME` ⇒ the admin console is disabled entirely.
+  (`AGAMI_ADMIN_USERNAME`). The admin signs in with their **pinned** social provider or a password; a
+  valid non-admin is refused (and a social identity for the admin email via a *different* provider is
+  refused — the pin closes IdP-confusion). An `/mcp` bearer token is useless here (different
+  credential). Unset `AGAMI_ADMIN_USERNAME` ⇒ the admin console is disabled entirely.
 
 The admin adds a teammate by **email + name**; the teammate then signs in at the connector. (Letting
 that teammate choose their own sign-in method on first login — Google/Microsoft or a self-set
