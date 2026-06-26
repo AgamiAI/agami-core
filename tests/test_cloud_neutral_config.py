@@ -144,7 +144,9 @@ def test_auth_middleware_attaches_resolved_org_after_auth(monkeypatch):
     from starlette.responses import Response
 
     mw = mcp_http._AuthMiddleware(
-        app=None, resolver=mcp_http.SingleTenantOrgResolver(Org(id="acme"))
+        app=None,
+        resolver=mcp_http.SingleTenantOrgResolver(Org(id="acme")),
+        auth=mcp_http.PresenceAuthProvider(),
     )
     captured: dict[str, object] = {}
 
