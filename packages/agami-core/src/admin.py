@@ -411,14 +411,15 @@ async def admin_home(request: Request) -> Response:
 
 def _valid_email(email: str) -> bool:
     # A deliberately loose check — we're not validating deliverability, just rejecting obvious junk
-    # before it becomes a username. Real verification happens when the user signs in (ACE-009).
+    # before it becomes a username. Real verification happens when the user first signs in (a later
+    # self-onboarding step).
     email = email.strip()
     return "@" in email and "." in email.rsplit("@", 1)[-1] and " " not in email
 
 
 async def admin_create_user(request: Request) -> Response:
     """Onboard a teammate: a *pending* user (no password, no provider) keyed by their email. They pick
-    their sign-in method on first login (ACE-009). Admin-gated + CSRF-checked."""
+    their sign-in method on first login (a later self-onboarding step). Admin-gated + CSRF-checked."""
     admin = current_admin(request)
     if admin is None:
         return RedirectResponse("/admin/login", status_code=302)
@@ -454,7 +455,8 @@ async def admin_create_user(request: Request) -> Response:
 
 
 async def admin_set_status(request: Request) -> Response:
-    """Enable/disable a user (the F2 status flag). Admin-gated + CSRF-checked; can't disable self."""
+    """Enable/disable a user (the existing active/disabled status flag). Admin-gated + CSRF-checked;
+    can't disable self."""
     admin = current_admin(request)
     if admin is None:
         return RedirectResponse("/admin/login", status_code=302)

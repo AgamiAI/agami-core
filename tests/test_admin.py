@@ -106,6 +106,12 @@ def test_admin_login_has_no_provider_buttons_when_none_configured():
     assert "Manage who" not in html
 
 
+def test_provider_buttons_render_with_icon_and_label():
+    html = admin.admin_login_body_html(providers=("google", "microsoft"))
+    assert "Continue with Google" in html and "Continue with Microsoft" in html
+    assert "/static/google_logo.svg" in html and "/static/microsoft_logo.svg" in html
+
+
 def test_not_admin_and_not_authorized_pages_are_branded():
     assert "/static/logo_h.svg" in admin.not_admin_body_html(BASE)
     assert "isn't authorized" in admin.not_authorized_body_html("nope@example.com")
@@ -204,7 +210,7 @@ def test_create_user_appears_pending_and_cannot_yet_authenticate(client, env):
     assert r.headers["location"] == "/admin?ok=added"
     page = client.get("/admin").text
     assert "jordan@example.com" in page and "Jordan Lee" in page and "not set yet" in page
-    # Pending = no password set → can't password-login yet (that's ACE-009's claim flow).
+    # Pending = no password set → can't password-login yet (the later self-onboarding claim flow).
     s = Store.connect(env)
     assert user_store.authenticate(s, "jordan@example.com", "anything") is None
     s.close()
@@ -320,6 +326,67 @@ def test_admin_ui_is_disabled_when_no_admin_configured(env, monkeypatch):
     r = c.post("/admin/login", data={"username": ADMIN_USER, "password": ADMIN_PW}, follow_redirects=False)
     assert r.status_code == 403  # no configured admin ⇒ nobody is the admin
     assert c.get("/admin", follow_redirects=False).headers["location"] == "/admin/login"
+
+
+def test_dashboard_and_sessions_tabs_are_placeholders(client):
+    _login(client)
+    assert "Coming soon" in client.get("/admin?tab=dashboard").text
+    assert "Coming soon" in client.get("/admin?tab=sessions").text
+
+
+def test_login_page_redirects_when_already_signed_in(client):
+    _login(client)
+    r = client.get("/admin/login", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/admin"
+
+
+def test_create_without_session_redirects_and_does_not_mutate(client, env):
+    r = client.post(
+        "/admin/users", data={"csrf": "x", "email": "ghost@example.com"}, follow_redirects=False
+    )
+    assert r.status_code == 302 and r.headers["location"] == "/admin/login"
+    s = Store.connect(env)
+    assert user_store.get_user(s, "ghost@example.com") is None
+    s.close()
+
+
+def test_status_mutation_needs_csrf_and_a_known_status(client, env):
+    _login(client)
+    csrf = _csrf(client)
+    # No CSRF token → rejected.
+    assert (
+        client.post(
+            "/admin/users/status",
+            data={"username": "bob@example.com", "status": "disabled"},
+            follow_redirects=False,
+        ).headers["location"]
+        == "/admin?err=csrf"
+    )
+    # An unknown status value is refused (only active/disabled are allowed).
+    assert (
+        client.post(
+            "/admin/users/status",
+            data={"csrf": csrf, "username": "bob@example.com", "status": "superuser"},
+            follow_redirects=False,
+        ).headers["location"]
+        == "/admin?err=bad"
+    )
+    s = Store.connect(env)
+    assert user_store.get_user(s, "bob@example.com")["status"] == "active"
+    s.close()
+
+
+def test_a_garbage_session_cookie_is_rejected(client):
+    r = client.get("/admin", cookies={"agami_admin_session": "not-a-jwt"}, follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/admin/login"
+
+
+def test_a_well_formed_session_for_a_non_admin_subject_is_rejected(client):
+    # A correctly-signed, purpose-marked session — but for a subject that isn't the configured admin
+    # — must not pass the gate (the sub == admin check is the last line).
+    forged = admin.issue_session("bob@example.com")
+    r = client.get("/admin", cookies={"agami_admin_session": forged}, follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/admin/login"
 
 
 def test_no_role_column_was_introduced(env):
