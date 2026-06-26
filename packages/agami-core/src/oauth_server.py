@@ -230,12 +230,6 @@ def login_body_html(
         f'<input type="hidden" name="{k}" value="{ui.esc(params.get(k, ""))}">'
         for k in _OAUTH_CONTEXT_KEYS
     )
-    # OIDC buttons carry the same OAuth context to /oauth/oidc/start so the flow resumes after the IdP.
-    buttons = "".join(
-        ui.provider_button(key, f"/oauth/oidc/start?{urlencode({**carried, 'provider': key})}")
-        for key in providers
-    )
-    social = f'<div class="providers">{buttons}</div><div class="divider">or</div>' if buttons else ""
     alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
     client = _client_label(params.get("redirect_uri", ""))
     # Consent banner mirrors the web app: a quiet "Allow <client> to access your data". When the
@@ -247,15 +241,24 @@ def login_body_html(
         if client
         else ""
     )
-    body = f"""{consent}
-{alert}{social}
-<form method="post">{hidden}
+    if providers:
+        # OIDC deployment — the auth method is the configured provider(s) for everyone; no password
+        # surface (the OIDC buttons carry the OAuth context to /oauth/oidc/start to resume after the IdP).
+        buttons = "".join(
+            ui.provider_button(key, f"/oauth/oidc/start?{urlencode({**carried, 'provider': key})}")
+            for key in providers
+        )
+        methods = f'<div class="providers">{buttons}</div>'
+    else:
+        # Password deployment — the email/password form (the OAuth context rides as hidden fields).
+        methods = f"""<form method="post">{hidden}
 <label for="u">Email</label>
 <input id="u" name="username" type="email" autocomplete="email" placeholder="you@example.com">
 <label for="p">Password</label>
 <input id="p" name="password" type="password" autocomplete="current-password" placeholder="••••••••">
 <button class="btn" type="submit" style="margin-top:22px">Sign in</button>
 </form>"""
+    body = f"{consent}\n{alert}{methods}"
     return ui.auth_page("Sign in", body) if wrap else body
 
 
@@ -598,8 +601,8 @@ def _resolve_oidc_user(
     if user is not None:
         if user["status"] not in _LOGIN_STATUSES:
             return None
-        # Pending user (deployment-wide OIDC onboarding, ACE-011): a row with no password and no
-        # provider adopts THIS provider + subject on first login, then we re-read and require both are
+        # Pending user (deployment-wide OIDC onboarding): a row with no password and no provider
+        # adopts THIS provider + subject on first login, then we re-read and require both are
         # ours. The guard makes a concurrent or already-claimed case (e.g. a password set first) a
         # no-op → we reject rather than log in against an unexpected binding.
         if user["oidc_provider"] is None and user["password_hash"] is None:

@@ -474,6 +474,18 @@ def test_subject_tofu_binds_then_enforces(env):
     s.close()
 
 
+def test_connector_login_shows_only_the_configured_method(env, monkeypatch):
+    p = {"client_id": CLIENT_ID, "redirect_uri": REDIRECT, "code_challenge": CHALLENGE, "state": "x"}
+    # OIDC deployment (google configured by the fixture): providers only, no password surface.
+    html = _client().get("/oauth/authorize", params=p).text
+    assert "Continue with Google" in html and 'name="password"' not in html
+    # Password deployment: clear OIDC → the password form, no provider buttons.
+    monkeypatch.delenv("AGAMI_OIDC_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("AGAMI_OIDC_GOOGLE_CLIENT_SECRET", raising=False)
+    html2 = _client().get("/oauth/authorize", params=p).text
+    assert 'name="password"' in html2 and "Continue with Google" not in html2
+
+
 def test_pending_user_binds_on_first_oidc_login(env):
     # A pending teammate (no password, no provider) adopts the provider + subject on first OIDC login.
     s = Store.from_env()
