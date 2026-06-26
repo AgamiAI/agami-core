@@ -328,6 +328,26 @@ def test_jwt_provider_accepts_issued_token_and_rejects_junk(env):
     assert provider.validate_token(forged) is None
 
 
+def test_jwt_provider_rejects_alg_none_and_alg_confusion(env):
+    # The two classic JWT forgeries: an unsigned alg=none token, and a token whose header claims a
+    # different algorithm than the HS256 we pin. Both must be rejected.
+    from oauth_server import JwtAuthProvider
+
+    provider = JwtAuthProvider()
+    claims = {"sub": "admin", "iss": BASE, "exp": 9_999_999_999}
+    assert provider.validate_token(jwt.encode(claims, None, algorithm="none")) is None
+    assert provider.validate_token(jwt.encode(claims, SECRET, algorithm="HS512")) is None
+
+
+def test_jwt_provider_rejects_token_from_a_different_issuer(env):
+    from oauth_server import JwtAuthProvider
+
+    forged = jwt.encode(
+        {"sub": "admin", "iss": "https://evil.example.com", "exp": 9_999_999_999}, SECRET, "HS256"
+    )
+    assert JwtAuthProvider().validate_token(forged) is None
+
+
 def test_end_to_end_oauth_then_mcp_tools_list(env):
     # The whole point: a token minted via the OAuth flow is accepted by the transport, and the
     # tools/list comes back with exactly the 5 product tools.
