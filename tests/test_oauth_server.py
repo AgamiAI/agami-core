@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import re
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -293,3 +295,86 @@ def test_oauth_endpoints_are_public_but_mcp_still_requires_auth(env):
     # The OAuth skip is EXACT-match: a sibling under /oauth/* that isn't a real route doesn't get a
     # free pass — it still hits auth (401) rather than being treated as public.
     assert c.post("/oauth/token/extra").status_code == 401
+
+
+# --- the JWT-validating provider + end-to-end (the issued token gates /mcp) ---
+
+
+def _mint_jwt(c: TestClient) -> str:
+    """Run the full authorize→token flow and return the issued access token (a JWT)."""
+    code = _authorize_code(c)
+    r = c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": VERIFIER,
+            "redirect_uri": REDIRECT,
+        },
+    )
+    assert r.status_code == 200
+    return r.json()["access_token"]
+
+
+def test_jwt_provider_accepts_issued_token_and_rejects_junk(env):
+    from oauth_server import JwtAuthProvider, issue_jwt
+
+    provider = JwtAuthProvider()
+    principal = provider.validate_token(issue_jwt("admin"))
+    assert principal is not None and principal.subject == "admin"
+    assert provider.validate_token("not-a-jwt") is None
+    # a token signed with the WRONG secret must not validate
+    forged = jwt.encode({"sub": "admin", "iss": BASE, "exp": 9_999_999_999}, "wrong", "HS256")
+    assert provider.validate_token(forged) is None
+
+
+def test_end_to_end_oauth_then_mcp_tools_list(env):
+    # The whole point: a token minted via the OAuth flow is accepted by the transport, and the
+    # tools/list comes back with exactly the 5 product tools.
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    with TestClient(mcp_http.build_app()) as c:
+        bearer = {"Authorization": f"Bearer {_mint_jwt(c)}", **headers}
+        init = c.post(
+            "/mcp",
+            headers=bearer,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "1"},
+                },
+            },
+        )
+        assert init.status_code == 200
+        sid = init.headers.get("mcp-session-id")
+        h2 = {**bearer, **({"mcp-session-id": sid} if sid else {})}
+        c.post("/mcp", headers=h2, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        tl = c.post("/mcp", headers=h2, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert tl.status_code == 200
+        payload = json.loads(re.search(r"\{.*\}", tl.text, re.DOTALL).group(0))
+        names = {t["name"] for t in payload["result"]["tools"]}
+    assert names == {
+        "list_datasources",
+        "get_datasource_schema",
+        "get_prompt_examples",
+        "execute_sql",
+        "log_feedback",
+    }
+
+
+def test_non_jwt_bearer_is_rejected_when_signing_secret_set(env):
+    # With a signing secret configured the transport uses the JWT provider, so a bare presence token
+    # ("Bearer present") that worked in the no-secret fallback is now rejected.
+    c = TestClient(mcp_http.build_app())
+    r = c.post(
+        "/mcp",
+        headers={"Authorization": "Bearer present"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+    assert r.status_code == 401

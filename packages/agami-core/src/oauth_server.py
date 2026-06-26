@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import uuid4
 
 import jwt
+from ports import Principal
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from store import Store
@@ -75,6 +76,31 @@ def issue_jwt(subject: str) -> str:
         "exp": int((now + _JWT_TTL).timestamp()),
     }
     return jwt.encode(payload, _signing_secret(), algorithm="HS256")
+
+
+class JwtAuthProvider:
+    """Validates the self-signed HS256 JWTs `issue_jwt` mints — the transport's real token gate.
+
+    Conforms structurally to the `ports.AuthProvider` protocol (validate_token → Principal | None).
+    Pins the algorithm to HS256 (no `alg=none`/confusion), requires sub/exp/iss, and checks the
+    issuer == PUBLIC_BASE_URL. Any bad/expired/forged token returns None (fail closed → 401)."""
+
+    def validate_token(self, token: str) -> Principal | None:
+        from mcp_http import public_base_url  # lazy: avoid the import cycle
+
+        try:
+            claims = jwt.decode(
+                token,
+                _signing_secret(),
+                algorithms=["HS256"],
+                issuer=public_base_url(),
+                options={"require": ["exp", "sub", "iss"]},
+            )
+        except Exception:
+            # Invalid signature, expired, wrong issuer, malformed, or no secret → reject.
+            return None
+        sub = claims.get("sub")
+        return Principal(subject=sub) if sub else None
 
 
 def _b64url_nopad(raw: bytes) -> str:
