@@ -21,6 +21,7 @@ PKG_SRC = Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "
 if str(PKG_SRC) not in sys.path:
     sys.path.insert(0, str(PKG_SRC))
 
+import admin  # noqa: E402
 import mcp_http  # noqa: E402
 import model_store  # noqa: E402
 import ui  # noqa: E402
@@ -117,6 +118,21 @@ ORG = {
                         {"name": "language", "type": "string"},
                     ],
                     "performance_hints": {"estimated_row_count": 6591},
+                },
+                {
+                    # A SQL-backed (view) table — exercises the "Defining SQL" block.
+                    "name": "monthly_revenue",
+                    "schema": "public",
+                    "storage_connection": "warehouse",
+                    "source_type": "sql",
+                    "sql": "SELECT date_trunc('month', placed_at) AS m, SUM(amount) FROM orders "
+                    "GROUP BY 1",
+                    "grain": ["m"],
+                    "description": "Monthly revenue rollup.",
+                    "columns": [
+                        {"name": "m", "type": "date"},
+                        {"name": "revenue", "type": "decimal", "unit": "USD"},
+                    ],
                 },
             ],
             "metrics": [
@@ -419,3 +435,29 @@ def test_cross_area_objects_surface_on_overview(client, env):
     html = client.get("/admin/model?datasource=X").text
     assert "Cross-area metrics" in html and "global_rev" in html
     assert "Cross-area entities" in html and "company" in html
+
+
+# --- odds and ends -----------------------------------------------------------
+
+
+def test_human_count_branches():
+    assert admin._human_count(None) == ""
+    assert admin._human_count(42) == "≈ 42"
+    assert admin._human_count(6591) == "≈ 6.6k"
+    assert admin._human_count(184000) == "≈ 184k"
+    assert admin._human_count(2_400_000) == "≈ 2.4M"
+
+
+def test_sql_backed_table_shows_defining_sql(client, env):
+    _seed(env)
+    _login(client)
+    html = client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=monthly_revenue").text
+    assert "Defining SQL" in html and "date_trunc" in html
+
+
+def test_stale_datasource_param_falls_back_to_first(client, env):
+    _seed(env, "SALES_DATA")
+    _login(client)
+    # An unknown datasource param degrades to the first served one, not a 500.
+    html = client.get("/admin/model?datasource=DOES_NOT_EXIST").text
+    assert "acme" in html and "Subject areas" in html
