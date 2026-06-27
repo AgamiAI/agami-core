@@ -23,6 +23,7 @@ if str(PKG_SRC) not in sys.path:
 
 import mcp_http  # noqa: E402
 import model_store  # noqa: E402
+import ui  # noqa: E402
 import user_store  # noqa: E402
 from semantic_model.models import Organization  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
@@ -354,3 +355,67 @@ def test_unknown_table_falls_back_to_area(client, env):
     # A stale/unknown table param degrades to the area landing, not a 500.
     html = client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=nope").text
     assert "Tables" in html and "orders" in html
+
+
+# --- domain context (markdown) ----------------------------------------------
+
+
+def test_md_renders_subset_and_escapes_raw_html():
+    out = ui.md("# Title\n\nHello **bold** and `c`.\n\n- one\n- two\n\n<script>alert(1)</script>")
+    assert "<h1>Title</h1>" in out
+    assert "<strong>bold</strong>" in out and "<code>c</code>" in out
+    assert "<ul>" in out and "<li>one</li>" in out
+    assert "<script>alert(1)" not in out and "&lt;script&gt;" in out
+
+
+def test_md_fenced_code_and_link_scheme_check():
+    out = ui.md("```\nSELECT 1\n```\n\n[ok](https://example.com) [bad](javascript:alert(1))")
+    assert "<pre" in out and "SELECT 1" in out
+    assert 'href="https://example.com"' in out
+    assert "javascript:" not in out  # a non-http link degrades to plain text, never a live href
+
+
+def test_context_page_renders_org_md(client, env):
+    _seed(env)
+    s = Store.connect(env)
+    model_store.write_memory(s, "SALES_DATA", organization="# About\n\nAcme **notes**.")
+    s.close()
+    _login(client)
+    html = client.get("/admin/model?datasource=SALES_DATA&view=context").text
+    assert "<h1>About</h1>" in html and "<strong>notes</strong>" in html
+
+
+def test_context_page_escapes_doc(client, env):
+    _seed(env)
+    s = Store.connect(env)
+    model_store.write_memory(s, "SALES_DATA", organization="<script>alert(1)</script>")
+    s.close()
+    _login(client)
+    html = client.get("/admin/model?datasource=SALES_DATA&view=context").text
+    assert "<script>alert(1)" not in html and "&lt;script&gt;" in html
+
+
+def test_context_page_empty_when_no_doc(client, env):
+    _seed(env)
+    _login(client)
+    html = client.get("/admin/model?datasource=SALES_DATA&view=context").text
+    assert "No domain context" in html
+
+
+# --- cross-area (org-level) objects are not dropped --------------------------
+
+CROSS_ORG = {
+    "organization": "acme",
+    "storage_connections": [{"name": "c", "storage_type": "PostgreSQL"}],
+    "subject_areas": [{"name": "A", "tables": [], "tables_defined": []}],
+    "cross_subject_area_metrics": [{"name": "global_rev", "calculation": "sum all"}],
+    "cross_subject_area_entities": [{"name": "company"}],
+}
+
+
+def test_cross_area_objects_surface_on_overview(client, env):
+    _seed(env, "X", CROSS_ORG)
+    _login(client)
+    html = client.get("/admin/model?datasource=X").text
+    assert "Cross-area metrics" in html and "global_rev" in html
+    assert "Cross-area entities" in html and "company" in html

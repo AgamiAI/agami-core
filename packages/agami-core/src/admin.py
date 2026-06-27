@@ -928,6 +928,14 @@ def model_overview_html(org: Any, version: str | None, datasource: str, datasour
         f'<h2 class="sec">Subject areas <span class="c">{len(org.subject_areas)}</span></h2>'
         f'<div class="tlist">{areas}</div>'
     )
+    # Org-level (cross-area) metrics/entities belong to no single area — surface them here so they
+    # aren't silently dropped.
+    if org.cross_subject_area_metrics:
+        cards = "".join(_metric_card_html(m) for m in org.cross_subject_area_metrics)
+        content += f'<h2 class="sec">Cross-area metrics</h2><div class="grid">{cards}</div>'
+    if org.cross_subject_area_entities:
+        cards = "".join(_entity_card_html(e) for e in org.cross_subject_area_entities)
+        content += f'<h2 class="sec">Cross-area entities</h2><div class="grid">{cards}</div>'
     return _model_shell(content, tree, **chrome)
 
 
@@ -1174,6 +1182,25 @@ def model_table_html(org: Any, area: Any, table: Any, datasource: str, datasourc
     return _model_shell(content, tree, **chrome)
 
 
+def model_context_html(org: Any, memory: dict[str, str], datasource: str, datasources: list[str],
+                       **chrome: str) -> str:
+    """The Domain-context page — the deployed ORGANIZATION.md rendered as (safe) markdown."""
+    tree = _model_tree_html(org, datasource, datasources, active_view="context")
+    org_md = memory.get("organization")
+    doc = (
+        f'<div class="context">{ui.md(org_md)}</div>'
+        if org_md
+        else '<p class="lead">No domain context (ORGANIZATION.md) deployed for this datasource.</p>'
+    )
+    content = (
+        f'<div class="crumbs"><a href="{_model_url(datasource)}">{ui.esc(datasource)}</a>'
+        '<span class="sep">/</span>Domain context</div><h1>Domain context</h1>'
+        '<p class="lead">The deployed ORGANIZATION.md — the domain notes Claude reads as context. '
+        f'Read-only.</p>{doc}'
+    )
+    return _model_shell(content, tree, **chrome)
+
+
 async def admin_model(request: Request) -> Response:
     """The read-only Model explorer. Session-gated; a pure GET projection of the served model. Query:
     `?datasource=` (defaults to the first served), `?area=`, `?view=context`."""
@@ -1194,6 +1221,9 @@ async def admin_model(request: Request) -> Response:
         org = model_store.load_organization(store, datasource)
         if org is None:
             return HTMLResponse(model_empty_html(datasource, datasources, **chrome))
+        if request.query_params.get("view") == "context":
+            memory = model_store.load_memory(store, datasource)
+            return HTMLResponse(model_context_html(org, memory, datasource, datasources, **chrome))
         area_name = request.query_params.get("area")
         if area_name:
             area = next((a for a in org.subject_areas if a.name == area_name), None)

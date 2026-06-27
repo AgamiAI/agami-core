@@ -11,6 +11,7 @@ Pure strings; no template engine; a tiny CSS-only drawer + a native `<details>` 
 from __future__ import annotations
 
 import html
+import re
 
 # Palette + components mirror the agami web app (brand #0b57d0, line #D2DBF1, chip #f4f5fb). Embedded
 # so pages are self-contained — no build step, no asset pipeline. Layout is responsive: the media
@@ -171,6 +172,89 @@ time{font-variant-numeric:tabular-nums}
 def esc(value: str | None) -> str:
     """HTML-escape (attribute-safe) any interpolated value. Use for EVERYTHING user-influenced."""
     return html.escape(value or "", quote=True)
+
+
+def _md_inline(s: str) -> str:
+    """Inline markdown on an ALREADY-escaped string: inline code, bold, italic, and scheme-checked
+    links. Code is substituted first so `**` inside backticks is left literal."""
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"(?<![*\w])\*([^*]+)\*(?![*\w])", r"<em>\1</em>", s)
+
+    def _link(m: "re.Match[str]") -> str:
+        text, url = m.group(1), m.group(2)
+        # Only http(s) links — the text is already escaped, so a `javascript:`/`data:` URL renders as
+        # plain text (never a live href). This is the one place a URL becomes an attribute.
+        if url.startswith(("http://", "https://")):
+            return f'<a href="{url}" rel="noopener noreferrer" target="_blank">{text}</a>'
+        return text
+
+    return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, s)
+
+
+def md(text: str) -> str:
+    """A tiny, SAFE markdown subset for the domain-context doc — **escape-first**, so any raw HTML in
+    the source is inert. Supports headings, bold/italic, inline + fenced code, bullet/numbered lists,
+    and http(s) links. Not a full renderer; just enough for an ORGANIZATION.md."""
+    if not text:
+        return ""
+    out: list[str] = []
+    lst: str | None = None  # the open list tag ("ul"/"ol"), or None
+    para: list[str] = []
+    code: list[str] | None = None  # accumulating fenced-code lines, or None
+
+    def _flush_para() -> None:
+        if para:
+            out.append(f"<p>{_md_inline(' '.join(para))}</p>")
+            para.clear()
+
+    def _close_list() -> None:
+        nonlocal lst
+        if lst:
+            out.append(f"</{lst}>")
+            lst = None
+
+    for raw in text.splitlines():
+        line = html.escape(raw)
+        if line.strip() == "```" or line.strip().startswith("```"):
+            if code is None:  # opening a fence
+                _flush_para()
+                _close_list()
+                code = []
+            else:  # closing it
+                out.append(f'<pre class="code">{chr(10).join(code)}</pre>')
+                code = None
+            continue
+        if code is not None:
+            code.append(line)
+            continue
+        h = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if h:
+            _flush_para()
+            _close_list()
+            lvl = len(h.group(1))
+            out.append(f"<h{lvl}>{_md_inline(h.group(2))}</h{lvl}>")
+            continue
+        m = re.match(r"^\s*([-*]|\d+\.)\s+(.*)$", line)
+        if m:
+            _flush_para()
+            want = "ol" if m.group(1)[0].isdigit() else "ul"
+            if lst != want:
+                _close_list()
+                out.append(f"<{want}>")
+                lst = want
+            out.append(f"<li>{_md_inline(m.group(2))}</li>")
+            continue
+        if not line.strip():
+            _flush_para()
+            _close_list()
+            continue
+        para.append(line.strip())
+    if code is not None:  # an unterminated fence still renders (no data dropped)
+        out.append(f'<pre class="code">{chr(10).join(code)}</pre>')
+    _flush_para()
+    _close_list()
+    return "\n".join(out)
 
 
 def initials(name: str) -> str:
