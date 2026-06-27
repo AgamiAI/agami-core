@@ -65,7 +65,58 @@ ORG = {
                         {"name": "amount", "type": "decimal", "unit": "USD"},
                     ],
                     "performance_hints": {"estimated_row_count": 184000},
-                }
+                },
+                {
+                    # A wide, low-trust table exercising every flag + truncation + escaping.
+                    "name": "products",
+                    "schema": "public",
+                    "storage_connection": "warehouse",
+                    "grain": ["id"],
+                    "description": "Master product catalog.",
+                    "description_source": "ai_unvalidated",
+                    "confidence": "proposed",
+                    "review_state": "unreviewed",
+                    "caveats": ["Coffee = category='cafe'. danger <script>alert(1)</script>"],
+                    "columns": [
+                        {"name": "id", "type": "uuid", "primary_key": True},
+                        {"name": "sku", "type": "string"},
+                        {
+                            "name": "category",
+                            "type": "string",
+                            "description": "Type.",
+                            "description_source": "ai_unvalidated",
+                            "choice_field": {"book": "Book", "cafe": "Cafe"},
+                        },
+                        {"name": "price", "type": "decimal", "unit": "INR"},
+                        {
+                            "name": "cost_price",
+                            "type": "decimal",
+                            "unit": "INR",
+                            "caveats": [
+                                "~20% of rows have cost_price > price — exclude for margins."
+                            ],
+                        },
+                        {
+                            "name": "supplier_email",
+                            "type": "string",
+                            "sensitive": True,
+                            "description": "Distributor contact.",
+                        },
+                        {
+                            "name": "added_by_user_id",
+                            "type": "uuid",
+                            "foreign_key": {"table": "users", "column": "id"},
+                        },
+                        {"name": "created_at", "type": "timestamp"},
+                        {"name": "is_active", "type": "boolean"},
+                        {"name": "stock_qty", "type": "integer"},
+                        {"name": "genre", "type": "string"},
+                        {"name": "publisher", "type": "string"},
+                        {"name": "barcode", "type": "string"},
+                        {"name": "language", "type": "string"},
+                    ],
+                    "performance_hints": {"estimated_row_count": 6591},
+                },
             ],
             "metrics": [
                 {
@@ -73,10 +124,50 @@ ORG = {
                     "calculation": "sum of amount",
                     "other_names": ["sales"],
                     "unit": "USD",
+                    "source_tables": ["orders"],
                 }
             ],
             "entities": [{"name": "customer", "value_pattern": "^C[0-9]+$"}],
-            "relationships": [],
+            "relationships": [
+                {
+                    "from_table": "orders",
+                    "from_column": "customer_id",
+                    "to_table": "customers",
+                    "to_column": "id",
+                    "relationship": "many_to_one",
+                    "confidence": "inferred",
+                    "review_state": "unreviewed",
+                }
+            ],
+        }
+    ],
+}
+
+# A model whose table authors `column_groups` — the grouped column view (the other 12%).
+GROUPED_ORG = {
+    "organization": "acme",
+    "storage_connections": [{"name": "c", "storage_type": "PostgreSQL"}],
+    "subject_areas": [
+        {
+            "name": "Catalog",
+            "tables": [{"storage_connection": "c", "schema": "public", "table": "items"}],
+            "tables_defined": [
+                {
+                    "name": "items",
+                    "schema": "public",
+                    "storage_connection": "c",
+                    "grain": ["id"],
+                    "description": "Items.",
+                    "column_groups": {"Identity": ["id", "sku"], "Pricing": ["price"]},
+                    "column_group_descriptions": {"Identity": "keys & codes", "Pricing": "money"},
+                    "columns": [
+                        {"name": "id", "type": "uuid", "primary_key": True},
+                        {"name": "sku", "type": "string"},
+                        {"name": "price", "type": "decimal", "unit": "USD"},
+                        {"name": "notes", "type": "string"},  # in no group → trailing "Other"
+                    ],
+                }
+            ],
         }
     ],
 }
@@ -190,3 +281,76 @@ def test_unknown_area_falls_back_to_overview(client, env):
     # A stale/unknown area param must not 500 — it degrades to the datasource overview.
     html = client.get("/admin/model?datasource=SALES_DATA&area=Nope").text
     assert "acme" in html and "Subject areas" in html
+
+
+# --- table (dataset) page ----------------------------------------------------
+
+
+def _products(client):
+    return client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=products").text
+
+
+def test_table_page_shows_every_flag(client, env):
+    _seed(env)
+    _login(client)
+    html = _products(client)
+    assert ">PK<" in html  # primary key
+    assert "FK → users" in html  # foreign key → target
+    assert ">enum<" in html  # choice_field
+    assert ">INR<" in html  # unit
+    assert "sensitive" in html  # sensitive column flag
+    assert "caveat" in html  # a column with caveats is flagged
+    assert "AI-described" in html  # ai_unvalidated table description
+    assert "proposed" in html  # the table-level (low) confidence badge
+
+
+def test_wide_table_collapses_extra_columns(client, env):
+    _seed(env)
+    _login(client)
+    assert "Show all 14 columns" in _products(client)
+
+
+def test_table_page_escapes_caveat(client, env):
+    _seed(env)
+    _login(client)
+    html = _products(client)
+    assert "<script>alert(1)" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_table_page_never_leaks_storage_config(client, env):
+    _seed(env)
+    _login(client)
+    assert "host-should-not-render" not in _products(client)
+
+
+def test_table_page_shows_relationships_and_metrics(client, env):
+    _seed(env)
+    _login(client)
+    html = client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=orders").text
+    assert "Relationships" in html and "customers" in html  # a relationship touching orders
+    assert "Used by metrics" in html and "revenue" in html  # a metric whose source is orders
+
+
+def test_flat_columns_when_no_authored_groups(client, env):
+    _seed(env)
+    _login(client)
+    assert 'class="grp"' not in _products(client)  # products authors no column_groups → flat
+
+
+def test_grouped_columns_when_authored(client, env):
+    _seed(env, "CATALOG", GROUPED_ORG)
+    _login(client)
+    html = client.get("/admin/model?datasource=CATALOG&area=Catalog&table=items").text
+    assert 'class="grp"' in html  # collapsible groups
+    assert "Identity" in html and "keys &amp; codes" in html  # group label + gloss
+    assert "Pricing" in html
+    assert "Other" in html  # a column in no authored group falls into a trailing group
+
+
+def test_unknown_table_falls_back_to_area(client, env):
+    _seed(env)
+    _login(client)
+    # A stale/unknown table param degrades to the area landing, not a 500.
+    html = client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=nope").text
+    assert "Tables" in html and "orders" in html

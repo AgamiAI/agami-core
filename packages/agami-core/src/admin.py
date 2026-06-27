@@ -793,10 +793,29 @@ def _model_url(datasource: str, *, area: str | None = None, table: str | None = 
     return "/admin/model?" + "&amp;".join(parts)
 
 
+def _area_nav_html(a: Any, datasource: str, active_area: str | None,
+                   active_table: str | None) -> str:
+    """One area node; when it's the active area it expands into links to its tables."""
+    head = (
+        f'<a class="navitem{" active" if a.name == active_area else ""}" '
+        f'href="{_model_url(datasource, area=a.name)}">{ui.esc(a.name)} '
+        f'<span class="n">{len(a.tables_defined)}</span></a>'
+    )
+    if a.name != active_area:
+        return head
+    leaves = "".join(
+        f'<a class="leaf{" active" if t.name == active_table else ""}" '
+        f'href="{_model_url(datasource, area=a.name, table=t.name)}">{ui.esc(t.name)}</a>'
+        for t in a.tables_defined
+    )
+    return head + f'<div class="children">{leaves}</div>' if leaves else head
+
+
 def _model_tree_html(org: Any, datasource: str, datasources: list[str], *,
-                     active_area: str | None = None, active_view: str | None = None) -> str:
+                     active_area: str | None = None, active_table: str | None = None,
+                     active_view: str | None = None) -> str:
     """The left browse rail: a datasource picker (only when more than one is served), an Overview
-    link, the subject areas, and the Domain-context node."""
+    link, the subject areas (the active one expands to its tables), and the Domain-context node."""
     if len(datasources) > 1:
         opts = "".join(
             f'<option value="{ui.esc(d)}"{" selected" if d == datasource else ""}>{ui.esc(d)}'
@@ -813,12 +832,11 @@ def _model_tree_html(org: Any, datasource: str, datasources: list[str], *,
             f'<div class="ds"><span class="muted">Datasource</span>'
             f'<b>{ui.esc(datasource)}</b></div>'
         )
-    overview_cls = "navitem" + (" active" if active_area is None and active_view is None else "")
+    overview_cls = "navitem" + (
+        " active" if active_area is None and active_view is None else ""
+    )
     areas = "".join(
-        f'<a class="navitem{" active" if a.name == active_area else ""}" '
-        f'href="{_model_url(datasource, area=a.name)}">{ui.esc(a.name)} '
-        f'<span class="n">{len(a.tables_defined)}</span></a>'
-        for a in org.subject_areas
+        _area_nav_html(a, datasource, active_area, active_table) for a in org.subject_areas
     )
     context_cls = "navitem" + (" active" if active_view == "context" else "")
     return (
@@ -944,10 +962,12 @@ def model_area_html(org: Any, area: Any, datasource: str, datasources: list[str]
     """A subject-area landing: its tables (scannable), then metrics + entities as cards."""
     tree = _model_tree_html(org, datasource, datasources, active_area=area.name)
     tables = "".join(
-        f'<div class="trow"><span class="nm">{ui.esc(t.name)}</span>'
+        f'<a class="trow" href="{_model_url(datasource, area=area.name, table=t.name)}">'
+        f'<span class="nm">{ui.esc(t.name)}</span>'
         f'<span class="d">{ui.esc(t.description or "")}</span>'
         f'<span class="meta">{len(t.columns)} cols · '
-        f'{ui.esc(_human_count(_est_rows_obj(t)))}</span>{_conf_badge(t.confidence)}</div>'
+        f'{ui.esc(_human_count(_est_rows_obj(t)))}</span>{_conf_badge(t.confidence)}'
+        '<span class="chev">›</span></a>'
         for t in area.tables_defined
     )
     metrics = "".join(_metric_card_html(m) for m in area.metrics)
@@ -979,6 +999,181 @@ def _est_rows_obj(table: Any) -> int | None:
     return getattr(ph, "estimated_row_count", None) if ph is not None else None
 
 
+# --- the table (dataset) page ------------------------------------------------
+
+_COL_THEAD = (
+    '<thead><tr><th style="width:210px">Column</th><th style="width:120px">Type</th>'
+    '<th>Description</th><th style="width:170px" class="flags">Flags</th></tr></thead>'
+)
+
+
+def _col_flags_html(col: Any) -> str:
+    """Per-column flags — only what carries signal (PK / FK / enum / unit / sensitive / caveat); the
+    redundant per-column 'confirmed/approved' the old view repeated on every row is left out."""
+    flags = []
+    if col.primary_key:
+        flags.append('<span class="badge b-pk">PK</span>')
+    fk = getattr(col, "foreign_key", None)
+    if fk is not None and getattr(fk, "table", None):
+        flags.append(f'<span class="badge b-fk">FK → {ui.esc(fk.table)}</span>')
+    if getattr(col, "choice_field", None):
+        flags.append('<span class="badge b-soft">enum</span>')
+    if col.unit:
+        flags.append(f'<span class="badge b-soft">{ui.esc(str(col.unit))}</span>')
+    if col.sensitive:
+        flags.append('<span class="badge b-sensitive">● sensitive</span>')
+    if col.caveats:
+        flags.append('<span class="badge b-proposed">⚠ caveat</span>')
+    return " ".join(flags)
+
+
+def _col_rows_html(columns: list[Any]) -> str:
+    """The <tr>s for a set of columns; a column with caveats gets an inline note row beneath it."""
+    out = ""
+    for col in columns:
+        if col.description:
+            desc = ui.esc(col.description)
+            if getattr(col, "description_source", None) == "ai_unvalidated":
+                desc += ' <span class="aichip" title="AI-described, unvalidated">AI</span>'
+        else:
+            desc = '<span class="dash">—</span>'
+        out += (
+            '<tr class="crow">'
+            f'<td class="cn">{ui.esc(col.name)}</td>'
+            f'<td><span class="ct">{ui.esc(str(col.type))}</span></td>'
+            f'<td class="cd">{desc}</td>'
+            f'<td class="flags">{_col_flags_html(col)}</td></tr>'
+        )
+        if col.caveats:
+            note = "<br>".join(ui.esc(c) for c in col.caveats)
+            out += f'<tr class="noterow"><td colspan="4"><div class="note">{note}</div></td></tr>'
+    return out
+
+
+def _columns_flat_html(columns: list[Any]) -> str:
+    """A flat schema table. Narrow tables show in full; wide ones show the first 8 and tuck the rest
+    behind a JS-free 'show all N' <details> — the default stays short without hiding anything."""
+    if len(columns) <= 12:
+        return f'<table class="cols">{_COL_THEAD}<tbody>{_col_rows_html(columns)}</tbody></table>'
+    head = _col_rows_html(columns[:8])
+    rest = _col_rows_html(columns[8:])
+    return (
+        f'<table class="cols">{_COL_THEAD}<tbody>{head}</tbody></table>'
+        f'<details class="showmore"><summary>Show all {len(columns)} columns</summary>'
+        f'<table class="cols"><tbody>{rest}</tbody></table></details>'
+    )
+
+
+def _columns_grouped_html(table: Any) -> str:
+    """Collapsible groups from the table's authored `column_groups` (labelled by
+    `column_group_descriptions`); columns in no authored group fall into a trailing 'Other'."""
+    descs = getattr(table, "column_group_descriptions", {}) or {}
+    by_name = {c.name: c for c in table.columns}
+    seen: set[str] = set()
+    blocks = ""
+    for i, (gname, colnames) in enumerate(table.column_groups.items()):
+        cols = [by_name[n] for n in colnames if n in by_name]
+        seen.update(colnames)
+        gloss = ui.esc(descs.get(gname, ""))
+        gloss_html = f'<span class="gdesc">{gloss}</span>' if gloss else ""
+        blocks += (
+            f'<details class="grp"{" open" if i < 2 else ""}><summary>'
+            f'<span class="gname">{ui.esc(gname)}</span>{gloss_html}'
+            f'<span class="gn">{len(cols)}</span></summary>'
+            f'<table class="cols"><tbody>{_col_rows_html(cols)}</tbody></table></details>'
+        )
+    other = [c for c in table.columns if c.name not in seen]
+    if other:
+        blocks += (
+            '<details class="grp"><summary><span class="gname">Other</span>'
+            f'<span class="gn">{len(other)}</span></summary>'
+            f'<table class="cols"><tbody>{_col_rows_html(other)}</tbody></table></details>'
+        )
+    return blocks
+
+
+def _caveat_callout(caveats: list[str]) -> str:
+    if not caveats:
+        return ""
+    body = "<br>".join(ui.esc(c) for c in caveats)
+    return f'<div class="caveat"><span class="ic">⚠</span><div class="t">{body}</div></div>'
+
+
+def _table_rels_html(org: Any, area: Any, table_name: str) -> str:
+    """Relationships touching this table — within-area + the org-level cross-area ones."""
+    rels = list(area.relationships) + list(org.cross_subject_area_relationships)
+    rows = "".join(
+        f'<div class="rel"><span class="mono">{ui.esc(r.from_table)}</span>'
+        f'<span class="arr">→</span><span class="mono">{ui.esc(r.to_table)}</span>'
+        f'<span class="badge b-soft">{ui.esc(str(r.relationship))}</span>'
+        f'<span class="ro">{ui.esc(str(r.join_type))} · {ui.esc(str(r.confidence))}</span></div>'
+        for r in rels
+        if r.from_table == table_name or r.to_table == table_name
+    )
+    if not rows:
+        return ""
+    return f'<h2 class="sec">Relationships</h2><div class="card">{rows}</div>'
+
+
+def _table_metrics_html(area: Any, table_name: str) -> str:
+    """Metrics whose `source_tables` include this table."""
+    using = [m for m in area.metrics if table_name in (m.source_tables or [])]
+    if not using:
+        return ""
+    cards = "".join(_metric_card_html(m) for m in using)
+    return f'<h2 class="sec">Used by metrics</h2><div class="grid">{cards}</div>'
+
+
+def model_table_html(org: Any, area: Any, table: Any, datasource: str, datasources: list[str],
+                     **chrome: str) -> str:
+    """A table (dataset) page — the heart of the explorer: header, caveats, columns
+    (grouped-when-authored else flat), then relationships + metrics that use it."""
+    tree = _model_tree_html(org, datasource, datasources,
+                            active_area=area.name, active_table=table.name)
+    schema = f'<span class="schema">{ui.esc(table.schema_name)}.</span>' if table.schema_name else ""
+    rows = _human_count(_est_rows_obj(table))
+    grain = ", ".join(table.grain) if table.grain else ""
+    aichip = (
+        ' <span class="descsrc">AI-described · unvalidated</span>'
+        if getattr(table, "description_source", None) == "ai_unvalidated" else ""
+    )
+    sql_block = ""
+    if getattr(table, "source_type", None) == "sql" and table.sql:
+        sql_block = (
+            '<h2 class="sec">Defining SQL</h2>'
+            f'<pre class="code" style="white-space:pre-wrap;display:block;padding:12px">'
+            f'{ui.esc(table.sql)}</pre>'
+        )
+    subline = "".join(
+        f"<span>{s}</span>"
+        for s in (
+            f"<b>{len(table.columns)}</b> columns",
+            f"<b>{ui.esc(rows)}</b> rows" if rows else "",
+            f'grain · <b class="mono">{ui.esc(grain)}</b>' if grain else "",
+            ui.esc(table.storage_connection or ""),
+        )
+        if s
+    )
+    columns = _columns_grouped_html(table) if table.column_groups else _columns_flat_html(table.columns)
+    content = (
+        f'<div class="crumbs"><a href="{_model_url(datasource)}">{ui.esc(datasource)}</a>'
+        f'<span class="sep">/</span>'
+        f'<a href="{_model_url(datasource, area=area.name)}">{ui.esc(area.name)}</a>'
+        f'<span class="sep">/</span>{ui.esc(table.name)}</div>'
+        f'<div class="h1row"><h1>{schema}{ui.esc(table.name)}</h1>'
+        f'{_conf_badge(table.confidence)}'
+        '<span class="readonly-pill">Read-only · edit in Claude</span></div>'
+        f'<div class="subline">{subline}</div>'
+        f'<p class="desc">{ui.esc(table.description or "")}{aichip}</p>'
+        f'{_caveat_callout(table.caveats)}'
+        f'<h2 class="sec">Columns <span class="c">{len(table.columns)}</span></h2>'
+        f'{columns}{sql_block}'
+        f'{_table_rels_html(org, area, table.name)}'
+        f'{_table_metrics_html(area, table.name)}'
+    )
+    return _model_shell(content, tree, **chrome)
+
+
 async def admin_model(request: Request) -> Response:
     """The read-only Model explorer. Session-gated; a pure GET projection of the served model. Query:
     `?datasource=` (defaults to the first served), `?area=`, `?view=context`."""
@@ -1003,6 +1198,13 @@ async def admin_model(request: Request) -> Response:
         if area_name:
             area = next((a for a in org.subject_areas if a.name == area_name), None)
             if area is not None:
+                table_name = request.query_params.get("table")
+                if table_name:
+                    table = next((t for t in area.tables_defined if t.name == table_name), None)
+                    if table is not None:
+                        return HTMLResponse(
+                            model_table_html(org, area, table, datasource, datasources, **chrome)
+                        )
                 return HTMLResponse(model_area_html(org, area, datasource, datasources, **chrome))
         version = model_store.newest_model_version(store, datasource)
         return HTMLResponse(
