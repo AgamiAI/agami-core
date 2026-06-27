@@ -131,6 +131,40 @@ td{padding:13px 12px;border-top:1px solid var(--line);vertical-align:middle}
   .topbar{padding:0 16px;height:56px}
   .main{padding:20px 16px 48px}
 }
+
+/* — design polish: self-hosted Inter (no font-CDN call) + refined buttons/tables, full-width admin,
+   dark code blocks. Appended so these override the base rules above. — */
+@font-face{font-family:Inter;font-weight:400;font-display:swap;src:url(/static/fonts/inter-400.woff2) format("woff2")}
+@font-face{font-family:Inter;font-weight:500;font-display:swap;src:url(/static/fonts/inter-500.woff2) format("woff2")}
+@font-face{font-family:Inter;font-weight:600;font-display:swap;src:url(/static/fonts/inter-600.woff2) format("woff2")}
+@font-face{font-family:Inter;font-weight:700;font-display:swap;src:url(/static/fonts/inter-700.woff2) format("woff2")}
+:root{--ink:#0e1525;--muted:#69748b;--line:#e7ebf3;--ring:rgba(11,87,208,.18)}
+body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  letter-spacing:-.006em;background:#fbfcfe;color:var(--ink)}
+h1{font-weight:660;letter-spacing:-.024em}
+.main{max-width:none;padding:30px 40px 64px}
+.topbar{height:64px;padding:0 40px;background:#fff;position:sticky;top:0;z-index:30}
+.tabs{gap:8px}
+.tabs a{font-weight:550;color:var(--muted)}
+.tabs a.active{font-weight:650;color:var(--ink)}
+.btn{font-weight:600;border-radius:10px;height:42px;box-shadow:0 1px 2px rgba(13,20,38,.07);
+  transition:transform .12s ease,box-shadow .18s ease,background .15s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(11,87,208,.24)}
+.btn.tiny{height:30px;border-radius:8px;font-weight:550;box-shadow:none}
+.btn.tiny:hover{transform:none;box-shadow:0 1px 2px rgba(13,20,38,.08)}
+.btn.secondary{background:#fff;color:var(--ink);border-color:var(--line)}
+.btn.secondary:hover{background:#f4f7fe;border-color:#cdd8ee}
+table{font-size:13.5px}
+thead th{font-size:11px;letter-spacing:.07em;color:#8a94a8;padding-bottom:12px}
+td{padding:15px 12px;border-top:1px solid var(--line)}
+tbody tr:hover{background:#f6f9ff}
+.pill{font-weight:600;letter-spacing:.01em;padding:3px 11px}
+pre.code{background:#0e1525;color:#e8edf7;border:0;border-radius:12px;line-height:1.6}
+input,select{border-radius:10px;border-color:var(--line)}
+input:focus,select:focus{border-color:var(--brand);box-shadow:0 0 0 4px var(--ring)}
+.drawer{box-shadow:-26px 0 70px rgba(13,20,38,.20);border-left:1px solid var(--line)}
+time{font-variant-numeric:tabular-nums}
+@media (max-width:680px){.main{padding:18px 16px 48px}.topbar{padding:0 16px}.drawer{width:94vw!important}}
 """
 
 
@@ -146,6 +180,16 @@ def initials(name: str) -> str:
     return letters.upper() or "?"
 
 
+# Localize <time data-utc="…"> to the viewer's timezone — the server stores UTC and can't know the
+# browser's zone, so this is the one small script. No-JS degrades to the UTC text already in the element.
+_TIME_SCRIPT = (
+    "<script>for(const t of document.querySelectorAll('time[data-utc]')){"
+    "const d=new Date(t.dataset.utc);"
+    "if(!isNaN(d))t.textContent=d.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});}"
+    "</script>"
+)
+
+
 def _doc(title: str, body: str) -> str:
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -154,7 +198,7 @@ def _doc(title: str, body: str) -> str:
 <title>{esc(title)}</title>
 <link rel="icon" href="/static/logo_icon.png">
 <style>{_CSS}</style>
-</head><body>{body}</body></html>"""
+</head><body>{body}{_TIME_SCRIPT}</body></html>"""
 
 
 def auth_page(title: str, body: str) -> str:

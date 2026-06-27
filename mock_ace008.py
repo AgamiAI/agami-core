@@ -150,9 +150,8 @@ time{font-variant-numeric:tabular-nums}
 
 
 def write(name, html):
-    html = html.replace('"/static/', '"static/')
-    html = html.replace("</head>", _POLISH + "</head>").replace("</body>", _SCRIPT + "</body>")
-    (OUT / name).write_text(html)
+    # ui.py now ships the polish + the browser-local time script — render exactly what ships.
+    (OUT / name).write_text(html.replace('"/static/', '"static/'))
 
 
 write("20-sessions.html", ui.admin_shell("Sessions · agami admin", "sessions", sessions_panel(),

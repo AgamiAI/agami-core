@@ -93,9 +93,11 @@ def test_every_interpolated_value_is_escaped():
              "last_name": "", "email": '"><img src=x onerror=alert(1)>', "status": "active",
              "oidc_provider": None, "has_password": 0}]
     html = admin.users_tab_html(rows, csrf="t", admin_username=ADMIN_USER)
-    assert "<script>" not in html
+    # The injected payload must be neutralized (the only literal <script> on the page is our own
+    # time-localize script, which is not attacker-controlled).
+    assert "<script>alert(1)" not in html
     assert "<img src=x" not in html
-    assert "&lt;script&gt;" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
 
 def test_admin_login_is_password_only_with_no_marketing_copy():
