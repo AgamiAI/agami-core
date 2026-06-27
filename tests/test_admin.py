@@ -357,7 +357,7 @@ def test_admin_ui_is_disabled_when_no_admin_configured(env, monkeypatch):
 
 
 def test_dashboard_tab_is_a_placeholder(client):
-    # Dashboard is still a placeholder; Sessions + Tool calls became real views in ACE-008.
+    # Dashboard is still a placeholder; Sessions + Tool calls are now real views.
     _login(client)
     assert "Coming soon" in client.get("/admin?tab=dashboard").text
     assert "No sessions yet" in client.get("/admin?tab=sessions").text

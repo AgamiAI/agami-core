@@ -98,6 +98,20 @@ on `/admin/login`).
 > configured IdP — so add a teammate by an email the *right* person controls there. The setup link and
 > the other pre-auth endpoints aren't rate-limited in-process; put them behind your proxy/LB if exposed.
 
+### Activity views
+
+The admin console also has two read-only activity tabs:
+
+- **Tool calls** — *every* MCP tool call, newest first: who (the authenticated user), the tool,
+  datasource, and for a query the SQL, row count, latency, and status. This is **audit-grade** — the
+  server observes it directly, so it's always accurate.
+- **Sessions** — those queries grouped into a conversation, each opening to its queries with the
+  natural-language **question**. This is **best-effort**: the MCP protocol carries neither the user's
+  question nor a conversation id, so Claude self-reports them (a `user_question` param + a `thread_id`
+  it reuses per conversation). When it does, you get grouping + the question; when it doesn't, the view
+  degrades to ungrouped and the question shows as not reported. Treat those two fields as a hint, not a
+  record.
+
 ### Local end-to-end test (HTTPS via a tunnel)
 
 OAuth and the `Secure` admin cookie need HTTPS, so expose the local server through a tunnel:

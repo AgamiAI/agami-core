@@ -80,6 +80,13 @@ def test_record_logs_every_tool_with_null_self_report(db):
     assert r["tool_name"] == "list_datasources" and r["user_question"] is None and r["thread_id"] is None
 
 
+def test_record_tolerates_a_non_json_result(db):
+    tools.record_tool_call(name="list_datasources", arguments={}, result_text="not json",
+                           execution_ms=1, actor="a")
+    (r,) = _rows(db)
+    assert r["success"] == 1 and r["row_count"] is None  # unparseable result → defaults, no crash
+
+
 def test_record_is_best_effort_and_never_raises(tmp_path, monkeypatch):
     # No datastore configured → falls back to the local jsonl; a broken record is swallowed.
     monkeypatch.delenv("AGAMI_DB_URL", raising=False)
@@ -117,14 +124,12 @@ def test_actor_from_scope_prefers_state_then_header():
 # --- end to end: the gate ----------------------------------------------------
 
 
-def test_authenticated_mcp_call_logs_the_actor(db, monkeypatch):
-    monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
-    monkeypatch.setenv("AGAMI_SIGNING_SECRET", SECRET)
+def _mcp_tool_call(subject: str, name: str) -> None:
+    """initialize → notifications/initialized → tools/call(name) over the authed HTTP transport."""
     from oauth_server import issue_jwt
 
-    token = issue_jwt("jordan@example.com")
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {issue_jwt(subject)}",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
@@ -133,10 +138,30 @@ def test_authenticated_mcp_call_logs_the_actor(db, monkeypatch):
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                        "clientInfo": {"name": "t", "version": "1"}}})
-        sid = init.headers.get("mcp-session-id")
-        h2 = {**headers, **({"mcp-session-id": sid} if sid else {})}
+        h2 = {**headers, **({"mcp-session-id": init.headers["mcp-session-id"]}
+                            if init.headers.get("mcp-session-id") else {})}
         c.post("/mcp", headers=h2, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
         c.post("/mcp", headers=h2, json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                                         "params": {"name": "list_datasources", "arguments": {}}})
+                                         "params": {"name": name, "arguments": {}}})
+
+
+def test_authenticated_mcp_call_logs_the_actor(db, monkeypatch):
+    monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
+    monkeypatch.setenv("AGAMI_SIGNING_SECRET", SECRET)
+    _mcp_tool_call("jordan@example.com", "list_datasources")
     rows = [r for r in _rows(db) if r["tool_name"] == "list_datasources"]
     assert rows and rows[0]["actor"] == "jordan@example.com"  # the actor reached the dispatch + the log
+
+
+def test_a_raising_tool_is_still_logged_as_an_error(db, monkeypatch):
+    # The capture hook records a tool that raises (and re-raises it) — failures are observable too.
+    monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
+    monkeypatch.setenv("AGAMI_SIGNING_SECRET", SECRET)
+
+    def _boom(_args):
+        raise RuntimeError("nope")
+
+    monkeypatch.setitem(tools.TOOLS["list_datasources"], "handler", _boom)
+    _mcp_tool_call("jordan@example.com", "list_datasources")
+    rows = [r for r in _rows(db) if r["tool_name"] == "list_datasources"]
+    assert rows and rows[0]["success"] == 0 and rows[0]["error_kind"] == "exception"
