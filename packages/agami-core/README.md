@@ -115,6 +115,24 @@ The admin console also has two read-only activity tabs:
 The `tool_calls` log grows one row per call and has **no automatic retention** — it's your local store,
 so prune it on your own schedule if it gets large.
 
+### Model view
+
+The **Model** tab (`{base}/admin/model`) is a **read-only** explorer of the semantic model you've
+deployed — the same tree the MCP tools serve, so it can't drift from what Claude actually reads. It's a
+catalog: a browse rail (datasource → subject area → table) and one page at a time —
+
+- a **datasource overview** (description, glossary, storage-connection names/types, the subject areas),
+- a **subject-area landing** (its tables, metrics, entities),
+- a **table page** — the schema, with each column's type and description, and flags only where they
+  carry signal (**PK / FK / sensitive / unit / enum / caveat**). Trust is shown as a single table-level
+  **confidence** badge; **caveats** (the domain gotchas) are elevated to a callout; wide tables collapse
+  behind "show all N", and tables that author `column_groups` render those as collapsible sections,
+- a **domain-context** page (your `ORGANIZATION.md`, rendered as safe markdown).
+
+It is **read-only by construction** — a single GET endpoint, no write path. Editing the model stays
+conversational in Claude (the in-app editor is a Hosted feature); connection **credentials are never
+rendered** (names and types only). Deploy a change in Claude and it shows up here on the next deploy.
+
 ### Local end-to-end test (HTTPS via a tunnel)
 
 OAuth and the `Secure` admin cookie need HTTPS, so expose the local server through a tunnel:
