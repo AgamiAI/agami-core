@@ -16,6 +16,7 @@ import hmac
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 import jwt
 import ui
@@ -744,6 +745,274 @@ async def admin_set_status(request: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Admin console — Model tab (read-only model explorer)
+#
+# A pure projection of the served model (`model_store.load_organization`) + the domain docs
+# (`load_memory`) — the SAME tree every MCP tool reads, so there is zero drift and no second store.
+# Read-only by construction: the only route is a GET (see `routes()`), there is no write path, and
+# `storage_connections[].storage_config` (hosts/credentials) is NEVER rendered. The catalog idiom (a
+# browse tree + one page at a time) keeps a wide model — real tables run to dozens of columns —
+# legible. Builders are split from the handler so previews can render them with sample data.
+# ---------------------------------------------------------------------------
+
+# Trust posture is surfaced as an honest read-only badge (agami's differentiator: the model says how
+# much to trust each piece), never as a clickable review control — that editor is Hosted.
+_CONF_LABEL = {"confirmed": "✓ confirmed", "inferred": "~ inferred", "proposed": "⋯ proposed"}
+
+
+def _conf_badge(confidence: str | None) -> str:
+    c = (confidence or "").lower()
+    if c not in _CONF_LABEL:
+        return ""
+    return f'<span class="badge b-{c}">{_CONF_LABEL[c]}</span>'
+
+
+def _human_count(n: int | None) -> str:
+    """A compact row-count, e.g. 6591 -> '≈ 6.6k', 612000 -> '≈ 612k'. None -> '' (unknown)."""
+    if n is None:
+        return ""
+    if n < 1000:
+        return f"≈ {n}"
+    if n < 1_000_000:
+        return f"≈ {n / 1000:.1f}k".replace(".0k", "k")
+    return f"≈ {n / 1_000_000:.1f}M".replace(".0M", "M")
+
+
+def _model_url(datasource: str, *, area: str | None = None, table: str | None = None,
+               view: str | None = None) -> str:
+    """An attribute-safe `/admin/model` href. Values are %-encoded (names may contain spaces); the
+    `&` separators are written as `&amp;` so the whole string is safe in an HTML attribute."""
+    parts = [f"datasource={quote(datasource)}"]
+    if area is not None:
+        parts.append(f"area={quote(area)}")
+    if table is not None:
+        parts.append(f"table={quote(table)}")
+    if view is not None:
+        parts.append(f"view={quote(view)}")
+    return "/admin/model?" + "&amp;".join(parts)
+
+
+def _model_tree_html(org: Any, datasource: str, datasources: list[str], *,
+                     active_area: str | None = None, active_view: str | None = None) -> str:
+    """The left browse rail: a datasource picker (only when more than one is served), an Overview
+    link, the subject areas, and the Domain-context node."""
+    if len(datasources) > 1:
+        opts = "".join(
+            f'<option value="{ui.esc(d)}"{" selected" if d == datasource else ""}>{ui.esc(d)}'
+            "</option>"
+            for d in datasources
+        )
+        picker = (
+            '<form class="ds" method="get" action="/admin/model">'
+            '<span class="muted">Datasource</span>'
+            f'<select name="datasource" onchange="this.form.submit()">{opts}</select></form>'
+        )
+    else:
+        picker = (
+            f'<div class="ds"><span class="muted">Datasource</span>'
+            f'<b>{ui.esc(datasource)}</b></div>'
+        )
+    overview_cls = "navitem" + (" active" if active_area is None and active_view is None else "")
+    areas = "".join(
+        f'<a class="navitem{" active" if a.name == active_area else ""}" '
+        f'href="{_model_url(datasource, area=a.name)}">{ui.esc(a.name)} '
+        f'<span class="n">{len(a.tables_defined)}</span></a>'
+        for a in org.subject_areas
+    )
+    context_cls = "navitem" + (" active" if active_view == "context" else "")
+    return (
+        f'<aside class="tree">{picker}'
+        f'<a class="{overview_cls}" href="{_model_url(datasource)}">Overview</a>'
+        f'<h4>Subject areas</h4>{areas}'
+        f'<h4>Browse</h4>'
+        f'<a class="{context_cls}" href="{_model_url(datasource, view="context")}">Domain context</a>'
+        "</aside>"
+    )
+
+
+def _model_shell(content: str, tree: str, *, admin_label: str = "", admin_email: str = "") -> str:
+    """Wrap the browse tree + a content pane in the admin shell with the Model tab active."""
+    body = f'<div class="explorer">{tree}<main class="content">{content}</main></div>'
+    return ui.admin_shell("Model · agami admin", "model", body,
+                          admin_label=admin_label, admin_email=admin_email)
+
+
+def model_empty_html(datasource: str, datasources: list[str], **chrome: str) -> str:
+    """The clean state when nothing is deployed yet (no served model rows)."""
+    content = (
+        '<div class="crumbs">Model</div><h1>Model</h1>'
+        '<p class="lead">No model deployed yet. Author your semantic model in Claude with the agami '
+        "plugin and deploy it — the served subject areas, tables, and metrics will show up here, "
+        "read-only.</p>"
+    )
+    label = datasource or (datasources[0] if datasources else "")
+    tree = (
+        f'<aside class="tree"><div class="ds"><span class="muted">Datasource</span>'
+        f'<b>{ui.esc(label) or "—"}</b></div></aside>'
+    )
+    return _model_shell(content, tree, **chrome)
+
+
+def _glossary_html(key_terminology: dict[str, str]) -> str:
+    if not key_terminology:
+        return ""
+    terms = "".join(
+        f'<span class="term"><b>{ui.esc(k)}</b> {ui.esc(v)}</span>'
+        for k, v in key_terminology.items()
+    )
+    return f'<h2 class="sec">Glossary</h2><div class="gloss">{terms}</div>'
+
+
+def _storage_html(connections: list[Any]) -> str:
+    # Names + types only — storage_config (hosts/credentials) is deliberately never rendered.
+    if not connections:
+        return ""
+    rows = "".join(
+        f'<span class="term"><b>{ui.esc(c.name)}</b> '
+        f'{ui.esc(getattr(c, "storage_type", "") or "")}</span>'
+        for c in connections
+    )
+    return f'<h2 class="sec">Storage connections</h2><div class="gloss">{rows}</div>'
+
+
+def model_overview_html(org: Any, version: str | None, datasource: str, datasources: list[str],
+                        **chrome: str) -> str:
+    """The datasource landing: org header + glossary + storage + the subject-area list."""
+    tree = _model_tree_html(org, datasource, datasources)
+    table_total = sum(len(a.tables_defined) for a in org.subject_areas)
+    ver = ui.esc(version[:8]) if version else f"v{org.version}"
+    stats = (
+        f'<div class="stat"><div class="k">Subject areas</div>'
+        f'<div class="v">{len(org.subject_areas)}</div></div>'
+        f'<div class="stat"><div class="k">Tables</div><div class="v">{table_total}</div></div>'
+        f'<div class="stat"><div class="k">Version</div>'
+        f'<div class="v mono" style="font-size:14px">{ver}</div></div>'
+        f'<div class="stat"><div class="k">Fiscal year</div>'
+        f'<div class="v" style="font-size:14px">Starts month {org.fiscal_year_start_month}</div></div>'
+    )
+    areas = "".join(
+        f'<a class="trow" href="{_model_url(datasource, area=a.name)}">'
+        f'<span class="nm">{ui.esc(a.name)}</span>'
+        f'<span class="d">{ui.esc(a.description or "")}</span>'
+        f'<span class="meta">{len(a.tables_defined)} tables · {len(a.metrics)} metrics</span>'
+        '<span class="chev">›</span></a>'
+        for a in org.subject_areas
+    )
+    content = (
+        '<div class="crumbs">Model</div>'
+        f'<div class="h1row"><h1>{ui.esc(org.organization)}</h1>'
+        '<span class="readonly-pill">Read-only · edit in Claude</span></div>'
+        f'<p class="lead">{ui.esc(org.description or "The deployed semantic model.")}</p>'
+        f'<div class="statrow">{stats}</div>'
+        f'{_glossary_html(org.key_terminology)}'
+        f'{_storage_html(org.storage_connections)}'
+        f'<h2 class="sec">Subject areas <span class="c">{len(org.subject_areas)}</span></h2>'
+        f'<div class="tlist">{areas}</div>'
+    )
+    return _model_shell(content, tree, **chrome)
+
+
+def _metric_card_html(m: Any) -> str:
+    aliases = ", ".join(m.other_names) if m.other_names else ""
+    alias_html = f' <span class="al">· {ui.esc(aliases)}</span>' if aliases else ""
+    unit = f' <span class="al">· {ui.esc(m.unit)}</span>' if m.unit else ""
+    calc = ui.esc(m.calculation or "")
+    return (
+        f'<div class="mcard"><div class="nm">{ui.esc(m.name)}{alias_html}{unit}</div>'
+        f'<div class="muted" style="font-size:13px">{ui.esc(m.description or "")}</div>'
+        f'<span class="calc">{calc}</span></div>'
+    )
+
+
+def _entity_card_html(e: Any) -> str:
+    aliases = ", ".join(e.other_names) if e.other_names else ""
+    alias_html = f' <span class="al">· {ui.esc(aliases)}</span>' if aliases else ""
+    pattern = (
+        f' <span class="muted mono" style="font-size:12px">{ui.esc(e.value_pattern)}</span>'
+        if e.value_pattern else ""
+    )
+    return (
+        f'<div class="mcard"><div class="nm">{ui.esc(e.name)}{alias_html} '
+        f'{_conf_badge(e.confidence)}</div>'
+        f'<div class="muted" style="font-size:13px">{ui.esc(e.description or "")}{pattern}</div></div>'
+    )
+
+
+def model_area_html(org: Any, area: Any, datasource: str, datasources: list[str],
+                    **chrome: str) -> str:
+    """A subject-area landing: its tables (scannable), then metrics + entities as cards."""
+    tree = _model_tree_html(org, datasource, datasources, active_area=area.name)
+    tables = "".join(
+        f'<div class="trow"><span class="nm">{ui.esc(t.name)}</span>'
+        f'<span class="d">{ui.esc(t.description or "")}</span>'
+        f'<span class="meta">{len(t.columns)} cols · '
+        f'{ui.esc(_human_count(_est_rows_obj(t)))}</span>{_conf_badge(t.confidence)}</div>'
+        for t in area.tables_defined
+    )
+    metrics = "".join(_metric_card_html(m) for m in area.metrics)
+    entities = "".join(_entity_card_html(e) for e in area.entities)
+    window = (
+        f'<span>default window · <b>{ui.esc(area.default_time_window)}</b></span>'
+        if area.default_time_window else ""
+    )
+    content = (
+        f'<div class="crumbs"><a href="{_model_url(datasource)}">{ui.esc(datasource)}</a>'
+        f'<span class="sep">/</span>{ui.esc(area.name)}</div>'
+        f'<h1>{ui.esc(area.name)}</h1>'
+        f'<div class="subline"><span><b>{len(area.tables_defined)}</b> tables</span>'
+        f'<span><b>{len(area.metrics)}</b> metrics</span>'
+        f'<span><b>{len(area.entities)}</b> entities</span>{window}</div>'
+        f'<p class="lead">{ui.esc(area.description or "")}</p>'
+        f'<h2 class="sec">Tables <span class="c">{len(area.tables_defined)}</span></h2>'
+        f'<div class="tlist">{tables}</div>'
+    )
+    if metrics:
+        content += f'<h2 class="sec">Metrics</h2><div class="grid">{metrics}</div>'
+    if entities:
+        content += f'<h2 class="sec">Entities</h2><div class="grid">{entities}</div>'
+    return _model_shell(content, tree, **chrome)
+
+
+def _est_rows_obj(table: Any) -> int | None:
+    ph = getattr(table, "performance_hints", None)
+    return getattr(ph, "estimated_row_count", None) if ph is not None else None
+
+
+async def admin_model(request: Request) -> Response:
+    """The read-only Model explorer. Session-gated; a pure GET projection of the served model. Query:
+    `?datasource=` (defaults to the first served), `?area=`, `?view=context`."""
+    import model_store
+
+    admin = current_admin(request)
+    if admin is None:
+        return RedirectResponse("/admin/login", status_code=302)
+    store = _open_store()
+    try:
+        chrome = _admin_chrome(store, admin)
+        datasources = model_store.list_datasources(store) if store is not None else []
+        if not datasources:
+            return HTMLResponse(model_empty_html("", [], **chrome))
+        datasource = request.query_params.get("datasource") or datasources[0]
+        if datasource not in datasources:  # an unknown/stale datasource param → the first served
+            datasource = datasources[0]
+        org = model_store.load_organization(store, datasource)
+        if org is None:
+            return HTMLResponse(model_empty_html(datasource, datasources, **chrome))
+        area_name = request.query_params.get("area")
+        if area_name:
+            area = next((a for a in org.subject_areas if a.name == area_name), None)
+            if area is not None:
+                return HTMLResponse(model_area_html(org, area, datasource, datasources, **chrome))
+        version = model_store.newest_model_version(store, datasource)
+        return HTMLResponse(
+            model_overview_html(org, version, datasource, datasources, **chrome)
+        )
+    finally:
+        if store is not None:
+            store.close()
+
+
 def routes() -> list:
     """The `/admin/*` routes, for the transport to mount. Each is session-gated in the handler (the
     transport adds these paths to the bearer public-skip — they do their own auth, not the MCP one)."""
@@ -751,6 +1020,8 @@ def routes() -> list:
 
     return [
         Route("/admin", admin_home, methods=["GET"]),
+        # Read-only model explorer — GET only, by design (no write path can hide behind /admin/model).
+        Route("/admin/model", admin_model, methods=["GET"]),
         Route("/admin/login", admin_login, methods=["GET", "POST"]),
         Route("/admin/logout", admin_logout, methods=["GET"]),
         # The admin OIDC start (handler lives in oauth_server, with the OIDC machinery). The IdP
@@ -763,6 +1034,7 @@ def routes() -> list:
 
 ADMIN_PATHS = (
     "/admin",
+    "/admin/model",
     "/admin/login",
     "/admin/logout",
     "/admin/oidc/start",

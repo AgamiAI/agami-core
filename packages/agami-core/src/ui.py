@@ -228,7 +228,16 @@ _TABS = (
     ("users", "Users"),
     ("sessions", "Sessions"),
     ("calls", "Tool calls"),
+    ("model", "Model"),
 )
+
+# Most tabs hang off `/admin?tab=`; the read-only Model view has its own contract-named GET endpoint
+# (`/admin/model`) so it's the *only* model surface — no write route can hide behind a shared handler.
+_TAB_HREFS = {"model": "/admin/model"}
+
+
+def _tab_href(key: str) -> str:
+    return _TAB_HREFS.get(key, f"/admin?tab={esc(key)}")
 
 
 def _account_menu(label: str, email: str) -> str:
@@ -254,7 +263,7 @@ def admin_shell(
     `extra` is emitted at the body root before the bar — used for the CSS-only drawer (whose toggle
     checkbox must be a sibling of `.drawer-wrap`)."""
     tabs = "".join(
-        f'<a href="/admin?tab={esc(key)}" class="{"active" if key == active else ""}">{esc(label)}</a>'
+        f'<a href="{_tab_href(key)}" class="{"active" if key == active else ""}">{esc(label)}</a>'
         for key, label in _TABS
     )
     body_html = f"""{extra}<div class="topbar">
