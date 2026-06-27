@@ -179,7 +179,12 @@ def provider_button(key: str, href: str) -> str:
     )
 
 
-_TABS = (("dashboard", "Dashboard"), ("users", "Users"), ("sessions", "Sessions"))
+_TABS = (
+    ("dashboard", "Dashboard"),
+    ("users", "Users"),
+    ("sessions", "Sessions"),
+    ("calls", "Tool calls"),
+)
 
 
 def _account_menu(label: str, email: str) -> str:

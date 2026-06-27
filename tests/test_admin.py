@@ -354,10 +354,12 @@ def test_admin_ui_is_disabled_when_no_admin_configured(env, monkeypatch):
     assert c.get("/admin", follow_redirects=False).headers["location"] == "/admin/login"
 
 
-def test_dashboard_and_sessions_tabs_are_placeholders(client):
+def test_dashboard_tab_is_a_placeholder(client):
+    # Dashboard is still a placeholder; Sessions + Tool calls became real views in ACE-008.
     _login(client)
     assert "Coming soon" in client.get("/admin?tab=dashboard").text
-    assert "Coming soon" in client.get("/admin?tab=sessions").text
+    assert "No sessions yet" in client.get("/admin?tab=sessions").text
+    assert "No tool calls yet" in client.get("/admin?tab=calls").text
 
 
 def test_login_page_redirects_when_already_signed_in(client):
