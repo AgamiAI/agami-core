@@ -70,6 +70,7 @@ write("05-admin-users.html",
 write("06-admin-dashboard.html", admin.dashboard_tab_html(**CHROME))
 
 # The activity views — rendered from the REAL builders + read helpers over a temp store (no drift).
+import os  # noqa: E402
 import tempfile  # noqa: E402
 
 import model_store  # noqa: E402
@@ -77,7 +78,9 @@ from contracts import ToolCallRecord  # noqa: E402
 from model_store import DbActivitySink  # noqa: E402
 from store import Store  # noqa: E402
 
-_s = Store.connect("sqlite://" + tempfile.mktemp(suffix=".db"))
+_fd, _db_path = tempfile.mkstemp(suffix=".db")  # atomic, not the race-prone mktemp
+os.close(_fd)
+_s = Store.connect("sqlite://" + _db_path)
 _s.run_migrations()
 _sink = DbActivitySink(_s)
 _SAMPLE_CALLS = [

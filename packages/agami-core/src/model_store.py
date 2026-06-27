@@ -376,10 +376,13 @@ def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
         "ORDER BY ts DESC LIMIT ?",
         (limit,),
     )
-    sessions: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
+    sessions: dict[Any, dict[str, Any]] = {}
+    order: list[Any] = []
     for r in rows:
-        key = r["thread_id"] or r["id"]
+        # Scope the group by the (audit-grade) actor as well as the (self-reported, untrusted) thread_id:
+        # two different users colliding on one thread_id must NOT blend into a single, misattributed
+        # session. A call with no thread_id stays its own singleton (grouped on its id).
+        key = (r["actor"], r["thread_id"]) if r["thread_id"] else r["id"]
         s = sessions.get(key)
         if s is None:
             s = {"key": key, "thread_id": r["thread_id"], "actor": r["actor"],

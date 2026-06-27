@@ -84,6 +84,18 @@ def test_list_sessions_groups_by_thread_and_degrades(env):
     assert len(singletons) == 1 and singletons[0]["query_count"] == 1  # degraded → ungrouped
 
 
+def test_list_sessions_does_not_blend_different_actors_on_a_colliding_thread(env):
+    # thread_id is self-reported (untrusted); a collision across users must not merge/misattribute them.
+    s = Store.connect(env)
+    _call(s, ts="2026-06-27T10:00:00Z", actor="jordan@example.com", sql="A", success=True, thread_id="shared")
+    _call(s, ts="2026-06-27T10:01:00Z", actor="sam@example.com", sql="B", success=True, thread_id="shared")
+    sessions = model_store.list_sessions(s)
+    s.close()
+    assert len(sessions) == 2
+    assert {x["actor"] for x in sessions} == {"jordan@example.com", "sam@example.com"}
+    assert all(x["query_count"] == 1 for x in sessions)
+
+
 def test_list_tool_calls_is_newest_first(env):
     s = Store.connect(env)
     _call(s, ts="2026-06-27T10:00:00Z", tool_name="list_datasources", actor="a", success=True)
