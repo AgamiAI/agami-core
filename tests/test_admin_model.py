@@ -277,7 +277,10 @@ def test_picker_only_when_multiple_datasources(client, env):
     _login(client)
     assert 'name="datasource"' not in client.get("/admin/model").text  # one → no picker
     _seed(env, "MARKETING")
-    assert 'name="datasource"' in client.get("/admin/model").text  # two → picker
+    html = client.get("/admin/model").text
+    assert 'name="datasource"' in html  # two → picker
+    # The picker form must have a real submit control (no-JS fallback, not only onchange JS).
+    assert 'class="ds-go"' in html and 'type="submit"' in html
 
 
 # --- area landing ------------------------------------------------------------
@@ -416,6 +419,15 @@ def test_md_empty_and_unterminated_fence():
         "```\nopen fence never closed"
     )  # an unterminated fence still renders, dropping nothing
     assert "open fence never closed" in out
+
+
+def test_md_inline_code_is_literal_not_reparsed():
+    # A link or bold inside backticks must stay literal text in a <code> span — not become a live
+    # <a>/<strong> (Copilot finding: code spans were re-parsed after substitution).
+    out = ui.md("Use the syntax `[label](https://example.com)` and `**not bold**`.")
+    assert "<code>[label](https://example.com)</code>" in out
+    assert "<a href" not in out  # the link inside backticks did NOT become live
+    assert "<code>**not bold**</code>" in out and "<strong>" not in out
 
 
 def test_context_page_renders_org_md(client, env):

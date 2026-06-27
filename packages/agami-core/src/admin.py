@@ -858,10 +858,13 @@ def _model_tree_html(
             "</option>"
             for d in datasources
         )
+        # onchange auto-submits for JS users; the Go button is the no-JS fallback (the rest of the
+        # admin UI is JS-free, so the picker keeps a working control without JavaScript too).
         picker = (
             '<form class="ds" method="get" action="/admin/model">'
             '<span class="muted">Datasource</span>'
-            f'<select name="datasource" onchange="this.form.submit()">{opts}</select></form>'
+            f'<select name="datasource" onchange="this.form.submit()">{opts}</select>'
+            '<button type="submit" class="ds-go">Go</button></form>'
         )
     else:
         picker = (

@@ -173,6 +173,8 @@ time{font-variant-numeric:tabular-nums}
 .tree h4{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8a94a8;margin:16px 8px 6px}
 .ds{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:#f7f9fc;font-weight:600;margin-bottom:8px}
 .ds select{border:0;background:transparent;font:inherit;font-weight:600;color:var(--ink);outline:none;width:100%;height:auto}
+.ds-go{flex:none;font:inherit;font-size:12px;font-weight:600;color:var(--brand-600);background:#fff;border:1px solid var(--line);border-radius:7px;padding:3px 9px;cursor:pointer}
+.ds-go:hover{background:#eef3fe;border-color:#cfe0fb}
 .navitem{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-weight:550}
 .navitem:hover{background:#f1f5fd;text-decoration:none}
 .navitem.active{background:#eef3fe;color:var(--brand-600)}
@@ -274,8 +276,16 @@ def esc(value: str | None) -> str:
 
 def _md_inline(s: str) -> str:
     """Inline markdown on an ALREADY-escaped string: inline code, bold, italic, and scheme-checked
-    links. Code is substituted first so `**` inside backticks is left literal."""
-    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    links. Inline-code spans are pulled out FIRST and restored LAST, so their contents stay literal —
+    a `[x](url)` or `**y**` inside backticks is never re-parsed into a live link / bold."""
+    spans: list[str] = []
+
+    def _stash(m: "re.Match[str]") -> str:
+        spans.append(m.group(1))
+        # NUL can't appear in html.escape'd text, so the placeholder can't collide with real content.
+        return f"\x00{len(spans) - 1}\x00"
+
+    s = re.sub(r"`([^`]+)`", _stash, s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![*\w])\*([^*]+)\*(?![*\w])", r"<em>\1</em>", s)
 
@@ -287,7 +297,8 @@ def _md_inline(s: str) -> str:
             return f'<a href="{url}" rel="noopener noreferrer" target="_blank">{text}</a>'
         return text
 
-    return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, s)
+    s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, s)
+    return re.sub(r"\x00(\d+)\x00", lambda m: f"<code>{spans[int(m.group(1))]}</code>", s)
 
 
 def md(text: str) -> str:
