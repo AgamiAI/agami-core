@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
+from contextvars import ContextVar
 from pathlib import Path
 
 import admin
@@ -32,7 +34,33 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
-from tools import SERVER_INSTRUCTIONS, SERVER_NAME, TOOLS, bootstrap_paths, server_version
+from tools import (
+    SERVER_INSTRUCTIONS,
+    SERVER_NAME,
+    TOOLS,
+    bootstrap_paths,
+    record_tool_call,
+    server_version,
+)
+
+# The authenticated user for the in-flight tool call. Set in `handle_mcp` (the raw-ASGI endpoint, which
+# runs in the request's task) so it propagates into the MCP dispatch — the tool handler `_call_tool`
+# only receives (name, arguments), and a contextvar set in the BaseHTTPMiddleware wouldn't reach it.
+_actor_ctx: ContextVar[str | None] = ContextVar("agami_tool_actor", default=None)
+
+
+def _actor_from_scope(scope: dict, auth: AuthProvider) -> str | None:
+    """The authenticated user's subject for this /mcp request: the principal the auth middleware already
+    validated (carried on the ASGI scope state), or — if that didn't propagate — re-validated from the
+    bearer header on the scope (robust fallback). None under presence auth or if absent."""
+    principal = (scope.get("state") or {}).get("principal")
+    if principal is not None:
+        return getattr(principal, "subject", None)
+    for key, value in scope.get("headers", []):
+        if key == b"authorization" and value[:7].lower() == b"bearer ":
+            revalidated = auth.validate_token(value[7:].strip().decode("latin-1"))
+            return getattr(revalidated, "subject", None) if revalidated is not None else None
+    return None
 
 # The brand assets (logo, provider icons, favicon) served at /static — packaged alongside this module.
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -155,8 +183,12 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         # bearer-presence locally.
         if not authz.lower().startswith("bearer "):
             return _unauthenticated(public_base_url(), request)
-        if self._auth.validate_token(authz[7:].strip()) is None:
+        principal = self._auth.validate_token(authz[7:].strip())
+        if principal is None:
             return _unauthenticated(public_base_url(), request)
+        # Carry the validated principal on the ASGI scope state so the /mcp endpoint can stamp the
+        # activity log with the actor (the tool dispatch doesn't get the request).
+        request.state.principal = principal
         # Resolve the org for this request. Single-tenant returns the one configured org regardless
         # of context; nothing downstream consumes it yet (tools key on `datasource`), so this asserts
         # the contract and reserves the seam — it does not add org-scoped behavior.
@@ -215,7 +247,29 @@ def build_server():
         meta = TOOLS.get(name)
         if meta is None:
             raise ValueError(f"Unknown tool: {name}")
-        return [mt.TextContent(type="text", text=meta["handler"](arguments or {}))]
+        # Record every tool call to the admin activity log — timed, attributed to the authenticated
+        # actor, never allowed to break the tool (logging is best-effort + double-guarded).
+        started = time.monotonic()
+        result_text = None
+        raised = False
+        try:
+            result_text = meta["handler"](arguments or {})
+            return [mt.TextContent(type="text", text=result_text)]
+        except Exception:
+            raised = True
+            raise
+        finally:
+            try:
+                record_tool_call(
+                    name=name,
+                    arguments=arguments,
+                    result_text=result_text,
+                    execution_ms=int((time.monotonic() - started) * 1000),
+                    actor=_actor_ctx.get(),
+                    raised=raised,
+                )
+            except Exception:
+                pass
 
     return server
 
@@ -236,12 +290,21 @@ def build_app() -> Starlette:
     if not base.startswith("https://"):
         raise RuntimeError("PUBLIC_BASE_URL must be https:// (OAuth + the Secure admin cookie need TLS).")
     bootstrap_paths()
+    auth_provider = _build_auth_provider()
     session_manager = StreamableHTTPSessionManager(
         app=build_server(), json_response=True, stateless=True
     )
 
     async def handle_mcp(scope, receive, send):
-        await session_manager.handle_request(scope, receive, send)
+        # Set the actor for this request's tool calls, then run the MCP dispatch in the same task so the
+        # contextvar reaches `_call_tool`. Prefer the principal the middleware validated (on scope state);
+        # fall back to re-validating the bearer from the scope headers if it didn't propagate.
+        actor = _actor_from_scope(scope, auth_provider)
+        token = _actor_ctx.set(actor)
+        try:
+            await session_manager.handle_request(scope, receive, send)
+        finally:
+            _actor_ctx.reset(token)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette):
@@ -271,7 +334,7 @@ def build_app() -> Starlette:
         Mount("/mcp", app=handle_mcp),
     ]
     middleware = [
-        Middleware(_AuthMiddleware, resolver=_build_org_resolver(), auth=_build_auth_provider())
+        Middleware(_AuthMiddleware, resolver=_build_org_resolver(), auth=auth_provider)
     ]
     return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 
