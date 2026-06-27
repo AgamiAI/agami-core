@@ -261,9 +261,9 @@ def test_overview_renders_org_and_areas(client, env):
     _login(client)
     html = client.get("/admin/model").text
     assert "acme" in html and "Sales" in html
+    assert "Acme Commerce" in html  # the org description renders
     assert "AOV" in html and "average order value" in html  # glossary
     assert "warehouse" in html and "PostgreSQL" in html  # storage names/types
-    assert "Model" in html  # the tab is present in the shell
 
 
 def test_overview_never_leaks_storage_config(client, env):
@@ -296,8 +296,9 @@ def test_unknown_area_falls_back_to_overview(client, env):
     _seed(env)
     _login(client)
     # A stale/unknown area param must not 500 — it degrades to the datasource overview.
-    html = client.get("/admin/model?datasource=SALES_DATA&area=Nope").text
-    assert "acme" in html and "Subject areas" in html
+    r = client.get("/admin/model?datasource=SALES_DATA&area=Nope")
+    assert r.status_code == 200
+    assert "acme" in r.text and "Subject areas" in r.text
 
 
 # --- table (dataset) page ----------------------------------------------------
@@ -346,13 +347,30 @@ def test_table_page_shows_relationships_and_metrics(client, env):
     _login(client)
     html = client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=orders").text
     assert "Relationships" in html and "customers" in html  # a relationship touching orders
+    assert "many_to_one" in html  # the cardinality renders, not just the table name
     assert "Used by metrics" in html and "revenue" in html  # a metric whose source is orders
+    assert 'class="caveat"' not in html  # orders has no caveats → no stray callout
+
+
+def test_table_with_no_relationships_omits_the_section(client, env):
+    _seed(env)
+    _login(client)
+    # products is in no relationship → the filter must omit the section, not show every relationship.
+    assert "Relationships" not in _products(client)
+
+
+def test_empty_description_renders_a_dash(client, env):
+    _seed(env)
+    _login(client)
+    assert 'class="dash"' in _products(client)  # description-less columns (sku, barcode…) show "—"
 
 
 def test_flat_columns_when_no_authored_groups(client, env):
     _seed(env)
     _login(client)
-    assert 'class="grp"' not in _products(client)  # products authors no column_groups → flat
+    html = _products(client)
+    assert 'class="grp"' not in html  # products authors no column_groups → flat
+    assert 'class="cols"' in html and "supplier_email" in html  # …and the columns actually render
 
 
 def test_grouped_columns_when_authored(client, env):
@@ -369,8 +387,9 @@ def test_unknown_table_falls_back_to_area(client, env):
     _seed(env)
     _login(client)
     # A stale/unknown table param degrades to the area landing, not a 500.
-    html = client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=nope").text
-    assert "Tables" in html and "orders" in html
+    r = client.get("/admin/model?datasource=SALES_DATA&area=Sales&table=nope")
+    assert r.status_code == 200
+    assert "Tables" in r.text and "orders" in r.text
 
 
 # --- domain context (markdown) ----------------------------------------------
@@ -467,5 +486,6 @@ def test_stale_datasource_param_falls_back_to_first(client, env):
     _seed(env, "SALES_DATA")
     _login(client)
     # An unknown datasource param degrades to the first served one, not a 500.
-    html = client.get("/admin/model?datasource=DOES_NOT_EXIST").text
-    assert "acme" in html and "Subject areas" in html
+    r = client.get("/admin/model?datasource=DOES_NOT_EXIST")
+    assert r.status_code == 200
+    assert "acme" in r.text and "Subject areas" in r.text
