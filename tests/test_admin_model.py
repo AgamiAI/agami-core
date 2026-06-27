@@ -391,6 +391,14 @@ def test_md_fenced_code_and_link_scheme_check():
     assert "javascript:" not in out  # a non-http link degrades to plain text, never a live href
 
 
+def test_md_empty_and_unterminated_fence():
+    assert ui.md("") == ""
+    out = ui.md(
+        "```\nopen fence never closed"
+    )  # an unterminated fence still renders, dropping nothing
+    assert "open fence never closed" in out
+
+
 def test_context_page_renders_org_md(client, env):
     _seed(env)
     s = Store.connect(env)
