@@ -322,3 +322,84 @@ class DbActivitySink:
             ),
         )
         self._store.commit()
+
+    def record_tool_call(self, record: Any) -> None:
+        # `success` is a portable 0/1 (no boolean literal across SQLite/Postgres).
+        self._store.execute(
+            "INSERT INTO tool_calls (id, ts, actor, tool_name, datasource, sql, row_count, "
+            "execution_ms, success, error_kind, source, user_question, agent_query, thread_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                uuid4().hex,
+                record.ts,
+                record.actor,
+                record.tool_name,
+                record.datasource,
+                record.sql,
+                record.row_count,
+                record.execution_ms,
+                1 if record.success else 0,
+                record.error_kind,
+                record.source,
+                record.user_question,
+                record.agent_query,
+                record.thread_id,
+            ),
+        )
+        self._store.commit()
+
+
+# ---------------------------------------------------------------------------
+# Read path — the admin activity views (read-only).
+# ---------------------------------------------------------------------------
+
+_TOOL_CALL_COLS = (
+    "id, ts, actor, tool_name, datasource, sql, row_count, execution_ms, success, error_kind, "
+    "user_question, agent_query, thread_id"
+)
+
+
+def list_tool_calls(store: Store, *, limit: int = 200) -> list[dict[str, Any]]:
+    """Recent tool calls, newest first — the audit-grade flat activity view."""
+    return store.query(
+        f"SELECT {_TOOL_CALL_COLS} FROM tool_calls ORDER BY ts DESC LIMIT ?", (limit,)
+    )
+
+
+def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
+    """Group the **query** calls (execute_sql) into sessions for the best-effort Sessions view: same
+    `thread_id` = one session; a call with no `thread_id` (Claude didn't self-report) becomes its own
+    singleton session (grouped on its id), so the view degrades gracefully to ungrouped. Grouping +
+    aggregation are done in Python (portable, no dialect-specific GROUP BY)."""
+    rows = store.query(
+        f"SELECT {_TOOL_CALL_COLS} FROM tool_calls WHERE tool_name = 'execute_sql' "
+        "ORDER BY ts DESC LIMIT ?",
+        (limit,),
+    )
+    sessions: dict[Any, dict[str, Any]] = {}
+    order: list[Any] = []
+    for r in rows:
+        # Scope the group by the (audit-grade) actor as well as the (self-reported, untrusted) thread_id:
+        # two different users colliding on one thread_id must NOT blend into a single, misattributed
+        # session. A call with no thread_id stays its own singleton (grouped on its id).
+        key = (r["actor"], r["thread_id"]) if r["thread_id"] else r["id"]
+        s = sessions.get(key)
+        if s is None:
+            s = {"key": key, "thread_id": r["thread_id"], "actor": r["actor"],
+                 "datasource": r["datasource"], "queries": []}
+            sessions[key] = s
+            order.append(key)
+        s["queries"].append(r)
+    out: list[dict[str, Any]] = []
+    for key in order:
+        s = sessions[key]
+        qs = s["queries"]
+        ts_all = [q["ts"] for q in qs]
+        ms = [q["execution_ms"] for q in qs if q["execution_ms"] is not None]
+        s["started"] = min(ts_all)
+        s["last_activity"] = max(ts_all)
+        s["query_count"] = len(qs)
+        s["error_count"] = sum(1 for q in qs if not q["success"])
+        s["avg_ms"] = round(sum(ms) / len(ms)) if ms else None
+        out.append(s)
+    return out

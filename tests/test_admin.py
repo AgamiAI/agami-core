@@ -93,9 +93,11 @@ def test_every_interpolated_value_is_escaped():
              "last_name": "", "email": '"><img src=x onerror=alert(1)>', "status": "active",
              "oidc_provider": None, "has_password": 0}]
     html = admin.users_tab_html(rows, csrf="t", admin_username=ADMIN_USER)
-    assert "<script>" not in html
+    # The injected payload must be neutralized (the only literal <script> on the page is our own
+    # time-localize script, which is not attacker-controlled).
+    assert "<script>alert(1)" not in html
     assert "<img src=x" not in html
-    assert "&lt;script&gt;" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
 
 def test_admin_login_is_password_only_with_no_marketing_copy():
@@ -354,10 +356,12 @@ def test_admin_ui_is_disabled_when_no_admin_configured(env, monkeypatch):
     assert c.get("/admin", follow_redirects=False).headers["location"] == "/admin/login"
 
 
-def test_dashboard_and_sessions_tabs_are_placeholders(client):
+def test_dashboard_tab_is_a_placeholder(client):
+    # Dashboard is still a placeholder; Sessions + Tool calls are now real views.
     _login(client)
     assert "Coming soon" in client.get("/admin?tab=dashboard").text
-    assert "Coming soon" in client.get("/admin?tab=sessions").text
+    assert "No sessions yet" in client.get("/admin?tab=sessions").text
+    assert "No tool calls yet" in client.get("/admin?tab=calls").text
 
 
 def test_login_page_redirects_when_already_signed_in(client):

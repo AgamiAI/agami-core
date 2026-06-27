@@ -42,6 +42,7 @@ CREDENTIALS_PATH = agami_paths.credentials_path()
 CONFIG_PATH = agami_paths.config_path()
 QUERY_LOG = agami_paths.query_log_path()
 FEEDBACK_LOG = AGAMI_LOCAL / "feedback.jsonl"
+TOOL_CALL_LOG = AGAMI_LOCAL / "tool_calls.jsonl"
 
 SERVER_NAME = "agami"
 
@@ -75,7 +76,10 @@ SERVER_INSTRUCTIONS = (
     "PII: a column marked `sensitive: true` restricts OUTPUT, not the query — you MAY "
     "COUNT/COUNT(DISTINCT)/filter/GROUP BY/JOIN on it, but never SELECT its raw per-row values. "
     "'unique emails' → COUNT(DISTINCT email). To disambiguate identical labels, project the "
-    "non-sensitive id. (execute_sql enforces this and errors on a raw sensitive projection.)"
+    "non-sensitive id. (execute_sql enforces this and errors on a raw sensitive projection.)\n"
+    "Activity log: on execute_sql, pass `user_question` (the user's verbatim question) and a "
+    "`thread_id` you generate once per conversation and reuse on every call — so a deployment admin "
+    "can see what was asked and group a conversation's queries. Best-effort; omit if unknown."
 )
 
 
@@ -85,13 +89,14 @@ def bootstrap_paths() -> None:
     installs never create ~/.agami, so the migration is a no-op once there's nothing to move (it's
     a backward-compat shim, safe to drop in a later cleanup). Every entrypoint calls this so the
     paths reflect the resolved (possibly migrated) artifacts dir."""
-    global AGAMI_LOCAL, CREDENTIALS_PATH, CONFIG_PATH, QUERY_LOG, FEEDBACK_LOG
+    global AGAMI_LOCAL, CREDENTIALS_PATH, CONFIG_PATH, QUERY_LOG, FEEDBACK_LOG, TOOL_CALL_LOG
     agami_paths.bootstrap()
     AGAMI_LOCAL = agami_paths.local_dir()
     CREDENTIALS_PATH = agami_paths.credentials_path()
     CONFIG_PATH = agami_paths.config_path()
     QUERY_LOG = agami_paths.query_log_path()
     FEEDBACK_LOG = AGAMI_LOCAL / "feedback.jsonl"
+    TOOL_CALL_LOG = AGAMI_LOCAL / "tool_calls.jsonl"
 
 
 def _load_config() -> dict[str, Any]:
@@ -964,6 +969,74 @@ def _record_feedback(rec: dict[str, Any]) -> str | None:
         store.close()
 
 
+def record_tool_call(
+    *,
+    name: str,
+    arguments: dict[str, Any] | None,
+    result_text: str | None,
+    execution_ms: int | None,
+    actor: str | None,
+    raised: bool = False,
+) -> None:
+    """Record one MCP tool call to the activity log (the transport calls this for **every** tool). The
+    audit-grade fields are server-observed; `success`/`row_count`/`error_kind` are derived from the
+    result (execute_sql returns an `{"error": ...}` body on a bad query without raising). The self-report
+    fields (`user_question`/`agent_query`/`thread_id`) are whatever Claude supplied — may be None.
+    **Best-effort and never raises** — a logging failure must not break the tool."""
+    args = arguments or {}
+    success, row_count, error_kind = True, None, None
+    if raised:
+        success, error_kind = False, "exception"
+    else:
+        try:
+            parsed = json.loads(result_text) if result_text else None
+            if isinstance(parsed, dict):
+                if isinstance(parsed.get("error"), dict):
+                    success = False
+                    error_kind = parsed["error"].get("kind") or "error"
+                row_count = parsed.get("row_count")
+        except (ValueError, TypeError):
+            pass
+    _record_tool_call(
+        {
+            "ts": _now_iso(),
+            "tool_name": name,
+            "source": "mcp_server",
+            "actor": actor,
+            "datasource": args.get("datasource"),
+            "sql": args.get("sql"),
+            "row_count": row_count if isinstance(row_count, int) else None,
+            "execution_ms": execution_ms,
+            "success": success,
+            "error_kind": error_kind,
+            "user_question": args.get("user_question"),
+            "agent_query": args.get("raw_query"),  # the existing arg is the agent's framing of the query
+            "thread_id": args.get("thread_id"),
+        }
+    )
+
+
+def _record_tool_call(rec: dict[str, Any]) -> None:
+    """Write a tool-call record through the DB sink (AGAMI_DB_URL) or the local jsonl. Wrapped so the
+    whole thing is best-effort — even opening the store can't surface an error to the caller."""
+    try:
+        from store import Store
+
+        store = Store.from_env()
+        if store is None:
+            _append_jsonl(TOOL_CALL_LOG, rec)
+            return
+        try:
+            from contracts import ToolCallRecord
+            from model_store import DbActivitySink
+
+            DbActivitySink(store).record_tool_call(ToolCallRecord(**rec))
+        finally:
+            store.close()
+    except Exception:
+        pass  # best-effort: never fail the tool because logging failed
+
+
 # ---------------------------------------------------------------------------
 # Tool registry (name → (handler, description, inputSchema))
 # ---------------------------------------------------------------------------
@@ -1067,7 +1140,17 @@ TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "raw_query": {
                     "type": "string",
-                    "description": "The user's NL question (recorded in the query log).",
+                    "description": "Your (the agent's) framing of this query — recorded for the admin activity log.",
+                },
+                "user_question": {
+                    "type": "string",
+                    "description": "The user's ORIGINAL question, verbatim, that led to this query — "
+                    "recorded so an admin can see what was asked. Pass it whenever you have it.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": "A short id you generate ONCE per conversation and reuse on every "
+                    "tool call in it — lets the admin group a conversation's queries into one session.",
                 },
                 "max_rows": {"type": "integer", "description": "Row cap (clamped 1–10000)."},
             },

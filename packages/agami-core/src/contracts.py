@@ -217,3 +217,22 @@ class FeedbackRecord(_Contract):
     rating: str
     source: str
     notes: str | None = None
+
+
+class ToolCallRecord(_Contract):
+    """One MCP tool call. Audit-grade fields (server-observed) are required-ish; the self-report fields
+    (user_question / agent_query / thread_id) are Claude-supplied and nullable (best-effort)."""
+
+    ts: str
+    tool_name: str
+    source: str
+    actor: str | None = None
+    datasource: str | None = None
+    sql: str | None = None
+    row_count: int | None = None
+    execution_ms: int | None = None
+    success: bool = True
+    error_kind: str | None = None
+    user_question: str | None = None
+    agent_query: str | None = None
+    thread_id: str | None = None
