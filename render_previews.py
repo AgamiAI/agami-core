@@ -68,7 +68,40 @@ SETUP_LINKS = {
 write("05-admin-users.html",
       admin.users_tab_html(USERS, csrf="t0ken", ok="User added.", setup_links=SETUP_LINKS, **ADMIN))
 write("06-admin-dashboard.html", admin.dashboard_tab_html(**CHROME))
-write("07-admin-sessions.html", admin.sessions_tab_html(**CHROME))
+
+# The activity views — rendered from the REAL builders + read helpers over a temp store (no drift).
+import tempfile  # noqa: E402
+
+import model_store  # noqa: E402
+from contracts import ToolCallRecord  # noqa: E402
+from model_store import DbActivitySink  # noqa: E402
+from store import Store  # noqa: E402
+
+_s = Store.connect("sqlite://" + tempfile.mktemp(suffix=".db"))
+_s.run_migrations()
+_sink = DbActivitySink(_s)
+_SAMPLE_CALLS = [
+    dict(ts="2026-06-27T10:39:02Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
+         datasource="SALES_DATA", sql="SELECT id, customer_id, amount\nFROM orders\nORDER BY created_at DESC\nLIMIT 10",
+         row_count=10, execution_ms=73, success=True, user_question="Show me the 10 most recent orders",
+         agent_query="recent orders", thread_id="t1"),
+    dict(ts="2026-06-27T10:40:55Z", tool_name="get_datasource_schema", source="mcp_server",
+         actor="jordan@example.com", datasource="SALES_DATA", execution_ms=12, success=True),
+    dict(ts="2026-06-27T10:42:17Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
+         datasource="SALES_DATA", sql="SELECT region, SUM(amount) AS revenue\nFROM orders\nGROUP BY region\nORDER BY revenue DESC",
+         row_count=5, execution_ms=84, success=True, user_question="What's our revenue by region this quarter?",
+         agent_query="revenue by region", thread_id="t1"),
+    dict(ts="2026-06-27T10:41:50Z", tool_name="execute_sql", source="mcp_server", actor="sam@example.com",
+         datasource="SALES_DATA", sql="SELECT * FROM ordrs", execution_ms=31, success=False,
+         error_kind="syntax", thread_id="t2"),
+    dict(ts="2026-06-27T10:40:03Z", tool_name="list_datasources", source="mcp_server",
+         actor="jordan@example.com", execution_ms=3, success=True),
+]
+for _c in _SAMPLE_CALLS:
+    _sink.record_tool_call(ToolCallRecord(**_c))
+write("07-admin-sessions.html", admin.sessions_tab_html(model_store.list_sessions(_s), **CHROME))
+write("15-tool-calls.html", admin.calls_tab_html(model_store.list_tool_calls(_s), **CHROME))
+_s.close()
 write("08-not-admin.html", admin.not_admin_body_html(BASE))
 write("09-landing.html", admin.landing_body_html(BASE))
 write("10-mcp-in-browser.html", admin.mcp_landing_body_html(BASE))

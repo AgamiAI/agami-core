@@ -112,6 +112,9 @@ The admin console also has two read-only activity tabs:
   degrades to ungrouped and the question shows as not reported. Treat those two fields as a hint, not a
   record.
 
+The `tool_calls` log grows one row per call and has **no automatic retention** — it's your local store,
+so prune it on your own schedule if it gets large.
+
 ### Local end-to-end test (HTTPS via a tunnel)
 
 OAuth and the `Secure` admin cookie need HTTPS, so expose the local server through a tunnel:

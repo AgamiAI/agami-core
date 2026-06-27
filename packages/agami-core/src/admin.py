@@ -203,10 +203,11 @@ def _utc(ts: str | None) -> str:
     return f'<time data-utc="{ui.esc(ts)}">{ui.esc(ts)}</time>'
 
 
-def _call_drawer(r: dict[str, Any]) -> str:
+def _call_drawer(r: dict[str, Any], idx: int) -> str:
     """A per-call detail drawer (toggled by the row's Open). The question/agent-query are self-reported,
-    so they're labelled as such; SQL/question are attacker-influenceable → escaped."""
-    cid = f'call-{ui.esc(r["id"])}'
+    so they're labelled as such; SQL/question are attacker-influenceable → escaped. The DOM id is the
+    row index (never user data), so a crafted value can't break the toggle."""
+    cid = f"call-{idx}"
     rows = [
         ("User question", r.get("user_question"), "self-reported"),
         ("Agent query", r.get("agent_query"), "self-reported"),
@@ -240,11 +241,10 @@ def _call_drawer(r: dict[str, Any]) -> str:
 def calls_tab_html(rows: list[dict[str, Any]], *, admin_label: str = "", admin_email: str = "") -> str:
     """The Tool calls tab: every MCP call, newest first, each with a detail drawer."""
     body_rows, drawers = "", ""
-    for r in rows:
+    for i, r in enumerate(rows):
         has_detail = bool(r.get("sql") or r.get("user_question") or r.get("agent_query"))
         open_ = (
-            f'<label for="call-{ui.esc(r["id"])}" class="btn tiny secondary">Open</label>'
-            if has_detail else ""
+            f'<label for="call-{i}" class="btn tiny secondary">Open</label>' if has_detail else ""
         )
         body_rows += (
             "<tr>"
@@ -259,7 +259,7 @@ def calls_tab_html(rows: list[dict[str, Any]], *, admin_label: str = "", admin_e
             "</tr>"
         )
         if has_detail:
-            drawers += _call_drawer(r)
+            drawers += _call_drawer(r, i)
     empty = '<p class="muted">No tool calls yet.</p>' if not rows else ""
     panel = f"""<p class="muted" style="margin-bottom:14px">Every tool call, newest first.</p>{empty}
 <div class="table-wrap"><table>
@@ -269,8 +269,8 @@ def calls_tab_html(rows: list[dict[str, Any]], *, admin_label: str = "", admin_e
                           admin_email=admin_email, extra=drawers)
 
 
-def _session_drawer(s: dict[str, Any]) -> str:
-    sid = f'sess-{ui.esc(s["key"])}'
+def _session_drawer(s: dict[str, Any], idx: int) -> str:
+    sid = f"sess-{idx}"  # DOM id is the row index, never the (self-reported, attacker-influenceable) key
     cards = ""
     for q in s["queries"]:
         question = q.get("user_question") or "(no question reported)"
@@ -308,20 +308,20 @@ def sessions_tab_html(
     `thread_id`; ungrouped singletons otherwise). Each row opens to its queries + their NL questions."""
     sessions = sessions or []
     body_rows, drawers = "", ""
-    for s in sessions:
+    for i, s in enumerate(sessions):
         body_rows += (
             "<tr>"
-            f'<td><label for="sess-{ui.esc(s["key"])}" style="cursor:pointer;color:var(--brand)">{_utc(s["started"])}</label></td>'
+            f'<td><label for="sess-{i}" style="cursor:pointer;color:var(--brand)">{_utc(s["started"])}</label></td>'
             f'<td><strong>{ui.esc(s.get("actor") or "—")}</strong></td>'
             f'<td class="muted">{ui.esc(s.get("datasource") or "—")}</td>'
             f'<td class="muted">{s["query_count"]}</td>'
             f'<td class="muted">{s["error_count"] or "—"}</td>'
             f'<td class="muted">{(str(s["avg_ms"]) + " ms") if s.get("avg_ms") is not None else "—"}</td>'
             f"<td>{_utc(s['last_activity'])}</td>"
-            f'<td style="text-align:right"><label for="sess-{ui.esc(s["key"])}" class="btn tiny secondary">Open</label></td>'
+            f'<td style="text-align:right"><label for="sess-{i}" class="btn tiny secondary">Open</label></td>'
             "</tr>"
         )
-        drawers += _session_drawer(s)
+        drawers += _session_drawer(s, i)
     empty = '<p class="muted">No sessions yet.</p>' if not sessions else ""
     panel = f"""<p class="muted" style="margin-bottom:14px">Queries grouped into conversations (best-effort).</p>{empty}
 <div class="table-wrap"><table>

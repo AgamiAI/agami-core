@@ -69,6 +69,8 @@ def test_list_sessions_groups_by_thread_and_degrades(env):
           thread_id="t2", execution_ms=30)
     _call(s, ts="2026-06-27T10:30:00Z", actor="morgan@example.com", sql="D", success=True,
           thread_id=None, execution_ms=40)  # no thread → its own singleton session
+    _call(s, ts="2026-06-27T10:50:00Z", actor="pat@example.com", sql="E", success=True,
+          thread_id="t3")  # no latency recorded → avg_ms must be None
     sessions = model_store.list_sessions(s)
     s.close()
     by_thread = {x["thread_id"]: x for x in sessions if x["thread_id"]}
@@ -76,6 +78,7 @@ def test_list_sessions_groups_by_thread_and_degrades(env):
     assert by_thread["t1"]["started"] == "2026-06-27T10:39:00Z"
     assert by_thread["t1"]["last_activity"] == "2026-06-27T10:42:00Z"
     assert by_thread["t1"]["avg_ms"] == 15
+    assert by_thread["t3"]["avg_ms"] is None  # all-null latency degrades cleanly
     assert by_thread["t2"]["query_count"] == 1
     singletons = [x for x in sessions if x["thread_id"] is None]
     assert len(singletons) == 1 and singletons[0]["query_count"] == 1  # degraded → ungrouped
