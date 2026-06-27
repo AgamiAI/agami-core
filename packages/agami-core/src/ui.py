@@ -247,7 +247,8 @@ details.grp>summary:hover{background:#f7f9fc}
 details.grp .gname{font-weight:680;font-size:13.5px}
 details.grp .gdesc{color:var(--muted);font-size:12.5px}
 details.grp .gn{margin-left:auto;font-size:11px;color:#8a94a8;background:#eef1f7;border:1px solid var(--line);border-radius:20px;padding:1px 9px}
-details.grp .cols{border-top:1px solid var(--line)}
+details.grp .cols,details.grp>.rel:first-of-type{border-top:1px solid var(--line)}
+details.grp>.rel{padding-left:18px;padding-right:18px}
 details.showmore>summary{cursor:pointer;color:var(--brand);font-size:12.5px;font-weight:600;padding:11px 12px;list-style:none}
 details.showmore>summary::-webkit-details-marker{display:none}
 .rel{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}

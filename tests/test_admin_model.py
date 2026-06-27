@@ -464,6 +464,92 @@ def test_cross_area_objects_surface_on_overview(client, env):
     assert "Cross-area entities" in html and "company" in html
 
 
+# --- cross-area relationships view -------------------------------------------
+
+XREL_ORG = {
+    "organization": "acme",
+    "storage_connections": [{"name": "c", "storage_type": "PostgreSQL"}],
+    "subject_areas": [
+        {"name": "finance", "tables": [], "tables_defined": []},
+        {"name": "billing", "tables": [], "tables_defined": []},
+        {"name": "crm", "tables": [], "tables_defined": []},
+    ],
+    "cross_subject_area_relationships": [
+        {
+            "from_table": "revenue",
+            "to_table": "subscriptions",
+            "from_column": "sub_id",
+            "to_column": "id",
+            "from_schema": "finance",
+            "to_schema": "billing",
+            "join_type": "LEFT",
+            "relationship": "many_to_one",
+            "confidence": "proposed",
+            "review_state": "approved",
+            "from_subject_area": "finance",
+            "to_subject_area": "billing",
+        },
+        {
+            "from_table": "revenue",
+            "to_table": "customers",
+            "from_column": "cust_id",
+            "to_column": "id",
+            "from_schema": "finance",
+            "to_schema": "billing",
+            "join_type": "LEFT",
+            "relationship": "many_to_one",
+            "confidence": "proposed",
+            "review_state": "approved",
+            "from_subject_area": "finance",
+            "to_subject_area": "billing",
+        },
+        {
+            "from_table": "invoice",
+            "to_table": "account",
+            "from_column": "acct_id",
+            "to_column": "id",
+            "from_schema": "billing",
+            "to_schema": "crm",
+            "join_type": "LEFT",
+            "relationship": "many_to_one",
+            "confidence": "confirmed",
+            "review_state": "approved",
+            "from_subject_area": "billing",
+            "to_subject_area": "crm",
+        },
+    ],
+}
+
+
+def test_relationships_node_only_when_cross_rels_exist(client, env):
+    _seed(env)  # the demo ORG has no cross-area relationships
+    _login(client)
+    assert "view=relationships" not in client.get("/admin/model").text  # no dead node
+    _seed(env, "XR", XREL_ORG)
+    assert "view=relationships" in client.get("/admin/model?datasource=XR").text  # node appears
+
+
+def test_relationships_view_groups_by_area_pair(client, env):
+    _seed(env, "XR", XREL_ORG)
+    _login(client)
+    html = client.get("/admin/model?datasource=XR&view=relationships").text
+    assert "Cross-area relationships" in html
+    assert "finance" in html and "billing" in html and "crm" in html  # the area-pairs
+    assert "revenue" in html and "subscriptions" in html  # a schema-qualified endpoint pair
+    assert "many_to_one" in html  # the cardinality
+    # finance→billing has 2 rels, billing→crm has 1 → grouped (3 total, 2 groups)
+    assert html.count('class="grp"') == 2
+    assert html.count('class="rel"') == 3
+
+
+def test_relationships_view_empty_when_none(client, env):
+    _seed(env)  # demo: no cross-area rels — reachable by direct URL, must not 500
+    _login(client)
+    r = client.get("/admin/model?datasource=SALES_DATA&view=relationships")
+    assert r.status_code == 200
+    assert "No cross-area relationships" in r.text
+
+
 # --- odds and ends -----------------------------------------------------------
 
 

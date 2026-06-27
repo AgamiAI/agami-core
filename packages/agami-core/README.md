@@ -127,6 +127,8 @@ catalog: a browse rail (datasource → subject area → table) and one page at a
   carry signal (**PK / FK / sensitive / unit / enum / caveat**). Trust is shown as a single table-level
   **confidence** badge; **caveats** (the domain gotchas) are elevated to a callout; wide tables collapse
   behind "show all N", and tables that author `column_groups` render those as collapsible sections,
+- a **Relationships** page (when the model has cross-area joins) — the org-level relationships that
+  span subject areas, **grouped by area-pair**, so the cross-area topology is readable in one place,
 - a **domain-context** page (your `ORGANIZATION.md`, rendered as safe markdown).
 
 It is **read-only by construction** — a single GET endpoint, no write path. Editing the model stays

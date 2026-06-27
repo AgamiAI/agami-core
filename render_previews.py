@@ -217,6 +217,18 @@ _MODEL_ORG = {
             "relationships": [],
         },
     ],
+    # Cross-area joins (Sales → Catalog) — surfaced in the Relationships browse view, grouped by pair.
+    "cross_subject_area_relationships": [
+        {"from_table": "orders", "to_table": "products", "from_column": "product_id",
+         "to_column": "id", "from_schema": "public", "to_schema": "public", "join_type": "LEFT",
+         "relationship": "many_to_one", "confidence": "inferred", "review_state": "unreviewed",
+         "from_subject_area": "Sales", "to_subject_area": "Catalog"},
+        {"from_table": "orders", "to_table": "inventory", "from_column": "warehouse_id",
+         "to_column": "location_id", "from_schema": "public", "to_schema": "public",
+         "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
+         "review_state": "unreviewed",
+         "from_subject_area": "Sales", "to_subject_area": "Catalog"},
+    ],
 }
 _ORG_MD = (
     "# About Acme Commerce\n\n"
@@ -246,6 +258,8 @@ write("19-model-table-grouped.html",
 write("20-model-context.html",
       admin.model_context_html(_org, model_store.load_memory(_s, "SALES_DATA"), "SALES_DATA", _dss,
                                **CHROME))
+write("21-model-relationships.html",
+      admin.model_relationships_html(_org, "SALES_DATA", _dss, **CHROME))
 _s.close()
 write("08-not-admin.html", admin.not_admin_body_html(BASE))
 write("09-landing.html", admin.landing_body_html(BASE))
