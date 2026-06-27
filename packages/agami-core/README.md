@@ -79,9 +79,24 @@ A deployment is one host (`PUBLIC_BASE_URL`). Everything lives under it:
   refused — the pin closes IdP-confusion). An `/mcp` bearer token is useless here (different
   credential). Unset `AGAMI_ADMIN_USERNAME` ⇒ the admin console is disabled entirely.
 
-The admin adds a teammate by **email + name**; the teammate then signs in at the connector. (Letting
-that teammate choose their own sign-in method on first login — Google/Microsoft or a self-set
-password — is the next increment.)
+### Onboarding a teammate
+
+The admin adds a teammate by **email + name** (a *pending* user). How they finish setting up follows
+the deployment's **single auth method** — uniform for everyone, set by what you configured:
+
+- **OIDC deployment** (a Google/Microsoft client is configured): the teammate just adds `{base}/mcp` to
+  Claude and signs in with that provider — the IdP verifies their email and binds the account on first
+  login. No link to share.
+- **Password deployment** (no OIDC configured): the admin **copies the teammate's setup link** from the
+  Users tab and shares it out-of-band; the teammate opens it and sets their own password. The link is a
+  signed, time-boxed token and is single-use (it stops working once the account is set up).
+
+The login surfaces show only the configured method (the admin keeps a password **break-glass** fallback
+on `/admin/login`).
+
+> **Trust note.** OIDC onboarding binds the account to whoever first proves the teammate's email at the
+> configured IdP — so add a teammate by an email the *right* person controls there. The setup link and
+> the other pre-auth endpoints aren't rate-limited in-process; put them behind your proxy/LB if exposed.
 
 ### Local end-to-end test (HTTPS via a tunnel)
 

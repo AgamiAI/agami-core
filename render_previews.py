@@ -16,6 +16,7 @@ sys.path.insert(0, str(PKG))
 
 import admin  # noqa: E402
 import oauth_server  # noqa: E402
+import onboarding  # noqa: E402
 
 OUT = ROOT / "previews"
 OUT.mkdir(exist_ok=True)
@@ -58,13 +59,23 @@ write(
     oauth_server.login_body_html(OAUTH, error="Invalid email or password.", providers=("google", "microsoft"), wrap=True),
 )
 write("04-admin-login.html", admin.admin_login_body_html(provider="google"))
-write("05-admin-users.html", admin.users_tab_html(USERS, csrf="t0ken", ok="User added.", **ADMIN))
+# In a password deployment the roster shows a copy-able setup link per pending user.
+SETUP_LINKS = {
+    u["username"]: f"{BASE}/claim?token=eyJhbGciOi.SAMPLE-SETUP-TOKEN.xyz"
+    for u in USERS
+    if onboarding.is_pending(u)
+}
+write("05-admin-users.html",
+      admin.users_tab_html(USERS, csrf="t0ken", ok="User added.", setup_links=SETUP_LINKS, **ADMIN))
 write("06-admin-dashboard.html", admin.dashboard_tab_html(**CHROME))
 write("07-admin-sessions.html", admin.sessions_tab_html(**CHROME))
 write("08-not-admin.html", admin.not_admin_body_html(BASE))
 write("09-landing.html", admin.landing_body_html(BASE))
 write("10-mcp-in-browser.html", admin.mcp_landing_body_html(BASE))
 write("11-not-authorized.html", admin.not_authorized_body_html("morgan@example.com"))
+write("12-setup-password.html", onboarding.setup_page_html("eyJhbGciOi.SAMPLE.xyz"))
+write("13-setup-done.html", onboarding.setup_done_html(BASE))
+write("14-setup-invalid.html", onboarding.setup_invalid_html())
 
 print(f"Wrote {len(list(OUT.glob('*.html')))} previews to {OUT}/")
 for p in sorted(OUT.glob("*.html")):

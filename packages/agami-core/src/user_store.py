@@ -99,6 +99,34 @@ def bind_oidc_subject(store: Store, username: str, subject: str) -> None:
     store.commit()
 
 
+def claim_pending_oidc(store: Store, username: str, provider: str, subject: str) -> int:
+    """A **pending** user (no password, no provider) adopts an OIDC provider + subject on first login.
+    Guarded so it fires ONLY while still pending — if a password was set (a password deployment) or
+    another provider already bound, the WHERE matches nothing and this no-ops; the caller re-reads and
+    rejects rather than logging in against an unexpected binding. Returns the row count (0 ⇒ not
+    pending / not claimable)."""
+    cur = store.execute(
+        "UPDATE users SET oidc_provider = ?, oidc_subject = ? "
+        "WHERE username = ? AND oidc_provider IS NULL AND password_hash IS NULL",
+        (provider, subject, username),
+    )
+    store.commit()
+    return cur.rowcount
+
+
+def claim_pending_password(store: Store, username: str, password: str) -> int:
+    """A **pending** user sets their own password (a password deployment, via the admin setup link).
+    Guarded so it fires ONLY while still pending — if an OIDC provider already bound (or a password was
+    already set), the WHERE matches nothing and this no-ops. Returns the row count (0 ⇒ not claimable)."""
+    cur = store.execute(
+        "UPDATE users SET password_hash = ? "
+        "WHERE username = ? AND password_hash IS NULL AND oidc_provider IS NULL",
+        (hash_password(password), username),
+    )
+    store.commit()
+    return cur.rowcount
+
+
 def get_user_by_email(store: Store, email: str) -> dict[str, Any] | None:
     """Look up a user by email — the onboarded-only lookup OIDC uses. Case-insensitive (emails are
     stored lowercased) and one-to-one (the email index is UNIQUE)."""

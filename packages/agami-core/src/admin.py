@@ -114,6 +114,21 @@ or a password they set the first time — and can then use this agami server fro
 </div>"""
 
 
+def _signin_cell(user: dict[str, Any], setup_links: dict[str, str]) -> str:
+    """The Sign-in column: the user's method, plus — for a *pending* user in a password deployment —
+    a copy-able setup link the admin shares out-of-band (the page is session-gated, admin-only)."""
+    sign_in = user.get("oidc_provider") or ("password" if user.get("has_password") else "not set yet")
+    link = setup_links.get(user.get("username", ""))
+    extra = (
+        f'<details class="setup"><summary>Setup link</summary>'
+        f'<input class="code" readonly value="{ui.esc(link)}" style="width:100%;margin-top:6px">'
+        f"</details>"
+        if link
+        else ""
+    )
+    return f'<td class="muted">{ui.esc(sign_in)}{extra}</td>'
+
+
 def users_tab_html(
     users: list[dict[str, Any]],
     csrf: str,
@@ -121,18 +136,20 @@ def users_tab_html(
     admin_username: str = "",
     admin_email: str = "",
     admin_label: str = "",
+    setup_links: dict[str, str] | None = None,
     error: str = "",
     ok: str = "",
 ) -> str:
-    """The Users tab: a roster table + an 'Add user' button that opens the drawer."""
+    """The Users tab: a roster table + an 'Add user' button that opens the drawer. `setup_links`
+    (username → URL) attaches a copy-able setup link to each pending row (password deployments)."""
+    setup_links = setup_links or {}
     rows = ""
     for u in users:
-        sign_in = u.get("oidc_provider") or ("password" if u.get("has_password") else "not set yet")
         rows += (
             "<tr>"
             f'<td><strong>{ui.esc(_full_name(u))}</strong></td>'
             f'<td class="muted">{ui.esc(u.get("email") or "—")}</td>'
-            f'<td class="muted">{ui.esc(sign_in)}</td>'
+            f"{_signin_cell(u, setup_links)}"
             f"<td>{_status_pill(u['status'])}</td>"
             f'<td style="text-align:right">{_row_action(u, csrf, admin_username)}</td>'
             "</tr>"
@@ -482,8 +499,27 @@ async def admin_home(request: Request) -> Response:
     ok = _OK_FLASH.get(request.query_params.get("ok", ""), "")
     err = _ERR_FLASH.get(request.query_params.get("err", ""), "")
     return HTMLResponse(
-        users_tab_html(users, csrf, admin_username=admin, ok=ok, error=err, **chrome)
+        users_tab_html(
+            users, csrf, admin_username=admin, setup_links=_setup_links(users), ok=ok, error=err, **chrome
+        )
     )
+
+
+def _setup_links(users: list[dict[str, Any]]) -> dict[str, str]:
+    """Per-pending-user setup links — but only in a **password** deployment (no OIDC configured). When
+    an OIDC provider is configured, teammates onboard by signing in with it, so no link is offered."""
+    import oidc  # lazy: the egress module, server-only
+
+    if oidc.available_providers():
+        return {}
+    import onboarding
+
+    base = _base_url()
+    return {
+        u["username"]: f"{base}/claim?token={onboarding.mint_setup_token(u['username'])}"
+        for u in users
+        if onboarding.is_pending(u)
+    }
 
 
 def _valid_email(email: str) -> bool:

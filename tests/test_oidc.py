@@ -474,6 +474,65 @@ def test_subject_tofu_binds_then_enforces(env):
     s.close()
 
 
+def test_connector_login_shows_only_the_configured_method(env, monkeypatch):
+    p = {"client_id": CLIENT_ID, "redirect_uri": REDIRECT, "code_challenge": CHALLENGE, "state": "x"}
+    # OIDC deployment (google configured by the fixture): providers only, no password surface.
+    html = _client().get("/oauth/authorize", params=p).text
+    assert "Continue with Google" in html and 'name="password"' not in html
+    # Password deployment: clear OIDC → the password form, no provider buttons.
+    monkeypatch.delenv("AGAMI_OIDC_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("AGAMI_OIDC_GOOGLE_CLIENT_SECRET", raising=False)
+    html2 = _client().get("/oauth/authorize", params=p).text
+    assert 'name="password"' in html2 and "Continue with Google" not in html2
+
+
+def test_connector_password_post_is_refused_in_an_oidc_deployment(env):
+    # The method-gating is enforced server-side, not just hidden: a *correct* password POST issues no
+    # code when an OIDC provider is configured (the gate fires before authenticate).
+    s = Store.from_env()
+    user_store.create_user(s, username="pat@example.com", email="pat@example.com", password="pat-pw-123456")
+    s.close()
+    r = _client().post(
+        "/oauth/authorize",
+        data={"username": "pat@example.com", "password": "pat-pw-123456", "redirect_uri": REDIRECT,
+              "client_id": CLIENT_ID, "code_challenge": CHALLENGE, "state": "x"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 200 and "Continue with Google" in r.text  # re-rendered login, no auth code
+
+
+def test_oidc_bound_user_cannot_then_set_a_password(env):
+    # First-claim-locks the other direction: once OIDC-bound, the password claim guard no-ops.
+    s = Store.from_env()
+    user_store.create_user(s, username="newbie@example.com", email="newbie@example.com", password=None)
+    assert _resolve_oidc_user(s, "google", Identity("newbie@example.com", "sub-1")) == "newbie@example.com"
+    assert user_store.claim_pending_password(s, "newbie@example.com", "late-pw-12345") == 0
+    s.close()
+
+
+def test_pending_user_binds_on_first_oidc_login(env):
+    # A pending teammate (no password, no provider) adopts the provider + subject on first OIDC login.
+    s = Store.from_env()
+    user_store.create_user(s, username="newbie@example.com", email="newbie@example.com", password=None)
+    assert _resolve_oidc_user(s, "google", Identity("newbie@example.com", "sub-1")) == "newbie@example.com"
+    row = user_store.get_user(s, "newbie@example.com")
+    assert row["oidc_provider"] == "google" and row["oidc_subject"] == "sub-1"
+    # bound now: same provider+subject still resolves; a different provider for the email is refused
+    assert _resolve_oidc_user(s, "google", Identity("newbie@example.com", "sub-1")) == "newbie@example.com"
+    assert _resolve_oidc_user(s, "microsoft", Identity("newbie@example.com", "ms-sub")) is None
+    s.close()
+
+
+def test_password_user_is_not_a_pending_oidc_claim(env):
+    # A password user (a password deployment) is NOT pending — an OIDC login for that email is refused,
+    # never silently binds a provider onto a password account.
+    s = Store.from_env()
+    user_store.create_user(s, username="pat@example.com", email="pat@example.com", password="pat-pw-1234")
+    assert _resolve_oidc_user(s, "google", Identity("pat@example.com", "sub-1")) is None
+    assert user_store.get_user(s, "pat@example.com")["oidc_provider"] is None  # unchanged
+    s.close()
+
+
 def test_demo_signup_off_rejects_unknown_email(env):
     s = Store.from_env()  # AGAMI_PUBLIC_SIGNUP unset → fail-closed
     assert _resolve_oidc_user(s, "google", Identity("stranger@example.com", "s")) is None

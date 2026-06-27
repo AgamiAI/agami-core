@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 
 import admin
+import onboarding
 from oss_adapters import PresenceAuthProvider, SingleTenantOrgResolver
 from ports import AuthProvider, Org
 from starlette.applications import Starlette
@@ -131,7 +132,7 @@ def _is_public_path(path: str) -> bool:
         return True
     if path == "/":
         return True
-    return path in _OAUTH_PATHS or path in admin.ADMIN_PATHS
+    return path in _OAUTH_PATHS or path in admin.ADMIN_PATHS or path in onboarding.PUBLIC_PATHS
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):
@@ -265,6 +266,7 @@ def build_app() -> Starlette:
         Route("/oauth/oidc/start", oidc_start, methods=["GET"]),
         Route("/oauth/oidc/callback", oidc_callback, methods=["GET"]),
         *admin.routes(),
+        *onboarding.routes(),
         Mount("/static", app=StaticFiles(directory=_STATIC_DIR), name="static"),
         Mount("/mcp", app=handle_mcp),
     ]
