@@ -116,6 +116,21 @@ def test_list_sessions_folds_non_query_calls_into_the_conversation(env):
     assert conv["datasource"] == "SALES_DATA"
 
 
+def test_conversation_datasource_is_the_earliest_call_that_has_one(env):
+    # Skip a datasource-less opener (list_datasources) and, when the datasource changes mid-thread,
+    # take the EARLIEST one — not the newest (the rows arrive ts-DESC, so order matters).
+    s = Store.connect(env)
+    _call(s, ts="2026-06-27T10:00:00Z", tool_name="list_datasources", actor="a", success=True,
+          thread_id="t1", correlation_id="c0")  # no datasource
+    _call(s, ts="2026-06-27T10:01:00Z", actor="a", sql="SELECT 1", success=True,
+          datasource="SALES_DATA", thread_id="t1", correlation_id="c1")
+    _call(s, ts="2026-06-27T10:02:00Z", actor="a", sql="SELECT 2", success=True,
+          datasource="OTHER_DATA", thread_id="t1", correlation_id="c2")
+    sessions = model_store.list_sessions(s)
+    s.close()
+    assert sessions[0]["datasource"] == "SALES_DATA"  # earliest with one set, not OTHER_DATA
+
+
 def test_list_sessions_keeps_a_thread_less_non_query_call_as_a_singleton(env):
     # Audit-complete: a call with NO thread_id is never dropped — it shows as its own conversation,
     # whatever the tool (here a non-query get_datasource_schema with no SQL).
