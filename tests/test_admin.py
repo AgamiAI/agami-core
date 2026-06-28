@@ -357,11 +357,10 @@ def test_admin_ui_is_disabled_when_no_admin_configured(env, monkeypatch):
 
 
 def test_dashboard_tab_is_a_placeholder(client):
-    # Dashboard is still a placeholder; Sessions + Tool calls are now real views.
+    # Dashboard is still a placeholder; Activity is the real (unified) view.
     _login(client)
     assert "Coming soon" in client.get("/admin?tab=dashboard").text
-    assert "No sessions yet" in client.get("/admin?tab=sessions").text
-    assert "No tool calls yet" in client.get("/admin?tab=calls").text
+    assert "No activity yet" in client.get("/admin?tab=activity").text
 
 
 def test_login_page_redirects_when_already_signed_in(client):

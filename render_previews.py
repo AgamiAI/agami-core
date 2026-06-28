@@ -69,7 +69,7 @@ write("05-admin-users.html",
       admin.users_tab_html(USERS, csrf="t0ken", ok="User added.", setup_links=SETUP_LINKS, **ADMIN))
 write("06-admin-dashboard.html", admin.dashboard_tab_html(**CHROME))
 
-# The activity views — rendered from the REAL builders + read helpers over a temp store (no drift).
+# The activity view — rendered from the REAL builders + read helpers over a temp store (no drift).
 import os  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -84,29 +84,34 @@ _s = Store.connect("sqlite://" + _db_path)
 _s.run_migrations()
 _sink = DbActivitySink(_s)
 _SAMPLE_CALLS = [
-    # One turn (correlation c1): a single user question that the agent answered with TWO queries.
+    # One conversation (thread t1), two turns — and EVERY call folds in, not just the execute_sql ones:
+    # turn c1 scopes the datasource (list_datasources), turn c2 answers a question (schema + 2 queries).
+    dict(ts="2026-06-27T10:40:50Z", tool_name="list_datasources", source="mcp_server",
+         actor="jordan@example.com", execution_ms=3, success=True,
+         user_question="What datasources can I ask about?", thread_id="t1", correlation_id="c1"),
+    dict(ts="2026-06-27T10:41:05Z", tool_name="get_datasource_schema", source="mcp_server",
+         actor="jordan@example.com", datasource="SALES_DATA", execution_ms=12, success=True,
+         user_question="What's our revenue by region this quarter?", thread_id="t1", correlation_id="c2"),
     dict(ts="2026-06-27T10:42:17Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
          datasource="SALES_DATA", sql="SELECT region, SUM(amount) AS revenue\nFROM orders\nGROUP BY region\nORDER BY revenue DESC",
          row_count=5, execution_ms=84, success=True, user_question="What's our revenue by region this quarter?",
-         agent_query="revenue by region", thread_id="t1", correlation_id="c1"),
+         agent_query="revenue by region", thread_id="t1", correlation_id="c2"),
     dict(ts="2026-06-27T10:42:41Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
          datasource="SALES_DATA", sql="SELECT date_trunc('month', placed_at) AS month, SUM(amount)\nFROM orders\nWHERE region = 'West'\nGROUP BY 1\nORDER BY 1",
          row_count=3, execution_ms=61, success=True, user_question="What's our revenue by region this quarter?",
-         agent_query="monthly trend for the top region (West)", thread_id="t1", correlation_id="c1"),
-    dict(ts="2026-06-27T10:40:55Z", tool_name="get_datasource_schema", source="mcp_server",
-         actor="jordan@example.com", datasource="SALES_DATA", execution_ms=12, success=True),
-    # A separate one-query turn that errored (correlation c2).
+         agent_query="monthly trend for the top region (West)", thread_id="t1", correlation_id="c2"),
+    # A separate one-query turn that errored (thread t2).
     dict(ts="2026-06-27T10:41:50Z", tool_name="execute_sql", source="mcp_server", actor="sam@example.com",
          datasource="SALES_DATA", sql="SELECT * FROM ordrs", execution_ms=31, success=False,
          error_kind="syntax", user_question="how many orders today?", agent_query="count today's orders",
-         thread_id="t2", correlation_id="c2"),
+         thread_id="t2", correlation_id="c3"),
+    # A bare call with no self-reported ids → its own singleton conversation (audit-complete degradation).
     dict(ts="2026-06-27T10:40:03Z", tool_name="list_datasources", source="mcp_server",
-         actor="jordan@example.com", execution_ms=3, success=True),
+         actor="morgan@example.com", execution_ms=3, success=True),
 ]
 for _c in _SAMPLE_CALLS:
     _sink.record_tool_call(ToolCallRecord(**_c))
-write("07-admin-sessions.html", admin.sessions_tab_html(model_store.list_sessions(_s), **CHROME))
-write("15-tool-calls.html", admin.calls_tab_html(model_store.list_tool_calls(_s), **CHROME))
+write("07-admin-activity.html", admin.activity_tab_html(model_store.list_sessions(_s), **CHROME))
 
 # The read-only model explorer — rendered from the REAL builders over the SAME served tree the MCP
 # tools read (load_organization), so the previews can't drift from production. Neutral demo data only.

@@ -1,7 +1,7 @@
-"""The admin activity views — Tool calls (audit-grade flat) + Sessions (best-effort grouping).
+"""The admin Activity view — every tool call folded into its conversation (thread ▸ turn ▸ call).
 
-Covers the read helpers' grouping/degradation and the two rendered tabs (actor shown, SQL/question
-escaped, no secret leak, admin-gated).
+Covers the read helper's grouping/degradation (all call types, audit-complete) and the rendered tab
+(actor shown, SQL/question escaped, no secret leak, admin-gated).
 """
 
 from __future__ import annotations
@@ -74,14 +74,14 @@ def test_list_sessions_groups_by_thread_and_degrades(env):
     sessions = model_store.list_sessions(s)
     s.close()
     by_thread = {x["thread_id"]: x for x in sessions if x["thread_id"]}
-    assert by_thread["t1"]["query_count"] == 2 and by_thread["t1"]["error_count"] == 1
+    assert by_thread["t1"]["call_count"] == 2 and by_thread["t1"]["error_count"] == 1
     assert by_thread["t1"]["started"] == "2026-06-27T10:39:00Z"
     assert by_thread["t1"]["last_activity"] == "2026-06-27T10:42:00Z"
     assert by_thread["t1"]["avg_ms"] == 15
     assert by_thread["t3"]["avg_ms"] is None  # all-null latency degrades cleanly
-    assert by_thread["t2"]["query_count"] == 1
+    assert by_thread["t2"]["call_count"] == 1
     singletons = [x for x in sessions if x["thread_id"] is None]
-    assert len(singletons) == 1 and singletons[0]["query_count"] == 1  # degraded → ungrouped
+    assert len(singletons) == 1 and singletons[0]["call_count"] == 1  # degraded → ungrouped
 
 
 def test_list_sessions_does_not_blend_different_actors_on_a_colliding_thread(env):
@@ -93,16 +93,35 @@ def test_list_sessions_does_not_blend_different_actors_on_a_colliding_thread(env
     s.close()
     assert len(sessions) == 2
     assert {x["actor"] for x in sessions} == {"jordan@example.com", "sam@example.com"}
-    assert all(x["query_count"] == 1 for x in sessions)
+    assert all(x["call_count"] == 1 for x in sessions)
 
 
-def test_list_tool_calls_is_newest_first(env):
+def test_list_sessions_folds_non_query_calls_into_the_conversation(env):
+    # The point of the unified view: a non-execute_sql call sharing a thread_id groups into the SAME
+    # conversation as the query (not dropped, as it was when list_sessions filtered to execute_sql).
     s = Store.connect(env)
-    _call(s, ts="2026-06-27T10:00:00Z", tool_name="list_datasources", actor="a", success=True)
-    _call(s, ts="2026-06-27T11:00:00Z", tool_name="execute_sql", actor="b", sql="X", success=True)
-    rows = model_store.list_tool_calls(s)
+    _call(s, ts="2026-06-27T10:00:00Z", tool_name="list_datasources", actor="a", success=True,
+          thread_id="t1", user_question="what datasources do I have?", correlation_id="c0")
+    _call(s, ts="2026-06-27T10:01:00Z", tool_name="execute_sql", actor="a", sql="SELECT 1", success=True,
+          thread_id="t1", user_question="revenue?", correlation_id="c1")
+    sessions = model_store.list_sessions(s)
     s.close()
-    assert [r["tool_name"] for r in rows] == ["execute_sql", "list_datasources"]
+    assert len(sessions) == 1  # one conversation holding both calls
+    conv = sessions[0]
+    assert conv["call_count"] == 2
+    tool_names = {c["tool_name"] for t in conv["turns"] for c in t["calls"]}
+    assert tool_names == {"list_datasources", "execute_sql"}
+
+
+def test_list_sessions_keeps_a_thread_less_non_query_call_as_a_singleton(env):
+    # Audit-complete: a call with NO thread_id is never dropped — it shows as its own conversation,
+    # whatever the tool (here a non-query get_datasource_schema with no SQL).
+    s = Store.connect(env)
+    _call(s, ts="2026-06-27T10:00:00Z", tool_name="get_datasource_schema", actor="a", success=True)
+    sessions = model_store.list_sessions(s)
+    s.close()
+    assert len(sessions) == 1 and sessions[0]["call_count"] == 1
+    assert sessions[0]["turns"][0]["calls"][0]["tool_name"] == "get_datasource_schema"
 
 
 # --- the rendered tabs -------------------------------------------------------
@@ -117,16 +136,21 @@ def _login(c):
     c.post("/admin/login", data={"username": ADMIN_USER, "password": ADMIN_PW})
 
 
-def test_calls_tab_shows_actor_and_detail(client, env):
+def test_activity_tab_renders_query_and_non_query_calls(client, env):
+    # A conversation with both a non-query call (list_datasources — tool name, no SQL) and a query call
+    # (SQL + rows + latency). Both must render in the one Activity drawer.
     s = Store.connect(env)
+    _call(s, ts="2026-06-27T10:41:00Z", tool_name="list_datasources", actor="jordan@example.com",
+          success=True, thread_id="t1", correlation_id="c0", user_question="what can I ask about?")
     _call(s, ts="2026-06-27T10:42:00Z", actor="jordan@example.com", datasource="SALES_DATA",
           sql="SELECT region FROM orders", row_count=5, execution_ms=84, success=True,
-          user_question="revenue by region?")
+          thread_id="t1", correlation_id="c1", user_question="revenue by region?")
     s.close()
     _login(client)
-    html = client.get("/admin?tab=calls").text
-    assert "jordan@example.com" in html and "execute_sql" in html and "SALES_DATA" in html
-    assert "SELECT region FROM orders" in html and "revenue by region?" in html  # in the drawer
+    html = client.get("/admin?tab=activity").text
+    assert "jordan@example.com" in html and "SALES_DATA" in html
+    assert "list_datasources" in html  # the non-query call shows its tool name (no SQL)
+    assert "SELECT region FROM orders" in html and "revenue by region?" in html  # the query, in the drawer
 
 
 def test_activity_views_escape_sql_and_question(client, env):
@@ -135,27 +159,25 @@ def test_activity_views_escape_sql_and_question(client, env):
           user_question="<img src=x onerror=alert(1)>", success=True, thread_id="t1")
     s.close()
     _login(client)
-    for tab in ("calls", "sessions"):
-        html = client.get(f"/admin?tab={tab}").text
-        assert "<script>alert(1)" not in html and "<img src=x" not in html
-        assert "&lt;script&gt;" in html
+    html = client.get("/admin?tab=activity").text
+    assert "<script>alert(1)" not in html and "<img src=x" not in html
+    assert "&lt;script&gt;" in html
 
 
-def test_sessions_tab_groups_and_handles_missing_question(client, env):
+def test_activity_tab_groups_and_handles_missing_question(client, env):
     s = Store.connect(env)
     _call(s, ts="2026-06-27T10:42:00Z", actor="jordan@example.com", sql="A", success=True,
           thread_id="t1", user_question="what is the revenue by region")
     _call(s, ts="2026-06-27T10:30:00Z", actor="sam@example.com", sql="B", success=True, thread_id=None)
     s.close()
     _login(client)
-    html = client.get("/admin?tab=sessions").text
+    html = client.get("/admin?tab=activity").text
     assert "what is the revenue by region" in html  # the self-reported question
     assert "no question reported" in html  # graceful when Claude didn't supply one
 
 
 def test_activity_requires_a_session(client):
-    assert client.get("/admin?tab=calls", follow_redirects=False).status_code == 302
-    assert client.get("/admin?tab=sessions", follow_redirects=False).status_code == 302
+    assert client.get("/admin?tab=activity", follow_redirects=False).status_code == 302
 
 
 def test_activity_does_not_leak_the_password_hash(client, env):
@@ -163,14 +185,18 @@ def test_activity_does_not_leak_the_password_hash(client, env):
     _call(s, ts="2026-06-27T10:42:00Z", actor=ADMIN_USER, sql="SELECT 1", success=True)
     s.close()
     _login(client)
-    assert "password_hash" not in client.get("/admin?tab=calls").text
+    assert "password_hash" not in client.get("/admin?tab=activity").text
 
 
-def test_activity_tabs_drop_the_redundant_helper_text(client, env):
-    # The column headers + tab name already say what these are; the helper sentences were noise.
+def test_activity_tab_has_one_unified_tab_and_no_split_tabs(client, env):
+    # ACE-016: one Activity tab — the Tool-calls / Sessions split is gone from the rendered nav.
     _login(client)
-    assert "Every tool call, newest first" not in client.get("/admin?tab=calls").text
-    assert "Queries grouped into conversations" not in client.get("/admin?tab=sessions").text
+    html = client.get("/admin?tab=activity").text
+    assert ">Activity</a>" in html
+    assert ">Tool calls</a>" not in html and ">Sessions</a>" not in html
+    # And the old redundant helper sentences stay gone.
+    assert "Every tool call, newest first" not in html
+    assert "Queries grouped into conversations" not in html
 
 
 # --- ACE-015: the turn level (correlation_id) --------------------------------
@@ -187,9 +213,9 @@ def test_correlation_id_round_trips(env):
         thread_id="t1",
         correlation_id="turn-1",
     )
-    rows = model_store.list_tool_calls(s)
+    sessions = model_store.list_sessions(s)
     s.close()
-    assert rows[0]["correlation_id"] == "turn-1"
+    assert sessions[0]["turns"][0]["calls"][0]["correlation_id"] == "turn-1"
 
 
 def test_execute_sql_inputschema_exposes_correlation_id():
@@ -237,7 +263,7 @@ def test_turns_use_earliest_question_and_group_refinements(env):
     turns = sessions[0]["turns"]
     assert len(turns) == 1
     assert turns[0]["question"] == "feature adoption vs churn"  # earliest, not the drift
-    assert [q["sql"] for q in turns[0]["queries"]] == [
+    assert [c["sql"] for c in turns[0]["calls"]] == [
         "Q1",
         "Q2",
     ]  # chronological, both refinements
@@ -270,7 +296,7 @@ def test_turns_degrade_to_singletons_without_correlation_id(env):
     assert {t["question"] for t in turns} == {"q-a", "q-b"}
 
 
-def test_sessions_drawer_renders_turn_with_user_asked_and_agent_queries(client, env):
+def test_activity_drawer_renders_turn_with_user_asked_and_agent_queries(client, env):
     s = Store.connect(env)
     _call(
         s,
@@ -296,10 +322,30 @@ def test_sessions_drawer_renders_turn_with_user_asked_and_agent_queries(client, 
     )
     s.close()
     _login(client)
-    html = client.get("/admin?tab=sessions").text
+    html = client.get("/admin?tab=activity").text
     assert (
         "User asked" in html and "feature adoption vs churn" in html
     )  # the turn question (earliest)
     assert "drifted" not in html  # the drifted user_question is NOT shown
     assert "churn by adoption band" in html and "lost MRR" in html  # both agent refinements
-    assert "2 queries" in html
+    assert "2 calls" in html
+
+
+# --- ACE-016: every tool carries the grouping ids ----------------------------
+
+
+def test_all_tools_expose_thread_and_correlation_ids():
+    # The non-query tools must also accept thread_id/correlation_id so their calls can group into a
+    # conversation — without these, list_datasources/get_datasource_schema/... log with NULL ids.
+    import tools
+
+    for name in ("list_datasources", "get_datasource_schema", "get_prompt_examples",
+                 "execute_sql", "log_feedback"):
+        props = tools.TOOLS[name]["inputSchema"]["properties"]
+        assert "thread_id" in props and "correlation_id" in props, name
+
+
+def test_server_instructions_say_pass_ids_on_every_call():
+    import tools
+
+    assert "EVERY tool call" in tools.SERVER_INSTRUCTIONS

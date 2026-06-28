@@ -452,8 +452,7 @@ def provider_button(key: str, href: str) -> str:
 _TABS = (
     ("dashboard", "Dashboard"),
     ("users", "Users"),
-    ("sessions", "Sessions"),
-    ("calls", "Tool calls"),
+    ("activity", "Activity"),
     ("model", "Model"),
 )
 
@@ -485,7 +484,7 @@ def admin_shell(
     admin_email: str = "",
     extra: str = "",
 ) -> str:
-    """The admin console shell: a top bar (logo + account menu) and the Dashboard/Users/Sessions tabs.
+    """The admin console shell: a top bar (logo + account menu) and the Dashboard/Users/Activity tabs.
     `extra` is emitted at the body root before the bar — used for the CSS-only drawer (whose toggle
     checkbox must be the **immediately-preceding** sibling of its `.drawer-wrap`, per the `+` rule)."""
     tabs = "".join(

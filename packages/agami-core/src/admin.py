@@ -63,7 +63,7 @@ def admin_login_body_html(error: str = "", provider: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Admin console — Users tab (+ Dashboard / Sessions placeholders)
+# Admin console — Users tab (+ Dashboard / Activity placeholders)
 # ---------------------------------------------------------------------------
 
 
@@ -193,7 +193,7 @@ def dashboard_tab_html(*, admin_label: str = "", admin_email: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Activity views — Tool calls (audit-grade) + Sessions (best-effort grouping)
+# Activity view — every tool call, folded into its conversation (thread ▸ turn ▸ call)
 # ---------------------------------------------------------------------------
 
 
@@ -208,112 +208,50 @@ def _utc(ts: str | None) -> str:
     return f'<time data-utc="{ui.esc(ts)}">{ui.esc(ts)}</time>'
 
 
-def _call_drawer(r: dict[str, Any], idx: int) -> str:
-    """A per-call detail drawer (toggled by the row's Open). The question/agent-query are self-reported,
-    so they're labelled as such; SQL/question are attacker-influenceable → escaped. The DOM id is the
-    row index (never user data), so a crafted value can't break the toggle."""
-    cid = f"call-{idx}"
-    rows = [
-        ("User question", r.get("user_question"), "self-reported"),
-        ("Agent query", r.get("agent_query"), "self-reported"),
-    ]
-    fields = "".join(
-        f'<label>{lbl} <span class="muted">— {note}</span></label><div class="muted">{ui.esc(v)}</div>'
-        for lbl, v, note in rows
-        if v
-    )
-    sql = (
-        f'<label>SQL</label><pre class="code" style="white-space:pre-wrap;padding:12px;display:block">'
-        f"{ui.esc(r['sql'])}</pre>"
-        if r.get("sql")
-        else ""
-    )
-    return f"""<input type="checkbox" id="{cid}" class="drawer-toggle">
-<div class="drawer-wrap"><label for="{cid}" class="drawer-backdrop"></label>
-<aside class="drawer" style="width:560px">
-<div class="drawer-head"><h1 style="font-size:17px">Tool call</h1>
-<label for="{cid}" class="drawer-x" aria-label="Close">&times;</label></div>
-<p class="sub" style="margin-bottom:14px">{ui.esc(r["tool_name"])} · {ui.esc(r.get("actor") or "—")} · {_utc(r["ts"])}</p>
-{fields}{sql}
-<div class="grid2" style="margin-top:16px">
-<div><label>Rows</label><div class="muted">{r.get("row_count") if r.get("row_count") is not None else "—"}</div></div>
-<div><label>Latency</label><div class="muted">{(str(r["execution_ms"]) + " ms") if r.get("execution_ms") is not None else "—"}</div></div>
-<div><label>Status</label><div>{_ok_pill(r["success"])}</div></div>
-<div><label>Datasource</label><div class="muted">{ui.esc(r.get("datasource") or "—")}</div></div>
-</div></aside></div>"""
-
-
-def calls_tab_html(
-    rows: list[dict[str, Any]], *, admin_label: str = "", admin_email: str = ""
-) -> str:
-    """The Tool calls tab: every MCP call, newest first, each with a detail drawer."""
-    body_rows, drawers = "", ""
-    for i, r in enumerate(rows):
-        has_detail = bool(r.get("sql") or r.get("user_question") or r.get("agent_query"))
-        open_ = (
-            f'<label for="call-{i}" class="btn tiny secondary">Open</label>' if has_detail else ""
+def _call_card(c: dict[str, Any]) -> str:
+    """One call inside a turn. A **query** call (has `sql`) shows its agent-framing + SQL; a **non-query**
+    call (list_datasources, get_datasource_schema, …) has no SQL, so it shows its tool name + datasource —
+    so every call in the conversation is visible, not just the queries. SQL/framing are self-reported and
+    attacker-influenceable → escaped; rows shown only when the call recorded a count."""
+    if c.get("sql"):
+        head = (
+            f'<div class="muted" style="margin:0 0 6px">↳ {ui.esc(c["agent_query"])} '
+            f'<span class="muted">· agent-reported</span></div>'
+            if c.get("agent_query")
+            else ""
         )
-        body_rows += (
-            "<tr>"
-            f"<td>{_utc(r['ts'])}</td>"
-            f"<td><strong>{ui.esc(r.get('actor') or '—')}</strong></td>"
-            f'<td><span class="pill" style="background:var(--chip);color:var(--ink)">{ui.esc(r["tool_name"])}</span></td>'
-            f'<td class="muted">{ui.esc(r.get("datasource") or "—")}</td>'
-            f'<td class="muted">{r.get("row_count") if r.get("row_count") is not None else "—"}</td>'
-            f'<td class="muted">{(str(r["execution_ms"]) + " ms") if r.get("execution_ms") is not None else "—"}</td>'
-            f"<td>{_ok_pill(r['success'])}</td>"
-            f'<td style="text-align:right">{open_}</td>'
-            "</tr>"
+        body = (
+            f'<pre class="code" style="white-space:pre-wrap;padding:12px;display:block;margin-top:4px">'
+            f"{ui.esc(c['sql'])}</pre>"
         )
-        if has_detail:
-            drawers += _call_drawer(r, i)
-    empty = '<p class="muted">No tool calls yet.</p>' if not rows else ""
-    panel = f"""{empty}
-<div class="table-wrap"><table>
-<thead><tr><th>Time</th><th>User</th><th>Tool</th><th>Datasource</th><th>Rows</th><th>Latency</th><th>Status</th><th></th></tr></thead>
-<tbody>{body_rows}</tbody></table></div>"""
-    return ui.admin_shell(
-        "Tool calls · agami admin",
-        "calls",
-        panel,
-        admin_label=admin_label,
-        admin_email=admin_email,
-        extra=drawers,
+    else:
+        head = (
+            '<div style="margin:0 0 6px">'
+            f'<span class="pill" style="background:var(--chip);color:var(--ink)">{ui.esc(c["tool_name"])}</span> '
+            f'<span class="muted">{ui.esc(c.get("datasource") or "—")}</span></div>'
+        )
+        body = ""
+    lat = (str(c["execution_ms"]) + " ms") if c.get("execution_ms") is not None else ""
+    rows_bit = f' · {c["row_count"]} rows' if c.get("row_count") is not None else ""
+    return (
+        '<div style="border-top:1px solid var(--line);padding:9px 0 11px">'
+        f"{head}{body}"
+        f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(c["ts"])} · '
+        f"{lat} {_ok_pill(c['success'])}{rows_bit}</div></div>"
     )
 
 
 def _session_drawer(s: dict[str, Any], idx: int) -> str:
     sid = f"sess-{idx}"  # DOM id is the row index, never the (self-reported, attacker-influenceable) key
-    # Render the session as **turns** (one user question -> N agent queries), grouped on correlation_id
-    # by list_sessions. The turn header shows the verbatim question once; each agent refinement (its
-    # `agent_query` + SQL) lists beneath it. Degrades cleanly: a call with no correlation_id is its own
-    # one-query turn, so this reads like the old flat list when Claude doesn't self-report.
+    # Render the conversation as **turns** (one user question -> the N calls answering it), grouped on
+    # correlation_id by list_sessions. The turn header shows the verbatim question once; each call (a
+    # query's SQL, or a non-query tool's name) lists beneath it. Degrades cleanly: a call with no
+    # correlation_id is its own one-call turn, so this reads like a flat list when Claude doesn't self-report.
     cards = ""
     for t in s["turns"]:
         question = t.get("question") or "(no question reported)"
-        n = len(t["queries"])
-        qrows = ""
-        for q in t["queries"]:
-            sub = (
-                f'<div class="muted" style="margin:0 0 6px">↳ {ui.esc(q["agent_query"])} '
-                f'<span class="muted">· agent-reported</span></div>'
-                if q.get("agent_query")
-                else ""
-            )
-            sql = (
-                f'<pre class="code" style="white-space:pre-wrap;padding:12px;display:block;margin-top:4px">'
-                f"{ui.esc(q['sql'])}</pre>"
-                if q.get("sql")
-                else ""
-            )
-            lat = (str(q["execution_ms"]) + " ms") if q.get("execution_ms") is not None else ""
-            rc = q.get("row_count") if q.get("row_count") is not None else "—"
-            qrows += (
-                '<div style="border-top:1px solid var(--line);padding:9px 0 11px">'
-                f"{sub}{sql}"
-                f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(q["ts"])} · '
-                f"{lat} {_ok_pill(q['success'])} · {rc} rows</div></div>"
-            )
+        n = len(t["calls"])
+        call_cards = "".join(_call_card(c) for c in t["calls"])
         # The question is Claude-self-reported (best-effort, attacker-influenceable) — mark it so, like
         # the rest of the activity log; "User asked" is the framing, "· self-reported" the provenance.
         asked = (
@@ -325,23 +263,24 @@ def _session_drawer(s: dict[str, Any], idx: int) -> str:
         cards += (
             '<div style="border-top:2px solid var(--line);padding:14px 0 2px;margin-top:8px">'
             f'<div style="margin-bottom:4px">{asked} '
-            f'<span class="muted" style="font-size:13px">· {n} {"query" if n == 1 else "queries"}</span>'
-            f"</div>{qrows}</div>"
+            f'<span class="muted" style="font-size:13px">· {n} {"call" if n == 1 else "calls"}</span>'
+            f"</div>{call_cards}</div>"
         )
     return f"""<input type="checkbox" id="{sid}" class="drawer-toggle">
 <div class="drawer-wrap"><label for="{sid}" class="drawer-backdrop"></label>
 <aside class="drawer" style="width:560px">
-<div class="drawer-head"><h1 style="font-size:17px">Session</h1>
+<div class="drawer-head"><h1 style="font-size:17px">Conversation</h1>
 <label for="{sid}" class="drawer-x" aria-label="Close">&times;</label></div>
-<p class="sub" style="margin-bottom:8px">{ui.esc(s.get("actor") or "—")} · {ui.esc(s.get("datasource") or "—")} · {s["query_count"]} queries · started {_utc(s["started"])}</p>
+<p class="sub" style="margin-bottom:8px">{ui.esc(s.get("actor") or "—")} · {ui.esc(s.get("datasource") or "—")} · {s["call_count"]} calls · started {_utc(s["started"])}</p>
 {cards}</aside></div>"""
 
 
-def sessions_tab_html(
+def activity_tab_html(
     sessions: list[dict[str, Any]] | None = None, *, admin_label: str = "", admin_email: str = ""
 ) -> str:
-    """The Sessions tab: query calls grouped into conversations (best-effort via the self-reported
-    `thread_id`; ungrouped singletons otherwise). Each row opens to its queries + their NL questions."""
+    """The Activity tab: **every** tool call grouped into conversations (best-effort via the self-reported
+    `thread_id`; ungrouped singletons otherwise — so it stays audit-complete). Each row opens to the
+    conversation's turns, and within them every call (query or not)."""
     sessions = sessions or []
     body_rows, drawers = "", ""
     for i, s in enumerate(sessions):
@@ -350,7 +289,7 @@ def sessions_tab_html(
             f'<td><label for="sess-{i}" style="cursor:pointer;color:var(--brand)">{_utc(s["started"])}</label></td>'
             f"<td><strong>{ui.esc(s.get('actor') or '—')}</strong></td>"
             f'<td class="muted">{ui.esc(s.get("datasource") or "—")}</td>'
-            f'<td class="muted">{s["query_count"]}</td>'
+            f'<td class="muted">{s["call_count"]}</td>'
             f'<td class="muted">{s["error_count"] or "—"}</td>'
             f'<td class="muted">{(str(s["avg_ms"]) + " ms") if s.get("avg_ms") is not None else "—"}</td>'
             f"<td>{_utc(s['last_activity'])}</td>"
@@ -358,14 +297,14 @@ def sessions_tab_html(
             "</tr>"
         )
         drawers += _session_drawer(s, i)
-    empty = '<p class="muted">No sessions yet.</p>' if not sessions else ""
+    empty = '<p class="muted">No activity yet.</p>' if not sessions else ""
     panel = f"""{empty}
 <div class="table-wrap"><table>
-<thead><tr><th>Started</th><th>User</th><th>Datasource</th><th>Queries</th><th>Errors</th><th>Avg time</th><th>Last activity</th><th></th></tr></thead>
+<thead><tr><th>Started</th><th>User</th><th>Datasource</th><th>Calls</th><th>Errors</th><th>Avg time</th><th>Last activity</th><th></th></tr></thead>
 <tbody>{body_rows}</tbody></table></div>"""
     return ui.admin_shell(
-        "Sessions · agami admin",
-        "sessions",
+        "Activity · agami admin",
+        "activity",
         panel,
         admin_label=admin_label,
         admin_email=admin_email,
@@ -661,7 +600,7 @@ async def admin_logout(request: Request) -> Response:
 
 
 async def admin_home(request: Request) -> Response:
-    """The console. `?tab=` picks Dashboard / Users (default) / Sessions / Tool calls. Session-gated."""
+    """The console. `?tab=` picks Dashboard / Users (default) / Activity. Session-gated."""
     import model_store
 
     admin = current_admin(request)
@@ -673,12 +612,9 @@ async def admin_home(request: Request) -> Response:
         tab = request.query_params.get("tab", "users")
         if tab == "dashboard":
             return HTMLResponse(dashboard_tab_html(**chrome))
-        if tab == "sessions":
+        if tab == "activity":
             sessions = model_store.list_sessions(store) if store is not None else []
-            return HTMLResponse(sessions_tab_html(sessions, **chrome))
-        if tab == "calls":
-            calls = model_store.list_tool_calls(store) if store is not None else []
-            return HTMLResponse(calls_tab_html(calls, **chrome))
+            return HTMLResponse(activity_tab_html(sessions, **chrome))
         users = user_store.list_users(store) if store is not None else []
     finally:
         if store is not None:
