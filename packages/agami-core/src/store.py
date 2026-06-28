@@ -20,6 +20,7 @@ tracking table — re-running only applies new files.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -142,8 +143,14 @@ class Store:
             return ran
         finally:
             if locked:
-                self.execute("SELECT pg_advisory_unlock(?)", (_MIGRATION_LOCK_KEY,))
-                self.commit()
+                # A failed migration leaves the psycopg2 connection in an aborted-transaction state, so roll
+                # back FIRST — otherwise this unlock runs on the aborted connection, raises, masks the real
+                # migration error, and the lock would free only incidentally when the connection closes.
+                # Suppress any cleanup error so the in-flight migration exception is what propagates.
+                with contextlib.suppress(Exception):
+                    self.conn.rollback()
+                    self.execute("SELECT pg_advisory_unlock(?)", (_MIGRATION_LOCK_KEY,))
+                    self.commit()
 
     def _run_script(self, sql: str) -> None:
         """Run a multi-statement SQL script. SQLite needs executescript; psycopg2 runs a multi-

@@ -51,26 +51,42 @@ def test_run_migrations_applies_then_is_idempotent(tmp_path):
 
 
 def test_failing_migration_raises_and_is_not_recorded(tmp_path):
+    import sqlite3
+
     mig = tmp_path / "m"
     _write_migration(mig, "001_bad.sql", "CREATE TABLE oops (")  # invalid SQL
     s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
-    with pytest.raises(Exception):  # noqa: B017 — backend raises its own error type; we only need "raised"
+    with pytest.raises(sqlite3.OperationalError):  # the raise comes from APPLYING the bad migration
         s.run_migrations(mig)
     applied = {r["id"] for r in s.query("SELECT id FROM schema_migrations")}
+    leaked = s.query("SELECT name FROM sqlite_master WHERE type='table' AND name='oops'")
     s.close()
     assert "001_bad.sql" not in applied  # fail-closed: a failed migration is never recorded
+    assert not leaked  # and no partial DDL leaked from the half-run script
 
 
 # --- the advisory lock (dialect-branch, no real Postgres needed) -------------
 
 
+class _Conn:
+    """Stub psycopg2 connection — records whether the failed-migration rollback ran."""
+
+    def __init__(self) -> None:
+        self.rolled_back = False
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+
 class _Recorder:
     """A minimal stand-in for Store that records the SQL `run_migrations` issues, so we can assert the
-    advisory-lock bracketing per dialect without a live Postgres."""
+    advisory-lock bracketing per dialect (and the error-path cleanup) without a live Postgres."""
 
-    def __init__(self, dialect: str) -> None:
+    def __init__(self, dialect: str, *, fail_on_script: bool = False) -> None:
         self.dialect = dialect
         self.sql: list[str] = []
+        self.conn = _Conn()
+        self._fail = fail_on_script
 
     def execute(self, sql: str, params: tuple = ()) -> None:
         self.sql.append(sql)
@@ -83,7 +99,8 @@ class _Recorder:
         pass
 
     def _run_script(self, sql: str) -> None:
-        pass
+        if self._fail:
+            raise RuntimeError("bad migration")
 
 
 def test_postgres_brackets_the_apply_with_a_session_advisory_lock(tmp_path):
@@ -91,11 +108,10 @@ def test_postgres_brackets_the_apply_with_a_session_advisory_lock(tmp_path):
     _write_migration(mig, "001_demo.sql", "CREATE TABLE demo_x (a INTEGER);")
     rec = _Recorder("postgres")
     Store.run_migrations(rec, mig)  # call the unbound method with our recorder as self
-    joined = " | ".join(rec.sql)
-    assert "pg_advisory_lock" in joined and "pg_advisory_unlock" in joined
-    # the lock is taken BEFORE the work and released AFTER it
-    assert rec.sql[0].startswith("SELECT pg_advisory_lock")
-    assert rec.sql[-1].startswith("SELECT pg_advisory_unlock")
+    # SESSION lock (survives the per-migration commits), not the xact variant — taken first, freed last.
+    assert rec.sql[0] == "SELECT pg_advisory_lock(?)"
+    assert "pg_advisory_xact_lock" not in " | ".join(rec.sql)
+    assert rec.sql[-1] == "SELECT pg_advisory_unlock(?)"
     assert "pg_advisory_unlock" not in " | ".join(rec.sql[:-1])  # unlock only at the very end
 
 
@@ -105,6 +121,19 @@ def test_sqlite_takes_no_advisory_lock(tmp_path):
     rec = _Recorder("sqlite")
     Store.run_migrations(rec, mig)
     assert not any("pg_advisory" in s for s in rec.sql)  # single-writer — no lock
+    assert not rec.conn.rolled_back  # sqlite skips the whole locked-cleanup block
+
+
+def test_postgres_error_path_rolls_back_then_unlocks_without_masking(tmp_path):
+    # A failing migration must propagate the REAL error (not a masking "transaction aborted"), roll the
+    # aborted txn back, and still release the lock — see the run_migrations finally.
+    mig = tmp_path / "m"
+    _write_migration(mig, "001_demo.sql", "CREATE TABLE demo_x (a INTEGER);")
+    rec = _Recorder("postgres", fail_on_script=True)
+    with pytest.raises(RuntimeError, match="bad migration"):  # original error, not masked
+        Store.run_migrations(rec, mig)
+    assert rec.conn.rolled_back  # cleared the aborted state before unlocking
+    assert rec.sql[-1] == "SELECT pg_advisory_unlock(?)"  # lock still released on the error path
 
 
 # --- the startup wiring (lifespan applies on open, fail-closed) --------------
