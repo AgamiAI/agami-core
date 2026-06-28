@@ -329,7 +329,7 @@ def build_app() -> Starlette:
                 seeded = user_store.seed_admin_from_env(store)
                 store.commit()
                 if seeded:
-                    _log.info("seeded admin: %s", seeded)
+                    _log.info("seeded the configured admin")  # not the email — no PII in logs
             finally:
                 store.close()
         async with session_manager.run():

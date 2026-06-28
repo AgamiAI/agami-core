@@ -1,0 +1,9 @@
+# The deploy image's build context is the repo root; keep it lean (only packages/ + migrations/ are COPYed).
+.git
+previews
+tests
+**/__pycache__
+**/*.pyc
+*.db
+.venv
+node_modules

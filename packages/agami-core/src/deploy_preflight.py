@@ -33,10 +33,21 @@ def _parse_env(text: str) -> dict[str, str]:
     return out
 
 
-def _append(env_path: Path, key: str, value: str) -> None:
-    with env_path.open("a") as f:
-        f.write(f"\n{key}={value}\n")
-    env_path.chmod(0o600)  # the file holds the signing secret + DB creds
+def _set_env(env_path: Path, key: str, value: str) -> None:
+    """Set `KEY=VALUE` in the `.env` — **replacing** an existing (even present-but-empty) line in place, else
+    appending. Replace-not-append avoids a confusing duplicate key when e.g. `AGAMI_SIGNING_SECRET=` is blank.
+    chmod 600 because the file holds the signing secret + DB creds."""
+    lines = env_path.read_text().splitlines()
+    new = f"{key}={value}"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("#") and stripped.split("=", 1)[0].strip() == key:
+            lines[i] = new
+            break
+    else:
+        lines.append(new)
+    env_path.write_text("\n".join(lines) + "\n")
+    env_path.chmod(0o600)
 
 
 def prepare_env(env_path: Path) -> list[str]:
@@ -52,13 +63,13 @@ def prepare_env(env_path: Path) -> list[str]:
 
     # Generate-once-and-persist the signing secret — never regenerate (it would invalidate live tokens).
     if not env.get("AGAMI_SIGNING_SECRET"):
-        _append(env_path, "AGAMI_SIGNING_SECRET", secrets.token_hex(32))
+        _set_env(env_path, "AGAMI_SIGNING_SECRET", secrets.token_hex(32))
 
     # Caddy's TLS site needs the bare hostname, not the full URL — derive it from PUBLIC_BASE_URL.
     if not env.get("AGAMI_PUBLIC_HOST") and env.get("PUBLIC_BASE_URL"):
         host = urlparse(env["PUBLIC_BASE_URL"]).hostname
         if host:
-            _append(env_path, "AGAMI_PUBLIC_HOST", host)
+            _set_env(env_path, "AGAMI_PUBLIC_HOST", host)
         else:
             errors.append("PUBLIC_BASE_URL must be a URL like https://host (could not derive a hostname)")
 

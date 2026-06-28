@@ -16,6 +16,8 @@ for _ in range(60):
     try:
         Store.connect(url).close()
         break
+    except ValueError as e:
+        sys.exit(f"entrypoint: bad database URL — {e}")  # malformed scheme is permanent; don't wait 60s
     except Exception:
         time.sleep(1)
 else:

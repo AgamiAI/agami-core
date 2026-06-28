@@ -45,3 +45,6 @@ re-ingests the model on boot. **No rebuild, no new VM, no database access** — 
   gated by per-user OAuth. Both need the HTTPS that Caddy provides.
 - `.env` holds the signing secret and DB creds — it stays on your host and is never committed. **No data ever
   leaves your environment.**
+- **Always deploy via `./deploy.sh`** (it runs the preflight). If you `docker compose up` directly without
+  having run the preflight, `AGAMI_PUBLIC_HOST` is unset and Caddy fails to start (loudly, never insecurely) —
+  run `python -m deploy_preflight .env` first.

@@ -48,6 +48,14 @@ def test_signing_secret_is_generated_then_stable(tmp_path):
     assert first == second  # generated ONCE — never regenerated (would break live tokens)
 
 
+def test_present_but_empty_secret_is_filled_in_place_no_duplicate(tmp_path):
+    # A blank `AGAMI_SIGNING_SECRET=` must be filled in place, not appended as a second (duplicate) line.
+    p = _env(tmp_path, _COMPLETE + "AGAMI_SIGNING_SECRET=\n")
+    deploy_preflight.prepare_env(p)
+    lines = [ln for ln in p.read_text().splitlines() if ln.startswith("AGAMI_SIGNING_SECRET=")]
+    assert len(lines) == 1 and len(lines[0].split("=", 1)[1]) >= 32  # one line, now with a real value
+
+
 def test_public_host_is_derived_from_the_url(tmp_path):
     p = _env(tmp_path, _COMPLETE)
     deploy_preflight.prepare_env(p)
