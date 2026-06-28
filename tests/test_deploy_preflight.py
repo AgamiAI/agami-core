@@ -1,0 +1,98 @@
+"""ACE-009 — the host-side deploy preflight: validate the `.env`, persist the signing secret, derive the host."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+PKG_SRC = Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"
+if str(PKG_SRC) not in sys.path:
+    sys.path.insert(0, str(PKG_SRC))
+
+import deploy_preflight  # noqa: E402
+
+_COMPLETE = (
+    "PUBLIC_BASE_URL=https://agami.example.com\n"
+    "AGAMI_ADMIN_USERNAME=you@example.com\n"
+    "AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n"
+)
+
+
+def _env(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / ".env"
+    p.write_text(text)
+    return p
+
+
+def test_missing_public_base_url_is_an_error(tmp_path):
+    p = _env(tmp_path, _COMPLETE.replace("PUBLIC_BASE_URL=https://agami.example.com\n", ""))
+    errors = deploy_preflight.prepare_env(p)
+    assert any("PUBLIC_BASE_URL" in e for e in errors)
+    assert deploy_preflight.main([str(p)]) == 1  # fails fast, non-zero
+
+
+def test_missing_auth_method_is_an_error(tmp_path):
+    p = _env(tmp_path, _COMPLETE.replace("AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n", ""))
+    errors = deploy_preflight.prepare_env(p)
+    assert any("AGAMI_ADMIN_PASSWORD" in e for e in errors)  # neither password nor provider set
+
+
+def test_signing_secret_is_generated_then_stable(tmp_path):
+    p = _env(tmp_path, _COMPLETE)
+    assert deploy_preflight.prepare_env(p) == []  # complete .env → ready
+    first = deploy_preflight._parse_env(p.read_text())["AGAMI_SIGNING_SECRET"]
+    assert len(first) >= 32  # a real generated secret
+    deploy_preflight.prepare_env(p)  # re-run (a redeploy)
+    second = deploy_preflight._parse_env(p.read_text())["AGAMI_SIGNING_SECRET"]
+    assert first == second  # generated ONCE — never regenerated (would break live tokens)
+
+
+def test_present_but_empty_secret_is_filled_in_place_no_duplicate(tmp_path):
+    # A blank `AGAMI_SIGNING_SECRET=` must be filled in place, not appended as a second (duplicate) line.
+    p = _env(tmp_path, _COMPLETE + "AGAMI_SIGNING_SECRET=\n")
+    deploy_preflight.prepare_env(p)
+    lines = [ln for ln in p.read_text().splitlines() if ln.startswith("AGAMI_SIGNING_SECRET=")]
+    assert len(lines) == 1 and len(lines[0].split("=", 1)[1]) >= 32  # one line, now with a real value
+
+
+def test_public_host_is_derived_from_the_url(tmp_path):
+    p = _env(tmp_path, _COMPLETE)
+    deploy_preflight.prepare_env(p)
+    assert deploy_preflight._parse_env(p.read_text())["AGAMI_PUBLIC_HOST"] == "agami.example.com"
+
+
+def test_non_https_public_base_url_is_an_error(tmp_path):
+    p = _env(tmp_path, _COMPLETE.replace("https://agami.example.com", "http://agami.example.com"))
+    errors = deploy_preflight.prepare_env(p)
+    assert any("https://" in e for e in errors)  # TLS is mandatory; catch plain http at the preflight
+
+
+def test_provider_without_its_oidc_client_is_an_error(tmp_path):
+    # A pinned provider with no OIDC client would seed an admin who can't sign in — block it.
+    p = _env(
+        tmp_path,
+        _COMPLETE.replace("AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n", "AGAMI_ADMIN_PROVIDER=google\n"),
+    )
+    errors = deploy_preflight.prepare_env(p)
+    assert any("CLIENT_ID" in e for e in errors)
+
+
+def test_complete_env_passes(tmp_path):
+    p = _env(tmp_path, _COMPLETE)
+    assert deploy_preflight.main([str(p)]) == 0  # ready → exit 0
+
+
+def test_provider_with_its_oidc_client_is_accepted(tmp_path):
+    p = _env(
+        tmp_path,
+        _COMPLETE.replace(
+            "AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n",
+            "AGAMI_ADMIN_PROVIDER=google\n"
+            "AGAMI_OIDC_GOOGLE_CLIENT_ID=id\nAGAMI_OIDC_GOOGLE_CLIENT_SECRET=secret\n",
+        ),
+    )
+    assert deploy_preflight.prepare_env(p) == []  # a pinned provider + its OIDC client satisfies the auth floor
+
+
+def test_missing_env_file_is_a_clear_error(tmp_path):
+    assert deploy_preflight.main([str(tmp_path / "nope.env")]) == 1  # no .env → clean exit 1

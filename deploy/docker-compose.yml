@@ -1,0 +1,71 @@
+# agami self-host stack. The default `docker compose up` (with COMPOSE_PROFILES=bundled-db,edge in .env)
+# brings up the secure VM deployment: Caddy terminates TLS and is the ONLY public service; agami and
+# Postgres live on the internal network with no published ports. Toggle the profiles for the variants:
+#   bundled-db,edge   (default)  — Caddy TLS + agami + bundled Postgres on a VM
+#   edge              + APP_DATABASE_URL — external/managed Postgres (e.g. Cloud SQL via a plain URL)
+#   tunnel            — Cloudflare Tunnel instead of a public IP (no inbound ports)
+#   (none)            — agami only, behind the platform's own TLS (e.g. Cloud Run); set APP_DATABASE_URL
+name: agami
+
+services:
+  caddy:
+    image: caddy:2
+    profiles: ["edge"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      AGAMI_PUBLIC_HOST: ${AGAMI_PUBLIC_HOST}  # the bare hostname; deploy_preflight derives it from PUBLIC_BASE_URL
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  agami:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Bundled Postgres by default; set APP_DATABASE_URL in .env to point at managed Postgres instead.
+      AGAMI_DB_URL: ${APP_DATABASE_URL:-postgresql://agami:${POSTGRES_PASSWORD:-agami-bundled-local}@postgres:5432/agami}
+      AGAMI_ARTIFACTS_DIR: /artifacts
+      HOST: 0.0.0.0
+      PORT: "8000"
+    volumes:
+      - ${AGAMI_ARTIFACTS_DIR:-./artifacts}:/artifacts:ro  # your local agami-artifacts (the model), read-only
+    # No `ports:` and no `depends_on:` — agami is reached only via Caddy/the tunnel on the internal
+    # network, and the entrypoint waits for the DB itself (so the external-DB/cloud-run profiles work).
+
+  postgres:
+    image: postgres:16
+    profiles: ["bundled-db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agami
+      POSTGRES_USER: agami
+      # A bundled-local default — fine because the DB is never exposed; override it in .env if you like.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agami-bundled-local}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agami -d agami"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    # No `ports:` — the database is never published to the host or the internet.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}  # from your Cloudflare Zero Trust tunnel
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
