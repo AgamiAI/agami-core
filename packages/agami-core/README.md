@@ -105,8 +105,10 @@ it belongs to — **thread (conversation) ▸ turn (one user question) ▸ call*
 see its whole arc, *not just the queries*: the `list_datasources` / `get_datasource_schema` calls that
 scoped the work sit alongside the `execute_sql`s that answered it (*"User asked what datasources →
 `list_datasources`; user asked revenue by region → `get_datasource_schema`, then `execute_sql` ×2"*). A
-query call shows its SQL, row count, latency, and status; a non-query call shows its tool name and
-datasource.
+query call shows its SQL, row count, latency, and status; a non-query call shows its tool name. Every
+call carries its **own** datasource, because a conversation — or even a single turn — can span several:
+the user switches datasource mid-session, or asks something that runs one query per datasource. The
+conversation row lists the full set it touched.
 
 The split is deliberate: it is **audit-grade for *what* ran** — the server observes every call directly,
 so nothing is dropped — and **best-effort for *how* it's grouped**. The MCP protocol carries neither the

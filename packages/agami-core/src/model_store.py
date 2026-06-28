@@ -432,11 +432,15 @@ def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
         ms = [c["execution_ms"] for c in cs if c["execution_ms"] is not None]
         s["started"] = min(ts_all)
         s["last_activity"] = max(ts_all)
-        # The conversation's datasource = the EARLIEST call that has one set. A conversation now often
-        # opens with list_datasources (no datasource), so the first row's would show "—" even though the
-        # conversation queried a real datasource. `cs` is ts-DESC, so scan it chronologically (min ts).
-        with_ds = [c for c in cs if c["datasource"]]
-        s["datasource"] = min(with_ds, key=lambda c: c["ts"])["datasource"] if with_ds else None
+        # A conversation — or even one turn — can touch SEVERAL datasources: the user switches mid-session,
+        # or asks something spanning two (the agent runs one execute_sql per datasource). Surface the full
+        # distinct set in first-seen (chronological) order, not just one; `cs` is ts-DESC, so walk it
+        # reversed. Empty when only datasource-less calls (e.g. list_datasources) ran.
+        seen_ds: list[str] = []
+        for c in reversed(cs):
+            if c["datasource"] and c["datasource"] not in seen_ds:
+                seen_ds.append(c["datasource"])
+        s["datasources"] = seen_ds
         s["call_count"] = len(cs)
         s["error_count"] = sum(1 for c in cs if not c["success"])
         s["avg_ms"] = round(sum(ms) / len(ms)) if ms else None  # over calls that recorded latency

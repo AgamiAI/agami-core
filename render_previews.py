@@ -105,6 +105,16 @@ _SAMPLE_CALLS = [
          datasource="SALES_DATA", sql="SELECT * FROM ordrs", execution_ms=31, success=False,
          error_kind="syntax", user_question="how many orders today?", agent_query="count today's orders",
          thread_id="t2", correlation_id="c3"),
+    # A cross-datasource turn (thread t3, one correlation): a question spanning two datasources runs one
+    # execute_sql per datasource — the row lists both, and each call card shows its own.
+    dict(ts="2026-06-27T10:55:10Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
+         datasource="SALES_DATA", sql="SELECT region, SUM(amount) AS revenue\nFROM orders GROUP BY region",
+         row_count=5, execution_ms=72, success=True, user_question="revenue vs open support tickets by region",
+         agent_query="revenue by region", thread_id="t3", correlation_id="c4"),
+    dict(ts="2026-06-27T10:55:31Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
+         datasource="SUPPORT_DATA", sql="SELECT region, COUNT(*) AS open_tickets\nFROM tickets WHERE status='open' GROUP BY region",
+         row_count=5, execution_ms=58, success=True, user_question="revenue vs open support tickets by region",
+         agent_query="open tickets by region", thread_id="t3", correlation_id="c4"),
     # A bare call with no self-reported ids → its own singleton conversation (audit-complete degradation).
     dict(ts="2026-06-27T10:40:03Z", tool_name="list_datasources", source="mcp_server",
          actor="morgan@example.com", execution_ms=3, success=True),

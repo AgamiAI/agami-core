@@ -210,9 +210,11 @@ def _utc(ts: str | None) -> str:
 
 def _call_card(c: dict[str, Any]) -> str:
     """One call inside a turn. A **query** call (has `sql`) shows its agent-framing + SQL; a **non-query**
-    call (list_datasources, get_datasource_schema, …) has no SQL, so it shows its tool name + datasource —
-    so every call in the conversation is visible, not just the queries. SQL/framing are self-reported and
-    attacker-influenceable → escaped; rows shown only when the call recorded a count."""
+    call (list_datasources, get_datasource_schema, …) has no SQL, so it shows its tool name — so every call
+    in the conversation is visible, not just the queries. Every card's meta line carries the call's OWN
+    datasource (a turn can span datasources — a cross-datasource question runs one execute_sql each — so
+    per-call attribution matters). SQL/framing are self-reported + attacker-influenceable → escaped; rows
+    shown only when the call recorded a count."""
     if c.get("sql"):
         head = (
             f'<div class="muted" style="margin:0 0 6px">↳ {ui.esc(c["agent_query"])} '
@@ -227,16 +229,17 @@ def _call_card(c: dict[str, Any]) -> str:
     else:
         head = (
             '<div style="margin:0 0 6px">'
-            f'<span class="pill" style="background:var(--chip);color:var(--ink)">{ui.esc(c["tool_name"])}</span> '
-            f'<span class="muted">{ui.esc(c.get("datasource") or "—")}</span></div>'
+            f'<span class="pill" style="background:var(--chip);color:var(--ink)">{ui.esc(c["tool_name"])}</span>'
+            "</div>"
         )
         body = ""
+    ds = ui.esc(c.get("datasource") or "—")
     lat = (str(c["execution_ms"]) + " ms") if c.get("execution_ms") is not None else ""
     rows_bit = f' · {c["row_count"]} rows' if c.get("row_count") is not None else ""
     return (
         '<div style="border-top:1px solid var(--line);padding:9px 0 11px">'
         f"{head}{body}"
-        f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(c["ts"])} · '
+        f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(c["ts"])} · {ds} · '
         f"{lat} {_ok_pill(c['success'])}{rows_bit}</div></div>"
     )
 
@@ -271,7 +274,7 @@ def _session_drawer(s: dict[str, Any], idx: int) -> str:
 <aside class="drawer" style="width:560px">
 <div class="drawer-head"><h1 style="font-size:17px">Conversation</h1>
 <label for="{sid}" class="drawer-x" aria-label="Close">&times;</label></div>
-<p class="sub" style="margin-bottom:8px">{ui.esc(s.get("actor") or "—")} · {ui.esc(s.get("datasource") or "—")} · {s["call_count"]} calls · started {_utc(s["started"])}</p>
+<p class="sub" style="margin-bottom:8px">{ui.esc(s.get("actor") or "—")} · {ui.esc(", ".join(s["datasources"]) or "—")} · {s["call_count"]} calls · started {_utc(s["started"])}</p>
 {cards}</aside></div>"""
 
 
@@ -288,7 +291,7 @@ def activity_tab_html(
             "<tr>"
             f'<td><label for="sess-{i}" style="cursor:pointer;color:var(--brand)">{_utc(s["started"])}</label></td>'
             f"<td><strong>{ui.esc(s.get('actor') or '—')}</strong></td>"
-            f'<td class="muted">{ui.esc(s.get("datasource") or "—")}</td>'
+            f'<td class="muted">{ui.esc(", ".join(s["datasources"]) or "—")}</td>'
             f'<td class="muted">{s["call_count"]}</td>'
             f'<td class="muted">{s["error_count"] or "—"}</td>'
             f'<td class="muted">{(str(s["avg_ms"]) + " ms") if s.get("avg_ms") is not None else "—"}</td>'
@@ -300,7 +303,7 @@ def activity_tab_html(
     empty = '<p class="muted">No activity yet.</p>' if not sessions else ""
     panel = f"""{empty}
 <div class="table-wrap"><table>
-<thead><tr><th>Started</th><th>User</th><th>Datasource</th><th>Calls</th><th>Errors</th><th>Avg time</th><th>Last activity</th><th></th></tr></thead>
+<thead><tr><th>Started</th><th>User</th><th>Datasources</th><th>Calls</th><th>Errors</th><th>Avg time</th><th>Last activity</th><th></th></tr></thead>
 <tbody>{body_rows}</tbody></table></div>"""
     return ui.admin_shell(
         "Activity · agami admin",

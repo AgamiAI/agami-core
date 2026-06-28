@@ -113,22 +113,38 @@ def test_list_sessions_folds_non_query_calls_into_the_conversation(env):
     assert tool_names == {"list_datasources", "execute_sql"}
     # The conversation opens with a datasource-less list_datasources; the row still shows the real
     # datasource from the call that had one (not "—").
-    assert conv["datasource"] == "SALES_DATA"
+    assert conv["datasources"] == ["SALES_DATA"]
 
 
-def test_conversation_datasource_is_the_earliest_call_that_has_one(env):
-    # Skip a datasource-less opener (list_datasources) and, when the datasource changes mid-thread,
-    # take the EARLIEST one — not the newest (the rows arrive ts-DESC, so order matters).
+def test_conversation_lists_every_datasource_it_touched_in_order(env):
+    # A conversation can switch datasources mid-session (or a single turn can span two). The row shows
+    # the full distinct set in first-seen order, skipping datasource-less calls (list_datasources).
     s = Store.connect(env)
     _call(s, ts="2026-06-27T10:00:00Z", tool_name="list_datasources", actor="a", success=True,
-          thread_id="t1", correlation_id="c0")  # no datasource
+          thread_id="t1", correlation_id="c0")  # no datasource — contributes nothing
     _call(s, ts="2026-06-27T10:01:00Z", actor="a", sql="SELECT 1", success=True,
           datasource="SALES_DATA", thread_id="t1", correlation_id="c1")
     _call(s, ts="2026-06-27T10:02:00Z", actor="a", sql="SELECT 2", success=True,
-          datasource="OTHER_DATA", thread_id="t1", correlation_id="c2")
+          datasource="SUPPORT_DATA", thread_id="t1", correlation_id="c1")  # same turn, 2nd datasource
+    _call(s, ts="2026-06-27T10:03:00Z", actor="a", sql="SELECT 3", success=True,
+          datasource="SALES_DATA", thread_id="t1", correlation_id="c2")  # back to the first, no dupe
     sessions = model_store.list_sessions(s)
     s.close()
-    assert sessions[0]["datasource"] == "SALES_DATA"  # earliest with one set, not OTHER_DATA
+    assert sessions[0]["datasources"] == ["SALES_DATA", "SUPPORT_DATA"]  # distinct, first-seen order
+
+
+def test_activity_drawer_shows_each_call_datasource_for_a_spanning_turn(client, env):
+    # One turn (correlation_id="c1") spanning two datasources — each call card must show its OWN
+    # datasource, and the conversation row both.
+    s = Store.connect(env)
+    _call(s, ts="2026-06-27T10:01:00Z", actor="jordan@example.com", sql="SELECT a FROM x", success=True,
+          datasource="SALES_DATA", thread_id="t1", correlation_id="c1", user_question="compare sales vs support")
+    _call(s, ts="2026-06-27T10:01:30Z", actor="jordan@example.com", sql="SELECT b FROM y", success=True,
+          datasource="SUPPORT_DATA", thread_id="t1", correlation_id="c1", user_question="compare sales vs support")
+    s.close()
+    _login(client)
+    html = client.get("/admin?tab=activity").text
+    assert "SALES_DATA" in html and "SUPPORT_DATA" in html  # both datasources surfaced, per call
 
 
 def test_list_sessions_keeps_a_thread_less_non_query_call_as_a_singleton(env):
