@@ -334,8 +334,9 @@ class DbActivitySink:
         # `success` is a portable 0/1 (no boolean literal across SQLite/Postgres).
         self._store.execute(
             "INSERT INTO tool_calls (id, ts, actor, tool_name, datasource, sql, row_count, "
-            "execution_ms, success, error_kind, source, user_question, agent_query, thread_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
+            "correlation_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -351,6 +352,7 @@ class DbActivitySink:
                 record.user_question,
                 record.agent_query,
                 record.thread_id,
+                record.correlation_id,
             ),
         )
         self._store.commit()
@@ -362,7 +364,7 @@ class DbActivitySink:
 
 _TOOL_CALL_COLS = (
     "id, ts, actor, tool_name, datasource, sql, row_count, execution_ms, success, error_kind, "
-    "user_question, agent_query, thread_id"
+    "user_question, agent_query, thread_id, correlation_id"
 )
 
 

@@ -34,7 +34,11 @@ ADMIN_PW = "admin-password-localtest"
 
 
 def _call(s, **kw):
-    rec = {"ts": kw.pop("ts"), "tool_name": kw.pop("tool_name", "execute_sql"), "source": "mcp_server"}
+    rec = {
+        "ts": kw.pop("ts"),
+        "tool_name": kw.pop("tool_name", "execute_sql"),
+        "source": "mcp_server",
+    }
     rec.update(kw)
     DbActivitySink(s).record_tool_call(ToolCallRecord(**rec))
 
@@ -61,16 +65,46 @@ def env(tmp_path, monkeypatch):
 
 def test_list_sessions_groups_by_thread_and_degrades(env):
     s = Store.connect(env)
-    _call(s, ts="2026-06-27T10:39:00Z", actor="jordan@example.com", sql="A", success=True,
-          thread_id="t1", user_question="q1", execution_ms=10)
-    _call(s, ts="2026-06-27T10:42:00Z", actor="jordan@example.com", sql="B", success=False,
-          thread_id="t1", execution_ms=20)
-    _call(s, ts="2026-06-27T10:41:00Z", actor="sam@example.com", sql="C", success=True,
-          thread_id="t2", execution_ms=30)
-    _call(s, ts="2026-06-27T10:30:00Z", actor="morgan@example.com", sql="D", success=True,
-          thread_id=None, execution_ms=40)  # no thread → its own singleton session
-    _call(s, ts="2026-06-27T10:50:00Z", actor="pat@example.com", sql="E", success=True,
-          thread_id="t3")  # no latency recorded → avg_ms must be None
+    _call(
+        s,
+        ts="2026-06-27T10:39:00Z",
+        actor="jordan@example.com",
+        sql="A",
+        success=True,
+        thread_id="t1",
+        user_question="q1",
+        execution_ms=10,
+    )
+    _call(
+        s,
+        ts="2026-06-27T10:42:00Z",
+        actor="jordan@example.com",
+        sql="B",
+        success=False,
+        thread_id="t1",
+        execution_ms=20,
+    )
+    _call(
+        s,
+        ts="2026-06-27T10:41:00Z",
+        actor="sam@example.com",
+        sql="C",
+        success=True,
+        thread_id="t2",
+        execution_ms=30,
+    )
+    _call(
+        s,
+        ts="2026-06-27T10:30:00Z",
+        actor="morgan@example.com",
+        sql="D",
+        success=True,
+        thread_id=None,
+        execution_ms=40,
+    )  # no thread → its own singleton session
+    _call(
+        s, ts="2026-06-27T10:50:00Z", actor="pat@example.com", sql="E", success=True, thread_id="t3"
+    )  # no latency recorded → avg_ms must be None
     sessions = model_store.list_sessions(s)
     s.close()
     by_thread = {x["thread_id"]: x for x in sessions if x["thread_id"]}
@@ -87,8 +121,22 @@ def test_list_sessions_groups_by_thread_and_degrades(env):
 def test_list_sessions_does_not_blend_different_actors_on_a_colliding_thread(env):
     # thread_id is self-reported (untrusted); a collision across users must not merge/misattribute them.
     s = Store.connect(env)
-    _call(s, ts="2026-06-27T10:00:00Z", actor="jordan@example.com", sql="A", success=True, thread_id="shared")
-    _call(s, ts="2026-06-27T10:01:00Z", actor="sam@example.com", sql="B", success=True, thread_id="shared")
+    _call(
+        s,
+        ts="2026-06-27T10:00:00Z",
+        actor="jordan@example.com",
+        sql="A",
+        success=True,
+        thread_id="shared",
+    )
+    _call(
+        s,
+        ts="2026-06-27T10:01:00Z",
+        actor="sam@example.com",
+        sql="B",
+        success=True,
+        thread_id="shared",
+    )
     sessions = model_store.list_sessions(s)
     s.close()
     assert len(sessions) == 2
@@ -119,9 +167,17 @@ def _login(c):
 
 def test_calls_tab_shows_actor_and_detail(client, env):
     s = Store.connect(env)
-    _call(s, ts="2026-06-27T10:42:00Z", actor="jordan@example.com", datasource="SALES_DATA",
-          sql="SELECT region FROM orders", row_count=5, execution_ms=84, success=True,
-          user_question="revenue by region?")
+    _call(
+        s,
+        ts="2026-06-27T10:42:00Z",
+        actor="jordan@example.com",
+        datasource="SALES_DATA",
+        sql="SELECT region FROM orders",
+        row_count=5,
+        execution_ms=84,
+        success=True,
+        user_question="revenue by region?",
+    )
     s.close()
     _login(client)
     html = client.get("/admin?tab=calls").text
@@ -131,8 +187,15 @@ def test_calls_tab_shows_actor_and_detail(client, env):
 
 def test_activity_views_escape_sql_and_question(client, env):
     s = Store.connect(env)
-    _call(s, ts="2026-06-27T10:42:00Z", actor="x", sql="SELECT '<script>alert(1)</script>'",
-          user_question="<img src=x onerror=alert(1)>", success=True, thread_id="t1")
+    _call(
+        s,
+        ts="2026-06-27T10:42:00Z",
+        actor="x",
+        sql="SELECT '<script>alert(1)</script>'",
+        user_question="<img src=x onerror=alert(1)>",
+        success=True,
+        thread_id="t1",
+    )
     s.close()
     _login(client)
     for tab in ("calls", "sessions"):
@@ -143,9 +206,18 @@ def test_activity_views_escape_sql_and_question(client, env):
 
 def test_sessions_tab_groups_and_handles_missing_question(client, env):
     s = Store.connect(env)
-    _call(s, ts="2026-06-27T10:42:00Z", actor="jordan@example.com", sql="A", success=True,
-          thread_id="t1", user_question="what is the revenue by region")
-    _call(s, ts="2026-06-27T10:30:00Z", actor="sam@example.com", sql="B", success=True, thread_id=None)
+    _call(
+        s,
+        ts="2026-06-27T10:42:00Z",
+        actor="jordan@example.com",
+        sql="A",
+        success=True,
+        thread_id="t1",
+        user_question="what is the revenue by region",
+    )
+    _call(
+        s, ts="2026-06-27T10:30:00Z", actor="sam@example.com", sql="B", success=True, thread_id=None
+    )
     s.close()
     _login(client)
     html = client.get("/admin?tab=sessions").text
@@ -171,3 +243,37 @@ def test_activity_tabs_drop_the_redundant_helper_text(client, env):
     _login(client)
     assert "Every tool call, newest first" not in client.get("/admin?tab=calls").text
     assert "Queries grouped into conversations" not in client.get("/admin?tab=sessions").text
+
+
+# --- ACE-015: the turn level (correlation_id) --------------------------------
+
+
+def test_correlation_id_round_trips(env):
+    s = Store.connect(env)
+    _call(
+        s,
+        ts="2026-06-28T10:00:00Z",
+        actor="a",
+        sql="SELECT 1",
+        success=True,
+        thread_id="t1",
+        correlation_id="turn-1",
+    )
+    rows = model_store.list_tool_calls(s)
+    s.close()
+    assert rows[0]["correlation_id"] == "turn-1"
+
+
+def test_execute_sql_inputschema_exposes_correlation_id():
+    import tools
+
+    props = tools.TOOLS["execute_sql"]["inputSchema"]["properties"]
+    assert "correlation_id" in props
+    assert "turn" in props["correlation_id"]["description"].lower()
+
+
+def test_server_instructions_ask_for_verbatim_question_and_per_turn_correlation():
+    import tools
+
+    instr = tools.SERVER_INSTRUCTIONS
+    assert "correlation_id" in instr and "VERBATIM" in instr

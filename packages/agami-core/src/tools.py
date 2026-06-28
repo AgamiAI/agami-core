@@ -77,9 +77,12 @@ SERVER_INSTRUCTIONS = (
     "COUNT/COUNT(DISTINCT)/filter/GROUP BY/JOIN on it, but never SELECT its raw per-row values. "
     "'unique emails' → COUNT(DISTINCT email). To disambiguate identical labels, project the "
     "non-sensitive id. (execute_sql enforces this and errors on a raw sensitive projection.)\n"
-    "Activity log: on execute_sql, pass `user_question` (the user's verbatim question) and a "
-    "`thread_id` you generate once per conversation and reuse on every call — so a deployment admin "
-    "can see what was asked and group a conversation's queries. Best-effort; omit if unknown."
+    "Activity log: on execute_sql, pass `user_question` (the user's question VERBATIM — keep it the "
+    "SAME across every query answering that one question; put your own refinement in `raw_query`, never "
+    "in `user_question`), a `thread_id` (one per conversation), and a `correlation_id` (one per user "
+    "question/turn, reused across the queries answering it, fresh when they ask something new) — so a "
+    "deployment admin sees the conversation, and within it 'user asked X → agent ran N queries'. "
+    "Best-effort; omit if unknown."
 )
 
 
@@ -1012,6 +1015,7 @@ def record_tool_call(
             "user_question": args.get("user_question"),
             "agent_query": args.get("raw_query"),  # the existing arg is the agent's framing of the query
             "thread_id": args.get("thread_id"),
+            "correlation_id": args.get("correlation_id"),  # the turn (one user question)
         }
     )
 
@@ -1140,17 +1144,25 @@ TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "raw_query": {
                     "type": "string",
-                    "description": "Your (the agent's) framing of this query — recorded for the admin activity log.",
+                    "description": "Your (the agent's) framing of THIS sub-query — recorded for the "
+                    "admin activity log. Your refinement goes here, NOT in user_question.",
                 },
                 "user_question": {
                     "type": "string",
-                    "description": "The user's ORIGINAL question, verbatim, that led to this query — "
-                    "recorded so an admin can see what was asked. Pass it whenever you have it.",
+                    "description": "The user's ORIGINAL question, VERBATIM. Keep it the SAME across every "
+                    "query you run to answer one question — do not replace it with your refinement (that "
+                    "goes in raw_query). Recorded so an admin sees what was actually asked.",
                 },
                 "thread_id": {
                     "type": "string",
                     "description": "A short id you generate ONCE per conversation and reuse on every "
                     "tool call in it — lets the admin group a conversation's queries into one session.",
+                },
+                "correlation_id": {
+                    "type": "string",
+                    "description": "A short id you generate ONCE per USER QUESTION (a turn) and reuse on "
+                    "every query you run to answer THAT question — lets the admin see 'user asked X → "
+                    "agent ran N queries'. Start a fresh one when the user asks something new.",
                 },
                 "max_rows": {"type": "integer", "description": "Row cap (clamped 1–10000)."},
             },
