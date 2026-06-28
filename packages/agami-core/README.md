@@ -105,12 +105,14 @@ The admin console also has two read-only activity tabs:
 - **Tool calls** — *every* MCP tool call, newest first: who (the authenticated user), the tool,
   datasource, and for a query the SQL, row count, latency, and status. This is **audit-grade** — the
   server observes it directly, so it's always accurate.
-- **Sessions** — those queries grouped into a conversation, each opening to its queries with the
-  natural-language **question**. This is **best-effort**: the MCP protocol carries neither the user's
-  question nor a conversation id, so Claude self-reports them (a `user_question` param + a `thread_id`
-  it reuses per conversation). When it does, you get grouping + the question; when it doesn't, the view
-  degrades to ungrouped and the question shows as not reported. Treat those two fields as a hint, not a
-  record.
+- **Sessions** — those queries grouped into a conversation, and *within* it into **turns**: each turn
+  is one user question and the **N agent queries** Claude ran to answer it (*"User asked X → 2
+  queries"*). This is **best-effort** — the MCP protocol carries neither the user's question, a
+  conversation id, nor a turn boundary, so Claude self-reports them: a `user_question` (kept verbatim),
+  a `thread_id` (per conversation), and a `correlation_id` (per turn). The turn's question is taken from
+  the **first** call in the turn (the model sometimes drifts it on later refinements). When Claude
+  doesn't supply a `correlation_id`, each query simply shows as its own turn — the view degrades, never
+  errors. Treat the self-reported fields as a hint, not a record.
 
 The `tool_calls` log grows one row per call and has **no automatic retention** — it's your local store,
 so prune it on your own schedule if it gets large.
