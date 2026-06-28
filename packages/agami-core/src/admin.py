@@ -314,10 +314,17 @@ def _session_drawer(s: dict[str, Any], idx: int) -> str:
                 f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(q["ts"])} · '
                 f"{lat} {_ok_pill(q['success'])} · {rc} rows</div></div>"
             )
+        # The question is Claude-self-reported (best-effort, attacker-influenceable) — mark it so, like
+        # the rest of the activity log; "User asked" is the framing, "· self-reported" the provenance.
+        asked = (
+            f'<span class="muted">User asked</span> <strong>{ui.esc(question)}</strong> '
+            '<span class="muted" style="font-size:13px">· self-reported</span>'
+            if t.get("question")
+            else f'<strong class="muted">{ui.esc(question)}</strong>'
+        )
         cards += (
             '<div style="border-top:2px solid var(--line);padding:14px 0 2px;margin-top:8px">'
-            f'<div style="margin-bottom:4px"><span class="muted">User asked</span> '
-            f'<strong>{ui.esc(question)}</strong> '
+            f'<div style="margin-bottom:4px">{asked} '
             f'<span class="muted" style="font-size:13px">· {n} {"query" if n == 1 else "queries"}</span>'
             f"</div>{qrows}</div>"
         )
