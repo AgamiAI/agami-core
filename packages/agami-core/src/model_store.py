@@ -386,8 +386,13 @@ def _group_turns(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     turns: list[dict[str, Any]] = []
     for ck in turn_order:
         tc = sorted(turns_map[ck], key=lambda x: x["ts"])  # chronological within the turn
+        # The turn's question = the EARLIEST call that actually reported one. Not literally tc[0]: the
+        # setup calls that now fold into a turn (list_datasources, get_datasource_schema) carry no
+        # user_question, so they'd mask the real question that the execute_sql did report. Earliest-with-
+        # one stays drift-proof (a later call's drifted question can't win over the first real one).
+        question = next((c["user_question"] for c in tc if c.get("user_question")), None)
         turns.append({
-            "question": tc[0].get("user_question"),  # earliest call's question (drift-proof)
+            "question": question,
             "started": tc[0]["ts"],
             "calls": tc,
         })

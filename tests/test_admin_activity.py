@@ -287,6 +287,20 @@ def test_turns_use_earliest_question_and_group_refinements(env):
     ]  # chronological, both refinements
 
 
+def test_turn_question_comes_from_earliest_call_that_reported_one(env):
+    # A turn now folds in setup calls (get_datasource_schema) that carry no user_question; they lead the
+    # turn chronologically but must NOT mask the real question the execute_sql reported.
+    s = Store.connect(env)
+    _call(s, ts="2026-06-28T10:00:00Z", tool_name="get_datasource_schema", actor="a", success=True,
+          thread_id="t", correlation_id="c1")  # no user_question
+    _call(s, ts="2026-06-28T10:01:00Z", actor="a", sql="Q", success=True, datasource="SALES_DATA",
+          thread_id="t", correlation_id="c1", user_question="give me the incident trend")
+    sessions = model_store.list_sessions(s)
+    s.close()
+    turn = sessions[0]["turns"][0]
+    assert turn["question"] == "give me the incident trend"  # not None from the leading schema call
+
+
 def test_turns_degrade_to_singletons_without_correlation_id(env):
     s = Store.connect(env)
     _call(
