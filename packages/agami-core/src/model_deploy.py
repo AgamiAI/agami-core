@@ -19,13 +19,15 @@ from store import Store
 
 
 def deploy_one(store: Store, datasource: str, profile_dir: Path) -> None:
-    """Load one datasource's model (org + examples + memory + version) from `profile_dir` into the store.
+    """Load one datasource's per-datasource model (org + examples + ORGANIZATION.md + version) from
+    `profile_dir` into the store. The install-global `USER_MEMORY.md` is handled once per run, separately
+    (`_deploy_user_memory`) — it lives at the artifacts ROOT, not per profile.
 
-    Reads + parses **everything first, then writes** — so a malformed model/examples fails *before* any DB
-    write rather than half-way through. Each model_store writer is individually idempotent (clear-then-
-    insert), so a clean re-run fully overwrites a datasource; the deploy entrypoint fail-closes on a non-zero
-    exit, so a partial write from a rare mid-write DB error is never served and self-heals on the next deploy.
-    (The writers commit individually, so this isn't one transaction — load-then-write is the practical guard.)"""
+    Reads + parses **everything first, then writes** — so a malformed model fails *before* any DB write
+    rather than half-way through. Each model_store writer is individually idempotent (clear-then-insert), so
+    a clean re-run fully overwrites a datasource; the entrypoint fail-closes on a non-zero exit, so a partial
+    write from a rare mid-write DB error is never served and self-heals on the next deploy. (The writers commit
+    individually, so this isn't one transaction — load-then-write is the practical guard.)"""
     from semantic_model import loader
     from semantic_model.snapshot import newest_version
 
@@ -44,26 +46,40 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path) -> None:
             continue
         examples.extend({**ex, "area": ex.get("area") or sa.name} for ex in area_examples if isinstance(ex, dict))
     org_md = profile_dir / "ORGANIZATION.md"
-    user_md = profile_dir / "USER_MEMORY.md"
     org_text = org_md.read_text() if org_md.exists() else None
-    user_text = user_md.read_text() if user_md.exists() else None
     version = newest_version(profile_dir) or "deployed"
 
     # --- then write (version last, so its presence marks a completed deploy) ---
     model_store.write_organization(store, datasource, org)
-    if examples:
-        model_store.write_examples(store, datasource, examples)
-    model_store.write_memory(store, datasource, organization=org_text, user=user_text)
+    # Always write examples (even []) so a redeploy after REMOVING examples actually clears the stale rows —
+    # write_examples is clear-then-insert, so an empty list replaces the datasource's examples with none.
+    model_store.write_examples(store, datasource, examples)
+    model_store.write_memory(store, datasource, organization=org_text)  # per-datasource only
     model_store.write_model_version(store, datasource, version)
     store.commit()
 
 
+def _deploy_user_memory(store: Store, artifacts_dir: Path) -> None:
+    """USER_MEMORY.md is **install-global** (one shared row, keyed by the global sentinel inside
+    write_memory) and lives at the artifacts ROOT — not per profile — matching how the server reads it
+    (`tools._domain_memory` → `artifacts/USER_MEMORY.md`). Written once per run; absent ⇒ nothing to do."""
+    f = artifacts_dir / "USER_MEMORY.md"
+    if f.exists():
+        model_store.write_memory(store, "", user=f.read_text())  # datasource ignored for the global user row
+        store.commit()
+
+
 def deploy_models(store: Store, artifacts_dir: Path) -> list[str]:
-    """Load every datasource model under `artifacts_dir` (a subdir with an `org.yaml`) into the store.
-    Returns the datasources loaded. A non-model subdir (e.g. `local/`, which holds credentials) is skipped
-    because it has no `org.yaml`."""
+    """Load every datasource model under `artifacts_dir` (a *directory* with an `org.yaml`) into the store.
+    Returns the datasources loaded. The `local/` dir (gitignored secrets/state) and any non-directory or
+    org.yaml-less entry are skipped — `local/` explicitly, so a stray `local/org.yaml` can't deploy from the
+    secrets dir."""
     loaded: list[str] = []
-    for prof in sorted(p for p in artifacts_dir.iterdir() if (p / "org.yaml").exists()):
+    for prof in sorted(
+        p
+        for p in artifacts_dir.iterdir()
+        if p.is_dir() and p.name != agami_paths.LOCAL_SUBDIR and (p / "org.yaml").exists()
+    ):
         deploy_one(store, prof.name, prof)
         loaded.append(prof.name)
     return loaded
@@ -106,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+        _deploy_user_memory(store, artifacts_dir)  # install-global USER_MEMORY.md, once
+    except Exception as e:  # noqa: BLE001 — any load/write failure is a clean fail-closed exit, not a traceback
+        print(f"model_deploy: failed: {e}", file=sys.stderr)
+        return 1
     finally:
         store.close()
     print(f"model_deploy: loaded model for: {', '.join(loaded)}")

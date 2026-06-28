@@ -99,6 +99,44 @@ def test_examples_memory_and_version_are_loaded(tmp_path):
     assert version  # a model_version row was written
 
 
+def test_user_memory_is_loaded_from_the_artifacts_root(tmp_path, monkeypatch):
+    # USER_MEMORY.md is install-global — it lives at the artifacts ROOT (not per profile) and writes one
+    # shared row. main() handles it once (deploy_one does not).
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    (arts / "USER_MEMORY.md").write_text("# Preferences\nPrefer fiscal-year over calendar.\n")
+    monkeypatch.setenv("AGAMI_DB_URL", "sqlite://" + str(tmp_path / "m.db"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(arts))
+    assert model_deploy.main([]) == 0
+    store = Store.connect("sqlite://" + str(tmp_path / "m.db"))
+    user_rows = store.query("SELECT content FROM memory WHERE kind = 'user'")
+    store.close()
+    assert user_rows and "fiscal-year" in user_rows[0]["content"]  # the global user row was written
+
+
+def test_redeploy_clears_removed_examples(tmp_path):
+    # A redeploy after removing the examples file must clear the stale rows (write_examples always runs).
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    store = _store(tmp_path)
+    model_deploy.deploy_models(store, arts)
+    assert _count(store, "prompt_example", "demo") == 1
+    (arts / "demo" / "prompt_examples" / "Catalog" / "examples.yaml").unlink()  # remove the examples
+    model_deploy.deploy_models(store, arts)
+    after = _count(store, "prompt_example", "demo")
+    store.close()
+    assert after == 0  # stale examples cleared, not left behind
+
+
+def test_main_invalid_yaml_exits_one_not_traceback(tmp_path, monkeypatch):
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    (arts / "demo" / "org.yaml").write_text("organization: [unterminated\n")  # invalid YAML
+    monkeypatch.setenv("AGAMI_DB_URL", "sqlite://" + str(tmp_path / "m.db"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(arts))
+    assert model_deploy.main([]) == 1  # caught → clean exit, not an uncaught traceback
+
+
 def test_multiple_datasources_each_load(tmp_path):
     arts = tmp_path / "artifacts"
     _write_model(arts, "demo", org_name="acme")
