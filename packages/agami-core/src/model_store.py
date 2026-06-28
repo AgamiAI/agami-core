@@ -368,46 +368,46 @@ _TOOL_CALL_COLS = (
 )
 
 
-def list_tool_calls(store: Store, *, limit: int = 200) -> list[dict[str, Any]]:
-    """Recent tool calls, newest first — the audit-grade flat activity view."""
-    return store.query(
-        f"SELECT {_TOOL_CALL_COLS} FROM tool_calls ORDER BY ts DESC LIMIT ?", (limit,)
-    )
-
-
-def _group_turns(queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group a session's query calls into **turns** by the self-reported `correlation_id` (one user
-    question -> N agent sub-queries). A query with no `correlation_id` is its own singleton turn (so
-    the view degrades to the per-call list). The turn's `question` is the **earliest** call's
-    `user_question` — Claude drifts `user_question` onto later refinements, so the first is the reliable
-    one. Turns keep newest-first order (queries arrive ts-DESC); each turn's queries read chronologically."""
+def _group_turns(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group a conversation's calls into **turns** by the self-reported `correlation_id` (one user
+    question -> the N calls the agent made answering it). A call with no `correlation_id` is its own
+    singleton turn (so the view degrades to the per-call list). The turn's `question` is the **earliest**
+    call's `user_question` — Claude drifts `user_question` onto later refinements, so the first is the
+    reliable one. Turns keep newest-first order (calls arrive ts-DESC); each turn's calls read
+    chronologically."""
     turns_map: dict[Any, list[dict[str, Any]]] = {}
     turn_order: list[Any] = []
-    for q in queries:
-        ck = q["correlation_id"] or q["id"]  # no correlation_id -> singleton keyed on the row id
+    for c in calls:
+        ck = c["correlation_id"] or c["id"]  # no correlation_id -> singleton keyed on the row id
         if ck not in turns_map:
             turns_map[ck] = []
             turn_order.append(ck)
-        turns_map[ck].append(q)
+        turns_map[ck].append(c)
     turns: list[dict[str, Any]] = []
     for ck in turn_order:
-        tq = sorted(turns_map[ck], key=lambda x: x["ts"])  # chronological within the turn
+        tc = sorted(turns_map[ck], key=lambda x: x["ts"])  # chronological within the turn
+        # The turn's question = the EARLIEST call that actually reported one. Not literally tc[0]: the
+        # setup calls that now fold into a turn (list_datasources, get_datasource_schema) carry no
+        # user_question, so they'd mask the real question that the execute_sql did report. Earliest-with-
+        # one stays drift-proof (a later call's drifted question can't win over the first real one).
+        question = next((c["user_question"] for c in tc if c.get("user_question")), None)
         turns.append({
-            "question": tq[0].get("user_question"),  # earliest call's question (drift-proof)
-            "started": tq[0]["ts"],
-            "queries": tq,
+            "question": question,
+            "started": tc[0]["ts"],
+            "calls": tc,
         })
     return turns
 
 
 def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
-    """Group the **query** calls (execute_sql) into sessions for the best-effort Sessions view: same
-    `thread_id` = one session; a call with no `thread_id` (Claude didn't self-report) becomes its own
-    singleton session (grouped on its id), so the view degrades gracefully to ungrouped. Grouping +
-    aggregation are done in Python (portable, no dialect-specific GROUP BY)."""
+    """Group **all** tool calls into conversations for the best-effort Activity view: same `thread_id`
+    = one conversation; a call with no `thread_id` (Claude didn't self-report) becomes its own singleton
+    (grouped on its id), so the view degrades gracefully to ungrouped — and stays **audit-complete**:
+    every call appears, query or not (the non-query tools — list_datasources, get_datasource_schema, …
+    — fold into the conversation alongside the execute_sql calls). Grouping + aggregation are done in
+    Python (portable, no dialect-specific GROUP BY)."""
     rows = store.query(
-        f"SELECT {_TOOL_CALL_COLS} FROM tool_calls WHERE tool_name = 'execute_sql' "
-        "ORDER BY ts DESC LIMIT ?",
+        f"SELECT {_TOOL_CALL_COLS} FROM tool_calls ORDER BY ts DESC LIMIT ?",
         (limit,),
     )
     sessions: dict[Any, dict[str, Any]] = {}
@@ -415,26 +415,35 @@ def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
     for r in rows:
         # Scope the group by the (audit-grade) actor as well as the (self-reported, untrusted) thread_id:
         # two different users colliding on one thread_id must NOT blend into a single, misattributed
-        # session. A call with no thread_id stays its own singleton (grouped on its id).
+        # conversation. A call with no thread_id stays its own singleton (grouped on its id).
         key = (r["actor"], r["thread_id"]) if r["thread_id"] else r["id"]
         s = sessions.get(key)
         if s is None:
             s = {"key": key, "thread_id": r["thread_id"], "actor": r["actor"],
-                 "datasource": r["datasource"], "queries": []}
+                 "datasource": r["datasource"], "calls": []}
             sessions[key] = s
             order.append(key)
-        s["queries"].append(r)
+        s["calls"].append(r)
     out: list[dict[str, Any]] = []
     for key in order:
         s = sessions[key]
-        qs = s["queries"]
-        ts_all = [q["ts"] for q in qs]
-        ms = [q["execution_ms"] for q in qs if q["execution_ms"] is not None]
+        cs = s["calls"]
+        ts_all = [c["ts"] for c in cs]
+        ms = [c["execution_ms"] for c in cs if c["execution_ms"] is not None]
         s["started"] = min(ts_all)
         s["last_activity"] = max(ts_all)
-        s["query_count"] = len(qs)
-        s["error_count"] = sum(1 for q in qs if not q["success"])
-        s["avg_ms"] = round(sum(ms) / len(ms)) if ms else None
-        s["turns"] = _group_turns(qs)  # the within-session turn level (ACE-015)
+        # A conversation — or even one turn — can touch SEVERAL datasources: the user switches mid-session,
+        # or asks something spanning two (the agent runs one execute_sql per datasource). Surface the full
+        # distinct set in first-seen (chronological) order, not just one; `cs` is ts-DESC, so walk it
+        # reversed. Empty when only datasource-less calls (e.g. list_datasources) ran.
+        seen_ds: list[str] = []
+        for c in reversed(cs):
+            if c["datasource"] and c["datasource"] not in seen_ds:
+                seen_ds.append(c["datasource"])
+        s["datasources"] = seen_ds
+        s["call_count"] = len(cs)
+        s["error_count"] = sum(1 for c in cs if not c["success"])
+        s["avg_ms"] = round(sum(ms) / len(ms)) if ms else None  # over calls that recorded latency
+        s["turns"] = _group_turns(cs)  # the within-conversation turn level (ACE-015)
         out.append(s)
     return out

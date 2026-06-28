@@ -98,21 +98,29 @@ on `/admin/login`).
 > configured IdP — so add a teammate by an email the *right* person controls there. The setup link and
 > the other pre-auth endpoints aren't rate-limited in-process; put them behind your proxy/LB if exposed.
 
-### Activity views
+### Activity view
 
-The admin console also has two read-only activity tabs:
+The admin console has one read-only **Activity** tab: every MCP tool call, folded into the conversation
+it belongs to — **thread (conversation) ▸ turn (one user question) ▸ call**. Open a conversation and you
+see its whole arc, *not just the queries*: the `list_datasources` / `get_datasource_schema` calls that
+scoped the work sit alongside the `execute_sql`s that answered it (*"User asked what datasources →
+`list_datasources`; user asked revenue by region → `get_datasource_schema`, then `execute_sql` ×2"*). A
+query call shows its SQL, row count, latency, and status; a non-query call shows its tool name. Every
+call carries its **own** datasource, because a conversation — or even a single turn — can span several:
+the user switches datasource mid-session, or asks something that runs one query per datasource. The
+conversation row lists the full set it touched.
 
-- **Tool calls** — *every* MCP tool call, newest first: who (the authenticated user), the tool,
-  datasource, and for a query the SQL, row count, latency, and status. This is **audit-grade** — the
-  server observes it directly, so it's always accurate.
-- **Sessions** — those queries grouped into a conversation, and *within* it into **turns**: each turn
-  is one user question and the **N agent queries** Claude ran to answer it (*"User asked X → 2
-  queries"*). This is **best-effort** — the MCP protocol carries neither the user's question, a
-  conversation id, nor a turn boundary, so Claude self-reports them: a `user_question` (kept verbatim),
-  a `thread_id` (per conversation), and a `correlation_id` (per turn). The turn's question is taken from
-  the **first** call in the turn (the model sometimes drifts it on later refinements). When Claude
-  doesn't supply a `correlation_id`, each query simply shows as its own turn — the view degrades, never
-  errors. Treat the self-reported fields as a hint, not a record.
+The split is deliberate: it is **audit-grade for *what* ran** — the server observes every call directly,
+so nothing is dropped — and **best-effort for *how* it's grouped**. The MCP protocol carries neither the
+user's question, a conversation id, nor a turn boundary, so Claude self-reports them on every call: a
+`user_question` (kept verbatim), a `thread_id` (per conversation), and a `correlation_id` (per turn). The
+turn's question is taken from the **first** call in the turn (the model sometimes drifts it on later
+refinements). When Claude doesn't supply the ids, a call simply shows as its own singleton conversation —
+the view degrades, never drops a call. Treat the self-reported grouping as a hint, not a record.
+
+> **Free-tier limit.** A turn that produces **no** tool call — Claude answering "let's continue" from
+> context — never reaches the server and so can't appear here; this is an audit of what ran against your
+> data, not a chat transcript.
 
 The `tool_calls` log grows one row per call and has **no automatic retention** — it's your local store,
 so prune it on your own schedule if it gets large.

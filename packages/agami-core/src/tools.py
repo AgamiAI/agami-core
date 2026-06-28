@@ -77,12 +77,12 @@ SERVER_INSTRUCTIONS = (
     "COUNT/COUNT(DISTINCT)/filter/GROUP BY/JOIN on it, but never SELECT its raw per-row values. "
     "'unique emails' → COUNT(DISTINCT email). To disambiguate identical labels, project the "
     "non-sensitive id. (execute_sql enforces this and errors on a raw sensitive projection.)\n"
-    "Activity log: on execute_sql, pass `user_question` (the user's question VERBATIM — keep it the "
-    "SAME across every query answering that one question; put your own refinement in `raw_query`, never "
-    "in `user_question`), a `thread_id` (one per conversation), and a `correlation_id` (one per user "
-    "question/turn, reused across the queries answering it, fresh when they ask something new) — so a "
-    "deployment admin sees the conversation, and within it 'user asked X → agent ran N queries'. "
-    "Best-effort; omit if unknown."
+    "Activity log: on EVERY tool call (not just execute_sql), pass a `thread_id` (one per conversation, "
+    "reused across all its calls) and a `correlation_id` (one per user question/turn, reused across the "
+    "calls answering it, fresh when they ask something new), plus `user_question` (the user's question "
+    "VERBATIM — keep it the SAME across the calls answering it; on execute_sql your own refinement goes "
+    "in `raw_query`, never in `user_question`) — so a deployment admin sees the whole conversation, and "
+    "within it 'user asked X → agent made N calls'. Best-effort; omit if unknown."
 )
 
 
@@ -1045,6 +1045,27 @@ def _record_tool_call(rec: dict[str, Any]) -> None:
 # Tool registry (name → (handler, description, inputSchema))
 # ---------------------------------------------------------------------------
 
+# The self-reported grouping ids — the same on EVERY tool, so the admin activity log can reconstruct
+# the conversation (thread ▸ turn ▸ call) the MCP server never sees. Defined once and spread into each
+# schema's `properties` so the wording can't drift between tools; SERVER_INSTRUCTIONS tells Claude to
+# pass them on every call. All best-effort (omit if unknown).
+_THREAD_ID_PROP = {
+    "type": "string",
+    "description": "A short id you generate ONCE per conversation and reuse on every tool call in it "
+    "— lets the admin group a conversation's calls into one session.",
+}
+_CORRELATION_ID_PROP = {
+    "type": "string",
+    "description": "A short id you generate ONCE per USER QUESTION (a turn) and reuse on every call "
+    "you make answering THAT question — lets the admin see 'user asked X → agent made N calls'. "
+    "Start a fresh one when the user asks something new.",
+}
+_USER_QUESTION_PROP = {
+    "type": "string",
+    "description": "The user's question, VERBATIM, that this call helps answer — recorded so an admin "
+    "sees what was actually asked. Keep it the SAME across the calls answering one question.",
+}
+
 TOOLS: dict[str, dict[str, Any]] = {
     "list_datasources": {
         "handler": tool_list_datasources,
@@ -1053,7 +1074,15 @@ TOOLS: dict[str, dict[str, Any]] = {
             "semantic model. Local analog of the hosted list_organizations. Call this first "
             "when the datasource is not yet known; the others accept an optional `datasource`."
         ),
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "user_question": _USER_QUESTION_PROP,
+                "thread_id": _THREAD_ID_PROP,
+                "correlation_id": _CORRELATION_ID_PROP,
+            },
+            "additionalProperties": False,
+        },
     },
     "get_datasource_schema": {
         "handler": tool_get_datasource_schema,
@@ -1092,6 +1121,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string"},
                     "description": "Return full detail for these named metrics.",
                 },
+                "user_question": _USER_QUESTION_PROP,
+                "thread_id": _THREAD_ID_PROP,
+                "correlation_id": _CORRELATION_ID_PROP,
             },
             "additionalProperties": False,
         },
@@ -1118,6 +1150,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "type": "integer",
                     "description": "Accepted for hosted-parity; not applied locally.",
                 },
+                "user_question": _USER_QUESTION_PROP,
+                "thread_id": _THREAD_ID_PROP,
+                "correlation_id": _CORRELATION_ID_PROP,
             },
             "additionalProperties": False,
         },
@@ -1153,17 +1188,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "query you run to answer one question — do not replace it with your refinement (that "
                     "goes in raw_query). Recorded so an admin sees what was actually asked.",
                 },
-                "thread_id": {
-                    "type": "string",
-                    "description": "A short id you generate ONCE per conversation and reuse on every "
-                    "tool call in it — lets the admin group a conversation's queries into one session.",
-                },
-                "correlation_id": {
-                    "type": "string",
-                    "description": "A short id you generate ONCE per USER QUESTION (a turn) and reuse on "
-                    "every query you run to answer THAT question — lets the admin see 'user asked X → "
-                    "agent ran N queries'. Start a fresh one when the user asks something new.",
-                },
+                "thread_id": _THREAD_ID_PROP,
+                "correlation_id": _CORRELATION_ID_PROP,
                 "max_rows": {"type": "integer", "description": "Row cap (clamped 1–10000)."},
             },
             "required": ["sql"],
@@ -1189,6 +1215,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": "Profile name; defaults to the active profile.",
                 },
+                "user_question": _USER_QUESTION_PROP,
+                "thread_id": _THREAD_ID_PROP,
+                "correlation_id": _CORRELATION_ID_PROP,
             },
             "required": ["raw_query", "rating"],
             "additionalProperties": False,
