@@ -26,6 +26,7 @@ from pathlib import Path
 
 import admin
 import onboarding
+import user_store
 from oss_adapters import PresenceAuthProvider, SingleTenantOrgResolver
 from ports import AuthProvider, Org
 from starlette.applications import Starlette
@@ -322,6 +323,13 @@ def build_app() -> Starlette:
                 applied = store.run_migrations()
                 if applied:
                     _log.info("applied migrations: %s", ", ".join(applied))
+                # Seed the configured admin (AGAMI_ADMIN_*) so a fresh deploy has someone who can sign in —
+                # nothing else creates it. Create-if-absent + idempotent, so a redeploy never duplicates or
+                # clobbers an admin who has since changed their own credentials.
+                seeded = user_store.seed_admin_from_env(store)
+                store.commit()
+                if seeded:
+                    _log.info("seeded admin: %s", seeded)
             finally:
                 store.close()
         async with session_manager.run():
