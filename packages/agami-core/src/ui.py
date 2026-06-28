@@ -114,10 +114,22 @@ td{padding:13px 12px;border-top:1px solid var(--line);vertical-align:middle}
 .usermenu-pop a{display:block;padding:11px 15px;color:var(--ink);font-size:14px}
 .usermenu-pop a:hover{background:var(--chip);text-decoration:none}
 
+/* Password reveal (eye) toggle — the button is injected inside the field by _PW_SCRIPT. */
+.pw-field{position:relative;display:block}
+.pw-field>input{padding-right:44px}
+.pw-eye{position:absolute;right:6px;top:0;bottom:0;margin:auto;height:34px;width:34px;display:grid;
+  place-items:center;padding:0;border:0;background:none;color:var(--muted);cursor:pointer;border-radius:8px}
+.pw-eye:hover{background:var(--chip);color:var(--ink)}
+.pw-eye.on{color:var(--brand)}
+.pw-eye svg{height:18px;width:18px;display:block}
+
 /* CSS-only right drawer (no JS) */
 .drawer-toggle{position:absolute;opacity:0;pointer-events:none}
 .drawer-wrap{position:fixed;inset:0;z-index:50;pointer-events:none;visibility:hidden}
-.drawer-backdrop{position:absolute;inset:0;background:rgba(13,20,38,.5);opacity:0;transition:opacity .22s}
+/* margin:0 is load-bearing — the backdrop is a <label>, and the global `label{margin:16px 0 6px}`
+   form-label rule would otherwise push it 16px down, leaving an uncovered strip (the topbar showing
+   through) at the top of the overlay. */
+.drawer-backdrop{position:absolute;inset:0;margin:0;background:rgba(23,23,23,.32);opacity:0;transition:opacity .22s}
 .drawer{position:absolute;top:0;right:0;height:100%;width:430px;max-width:92vw;background:#fff;
   box-shadow:-10px 0 40px rgba(23,23,23,.14);transform:translateX(100%);transition:transform .26s ease;
   padding:26px 28px;overflow:auto}
@@ -386,6 +398,23 @@ _TIME_SCRIPT = (
     "</script>"
 )
 
+# Add a reveal (eye) toggle to every password field. Toggling an input's `type` needs a line of JS
+# (CSS can't do it); with no JS the field still works as a normal password input. Wraps each input so
+# the button sits inside it — applies to all sign-in pages (admin / OAuth / onboarding) at once.
+_PW_SCRIPT = (
+    "<script>for(const i of document.querySelectorAll('input[type=password]')){"
+    "const w=document.createElement('span');w.className='pw-field';"
+    "i.parentNode.insertBefore(w,i);w.appendChild(i);"
+    "const b=document.createElement('button');b.type='button';b.className='pw-eye';"
+    "b.setAttribute('aria-label','Show password');"
+    "b.innerHTML='<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\""
+    " stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10"
+    " 7-10-7-10-7Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg>';"
+    "b.addEventListener('click',function(){var s=i.type==='password';i.type=s?'text':'password';"
+    "b.classList.toggle('on',s);b.setAttribute('aria-label',s?'Hide password':'Show password');});"
+    "w.appendChild(b);}</script>"
+)
+
 
 def _doc(title: str, body: str) -> str:
     return f"""<!doctype html>
@@ -395,7 +424,7 @@ def _doc(title: str, body: str) -> str:
 <title>{esc(title)}</title>
 <link rel="icon" href="/static/logo_icon.png">
 <style>{_CSS}</style>
-</head><body>{body}{_TIME_SCRIPT}</body></html>"""
+</head><body>{body}{_TIME_SCRIPT}{_PW_SCRIPT}</body></html>"""
 
 
 def auth_page(title: str, body: str) -> str:

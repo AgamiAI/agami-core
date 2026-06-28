@@ -42,6 +42,13 @@ def test_inter_font_files_are_served(monkeypatch):
     assert r.status_code == 200 and int(r.headers["content-length"]) > 1000
 
 
+def test_password_fields_get_a_reveal_eye_toggle():
+    assert ".pw-eye" in ui._CSS and ".pw-field" in ui._CSS  # the eye-toggle styles ship
+    # the toggle script is emitted on every page; it no-ops where there's no password field.
+    page = ui.auth_page("t", '<input type="password" name="password">')
+    assert "input[type=password]" in page and "Show password" in page
+
+
 def test_drawer_uses_adjacent_sibling_not_general_sibling():
     # One drawer per row (Sessions / Tool calls): the general-sibling `~` revealed EVERY later drawer
     # at once — any row opened the same (last) one, and the backdrop toggled the wrong checkbox so it
@@ -49,3 +56,12 @@ def test_drawer_uses_adjacent_sibling_not_general_sibling():
     css = ui._CSS
     assert ".drawer-toggle:checked + .drawer-wrap" in css
     assert ".drawer-toggle:checked ~ .drawer-wrap" not in css
+
+
+def test_drawer_backdrop_resets_the_inherited_label_margin():
+    # The backdrop is a <label>; the global `label{margin:16px 0 6px}` would push it 16px down,
+    # leaving an uncovered strip (the topbar showing through) at the top of the overlay. margin:0 fixes it.
+    import re
+
+    m = re.search(r"\.drawer-backdrop\{[^}]*\}", ui._CSS)
+    assert m is not None and "margin:0" in m.group(0)
