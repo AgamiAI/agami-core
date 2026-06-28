@@ -20,6 +20,7 @@ tracking table — re-running only applies new files.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,10 @@ from typing import Any
 # The repo's migration home; resolved relative to this file so it works from an installed package
 # or a checkout.
 MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "core"
+
+# A fixed (non-secret) key for the Postgres session advisory lock that serializes concurrent
+# migration runs — see run_migrations. The digits spell "AGAMI" in hex; any stable bigint works.
+_MIGRATION_LOCK_KEY = 0x4147414D49
 
 
 def _now_iso() -> str:
@@ -105,24 +110,51 @@ class Store:
     # --- migrations ---------------------------------------------------------
 
     def run_migrations(self, migrations_dir: Path | None = None) -> list[str]:
-        """Apply un-applied `NNN_*.sql` in order; return the filenames newly applied. Idempotent."""
+        """Apply un-applied `NNN_*.sql` in order; return the filenames newly applied. Idempotent.
+
+        On Postgres a **session advisory lock** brackets the read-applied + apply so that when several
+        instances boot together (e.g. Cloud Run) exactly one migrates and the rest wait, then re-read the
+        applied set and skip what's done — otherwise two instances could both run a migration's DDL or
+        collide on the `schema_migrations` primary key. SQLite is single-writer, so the lock is a no-op.
+        A failing migration propagates (fail-closed: a half-migrated schema must not serve)."""
         migrations_dir = migrations_dir or MIGRATIONS_DIR
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT)"
-        )
-        self.commit()
-        applied = {r["id"] for r in self.query("SELECT id FROM schema_migrations")}
-        ran: list[str] = []
-        for path in sorted(migrations_dir.glob("*.sql")):
-            if path.name in applied:
-                continue
-            self._run_script(path.read_text())
+        # pg_advisory_lock (session-level, NOT released by commit) — must use the session variant so the
+        # per-migration commits in the loop below don't drop it mid-apply.
+        locked = self.dialect == "postgres"
+        if locked:
+            self.execute("SELECT pg_advisory_lock(?)", (_MIGRATION_LOCK_KEY,))
+        try:
             self.execute(
-                "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
-                (path.name, _now_iso()),
+                "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT)"
             )
             self.commit()
-            ran.append(path.name)
+            applied = {r["id"] for r in self.query("SELECT id FROM schema_migrations")}
+            ran: list[str] = []
+            for path in sorted(migrations_dir.glob("*.sql")):
+                if path.name in applied:
+                    continue
+                self._run_script(path.read_text())
+                self.execute(
+                    "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+                    (path.name, _now_iso()),
+                )
+                self.commit()
+                ran.append(path.name)
+        except Exception:
+            if locked:
+                # A failed migration leaves the psycopg2 connection in an aborted-transaction state, so roll
+                # back FIRST so the unlock can run; suppress cleanup errors here so the REAL migration error
+                # is what propagates (the lock also frees on connection close as a backstop).
+                with contextlib.suppress(Exception):
+                    self.conn.rollback()
+                    self.execute("SELECT pg_advisory_unlock(?)", (_MIGRATION_LOCK_KEY,))
+                    self.commit()
+            raise
+        if locked:
+            # Success: release the lock and let an unexpected unlock failure SURFACE — silently holding the
+            # lock would hang the next instance on pg_advisory_lock.
+            self.execute("SELECT pg_advisory_unlock(?)", (_MIGRATION_LOCK_KEY,))
+            self.commit()
         return ran
 
     def _run_script(self, sql: str) -> None:
