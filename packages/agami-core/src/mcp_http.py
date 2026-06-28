@@ -18,6 +18,7 @@ reliably auto-detected behind a proxy/LB.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import time
 from contextvars import ContextVar
@@ -34,6 +35,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from store import Store
 from tools import (
     SERVER_INSTRUCTIONS,
     SERVER_NAME,
@@ -42,6 +44,8 @@ from tools import (
     record_tool_call,
     server_version,
 )
+
+_log = logging.getLogger(__name__)
 
 # The authenticated user for the in-flight tool call. Set in `handle_mcp` (the raw-ASGI endpoint, which
 # runs in the request's task) so it propagates into the MCP dispatch — the tool handler `_call_tool`
@@ -308,6 +312,18 @@ def build_app() -> Starlette:
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette):
+        # Heal the schema before serving: apply any pending migrations so freshly-deployed code never hits
+        # an old DB shape (a column a migration adds, selected before it's applied, 500s the admin). This
+        # is fail-closed — a failing migration propagates and aborts startup; a half-migrated DB never
+        # serves. File-mode (no DB configured) has nothing to migrate.
+        store = Store.from_env()
+        if store is not None:
+            try:
+                applied = store.run_migrations()
+                if applied:
+                    _log.info("applied migrations: %s", ", ".join(applied))
+            finally:
+                store.close()
         async with session_manager.run():
             yield
 

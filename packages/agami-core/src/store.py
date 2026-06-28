@@ -28,6 +28,10 @@ from typing import Any
 # or a checkout.
 MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "core"
 
+# A fixed (non-secret) key for the Postgres session advisory lock that serializes concurrent
+# migration runs — see run_migrations. The digits spell "AGAMI" in hex; any stable bigint works.
+_MIGRATION_LOCK_KEY = 0x4147414D49
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -105,25 +109,41 @@ class Store:
     # --- migrations ---------------------------------------------------------
 
     def run_migrations(self, migrations_dir: Path | None = None) -> list[str]:
-        """Apply un-applied `NNN_*.sql` in order; return the filenames newly applied. Idempotent."""
+        """Apply un-applied `NNN_*.sql` in order; return the filenames newly applied. Idempotent.
+
+        On Postgres a **session advisory lock** brackets the read-applied + apply so that when several
+        instances boot together (e.g. Cloud Run) exactly one migrates and the rest wait, then re-read the
+        applied set and skip what's done — otherwise two instances could both run a migration's DDL or
+        collide on the `schema_migrations` primary key. SQLite is single-writer, so the lock is a no-op.
+        A failing migration propagates (fail-closed: a half-migrated schema must not serve)."""
         migrations_dir = migrations_dir or MIGRATIONS_DIR
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT)"
-        )
-        self.commit()
-        applied = {r["id"] for r in self.query("SELECT id FROM schema_migrations")}
-        ran: list[str] = []
-        for path in sorted(migrations_dir.glob("*.sql")):
-            if path.name in applied:
-                continue
-            self._run_script(path.read_text())
+        # pg_advisory_lock (session-level, NOT released by commit) — must use the session variant so the
+        # per-migration commits in the loop below don't drop it mid-apply.
+        locked = self.dialect == "postgres"
+        if locked:
+            self.execute("SELECT pg_advisory_lock(?)", (_MIGRATION_LOCK_KEY,))
+        try:
             self.execute(
-                "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
-                (path.name, _now_iso()),
+                "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT)"
             )
             self.commit()
-            ran.append(path.name)
-        return ran
+            applied = {r["id"] for r in self.query("SELECT id FROM schema_migrations")}
+            ran: list[str] = []
+            for path in sorted(migrations_dir.glob("*.sql")):
+                if path.name in applied:
+                    continue
+                self._run_script(path.read_text())
+                self.execute(
+                    "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+                    (path.name, _now_iso()),
+                )
+                self.commit()
+                ran.append(path.name)
+            return ran
+        finally:
+            if locked:
+                self.execute("SELECT pg_advisory_unlock(?)", (_MIGRATION_LOCK_KEY,))
+                self.commit()
 
     def _run_script(self, sql: str) -> None:
         """Run a multi-statement SQL script. SQLite needs executescript; psycopg2 runs a multi-
