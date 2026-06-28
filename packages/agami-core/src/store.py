@@ -140,17 +140,22 @@ class Store:
                 )
                 self.commit()
                 ran.append(path.name)
-            return ran
-        finally:
+        except Exception:
             if locked:
                 # A failed migration leaves the psycopg2 connection in an aborted-transaction state, so roll
-                # back FIRST — otherwise this unlock runs on the aborted connection, raises, masks the real
-                # migration error, and the lock would free only incidentally when the connection closes.
-                # Suppress any cleanup error so the in-flight migration exception is what propagates.
+                # back FIRST so the unlock can run; suppress cleanup errors here so the REAL migration error
+                # is what propagates (the lock also frees on connection close as a backstop).
                 with contextlib.suppress(Exception):
                     self.conn.rollback()
                     self.execute("SELECT pg_advisory_unlock(?)", (_MIGRATION_LOCK_KEY,))
                     self.commit()
+            raise
+        if locked:
+            # Success: release the lock and let an unexpected unlock failure SURFACE — silently holding the
+            # lock would hang the next instance on pg_advisory_lock.
+            self.execute("SELECT pg_advisory_unlock(?)", (_MIGRATION_LOCK_KEY,))
+            self.commit()
+        return ran
 
     def _run_script(self, sql: str) -> None:
         """Run a multi-statement SQL script. SQLite needs executescript; psycopg2 runs a multi-

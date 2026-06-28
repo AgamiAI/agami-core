@@ -113,6 +113,7 @@ def test_postgres_brackets_the_apply_with_a_session_advisory_lock(tmp_path):
     assert "pg_advisory_xact_lock" not in " | ".join(rec.sql)
     assert rec.sql[-1] == "SELECT pg_advisory_unlock(?)"
     assert "pg_advisory_unlock" not in " | ".join(rec.sql[:-1])  # unlock only at the very end
+    assert not rec.conn.rolled_back  # success path doesn't roll back (only the error path does)
 
 
 def test_sqlite_takes_no_advisory_lock(tmp_path):
