@@ -320,16 +320,20 @@ def build_app() -> Starlette:
         store = Store.from_env()
         if store is not None:
             try:
-                applied = store.run_migrations()
+                applied = store.run_migrations()  # fail-closed: a bad migration aborts startup
                 if applied:
                     _log.info("applied migrations: %s", ", ".join(applied))
                 # Seed the configured admin (AGAMI_ADMIN_*) so a fresh deploy has someone who can sign in —
-                # nothing else creates it. Create-if-absent + idempotent, so a redeploy never duplicates or
-                # clobbers an admin who has since changed their own credentials.
-                seeded = user_store.seed_admin_from_env(store)
-                store.commit()
-                if seeded:
-                    _log.info("seeded the configured admin")  # not the email — no PII in logs
+                # nothing else creates it. Create-if-absent + idempotent. BEST-EFFORT, unlike migrations: when
+                # several instances boot together they can race on the admin INSERT (a UNIQUE violation); the
+                # admin is seeded either way, so log + roll back + continue rather than aborting startup.
+                try:
+                    if user_store.seed_admin_from_env(store):
+                        _log.info("seeded the configured admin")  # not the email — no PII in logs
+                    store.commit()
+                except Exception:  # noqa: BLE001 — a concurrent boot won the seed; not fatal
+                    store.conn.rollback()
+                    _log.warning("admin seed skipped (already seeded or a concurrent boot won the race)")
             finally:
                 store.close()
         async with session_manager.run():

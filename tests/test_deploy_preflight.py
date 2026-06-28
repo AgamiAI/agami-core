@@ -15,7 +15,6 @@ _COMPLETE = (
     "PUBLIC_BASE_URL=https://agami.example.com\n"
     "AGAMI_ADMIN_USERNAME=you@example.com\n"
     "AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n"
-    "DATASOURCE_URL=postgresql://you@warehouse/db\n"
 )
 
 
@@ -62,10 +61,20 @@ def test_public_host_is_derived_from_the_url(tmp_path):
     assert deploy_preflight._parse_env(p.read_text())["AGAMI_PUBLIC_HOST"] == "agami.example.com"
 
 
-def test_public_base_url_without_a_hostname_is_an_error(tmp_path):
-    p = _env(tmp_path, _COMPLETE.replace("https://agami.example.com", "not-a-real-url"))
+def test_non_https_public_base_url_is_an_error(tmp_path):
+    p = _env(tmp_path, _COMPLETE.replace("https://agami.example.com", "http://agami.example.com"))
     errors = deploy_preflight.prepare_env(p)
-    assert any("hostname" in e.lower() for e in errors)  # can't derive the Caddy host from a non-URL
+    assert any("https://" in e for e in errors)  # TLS is mandatory; catch plain http at the preflight
+
+
+def test_provider_without_its_oidc_client_is_an_error(tmp_path):
+    # A pinned provider with no OIDC client would seed an admin who can't sign in — block it.
+    p = _env(
+        tmp_path,
+        _COMPLETE.replace("AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n", "AGAMI_ADMIN_PROVIDER=google\n"),
+    )
+    errors = deploy_preflight.prepare_env(p)
+    assert any("CLIENT_ID" in e for e in errors)
 
 
 def test_complete_env_passes(tmp_path):
@@ -73,12 +82,16 @@ def test_complete_env_passes(tmp_path):
     assert deploy_preflight.main([str(p)]) == 0  # ready → exit 0
 
 
-def test_provider_only_auth_is_accepted(tmp_path):
+def test_provider_with_its_oidc_client_is_accepted(tmp_path):
     p = _env(
         tmp_path,
-        _COMPLETE.replace("AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n", "AGAMI_ADMIN_PROVIDER=google\n"),
+        _COMPLETE.replace(
+            "AGAMI_ADMIN_PASSWORD=choose-a-strong-one\n",
+            "AGAMI_ADMIN_PROVIDER=google\n"
+            "AGAMI_OIDC_GOOGLE_CLIENT_ID=id\nAGAMI_OIDC_GOOGLE_CLIENT_SECRET=secret\n",
+        ),
     )
-    assert deploy_preflight.prepare_env(p) == []  # a pinned provider alone satisfies the auth floor
+    assert deploy_preflight.prepare_env(p) == []  # a pinned provider + its OIDC client satisfies the auth floor
 
 
 def test_missing_env_file_is_a_clear_error(tmp_path):

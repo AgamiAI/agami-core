@@ -64,6 +64,19 @@ def test_startup_admin_seed_is_idempotent(env):
     assert r.status_code == 302  # still exactly one working admin after a redeploy
 
 
+def test_startup_survives_a_seed_race(env, monkeypatch):
+    # If the admin seed raises (e.g. a concurrent boot won the INSERT — a UNIQUE violation), startup must
+    # NOT abort: the admin is seeded either way. Best-effort, unlike migrations.
+    import user_store
+
+    def _boom(_store):
+        raise RuntimeError("UNIQUE constraint failed: users.username")
+
+    monkeypatch.setattr(user_store, "seed_admin_from_env", _boom)
+    with TestClient(mcp_http.build_app()):  # entering runs the lifespan — must not raise
+        pass
+
+
 def test_startup_without_admin_env_seeds_nothing(env, monkeypatch):
     # No configured admin → startup still succeeds (no crash); there is just no admin to sign in as.
     monkeypatch.delenv("AGAMI_ADMIN_USERNAME", raising=False)
