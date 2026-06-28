@@ -44,7 +44,7 @@ server = [
 package-dir = { "" = "src" }
 # Flat top-level modules (not under a parent package) — listed explicitly so the import
 # names stay flat regardless of disk layout.
-py-modules = ["agami_paths", "execute_sql", "mcp_harness", "mcp_http", "tools", "ports", "contracts", "oss_adapters", "store", "model_store", "oauth_server", "oidc", "passwords", "user_store", "admin", "ui", "onboarding"]
+py-modules = ["agami_paths", "execute_sql", "mcp_harness", "mcp_http", "tools", "ports", "contracts", "oss_adapters", "store", "model_store", "model_deploy", "oauth_server", "oidc", "passwords", "user_store", "admin", "ui", "onboarding"]
 packages = ["semantic_model"]
 
 [tool.setuptools.package-data]
