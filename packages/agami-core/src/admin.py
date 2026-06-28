@@ -284,28 +284,49 @@ def calls_tab_html(
 
 def _session_drawer(s: dict[str, Any], idx: int) -> str:
     sid = f"sess-{idx}"  # DOM id is the row index, never the (self-reported, attacker-influenceable) key
+    # Render the session as **turns** (one user question -> N agent queries), grouped on correlation_id
+    # by list_sessions. The turn header shows the verbatim question once; each agent refinement (its
+    # `agent_query` + SQL) lists beneath it. Degrades cleanly: a call with no correlation_id is its own
+    # one-query turn, so this reads like the old flat list when Claude doesn't self-report.
     cards = ""
-    for q in s["queries"]:
-        question = q.get("user_question") or "(no question reported)"
-        sub = (
-            f'<div class="muted" style="margin:2px 0 8px">↳ {ui.esc(q["agent_query"])} '
-            f'<span class="muted">· self-reported</span></div>'
-            if q.get("agent_query")
-            else ""
+    for t in s["turns"]:
+        question = t.get("question") or "(no question reported)"
+        n = len(t["queries"])
+        qrows = ""
+        for q in t["queries"]:
+            sub = (
+                f'<div class="muted" style="margin:0 0 6px">↳ {ui.esc(q["agent_query"])} '
+                f'<span class="muted">· agent-reported</span></div>'
+                if q.get("agent_query")
+                else ""
+            )
+            sql = (
+                f'<pre class="code" style="white-space:pre-wrap;padding:12px;display:block;margin-top:4px">'
+                f"{ui.esc(q['sql'])}</pre>"
+                if q.get("sql")
+                else ""
+            )
+            lat = (str(q["execution_ms"]) + " ms") if q.get("execution_ms") is not None else ""
+            rc = q.get("row_count") if q.get("row_count") is not None else "—"
+            qrows += (
+                '<div style="border-top:1px solid var(--line);padding:9px 0 11px">'
+                f"{sub}{sql}"
+                f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(q["ts"])} · '
+                f"{lat} {_ok_pill(q['success'])} · {rc} rows</div></div>"
+            )
+        # The question is Claude-self-reported (best-effort, attacker-influenceable) — mark it so, like
+        # the rest of the activity log; "User asked" is the framing, "· self-reported" the provenance.
+        asked = (
+            f'<span class="muted">User asked</span> <strong>{ui.esc(question)}</strong> '
+            '<span class="muted" style="font-size:13px">· self-reported</span>'
+            if t.get("question")
+            else f'<strong class="muted">{ui.esc(question)}</strong>'
         )
-        sql = (
-            f'<pre class="code" style="white-space:pre-wrap;padding:12px;display:block;margin-top:6px">'
-            f"{ui.esc(q['sql'])}</pre>"
-            if q.get("sql")
-            else ""
-        )
-        lat = (str(q["execution_ms"]) + " ms") if q.get("execution_ms") is not None else ""
         cards += (
-            '<div style="border-top:1px solid var(--line);padding:14px 0">'
-            f'<div style="display:flex;justify-content:space-between"><strong>{ui.esc(question)}</strong>'
-            f'<span class="muted" style="font-size:13px">{_utc(q["ts"])} · {lat} {_ok_pill(q["success"])}</span></div>'
-            f"{sub}{sql}"
-            f'<div class="muted" style="font-size:13px;margin-top:6px">{q.get("row_count") if q.get("row_count") is not None else "—"} rows</div></div>'
+            '<div style="border-top:2px solid var(--line);padding:14px 0 2px;margin-top:8px">'
+            f'<div style="margin-bottom:4px">{asked} '
+            f'<span class="muted" style="font-size:13px">· {n} {"query" if n == 1 else "queries"}</span>'
+            f"</div>{qrows}</div>"
         )
     return f"""<input type="checkbox" id="{sid}" class="drawer-toggle">
 <div class="drawer-wrap"><label for="{sid}" class="drawer-backdrop"></label>

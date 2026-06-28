@@ -236,3 +236,4 @@ class ToolCallRecord(_Contract):
     user_question: str | None = None
     agent_query: str | None = None
     thread_id: str | None = None
+    correlation_id: str | None = None  # the turn: one user question -> N agent sub-queries

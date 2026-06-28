@@ -84,19 +84,22 @@ _s = Store.connect("sqlite://" + _db_path)
 _s.run_migrations()
 _sink = DbActivitySink(_s)
 _SAMPLE_CALLS = [
-    dict(ts="2026-06-27T10:39:02Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
-         datasource="SALES_DATA", sql="SELECT id, customer_id, amount\nFROM orders\nORDER BY created_at DESC\nLIMIT 10",
-         row_count=10, execution_ms=73, success=True, user_question="Show me the 10 most recent orders",
-         agent_query="recent orders", thread_id="t1"),
-    dict(ts="2026-06-27T10:40:55Z", tool_name="get_datasource_schema", source="mcp_server",
-         actor="jordan@example.com", datasource="SALES_DATA", execution_ms=12, success=True),
+    # One turn (correlation c1): a single user question that the agent answered with TWO queries.
     dict(ts="2026-06-27T10:42:17Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
          datasource="SALES_DATA", sql="SELECT region, SUM(amount) AS revenue\nFROM orders\nGROUP BY region\nORDER BY revenue DESC",
          row_count=5, execution_ms=84, success=True, user_question="What's our revenue by region this quarter?",
-         agent_query="revenue by region", thread_id="t1"),
+         agent_query="revenue by region", thread_id="t1", correlation_id="c1"),
+    dict(ts="2026-06-27T10:42:41Z", tool_name="execute_sql", source="mcp_server", actor="jordan@example.com",
+         datasource="SALES_DATA", sql="SELECT date_trunc('month', placed_at) AS month, SUM(amount)\nFROM orders\nWHERE region = 'West'\nGROUP BY 1\nORDER BY 1",
+         row_count=3, execution_ms=61, success=True, user_question="What's our revenue by region this quarter?",
+         agent_query="monthly trend for the top region (West)", thread_id="t1", correlation_id="c1"),
+    dict(ts="2026-06-27T10:40:55Z", tool_name="get_datasource_schema", source="mcp_server",
+         actor="jordan@example.com", datasource="SALES_DATA", execution_ms=12, success=True),
+    # A separate one-query turn that errored (correlation c2).
     dict(ts="2026-06-27T10:41:50Z", tool_name="execute_sql", source="mcp_server", actor="sam@example.com",
          datasource="SALES_DATA", sql="SELECT * FROM ordrs", execution_ms=31, success=False,
-         error_kind="syntax", thread_id="t2"),
+         error_kind="syntax", user_question="how many orders today?", agent_query="count today's orders",
+         thread_id="t2", correlation_id="c2"),
     dict(ts="2026-06-27T10:40:03Z", tool_name="list_datasources", source="mcp_server",
          actor="jordan@example.com", execution_ms=3, success=True),
 ]

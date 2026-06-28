@@ -171,3 +171,135 @@ def test_activity_tabs_drop_the_redundant_helper_text(client, env):
     _login(client)
     assert "Every tool call, newest first" not in client.get("/admin?tab=calls").text
     assert "Queries grouped into conversations" not in client.get("/admin?tab=sessions").text
+
+
+# --- ACE-015: the turn level (correlation_id) --------------------------------
+
+
+def test_correlation_id_round_trips(env):
+    s = Store.connect(env)
+    _call(
+        s,
+        ts="2026-06-28T10:00:00Z",
+        actor="a",
+        sql="SELECT 1",
+        success=True,
+        thread_id="t1",
+        correlation_id="turn-1",
+    )
+    rows = model_store.list_tool_calls(s)
+    s.close()
+    assert rows[0]["correlation_id"] == "turn-1"
+
+
+def test_execute_sql_inputschema_exposes_correlation_id():
+    import tools
+
+    props = tools.TOOLS["execute_sql"]["inputSchema"]["properties"]
+    assert "correlation_id" in props
+    assert "turn" in props["correlation_id"]["description"].lower()
+
+
+def test_server_instructions_ask_for_verbatim_question_and_per_turn_correlation():
+    import tools
+
+    instr = tools.SERVER_INSTRUCTIONS
+    assert "correlation_id" in instr and "VERBATIM" in instr
+
+
+def test_turns_use_earliest_question_and_group_refinements(env):
+    # Two calls of ONE turn: the 2nd drifts user_question; the turn must keep the FIRST (verbatim) one.
+    s = Store.connect(env)
+    _call(
+        s,
+        ts="2026-06-28T10:00:00Z",
+        actor="a",
+        sql="Q1",
+        success=True,
+        thread_id="t",
+        correlation_id="c1",
+        user_question="feature adoption vs churn",
+        agent_query="band",
+    )
+    _call(
+        s,
+        ts="2026-06-28T10:01:00Z",
+        actor="a",
+        sql="Q2",
+        success=True,
+        thread_id="t",
+        correlation_id="c1",
+        user_question="churn by cancel_reason (drift)",
+        agent_query="lost MRR",
+    )
+    sessions = model_store.list_sessions(s)
+    s.close()
+    turns = sessions[0]["turns"]
+    assert len(turns) == 1
+    assert turns[0]["question"] == "feature adoption vs churn"  # earliest, not the drift
+    assert [q["sql"] for q in turns[0]["queries"]] == [
+        "Q1",
+        "Q2",
+    ]  # chronological, both refinements
+
+
+def test_turns_degrade_to_singletons_without_correlation_id(env):
+    s = Store.connect(env)
+    _call(
+        s,
+        ts="2026-06-28T10:00:00Z",
+        actor="a",
+        sql="A",
+        success=True,
+        thread_id="t",
+        user_question="q-a",
+    )  # no correlation_id
+    _call(
+        s,
+        ts="2026-06-28T10:01:00Z",
+        actor="a",
+        sql="B",
+        success=True,
+        thread_id="t",
+        user_question="q-b",
+    )  # no correlation_id
+    sessions = model_store.list_sessions(s)
+    s.close()
+    turns = sessions[0]["turns"]
+    assert len(turns) == 2  # each bare call is its own turn (flat behaviour preserved)
+    assert {t["question"] for t in turns} == {"q-a", "q-b"}
+
+
+def test_sessions_drawer_renders_turn_with_user_asked_and_agent_queries(client, env):
+    s = Store.connect(env)
+    _call(
+        s,
+        ts="2026-06-28T10:00:00Z",
+        actor="jordan@example.com",
+        sql="Q1",
+        success=True,
+        thread_id="t",
+        correlation_id="c1",
+        user_question="feature adoption vs churn",
+        agent_query="churn by adoption band",
+    )
+    _call(
+        s,
+        ts="2026-06-28T10:01:00Z",
+        actor="jordan@example.com",
+        sql="Q2",
+        success=True,
+        thread_id="t",
+        correlation_id="c1",
+        user_question="drifted",
+        agent_query="lost MRR",
+    )
+    s.close()
+    _login(client)
+    html = client.get("/admin?tab=sessions").text
+    assert (
+        "User asked" in html and "feature adoption vs churn" in html
+    )  # the turn question (earliest)
+    assert "drifted" not in html  # the drifted user_question is NOT shown
+    assert "churn by adoption band" in html and "lost MRR" in html  # both agent refinements
+    assert "2 queries" in html

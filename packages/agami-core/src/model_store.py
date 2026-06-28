@@ -334,8 +334,9 @@ class DbActivitySink:
         # `success` is a portable 0/1 (no boolean literal across SQLite/Postgres).
         self._store.execute(
             "INSERT INTO tool_calls (id, ts, actor, tool_name, datasource, sql, row_count, "
-            "execution_ms, success, error_kind, source, user_question, agent_query, thread_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
+            "correlation_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -351,6 +352,7 @@ class DbActivitySink:
                 record.user_question,
                 record.agent_query,
                 record.thread_id,
+                record.correlation_id,
             ),
         )
         self._store.commit()
@@ -362,7 +364,7 @@ class DbActivitySink:
 
 _TOOL_CALL_COLS = (
     "id, ts, actor, tool_name, datasource, sql, row_count, execution_ms, success, error_kind, "
-    "user_question, agent_query, thread_id"
+    "user_question, agent_query, thread_id, correlation_id"
 )
 
 
@@ -371,6 +373,31 @@ def list_tool_calls(store: Store, *, limit: int = 200) -> list[dict[str, Any]]:
     return store.query(
         f"SELECT {_TOOL_CALL_COLS} FROM tool_calls ORDER BY ts DESC LIMIT ?", (limit,)
     )
+
+
+def _group_turns(queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group a session's query calls into **turns** by the self-reported `correlation_id` (one user
+    question -> N agent sub-queries). A query with no `correlation_id` is its own singleton turn (so
+    the view degrades to the per-call list). The turn's `question` is the **earliest** call's
+    `user_question` — Claude drifts `user_question` onto later refinements, so the first is the reliable
+    one. Turns keep newest-first order (queries arrive ts-DESC); each turn's queries read chronologically."""
+    turns_map: dict[Any, list[dict[str, Any]]] = {}
+    turn_order: list[Any] = []
+    for q in queries:
+        ck = q["correlation_id"] or q["id"]  # no correlation_id -> singleton keyed on the row id
+        if ck not in turns_map:
+            turns_map[ck] = []
+            turn_order.append(ck)
+        turns_map[ck].append(q)
+    turns: list[dict[str, Any]] = []
+    for ck in turn_order:
+        tq = sorted(turns_map[ck], key=lambda x: x["ts"])  # chronological within the turn
+        turns.append({
+            "question": tq[0].get("user_question"),  # earliest call's question (drift-proof)
+            "started": tq[0]["ts"],
+            "queries": tq,
+        })
+    return turns
 
 
 def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
@@ -408,5 +435,6 @@ def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
         s["query_count"] = len(qs)
         s["error_count"] = sum(1 for q in qs if not q["success"])
         s["avg_ms"] = round(sum(ms) / len(ms)) if ms else None
+        s["turns"] = _group_turns(qs)  # the within-session turn level (ACE-015)
         out.append(s)
     return out
