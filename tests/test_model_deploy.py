@@ -133,6 +133,29 @@ def test_main_errors_when_no_model_found(tmp_path, monkeypatch):
     assert model_deploy.main([]) == 1  # nothing to deploy → fail-closed
 
 
+def test_malformed_examples_file_is_skipped_not_fatal(tmp_path):
+    # A malformed examples file (a non-dict item) must not abort the deploy — the model still loads,
+    # that area's examples are just skipped (examples are best-effort).
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    (arts / "demo" / "prompt_examples" / "Catalog" / "examples.yaml").write_text(
+        "examples:\n  - just a bare string\n"  # invalid: a scalar where a mapping is expected
+    )
+    store = _store(tmp_path)
+    loaded = model_deploy.deploy_models(store, arts)  # must not raise
+    org = model_store.load_organization(store, "demo")
+    n_examples = _count(store, "prompt_example", "demo")
+    store.close()
+    assert loaded == ["demo"] and org is not None  # the model deployed despite the bad examples file
+    assert n_examples == 0  # the malformed area's examples were skipped, not partially written
+
+
+def test_main_errors_when_artifacts_dir_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGAMI_DB_URL", "sqlite://" + str(tmp_path / "m.db"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "does-not-exist"))
+    assert model_deploy.main([]) == 1  # clean exit, not an uncaught FileNotFoundError
+
+
 def test_main_errors_when_no_database(monkeypatch):
     monkeypatch.delenv("AGAMI_DB_URL", raising=False)
     monkeypatch.delenv("APP_DATABASE_URL", raising=False)

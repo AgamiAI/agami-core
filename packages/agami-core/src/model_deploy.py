@@ -20,31 +20,41 @@ from store import Store
 
 def deploy_one(store: Store, datasource: str, profile_dir: Path) -> None:
     """Load one datasource's model (org + examples + memory + version) from `profile_dir` into the store.
-    Idempotent — the model_store writers clear each datasource's rows before re-inserting."""
+
+    Reads + parses **everything first, then writes** — so a malformed model/examples fails *before* any DB
+    write rather than half-way through. Each model_store writer is individually idempotent (clear-then-
+    insert), so a clean re-run fully overwrites a datasource; the deploy entrypoint fail-closes on a non-zero
+    exit, so a partial write from a rare mid-write DB error is never served and self-heals on the next deploy.
+    (The writers commit individually, so this isn't one transaction — load-then-write is the practical guard.)"""
     from semantic_model import loader
     from semantic_model.snapshot import newest_version
 
+    # --- read + parse everything first (where malformed input fails, before any write) ---
     org = loader.load_organization(profile_dir)
-    model_store.write_organization(store, datasource, org)
-
     # Examples live per subject area (prompt_examples/<area>/examples.yaml); tag each with its area so the
-    # served row carries it (write_examples reads ex["area"]).
+    # served row carries it (write_examples reads ex["area"]). A malformed examples file for one area is
+    # skipped with a warning, not fatal — examples are best-effort few-shots, not the model itself, and a bad
+    # one shouldn't block the team's model from deploying.
     examples: list[dict] = []
     for sa in org.subject_areas:
-        for ex in loader.list_prompt_examples(profile_dir, sa.name):
-            examples.append({**ex, "area": ex.get("area") or sa.name})
-    if examples:
-        model_store.write_examples(store, datasource, examples)
-
+        try:
+            area_examples = loader.list_prompt_examples(profile_dir, sa.name)
+        except Exception as e:  # noqa: BLE001 — a bad examples file mustn't abort the model deploy
+            print(f"model_deploy: skipping malformed examples for area {sa.name!r}: {e}", file=sys.stderr)
+            continue
+        examples.extend({**ex, "area": ex.get("area") or sa.name} for ex in area_examples if isinstance(ex, dict))
     org_md = profile_dir / "ORGANIZATION.md"
     user_md = profile_dir / "USER_MEMORY.md"
-    model_store.write_memory(
-        store,
-        datasource,
-        organization=org_md.read_text() if org_md.exists() else None,
-        user=user_md.read_text() if user_md.exists() else None,
-    )
-    model_store.write_model_version(store, datasource, newest_version(profile_dir) or "deployed")
+    org_text = org_md.read_text() if org_md.exists() else None
+    user_text = user_md.read_text() if user_md.exists() else None
+    version = newest_version(profile_dir) or "deployed"
+
+    # --- then write (version last, so its presence marks a completed deploy) ---
+    model_store.write_organization(store, datasource, org)
+    if examples:
+        model_store.write_examples(store, datasource, examples)
+    model_store.write_memory(store, datasource, organization=org_text, user=user_text)
+    model_store.write_model_version(store, datasource, version)
     store.commit()
 
 
@@ -70,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
     # run_migrations is idempotent, so the later lifespan pass is a harmless no-op.
     store.run_migrations()
     artifacts_dir = agami_paths.artifacts_dir()
+    if not artifacts_dir.is_dir():  # clean exit, not an uncaught FileNotFoundError from iterdir()
+        store.close()
+        print(f"model_deploy: artifacts dir not found: {artifacts_dir}", file=sys.stderr)
+        return 1
     try:
         if args:  # deploy only the named datasources
             loaded: list[str] = []
