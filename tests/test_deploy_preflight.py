@@ -54,6 +54,12 @@ def test_public_host_is_derived_from_the_url(tmp_path):
     assert deploy_preflight._parse_env(p.read_text())["AGAMI_PUBLIC_HOST"] == "agami.example.com"
 
 
+def test_public_base_url_without_a_hostname_is_an_error(tmp_path):
+    p = _env(tmp_path, _COMPLETE.replace("https://agami.example.com", "not-a-real-url"))
+    errors = deploy_preflight.prepare_env(p)
+    assert any("hostname" in e.lower() for e in errors)  # can't derive the Caddy host from a non-URL
+
+
 def test_complete_env_passes(tmp_path):
     p = _env(tmp_path, _COMPLETE)
     assert deploy_preflight.main([str(p)]) == 0  # ready → exit 0
