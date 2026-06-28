@@ -117,15 +117,19 @@ td{padding:13px 12px;border-top:1px solid var(--line);vertical-align:middle}
 /* CSS-only right drawer (no JS) */
 .drawer-toggle{position:absolute;opacity:0;pointer-events:none}
 .drawer-wrap{position:fixed;inset:0;z-index:50;pointer-events:none;visibility:hidden}
-.drawer-backdrop{position:absolute;inset:0;background:rgba(23,23,23,.32);opacity:0;transition:opacity .22s}
+.drawer-backdrop{position:absolute;inset:0;background:rgba(13,20,38,.5);opacity:0;transition:opacity .22s}
 .drawer{position:absolute;top:0;right:0;height:100%;width:430px;max-width:92vw;background:#fff;
   box-shadow:-10px 0 40px rgba(23,23,23,.14);transform:translateX(100%);transition:transform .26s ease;
   padding:26px 28px;overflow:auto}
 .drawer-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
 .drawer-x{cursor:pointer;color:var(--muted);font-size:22px;line-height:1;border:0;background:none}
-.drawer-toggle:checked ~ .drawer-wrap{pointer-events:auto;visibility:visible}
-.drawer-toggle:checked ~ .drawer-wrap .drawer-backdrop{opacity:1}
-.drawer-toggle:checked ~ .drawer-wrap .drawer{transform:translateX(0)}
+/* Adjacent-sibling (+), NOT general-sibling (~): each toggle reveals ONLY its immediately-following
+   drawer. With the activity tabs' one-drawer-per-row, `~` matched EVERY later drawer — so any row
+   opened the same (last) drawer, and the backdrop click toggled the wrong checkbox so it wouldn't
+   close. `+` scopes each toggle to its own drawer. */
+.drawer-toggle:checked + .drawer-wrap{pointer-events:auto;visibility:visible}
+.drawer-toggle:checked + .drawer-wrap .drawer-backdrop{opacity:1}
+.drawer-toggle:checked + .drawer-wrap .drawer{transform:translateX(0)}
 
 @media (max-width:560px){
   .auth{padding:32px 18px}
@@ -454,7 +458,7 @@ def admin_shell(
 ) -> str:
     """The admin console shell: a top bar (logo + account menu) and the Dashboard/Users/Sessions tabs.
     `extra` is emitted at the body root before the bar — used for the CSS-only drawer (whose toggle
-    checkbox must be a sibling of `.drawer-wrap`)."""
+    checkbox must be the **immediately-preceding** sibling of its `.drawer-wrap`, per the `+` rule)."""
     tabs = "".join(
         f'<a href="{_tab_href(key)}" class="{"active" if key == active else ""}">{esc(label)}</a>'
         for key, label in _TABS

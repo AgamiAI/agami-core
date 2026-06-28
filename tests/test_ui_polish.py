@@ -40,3 +40,12 @@ def test_inter_font_files_are_served(monkeypatch):
     c = TestClient(mcp_http.build_app())
     r = c.get("/static/fonts/inter-400.woff2")
     assert r.status_code == 200 and int(r.headers["content-length"]) > 1000
+
+
+def test_drawer_uses_adjacent_sibling_not_general_sibling():
+    # One drawer per row (Sessions / Tool calls): the general-sibling `~` revealed EVERY later drawer
+    # at once — any row opened the same (last) one, and the backdrop toggled the wrong checkbox so it
+    # wouldn't close. The adjacent-sibling `+` scopes each toggle to its own drawer.
+    css = ui._CSS
+    assert ".drawer-toggle:checked + .drawer-wrap" in css
+    assert ".drawer-toggle:checked ~ .drawer-wrap" not in css

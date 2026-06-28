@@ -268,7 +268,7 @@ def calls_tab_html(
         if has_detail:
             drawers += _call_drawer(r, i)
     empty = '<p class="muted">No tool calls yet.</p>' if not rows else ""
-    panel = f"""<p class="muted" style="margin-bottom:14px">Every tool call, newest first.</p>{empty}
+    panel = f"""{empty}
 <div class="table-wrap"><table>
 <thead><tr><th>Time</th><th>User</th><th>Tool</th><th>Datasource</th><th>Rows</th><th>Latency</th><th>Status</th><th></th></tr></thead>
 <tbody>{body_rows}</tbody></table></div>"""
@@ -338,7 +338,7 @@ def sessions_tab_html(
         )
         drawers += _session_drawer(s, i)
     empty = '<p class="muted">No sessions yet.</p>' if not sessions else ""
-    panel = f"""<p class="muted" style="margin-bottom:14px">Queries grouped into conversations (best-effort).</p>{empty}
+    panel = f"""{empty}
 <div class="table-wrap"><table>
 <thead><tr><th>Started</th><th>User</th><th>Datasource</th><th>Queries</th><th>Errors</th><th>Avg time</th><th>Last activity</th><th></th></tr></thead>
 <tbody>{body_rows}</tbody></table></div>"""
