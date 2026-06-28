@@ -103,7 +103,7 @@ def test_list_sessions_folds_non_query_calls_into_the_conversation(env):
     _call(s, ts="2026-06-27T10:00:00Z", tool_name="list_datasources", actor="a", success=True,
           thread_id="t1", user_question="what datasources do I have?", correlation_id="c0")
     _call(s, ts="2026-06-27T10:01:00Z", tool_name="execute_sql", actor="a", sql="SELECT 1", success=True,
-          thread_id="t1", user_question="revenue?", correlation_id="c1")
+          datasource="SALES_DATA", thread_id="t1", user_question="revenue?", correlation_id="c1")
     sessions = model_store.list_sessions(s)
     s.close()
     assert len(sessions) == 1  # one conversation holding both calls
@@ -111,6 +111,9 @@ def test_list_sessions_folds_non_query_calls_into_the_conversation(env):
     assert conv["call_count"] == 2
     tool_names = {c["tool_name"] for t in conv["turns"] for c in t["calls"]}
     assert tool_names == {"list_datasources", "execute_sql"}
+    # The conversation opens with a datasource-less list_datasources; the row still shows the real
+    # datasource from the call that had one (not "—").
+    assert conv["datasource"] == "SALES_DATA"
 
 
 def test_list_sessions_keeps_a_thread_less_non_query_call_as_a_singleton(env):

@@ -427,6 +427,10 @@ def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
         ms = [c["execution_ms"] for c in cs if c["execution_ms"] is not None]
         s["started"] = min(ts_all)
         s["last_activity"] = max(ts_all)
+        # The conversation's datasource = its first call with one set. A conversation now often opens
+        # with list_datasources (no datasource), so taking the first row's would show "—" even though
+        # the conversation queried a real datasource.
+        s["datasource"] = next((c["datasource"] for c in cs if c["datasource"]), None)
         s["call_count"] = len(cs)
         s["error_count"] = sum(1 for c in cs if not c["success"])
         s["avg_ms"] = round(sum(ms) / len(ms)) if ms else None  # over calls that recorded latency
