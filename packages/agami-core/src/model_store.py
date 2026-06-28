@@ -137,6 +137,13 @@ def load_organization(store: Store, datasource: str) -> Organization | None:
     return Organization.model_validate(org_doc)
 
 
+def list_datasources(store: Store) -> list[str]:
+    """The datasources that have a served model, sorted. The admin model view picks among these; one
+    deployment can serve several (single-tenant per datasource)."""
+    rows = store.query("SELECT datasource FROM organization ORDER BY datasource")
+    return [r["datasource"] for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Memory (ORGANIZATION.md / USER_MEMORY.md) + model_version — served from the DB too, so a DB-only
 # deploy reads NO files at runtime (get_datasource_schema's domain context + the receipt's version

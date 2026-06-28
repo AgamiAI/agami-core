@@ -16,6 +16,7 @@ import hmac
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 import jwt
 import ui
@@ -77,7 +78,9 @@ def _row_action(user: dict[str, Any], csrf: str, admin_username: str) -> str:
     if user.get("username") == admin_username:
         return '<span class="muted">—</span>'
     active = user["status"] == "active"
-    target, label, cls = ("disabled", "Disable", "danger") if active else ("active", "Enable", "secondary")
+    target, label, cls = (
+        ("disabled", "Disable", "danger") if active else ("active", "Enable", "secondary")
+    )
     return (
         '<form method="post" action="/admin/users/status" style="display:inline">'
         f'<input type="hidden" name="csrf" value="{ui.esc(csrf)}">'
@@ -117,7 +120,9 @@ or a password they set the first time — and can then use this agami server fro
 def _signin_cell(user: dict[str, Any], setup_links: dict[str, str]) -> str:
     """The Sign-in column: the user's method, plus — for a *pending* user in a password deployment —
     a copy-able setup link the admin shares out-of-band (the page is session-gated, admin-only)."""
-    sign_in = user.get("oidc_provider") or ("password" if user.get("has_password") else "not set yet")
+    sign_in = user.get("oidc_provider") or (
+        "password" if user.get("has_password") else "not set yet"
+    )
     link = setup_links.get(user.get("username", ""))
     extra = (
         f'<details class="setup"><summary>Setup link</summary>'
@@ -147,7 +152,7 @@ def users_tab_html(
     for u in users:
         rows += (
             "<tr>"
-            f'<td><strong>{ui.esc(_full_name(u))}</strong></td>'
+            f"<td><strong>{ui.esc(_full_name(u))}</strong></td>"
             f'<td class="muted">{ui.esc(u.get("email") or "—")}</td>'
             f"{_signin_cell(u, setup_links)}"
             f"<td>{_status_pill(u['status'])}</td>"
@@ -219,7 +224,7 @@ def _call_drawer(r: dict[str, Any], idx: int) -> str:
     )
     sql = (
         f'<label>SQL</label><pre class="code" style="white-space:pre-wrap;padding:12px;display:block">'
-        f'{ui.esc(r["sql"])}</pre>'
+        f"{ui.esc(r['sql'])}</pre>"
         if r.get("sql")
         else ""
     )
@@ -238,7 +243,9 @@ def _call_drawer(r: dict[str, Any], idx: int) -> str:
 </div></aside></div>"""
 
 
-def calls_tab_html(rows: list[dict[str, Any]], *, admin_label: str = "", admin_email: str = "") -> str:
+def calls_tab_html(
+    rows: list[dict[str, Any]], *, admin_label: str = "", admin_email: str = ""
+) -> str:
     """The Tool calls tab: every MCP call, newest first, each with a detail drawer."""
     body_rows, drawers = "", ""
     for i, r in enumerate(rows):
@@ -249,7 +256,7 @@ def calls_tab_html(rows: list[dict[str, Any]], *, admin_label: str = "", admin_e
         body_rows += (
             "<tr>"
             f"<td>{_utc(r['ts'])}</td>"
-            f'<td><strong>{ui.esc(r.get("actor") or "—")}</strong></td>'
+            f"<td><strong>{ui.esc(r.get('actor') or '—')}</strong></td>"
             f'<td><span class="pill" style="background:var(--chip);color:var(--ink)">{ui.esc(r["tool_name"])}</span></td>'
             f'<td class="muted">{ui.esc(r.get("datasource") or "—")}</td>'
             f'<td class="muted">{r.get("row_count") if r.get("row_count") is not None else "—"}</td>'
@@ -265,8 +272,14 @@ def calls_tab_html(rows: list[dict[str, Any]], *, admin_label: str = "", admin_e
 <div class="table-wrap"><table>
 <thead><tr><th>Time</th><th>User</th><th>Tool</th><th>Datasource</th><th>Rows</th><th>Latency</th><th>Status</th><th></th></tr></thead>
 <tbody>{body_rows}</tbody></table></div>"""
-    return ui.admin_shell("Tool calls · agami admin", "calls", panel, admin_label=admin_label,
-                          admin_email=admin_email, extra=drawers)
+    return ui.admin_shell(
+        "Tool calls · agami admin",
+        "calls",
+        panel,
+        admin_label=admin_label,
+        admin_email=admin_email,
+        extra=drawers,
+    )
 
 
 def _session_drawer(s: dict[str, Any], idx: int) -> str:
@@ -277,19 +290,21 @@ def _session_drawer(s: dict[str, Any], idx: int) -> str:
         sub = (
             f'<div class="muted" style="margin:2px 0 8px">↳ {ui.esc(q["agent_query"])} '
             f'<span class="muted">· self-reported</span></div>'
-            if q.get("agent_query") else ""
+            if q.get("agent_query")
+            else ""
         )
         sql = (
             f'<pre class="code" style="white-space:pre-wrap;padding:12px;display:block;margin-top:6px">'
-            f'{ui.esc(q["sql"])}</pre>'
-            if q.get("sql") else ""
+            f"{ui.esc(q['sql'])}</pre>"
+            if q.get("sql")
+            else ""
         )
         lat = (str(q["execution_ms"]) + " ms") if q.get("execution_ms") is not None else ""
         cards += (
             '<div style="border-top:1px solid var(--line);padding:14px 0">'
             f'<div style="display:flex;justify-content:space-between"><strong>{ui.esc(question)}</strong>'
             f'<span class="muted" style="font-size:13px">{_utc(q["ts"])} · {lat} {_ok_pill(q["success"])}</span></div>'
-            f'{sub}{sql}'
+            f"{sub}{sql}"
             f'<div class="muted" style="font-size:13px;margin-top:6px">{q.get("row_count") if q.get("row_count") is not None else "—"} rows</div></div>'
         )
     return f"""<input type="checkbox" id="{sid}" class="drawer-toggle">
@@ -312,7 +327,7 @@ def sessions_tab_html(
         body_rows += (
             "<tr>"
             f'<td><label for="sess-{i}" style="cursor:pointer;color:var(--brand)">{_utc(s["started"])}</label></td>'
-            f'<td><strong>{ui.esc(s.get("actor") or "—")}</strong></td>'
+            f"<td><strong>{ui.esc(s.get('actor') or '—')}</strong></td>"
             f'<td class="muted">{ui.esc(s.get("datasource") or "—")}</td>'
             f'<td class="muted">{s["query_count"]}</td>'
             f'<td class="muted">{s["error_count"] or "—"}</td>'
@@ -327,8 +342,14 @@ def sessions_tab_html(
 <div class="table-wrap"><table>
 <thead><tr><th>Started</th><th>User</th><th>Datasource</th><th>Queries</th><th>Errors</th><th>Avg time</th><th>Last activity</th><th></th></tr></thead>
 <tbody>{body_rows}</tbody></table></div>"""
-    return ui.admin_shell("Sessions · agami admin", "sessions", panel, admin_label=admin_label,
-                          admin_email=admin_email, extra=drawers)
+    return ui.admin_shell(
+        "Sessions · agami admin",
+        "sessions",
+        panel,
+        admin_label=admin_label,
+        admin_email=admin_email,
+        extra=drawers,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +620,9 @@ async def admin_login(request: Request) -> Response:
         # Same generic message for wrong password, unknown user, or disabled — no enumeration oracle.
         # Keep the social button on the re-render so a failed password attempt doesn't hide it.
         return HTMLResponse(
-            admin_login_body_html(error="Invalid email or password.", provider=_admin_login_provider()),
+            admin_login_body_html(
+                error="Invalid email or password.", provider=_admin_login_provider()
+            ),
             status_code=401,
         )
     if principal.subject != _admin_username():
@@ -646,7 +669,13 @@ async def admin_home(request: Request) -> Response:
     err = _ERR_FLASH.get(request.query_params.get("err", ""), "")
     return HTMLResponse(
         users_tab_html(
-            users, csrf, admin_username=admin, setup_links=_setup_links(users), ok=ok, error=err, **chrome
+            users,
+            csrf,
+            admin_username=admin,
+            setup_links=_setup_links(users),
+            ok=ok,
+            error=err,
+            **chrome,
         )
     )
 
@@ -744,6 +773,586 @@ async def admin_set_status(request: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Admin console — Model tab (read-only model explorer)
+#
+# A pure projection of the served model (`model_store.load_organization`) + the domain docs
+# (`load_memory`) — the SAME tree every MCP tool reads, so there is zero drift and no second store.
+# Read-only by construction: the only route is a GET (see `routes()`), there is no write path, and
+# `storage_connections[].storage_config` (hosts/credentials) is NEVER rendered. The catalog idiom (a
+# browse tree + one page at a time) keeps a wide model — real tables run to dozens of columns —
+# legible. Builders are split from the handler so previews can render them with sample data.
+# ---------------------------------------------------------------------------
+
+# Trust posture is surfaced as an honest read-only badge (agami's differentiator: the model says how
+# much to trust each piece), never as a clickable review control — that editor is Hosted.
+_CONF_LABEL = {"confirmed": "✓ confirmed", "inferred": "~ inferred", "proposed": "⋯ proposed"}
+
+
+def _conf_badge(confidence: str | None) -> str:
+    c = (confidence or "").lower()
+    if c not in _CONF_LABEL:
+        return ""
+    return f'<span class="badge b-{c}">{_CONF_LABEL[c]}</span>'
+
+
+def _human_count(n: int | None) -> str:
+    """A compact row-count, e.g. 6591 -> '≈ 6.6k', 612000 -> '≈ 612k'. None -> '' (unknown)."""
+    if n is None:
+        return ""
+    if n < 1000:
+        return f"≈ {n}"
+    if n < 1_000_000:
+        return f"≈ {n / 1000:.1f}k".replace(".0k", "k")
+    return f"≈ {n / 1_000_000:.1f}M".replace(".0M", "M")
+
+
+def _model_url(
+    datasource: str, *, area: str | None = None, table: str | None = None, view: str | None = None
+) -> str:
+    """An attribute-safe `/admin/model` href. Values are %-encoded (names may contain spaces); the
+    `&` separators are written as `&amp;` so the whole string is safe in an HTML attribute."""
+    parts = [f"datasource={quote(datasource)}"]
+    if area is not None:
+        parts.append(f"area={quote(area)}")
+    if table is not None:
+        parts.append(f"table={quote(table)}")
+    if view is not None:
+        parts.append(f"view={quote(view)}")
+    return "/admin/model?" + "&amp;".join(parts)
+
+
+def _area_nav_html(
+    a: Any, datasource: str, active_area: str | None, active_table: str | None
+) -> str:
+    """One area node; when it's the active area it expands into links to its tables."""
+    head = (
+        f'<a class="navitem{" active" if a.name == active_area else ""}" '
+        f'href="{_model_url(datasource, area=a.name)}">{ui.esc(a.name)} '
+        f'<span class="n">{len(a.tables_defined)}</span></a>'
+    )
+    if a.name != active_area:
+        return head
+    leaves = "".join(
+        f'<a class="leaf{" active" if t.name == active_table else ""}" '
+        f'href="{_model_url(datasource, area=a.name, table=t.name)}">{ui.esc(t.name)}</a>'
+        for t in a.tables_defined
+    )
+    return head + f'<div class="children">{leaves}</div>' if leaves else head
+
+
+def _model_tree_html(
+    org: Any,
+    datasource: str,
+    datasources: list[str],
+    *,
+    active_area: str | None = None,
+    active_table: str | None = None,
+    active_view: str | None = None,
+) -> str:
+    """The left browse rail: a datasource picker (only when more than one is served), an Overview
+    link, the subject areas (the active one expands to its tables), and the Domain-context node."""
+    if len(datasources) > 1:
+        opts = "".join(
+            f'<option value="{ui.esc(d)}"{" selected" if d == datasource else ""}>{ui.esc(d)}'
+            "</option>"
+            for d in datasources
+        )
+        # onchange auto-submits for JS users; the Go button is the no-JS fallback (the rest of the
+        # admin UI is JS-free, so the picker keeps a working control without JavaScript too).
+        picker = (
+            '<form class="ds" method="get" action="/admin/model">'
+            '<span class="muted">Datasource</span>'
+            f'<select name="datasource" onchange="this.form.submit()">{opts}</select>'
+            '<button type="submit" class="ds-go">Go</button></form>'
+        )
+    else:
+        picker = (
+            f'<div class="ds"><span class="muted">Datasource</span>'
+            f"<b>{ui.esc(datasource)}</b></div>"
+        )
+    overview_cls = "navitem" + (" active" if active_area is None and active_view is None else "")
+    areas = "".join(
+        _area_nav_html(a, datasource, active_area, active_table) for a in org.subject_areas
+    )
+    # The cross-area Relationships node only appears when the model actually has org-level
+    # (cross-subject-area) relationships — no dead node for a single-area model.
+    rel_node = ""
+    if org.cross_subject_area_relationships:
+        rel_cls = "navitem" + (" active" if active_view == "relationships" else "")
+        rel_node = (
+            f'<a class="{rel_cls}" href="{_model_url(datasource, view="relationships")}">'
+            f'Relationships <span class="n">{len(org.cross_subject_area_relationships)}</span></a>'
+        )
+    context_cls = "navitem" + (" active" if active_view == "context" else "")
+    return (
+        f'<aside class="tree">{picker}'
+        f'<a class="{overview_cls}" href="{_model_url(datasource)}">Overview</a>'
+        f"<h4>Subject areas</h4>{areas}"
+        f"<h4>Browse</h4>{rel_node}"
+        f'<a class="{context_cls}" href="{_model_url(datasource, view="context")}">Domain context</a>'
+        "</aside>"
+    )
+
+
+def _model_shell(content: str, tree: str, *, admin_label: str = "", admin_email: str = "") -> str:
+    """Wrap the browse tree + a content pane in the admin shell with the Model tab active."""
+    body = f'<div class="explorer">{tree}<main class="content">{content}</main></div>'
+    return ui.admin_shell(
+        "Model · agami admin", "model", body, admin_label=admin_label, admin_email=admin_email
+    )
+
+
+def model_empty_html(datasource: str, datasources: list[str], **chrome: str) -> str:
+    """The clean state when nothing is deployed yet (no served model rows)."""
+    content = (
+        '<div class="crumbs">Model</div><h1>Model</h1>'
+        '<p class="lead">No model deployed yet. Author your semantic model in Claude with the agami '
+        "plugin and deploy it — the served subject areas, tables, and metrics will show up here, "
+        "read-only.</p>"
+    )
+    label = datasource or (datasources[0] if datasources else "")
+    tree = (
+        f'<aside class="tree"><div class="ds"><span class="muted">Datasource</span>'
+        f"<b>{ui.esc(label) or '—'}</b></div></aside>"
+    )
+    return _model_shell(content, tree, **chrome)
+
+
+def _glossary_html(key_terminology: dict[str, str]) -> str:
+    if not key_terminology:
+        return ""
+    terms = "".join(
+        f'<span class="term"><b>{ui.esc(k)}</b> {ui.esc(v)}</span>'
+        for k, v in key_terminology.items()
+    )
+    return f'<h2 class="sec">Glossary</h2><div class="gloss">{terms}</div>'
+
+
+def _storage_html(connections: list[Any]) -> str:
+    # Names + types only — storage_config (hosts/credentials) is deliberately never rendered.
+    if not connections:
+        return ""
+    rows = "".join(
+        f'<span class="term"><b>{ui.esc(c.name)}</b> '
+        f"{ui.esc(getattr(c, 'storage_type', '') or '')}</span>"
+        for c in connections
+    )
+    return f'<h2 class="sec">Storage connections</h2><div class="gloss">{rows}</div>'
+
+
+def model_overview_html(
+    org: Any, version: str | None, datasource: str, datasources: list[str], **chrome: str
+) -> str:
+    """The datasource landing: org header + glossary + storage + the subject-area list."""
+    tree = _model_tree_html(org, datasource, datasources)
+    table_total = sum(len(a.tables_defined) for a in org.subject_areas)
+    ver = ui.esc(version[:8]) if version else f"v{org.version}"
+    stats = (
+        f'<div class="stat"><div class="k">Subject areas</div>'
+        f'<div class="v">{len(org.subject_areas)}</div></div>'
+        f'<div class="stat"><div class="k">Tables</div><div class="v">{table_total}</div></div>'
+        f'<div class="stat"><div class="k">Version</div>'
+        f'<div class="v mono" style="font-size:14px">{ver}</div></div>'
+        f'<div class="stat"><div class="k">Fiscal year</div>'
+        f'<div class="v" style="font-size:14px">Starts month {org.fiscal_year_start_month}</div></div>'
+    )
+    areas = "".join(
+        f'<a class="trow" href="{_model_url(datasource, area=a.name)}">'
+        f'<span class="nm">{ui.esc(a.name)}</span>'
+        f'<span class="d">{ui.esc(a.description or "")}</span>'
+        f'<span class="meta">{len(a.tables_defined)} tables · {len(a.metrics)} metrics</span>'
+        '<span class="chev">›</span></a>'
+        for a in org.subject_areas
+    )
+    content = (
+        '<div class="crumbs">Model</div>'
+        f'<div class="h1row"><h1>{ui.esc(org.organization)}</h1>'
+        '<span class="readonly-pill">Read-only · edit in Claude</span></div>'
+        f'<p class="lead">{ui.esc(org.description or "The deployed semantic model.")}</p>'
+        f'<div class="statrow">{stats}</div>'
+        f"{_glossary_html(org.key_terminology)}"
+        f"{_storage_html(org.storage_connections)}"
+        f'<h2 class="sec">Subject areas <span class="c">{len(org.subject_areas)}</span></h2>'
+        f'<div class="tlist">{areas}</div>'
+    )
+    # Org-level (cross-area) metrics/entities belong to no single area — surface them here so they
+    # aren't silently dropped.
+    if org.cross_subject_area_metrics:
+        cards = "".join(_metric_card_html(m) for m in org.cross_subject_area_metrics)
+        content += f'<h2 class="sec">Cross-area metrics</h2><div class="grid">{cards}</div>'
+    if org.cross_subject_area_entities:
+        cards = "".join(_entity_card_html(e) for e in org.cross_subject_area_entities)
+        content += f'<h2 class="sec">Cross-area entities</h2><div class="grid">{cards}</div>'
+    return _model_shell(content, tree, **chrome)
+
+
+def _metric_card_html(m: Any) -> str:
+    aliases = ", ".join(m.other_names) if m.other_names else ""
+    alias_html = f' <span class="al">· {ui.esc(aliases)}</span>' if aliases else ""
+    unit = f' <span class="al">· {ui.esc(m.unit)}</span>' if m.unit else ""
+    calc = ui.esc(m.calculation or "")
+    return (
+        f'<div class="mcard"><div class="nm">{ui.esc(m.name)}{alias_html}{unit}</div>'
+        f'<div class="muted" style="font-size:13px">{ui.esc(m.description or "")}</div>'
+        f'<span class="calc">{calc}</span></div>'
+    )
+
+
+def _entity_card_html(e: Any) -> str:
+    aliases = ", ".join(e.other_names) if e.other_names else ""
+    alias_html = f' <span class="al">· {ui.esc(aliases)}</span>' if aliases else ""
+    pattern = (
+        f' <span class="muted mono" style="font-size:12px">{ui.esc(e.value_pattern)}</span>'
+        if e.value_pattern
+        else ""
+    )
+    return (
+        f'<div class="mcard"><div class="nm">{ui.esc(e.name)}{alias_html} '
+        f"{_conf_badge(e.confidence)}</div>"
+        f'<div class="muted" style="font-size:13px">{ui.esc(e.description or "")}{pattern}</div></div>'
+    )
+
+
+def model_area_html(
+    org: Any, area: Any, datasource: str, datasources: list[str], **chrome: str
+) -> str:
+    """A subject-area landing: its tables (scannable), then metrics + entities as cards."""
+    tree = _model_tree_html(org, datasource, datasources, active_area=area.name)
+    tables = "".join(
+        f'<a class="trow" href="{_model_url(datasource, area=area.name, table=t.name)}">'
+        f'<span class="nm">{ui.esc(t.name)}</span>'
+        f'<span class="d">{ui.esc(t.description or "")}</span>'
+        f'<span class="meta">{len(t.columns)} cols · '
+        f"{ui.esc(_human_count(_est_rows_obj(t)))}</span>{_conf_badge(t.confidence)}"
+        '<span class="chev">›</span></a>'
+        for t in area.tables_defined
+    )
+    metrics = "".join(_metric_card_html(m) for m in area.metrics)
+    entities = "".join(_entity_card_html(e) for e in area.entities)
+    window = (
+        f"<span>default window · <b>{ui.esc(area.default_time_window)}</b></span>"
+        if area.default_time_window
+        else ""
+    )
+    content = (
+        f'<div class="crumbs"><a href="{_model_url(datasource)}">{ui.esc(datasource)}</a>'
+        f'<span class="sep">/</span>{ui.esc(area.name)}</div>'
+        f"<h1>{ui.esc(area.name)}</h1>"
+        f'<div class="subline"><span><b>{len(area.tables_defined)}</b> tables</span>'
+        f"<span><b>{len(area.metrics)}</b> metrics</span>"
+        f"<span><b>{len(area.entities)}</b> entities</span>{window}</div>"
+        f'<p class="lead">{ui.esc(area.description or "")}</p>'
+        f'<h2 class="sec">Tables <span class="c">{len(area.tables_defined)}</span></h2>'
+        f'<div class="tlist">{tables}</div>'
+    )
+    if metrics:
+        content += f'<h2 class="sec">Metrics</h2><div class="grid">{metrics}</div>'
+    if entities:
+        content += f'<h2 class="sec">Entities</h2><div class="grid">{entities}</div>'
+    return _model_shell(content, tree, **chrome)
+
+
+def _est_rows_obj(table: Any) -> int | None:
+    ph = getattr(table, "performance_hints", None)
+    return getattr(ph, "estimated_row_count", None) if ph is not None else None
+
+
+# --- the table (dataset) page ------------------------------------------------
+
+_COL_THEAD = (
+    '<thead><tr><th style="width:210px">Column</th><th style="width:120px">Type</th>'
+    '<th>Description</th><th style="width:170px" class="flags">Flags</th></tr></thead>'
+)
+
+
+def _col_flags_html(col: Any) -> str:
+    """Per-column flags — only what carries signal (PK / FK / enum / unit / sensitive / caveat); the
+    redundant per-column 'confirmed/approved' the old view repeated on every row is left out."""
+    flags = []
+    if col.primary_key:
+        flags.append('<span class="badge b-pk">PK</span>')
+    fk = getattr(col, "foreign_key", None)
+    if fk is not None and getattr(fk, "table", None):
+        flags.append(f'<span class="badge b-fk">FK → {ui.esc(fk.table)}</span>')
+    if getattr(col, "choice_field", None):
+        flags.append('<span class="badge b-soft">enum</span>')
+    if col.unit:
+        flags.append(f'<span class="badge b-soft">{ui.esc(str(col.unit))}</span>')
+    if col.sensitive:
+        flags.append('<span class="badge b-sensitive">● sensitive</span>')
+    if col.caveats:
+        flags.append('<span class="badge b-proposed">⚠ caveat</span>')
+    return " ".join(flags)
+
+
+def _col_rows_html(columns: list[Any]) -> str:
+    """The <tr>s for a set of columns; a column with caveats gets an inline note row beneath it."""
+    out = ""
+    for col in columns:
+        if col.description:
+            desc = ui.esc(col.description)
+            if getattr(col, "description_source", None) == "ai_unvalidated":
+                desc += ' <span class="aichip" title="AI-described, unvalidated">AI</span>'
+        else:
+            desc = '<span class="dash">—</span>'
+        out += (
+            '<tr class="crow">'
+            f'<td class="cn">{ui.esc(col.name)}</td>'
+            f'<td><span class="ct">{ui.esc(str(col.type))}</span></td>'
+            f'<td class="cd">{desc}</td>'
+            f'<td class="flags">{_col_flags_html(col)}</td></tr>'
+        )
+        if col.caveats:
+            note = "<br>".join(ui.esc(c) for c in col.caveats)
+            out += f'<tr class="noterow"><td colspan="4"><div class="note">{note}</div></td></tr>'
+    return out
+
+
+def _columns_flat_html(columns: list[Any]) -> str:
+    """A flat schema table. Narrow tables show in full; wide ones show the first 8 and tuck the rest
+    behind a JS-free 'show all N' <details> — the default stays short without hiding anything."""
+    if len(columns) <= 12:
+        return f'<table class="cols">{_COL_THEAD}<tbody>{_col_rows_html(columns)}</tbody></table>'
+    head = _col_rows_html(columns[:8])
+    rest = _col_rows_html(columns[8:])
+    return (
+        f'<table class="cols">{_COL_THEAD}<tbody>{head}</tbody></table>'
+        f'<details class="showmore"><summary>Show all {len(columns)} columns</summary>'
+        f'<table class="cols"><tbody>{rest}</tbody></table></details>'
+    )
+
+
+def _columns_grouped_html(table: Any) -> str:
+    """Collapsible groups from the table's authored `column_groups` (labelled by
+    `column_group_descriptions`); columns in no authored group fall into a trailing 'Other'."""
+    descs = getattr(table, "column_group_descriptions", {}) or {}
+    by_name = {c.name: c for c in table.columns}
+    seen: set[str] = set()
+    blocks = ""
+    for i, (gname, colnames) in enumerate(table.column_groups.items()):
+        cols = [by_name[n] for n in colnames if n in by_name]
+        seen.update(colnames)
+        gloss = ui.esc(descs.get(gname, ""))
+        gloss_html = f'<span class="gdesc">{gloss}</span>' if gloss else ""
+        blocks += (
+            f'<details class="grp"{" open" if i < 2 else ""}><summary>'
+            f'<span class="gname">{ui.esc(gname)}</span>{gloss_html}'
+            f'<span class="gn">{len(cols)}</span></summary>'
+            f'<table class="cols"><tbody>{_col_rows_html(cols)}</tbody></table></details>'
+        )
+    other = [c for c in table.columns if c.name not in seen]
+    if other:
+        blocks += (
+            '<details class="grp"><summary><span class="gname">Other</span>'
+            f'<span class="gn">{len(other)}</span></summary>'
+            f'<table class="cols"><tbody>{_col_rows_html(other)}</tbody></table></details>'
+        )
+    return blocks
+
+
+def _caveat_callout(caveats: list[str]) -> str:
+    if not caveats:
+        return ""
+    body = "<br>".join(ui.esc(c) for c in caveats)
+    return f'<div class="caveat"><span class="ic">⚠</span><div class="t">{body}</div></div>'
+
+
+def _table_rels_html(org: Any, area: Any, table_name: str) -> str:
+    """Relationships touching this table — within-area + the org-level cross-area ones."""
+    rels = list(area.relationships) + list(org.cross_subject_area_relationships)
+    rows = "".join(
+        f'<div class="rel"><span class="mono">{ui.esc(r.from_table)}</span>'
+        f'<span class="arr">→</span><span class="mono">{ui.esc(r.to_table)}</span>'
+        f'<span class="badge b-soft">{ui.esc(str(r.relationship))}</span>'
+        f'<span class="ro">{ui.esc(str(r.join_type))} · {ui.esc(str(r.confidence))}</span></div>'
+        for r in rels
+        if r.from_table == table_name or r.to_table == table_name
+    )
+    if not rows:
+        return ""
+    return f'<h2 class="sec">Relationships</h2><div class="card">{rows}</div>'
+
+
+def _table_metrics_html(area: Any, table_name: str) -> str:
+    """Metrics whose `source_tables` include this table."""
+    using = [m for m in area.metrics if table_name in (m.source_tables or [])]
+    if not using:
+        return ""
+    cards = "".join(_metric_card_html(m) for m in using)
+    return f'<h2 class="sec">Used by metrics</h2><div class="grid">{cards}</div>'
+
+
+def model_table_html(
+    org: Any, area: Any, table: Any, datasource: str, datasources: list[str], **chrome: str
+) -> str:
+    """A table (dataset) page — the heart of the explorer: header, caveats, columns
+    (grouped-when-authored else flat), then relationships + metrics that use it."""
+    tree = _model_tree_html(
+        org, datasource, datasources, active_area=area.name, active_table=table.name
+    )
+    schema = (
+        f'<span class="schema">{ui.esc(table.schema_name)}.</span>' if table.schema_name else ""
+    )
+    rows = _human_count(_est_rows_obj(table))
+    grain = ", ".join(table.grain) if table.grain else ""
+    aichip = (
+        ' <span class="descsrc">AI-described · unvalidated</span>'
+        if getattr(table, "description_source", None) == "ai_unvalidated"
+        else ""
+    )
+    sql_block = ""
+    if getattr(table, "source_type", None) == "sql" and table.sql:
+        sql_block = (
+            '<h2 class="sec">Defining SQL</h2>'
+            f'<pre class="code" style="white-space:pre-wrap;display:block;padding:12px">'
+            f"{ui.esc(table.sql)}</pre>"
+        )
+    subline = "".join(
+        f"<span>{s}</span>"
+        for s in (
+            f"<b>{len(table.columns)}</b> columns",
+            f"<b>{ui.esc(rows)}</b> rows" if rows else "",
+            f'grain · <b class="mono">{ui.esc(grain)}</b>' if grain else "",
+            ui.esc(table.storage_connection or ""),
+        )
+        if s
+    )
+    columns = (
+        _columns_grouped_html(table) if table.column_groups else _columns_flat_html(table.columns)
+    )
+    content = (
+        f'<div class="crumbs"><a href="{_model_url(datasource)}">{ui.esc(datasource)}</a>'
+        f'<span class="sep">/</span>'
+        f'<a href="{_model_url(datasource, area=area.name)}">{ui.esc(area.name)}</a>'
+        f'<span class="sep">/</span>{ui.esc(table.name)}</div>'
+        f'<div class="h1row"><h1>{schema}{ui.esc(table.name)}</h1>'
+        f"{_conf_badge(table.confidence)}"
+        '<span class="readonly-pill">Read-only · edit in Claude</span></div>'
+        f'<div class="subline">{subline}</div>'
+        f'<p class="desc">{ui.esc(table.description or "")}{aichip}</p>'
+        f"{_caveat_callout(table.caveats)}"
+        f'<h2 class="sec">Columns <span class="c">{len(table.columns)}</span></h2>'
+        f"{columns}{sql_block}"
+        f"{_table_rels_html(org, area, table.name)}"
+        f"{_table_metrics_html(area, table.name)}"
+    )
+    return _model_shell(content, tree, **chrome)
+
+
+def _qualified(schema: str | None, table: str) -> str:
+    return f"{ui.esc(schema)}.{ui.esc(table)}" if schema else ui.esc(table)
+
+
+def _cross_rel_row_html(r: Any) -> str:
+    """One cross-area relationship: schema-qualified from→to, the join columns, cardinality, trust."""
+    on = f"{ui.esc(r.from_column)} = {ui.esc(r.to_column)}" if r.from_column and r.to_column else ""
+    meta = " · ".join(p for p in (on, ui.esc(str(r.join_type)), ui.esc(str(r.confidence))) if p)
+    return (
+        f'<div class="rel"><span class="mono">{_qualified(r.from_schema, r.from_table)}</span>'
+        f'<span class="arr">→</span>'
+        f'<span class="mono">{_qualified(r.to_schema, r.to_table)}</span>'
+        f'<span class="badge b-soft">{ui.esc(str(r.relationship))}</span>'
+        f'<span class="ro">{meta}</span></div>'
+    )
+
+
+def model_relationships_html(
+    org: Any, datasource: str, datasources: list[str], **chrome: str
+) -> str:
+    """The cross-area relationships — the org-level joins that span subject areas — grouped by
+    area-pair, so the model's cross-area topology is readable in one place (within-area joins stay
+    on each table page)."""
+    tree = _model_tree_html(org, datasource, datasources, active_view="relationships")
+    rels = org.cross_subject_area_relationships
+    groups: dict[tuple[str, str], list[Any]] = {}
+    for r in rels:
+        groups.setdefault((r.from_subject_area, r.to_subject_area), []).append(r)
+    # Most-connected area-pairs first, then alphabetical — the same ordering as the topology view.
+    blocks = ""
+    for (fa, ta), items in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        rows = "".join(_cross_rel_row_html(r) for r in items)
+        blocks += (
+            f'<details class="grp" open><summary>'
+            f'<span class="gname">{ui.esc(fa)} <span class="arr">→</span> {ui.esc(ta)}</span>'
+            f'<span class="gn">{len(items)}</span></summary>{rows}</details>'
+        )
+    body = blocks if rels else '<p class="lead">No cross-area relationships in this model.</p>'
+    content = (
+        f'<div class="crumbs"><a href="{_model_url(datasource)}">{ui.esc(datasource)}</a>'
+        '<span class="sep">/</span>Relationships</div><h1>Cross-area relationships</h1>'
+        f'<p class="lead">The <b>{len(rels)}</b> org-level joins that span subject areas, grouped by '
+        "area-pair. (Joins within a single area show on each table page.)</p>"
+        f"{body}"
+    )
+    return _model_shell(content, tree, **chrome)
+
+
+def model_context_html(
+    org: Any, memory: dict[str, str], datasource: str, datasources: list[str], **chrome: str
+) -> str:
+    """The Domain-context page — the deployed ORGANIZATION.md rendered as (safe) markdown."""
+    tree = _model_tree_html(org, datasource, datasources, active_view="context")
+    org_md = memory.get("organization")
+    doc = (
+        f'<div class="context">{ui.md(org_md)}</div>'
+        if org_md
+        else '<p class="lead">No domain context (ORGANIZATION.md) deployed for this datasource.</p>'
+    )
+    content = (
+        f'<div class="crumbs"><a href="{_model_url(datasource)}">{ui.esc(datasource)}</a>'
+        '<span class="sep">/</span>Domain context</div><h1>Domain context</h1>'
+        '<p class="lead">The deployed ORGANIZATION.md — the domain notes Claude reads as context. '
+        f"Read-only.</p>{doc}"
+    )
+    return _model_shell(content, tree, **chrome)
+
+
+async def admin_model(request: Request) -> Response:
+    """The read-only Model explorer. Session-gated; a pure GET projection of the served model. Query:
+    `?datasource=` (defaults to the first served), `?area=`, `?view=context`."""
+    import model_store
+
+    admin = current_admin(request)
+    if admin is None:
+        return RedirectResponse("/admin/login", status_code=302)
+    store = _open_store()
+    try:
+        chrome = _admin_chrome(store, admin)
+        datasources = model_store.list_datasources(store) if store is not None else []
+        if not datasources:
+            return HTMLResponse(model_empty_html("", [], **chrome))
+        datasource = request.query_params.get("datasource") or datasources[0]
+        if datasource not in datasources:  # an unknown/stale datasource param → the first served
+            datasource = datasources[0]
+        org = model_store.load_organization(store, datasource)
+        if org is None:
+            return HTMLResponse(model_empty_html(datasource, datasources, **chrome))
+        view = request.query_params.get("view")
+        if view == "relationships":
+            return HTMLResponse(model_relationships_html(org, datasource, datasources, **chrome))
+        if view == "context":
+            memory = model_store.load_memory(store, datasource)
+            return HTMLResponse(model_context_html(org, memory, datasource, datasources, **chrome))
+        area_name = request.query_params.get("area")
+        if area_name:
+            area = next((a for a in org.subject_areas if a.name == area_name), None)
+            if area is not None:
+                table_name = request.query_params.get("table")
+                if table_name:
+                    table = next((t for t in area.tables_defined if t.name == table_name), None)
+                    if table is not None:
+                        return HTMLResponse(
+                            model_table_html(org, area, table, datasource, datasources, **chrome)
+                        )
+                return HTMLResponse(model_area_html(org, area, datasource, datasources, **chrome))
+        version = model_store.newest_model_version(store, datasource)
+        return HTMLResponse(model_overview_html(org, version, datasource, datasources, **chrome))
+    finally:
+        if store is not None:
+            store.close()
+
+
 def routes() -> list:
     """The `/admin/*` routes, for the transport to mount. Each is session-gated in the handler (the
     transport adds these paths to the bearer public-skip — they do their own auth, not the MCP one)."""
@@ -751,6 +1360,8 @@ def routes() -> list:
 
     return [
         Route("/admin", admin_home, methods=["GET"]),
+        # Read-only model explorer — GET only, by design (no write path can hide behind /admin/model).
+        Route("/admin/model", admin_model, methods=["GET"]),
         Route("/admin/login", admin_login, methods=["GET", "POST"]),
         Route("/admin/logout", admin_logout, methods=["GET"]),
         # The admin OIDC start (handler lives in oauth_server, with the OIDC machinery). The IdP
@@ -763,6 +1374,7 @@ def routes() -> list:
 
 ADMIN_PATHS = (
     "/admin",
+    "/admin/model",
     "/admin/login",
     "/admin/logout",
     "/admin/oidc/start",

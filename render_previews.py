@@ -104,6 +104,162 @@ for _c in _SAMPLE_CALLS:
     _sink.record_tool_call(ToolCallRecord(**_c))
 write("07-admin-sessions.html", admin.sessions_tab_html(model_store.list_sessions(_s), **CHROME))
 write("15-tool-calls.html", admin.calls_tab_html(model_store.list_tool_calls(_s), **CHROME))
+
+# The read-only model explorer — rendered from the REAL builders over the SAME served tree the MCP
+# tools read (load_organization), so the previews can't drift from production. Neutral demo data only.
+from semantic_model.models import Organization  # noqa: E402
+
+_MODEL_ORG = {
+    "organization": "acme",
+    "version": 1,
+    "description": "Acme Commerce — the deployed semantic model.",
+    "fiscal_year_start_month": 1,
+    "key_terminology": {"AOV": "average order value", "Net revenue": "sales minus refunds"},
+    "storage_connections": [
+        {"name": "warehouse", "storage_type": "PostgreSQL",
+         "storage_config": {"host": "never-rendered"}}
+    ],
+    "subject_areas": [
+        {
+            "name": "Catalog", "description": "Products, pricing and stock.",
+            "default_time_window": "last_90_days",
+            "tables": [{"storage_connection": "warehouse", "schema": "public", "table": "products"}],
+            "tables_defined": [
+                {
+                    "name": "products", "schema": "public", "storage_connection": "warehouse",
+                    "grain": ["id"], "description": "Master product catalog.",
+                    "description_source": "ai_unvalidated", "confidence": "proposed",
+                    "review_state": "unreviewed",
+                    "caveats": ["\"Coffee\" = category='cafe' AND name ILIKE '%coffee%','%latte%'…"],
+                    "columns": [
+                        {"name": "id", "type": "uuid", "primary_key": True},
+                        {"name": "sku", "type": "string"},
+                        {"name": "name", "type": "string"},
+                        {"name": "category", "type": "string",
+                         "description": "Product type: 'book', 'cafe', 'merchandise', or 'other'.",
+                         "description_source": "ai_unvalidated",
+                         "choice_field": {"book": "Book", "cafe": "Cafe"}},
+                        {"name": "price", "type": "decimal", "unit": "USD"},
+                        {"name": "cost_price", "type": "decimal", "unit": "USD",
+                         "caveats": ["~20% of rows have cost_price > price (data-entry errors). "
+                                     "Treat as valid only when cost_price <= price."]},
+                        {"name": "supplier_email", "type": "string", "sensitive": True,
+                         "description": "Distributor contact."},
+                        {"name": "category_id", "type": "uuid",
+                         "foreign_key": {"table": "categories", "column": "id"}},
+                        {"name": "stock_qty", "type": "integer"},
+                        {"name": "is_active", "type": "boolean"},
+                        {"name": "created_at", "type": "timestamp"},
+                        {"name": "author", "type": "string"},
+                        {"name": "publisher", "type": "string"},
+                        {"name": "barcode", "type": "string"},
+                    ],
+                    "performance_hints": {"estimated_row_count": 6591},
+                },
+                {
+                    "name": "inventory", "schema": "public", "storage_connection": "warehouse",
+                    "grain": ["id"], "description": "Per-location stock levels.",
+                    "confidence": "confirmed", "review_state": "approved",
+                    "column_groups": {"Identifiers": ["id", "product_id", "location_id"],
+                                      "Levels": ["on_hand", "reserved"]},
+                    "column_group_descriptions": {"Identifiers": "keys & references",
+                                                  "Levels": "stock counts"},
+                    "columns": [
+                        {"name": "id", "type": "uuid", "primary_key": True},
+                        {"name": "product_id", "type": "uuid",
+                         "foreign_key": {"table": "products", "column": "id"}},
+                        {"name": "location_id", "type": "uuid"},
+                        {"name": "on_hand", "type": "integer"},
+                        {"name": "reserved", "type": "integer"},
+                        {"name": "counted_at", "type": "timestamp"},  # in no group → "Other"
+                    ],
+                    "performance_hints": {"estimated_row_count": 41000},
+                },
+            ],
+            "metrics": [
+                {"name": "active products", "calculation": "COUNT(*) FILTER (WHERE is_active)",
+                 "other_names": ["live items"]}
+            ],
+            "entities": [
+                {"name": "product", "other_names": ["sku", "item"],
+                 "description": "A sellable catalog item.", "value_pattern": "SKU-[0-9]{6}",
+                 "confidence": "inferred"}
+            ],
+            "relationships": [
+                {"from_table": "products", "to_table": "categories", "from_column": "category_id",
+                 "to_column": "id", "relationship": "many_to_one", "confidence": "confirmed",
+                 "review_state": "approved"}
+            ],
+        },
+        {
+            "name": "Sales", "description": "Orders, line items and revenue.",
+            "tables": [{"storage_connection": "warehouse", "schema": "public", "table": "orders"}],
+            "tables_defined": [
+                {
+                    "name": "orders", "schema": "public", "storage_connection": "warehouse",
+                    "grain": ["id"], "description": "One row per placed order.",
+                    "confidence": "confirmed", "review_state": "approved",
+                    "columns": [
+                        {"name": "id", "type": "integer", "primary_key": True},
+                        {"name": "customer_id", "type": "integer",
+                         "foreign_key": {"table": "customers", "column": "id"}},
+                        {"name": "amount", "type": "decimal", "unit": "USD"},
+                        {"name": "placed_at", "type": "timestamp"},
+                    ],
+                    "performance_hints": {"estimated_row_count": 184000},
+                }
+            ],
+            "metrics": [
+                {"name": "revenue", "calculation": "SUM(amount)", "unit": "USD",
+                 "other_names": ["sales"], "source_tables": ["orders"]}
+            ],
+            "entities": [],
+            "relationships": [],
+        },
+    ],
+    # Cross-area joins (Sales → Catalog) — surfaced in the Relationships browse view, grouped by pair.
+    "cross_subject_area_relationships": [
+        {"from_table": "orders", "to_table": "products", "from_column": "product_id",
+         "to_column": "id", "from_schema": "public", "to_schema": "public", "join_type": "LEFT",
+         "relationship": "many_to_one", "confidence": "inferred", "review_state": "unreviewed",
+         "from_subject_area": "Sales", "to_subject_area": "Catalog"},
+        {"from_table": "orders", "to_table": "inventory", "from_column": "warehouse_id",
+         "to_column": "location_id", "from_schema": "public", "to_schema": "public",
+         "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
+         "review_state": "unreviewed",
+         "from_subject_area": "Sales", "to_subject_area": "Catalog"},
+    ],
+}
+_ORG_MD = (
+    "# About Acme Commerce\n\n"
+    "Acme sells direct-to-consumer goods online. Every checkout writes an **orders** row.\n\n"
+    "## Key terms\n\n"
+    "- **Net revenue** excludes cancelled orders and nets refunds.\n"
+    "- A **member** has a row in the loyalty table — not just anyone who checked out.\n"
+)
+model_store.write_organization(_s, "SALES_DATA", Organization.model_validate(_MODEL_ORG))
+model_store.write_organization(_s, "MARKETING", Organization.model_validate(_MODEL_ORG))  # → picker
+model_store.write_memory(_s, "SALES_DATA", organization=_ORG_MD)
+model_store.write_model_version(_s, "SALES_DATA", "a1f4c39c0b2e", created_at="2026-06-27T09:00:00Z")
+_dss = model_store.list_datasources(_s)
+_org = model_store.load_organization(_s, "SALES_DATA")
+_ver = model_store.newest_model_version(_s, "SALES_DATA")
+_catalog = next(a for a in _org.subject_areas if a.name == "Catalog")
+_products = next(t for t in _catalog.tables_defined if t.name == "products")
+_inventory = next(t for t in _catalog.tables_defined if t.name == "inventory")
+write("16-model-overview.html",
+      admin.model_overview_html(_org, _ver, "SALES_DATA", _dss, **CHROME))
+write("17-model-area.html",
+      admin.model_area_html(_org, _catalog, "SALES_DATA", _dss, **CHROME))
+write("18-model-table-flat.html",
+      admin.model_table_html(_org, _catalog, _products, "SALES_DATA", _dss, **CHROME))
+write("19-model-table-grouped.html",
+      admin.model_table_html(_org, _catalog, _inventory, "SALES_DATA", _dss, **CHROME))
+write("20-model-context.html",
+      admin.model_context_html(_org, model_store.load_memory(_s, "SALES_DATA"), "SALES_DATA", _dss,
+                               **CHROME))
+write("21-model-relationships.html",
+      admin.model_relationships_html(_org, "SALES_DATA", _dss, **CHROME))
 _s.close()
 write("08-not-admin.html", admin.not_admin_body_html(BASE))
 write("09-landing.html", admin.landing_body_html(BASE))
