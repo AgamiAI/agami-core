@@ -164,3 +164,10 @@ def test_activity_does_not_leak_the_password_hash(client, env):
     s.close()
     _login(client)
     assert "password_hash" not in client.get("/admin?tab=calls").text
+
+
+def test_activity_tabs_drop_the_redundant_helper_text(client, env):
+    # The column headers + tab name already say what these are; the helper sentences were noise.
+    _login(client)
+    assert "Every tool call, newest first" not in client.get("/admin?tab=calls").text
+    assert "Queries grouped into conversations" not in client.get("/admin?tab=sessions").text
