@@ -112,6 +112,27 @@ def test_multiple_datasources_each_load(tmp_path):
     assert loaded == ["demo", "demo2"]  # both models, 'local' skipped
 
 
+def test_main_deploys_all_then_a_named_datasource(tmp_path, monkeypatch):
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    monkeypatch.setenv("AGAMI_DB_URL", "sqlite://" + str(tmp_path / "m.db"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(arts))
+    assert model_deploy.main([]) == 0  # deploy every model under the dir (migrates first, then loads)
+    assert model_deploy.main(["demo"]) == 0  # deploy a named datasource
+    store = Store.connect("sqlite://" + str(tmp_path / "m.db"))
+    org = model_store.load_organization(store, "demo")
+    store.close()
+    assert org is not None and org.organization == "acme"
+
+
+def test_main_errors_when_no_model_found(tmp_path, monkeypatch):
+    arts = tmp_path / "artifacts"
+    arts.mkdir()  # exists but holds no model
+    monkeypatch.setenv("AGAMI_DB_URL", "sqlite://" + str(tmp_path / "m.db"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(arts))
+    assert model_deploy.main([]) == 1  # nothing to deploy → fail-closed
+
+
 def test_main_errors_when_no_database(monkeypatch):
     monkeypatch.delenv("AGAMI_DB_URL", raising=False)
     monkeypatch.delenv("APP_DATABASE_URL", raising=False)
