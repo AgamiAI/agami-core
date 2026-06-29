@@ -1,0 +1,6 @@
+# gitleaks fingerprints to ignore (format: commit:file:rule:line — no secret value is stored here).
+#
+# One grandfathered historical finding: the value was removed from the working tree and rotated out of
+# use; this entry lets the new detectors run without rewriting public history. Do NOT add entries here to
+# silence a new finding — fix the leak instead.
+2c78f9c1b99f6400f6a6099d4e1bccfbc476733c:tests/test_dsn_parsing.py:supabase-pooler-credential:43

@@ -37,17 +37,17 @@ def test_short_postgres_scheme():
 
 
 def test_supabase_asyncpg_scheme():
-    """The user's actual Supabase URL — pasted from their dashboard."""
+    """Supabase pooler-mode DSN: the asyncpg driver suffix + the `postgres.<project_ref>` user form."""
     dsn = (
-        "postgresql+asyncpg://postgres.odzuxljstuccrblqcevo:HDsA1qduFmivRWzZ"
-        "@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
+        "postgresql+asyncpg://postgres.projectref:examplepw"
+        "@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
     )
     out = _parse_dsn(dsn)
     assert out["type"] == "postgres"
-    assert out["host"] == "aws-1-ap-northeast-1.pooler.supabase.com"
+    assert out["host"] == "aws-1-us-east-1.pooler.supabase.com"
     assert out["port"] == "5432"
-    assert out["user"] == "postgres.odzuxljstuccrblqcevo"
-    assert out["password"] == "HDsA1qduFmivRWzZ"
+    assert out["user"] == "postgres.projectref"
+    assert out["password"] == "examplepw"
     assert out["database"] == "postgres"
 
 

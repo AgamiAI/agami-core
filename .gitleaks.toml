@@ -1,0 +1,39 @@
+# gitleaks config for agami-core. Extends the built-in ruleset (every default detector stays on) and adds
+# rules for a gap the defaults miss: an inline password in a database connection string. A bare
+# `postgres://user:pass@host` password has no telltale prefix (unlike an AWS or GitHub token), so the
+# default detectors don't flag it. CI runs `gitleaks detect` over full history; this file is auto-loaded
+# from the repo root.
+#
+# NOTE: gitleaks matches per line, so a DSN split across adjacent string literals can evade a whole-URL
+# rule — hence two detectors (the general URL form + the Supabase pooler `postgres.<ref>:<pw>` form, which
+# stays contiguous on one line). The standing rule still holds: never put a real credential in a
+# fixture/doc (CLAUDE.md). Defense in depth, not a perfect gate.
+title = "agami-core"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "db-connection-string-inline-password"
+description = "Inline password in a DB connection string — use ${ENV_VAR} or a placeholder, never a real value"
+# scheme://user:<PASSWORD>@host on one line; capture the password (group 1), >= 6 chars to skip `:p@`/`:pass@`.
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?)(?:\+[a-z0-9]+)?://[^:@/\s]+:([^@/\s"']{6,})@'''
+secretGroup = 1
+entropy = 3.5
+
+  [rules.allowlist]
+  regexes = ['''\$\{''', '''<[^>]*>''']
+  stopwords = ["password", "example", "changeme", "placeholder", "your-", "secret", "bundled-local", "demo"]
+
+[[rules]]
+id = "supabase-pooler-credential"
+description = "Supabase pooler credential (postgres.<project_ref>:<password>) with a real inline password"
+# The Supabase pooler username is literally `postgres.<project_ref>` (a ~20-char ref); the password
+# follows on the same line. Catches the real-DSN-as-fixture case even when the URL is split across lines.
+regex = '''postgres\.[a-z0-9]{16,}:([^@/\s"']{8,})'''
+secretGroup = 1
+entropy = 3.5
+
+  [rules.allowlist]
+  regexes = ['''\$\{''', '''<[^>]*>''']
+  stopwords = ["password", "example", "changeme", "placeholder", "your-", "secret", "demo"]

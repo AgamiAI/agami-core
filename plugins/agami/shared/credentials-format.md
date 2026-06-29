@@ -90,7 +90,7 @@ Drop it into the `url` field. Optionally add `sslmode = require` (Supabase requi
 
 ```ini
 [main]
-url     = postgresql://postgres.odzuxljstuccrblqcevo:<your-password>@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres
+url     = postgresql://postgres.projectref:<your-password>@aws-1-us-east-1.pooler.supabase.com:5432/postgres
 sslmode = require
 ```
 
