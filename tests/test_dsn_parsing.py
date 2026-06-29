@@ -40,11 +40,11 @@ def test_supabase_asyncpg_scheme():
     """Supabase pooler-mode DSN: the asyncpg driver suffix + the `postgres.<project_ref>` user form."""
     dsn = (
         "postgresql+asyncpg://postgres.projectref:examplepw"
-        "@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+        "@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
     )
     out = _parse_dsn(dsn)
     assert out["type"] == "postgres"
-    assert out["host"] == "aws-0-us-east-1.pooler.supabase.com"
+    assert out["host"] == "aws-1-us-east-1.pooler.supabase.com"
     assert out["port"] == "5432"
     assert out["user"] == "postgres.projectref"
     assert out["password"] == "examplepw"

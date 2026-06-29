@@ -5,8 +5,8 @@ relationship completeness, one-primary-per-entity, …). This module handles the
 invariants that need the *whole* model in view — things a single object can't
 check on its own.
 
-Every rule listed in the design doc's "Validator" subsection + the
-cardinality + BigQuery-gap additions is implemented here:
+Every rule from the design doc's "Validator" subsection — plus the cardinality and
+BigQuery-gap additions — is implemented here:
 
   - Relationship cardinality required (handled in models; re-asserted here for the
     structural gate, verification check #17).
