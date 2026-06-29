@@ -1,0 +1,6 @@
+# Caddy terminates TLS for your hostname (automatic Let's Encrypt) and proxies to the internal agami
+# server. AGAMI_PUBLIC_HOST is the bare hostname (e.g. agami.example.com) — deploy_preflight derives it
+# from PUBLIC_BASE_URL. The host must resolve (a DNS A-record → this VM) for the certificate to issue.
+{$AGAMI_PUBLIC_HOST} {
+	reverse_proxy agami:8000
+}
