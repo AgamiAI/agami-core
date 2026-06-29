@@ -52,8 +52,9 @@ Ask only these (everything else is defaulted or generated). Prefer one compact e
      `bundled-db,tunnel`; they'll add `CLOUDFLARE_TUNNEL_TOKEN` to `.env`). The tunnel still needs a
      domain on Cloudflare — it removes the public IP, not the name.
 2. **Admin** — first name, last name, work **email** (the email is the admin identity).
-3. *(only if they bring their own Postgres)* a managed `postgresql://…?sslmode=require` URL → profiles
-   `edge` + `--app-database-url`.
+3. *(only if they bring their own Postgres)* note it → use profiles `edge` (drops the bundled DB). The
+   managed `postgresql://…` URL is a **credential**, so do **not** collect it in chat — after the bundle
+   is written, the user sets `APP_DATABASE_URL` in `.env` themselves (the same hand-off as the password).
 
 Then write the bundle (default target `~/agami-deploy`; mention they can pick another):
 
@@ -66,15 +67,17 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/prepare_deploy.py" \
   --profiles "bundled-db,edge"
 ```
 
-(Use `--profiles "bundled-db,tunnel"` for the tunnel, or `--profiles "edge" --app-database-url "<url>"`
-for managed Postgres.) Report the status line: `PREPARED <dir>` (fresh) or `PREPARED_KEPT_ENV <dir>`
-(an existing `.env` was preserved — tell the user to edit it directly to change values).
+(Use `--profiles "bundled-db,tunnel"` for the tunnel, or `--profiles "edge"` for managed Postgres — then
+have the user set `APP_DATABASE_URL` in `.env` by hand, never on the command line.) Report the status
+line: `PREPARED <dir>` (fresh) or `PREPARED_KEPT_ENV <dir>` (an existing `.env` was preserved — tell the
+user to edit it directly to change values).
 
 ## Phase 2: Hand off the password (then end the turn)
 Tell the user (do **not** proceed past this in the same turn):
 
-> Open `~/agami-deploy/.env`, set **`AGAMI_ADMIN_PASSWORD=`** to a strong password, and save. Then tell
-> me to continue. (I never see it — it stays in the file on your machine.)
+> Open `~/agami-deploy/.env`, set **`AGAMI_ADMIN_PASSWORD=`** to a strong password (and, if you chose
+> managed Postgres, set **`APP_DATABASE_URL=`** too), and save. Then tell me to continue. (I never see
+> them — they stay in the file on your machine.)
 
 End the turn here. The user fills the password and re-invokes (or says "continue").
 

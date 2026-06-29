@@ -2,10 +2,12 @@
 """Scaffold an `/agami-deploy` bundle on the user's machine: copy the carried templates, stage the
 model artifacts, and write a `.env` with the NON-SECRET values the skill gathered.
 
-This helper never touches a secret. The admin password is typed by the user into the file afterwards
-(the agami-connect hand-off pattern), and `deploy_preflight` generates the signing secret. So that a
-re-run can't wipe a password the user already typed or a secret already generated, an EXISTING `.env`
-is preserved untouched — only the other bundle files (and the artifacts copy) are refreshed.
+This helper never touches a secret: the admin password is typed by the user into the file afterwards
+(the agami-connect hand-off pattern), `deploy_preflight` generates the signing secret, and an external
+`APP_DATABASE_URL` (itself a credential) is likewise edited into `.env` by the user — never passed here
+on the command line. So that a re-run can't wipe a password the user already typed or a secret already
+generated, an EXISTING `.env` is preserved untouched — only the other bundle files (and the artifacts
+copy) are refreshed.
 
 Stdout is a single status line (first token machine-readable); the skill reads it and acts. Stdlib only.
 
@@ -55,9 +57,8 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
     text = _set_key(text, "AGAMI_ADMIN_USERNAME", args.admin_email)
     text = _set_key(text, "AGAMI_ADMIN_FIRST_NAME", args.admin_first)
     text = _set_key(text, "AGAMI_ADMIN_LAST_NAME", args.admin_last)
-    if args.app_database_url:
-        # External/managed Postgres: the template ships this commented; set it as a real line.
-        text = _set_key(text, "APP_DATABASE_URL", args.app_database_url)
+    # External/managed Postgres (APP_DATABASE_URL) is a credential, so it is NOT set here — the template
+    # ships it commented and the user edits it into .env by hand (the same hand-off as the password).
     return text
 
 
@@ -71,6 +72,9 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
     if not (artifacts / "local").is_dir():
         # No staged model/creds to ship — the deploy would have nothing to serve.
         return f"ERROR no artifacts (model + credentials) found at {artifacts} — run /agami-connect first", 1
+    if target == artifacts or target.is_relative_to(artifacts) or artifacts.is_relative_to(target):
+        # Else the copytree(artifacts -> target/artifacts) would recurse into the bundle it just created.
+        return f"ERROR --target must not be inside --artifacts-dir (or vice versa): {target}", 1
 
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -85,7 +89,9 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
 
         env_path = target / ".env"
         if env_path.exists():
-            # Never clobber a .env that may already hold a typed password / a generated signing secret.
+            # Never clobber a .env that may already hold a typed password / a generated signing secret —
+            # but do reassert chmod 600 in case an editor/umask loosened it (the file holds secrets).
+            env_path.chmod(0o600)
             return f"PREPARED_KEPT_ENV {target}", 0
         example = (_BUNDLE_SRC / ".env.example").read_text(encoding="utf-8")
         env_path.write_text(_build_env(example, args), encoding="utf-8")
@@ -105,9 +111,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--admin-first", required=True)
     p.add_argument("--admin-last", required=True)
     p.add_argument("--profiles", default="bundled-db,edge", help="COMPOSE_PROFILES (default: single-server)")
-    p.add_argument("--app-database-url", default="", help="external Postgres URL (omit for bundled)")
     p.add_argument("--image-tag", default="latest", help="ghcr.io/agamiai/agami-core tag to pull")
-    # Deliberately NO --password / secret args: secrets never travel on the command line.
+    # Deliberately NO --password / --app-database-url / secret args: a credential never travels on the
+    # command line (it would leak into chat logs / shell history). The user edits those into .env.
     args = p.parse_args(argv)
 
     status, code = prepare(args)

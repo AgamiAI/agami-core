@@ -18,7 +18,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "packages" / "agami-core" / "src"))
 
+import deploy_preflight  # noqa: E402
 import prepare_deploy  # noqa: E402
 
 
@@ -43,7 +45,6 @@ def _args(target: Path, artifacts: Path, **over) -> argparse.Namespace:
         admin_first="Alex",
         admin_last="Kim",
         profiles="bundled-db,edge",
-        app_database_url="",
         image_tag="latest",
     )
     base.update(over)
@@ -89,20 +90,17 @@ def test_env_is_chmod_600(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "profiles,app_db,expect",
-    [
-        ("bundled-db,edge", "", "COMPOSE_PROFILES=bundled-db,edge"),
-        ("bundled-db,tunnel", "", "COMPOSE_PROFILES=bundled-db,tunnel"),
-        ("edge", "postgresql://u@mgd.example:5432/agami?sslmode=require", "COMPOSE_PROFILES=edge"),
-    ],
+    "profiles",
+    ["bundled-db,edge", "bundled-db,tunnel", "edge"],
 )
-def test_tier2_toggles_set_profiles(tmp_path, profiles, app_db, expect):
+def test_tier2_toggles_set_profiles(tmp_path, profiles):
     target = tmp_path / "bundle"
-    prepare_deploy.prepare(_args(target, _artifacts(tmp_path), profiles=profiles, app_database_url=app_db))
+    prepare_deploy.prepare(_args(target, _artifacts(tmp_path), profiles=profiles))
     env = (target / ".env").read_text()
-    assert expect in env
-    if app_db:
-        assert f"APP_DATABASE_URL={app_db}" in env
+    assert f"COMPOSE_PROFILES={profiles}" in env
+    # APP_DATABASE_URL is a credential — the helper never writes it (the user edits .env by hand); the
+    # external-DB case ships it only as the commented template hint.
+    assert "\nAPP_DATABASE_URL=" not in env
 
 
 def test_set_key_uncomments_a_hint_and_avoids_duplicates_and_prefixes():
@@ -167,9 +165,15 @@ def test_no_artifacts_is_a_clean_error(tmp_path):
     assert code == 1 and status.startswith("ERROR ") and "artifacts" in status
 
 
+def test_target_inside_artifacts_is_rejected(tmp_path):
+    """Else copytree(artifacts -> target/artifacts) would recurse into the bundle it just created."""
+    art = _artifacts(tmp_path)
+    status, code = prepare_deploy.prepare(_args(art / "nested-bundle", art))
+    assert code == 1 and status.startswith("ERROR ") and "must not be inside" in status
+
+
 def test_generated_env_passes_deploy_preflight(tmp_path):
     """The .env (once a password is set) satisfies deploy_preflight: secret generated, host derived."""
-    deploy_preflight = pytest.importorskip("deploy_preflight")
     target = tmp_path / "bundle"
     prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
     env_path = target / ".env"
