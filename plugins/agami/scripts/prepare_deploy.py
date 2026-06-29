@@ -29,11 +29,13 @@ _BUNDLE_SRC = Path(__file__).resolve().parents[1] / "skills" / "agami-deploy" / 
 
 
 def _set_key(text: str, key: str, value: str) -> str:
-    """Replace the uncommented `KEY=...` line in-place, or append it if absent. Replace-not-append
-    avoids a confusing duplicate key (mirrors deploy_preflight._set_env)."""
+    """Set `KEY=value`, replacing the first matching line — whether it ships uncommented (`KEY=...`)
+    or commented as a hint (`# KEY=...`) — so e.g. `--app-database-url` uncomments the template's hint
+    rather than appending a confusing duplicate. Append only if the key is absent entirely. The `=`
+    guard prevents a prefix key (`AGAMI_IMAGE_TAG`) from matching a longer one (`AGAMI_IMAGE_TAG_X`)."""
     out, replaced = [], False
     for line in text.splitlines():
-        if line.startswith(f"{key}="):
+        if not replaced and line.lstrip("#").lstrip().startswith(f"{key}="):
             out.append(f"{key}={value}")
             replaced = True
         else:
@@ -77,8 +79,9 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         (target / "deploy.sh").chmod(0o755)
 
         # Stage the model + warehouse credentials so the bundle is self-contained + shippable. copy2
-        # preserves the chmod-600 on local/credentials. dirs_exist_ok so a re-run refreshes in place.
-        shutil.copytree(artifacts, target / "artifacts", dirs_exist_ok=True)
+        # preserves the chmod-600 on local/credentials; symlinks=True keeps links as links rather than
+        # materializing their targets into the bundle. dirs_exist_ok so a re-run refreshes in place.
+        shutil.copytree(artifacts, target / "artifacts", symlinks=True, dirs_exist_ok=True)
 
         env_path = target / ".env"
         if env_path.exists():

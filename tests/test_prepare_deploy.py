@@ -105,6 +105,16 @@ def test_tier2_toggles_set_profiles(tmp_path, profiles, app_db, expect):
         assert f"APP_DATABASE_URL={app_db}" in env
 
 
+def test_set_key_uncomments_a_hint_and_avoids_duplicates_and_prefixes():
+    # A commented hint line is uncommented + set (no duplicate APP_DATABASE_URL appended).
+    out = prepare_deploy._set_key("# APP_DATABASE_URL=hint\nOTHER=1\n", "APP_DATABASE_URL", "real")
+    assert out.count("APP_DATABASE_URL=") == 1
+    assert "APP_DATABASE_URL=real" in out and "# APP_DATABASE_URL=hint" not in out
+    # A prefix key must not match a longer one.
+    out2 = prepare_deploy._set_key("AGAMI_IMAGE_TAG_X=keep\n", "AGAMI_IMAGE_TAG", "latest")
+    assert "AGAMI_IMAGE_TAG_X=keep" in out2 and "AGAMI_IMAGE_TAG=latest" in out2
+
+
 def test_helper_takes_no_password_argument(tmp_path):
     """Criterion: a secret never travels on the command line. Passing --password must be rejected."""
     with pytest.raises(SystemExit):
