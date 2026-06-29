@@ -1,4 +1,4 @@
-"""Phase A — deterministic render piping (docs/design/determinism-refactor.md).
+"""Phase A — deterministic render piping.
 
 csv_to_sections.py builds the render sections from the result CSV (numbers piped,
 not LLM-transcribed); `sm receipt` (cli.cmd_receipt) assembles the trust receipt

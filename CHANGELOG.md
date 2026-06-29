@@ -33,8 +33,7 @@ below corresponds to one such version.
   `parse_prune_block.py` (fixes a shell word-split that mangled table lists),
   `parse_model_feedback.py` (the dashboard back-channel), `csv_to_sections.py`
   (charts/tables get their numbers from the result CSV, not the model), and the
-  `sm receipt` / `sm curate-gate` subcommands. See
-  [`docs/design/determinism-refactor.md`](docs/design/determinism-refactor.md).
+  `sm receipt` / `sm curate-gate` subcommands.
 
 ### Changed
 

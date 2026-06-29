@@ -10,7 +10,7 @@ import pathlib
 import shutil
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent  # repo root (this dev tool lives in dev/)
 PKG = ROOT / "packages" / "agami-core" / "src"
 sys.path.insert(0, str(PKG))
 
