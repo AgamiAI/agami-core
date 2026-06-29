@@ -16,14 +16,13 @@ on:
   # smoke-tested without cutting a formal release.
   workflow_dispatch:
 
-permissions:
-  contents: read   # checkout
-  packages: write  # push to GHCR
-
 jobs:
   publish:
     name: build + push (multi-arch -> GHCR)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read   # checkout
+      packages: write  # push to GHCR
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -37,15 +36,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `latest` only on a real release; semver tags from the release tag; a sha tag for dispatch
-      # test runs. metadata-action lowercases the image name, so the AgamiAI owner -> agamiai.
+      # metadata-action lowercases the image name, so the AgamiAI owner -> agamiai.
       - id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/agami-core
+          # semver + latest only on a real release (so a workflow_dispatch from a tag ref can't mint or
+          # overwrite a released version); a sha tag for dispatch test runs.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' }}
             type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
 
