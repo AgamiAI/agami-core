@@ -6,7 +6,7 @@ invariants that need the *whole* model in view — things a single object can't
 check on its own.
 
 Every rule listed in the design doc's "Validator" subsection + the
-ktx/BigQuery-gap additions is implemented here:
+cardinality + BigQuery-gap additions is implemented here:
 
   - Relationship cardinality required (handled in models; re-asserted here for the
     structural gate, verification check #17).
