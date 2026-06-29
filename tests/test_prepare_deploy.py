@@ -135,6 +135,20 @@ def test_existing_env_is_preserved(tmp_path):
     assert "AGAMI_SIGNING_SECRET=deadbeef" in kept
 
 
+def test_main_prints_status_and_returns_zero(tmp_path, capsys):
+    code = prepare_deploy.main(
+        [
+            "--target", str(tmp_path / "b"),
+            "--artifacts-dir", str(_artifacts(tmp_path)),
+            "--public-base-url", "https://h.example",
+            "--admin-email", "you@example.com",
+            "--admin-first", "A", "--admin-last", "K",
+        ]
+    )
+    assert code == 0
+    assert capsys.readouterr().out.startswith("PREPARED ")
+
+
 def test_no_artifacts_is_a_clean_error(tmp_path):
     target = tmp_path / "bundle"
     empty = tmp_path / "empty-artifacts"
