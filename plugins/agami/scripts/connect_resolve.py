@@ -12,7 +12,8 @@ Output (the standard refactor contract):
   {
     "ok": true,
     "data": {
-      "profile": "main",
+      "profile": "main" | null,   # null on a first-time bootstrap (no profile yet — don't invent a name)
+      "profile_source": "explicit" | "env" | "active_profile" | "default",
       "artifacts_dir": "/Users/me/agami-artifacts",
       "credentials": {"present": bool, "chmod_ok": bool, "type": "sqlite"|null,
                       "fields": {...}, "missing_fields": [...]},
@@ -161,9 +162,17 @@ def main(argv=None) -> int:
         except Exception as e:
             anomalies.append({"kind": "config_unreadable", "where": str(cfg_path), "detail": str(e)})
 
-    # profile: explicit → AGAMI_PROFILE → .config active_profile → "main"
-    profile = (args.profile or os.environ.get("AGAMI_PROFILE")
-               or config["active_profile"] or "main")
+    # profile: explicit → AGAMI_PROFILE → .config active_profile → "main". Track WHERE it resolved from so
+    # a first-time bootstrap (nothing set → the bare "main" fallback) doesn't narrate an invented profile
+    # name — the skill's rule is "let the user name it", so we null it out in the emitted data below.
+    if args.profile:
+        profile, profile_source = args.profile, "explicit"
+    elif os.environ.get("AGAMI_PROFILE"):
+        profile, profile_source = os.environ["AGAMI_PROFILE"], "env"
+    elif config["active_profile"]:
+        profile, profile_source = config["active_profile"], "active_profile"
+    else:
+        profile, profile_source = "main", "default"
 
     # credentials section + chmod
     creds = {"present": False, "chmod_ok": True, "type": None, "fields": {}, "missing_fields": []}
@@ -196,8 +205,14 @@ def main(argv=None) -> int:
     interpreter = _resolve_interpreter(db_type, config["tool_paths"].get("python3"))
     tools = {t: shutil.which(t) for t in _NATIVE_TOOLS}
 
+    # On a first-time bootstrap the profile is genuinely unresolved (the "main" fallback is a placeholder
+    # for the section lookup above, never a real choice) — emit null so the skill narrates "first-time
+    # setup" without inventing a name. A real [main] section (ready/promote) is never hidden.
+    emitted_profile = None if (profile_source == "default" and nxt == "bootstrap") else profile
+
     data = {
-        "profile": profile,
+        "profile": emitted_profile,
+        "profile_source": profile_source,
         "artifacts_dir": str(art),
         "credentials": creds,
         "example_present": example_present,
