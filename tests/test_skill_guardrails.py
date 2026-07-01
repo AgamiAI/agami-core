@@ -8,8 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CONNECT = (REPO / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text()
-QUERY = (REPO / "plugins" / "agami" / "skills" / "agami-query" / "SKILL.md").read_text()
+CONNECT = (REPO / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(encoding="utf-8")
+QUERY = (REPO / "plugins" / "agami" / "skills" / "agami-query" / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_sample_6b_opens_model_explorer():
