@@ -39,6 +39,9 @@ _ROOT = Path(__file__).resolve().parent
 # package; `sync-lib` regenerates the copy and `check` fails on drift. See OCR-030.
 _LIB_SRC = _ROOT / "packages" / "agami-core" / "src"
 _LIB_DST = _ROOT / "plugins" / "agami" / "lib"
+# The module-load import closure of the 4 scripts (all stdlib-only). tests/test_plugin_lib_resolution.py
+# fails if a script gains a module-level import that's missing here; a new *lazy* import from the package
+# would also need adding to this list.
 _VENDORED = ["agami_paths.py", "execute_sql.py", "semantic_model/__init__.py", "semantic_model/units.py"]
 
 
