@@ -1,0 +1,67 @@
+name: Release PyPI
+
+# Builds the agami-core sdist + wheel from packages/agami-core and publishes them to PyPI via
+# TRUSTED PUBLISHING (OIDC) -- so a marketplace `/agami-connect` can `pip install "agami-core[model]"`
+# from the index instead of the git fallback. OCR-031's `sm` installer already tries the index before
+# git, so the moment a version lands on PyPI every marketplace install upgrades with no code change.
+# The version published is packages/agami-core/pyproject.toml `version` (a release tag must match it).
+#
+# Manual prerequisite (ONE-TIME, no secret to manage): register the `agami-core` project on PyPI and add
+# a GitHub Actions "trusted publisher" -- owner AgamiAI, repo agami-core, workflow release-pypi.yml,
+# environment (none). Add the same trusted publisher on TestPyPI to enable the workflow_dispatch smoke
+# test below. Trusted publishing uses the OIDC `id-token` minted per-run (see permissions) -- there is
+# NO PyPI API token stored in the repo.
+
+on:
+  release:
+    types: [published]
+  # Manual smoke-test: publishes to TestPyPI (not the real index) so the pipeline can be proven before
+  # the first real release. Requires the TestPyPI trusted publisher from the prerequisite above.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: build + publish (sdist + wheel -> PyPI)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read    # checkout
+      id-token: write    # OIDC token for trusted publishing -- this is what replaces an API token
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      # `python -m build` publishes whatever pyproject says, regardless of the release tag -- so a
+      # mistagged release (tag v0.3.2 while pyproject is still 0.3.1) would permanently mislabel a PyPI
+      # version. Fail fast on a mismatch. (Release-only: a workflow_dispatch has no version tag.)
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("packages/agami-core/pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::release tag '$GITHUB_REF_NAME' (-> '$tag') != pyproject version '$pkg'"
+            exit 1
+          fi
+          echo "release tag matches package version: $pkg"
+
+      # Build both artifacts from the package subdir into repo-root dist/ (the pypa action's default
+      # packages-dir), using the PEP 517 frontend.
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist --wheel --outdir dist packages/agami-core
+
+      # Two gated publish steps (mirrors release-image.yml's release-vs-dispatch split): a dispatch run
+      # goes to TestPyPI to prove the pipeline; a real release goes to the default index (PyPI).
+      - name: Publish to TestPyPI (smoke test)
+        if: github.event_name == 'workflow_dispatch'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: github.event_name == 'release'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
