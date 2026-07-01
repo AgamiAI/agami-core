@@ -22,14 +22,13 @@ Usage:
     python3 setup_desktop_mcp.py                 # wire active profile into Desktop
     python3 setup_desktop_mcp.py --profile main  # pin a specific profile
     python3 setup_desktop_mcp.py --dry-run       # show the plan, write nothing
-    python3 setup_desktop_mcp.py --in-place      # editable install from this checkout (dev mode)
     python3 setup_desktop_mcp.py --python /abs/python3   # force an interpreter
     python3 setup_desktop_mcp.py --config /path/to/config.json  # override target file
 
-Stdlib only (shells out to pip). Reads nothing secret beyond the credentials file
-(to learn the active profile's db type → which driver to require). Installs the
-agami-core package into the chosen interpreter and writes the desktop config (with a
-timestamped backup).
+Stdlib only. Reads nothing secret beyond the credentials file (to learn the active
+profile's db type → which driver to require). Installs the agami-core package into the
+chosen interpreter via `sm install` (the single install chokepoint) and writes the
+desktop config (with a timestamped backup).
 """
 
 from __future__ import annotations
@@ -45,13 +44,17 @@ import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# This installer can run before the package is pip-installed, so bootstrap the package source
-# onto sys.path to import agami_paths; the Desktop entry it writes runs the installed package
-# via `-m mcp_harness`.
-PACKAGE_DIR = (SCRIPT_DIR.parent.parent.parent / "packages" / "agami-core").resolve()
-_sys = sys
-_sys.path.insert(0, str(PACKAGE_DIR / "src"))
+# agami_paths lives in the agami-core package; the resolver puts it on the path in every layout
+# (pip-installed / the plugin's bundled lib / a dev checkout) with no pip required. A bare import off
+# packages/src breaks on a marketplace install, which ships no packages/ (mirrors connect_resolve.py).
+from _agami_lib import ensure_importable  # noqa: E402
+
+ensure_importable()
 import agami_paths  # noqa: E402
+
+# A dev checkout has packages/agami-core; a marketplace install does NOT. Optional — used only as a
+# version-source fallback. The package INSTALL goes through `sm install`, never a path to this dir.
+_DEV_PKG_DIR = (SCRIPT_DIR.parent.parent.parent / "packages" / "agami-core").resolve()
 
 # Never bootstrap() at import (tests import this module); main() does it.
 AGAMI_HOME = agami_paths.local_dir()
@@ -125,14 +128,20 @@ def _interpreter_can_import(py: str, module: str | None) -> bool:
     else:
         code = f"import {module}"
     try:
-        return subprocess.run([py, "-c", code], capture_output=True, timeout=20).returncode == 0
+        # cwd="/" so a `semantic_model`/module dir in the caller's cwd can't shadow the real import
+        # (`python -c` puts cwd on sys.path[0]).
+        return subprocess.run([py, "-c", code], capture_output=True, timeout=20, cwd="/").returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
 
 def find_interpreter(module: str | None, forced: str | None) -> str | None:
-    """Return an absolute python that can import `module`, or None."""
-    candidates: list[str] = []
+    """Return an absolute python that can import `module`, or None.
+
+    Two passes when not forced: first prefer a candidate that imports BOTH the driver `module` AND the
+    full model stack (`semantic_model.cli` — i.e. one that already has agami-core[model], so no install
+    is needed); fall back to driver-only (the `sm install` step, with its PEP-668 tier, equips it).
+    """
     if forced:
         candidates = [forced]
     else:
@@ -147,17 +156,21 @@ def find_interpreter(module: str | None, forced: str | None) -> str | None:
             "/usr/bin/python3",
             str(Path.home() / ".pyenv/shims/python3"),
         ]
-    seen: set[str] = set()
-    for c in candidates:
-        if not c:
-            continue
-        real = str(Path(c).resolve()) if Path(c).exists() else c
-        if real in seen or not Path(c).exists():
-            continue
-        seen.add(real)
-        if _interpreter_can_import(c, module):
-            # Prefer the absolute resolved path (GUI apps need it).
-            return str(Path(c).resolve())
+    require = [True, False] if not forced else [False]  # pass 1: driver+agami-core; pass 2: driver only
+    for want_agami in require:
+        seen: set[str] = set()
+        for c in candidates:
+            if not c:
+                continue
+            real = str(Path(c).resolve()) if Path(c).exists() else c
+            if real in seen or not Path(c).exists():
+                continue
+            seen.add(real)
+            if want_agami and not _interpreter_can_import(c, "semantic_model.cli"):
+                continue
+            if _interpreter_can_import(c, module):
+                # Prefer the absolute resolved path (GUI apps need it).
+                return str(Path(c).resolve())
     return None
 
 
@@ -173,30 +186,36 @@ def desktop_config_path(override: str | None) -> Path:
     return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
 
-def ensure_package_installed(python: str, package_dir: Path, editable: bool, dry_run: bool) -> None:
-    """Install agami-core[model] into `python` so it can run `python -m mcp_harness`.
-
-    Non-editable by default so the Desktop registration survives the plugin's
-    version-pinned cache dir moving on update (the code lands in site-packages, not a path
-    that moves); --in-place uses an editable install for development. The [model] extra
-    pulls pydantic/sqlglot/pyyaml so the model-backed tools work; the stdlib execute_sql
-    path works regardless. Idempotent. Raises RuntimeError on failure.
+def ensure_package_installed(python: str, dry_run: bool) -> None:
+    """Make agami-core + its model deps importable in `python` by delegating to the `sm` launcher — the
+    single install chokepoint (resolver-style source order dev-editable → PyPI → git, plus the PEP-668
+    tier and path isolation). We ALWAYS call `sm install`: it's idempotent (a fast no-op when the
+    interpreter is already ready), so there's no separate, weaker "already present?" check to drift —
+    important because `agami-core` has no base deps and the model deps live in the [model] extra, so a
+    base-only install would pass a bare `import mcp_harness` yet fail later in semantic-model tooling.
+    Verifies the REAL entrypoint (`semantic_model.cli`, which pulls pydantic/sqlglot/pyyaml) afterward.
+    Raises RuntimeError if bash is unavailable, or the model stack still won't import.
     """
-    spec = f"{package_dir}[model]"
-    base = [python, "-m", "pip", "install"]
-    if editable:
-        base.append("-e")
     if dry_run:
-        print(f"• would install  : {' '.join(base + [spec])}")
+        print(f"• would ensure   : bash {SCRIPT_DIR / 'sm'} install   (AGAMI_PYTHON={python})")
         return
-    # Plain install first, then --user (system pythons whose site-packages aren't
-    # writable). Mirrors the `sm` launcher's strategy.
-    proc = None
-    for extra in ([], ["--user"]):
-        proc = subprocess.run(base + extra + [spec], capture_output=True, text=True)
-        if proc.returncode == 0:
-            return
-    raise RuntimeError((proc.stderr or "").strip() or "pip install agami-core failed")
+    if shutil.which("bash") is None:
+        raise RuntimeError(
+            "`bash` is required to run the agami installer (sm) but wasn't found on PATH. "
+            f"Install bash, or pre-install agami-core yourself:  {python} -m pip install 'agami-core[model]'"
+        )
+    subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sm"), "install"],
+        env={**os.environ, "AGAMI_PYTHON": python},
+        check=False,
+    )
+    # The real readiness bar: the semantic-model entrypoint + its [model] deps, not just that
+    # agami-core is importable (base has no deps — see docstring).
+    if not _interpreter_can_import(python, "semantic_model.cli"):
+        raise RuntimeError(
+            f"agami-core (with its model deps) still isn't importable in {python} after `sm install`. "
+            "Point agami at a Python that has it:  export AGAMI_PYTHON=/abs/path/to/python3"
+        )
 
 
 def build_server_entry(python: str, profile: str, version: str) -> dict:
@@ -207,15 +226,22 @@ def build_server_entry(python: str, profile: str, version: str) -> dict:
     }
 
 
-def read_version(package_dir: Path) -> str:
-    """The agami-core version, read from the package's pyproject (single source)."""
+def read_version() -> str:
+    """The agami-core version for the AGAMI_VERSION env hint (informational only). Prefer the
+    version-pinned plugin cache-dir name (…/agami-core/<version>/scripts/); fall back to a dev
+    checkout's pyproject; else 0.0.0. Never crash on a missing packages/ (marketplace ships none)."""
     import re
+    ver = SCRIPT_DIR.parent.name  # …/agami-core/<version>/scripts → <version>
+    if re.match(r"^\d+\.\d+", ver):
+        return ver
     try:
-        text = (package_dir / "pyproject.toml").read_text()
+        text = (_DEV_PKG_DIR / "pyproject.toml").read_text()
+        m = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"', text)
+        if m:
+            return m.group(1)
     except OSError:
-        return "0.0.0"
-    m = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"', text)
-    return m.group(1) if m else "0.0.0"
+        pass
+    return "0.0.0"
 
 
 def merge_into_config(cfg_path: Path, server_name: str, entry: dict, dry_run: bool) -> tuple[dict, Path | None]:
@@ -265,7 +291,7 @@ def main() -> int:
     p.add_argument("--server-name", default="agami", help="Name of the MCP server entry (default: agami).")
     p.add_argument("--python", default=None, help="Force a specific python interpreter (absolute path).")
     p.add_argument("--config", default=None, help="Override the desktop config path (for testing / other clients).")
-    p.add_argument("--in-place", action="store_true", help="Editable install from this checkout (dev mode) instead of a stable site-packages install.")
+    p.add_argument("--in-place", action="store_true", help="(deprecated no-op) install now goes through `sm install`, which does an editable install automatically in a dev checkout.")
     p.add_argument("--dry-run", action="store_true", help="Print the plan; write nothing.")
     args = p.parse_args()
 
@@ -289,14 +315,14 @@ def main() -> int:
     print(f"• interpreter    : {python}")
 
     try:
-        ensure_package_installed(python, PACKAGE_DIR, editable=args.in_place, dry_run=args.dry_run)
+        ensure_package_installed(python, dry_run=args.dry_run)
     except RuntimeError as e:
         print(f"\nERROR: couldn't install agami-core into {python}:\n  {e}", file=sys.stderr)
         return 2
     if not args.dry_run:
-        print(f"• agami-core     : {'editable (dev)' if args.in_place else 'installed'} into the interpreter")
+        print("• agami-core     : present in the interpreter")
 
-    version = read_version(PACKAGE_DIR)
+    version = read_version()
     entry = build_server_entry(python, profile, version)
     cfg_path = desktop_config_path(args.config)
     print(f"• desktop config : {cfg_path}")

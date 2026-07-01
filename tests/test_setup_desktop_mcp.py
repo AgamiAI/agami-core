@@ -125,45 +125,72 @@ def test_desktop_config_path_linux(monkeypatch):
     assert p.parts[-3:] == (".config", "Claude", "claude_desktop_config.json")
 
 
-# --- package install (replaces the old copy-to-serve-dir staging) -----------
+# --- package install (delegates to `sm install`, OCR-033 #8) ----------------
 
-def test_ensure_package_installed_dry_run_runs_no_pip(monkeypatch, capsys):
+def test_ensure_package_installed_dry_run_delegates_no_exec(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: calls.append(a))
-    sd.ensure_package_installed("/py", Path("/pkg"), editable=False, dry_run=True)
+    sd.ensure_package_installed("/py", dry_run=True)
     assert calls == []                                   # nothing executed in dry-run
-    assert "would install" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "would ensure" in out and "sm" in out         # delegates to sm, not a pip command
 
 
-def test_ensure_package_installed_builds_pip_command(monkeypatch):
+def test_ensure_package_installed_delegates_to_sm(monkeypatch):
+    # Always delegates to `sm install` (idempotent); verifies the real model entrypoint after.
+    monkeypatch.setattr(sd.shutil, "which", lambda _: "/bin/bash")
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: True)  # model stack imports after
     seen = {}
-
-    class _OK:
-        returncode = 0
-        stderr = ""
 
     def fake_run(cmd, *a, **k):
         seen["cmd"] = cmd
-        return _OK()
+        seen["env"] = k.get("env")
+        return type("R", (), {"returncode": 0})()
 
     monkeypatch.setattr(sd.subprocess, "run", fake_run)
-    sd.ensure_package_installed("/py", Path("/pkg"), editable=True, dry_run=False)
-    assert seen["cmd"][:4] == ["/py", "-m", "pip", "install"]
-    assert "-e" in seen["cmd"]                            # editable for dev mode
-    assert seen["cmd"][-1] == "/pkg[model]"               # the [model] extra
+    sd.ensure_package_installed("/py", dry_run=False)
+    assert seen["cmd"][0] == "bash" and seen["cmd"][-1] == "install"
+    assert seen["cmd"][1].endswith("/sm")                # delegates to the sm launcher
+    assert seen["env"]["AGAMI_PYTHON"] == "/py"          # installs into the chosen interpreter
 
 
-def test_ensure_package_installed_raises_on_failure(monkeypatch):
-    class _Fail:
-        returncode = 1
-        stderr = "boom"
+def test_ensure_package_installed_checks_model_entrypoint(monkeypatch):
+    # The post-install readiness bar is the model entrypoint, NOT bare mcp_harness (base has no deps).
+    seen = {}
+    monkeypatch.setattr(sd.shutil, "which", lambda _: "/bin/bash")
+    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: seen.setdefault("mod", mod) or True)
+    sd.ensure_package_installed("/py", dry_run=False)
+    assert seen["mod"] == "semantic_model.cli"
 
-    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: _Fail())
+
+def test_ensure_package_installed_raises_when_still_missing(monkeypatch):
+    monkeypatch.setattr(sd.shutil, "which", lambda _: "/bin/bash")
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: False)  # never becomes importable
+    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
     with pytest.raises(RuntimeError):
-        sd.ensure_package_installed("/py", Path("/pkg"), editable=False, dry_run=False)
+        sd.ensure_package_installed("/py", dry_run=False)
 
 
-def test_read_version_from_pyproject():
-    # Reads the real agami-core version from the package's pyproject (single source).
-    v = sd.read_version(REPO_ROOT / "packages" / "agami-core")
+def test_ensure_package_installed_raises_without_bash(monkeypatch):
+    # No bash on PATH → a clear, actionable error, not an opaque FileNotFoundError traceback.
+    monkeypatch.setattr(sd.shutil, "which", lambda _: None)
+    ran = []
+    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(RuntimeError, match="bash"):
+        sd.ensure_package_installed("/py", dry_run=False)
+    assert ran == []                                     # never even tried to shell out
+
+
+def test_read_version_returns_a_version():
+    # No arg now — derived from the cache-dir name, else the dev pyproject fallback (single source).
+    v = sd.read_version()
     assert v and v[0].isdigit()
+
+
+def test_read_version_prefers_cache_dir_name(monkeypatch, tmp_path):
+    # Marketplace layout: version comes from the version-pinned cache dir (…/agami-core/<ver>/scripts).
+    fake = tmp_path / "agami-core" / "0.3.9" / "scripts"
+    fake.mkdir(parents=True)
+    monkeypatch.setattr(sd, "SCRIPT_DIR", fake)
+    assert sd.read_version() == "0.3.9"
