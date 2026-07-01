@@ -138,10 +138,9 @@ def _interpreter_can_import(py: str, module: str | None) -> bool:
 def find_interpreter(module: str | None, forced: str | None) -> str | None:
     """Return an absolute python that can import `module`, or None.
 
-    Two passes when not forced: first prefer a candidate that imports BOTH the driver `module` AND
-    `mcp_harness` (i.e. one that already has agami-core — no install needed, and it can't be an
-    externally-managed python we then fail to install into); fall back to driver-only (the `sm install`
-    step, with its PEP-668 tier, equips it).
+    Two passes when not forced: first prefer a candidate that imports BOTH the driver `module` AND the
+    full model stack (`semantic_model.cli` — i.e. one that already has agami-core[model], so no install
+    is needed); fall back to driver-only (the `sm install` step, with its PEP-668 tier, equips it).
     """
     if forced:
         candidates = [forced]
@@ -167,7 +166,7 @@ def find_interpreter(module: str | None, forced: str | None) -> str | None:
             if real in seen or not Path(c).exists():
                 continue
             seen.add(real)
-            if want_agami and not _interpreter_can_import(c, "mcp_harness"):
+            if want_agami and not _interpreter_can_import(c, "semantic_model.cli"):
                 continue
             if _interpreter_can_import(c, module):
                 # Prefer the absolute resolved path (GUI apps need it).
@@ -188,26 +187,34 @@ def desktop_config_path(override: str | None) -> Path:
 
 
 def ensure_package_installed(python: str, dry_run: bool) -> None:
-    """Make agami-core importable in `python` (so it can run `python -m mcp_harness`) by delegating to
-    the `sm` launcher — the single install chokepoint (resolver-style source order: dev-editable →
-    PyPI → git; plus the PEP-668 tier and path isolation). Skip when the package is already present
-    (common: the interpreter agami-connect used already has it, so no install is needed). Idempotent.
-    Raises RuntimeError if the package still isn't importable afterward.
+    """Make agami-core + its model deps importable in `python` by delegating to the `sm` launcher — the
+    single install chokepoint (resolver-style source order dev-editable → PyPI → git, plus the PEP-668
+    tier and path isolation). We ALWAYS call `sm install`: it's idempotent (a fast no-op when the
+    interpreter is already ready), so there's no separate, weaker "already present?" check to drift —
+    important because `agami-core` has no base deps and the model deps live in the [model] extra, so a
+    base-only install would pass a bare `import mcp_harness` yet fail later in semantic-model tooling.
+    Verifies the REAL entrypoint (`semantic_model.cli`, which pulls pydantic/sqlglot/pyyaml) afterward.
+    Raises RuntimeError if bash is unavailable, or the model stack still won't import.
     """
-    if _interpreter_can_import(python, "mcp_harness"):
-        return  # already installed in this interpreter — nothing to do
     if dry_run:
-        print(f"• would install  : bash {SCRIPT_DIR / 'sm'} install   (AGAMI_PYTHON={python})")
+        print(f"• would ensure   : bash {SCRIPT_DIR / 'sm'} install   (AGAMI_PYTHON={python})")
         return
+    if shutil.which("bash") is None:
+        raise RuntimeError(
+            "`bash` is required to run the agami installer (sm) but wasn't found on PATH. "
+            f"Install bash, or pre-install agami-core yourself:  {python} -m pip install 'agami-core[model]'"
+        )
     subprocess.run(
         ["bash", str(SCRIPT_DIR / "sm"), "install"],
         env={**os.environ, "AGAMI_PYTHON": python},
         check=False,
     )
-    if not _interpreter_can_import(python, "mcp_harness"):
+    # The real readiness bar: the semantic-model entrypoint + its [model] deps, not just that
+    # agami-core is importable (base has no deps — see docstring).
+    if not _interpreter_can_import(python, "semantic_model.cli"):
         raise RuntimeError(
-            f"`sm install` did not make agami-core importable in {python}. "
-            "Point agami at a Python that already has it:  export AGAMI_PYTHON=/abs/path/to/python3"
+            f"agami-core (with its model deps) still isn't importable in {python} after `sm install`. "
+            "Point agami at a Python that has it:  export AGAMI_PYTHON=/abs/path/to/python3"
         )
 
 

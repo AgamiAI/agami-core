@@ -128,19 +128,18 @@ def test_desktop_config_path_linux(monkeypatch):
 # --- package install (delegates to `sm install`, OCR-033 #8) ----------------
 
 def test_ensure_package_installed_dry_run_delegates_no_exec(monkeypatch, capsys):
-    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: False)  # not present yet
     calls = []
     monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: calls.append(a))
     sd.ensure_package_installed("/py", dry_run=True)
     assert calls == []                                   # nothing executed in dry-run
     out = capsys.readouterr().out
-    assert "would install" in out and "sm" in out        # delegates to sm, not a pip command
+    assert "would ensure" in out and "sm" in out         # delegates to sm, not a pip command
 
 
 def test_ensure_package_installed_delegates_to_sm(monkeypatch):
-    # absent before install → runs `sm install` with AGAMI_PYTHON; present after → no raise.
-    states = iter([False, True])
-    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: next(states))
+    # Always delegates to `sm install` (idempotent); verifies the real model entrypoint after.
+    monkeypatch.setattr(sd.shutil, "which", lambda _: "/bin/bash")
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: True)  # model stack imports after
     seen = {}
 
     def fake_run(cmd, *a, **k):
@@ -155,19 +154,32 @@ def test_ensure_package_installed_delegates_to_sm(monkeypatch):
     assert seen["env"]["AGAMI_PYTHON"] == "/py"          # installs into the chosen interpreter
 
 
-def test_ensure_package_installed_skips_when_already_present(monkeypatch):
-    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: True)  # already importable
-    calls = []
-    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: calls.append(a))
+def test_ensure_package_installed_checks_model_entrypoint(monkeypatch):
+    # The post-install readiness bar is the model entrypoint, NOT bare mcp_harness (base has no deps).
+    seen = {}
+    monkeypatch.setattr(sd.shutil, "which", lambda _: "/bin/bash")
+    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: seen.setdefault("mod", mod) or True)
     sd.ensure_package_installed("/py", dry_run=False)
-    assert calls == []                                   # no install attempted
+    assert seen["mod"] == "semantic_model.cli"
 
 
 def test_ensure_package_installed_raises_when_still_missing(monkeypatch):
+    monkeypatch.setattr(sd.shutil, "which", lambda _: "/bin/bash")
     monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: False)  # never becomes importable
     monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
     with pytest.raises(RuntimeError):
         sd.ensure_package_installed("/py", dry_run=False)
+
+
+def test_ensure_package_installed_raises_without_bash(monkeypatch):
+    # No bash on PATH → a clear, actionable error, not an opaque FileNotFoundError traceback.
+    monkeypatch.setattr(sd.shutil, "which", lambda _: None)
+    ran = []
+    monkeypatch.setattr(sd.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(RuntimeError, match="bash"):
+        sd.ensure_package_installed("/py", dry_run=False)
+    assert ran == []                                     # never even tried to shell out
 
 
 def test_read_version_returns_a_version():
