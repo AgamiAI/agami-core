@@ -15,19 +15,31 @@ Tasks:
   lint    just ruff (lint + format check)
   fmt     apply ruff's auto-formatter to the tree
   cover   patch coverage — are the lines you changed covered by a test?
+  sync-lib  regenerate plugins/agami/lib/ (the vendored slice the plugin scripts import)
 """
 
 from __future__ import annotations
 
+import filecmp
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 RUFF = ["uvx", "ruff@0.15.19"]
 # The suite imports the agami-core library, so install it editable with the [model]
 # extra (pydantic/pyyaml/sqlglot). DB drivers are omitted on purpose — those tests skip without a DB.
 TEST_DEPS = ["--with", "pytest-cov", "--with-editable", "packages/agami-core[model,server]"]
 TARGETS = ["plugins", "packages", "tests", "dev.py"]
+
+_ROOT = Path(__file__).resolve().parent
+# The plugin's runtime scripts import a small stdlib-only slice of the agami-core library. The
+# marketplace ships only plugins/agami/ (no packages/, no pip install), so that slice is vendored —
+# drift-checked — into plugins/agami/lib/ so the scripts resolve it there. Source of truth stays the
+# package; `sync-lib` regenerates the copy and `check` fails on drift. See OCR-030.
+_LIB_SRC = _ROOT / "packages" / "agami-core" / "src"
+_LIB_DST = _ROOT / "plugins" / "agami" / "lib"
+_VENDORED = ["agami_paths.py", "execute_sql.py", "semantic_model/__init__.py", "semantic_model/units.py"]
 
 
 def run(cmd: list[str], *, allow_fail: bool = False) -> int:
@@ -58,11 +70,36 @@ def secrets() -> int:
     return run(["uvx", "pre-commit", "run", "gitleaks", "--all-files"])
 
 
+def sync_lib() -> int:
+    """Regenerate plugins/agami/lib/ from packages/agami-core/src (the vendored closure the scripts import)."""
+    for rel in _VENDORED:
+        dst = _LIB_DST / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_LIB_SRC / rel, dst)
+        print(f"  synced {dst.relative_to(_ROOT)}")
+    return 0
+
+
+def _lib_drift() -> int:
+    """Fail if plugins/agami/lib/ has drifted from packages/agami-core/src (someone edited the source)."""
+    drifted = [
+        rel
+        for rel in _VENDORED
+        if not (_LIB_DST / rel).exists() or not filecmp.cmp(_LIB_SRC / rel, _LIB_DST / rel, shallow=False)
+    ]
+    if drifted:
+        print(f"\n$ lib drift check\n  ✗ plugins/agami/lib is stale: {', '.join(drifted)}"
+              "\n    run: uv run dev.py sync-lib")
+        return 1
+    return 0
+
+
 def check() -> int:
-    """ruff lint + tests + gitleaks — the same checks CI gates on."""
+    """ruff lint + tests + gitleaks + the vendored-lib drift check — the same checks CI gates on."""
     rc = lint()
     rc |= test()
     rc |= secrets()
+    rc |= _lib_drift()
     print("\n✓ all checks passed" if rc == 0 else "\n✗ some checks failed")
     return rc
 
@@ -83,7 +120,8 @@ def setup() -> int:
     )
 
 
-TASKS = {"setup": setup, "check": check, "test": test, "lint": lint, "fmt": fmt, "cover": cover}
+TASKS = {"setup": setup, "check": check, "test": test, "lint": lint, "fmt": fmt, "cover": cover,
+         "sync-lib": sync_lib}
 
 
 def main() -> int:

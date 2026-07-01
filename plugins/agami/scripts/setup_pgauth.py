@@ -48,9 +48,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-# agami_paths + the executor live in the agami-core package; add its src so this resolves
-# them whether or not the package is pip-installed yet.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "agami-core" / "src"))
+# agami_paths + the executor live in the agami-core package; the resolver makes them importable in
+# every layout (pip-installed / the plugin's bundled lib / a dev checkout) with no pip required.
+from _agami_lib import ensure_importable  # noqa: E402
+
+ensure_importable()
 import agami_paths  # noqa: E402
 from execute_sql import _parse_dsn  # reuse DSN parsing logic  # noqa: E402
 

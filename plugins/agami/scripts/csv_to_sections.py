@@ -41,11 +41,12 @@ import argparse
 import csv
 import io
 import json
-import sys
 from pathlib import Path
 
-# semantic_model lives in the agami-core package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "agami-core" / "src"))
+# semantic_model lives in the agami-core package; the resolver makes it importable in every layout.
+from _agami_lib import ensure_importable  # noqa: E402
+
+ensure_importable()
 from semantic_model import units  # noqa: E402  (stdlib-only module)
 
 
