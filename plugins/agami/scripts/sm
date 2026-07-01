@@ -83,13 +83,17 @@ _pip_try() { "$PY" -m pip install --user -q "$@" >&2 2>/dev/null || "$PY" -m pip
 # is version-pinned and moves on every update.) Install source by layout — dev editable → the
 # published package on an index (lights up once agami-core is on PyPI, OCR-032) → pinned git (public
 # repo, no auth) → git main. First success wins.
+_imports_ok() { "$PY" -c 'import semantic_model, pydantic, sqlglot, yaml' 2>/dev/null; }
+
 ensure_pkg() {
-  "$PY" -c 'import semantic_model, pydantic, sqlglot, yaml' 2>/dev/null && return 0
+  _imports_ok && return 0
   echo "agami: installing agami-core (semantic model) into $PY …" >&2
-  { [ -n "$DEV_PKG_DIR" ] && _pip_try -e "$DEV_PKG_DIR[model]"; } && return 0
-  _pip_try "agami-core[model]" && return 0
-  _pip_try "agami-core[model] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core" && return 0
-  _pip_try "agami-core[model] @ ${GIT_BASE}@main#subdirectory=packages/agami-core" && return 0
+  # Re-verify the imports after each attempt: a pip that exits 0 but leaves the import broken (e.g.
+  # "already satisfied" into the wrong site) must fall through to the next source, not falsely succeed.
+  { [ -n "$DEV_PKG_DIR" ] && _pip_try -e "$DEV_PKG_DIR[model]"; } && _imports_ok && return 0
+  _pip_try "agami-core[model]" && _imports_ok && return 0
+  _pip_try "agami-core[model] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core" && _imports_ok && return 0
+  _pip_try "agami-core[model] @ ${GIT_BASE}@main#subdirectory=packages/agami-core" && _imports_ok && return 0
   echo "agami: couldn't install agami-core into $PY." >&2
   echo "       Try:  $PY -m pip install --user \"agami-core[model] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core\"" >&2
   echo "       Or point agami at a Python that has it:  export AGAMI_PYTHON=/path/to/python" >&2
