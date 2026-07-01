@@ -174,3 +174,11 @@ def test_read_version_returns_a_version():
     # No arg now — derived from the cache-dir name, else the dev pyproject fallback (single source).
     v = sd.read_version()
     assert v and v[0].isdigit()
+
+
+def test_read_version_prefers_cache_dir_name(monkeypatch, tmp_path):
+    # Marketplace layout: version comes from the version-pinned cache dir (…/agami-core/<ver>/scripts).
+    fake = tmp_path / "agami-core" / "0.3.9" / "scripts"
+    fake.mkdir(parents=True)
+    monkeypatch.setattr(sd, "SCRIPT_DIR", fake)
+    assert sd.read_version() == "0.3.9"
