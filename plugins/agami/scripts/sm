@@ -73,7 +73,9 @@ if [ -z "$PY" ]; then
 fi
 
 # Try a pip requirement `--user` first, then a plain install. "$@" preserves arg boundaries so a
-# PEP-508 direct reference (`agami-core[model] @ git+…`) stays a single argument.
+# PEP-508 direct reference (`agami-core[model] @ git+…`) stays a single argument. On the --user attempt
+# `>&2 2>/dev/null` sends its stdout to our stderr but swallows its stderr, so a "--user rejected"
+# environment falls through quietly to the plain install instead of printing a scary error.
 _pip_try() { "$PY" -m pip install --user -q "$@" >&2 2>/dev/null || "$PY" -m pip install -q "$@" >&2; }
 
 # Ensure the agami-core package (+ its model deps) is importable in $PY; install once if not.
