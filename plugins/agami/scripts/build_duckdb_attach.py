@@ -42,11 +42,14 @@ import secrets
 import sys
 from pathlib import Path
 
-# setup_pgauth stays a skill-side helper (scripts/); agami_paths lives in the agami-core
-# package. Add both: the scripts dir (for setup_pgauth) and the package src.
+# setup_pgauth stays a skill-side helper (scripts/); agami_paths lives in the agami-core package.
+# Add the scripts dir (for the sibling setup_pgauth + _agami_lib imports); the resolver then makes
+# agami_paths importable in every layout (pip-installed / the plugin's bundled lib / a dev checkout).
 _SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS))
-sys.path.insert(0, str(_SCRIPTS.parents[2] / "packages" / "agami-core" / "src"))
+from _agami_lib import ensure_importable  # noqa: E402
+
+ensure_importable()
 import agami_paths  # noqa: E402
 from setup_pgauth import _atomic_write, _load_section  # noqa: E402
 
