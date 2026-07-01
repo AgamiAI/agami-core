@@ -46,9 +46,28 @@ sys.exit(0)
 """
 
 
-def _run_install(sm_path: Path, tmp_path: Path):
+# Externally-managed interpreter (PEP 668): refuse BOTH `--user` and plain pip; only
+# `--break-system-packages` is allowed to install. Proves `sm` reaches that last-resort tier (OCR-033 #2).
+_SHIM_PEP668 = """#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open(os.environ["SM_SHIM_LOG"], "a") as f:
+    f.write(" ".join(args) + "\\n")
+marker = os.environ["SM_SHIM_INSTALLED"]
+if args[:1] == ["-c"]:
+    sys.exit(0 if os.path.exists(marker) else 1)
+if "pip" in args and "install" in args:
+    if "--break-system-packages" in args:
+        open(marker, "w").close()
+        sys.exit(0)
+    sys.exit(1)  # externally-managed: --user and plain both refused
+sys.exit(0)
+"""
+
+
+def _run_install(sm_path: Path, tmp_path: Path, shim_src: str = _SHIM):
     shim = tmp_path / "pyshim"
-    shim.write_text(_SHIM)
+    shim.write_text(shim_src)
     shim.chmod(0o755)
     log = tmp_path / "pip.log"
     env = {
@@ -93,3 +112,20 @@ def test_skill_delegates_install_to_sm():
     txt = SKILL.read_text()
     assert "packages/agami-core[model]" not in txt  # no hardcoded dev-path install command
     assert 'scripts/sm" install' in txt
+
+
+def test_pep668_reaches_break_system_packages(tmp_path):
+    # An externally-managed interpreter refuses --user + plain; sm must fall through to the
+    # --break-system-packages tier and still install (OCR-033 #2). Dev layout → the `-e` requirement.
+    r, installs = _run_install(SM, tmp_path, shim_src=_SHIM_PEP668)
+    assert r.returncode == 0, r.stderr
+    assert any("--break-system-packages" in ln for ln in installs), installs
+
+
+def test_readiness_probes_cli_entrypoint_and_isolates_cwd():
+    # OCR-033 #5: the readiness probe must import the real entrypoint `semantic_model.cli` (not just the
+    # package, which the bundled stub's __init__ would satisfy), and the CLI must run from a neutral cwd
+    # so a `semantic_model` in the caller's cwd can't shadow the installed package.
+    txt = SM.read_text()
+    assert "import semantic_model.cli" in txt, "readiness probe must check the .cli entrypoint"
+    assert "cd /" in txt, "the CLI/probe must run from a neutral cwd (path isolation)"
