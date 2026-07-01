@@ -76,14 +76,28 @@ fi
 # PEP-508 direct reference (`agami-core[model] @ git+…`) stays a single argument. On the --user attempt
 # `>&2 2>/dev/null` sends its stdout to our stderr but swallows its stderr, so a "--user rejected"
 # environment falls through quietly to the plain install instead of printing a scary error.
-_pip_try() { "$PY" -m pip install --user -q "$@" >&2 2>/dev/null || "$PY" -m pip install -q "$@" >&2; }
+# Last resort: an externally-managed interpreter (PEP 668 — Homebrew's python3, most distro pythons)
+# refuses BOTH --user and plain with "externally-managed-environment"; --break-system-packages is the
+# sanctioned escape for a user-scoped tool install like ours. (Ancient pip lacks the flag → that tier
+# just fails and we fall through to the next source / exit 3 — no regression.)
+_pip_try() {
+  "$PY" -m pip install --user -q "$@" >&2 2>/dev/null \
+    || "$PY" -m pip install -q "$@" >&2 2>/dev/null \
+    || "$PY" -m pip install --user --break-system-packages -q "$@" >&2 2>/dev/null \
+    || "$PY" -m pip install --break-system-packages -q "$@" >&2
+}
 
 # Ensure the agami-core package (+ its model deps) is importable in $PY; install once if not.
 # (A broken/moved install fails this import and self-heals via the reinstall — the plugin cache dir
 # is version-pinned and moves on every update.) Install source by layout — dev editable → the
 # published package on an index (lights up once agami-core is on PyPI, OCR-032) → pinned git (public
 # repo, no auth) → git main. First success wins.
-_imports_ok() { "$PY" -c 'import semantic_model, pydantic, sqlglot, yaml' 2>/dev/null; }
+# Verify the REAL entrypoint (`semantic_model.cli`), not just the package — the OCR-030 bundled `lib/`
+# ships a stub `semantic_model` (only __init__ + units, no cli) that satisfies a bare `import
+# semantic_model` and would let a stub/partial install pass this check. Probe from a neutral cwd (`cd /`)
+# so a `semantic_model` in the caller's cwd can't shadow the installed package (`python -c` puts cwd on
+# sys.path[0]).
+_imports_ok() { ( cd / && "$PY" -c 'import semantic_model.cli, pydantic, sqlglot, yaml' ) 2>/dev/null; }
 
 ensure_pkg() {
   _imports_ok && return 0
@@ -108,4 +122,11 @@ if [ "${1:-}" = "install" ]; then
 fi
 
 ensure_pkg
+# Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd (notably the OCR-030 stub in
+# the plugin's lib/) can't shadow the installed package via `python -m` putting cwd on sys.path[0]. The
+# CLI's path args are absolute (the skill passes <artifacts_dir> absolute), so cwd is irrelevant to what
+# it does. PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the
+# portable guarantee.
+export PYTHONSAFEPATH=1
+cd /
 exec "$PY" -m semantic_model.cli "$@"
