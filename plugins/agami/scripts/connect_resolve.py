@@ -46,7 +46,6 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 from pathlib import Path
 
 # agami_paths lives in the agami-core package; the resolver puts it on the path in every layout
