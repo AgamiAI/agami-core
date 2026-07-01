@@ -33,6 +33,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      # `python -m build` publishes whatever pyproject says, regardless of the release tag -- so a
+      # mistagged release (tag v0.3.2 while pyproject is still 0.3.1) would permanently mislabel a PyPI
+      # version. Fail fast on a mismatch. (Release-only: a workflow_dispatch has no version tag.)
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("packages/agami-core/pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::release tag '$GITHUB_REF_NAME' (-> '$tag') != pyproject version '$pkg'"
+            exit 1
+          fi
+          echo "release tag matches package version: $pkg"
+
       # Build both artifacts from the package subdir into repo-root dist/ (the pypa action's default
       # packages-dir), using the PEP 517 frontend.
       - name: Build sdist + wheel

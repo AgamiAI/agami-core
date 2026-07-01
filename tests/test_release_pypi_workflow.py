@@ -56,6 +56,19 @@ def test_builds_from_agami_core_package():
     assert "packages/agami-core" in build["run"], build["run"]
 
 
+def test_release_guards_tag_matches_version():
+    # A release run must fail fast if the tag and pyproject version disagree (else PyPI records a
+    # mislabeled version permanently). The guard is the release-only `run` step.
+    wf, _ = _load()
+    steps = wf["jobs"]["publish"]["steps"]
+    guard = next(
+        (s for s in steps if s.get("if") == "github.event_name == 'release'" and "run" in s), None
+    )
+    assert guard is not None, "no release-only tag/version guard step"
+    assert "pyproject.toml" in guard["run"], guard["run"]
+    assert "GITHUB_REF_NAME" in guard["run"], guard["run"]
+
+
 def test_release_goes_to_pypi_dispatch_to_testpypi():
     wf, _ = _load()
     steps = wf["jobs"]["publish"]["steps"]
