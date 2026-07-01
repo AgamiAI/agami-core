@@ -22,9 +22,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The CLI runs as `python -m semantic_model.cli` against the installed agami-core package;
-# we install it (with the model extra, which brings pydantic/sqlglot/pyyaml) on demand below.
-PKG_DIR="$(cd "$SCRIPT_DIR/../../../packages/agami-core" && pwd)"
+# The CLI runs as `python -m semantic_model.cli` against the INSTALLED agami-core package; we install it
+# (with the model extra: pydantic/sqlglot/pyyaml) on demand below. The source differs by layout:
+#   - a dev checkout has packages/agami-core → editable install;
+#   - a marketplace install ships only plugins/agami/ (no packages/) → install the PUBLISHED package
+#     (PyPI once available, else pinned git). So packages/ is OPTIONAL here — never fatal (OCR-031).
+DEV_PKG_DIR=""
+if [ -f "$SCRIPT_DIR/../../../packages/agami-core/pyproject.toml" ]; then
+  DEV_PKG_DIR="$(cd "$SCRIPT_DIR/../../../packages/agami-core" && pwd)"
+fi
+# Pin the git-install fallback to the plugin version (the cache dir name, e.g. .../agami-core/0.3.1/);
+# fall back to `main` outside a versioned cache (e.g. a dev checkout, where DEV_PKG_DIR wins anyway).
+VER="$(basename "$(cd "$SCRIPT_DIR/.." && pwd)")"
+case "$VER" in [0-9]*) GIT_REF="v$VER" ;; *) GIT_REF="main" ;; esac
+GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 
 resolve_python() {
   if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
@@ -61,19 +72,40 @@ if [ -z "$PY" ]; then
   exit 3
 fi
 
-# Ensure the agami-core package + its model deps are importable in $PY; install once if not.
-# (A broken/moved editable install fails this import and self-heals via the reinstall — which
-# matters because the plugin's cache dir is version-pinned and moves on every update.)
-if ! "$PY" -c 'import semantic_model, pydantic, sqlglot, yaml' 2>/dev/null; then
+# Try a pip requirement `--user` first, then a plain install. "$@" preserves arg boundaries so a
+# PEP-508 direct reference (`agami-core[model] @ git+…`) stays a single argument. On the --user attempt
+# `>&2 2>/dev/null` sends its stdout to our stderr but swallows its stderr, so a "--user rejected"
+# environment falls through quietly to the plain install instead of printing a scary error.
+_pip_try() { "$PY" -m pip install --user -q "$@" >&2 2>/dev/null || "$PY" -m pip install -q "$@" >&2; }
+
+# Ensure the agami-core package (+ its model deps) is importable in $PY; install once if not.
+# (A broken/moved install fails this import and self-heals via the reinstall — the plugin cache dir
+# is version-pinned and moves on every update.) Install source by layout — dev editable → the
+# published package on an index (lights up once agami-core is on PyPI, OCR-032) → pinned git (public
+# repo, no auth) → git main. First success wins.
+_imports_ok() { "$PY" -c 'import semantic_model, pydantic, sqlglot, yaml' 2>/dev/null; }
+
+ensure_pkg() {
+  _imports_ok && return 0
   echo "agami: installing agami-core (semantic model) into $PY …" >&2
-  if ! "$PY" -m pip install --user -q -e "$PKG_DIR[model]" >&2 2>/dev/null; then
-    if ! "$PY" -m pip install -q -e "$PKG_DIR[model]" >&2; then
-      echo "agami: couldn't install agami-core into $PY." >&2
-      echo "       Run:  $PY -m pip install -e \"$PKG_DIR[model]\"" >&2
-      echo "       Or point agami at a Python that has it:  export AGAMI_PYTHON=/path/to/python" >&2
-      exit 3
-    fi
-  fi
+  # Re-verify the imports after each attempt: a pip that exits 0 but leaves the import broken (e.g.
+  # "already satisfied" into the wrong site) must fall through to the next source, not falsely succeed.
+  { [ -n "$DEV_PKG_DIR" ] && _pip_try -e "$DEV_PKG_DIR[model]"; } && _imports_ok && return 0
+  _pip_try "agami-core[model]" && _imports_ok && return 0
+  _pip_try "agami-core[model] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core" && _imports_ok && return 0
+  _pip_try "agami-core[model] @ ${GIT_BASE}@main#subdirectory=packages/agami-core" && _imports_ok && return 0
+  echo "agami: couldn't install agami-core into $PY." >&2
+  echo "       Try:  $PY -m pip install --user \"agami-core[model] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core\"" >&2
+  echo "       Or point agami at a Python that has it:  export AGAMI_PYTHON=/path/to/python" >&2
+  exit 3
+}
+
+# `sm install` just ensures the package is present (agami-connect calls this before a model exists).
+if [ "${1:-}" = "install" ]; then
+  ensure_pkg
+  echo "agami: agami-core ready in $PY" >&2
+  exit 0
 fi
 
+ensure_pkg
 exec "$PY" -m semantic_model.cli "$@"

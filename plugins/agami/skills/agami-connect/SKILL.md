@@ -240,7 +240,7 @@ The model (introspection, validation, traversal, curation — everything the `sm
 If they're present, continue. If missing, **confirm via AskUserQuestion before installing** (same convention as the DB-driver install above — agami never installs silently):
 > agami needs the **agami-core** package (which pulls `pydantic`, `sqlglot`, `pyyaml`) to build and read the semantic model. Install it now? (one-time, user-site — `pip install --user`)
 
-On **Yes**: `"$PY" -m pip install --user -e "$AGAMI_PLUGIN_ROOT/../../packages/agami-core[model]"` (fall back to a plain `pip install` if `--user` is rejected). This installs the agami-core library so `python -m execute_sql` / `python -m semantic_model.cli` and the `sm` launcher all resolve it. On **No**: stop with *"Can't build the model without it — re-run when you're ready to install."* — don't proceed to introspect.
+On **Yes**: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` — the `sm` launcher is the single place that installs the agami-core library into the resolved interpreter (editable from a dev checkout, else the published package via PyPI or pinned git — so it works in a marketplace install with no `packages/` dir), and everything (`python -m execute_sql` / `python -m semantic_model.cli` / `sm`) then resolves it. On **No**: stop with *"Can't build the model without it — re-run when you're ready to install."* — don't proceed to introspect.
 
 (The `sm` wrapper also self-installs these on first use as a safety net, but doing it here makes it explicit, confirmed, and at a predictable moment rather than mid-introspection.)
 
@@ -331,7 +331,7 @@ If `<artifacts_dir>/agami-example/org.yaml` already exists, the sample is alread
 ```
 
 1. **Set up `local/`** (same as 0a.1): `mkdir -p "<artifacts_dir>/local" && chmod 700 "<artifacts_dir>/local"`. Ensure `<artifacts_dir>/.gitignore` ignores `local/`. Resolve `<artifacts_dir>` per Phase 0 (first run: ask via 0a.6, default `~/agami-artifacts`).
-2. **Resolve `$PY` + the agami-core package** (trimmed 0a.5/0a.5b): SQLite needs **no DB driver** (stdlib), so only ensure the **agami-core** package is importable in `$PY` — confirm via AskUserQuestion, then `"$PY" -m pip install --user -e "$AGAMI_PLUGIN_ROOT/../../packages/agami-core[model]"` (the one, one-time install; brings pydantic/sqlglot/pyyaml). Detect the `sqlite3` CLI with `which sqlite3` → `tier = cli` if present else `python`.
+2. **Resolve `$PY` + the agami-core package** (trimmed 0a.5/0a.5b): SQLite needs **no DB driver** (stdlib), so only ensure the **agami-core** package is importable in `$PY` — confirm via AskUserQuestion, then `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` (the one, one-time install via the `sm` launcher; brings pydantic/sqlglot/pyyaml and works with no `packages/` dir). Detect the `sqlite3` CLI with `which sqlite3` → `tier = cli` if present else `python`.
 3. **Build the `.db`** into the gitignored `local/` (it's regenerable machine state, not committed):
    ```bash
    "$PY" "$AGAMI_PLUGIN_ROOT/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
