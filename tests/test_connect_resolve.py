@@ -36,7 +36,24 @@ def _run(monkeypatch, art: Path, **env) -> dict:
 def test_next_bootstrap_when_empty(tmp_path, monkeypatch):
     data, _ = _run(monkeypatch, tmp_path)
     assert data["next"] == "bootstrap"
+    # First-time bootstrap: the profile is unresolved — emit null (+ source), never the invented "main"
+    # (so the skill narrates "first-time setup" without a fake name).
+    assert data["profile"] is None
+    assert data["profile_source"] == "default"
+
+
+def test_ready_with_default_main_section_is_not_nulled(tmp_path, monkeypatch):
+    # A real [main] section with no env/active_profile → next=ready → the name must NOT be hidden
+    # (the null-out is scoped to default-AND-bootstrap).
+    local = tmp_path / "local"
+    local.mkdir()
+    creds = local / "credentials"
+    creds.write_text("[main]\ntype = sqlite\npath = /x/y.db\n", encoding="utf-8")
+    os.chmod(creds, 0o600)
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["next"] == "ready"
     assert data["profile"] == "main"
+    assert data["profile_source"] == "default"
 
 
 def test_next_ready_with_section(tmp_path, monkeypatch):
@@ -80,9 +97,11 @@ def test_profile_resolution_order(tmp_path, monkeypatch):
     # AGAMI_PROFILE wins over .config
     data, _ = _run(monkeypatch, tmp_path, AGAMI_PROFILE="from_env")
     assert data["profile"] == "from_env"
+    assert data["profile_source"] == "env"
     # without the env var, .config.active_profile wins over the "main" default
     data2, _ = _run(monkeypatch, tmp_path)
     assert data2["profile"] == "from_config"
+    assert data2["profile_source"] == "active_profile"
 
 
 def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for):
