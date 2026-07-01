@@ -31,6 +31,15 @@ import re
 import sys
 from pathlib import Path
 
+# agami_paths lives in the agami-core package; the resolver puts it on the path in every layout
+# (pip-installed / the plugin's bundled lib / a dev checkout) with no pip required. A bare
+# `import agami_paths` off the script's own dir breaks on a marketplace install, where agami_paths
+# lives in lib/, not next to this script (mirrors connect_resolve.py).
+from _agami_lib import ensure_importable  # noqa: E402
+
+ensure_importable()
+import agami_paths  # noqa: E402
+
 # Placeholder tokens the Phase 0a templates ship with — their presence means the user
 # hasn't filled the template in yet. Mirrors the grep guard the skill used inline.
 _PLACEHOLDER_RE = re.compile(
@@ -120,9 +129,6 @@ def promote(agami_dir: Path) -> tuple[str, int]:
 
 
 def main() -> int:
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import agami_paths
     agami_paths.bootstrap()
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--agami-dir", default=None,
