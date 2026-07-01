@@ -22,14 +22,13 @@ Usage:
     python3 setup_desktop_mcp.py                 # wire active profile into Desktop
     python3 setup_desktop_mcp.py --profile main  # pin a specific profile
     python3 setup_desktop_mcp.py --dry-run       # show the plan, write nothing
-    python3 setup_desktop_mcp.py --in-place      # editable install from this checkout (dev mode)
     python3 setup_desktop_mcp.py --python /abs/python3   # force an interpreter
     python3 setup_desktop_mcp.py --config /path/to/config.json  # override target file
 
-Stdlib only (shells out to pip). Reads nothing secret beyond the credentials file
-(to learn the active profile's db type → which driver to require). Installs the
-agami-core package into the chosen interpreter and writes the desktop config (with a
-timestamped backup).
+Stdlib only. Reads nothing secret beyond the credentials file (to learn the active
+profile's db type → which driver to require). Installs the agami-core package into the
+chosen interpreter via `sm install` (the single install chokepoint) and writes the
+desktop config (with a timestamped backup).
 """
 
 from __future__ import annotations
