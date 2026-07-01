@@ -597,7 +597,7 @@ Why structured beats prose: the SQL generator translates "high severity" → `se
 - table: `{op:edit, kind:table, name:"<table>", field:"description", value:"<text>", source:"ai"}`
 - column: same + `column:"<col>"`
 
-Pass `area` **only** to disambiguate a bare name that exists in two schemas (curate skips an ambiguous op with a clear "pass an explicit area" reason rather than editing the wrong one). **Always include `"source":"ai"` on every generated description** — this stamps `description_source: ai_unvalidated` so the description earns trust through use (agami-query surfaces it in the answer receipt for confirmation the first time a query actually uses that column, instead of forcing an upfront review of hundreds of descriptions; see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). **Skip any column that already has a description** (so a partial hand-edit or a reintrospect merge is never clobbered):
+Pass `area` **only** to disambiguate a bare name that exists in two schemas (curate skips an ambiguous op with a clear "pass an explicit area" reason rather than editing the wrong one). **Always include `"source":"ai"` on every generated description** — this stamps `description_source: ai_unvalidated` so the description earns trust through use (agami-query surfaces it in the answer receipt for confirmation the first time a query actually uses that column, instead of forcing an upfront review of hundreds of descriptions). **Skip any column that already has a description** (so a partial hand-edit or a reintrospect merge is never clobbered):
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-descriptions.json
 ```

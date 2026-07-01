@@ -57,5 +57,5 @@ coverage.xml
 htmlcov/
 .ruff_cache/
 
-# Generated UI previews (regenerate with render_previews.py)
+# Generated UI previews (regenerate with dev/render_previews.py)
 previews/

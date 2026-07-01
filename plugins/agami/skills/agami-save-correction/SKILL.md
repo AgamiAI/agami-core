@@ -246,7 +246,7 @@ For every other kind, you propose a model edit and run the validator BEFORE writ
 
 Model edits go through the curation engine (`semantic_model.cli curate "$ROOT" --ops-file …`), which validates + commits + reverts on failure — you don't stage/validate/promote by hand. `ROOT="<artifacts_dir>/<profile>"`. Resolve the subject `<area>` for an affected table the same way as Phase 2 (the area whose `tables_defined` holds it). The new-metric case uses `cli add --kind metric` (curate's `--ops-file` edits existing entries; `add` creates them) — same validate + commit + revert guarantees.
 
-**Fixing a column/table `description` marks it human-validated.** A correction that rewrites a `description` via a curate `edit` op (no `source:"ai"`) automatically sets `description_source: "human"` — so a description agami had inferred is now trusted and stops surfacing as an "assumption" in answer receipts (see [`docs/design/validated-through-use-descriptions.md`](../../../../docs/design/validated-through-use-descriptions.md)). You don't set `description_source` yourself; the curate engine does it.
+**Fixing a column/table `description` marks it human-validated.** A correction that rewrites a `description` via a curate `edit` op (no `source:"ai"`) automatically sets `description_source: "human"` — so a description agami had inferred is now trusted and stops surfacing as an "assumption" in answer receipts. You don't set `description_source` yourself; the curate engine does it.
 
 | Edit kind | How |
 |---|---|
