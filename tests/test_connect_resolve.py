@@ -42,6 +42,16 @@ def test_next_bootstrap_when_empty(tmp_path, monkeypatch):
     assert data["profile_source"] == "default"
 
 
+def test_named_profile_without_creds_keeps_name(tmp_path, monkeypatch):
+    # The OTHER half of the gate: a named-but-not-onboarded profile → bootstrap, but the name must NOT
+    # be nulled (only the bare "default" fallback is). This is what the skill's "name it only when
+    # non-null" narration depends on.
+    data, _ = _run(monkeypatch, tmp_path, AGAMI_PROFILE="staging")
+    assert data["next"] == "bootstrap"
+    assert data["profile"] == "staging"
+    assert data["profile_source"] == "env"
+
+
 def test_ready_with_default_main_section_is_not_nulled(tmp_path, monkeypatch):
     # A real [main] section with no env/active_profile → next=ready → the name must NOT be hidden
     # (the null-out is scoped to default-AND-bootstrap).
