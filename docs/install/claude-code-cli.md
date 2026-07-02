@@ -53,7 +53,7 @@ Expected output:
 
 ```
 Installed agami-core v0.3.3 (from agami)
-5 skills available: agami-connect, agami-query, agami-model, agami-save-correction, agami-reconcile
+7 skills available: agami-connect, agami-query, agami-model, agami-save-correction, agami-reconcile, agami-serve, agami-deploy
 ```
 
 ## 5. Verify

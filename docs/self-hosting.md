@@ -20,7 +20,11 @@ pip install "agami-core[server]"
 
 ## Run
 
+Both steps read `AGAMI_DB_URL` (the store) — set it in the environment or inline as shown:
+
 ```bash
+export AGAMI_DB_URL=postgresql://user:pass@host:5432/agami
+
 # 1. migrate the store + load the model into Postgres (idempotent, fail-closed)
 python -m model_deploy
 
