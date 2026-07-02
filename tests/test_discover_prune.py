@@ -175,14 +175,25 @@ def test_render_writes_prunable_html(tmp_path):
 # ModuleNotFound'd on every real install. These drive that locator (the DB-driven cmd_discover doesn't).
 
 
+def _force_relocate(monkeypatch):
+    """Undo this module's top-level `render_prune` preload so `_load_render_prune` must genuinely locate
+    + insert + import it — otherwise the test would pass even if the locator no-op'd (it wouldn't need to
+    do anything, since `render_prune` is already importable)."""
+    monkeypatch.delitem(sys.modules, "render_prune", raising=False)
+    scripts = str(PLUGIN_DIR / "scripts")
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != scripts])
+
+
 def test_load_render_prune_via_plugin_root(monkeypatch):
+    _force_relocate(monkeypatch)
     monkeypatch.setenv("AGAMI_PLUGIN_ROOT", str(PLUGIN_DIR))
     mod = cli._load_render_prune()
     assert hasattr(mod, "build_manifest") and hasattr(mod, "render")
 
 
 def test_load_render_prune_raises_without_plugin_root(monkeypatch):
-    # No AGAMI_PLUGIN_ROOT and no package-relative copy → a clear, named error (not a bare ImportError).
+    # No AGAMI_PLUGIN_ROOT → a clear, named error (not a bare ImportError).
+    _force_relocate(monkeypatch)
     monkeypatch.delenv("AGAMI_PLUGIN_ROOT", raising=False)
     with pytest.raises(RuntimeError, match="AGAMI_PLUGIN_ROOT"):
         cli._load_render_prune()

@@ -937,27 +937,24 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
 def _load_render_prune():
     """Import the `render_prune` script (the prune-page renderer) and return the module.
 
-    render_prune lives in the PLUGIN (`plugins/agami/scripts/`), not this package, so a
-    package-relative import fails on any installed layout (`site-packages/` when pip-installed,
-    `src/` in a dev checkout — neither has it). Locate it via `AGAMI_PLUGIN_ROOT`, which every `sm`
-    caller sets and which is inherited by this `python -m semantic_model.cli` subprocess; an explicit
-    `sys.path.insert` survives `sm`'s `cd /` + `PYTHONSAFEPATH`. Fall back to the package-relative dir
-    for a manual/dev invocation, and raise a clear error if neither has the file.
+    render_prune lives in the PLUGIN (`plugins/agami/scripts/`), not this package — a package-relative
+    import fails on every layout (`site-packages/` installed, `src/` in a dev checkout; neither has it).
+    Locate it via `AGAMI_PLUGIN_ROOT`, which the `sm` launcher always exports (deriving it from its own
+    location if the caller didn't), so it's present in this `python -m semantic_model.cli` subprocess even
+    under `sm`'s `cd /` + `PYTHONSAFEPATH` (an explicit `sys.path.insert` is honored). Raise a clear error
+    if it's unset or doesn't point at the plugin.
     """
-    candidates: list[str] = []
     plugin_root = os.environ.get("AGAMI_PLUGIN_ROOT")
-    if plugin_root:
-        candidates.append(str(Path(plugin_root).expanduser() / "scripts"))
-    candidates.append(str(Path(__file__).resolve().parent.parent))  # dev/manual fallback
-    for d in candidates:
-        if (Path(d) / "render_prune.py").is_file():  # file check, so a stale sys.modules can't mask a miss
-            if d not in sys.path:
-                sys.path.insert(0, d)
-            import render_prune  # noqa: E402
-            return render_prune
+    scripts_dir = Path(plugin_root).expanduser() / "scripts" if plugin_root else None
+    if scripts_dir and (scripts_dir / "render_prune.py").is_file():
+        d = str(scripts_dir)
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        import render_prune  # noqa: E402
+        return render_prune
     raise RuntimeError(
         "render_prune.py not found — set AGAMI_PLUGIN_ROOT to the agami plugin dir (its scripts/ holds "
-        "the prune-page renderer). Checked: " + ", ".join(candidates)
+        f"the prune-page renderer). AGAMI_PLUGIN_ROOT={plugin_root!r}"
     )
 
 

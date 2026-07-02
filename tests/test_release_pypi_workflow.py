@@ -9,6 +9,7 @@ points the build elsewhere fails here.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -45,6 +46,10 @@ def test_trusted_publishing_no_api_token():
 
     publish_steps = [s for s in job["steps"] if "gh-action-pypi-publish" in str(s.get("uses", ""))]
     assert publish_steps, "no pypa/gh-action-pypi-publish step found"
+    # Targeted tokenless guard: no publish step may reference a repo secret (trusted publishing needs
+    # none). Scoped to the publish steps so a legit `secrets.GITHUB_TOKEN` elsewhere wouldn't false-trip.
+    for s in publish_steps:
+        assert "secrets." not in json.dumps(s), "publish step must not reference a repo secret (tokenless)"
 
 
 def test_builds_from_agami_core_package():
