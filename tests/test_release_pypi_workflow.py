@@ -9,6 +9,7 @@ points the build elsewhere fails here.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -39,13 +40,16 @@ def test_trusted_publishing_no_api_token():
     assert job["permissions"].get("contents") == "read", job["permissions"]
 
     raw = WORKFLOW.read_text()
-    # No API-token publish path: the pypa action must never be handed a password, and no secret is
-    # referenced anywhere in the workflow (trusted publishing needs none).
+    # No API-token publish path: the pypa action must never be handed a password. Combined with the
+    # `id-token: write` permission above, this pins trusted (tokenless) publishing.
     assert "password:" not in raw, "publish must not use a password/API token"
-    assert "secrets." not in raw, "no repo secret should be referenced (trusted publishing is tokenless)"
 
     publish_steps = [s for s in job["steps"] if "gh-action-pypi-publish" in str(s.get("uses", ""))]
     assert publish_steps, "no pypa/gh-action-pypi-publish step found"
+    # Targeted tokenless guard: no publish step may reference a repo secret (trusted publishing needs
+    # none). Scoped to the publish steps so a legit `secrets.GITHUB_TOKEN` elsewhere wouldn't false-trip.
+    for s in publish_steps:
+        assert "secrets." not in json.dumps(s), "publish step must not reference a repo secret (tokenless)"
 
 
 def test_builds_from_agami_core_package():

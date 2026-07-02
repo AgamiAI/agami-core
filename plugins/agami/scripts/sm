@@ -37,6 +37,12 @@ VER="$(basename "$(cd "$SCRIPT_DIR/.." && pwd)")"
 case "$VER" in [0-9]*) GIT_REF="v$VER" ;; *) GIT_REF="main" ;; esac
 GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 
+# Guarantee AGAMI_PLUGIN_ROOT for the CLI subprocess: `semantic_model.cli discover` locates the plugin's
+# render_prune renderer via it (it lives in the plugin, not the installed package). Every skill sets it,
+# but derive it from our own location (the plugin root = the scripts dir's parent) if a direct caller
+# didn't — so `sm discover` never depends on the caller remembering to export it.
+export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
 resolve_python() {
   if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
   # configured interpreter from <artifacts_dir>/local/.config (best-effort), with a
