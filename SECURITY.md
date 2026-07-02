@@ -18,7 +18,7 @@ When reporting, include where possible:
 
 ## Supported Versions
 
-agami-core is in early development. We only support the **latest released version**; older releases will not receive security backports.
+We support the **latest released version**; older releases will not receive security backports.
 
 ## Scope
 

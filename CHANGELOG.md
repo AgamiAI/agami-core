@@ -10,6 +10,46 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.3.3] — 2026-07-02
+
+### Fixed
+
+- **Marketplace-install reliability.** Credential promotion and the Claude Desktop
+  setup (`/agami-serve`) no longer fail on a fresh marketplace install — they resolve
+  the bundled library the same way every other script does, and install the model
+  engine through the single `sm install` path.
+- **Externally-managed Python + package shadowing.** The installer now works on an
+  externally-managed interpreter (Homebrew / PEP 668) and can no longer be shadowed by
+  a partially-installed package (the model CLI is verified from a neutral path).
+
+### Changed
+
+- **Sample "watch it build" opens the model explorer** when the build completes, and
+  skips the prompts that don't apply to the curated sample (no table-prune / org /
+  data-dictionary questions).
+- **First-time setup no longer shows a placeholder profile name** — it reads as
+  "first-time setup" until you name your profile.
+
+## [0.3.2] — 2026-07-01
+
+### Added
+
+- **Published to PyPI.** `pip install "agami-core[model]"` (and `[server]`) installs
+  the library from the index, and the plugin's model-build step uses it automatically.
+  Published via GitHub trusted publishing (no stored token). The self-host server image
+  is published to GHCR (`ghcr.io/agamiai/agami-core`) so a deploy pulls it — no clone,
+  no build.
+
+## [0.3.1] — 2026-07-01
+
+### Fixed
+
+- **Marketplace installs can query and build models with no dev checkout.** Bundled the
+  stdlib query library into the plugin, so a marketplace install answers questions with
+  no `pip install`; and the model-build step installs the engine from a source that
+  exists in a marketplace layout (the published package, else git) instead of a
+  dev-only path.
+
 ## [0.3.0] — 2026-06-24
 
 ### Added
@@ -75,5 +115,8 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
+[0.3.3]: https://github.com/AgamiAI/agami-core/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/AgamiAI/agami-core/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/AgamiAI/agami-core/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/AgamiAI/agami-core/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/AgamiAI/agami-core/releases/tag/v0.2.2

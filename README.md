@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-fair--code-blue.svg" alt="License: fair-code"></a>
-  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.3.3-blue" alt="Version">
   <img src="https://img.shields.io/badge/status-pre--public-orange" alt="Status">
   <a href="#quickstart-under-5-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
 </p>
@@ -109,7 +109,7 @@ The same plugin works across Claude Code CLI, VS Code, and Cursor.
 /plugin marketplace add AgamiAI/agami-core
 /plugin install agami-core@agami
 ```
-Verify with `/plugin list` → you should see `agami-core@agami v0.3.0`.
+Verify with `/plugin list` → you should see `agami-core@agami v0.3.3`.
 
 **VS Code / Cursor** — install the **Claude Code** extension, type `/plugin` in the
 chat to open **Manage Plugins**, add the `AgamiAI/agami-core` marketplace, then install
@@ -175,40 +175,15 @@ cloud (a multi-tenant model registry over a remote MCP endpoint, shared governed
 always-on evals). The boundary, stated plainly:
 [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
-## Self-hosting the HTTP server (any cloud)
+## Self-hosting the team server
 
-The HTTP MCP server (the `[server]` extra) is **cloud-neutral** — a VM + Postgres, or a stateless
-platform (Cloud Run / Container Apps) + managed Postgres. No GCP service is required to boot: no
-Cloud SQL connector, no Secret Manager, no Cloud Logging (a regression test enforces this). Config
-is entirely environment variables:
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `AGAMI_DB_URL` | yes (server) | The store: `postgresql://…` in prod, `sqlite://…` for a small/local run. `APP_DATABASE_URL` is accepted as an alias for the cloud-platform convention (`AGAMI_DB_URL` wins if both are set). Unset ⇒ the local file path. |
-| `PUBLIC_BASE_URL` | yes (server) | Backs OAuth/MCP discovery + the `WWW-Authenticate` resource URL. Set it explicitly — it can't be auto-detected behind a proxy/LB; the server fails fast at startup if it's missing. |
-| `AGAMI_ORG_ID` | no | The single configured org id (default `local`). The server is single-tenant by default. |
-| `AGAMI_SIGNING_SECRET` | yes (auth) | ≥32-byte secret the server signs its own session JWTs with. When set, the server validates real tokens (the password / OIDC login flow); unset ⇒ the bearer-presence local default. |
-
-All serving state lives in Postgres — a fresh instance with only `AGAMI_DB_URL` serves identically,
-so the server survives restarts and stateless platforms. The serving path is **LLM-free and
-zero-egress by default**: the client is the brain, `execute_sql` runs SQL against your own database,
-and the other tools just read the model. Nothing leaves your environment.
-
-### Optional: social login (OIDC)
-
-"Sign in with Google / Microsoft" is **off by default**. Configure a provider's client id/secret to
-enable it (the option is hidden when unset; username/password still works):
-
-| Variable | Provider | Notes |
-|----------|----------|-------|
-| `AGAMI_OIDC_GOOGLE_CLIENT_ID` / `_SECRET` | Google | requires `email_verified` |
-| `AGAMI_OIDC_MICROSOFT_CLIENT_ID` / `_SECRET` | Microsoft | also set `AGAMI_OIDC_MICROSOFT_TENANT` to a **pinned** tenant id (not `common`/`organizations`) — the tenant is the trust boundary |
-| `AGAMI_PUBLIC_SIGNUP` | — | default off. When on, an unknown verified email self-provisions a **demo** account — intended only for a dedicated "Try for free" instance whose data is non-sensitive. Leave off for any real deployment (it's onboarded-only: an admin must add the user first). |
-
-**Egress note:** OIDC is the one feature where the **hosted** server reaches out — it calls the
-identity provider to verify a login. Everything else stays local. If you want a strictly no-egress
-deployment, leave OIDC unconfigured (or run the local `agami serve`); the skill and the query path
-never make a network call regardless.
+Beyond the local single-player setup, agami ships an **HTTP MCP server** so a team can point their
+Claude at one shared, governed model. It's cloud-neutral (a VM + Postgres, or a stateless platform
+like Cloud Run + managed Postgres), configured entirely by environment variables, and **LLM-free +
+zero-egress by default**. The full setup — the `pip install "agami-core[server]"` install, the
+env-var contract, and optional Google / Microsoft (OIDC) login — is in
+**[docs/self-hosting.md](docs/self-hosting.md)**. For a one-command deploy bundle, use the
+`/agami-deploy` skill.
 
 ## Documentation
 
@@ -217,6 +192,7 @@ never make a network call regardless.
 - [The trust layer](docs/trust-layer.md) — confidence, sign-off, receipts, snapshots
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop
+- [Self-hosting the team server](docs/self-hosting.md) — the HTTP server, env-var contract, OIDC
 - [Troubleshooting & uninstall](docs/troubleshooting.md)
 - [Fair-code vs hosted](docs/open-vs-hosted.md) · [Privacy](docs/privacy.md)
 

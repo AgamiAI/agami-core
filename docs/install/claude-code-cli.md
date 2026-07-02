@@ -52,8 +52,8 @@ Added marketplace: agami (AgamiAI)
 Expected output:
 
 ```
-Installed agami-core v0.3.0 (from agami)
-5 skills available: agami-connect, agami-query, agami-model, agami-save-correction, agami-reconcile
+Installed agami-core v0.3.3 (from agami)
+7 skills available: agami-connect, agami-query, agami-model, agami-save-correction, agami-reconcile, agami-serve, agami-deploy
 ```
 
 ## 5. Verify
@@ -62,7 +62,7 @@ Installed agami-core v0.3.0 (from agami)
 /plugin list
 ```
 
-You should see `agami-core v0.3.0` in the active list.
+You should see `agami-core v0.3.3` in the active list.
 
 Try invoking it:
 
