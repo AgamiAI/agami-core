@@ -101,9 +101,9 @@ It removes all three sharp edges of hand-editing:
   backup, atomic write, every other key and MCP server preserved.
 
 Then **fully quit** the app (Cmd+Q on macOS; quit from the system tray on Windows)
-and reopen. Flags: `--profile NAME` (pin a profile), `--in-place` (editable install
-from a checkout — for devs iterating on the server), `--config PATH`
-(target a different client's config file). Re-run after a plugin update to reinstall.
+and reopen. Flags: `--profile NAME` (pin a profile), `--config PATH`
+(target a different client's config file), `--python /abs/python3` (force an interpreter).
+Re-run after a plugin update to reinstall.
 The helper auto-resolves the macOS vs Windows config path for you.
 
 ### Manual (what the helper does under the hood)

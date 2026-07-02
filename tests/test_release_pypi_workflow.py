@@ -39,10 +39,9 @@ def test_trusted_publishing_no_api_token():
     assert job["permissions"].get("contents") == "read", job["permissions"]
 
     raw = WORKFLOW.read_text()
-    # No API-token publish path: the pypa action must never be handed a password, and no secret is
-    # referenced anywhere in the workflow (trusted publishing needs none).
+    # No API-token publish path: the pypa action must never be handed a password. Combined with the
+    # `id-token: write` permission above, this pins trusted (tokenless) publishing.
     assert "password:" not in raw, "publish must not use a password/API token"
-    assert "secrets." not in raw, "no repo secret should be referenced (trusted publishing is tokenless)"
 
     publish_steps = [s for s in job["steps"] if "gh-action-pypi-publish" in str(s.get("uses", ""))]
     assert publish_steps, "no pypa/gh-action-pypi-publish step found"

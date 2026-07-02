@@ -20,7 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
 import render_prune  # noqa: E402
+from semantic_model import cli  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
+
+PLUGIN_DIR = REPO_ROOT / "plugins" / "agami"
 
 # --- canned runners ---------------------------------------------------------
 
@@ -164,3 +167,22 @@ def test_render_writes_prunable_html(tmp_path):
     assert "dashboard-header" in html and "--accent" in html
     # {{...}} tokens all substituted
     assert "{{" not in html
+
+
+# --- _load_render_prune: the AGAMI_PLUGIN_ROOT locator --------------------------
+# render_prune lives in the plugin, not the installed package. The production caller (`sm discover` →
+# `python -m semantic_model.cli`) can only find it via AGAMI_PLUGIN_ROOT — a package-relative import
+# ModuleNotFound'd on every real install. These drive that locator (the DB-driven cmd_discover doesn't).
+
+
+def test_load_render_prune_via_plugin_root(monkeypatch):
+    monkeypatch.setenv("AGAMI_PLUGIN_ROOT", str(PLUGIN_DIR))
+    mod = cli._load_render_prune()
+    assert hasattr(mod, "build_manifest") and hasattr(mod, "render")
+
+
+def test_load_render_prune_raises_without_plugin_root(monkeypatch):
+    # No AGAMI_PLUGIN_ROOT and no package-relative copy → a clear, named error (not a bare ImportError).
+    monkeypatch.delenv("AGAMI_PLUGIN_ROOT", raising=False)
+    with pytest.raises(RuntimeError, match="AGAMI_PLUGIN_ROOT"):
+        cli._load_render_prune()

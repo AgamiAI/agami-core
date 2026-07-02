@@ -48,9 +48,8 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py" --dry-run
 python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py"
 ```
 
-Pass `--profile <name>` if the user named one. (For a developer iterating on the
-server from a checkout, `--in-place` does an **editable** install from the checkout
-so code edits take effect without reinstalling — mention this only if they ask.)
+Pass `--profile <name>` if the user named one. (Installation goes through `sm install`,
+which does an editable install automatically when run from a dev checkout — no flag needed.)
 
 ## Phase 2: Handle the two human cases
 

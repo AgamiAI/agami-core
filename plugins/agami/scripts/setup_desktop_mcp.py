@@ -291,7 +291,6 @@ def main() -> int:
     p.add_argument("--server-name", default="agami", help="Name of the MCP server entry (default: agami).")
     p.add_argument("--python", default=None, help="Force a specific python interpreter (absolute path).")
     p.add_argument("--config", default=None, help="Override the desktop config path (for testing / other clients).")
-    p.add_argument("--in-place", action="store_true", help="(deprecated no-op) install now goes through `sm install`, which does an editable install automatically in a dev checkout.")
     p.add_argument("--dry-run", action="store_true", help="Print the plan; write nothing.")
     args = p.parse_args()
 

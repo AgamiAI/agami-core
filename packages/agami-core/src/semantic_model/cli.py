@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -933,6 +934,33 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     return dict(intra), cross, skipped_target
 
 
+def _load_render_prune():
+    """Import the `render_prune` script (the prune-page renderer) and return the module.
+
+    render_prune lives in the PLUGIN (`plugins/agami/scripts/`), not this package, so a
+    package-relative import fails on any installed layout (`site-packages/` when pip-installed,
+    `src/` in a dev checkout — neither has it). Locate it via `AGAMI_PLUGIN_ROOT`, which every `sm`
+    caller sets and which is inherited by this `python -m semantic_model.cli` subprocess; an explicit
+    `sys.path.insert` survives `sm`'s `cd /` + `PYTHONSAFEPATH`. Fall back to the package-relative dir
+    for a manual/dev invocation, and raise a clear error if neither has the file.
+    """
+    candidates: list[str] = []
+    plugin_root = os.environ.get("AGAMI_PLUGIN_ROOT")
+    if plugin_root:
+        candidates.append(str(Path(plugin_root).expanduser() / "scripts"))
+    candidates.append(str(Path(__file__).resolve().parent.parent))  # dev/manual fallback
+    for d in candidates:
+        if (Path(d) / "render_prune.py").is_file():  # file check, so a stale sys.modules can't mask a miss
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            import render_prune  # noqa: E402
+            return render_prune
+    raise RuntimeError(
+        "render_prune.py not found — set AGAMI_PLUGIN_ROOT to the agami plugin dir (its scripts/ holds "
+        "the prune-page renderer). Checked: " + ", ".join(candidates)
+    )
+
+
 def cmd_discover(args) -> int:
     """First pass: cheap discovery (tables + columns only) → inventory JSON +
     a prune HTML page. The user prunes, then `introspect --tables <kept>` runs
@@ -955,11 +983,8 @@ def cmd_discover(args) -> int:
     inv_path.parent.mkdir(parents=True, exist_ok=True)
     inv_path.write_text(json.dumps(inventory, indent=2, default=str), encoding="utf-8")
 
-    # Render the standalone prune page (import the sibling top-level script).
-    scripts_dir = str(Path(__file__).resolve().parent.parent)
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    import render_prune  # noqa: E402
+    # Render the standalone prune page via the plugin's render_prune script (located by AGAMI_PLUGIN_ROOT).
+    render_prune = _load_render_prune()
 
     manifest = render_prune.build_manifest(inventory)
     out_path = Path(args.out).expanduser()
