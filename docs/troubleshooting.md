@@ -8,7 +8,7 @@
 | `psql: command not found` | `brew install postgresql` (or use DuckDB: `brew install duckdb`) |
 | `mysql: command not found` | `brew install mysql` (or DuckDB) |
 | `bq: command not found` | Install the [`gcloud` SDK](https://cloud.google.com/sdk/docs/install) and run `gcloud components install bq`. Or `pip install google-cloud-bigquery` for the Python path. |
-| `snowsql` flag-guessing failures | Snowflake CLI is fussy about flag ordering; use the explicit invocation table in `connection-reference.md`. |
+| `snowsql` flag-guessing failures | Snowflake CLI is fussy about flag ordering; use the explicit invocation table in [connection-reference.md](../plugins/agami/shared/connection-reference.md). |
 | `connection refused` on a remote DB | Check VPN / firewall, then connect with your native CLI (`psql -h ... -U ...` or `snowsql -a ... -u ...`) directly to confirm. |
 | "I don't have a model for `<profile>`" | Tell agami "introspect my schema" or run `/agami-connect`. The skill picks up `AGAMI_PROFILE` automatically. |
 | The generated SQL keeps using a column that doesn't exist | The model is stale. Run `/agami-connect reintrospect` — it preserves your hand-edits, refreshes from the DB, and surfaces any new entries in the review queue. See [When the database schema changes](usage.md#when-the-database-schema-changes-new-tables--new-columns--dropped-columns). |

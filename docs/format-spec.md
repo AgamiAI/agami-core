@@ -1,6 +1,6 @@
 # Format specs
 
-agami's state splits across two directories. See `[plugins/agami/shared/file-layout.md](../plugins/agami/shared/file-layout.md)` for the full design rationale; this page is the per-file format reference.
+agami's state splits across two directories. See [plugins/agami/shared/file-layout.md](../plugins/agami/shared/file-layout.md) for the full design rationale; this page is the per-file format reference.
 
 ## `<artifacts_dir>/local/` — secrets + per-user state — **NEVER commit**
 
@@ -35,13 +35,13 @@ agami's state splits across two directories. See `[plugins/agami/shared/file-lay
 
 `USER_MEMORY.md` is **distinct** from Claude Code's auto-memory at `~/.claude/projects/<workspace>/memory/MEMORY.md`. The auto-memory is host-managed and project-scoped; `USER_MEMORY.md` is agami-managed, lives in the artifacts dir, and persists across Claude Code hosts (CLI / VS Code extension / Cursor extension) the same way the rest of `<artifacts_dir>/` does.
 
-`USER_MEMORY.md` covers **user preferences that apply across every database** (default time windows, display preferences, exclude rules). The per-database `**ORGANIZATION.md`** at `<artifacts_dir>/<profile>/ORGANIZATION.md` covers **domain knowledge for that specific database** (terminology, key metrics, what the data represents). See `[plugins/agami/shared/organization-context-format.md](../plugins/agami/shared/organization-context-format.md)`.
+`USER_MEMORY.md` covers **user preferences that apply across every database** (default time windows, display preferences, exclude rules). The per-database `**ORGANIZATION.md`** at `<artifacts_dir>/<profile>/ORGANIZATION.md` covers **domain knowledge for that specific database** (terminology, key metrics, what the data represents). See [plugins/agami/shared/organization-context-format.md](../plugins/agami/shared/organization-context-format.md).
 
 `<profile>` matches the section name in `<artifacts_dir>/local/credentials` (default: `default`). One *directory* per profile under `<artifacts_dir>/`. The `agami-connect` skill auto-migrates v1.0 (single-file) and v1.1 (under `<artifacts_dir>/local/`) installs on first run after upgrade.
 
 ## Why the split
 
-Three concrete wins (full design in `[shared/file-layout.md](../plugins/agami/shared/file-layout.md)`):
+Three concrete wins (full design in [shared/file-layout.md](../plugins/agami/shared/file-layout.md)):
 
 1. **Zero credential-leak risk on commit.** `<artifacts_dir>/local/` is gitignored by default; `<artifacts_dir>/` is the only place anything goes when teams share.
 2. **Team workflows just work.** `cd ~/code/myteam/data && git add agami/` commits everyone's tuned semantic model, examples, ORGANIZATION.md, and USER_MEMORY.md preferences.
@@ -51,7 +51,7 @@ Three concrete wins (full design in `[shared/file-layout.md](../plugins/agami/sh
 
 ## 1. Credentials INI
 
-See `[plugins/agami/shared/credentials-format.md](../plugins/agami/shared/credentials-format.md)`. `chmod 600` is enforced by `agami-connect` Phase 0a.
+See [plugins/agami/shared/credentials-format.md](../plugins/agami/shared/credentials-format.md). `chmod 600` is enforced by `agami-connect` Phase 0a.
 
 ```ini
 [default]
@@ -213,7 +213,7 @@ examples:
 
 Seeded by `agami-connect` Phase 0a on first run with section hints (HTML comments). User edits by hand, OR the `agami-save-correction` skill appends a bullet when it classifies a correction as `user_preference` ("from now on, always exclude test users where email matches @example.com").
 
-Full spec: `[plugins/agami/shared/user-memory-format.md](../plugins/agami/shared/user-memory-format.md)`.
+Full spec: [plugins/agami/shared/user-memory-format.md](../plugins/agami/shared/user-memory-format.md).
 
 ## 5. Internal state files
 
@@ -283,7 +283,7 @@ Fields per line:
 
 ## 6. Chart artifacts (`<artifacts_dir>/local/charts/<ts>.html`)
 
-Self-contained Chart.js v4 HTML, rendered from `[plugins/agami/shared/chart-template.html](../plugins/agami/shared/chart-template.html)` with placeholders substituted (`{{TITLE}}`, `{{CHART_TYPE}}`, `{{LABELS}}`, `{{DATASETS}}`, `{{GENERATED_AT}}`, `{{SQL}}`). Open in any browser.
+Self-contained Chart.js v4 HTML, rendered from [plugins/agami/shared/chart-template.html](../plugins/agami/shared/chart-template.html) with placeholders substituted (`{{TITLE}}`, `{{CHART_TYPE}}`, `{{LABELS}}`, `{{DATASETS}}`, `{{GENERATED_AT}}`, `{{SQL}}`). Open in any browser.
 
 ## 7. CSV exports (`<artifacts_dir>/local/exports/<ts>.csv`)
 
