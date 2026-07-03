@@ -10,9 +10,12 @@ downstream that imports the same flat module names.
 ## Install
 
 ```bash
-pip install -e packages/agami-core            # executor + stdio harness (pure-stdlib)
-pip install -e 'packages/agami-core[model]'   # + the semantic model (pydantic / sqlglot / pyyaml)
+pip install agami-core            # executor + stdio harness (pure-stdlib)
+pip install 'agami-core[model]'   # + the semantic model (pydantic / sqlglot / pyyaml)
+pip install 'agami-core[server]'  # + the networked HTTP MCP server (see below)
 ```
+
+From a checkout, swap in the editable path — `pip install -e 'packages/agami-core[model]'`.
 
 ## Flat module names (an invariant)
 
@@ -36,7 +39,7 @@ python -m mcp_http             # the networked HTTP MCP server (see below)
 
 ## HTTP server — networked, with auth (`python -m mcp_http`)
 
-The `[server]` extra (`pip install -e 'packages/agami-core[server]'`) adds a networked MCP
+The `[server]` extra (`pip install 'agami-core[server]'`) adds a networked MCP
 transport: the same `TOOLS` surface as the stdio server, but over HTTP with OAuth + a small admin
 console. It's the self-host shape of the hosted product.
 

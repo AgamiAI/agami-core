@@ -41,7 +41,8 @@ the schema + examples these tools return) — exactly as with the hosted connect
   (it provides `mcp_harness` + `execute_sql`):
 
   ```bash
-  pip install -e "packages/agami-core[model]"
+  pip install "agami-core[model]"                 # from PyPI
+  # or, from a checkout (dev):  pip install -e "packages/agami-core[model]"
   ```
 
 - A **Python driver** for your database, because the server executes via
@@ -120,7 +121,7 @@ If you'd rather edit by hand, mind these two gotchas — both silently produce
    `C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe`.
 2. **Install agami-core into that Python and run it as a module.** The server is
    `python -m mcp_harness`, which needs the agami-core package importable in the
-   interpreter from gotcha #1: `"/abs/python3" -m pip install -e "/path/to/agami-core/packages/agami-core[model]"`.
+   interpreter from gotcha #1: `"/abs/python3" -m pip install "agami-core[model]"` (from a checkout, `-e "/path/to/packages/agami-core[model]"`).
    This is what the helper automates — and why it survives the plugin cache dir moving
    on each update (the code is installed, not referenced by a moving path).
 
