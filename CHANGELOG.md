@@ -10,6 +10,21 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.3.4] — 2026-07-03
+
+### Fixed
+
+- **Table-prune step of a real-DB onboarding no longer crashes on an installed
+  build.** The `discover` pass (which renders the prune page where you pick which
+  tables to model) failed with `ModuleNotFoundError` on a pip/marketplace install;
+  it now resolves its renderer via the plugin root and works everywhere.
+
+### Docs
+
+- Refreshed for the current release: README slimmed (self-hosting moved to
+  `docs/self-hosting.md`), the published PyPI install surfaced
+  (`pip install "agami-core[model]"`), and the changelog backfilled.
+
 ## [0.3.3] — 2026-07-02
 
 ### Fixed
@@ -115,6 +130,7 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
+[0.3.4]: https://github.com/AgamiAI/agami-core/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/AgamiAI/agami-core/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/AgamiAI/agami-core/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/AgamiAI/agami-core/compare/v0.3.0...v0.3.1
