@@ -223,7 +223,7 @@ def test_activity_does_not_leak_the_password_hash(client, env):
 
 
 def test_activity_tab_has_one_unified_tab_and_no_split_tabs(client, env):
-    # ACE-016: one Activity tab — the Tool-calls / Sessions split is gone from the rendered nav.
+    # one Activity tab — the Tool-calls / Sessions split is gone from the rendered nav.
     _login(client)
     html = client.get("/admin?tab=activity").text
     assert ">Activity</a>" in html
@@ -233,7 +233,7 @@ def test_activity_tab_has_one_unified_tab_and_no_split_tabs(client, env):
     assert "Queries grouped into conversations" not in html
 
 
-# --- ACE-015: the turn level (correlation_id) --------------------------------
+# --- the turn level (correlation_id) --------------------------------
 
 
 def test_correlation_id_round_trips(env):
@@ -379,7 +379,7 @@ def test_activity_drawer_renders_turn_with_user_asked_and_agent_queries(client, 
     assert "2 calls" in html
 
 
-# --- ACE-016: every tool carries the grouping ids ----------------------------
+# --- every tool carries the grouping ids ----------------------------
 
 
 def test_all_tools_expose_thread_and_correlation_ids():

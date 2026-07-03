@@ -1,4 +1,4 @@
-"""OCR-031 regression: the `sm` launcher must install agami-core[model] in a **marketplace** layout —
+"""Regression: the `sm` launcher must install agami-core[model] in a **marketplace** layout —
 `scripts/` + `lib/` with NO `packages/` sibling and no pip install — without crashing and without pointing
 at the dev-only `packages/agami-core` path (the failure the real run-through hit).
 
@@ -47,7 +47,7 @@ sys.exit(0)
 
 
 # Externally-managed interpreter (PEP 668): refuse BOTH `--user` and plain pip; only
-# `--break-system-packages` is allowed to install. Proves `sm` reaches that last-resort tier (OCR-033 #2).
+# `--break-system-packages` is allowed to install. Proves `sm` reaches that last-resort tier.
 _SHIM_PEP668 = """#!/usr/bin/env python3
 import os, sys
 args = sys.argv[1:]
@@ -116,14 +116,14 @@ def test_skill_delegates_install_to_sm():
 
 def test_pep668_reaches_break_system_packages(tmp_path):
     # An externally-managed interpreter refuses --user + plain; sm must fall through to the
-    # --break-system-packages tier and still install (OCR-033 #2). Dev layout → the `-e` requirement.
+    # --break-system-packages tier and still install. Dev layout → the `-e` requirement.
     r, installs = _run_install(SM, tmp_path, shim_src=_SHIM_PEP668)
     assert r.returncode == 0, r.stderr
     assert any("--break-system-packages" in ln for ln in installs), installs
 
 
 def test_readiness_probes_cli_entrypoint_and_isolates_cwd():
-    # OCR-033 #5: the readiness probe must import the real entrypoint `semantic_model.cli` (not just the
+    # the readiness probe must import the real entrypoint `semantic_model.cli` (not just the
     # package, which the bundled stub's __init__ would satisfy), and the CLI must run from a neutral cwd
     # so a `semantic_model` in the caller's cwd can't shadow the installed package.
     txt = SM.read_text()

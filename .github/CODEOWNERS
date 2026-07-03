@@ -1,4 +1,4 @@
-# Code owners for agami-core (OCR-025).
+# Code owners for agami-core.
 #
 # With branch protection's "require review from Code Owners" on, a PR touching any
 # path below needs approval from one of the listed maintainers. The point is that the

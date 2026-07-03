@@ -1,4 +1,4 @@
-"""OCR-033 regression: `promote_credentials.py` and `setup_desktop_mcp.py` must run in a **marketplace**
+"""Regression: `promote_credentials.py` and `setup_desktop_mcp.py` must run in a **marketplace**
 layout — `scripts/` + `lib/` with NO `packages/` sibling and no `agami_paths.py` next to the script —
 without a `ModuleNotFoundError` (they used to bare-import `agami_paths` off their own dir / a dev
 `packages/src`, issue #1), and `setup_desktop_mcp.py` must NOT install from a hardcoded `packages/agami-core`

@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-# The hard-floor inputs (see the ACE-009 `.env` contract). The warehouse credentials are NOT an env var —
+# The hard-floor inputs (see the `.env` contract). The warehouse credentials are NOT an env var —
 # they travel in the mounted artifacts (`<artifacts>/local/credentials`), so there's no DATASOURCE_URL here.
 _REQUIRED = ("PUBLIC_BASE_URL", "AGAMI_ADMIN_USERNAME")
 _OIDC_PROVIDERS = {"google": "GOOGLE", "microsoft": "MICROSOFT"}  # provider → AGAMI_OIDC_<PREFIX>_CLIENT_*

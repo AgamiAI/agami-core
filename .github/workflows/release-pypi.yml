@@ -2,7 +2,7 @@ name: Release PyPI
 
 # Builds the agami-core sdist + wheel from packages/agami-core and publishes them to PyPI via
 # TRUSTED PUBLISHING (OIDC) -- so a marketplace `/agami-connect` can `pip install "agami-core[model]"`
-# from the index instead of the git fallback. OCR-031's `sm` installer already tries the index before
+# from the index instead of the git fallback. The `sm` installer already tries the index before
 # git, so the moment a version lands on PyPI every marketplace install upgrades with no code change.
 # The version published is packages/agami-core/pyproject.toml `version` (a release tag must match it).
 #
