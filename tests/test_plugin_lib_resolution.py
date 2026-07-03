@@ -1,4 +1,4 @@
-"""OCR-030 regression: the plugin's runtime scripts must resolve the agami-core library in a
+"""Regression: the plugin's runtime scripts must resolve the agami-core library in a
 **marketplace install** — `scripts/` + the bundled `lib/`, with NO `packages/` sibling and no pip
 install — which is the exact layout that broke agami-connect (`import agami_paths` → ModuleNotFoundError).
 

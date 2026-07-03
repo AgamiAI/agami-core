@@ -1,7 +1,7 @@
-"""OCR-032 guard: the PyPI release workflow publishes via TRUSTED PUBLISHING and carries NO API token.
+"""Guard: the PyPI release workflow publishes via TRUSTED PUBLISHING and carries NO API token.
 
 The workflow itself (`.github/workflows/release-pypi.yml`) isn't ruff/pytest-covered — it only runs on a
-GitHub release — so this test locks the invariants OCR-032 promises: OIDC `id-token: write` (not a stored
+GitHub release — so this test locks the invariants the release promises: OIDC `id-token: write` (not a stored
 PyPI token), the `pypa/gh-action-pypi-publish` action, a build from `packages/agami-core`, and the
 release-vs-dispatch (PyPI vs TestPyPI) split. A change that reintroduces an API-token publish path or
 points the build elsewhere fails here.

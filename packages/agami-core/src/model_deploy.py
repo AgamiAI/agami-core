@@ -3,7 +3,7 @@
 The hosted server serves the model **from the database** (`tools._serve_model` reads the DB when one is
 configured), so a deploy has to push the YAML model into Postgres. The read→write primitives already exist
 and are idempotent; this is the orchestrator that wires them for every datasource under the artifacts dir.
-Run by the deploy entrypoint (ACE-009) and re-run on restart to pick up an edited model.
+Run by the deploy entrypoint and re-run on restart to pick up an edited model.
 
     AGAMI_DB_URL=postgresql://…  AGAMI_ARTIFACTS_DIR=/…/agami-artifacts  python -m model_deploy [datasource …]
 """
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         print("model_deploy: no database configured (set AGAMI_DB_URL).", file=sys.stderr)
         return 2
     # Ensure the model tables exist before writing — this runs in the deploy entrypoint *before* the
-    # server (whose lifespan auto-migrates, ACE-019) is up, so the schema may not be applied yet.
+    # server (whose lifespan auto-migrates) is up, so the schema may not be applied yet.
     # run_migrations is idempotent, so the later lifespan pass is a harmless no-op.
     store.run_migrations()
     artifacts_dir = agami_paths.artifacts_dir()

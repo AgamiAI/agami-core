@@ -36,7 +36,7 @@ _ROOT = Path(__file__).resolve().parent
 # The plugin's runtime scripts import a small stdlib-only slice of the agami-core library. The
 # marketplace ships only plugins/agami/ (no packages/, no pip install), so that slice is vendored —
 # drift-checked — into plugins/agami/lib/ so the scripts resolve it there. Source of truth stays the
-# package; `sync-lib` regenerates the copy and `check` fails on drift. See OCR-030.
+# package; `sync-lib` regenerates the copy and `check` fails on drift.
 _LIB_SRC = _ROOT / "packages" / "agami-core" / "src"
 _LIB_DST = _ROOT / "plugins" / "agami" / "lib"
 # The module-load import closure of the 4 scripts (all stdlib-only). tests/test_plugin_lib_resolution.py

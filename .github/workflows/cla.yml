@@ -7,7 +7,7 @@ name: CLA Assistant
 #
 # Manual prerequisite: a `PERSONAL_ACCESS_TOKEN` repo secret (a PAT with `repo` scope)
 # must exist so the Action can write the signatures file. The published "CLA Assistant"
-# status check is what branch protection should require (F13 / OCR-025).
+# status check is what branch protection should require.
 
 on:
   issue_comment:

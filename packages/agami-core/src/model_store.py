@@ -444,6 +444,6 @@ def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
         s["call_count"] = len(cs)
         s["error_count"] = sum(1 for c in cs if not c["success"])
         s["avg_ms"] = round(sum(ms) / len(ms)) if ms else None  # over calls that recorded latency
-        s["turns"] = _group_turns(cs)  # the within-conversation turn level (ACE-015)
+        s["turns"] = _group_turns(cs)  # the within-conversation turn level
         out.append(s)
     return out

@@ -1,4 +1,4 @@
-"""ACE-009 — the server seeds the configured admin on startup, so a fresh deploy can sign in.
+"""The server seeds the configured admin on startup, so a fresh deploy can sign in.
 
 Nothing else creates the configured admin in a deployment (the local `seed.py` is test-only), so the
 `mcp_http` lifespan seeds it from `AGAMI_ADMIN_*` right after migrating — create-if-absent + idempotent.

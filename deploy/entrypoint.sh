@@ -24,5 +24,5 @@ else:
     sys.exit("entrypoint: database not reachable after 60s")
 PY
 
-python -m model_deploy      # migrate (ACE-019) + load the model into Postgres (ACE-022); fail-closed
+python -m model_deploy      # migrate + load the model into Postgres; fail-closed
 exec python -m mcp_http     # serve (also re-migrates + seeds the admin on startup; both idempotent)

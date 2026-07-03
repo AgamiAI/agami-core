@@ -1,4 +1,4 @@
--- Add the **turn** level to the tool-call log (ACE-015). ACE-008 captured `thread_id` (the whole
+-- Add the **turn** level to the tool-call log. An earlier migration captured `thread_id` (the whole
 -- conversation) and the per-call `user_question`/`agent_query`; this adds `correlation_id` — the turn,
 -- i.e. the ONE user question whose answer fanned out into several agent sub-queries. Self-reported by
 -- Claude (the MCP protocol carries no turn boundary, so the server can't mint it), nullable and

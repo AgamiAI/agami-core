@@ -1,4 +1,4 @@
-"""ACE-019 — the server applies pending migrations on first DB open (idempotent, locked, fail-closed).
+"""The server applies pending migrations on first DB open (idempotent, locked, fail-closed).
 
 Covers the read helper (`Store.run_migrations`: the Postgres advisory-lock bracketing, idempotency, and
 fail-closed-on-error) and the startup wiring (`mcp_http` lifespan applies them before serving + propagates).

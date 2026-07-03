@@ -1,4 +1,4 @@
-"""ACE-022 — `model_deploy` loads the local YAML model into serving Postgres (idempotent, fail-closed).
+"""`model_deploy` loads the local YAML model into serving Postgres (idempotent, fail-closed).
 
 Builds a minimal NEUTRAL artifacts fixture in a tmp dir and runs the real loader → real DB writers (no
 mocking), then asserts the served model round-trips, re-running is idempotent, and the error paths exit non-zero.

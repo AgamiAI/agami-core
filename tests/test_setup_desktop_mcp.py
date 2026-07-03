@@ -125,7 +125,7 @@ def test_desktop_config_path_linux(monkeypatch):
     assert p.parts[-3:] == (".config", "Claude", "claude_desktop_config.json")
 
 
-# --- package install (delegates to `sm install`, OCR-033 #8) ----------------
+# --- package install (delegates to `sm install`) ----------------
 
 def test_ensure_package_installed_dry_run_delegates_no_exec(monkeypatch, capsys):
     calls = []

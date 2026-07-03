@@ -1,4 +1,4 @@
-"""ACE-009 — the host-side deploy preflight: validate the `.env`, persist the signing secret, derive the host."""
+"""The host-side deploy preflight: validate the `.env`, persist the signing secret, derive the host."""
 
 from __future__ import annotations
 

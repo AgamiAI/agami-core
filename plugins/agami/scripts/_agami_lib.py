@@ -1,6 +1,6 @@
 """Make the agami-core library importable for the plugin's runtime scripts.
 
-OCR-028 moved the library (`agami_paths`, `execute_sql`, `semantic_model`, …) out of this scripts dir
+A refactor moved the library (`agami_paths`, `execute_sql`, `semantic_model`, …) out of this scripts dir
 into the pip package `packages/agami-core/src`. The marketplace ships only `plugins/agami/`, so those
 modules aren't on `sys.path` there and nothing pip-installs them — which broke every marketplace install
 (agami-connect died on `import agami_paths`). This resolver makes the library importable in every layout,
