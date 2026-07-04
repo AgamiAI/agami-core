@@ -185,6 +185,13 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
             shutil.rmtree(stale_local)
         datasources = getattr(args, "datasources", None)
         dslist = [s.strip() for s in datasources.split(",") if s.strip()] if datasources else None
+        if dslist:
+            # Warn (don't fail) on a name that isn't a model here — staging it silently would deploy a
+            # server missing that datasource. A warning to stderr keeps the stdout status line clean.
+            available = {d.name for d in artifacts.iterdir() if d.is_dir() and (d / "org.yaml").is_file()}
+            unknown = [d for d in dslist if d not in available]
+            if unknown:
+                sys.stderr.write(f"warning: --datasources not found (staged nothing for them): {', '.join(unknown)}\n")
         shutil.copytree(
             artifacts, staged, symlinks=True, dirs_exist_ok=True,
             ignore=_stage_ignore(artifacts, dslist),  # drops `local/`, and non-chosen models when dslist set

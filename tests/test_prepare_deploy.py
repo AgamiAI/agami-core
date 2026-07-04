@@ -330,3 +330,14 @@ def test_selective_datasources_stages_only_chosen(tmp_path):
     assert (target / "artifacts" / "demo" / "org.yaml").exists()
     assert not (target / "artifacts" / "ops").exists()        # not chosen → dropped
     assert (target / "artifacts" / "USER_MEMORY.md").exists()  # install-global → always staged
+
+
+def test_unknown_datasource_name_warns_but_does_not_fail(tmp_path, capsys):
+    """A typo'd --datasources name warns to stderr (deploying a server silently missing a datasource is bad)
+    but the run still succeeds for the valid ones."""
+    art = _artifacts(tmp_path)  # model `demo`
+    target = tmp_path / "bundle"
+    status, code = prepare_deploy.prepare(_args(target, art, datasources="demo,nope"))
+    assert code == 0 and status.startswith("PREPARED ")
+    assert (target / "artifacts" / "demo" / "org.yaml").exists()
+    assert "nope" in capsys.readouterr().err
