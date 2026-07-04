@@ -374,6 +374,22 @@ def test_rerun_with_datasources_drops_a_previously_staged_model(tmp_path):
     assert not (target / "artifacts" / "ops").exists()               # stale ops purged
 
 
+def test_rerun_drops_a_symlinked_datasource_without_touching_its_target(tmp_path):
+    """A dropped datasource that was staged as a symlink must be unlinked (rmtree raises on a symlink), and
+    its target — which may live outside the bundle — must be left intact."""
+    art = _artifacts(tmp_path)  # model `demo`
+    external = tmp_path / "external-ops"
+    external.mkdir()
+    (external / "org.yaml").write_text("name: ops\n", encoding="utf-8")
+    (art / "ops").symlink_to(external, target_is_directory=True)  # a symlinked model in the artifacts dir
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, art))                       # stages demo + the ops symlink
+    status, code = prepare_deploy.prepare(_args(target, art, datasources="demo"))  # drop ops on re-run
+    assert code == 0 and status.startswith("UPGRADED ")
+    assert not (target / "artifacts" / "ops").exists()               # the staged symlink is gone
+    assert (external / "org.yaml").exists()                          # its target is untouched
+
+
 def test_all_unknown_datasources_fails_fast(tmp_path):
     """If NONE of the requested datasources exist, error out — don't build a modelless bundle that only
     breaks later at runtime."""

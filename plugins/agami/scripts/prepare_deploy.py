@@ -186,7 +186,9 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         # NOT `ignore_errors` — a failed purge (a perms/read-only issue) must surface as an ERROR, never
         # silently leave the secret behind. A missing `local/` is fine (nothing to purge).
         stale_local = staged / "local"
-        if stale_local.exists():
+        if stale_local.is_symlink():
+            stale_local.unlink()  # rmtree() raises on a symlink — drop the link, never its target
+        elif stale_local.exists():
             shutil.rmtree(stale_local)
         datasources = getattr(args, "datasources", None)
         dslist = [s.strip() for s in datasources.split(",") if s.strip()] if datasources else None
@@ -205,7 +207,11 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
             chosen = set(dslist)
             if staged.exists():
                 for d in staged.iterdir():
-                    if d.is_dir() and (d / "org.yaml").is_file() and d.name not in chosen:
+                    if d.name in chosen or not (d / "org.yaml").is_file():
+                        continue  # keep chosen models + non-model entries (e.g. USER_MEMORY.md)
+                    if d.is_symlink():
+                        d.unlink()  # a symlinked model: drop the link, never rmtree its target
+                    else:
                         shutil.rmtree(d)
         shutil.copytree(
             artifacts, staged, symlinks=True, dirs_exist_ok=True,
