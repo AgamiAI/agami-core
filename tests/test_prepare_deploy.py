@@ -1,7 +1,7 @@
 """
 Tests for plugins/agami/scripts/prepare_deploy.py — the `/agami-deploy` bundle scaffolder.
 
-It copies the carried bundle templates, stages the model artifacts, and writes a `agami.env` with the
+It copies the carried bundle templates, stages the model artifacts, and writes an `agami.env` file with the
 NON-SECRET values only. The contract these tests pin: a complete bundle is produced, the right
 COMPOSE_PROFILES land per toggle, no password ever passes through the helper, an existing `agami.env` is
 preserved, and the generated `agami.env` passes deploy_preflight.
