@@ -201,6 +201,27 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class _NormalizeMcpSlash:
+    """Rewrite the exact path ``/mcp`` → ``/mcp/`` before routing.
+
+    Starlette's ``Mount("/mcp", …)`` answers a request to the bare ``/mcp`` (no trailing slash) with a
+    307 redirect to ``/mcp/``. claude.ai posts the connector URL ``{base}/mcp`` and does **not** follow
+    that redirect, so the connector errors right after login. ``handle_mcp`` ignores the sub-path, so
+    normalizing here is loss-free. Pure ASGI (not ``BaseHTTPMiddleware``) so it edits the scope path
+    with no request-body buffering; only the exact ``/mcp`` is touched — ``/mcp/…`` and every other
+    route pass through untouched. Placed outermost so it runs before auth + routing; the fix lives in
+    the app, so it also covers the Caddy-less ``cloud-run`` profile (no proxy rewrite needed).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope, path="/mcp/", raw_path=b"/mcp/")
+        await self.app(scope, receive, send)
+
+
 async def _protected_resource(request: Request) -> JSONResponse:
     """RFC 9728 — tells the client where the authorization server is."""
     base = public_base_url()
@@ -362,7 +383,10 @@ def build_app() -> Starlette:
         Mount("/mcp", app=handle_mcp),
     ]
     middleware = [
-        Middleware(_AuthMiddleware, resolver=_build_org_resolver(), auth=auth_provider)
+        # Outermost: normalize the bare `/mcp` → `/mcp/` before routing so Starlette's Mount doesn't
+        # 307-redirect it (claude.ai posts `{base}/mcp` and won't follow the redirect). See _NormalizeMcpSlash.
+        Middleware(_NormalizeMcpSlash),
+        Middleware(_AuthMiddleware, resolver=_build_org_resolver(), auth=auth_provider),
     ]
     return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 

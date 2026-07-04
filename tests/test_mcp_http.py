@@ -136,6 +136,33 @@ def test_non_bearer_and_empty_tokens_are_rejected(base_url):
         assert r.status_code == 401, authz
 
 
+def test_mcp_bare_path_is_not_307_redirected(base_url):
+    """Regression: Mount('/mcp') 307-redirects the no-slash /mcp to /mcp/, and claude.ai (unlike
+    TestClient's default) does NOT follow it, so the connector errors right after login. The shim must
+    let an authed POST /mcp reach the handler directly — a non-307 status, matching /mcp/.
+
+    `follow_redirects=False` is load-bearing: with the default (follow on), the auto-followed 307
+    would hide the bug — which is exactly why it shipped."""
+    headers = {
+        "Authorization": "Bearer present",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    init = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "t", "version": "1"}},
+    }
+    with TestClient(mcp_http.build_app(), follow_redirects=False) as c:
+        # Auth still gates the bare path (the shim must not become a bypass) — no bearer → 401, not a 307.
+        assert c.post("/mcp", json=init).status_code == 401
+        bare = c.post("/mcp", headers=headers, json=init)
+        slashed = c.post("/mcp/", headers=headers, json=init)
+    assert bare.status_code != 307              # the fix: the bare path is served, not redirected
+    assert bare.status_code == 200              # reaches `initialize` directly
+    assert bare.status_code == slashed.status_code  # parity with the trailing-slash form
+
+
 def test_http_tools_list_is_the_same_five(base_url):
     """Authed end-to-end: initialize → tools/list over HTTP returns exactly the 5 product tools —
     the same surface stdio advertises (mirrored, not forked)."""
