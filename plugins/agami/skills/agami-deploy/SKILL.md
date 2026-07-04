@@ -72,14 +72,20 @@ have the user set `APP_DATABASE_URL` in `.env` by hand, never on the command lin
 line: `PREPARED <dir>` (fresh) or `PREPARED_KEPT_ENV <dir>` (an existing `.env` was preserved — tell the
 user to edit it directly to change values).
 
-## Phase 2: Hand off the password (then end the turn)
-Tell the user (do **not** proceed past this in the same turn):
+## Phase 2: Hand off the secrets (then end the turn)
+Tell the user (do **not** proceed past this in the same turn). These are credentials — the user types
+them by hand; you never see them, they stay in the file on their machine:
 
-> Open `~/agami-deploy/.env`, set **`AGAMI_ADMIN_PASSWORD=`** to a strong password (and, if you chose
-> managed Postgres, set **`APP_DATABASE_URL=`** too), and save. Then tell me to continue. (I never see
-> them — they stay in the file on your machine.)
+> Open `~/agami-deploy/.env` and set, then save:
+> - **`AGAMI_ADMIN_PASSWORD=`** — a strong admin password.
+> - **`DATASOURCE_URL=`** — the warehouse the model queries, as a connection DSN
+>   (e.g. `postgresql://user:pass@host:5432/db`; the scheme picks the type). A second datasource uses
+>   `DATASOURCE_URL__<NAME>`. *(The warehouse creds live here now — they are **not** shipped in the bundle.)*
+> - *(only if you chose managed Postgres)* **`APP_DATABASE_URL=`** — your Postgres URL.
+>
+> Then tell me to continue.
 
-End the turn here. The user fills the password and re-invokes (or says "continue").
+End the turn here. The user fills the secrets and re-invokes (or says "continue").
 
 ## Phase 3: Finalize + deploy
 1. **Validate + generate the signing secret:** `$PY -m deploy_preflight ~/agami-deploy/.env`. If it

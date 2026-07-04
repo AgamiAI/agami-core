@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -62,6 +63,24 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
     return text
 
 
+def _grant_world_read(root: Path) -> None:
+    """`chmod -R a+rX` in Python over the staged model: add read for all, and traverse (execute) for
+    directories (and any file already executable). The deployed container runs as uid 10001, not the
+    operator who owns these files, and mounts them read-only — without this the boot-time model load
+    fails "Permission denied" on ORGANIZATION.md and the container crash-loops. Add-only (never removes
+    a bit, so a read-only snapshot stays readable and never wider); symlinks are skipped so a link's
+    target outside the bundle is never touched. Only non-secret model files reach here — `local/`
+    (credentials + .pgpass) is excluded from staging."""
+    for path in [root, *root.rglob("*")]:
+        if path.is_symlink():
+            continue
+        mode = stat.S_IMODE(path.stat().st_mode)
+        add = 0o444  # a+r
+        if path.is_dir() or (mode & 0o111):  # a+X: dirs, or files that already carry an execute bit
+            add |= 0o111
+        path.chmod(mode | add)
+
+
 def prepare(args: argparse.Namespace) -> tuple[str, int]:
     """Returns (status_line, exit_code). The status line's first token is machine-readable."""
     target = Path(args.target).expanduser().resolve()
@@ -82,10 +101,18 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
             shutil.copy2(_BUNDLE_SRC / name, target / name)
         (target / "deploy.sh").chmod(0o755)
 
-        # Stage the model + warehouse credentials so the bundle is self-contained + shippable. copy2
-        # preserves the chmod-600 on local/credentials; symlinks=True keeps links as links rather than
-        # materializing their targets into the bundle. dirs_exist_ok so a re-run refreshes in place.
-        shutil.copytree(artifacts, target / "artifacts", symlinks=True, dirs_exist_ok=True)
+        # Stage the MODEL only — never a secret. `local/` (credentials + .pgpass) is excluded: the
+        # deployed server reads warehouse creds from DATASOURCE_URL in .env, so no 600-mode file is
+        # copied into a shippable bundle or mounted into the container (the uid-mismatch crash this
+        # replaces). symlinks=True keeps links as links; dirs_exist_ok so a re-run refreshes in place.
+        staged = target / "artifacts"
+        shutil.copytree(
+            artifacts, staged, symlinks=True, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("local"),
+        )
+        # The model is non-secret, but the container runs as a different uid than the file owner — widen
+        # the staged copy to world-readable/traversable so the read-only mount is readable regardless.
+        _grant_world_read(staged)
 
         env_path = target / ".env"
         if env_path.exists():

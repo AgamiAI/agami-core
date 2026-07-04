@@ -63,9 +63,50 @@ def test_prepares_a_complete_bundle(tmp_path):
     assert "image: ghcr.io/agamiai/agami-core:" in compose
     assert "build:" not in compose
 
-    # The model + credentials are staged so the bundle is self-contained + shippable.
+    # The MODEL is staged so the bundle is self-contained + shippable...
     assert (target / "artifacts" / "demo" / "org.yaml").exists()
-    assert (target / "artifacts" / "local" / "credentials").exists()
+    # ...but no secret travels: `local/` (credentials + .pgpass) is excluded entirely (creds come from
+    # DATASOURCE_URL in .env now), so no 600-mode file lands in a shippable bundle or a mounted volume.
+    assert not (target / "artifacts" / "local").exists()
+    assert list(target.glob("artifacts/**/credentials")) == []
+
+
+def test_local_secrets_are_never_staged(tmp_path):
+    """`local/` — credentials AND .pgpass — must not enter a shippable bundle (the field tester had to
+    chown both to the container uid; with them gone, neither exists to fix)."""
+    art = _artifacts(tmp_path)
+    pgpass = art / "local" / ".pgpass"
+    pgpass.write_text("db.example:5432:*:u:p\n", encoding="utf-8")
+    pgpass.chmod(0o600)
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, art))
+    assert not (target / "artifacts" / "local").exists()
+    assert list(target.glob("artifacts/**/credentials")) == []
+    assert list(target.glob("artifacts/**/.pgpass")) == []
+
+
+def test_staged_model_is_world_readable(tmp_path):
+    """The container runs as a different uid and mounts the model read-only — every staged dir must be
+    world-traversable and every file world-readable, else the boot-time load crashes (issue #1's fix)."""
+    art = _artifacts(tmp_path)
+    # Simulate a restrictive owner-only source (umask 077); the widening must repair it in the bundle.
+    (art / "demo" / "org.yaml").chmod(0o600)
+    (art / "demo").chmod(0o700)
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, art))
+    prof = target / "artifacts" / "demo"
+    assert stat.S_IMODE(prof.stat().st_mode) & 0o005 == 0o005          # dir: others r-x (traversable)
+    assert stat.S_IMODE((prof / "org.yaml").stat().st_mode) & 0o004     # file: others readable
+
+
+def test_env_ships_a_datasource_url_hint_left_unset(tmp_path):
+    """The warehouse DSN is a Phase-2 hand-off (a credential): .env carries a commented hint, and the
+    helper never sets it to a value (same discipline as APP_DATABASE_URL / the admin password)."""
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
+    env = (target / ".env").read_text()
+    assert "# DATASOURCE_URL=" in env       # the hint ships
+    assert "\nDATASOURCE_URL=" not in env    # but is never written as a live value by the helper
 
 
 def test_env_has_non_secrets_and_a_blank_password(tmp_path):
