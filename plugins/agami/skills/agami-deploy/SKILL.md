@@ -55,6 +55,11 @@ Ask only these (everything else is defaulted or generated). Prefer one compact e
 3. *(only if they bring their own Postgres)* note it → use profiles `edge` (drops the bundled DB). The
    managed `postgresql://…` URL is a **credential**, so do **not** collect it in chat — after the bundle
    is written, the user sets `APP_DATABASE_URL` in `agami.env` themselves (the same hand-off as the password).
+4. **Which datasource(s)?** — list the models in the artifacts dir (one per profile:
+   `<artifacts_dir>/<profile>/org.yaml`). If there's exactly one, use it silently. If there's **more than
+   one**, ask: *"You have N datasources — `<names>`. Deploy all, or pick?"* Pass the chosen set as
+   `--datasources a,b` (omit to deploy all). The server serves **every** datasource you stage, and each needs
+   its own DSN (Phase 2).
 
 **Confirm where to write the bundle.** Ask: *"Where should I put the deploy bundle? (default `~/agami-deploy`)"*
 and use their answer as `--target`. It must **not** be inside the artifacts dir (prepare_deploy rejects that —
@@ -69,10 +74,20 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/prepare_deploy.py" \
   --profiles "bundled-db,edge"
 ```
 
+**Append these flags to the command when they apply** (add each as another `\`-continued line): `--datasources
+"a,b"` to stage a subset of models; on a **version upgrade** `--image-tag "<version>"` to bump it (omit it on a
+model-only re-stage so an existing pin isn't changed).
+
 (Use `--profiles "bundled-db,tunnel"` for the tunnel, or `--profiles "edge"` for managed Postgres — then
-have the user set `APP_DATABASE_URL` in `agami.env` by hand, never on the command line.) Report the status
-line: `PREPARED <dir>` (fresh) or `PREPARED_KEPT_ENV <dir>` (an existing `agami.env` was preserved — tell the
-user to edit it directly to change values).
+have the user set `APP_DATABASE_URL` in `agami.env` by hand, never on the command line.)
+
+**Read the status line** and branch on the first token:
+- `PREPARED <dir>` — a **fresh** bundle. Go to Phase 2 (fill the secrets).
+- `UPGRADED <dir> new_keys=<a,b,…>` — an **existing** bundle upgraded **in place**: every value the user
+  typed (password, secret, DSN) is kept. If `new_keys` is **non-empty**, this version added settings — tell
+  the user exactly which to set (e.g. *"this version added `DATASOURCE_URL` — set it in `agami.env` before we
+  restart"*). If it's **empty**, nothing new is needed. Existing secrets are already there — don't re-ask;
+  continue to Phase 3 (deploy).
 
 ## Phase 2: Hand off the secrets (then end the turn)
 **Open the file for them** so they don't have to hunt for it (it's a plain visible file, `agami.env`, in the
@@ -83,9 +98,13 @@ credentials — the user types them by hand; you never see them, they stay in th
 
 > Open `<target>/agami.env` (I just opened it for you) and set, then save:
 > - **`AGAMI_ADMIN_PASSWORD=`** — a strong admin password.
-> - **`DATASOURCE_URL=`** — the warehouse the model queries, as a connection DSN
->   (e.g. `postgresql://user:pass@host:5432/db`; the scheme picks the type). A second datasource uses
->   `DATASOURCE_URL__<NAME>`. *(The warehouse creds live here now — they are **not** shipped in the bundle.)*
+> - the **warehouse DSN(s)** — the connection string(s) the model queries (the scheme picks the type:
+>   `postgresql://` `mysql://` `redshift://` `snowflake://…`). *(These live here now — **not** shipped in
+>   the bundle.)* Name them per the datasource(s) you deployed:
+>   - **one datasource** → **`DATASOURCE_URL=`** (e.g. `postgresql://<user>:<password>@host:5432/db`).
+>   - **several** → one per datasource: **`DATASOURCE_URL__<TOKEN>=`**, where `<TOKEN>` is the datasource id
+>     upper-cased with every non-alphanumeric char turned to `_` (so `sales-pg` → `DATASOURCE_URL__SALES_PG`).
+>     *(List the exact var names for the datasources they chose in Phase 1.4.)*
 > - *(only if you chose managed Postgres)* **`APP_DATABASE_URL=`** — your Postgres URL.
 >
 > Then tell me to continue.
@@ -110,9 +129,16 @@ End the turn here. The user fills the secrets and re-invokes (or says "continue"
 - **Docker** on the host: `curl -fsSL https://get.docker.com | sudo sh`.
 - Then `./deploy.sh` on the host → wait ~30s for Caddy to issue the cert → open `<PUBLIC_BASE_URL>/admin`.
 
-## Updating the model later
-They refresh the model locally → re-run `/agami-deploy` (re-stages `artifacts/`) → on the host
-`docker compose restart agami`. The server re-ingests the model on boot — no rebuild, no DB access.
+## Re-running later (model update vs version upgrade)
+A re-run of `/agami-deploy` over an existing bundle is **non-destructive** — it never touches the secrets the
+user typed (`UPGRADED` status); it re-stages the model, appends any settings new in this version, and reports
+them as `new_keys`. Two cases:
+
+- **Model update** (they changed the semantic model): re-run **without** `--image-tag` (keeps the pinned
+  version), then on the host `docker compose restart agami` — the server re-ingests the model on boot. No
+  rebuild, no DB access.
+- **Version upgrade** (a newer agami release): re-run **with** `--image-tag "<version>"` (bumps it), set any
+  `new_keys` the run reports, then `cd <target> && ./deploy.sh` (pulls the new image + recreates).
 
 ## Notes
 - This is the **team** path. For a quick local feel of the same tools, that's `agami-serve` (stdio, no

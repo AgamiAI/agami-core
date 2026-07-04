@@ -5,15 +5,15 @@ model artifacts, and write `agami.env` with the NON-SECRET values the skill gath
 This helper never touches a secret: the admin password is typed by the user into the file afterwards
 (the agami-connect hand-off pattern), `deploy_preflight` generates the signing secret, and an external
 `APP_DATABASE_URL` (itself a credential) is likewise edited into `agami.env` by the user — never passed
-here on the command line. So that a re-run can't wipe a password the user already typed or a secret already
-generated, an EXISTING `agami.env` is preserved untouched — only the other bundle files (and the artifacts
-copy) are refreshed.
+here on the command line. On a re-run over an EXISTING bundle it upgrades non-destructively: every value the
+user typed is kept, keys new in this version are appended (so an upgrade surfaces e.g. `DATASOURCE_URL`), and
+the image tag bumps only if one was passed.
 
 Stdout is a single status line (first token machine-readable); the skill reads it and acts. Stdlib only.
 
-  PREPARED <target>           fresh bundle written; user must set AGAMI_ADMIN_PASSWORD next        [0]
-  PREPARED_KEPT_ENV <target>  bundle refreshed; an existing agami.env was preserved (not overwritten) [0]
-  ERROR <message>             templates missing / artifacts missing / write failed                  [1]
+  PREPARED <target>                    fresh bundle written; user must set the secrets next          [0]
+  UPGRADED <target> new_keys=<a,b,…>   existing bundle upgraded in place; new_keys = keys just added [0]
+  ERROR <message>                      templates missing / artifacts missing / write failed          [1]
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
     password line is left blank (the user types it); the signing secret is left for deploy_preflight."""
     text = example if example.endswith("\n") else example + "\n"
     text = _set_key(text, "COMPOSE_PROFILES", args.profiles)
-    text = _set_key(text, "AGAMI_IMAGE_TAG", args.image_tag)
+    text = _set_key(text, "AGAMI_IMAGE_TAG", getattr(args, "image_tag", None) or "latest")
     text = _set_key(text, "PUBLIC_BASE_URL", args.public_base_url)
     text = _set_key(text, "AGAMI_ADMIN_USERNAME", args.admin_email)
     text = _set_key(text, "AGAMI_ADMIN_FIRST_NAME", args.admin_first)
@@ -94,6 +94,66 @@ def _grant_world_read(root: Path) -> None:
             _widen_one(base / name)
 
 
+def _env_key(line: str) -> str | None:
+    """The KEY of an `agami.env` line (`KEY=…` or `# KEY=…`), or None for prose/blank. A key is
+    UPPER_SNAKE (letters/digits/underscore), so a comment sentence that happens to contain `=`
+    (e.g. `?sslmode=require`) isn't mistaken for a setting."""
+    # Whitespace FIRST, then the comment marker(s): an INDENTED commented key ("  # KEY=…") must still be
+    # recognized, else _merge_env would think it's missing and re-append it (a duplicate).
+    s = line.lstrip().lstrip("#").lstrip()
+    key = s.split("=", 1)[0].strip() if "=" in s else ""
+    return key if key and all(c.isupper() or c.isdigit() or c == "_" for c in key) else None
+
+
+def _merge_env(existing: str, template: str, image_tag: str | None) -> tuple[str, list[str]]:
+    """Non-destructive upgrade of an existing `agami.env`: **preserve every existing value** (never touch a
+    typed password / generated secret), **append any template key not already present** (as the template's
+    own line — a commented hint or a value, so a key new in this version like `DATASOURCE_URL` shows up), and
+    — only when `image_tag` is given — bump the non-secret `AGAMI_IMAGE_TAG`. The output is LF-normalized
+    (docker's `env_file` + the generated file use LF; a value's content is unchanged by that). Returns
+    (merged_text, new_keys)."""
+    present = {k for line in existing.splitlines() if (k := _env_key(line))}
+    merged = existing if existing.endswith("\n") else existing + "\n"
+    new_lines: list[str] = []
+    new_keys: list[str] = []
+    for line in template.splitlines():
+        k = _env_key(line)
+        if k and k not in present and k not in new_keys:
+            new_lines.append(line)
+            new_keys.append(k)
+    if new_lines:
+        merged += (
+            "\n# --- added on upgrade by /agami-deploy (new in this version — fill any you need) ---\n"
+            + "\n".join(new_lines)
+            + "\n"
+        )
+    if image_tag is not None:
+        merged = _set_key(merged, "AGAMI_IMAGE_TAG", image_tag)
+    # Normalize to LF so appending LF lines to a CRLF file (Windows) can't produce mixed newlines.
+    return merged.replace("\r\n", "\n").replace("\r", "\n"), new_keys
+
+
+def _stage_ignore(artifacts: Path, datasources: list[str] | None):
+    """A `copytree` ignore callable: always drop `local/` (secrets never ship), and — when `datasources`
+    is given — also drop any TOP-LEVEL profile dir (a dir with an `org.yaml`) not in the chosen set.
+    Install-global files (e.g. `USER_MEMORY.md`) and non-profile entries are always kept. Default
+    (`datasources is None`) stages every model, preserving prior behavior."""
+    chosen = set(datasources) if datasources else None
+
+    def _ignore(dirpath: str, names: list[str]) -> set[str]:
+        drop: set[str] = set()
+        if Path(dirpath) == artifacts:  # only prune at the artifacts root
+            drop.add("local")
+            if chosen is not None:
+                for name in names:
+                    d = artifacts / name
+                    if name not in chosen and d.is_dir() and (d / "org.yaml").is_file():
+                        drop.add(name)
+        return drop
+
+    return _ignore
+
+
 def prepare(args: argparse.Namespace) -> tuple[str, int]:
     """Returns (status_line, exit_code). The status line's first token is machine-readable."""
     target = Path(args.target).expanduser().resolve()
@@ -126,11 +186,36 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         # NOT `ignore_errors` — a failed purge (a perms/read-only issue) must surface as an ERROR, never
         # silently leave the secret behind. A missing `local/` is fine (nothing to purge).
         stale_local = staged / "local"
-        if stale_local.exists():
+        if stale_local.is_symlink():
+            stale_local.unlink()  # rmtree() raises on a symlink — drop the link, never its target
+        elif stale_local.exists():
             shutil.rmtree(stale_local)
+        datasources = getattr(args, "datasources", None)
+        dslist = [s.strip() for s in datasources.split(",") if s.strip()] if datasources else None
+        if dslist:
+            available = {d.name for d in artifacts.iterdir() if d.is_dir() and (d / "org.yaml").is_file()}
+            unknown = [d for d in dslist if d not in available]
+            # Fail fast if NONE of the requested datasources exist — a modelless bundle would only break
+            # later at runtime. If SOME are unknown, warn (stderr keeps the stdout status line clean) and
+            # stage the valid ones.
+            if not any(d in available for d in dslist):
+                return f"ERROR --datasources matched no model in {artifacts}: {', '.join(dslist)}", 1
+            if unknown:
+                sys.stderr.write(f"warning: --datasources not found (staged nothing for them): {', '.join(unknown)}\n")
+            # On a re-run, drop any previously-staged model NOT in the chosen set — copytree(dirs_exist_ok)
+            # merges and won't delete, so without this a dropped datasource would linger and still be served.
+            chosen = set(dslist)
+            if staged.exists():
+                for d in staged.iterdir():
+                    if d.name in chosen or not (d / "org.yaml").is_file():
+                        continue  # keep chosen models + non-model entries (e.g. USER_MEMORY.md)
+                    if d.is_symlink():
+                        d.unlink()  # a symlinked model: drop the link, never rmtree its target
+                    else:
+                        shutil.rmtree(d)
         shutil.copytree(
             artifacts, staged, symlinks=True, dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("local"),
+            ignore=_stage_ignore(artifacts, dslist),  # drops `local/`, and non-chosen models when dslist set
         )
         # The model is non-secret, but the container runs as a different uid than the file owner — widen
         # the staged copy to world-readable/traversable so the read-only mount is readable regardless.
@@ -139,13 +224,18 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         # The operator-editable config is `agami.env` — a visible name (a dot-file like `.env` is hidden in
         # Finder, and this is the one file the user must open). docker-compose reads it via `--env-file` in
         # deploy.sh + the `env_file:` directive, since it no longer auto-loads by the `.env` name.
+        example = (_BUNDLE_SRC / "agami.env.example").read_text(encoding="utf-8")
         env_path = target / "agami.env"
         if env_path.exists():
-            # Never clobber an agami.env that may already hold a typed password / a generated signing secret —
-            # but do reassert chmod 600 in case an editor/umask loosened it (the file holds secrets).
-            env_path.chmod(0o600)
-            return f"PREPARED_KEPT_ENV {target}", 0
-        example = (_BUNDLE_SRC / "agami.env.example").read_text(encoding="utf-8")
+            # Upgrade-aware, NON-DESTRUCTIVE: keep the operator's typed password / generated secret, append
+            # any key new in this version (so an upgrade surfaces e.g. DATASOURCE_URL), and bump the image
+            # tag only if one was passed (a model-only re-stage passes none, so the pin is left alone).
+            merged, new_keys = _merge_env(
+                env_path.read_text(encoding="utf-8"), example, getattr(args, "image_tag", None)
+            )
+            env_path.write_text(merged, encoding="utf-8")
+            env_path.chmod(0o600)  # reassert 600 in case an editor/umask loosened it
+            return f"UPGRADED {target} new_keys={','.join(new_keys)}", 0
         env_path.write_text(_build_env(example, args), encoding="utf-8")
         env_path.chmod(0o600)
     except OSError as e:
@@ -163,7 +253,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--admin-first", required=True)
     p.add_argument("--admin-last", required=True)
     p.add_argument("--profiles", default="bundled-db,edge", help="COMPOSE_PROFILES (default: single-server)")
-    p.add_argument("--image-tag", default="latest", help="ghcr.io/agamiai/agami-core tag to pull")
+    p.add_argument("--image-tag", default=None,
+                   help="ghcr.io/agamiai/agami-core tag (fresh: defaults to 'latest'; on a re-run, set it to "
+                        "bump the version — omit to leave an existing pin alone)")
+    p.add_argument("--datasources", default=None,
+                   help="comma-separated datasource ids to stage (default: every model in the artifacts dir)")
     # Deliberately NO --password / --app-database-url / secret args: a credential never travels on the
     # command line (it would leak into chat logs / shell history). The user edits those into agami.env.
     args = p.parse_args(argv)
