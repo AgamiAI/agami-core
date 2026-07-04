@@ -56,7 +56,10 @@ def prepare_env(env_path: Path) -> list[str]:
     """Validate + complete `agami.env` in place. Returns a list of human-readable errors (empty = ready).
     Generates `AGAMI_SIGNING_SECRET` and derives `AGAMI_PUBLIC_HOST` when absent — both idempotent."""
     if not env_path.exists():
-        return [f"{env_path} not found — copy agami.env.example to agami.env and fill it in"]
+        return [
+            f"{env_path} not found — run /agami-deploy to write it "
+            "(or, from a repo clone, copy agami.env.example to agami.env and fill it in)"
+        ]
     env = _parse_env(env_path.read_text())
 
     errors = [f"{k} is required" for k in _REQUIRED if not env.get(k)]

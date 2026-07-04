@@ -76,7 +76,8 @@ user to edit it directly to change values).
 
 ## Phase 2: Hand off the secrets (then end the turn)
 **Open the file for them** so they don't have to hunt for it (it's a plain visible file, `agami.env`, in the
-bundle dir): `open -t "<target>/agami.env"` on macOS (opens it in the default text editor); on other platforms
+bundle dir): `open -t -- "<target>/agami.env"` on macOS (opens it in the default text editor; the `--` stops a
+path that starts with `-` being read as a flag); on other platforms
 just print the **absolute path**. Then tell the user (do **not** proceed past this in the same turn). These are
 credentials — the user types them by hand; you never see them, they stay in the file on their machine:
 
