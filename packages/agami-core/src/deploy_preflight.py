@@ -15,14 +15,15 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-# The hard-floor inputs (see the `.env` contract). The warehouse credentials are NOT an env var —
-# they travel in the mounted artifacts (`<artifacts>/local/credentials`), so there's no DATASOURCE_URL here.
+# The hard-floor inputs preflight checks (see the `agami.env` contract). The warehouse DSN(s) —
+# DATASOURCE_URL[__<datasource>] — are the operator's to fill and are NOT required here: a single- vs
+# multi-datasource deploy uses different keys, and the server reads them at query time (not at boot).
 _REQUIRED = ("PUBLIC_BASE_URL", "AGAMI_ADMIN_USERNAME")
 _OIDC_PROVIDERS = {"google": "GOOGLE", "microsoft": "MICROSOFT"}  # provider → AGAMI_OIDC_<PREFIX>_CLIENT_*
 
 
 def _parse_env(text: str) -> dict[str, str]:
-    """Parse a `.env` into {KEY: VALUE} — `KEY=VALUE` per line, `#` comments and blanks skipped. A value's
+    """Parse an `agami.env` into {KEY: VALUE} — `KEY=VALUE` per line, `#` comments and blanks skipped. A value's
     surrounding quotes are stripped; everything after the first `=` is the value (so URLs with `=` survive)."""
     out: dict[str, str] = {}
     for line in text.splitlines():
@@ -35,7 +36,7 @@ def _parse_env(text: str) -> dict[str, str]:
 
 
 def _set_env(env_path: Path, key: str, value: str) -> None:
-    """Set `KEY=VALUE` in the `.env` — **replacing** an existing (even present-but-empty) line in place, else
+    """Set `KEY=VALUE` in `agami.env` — **replacing** an existing (even present-but-empty) line in place, else
     appending. Replace-not-append avoids a confusing duplicate key when e.g. `AGAMI_SIGNING_SECRET=` is blank.
     chmod 600 because the file holds the signing secret + DB creds."""
     lines = env_path.read_text().splitlines()

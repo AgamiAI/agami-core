@@ -33,9 +33,9 @@ re-ingests the model on boot. **No rebuild, no new VM, no database access** — 
 ## Variants (toggle `COMPOSE_PROFILES` in `agami.env`)
 | You want… | `agami.env` | command |
 |---|---|---|
-| **Secure VM** (default) | `COMPOSE_PROFILES=bundled-db,edge` | `docker compose up -d` |
-| **External / managed Postgres** (e.g. a Cloud-SQL-like service) | `COMPOSE_PROFILES=edge` + set `APP_DATABASE_URL` (a plain `postgresql://…?sslmode=require` URL — not a cloud connector) | `docker compose up -d` |
-| **No public IP** (Cloudflare Tunnel) | `COMPOSE_PROFILES=bundled-db,tunnel` + set `CLOUDFLARE_TUNNEL_TOKEN` | `docker compose up -d` |
+| **Secure VM** (default) | `COMPOSE_PROFILES=bundled-db,edge` | `docker compose --env-file agami.env up -d` |
+| **External / managed Postgres** (e.g. a Cloud-SQL-like service) | `COMPOSE_PROFILES=edge` + set `APP_DATABASE_URL` (a plain `postgresql://…?sslmode=require` URL — not a cloud connector) | `docker compose --env-file agami.env up -d` |
+| **No public IP** (Cloudflare Tunnel) | `COMPOSE_PROFILES=bundled-db,tunnel` + set `CLOUDFLARE_TUNNEL_TOKEN` | `docker compose --env-file agami.env up -d` |
 | **Cloud Run / serverless** (platform gives TLS) | set `APP_DATABASE_URL`; deploy the built image with these env vars | (your platform) |
 
 ## Security notes

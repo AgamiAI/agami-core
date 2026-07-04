@@ -50,7 +50,7 @@ def _set_key(text: str, key: str, value: str) -> str:
 
 
 def _build_env(example: str, args: argparse.Namespace) -> str:
-    """The `.env` for a fresh bundle: the non-secret answers written onto the template. The admin
+    """The `agami.env` for a fresh bundle: the non-secret answers written onto the template. The admin
     password line is left blank (the user types it); the signing secret is left for deploy_preflight."""
     text = example if example.endswith("\n") else example + "\n"
     text = _set_key(text, "COMPOSE_PROFILES", args.profiles)
@@ -60,7 +60,7 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
     text = _set_key(text, "AGAMI_ADMIN_FIRST_NAME", args.admin_first)
     text = _set_key(text, "AGAMI_ADMIN_LAST_NAME", args.admin_last)
     # External/managed Postgres (APP_DATABASE_URL) is a credential, so it is NOT set here — the template
-    # ships it commented and the user edits it into .env by hand (the same hand-off as the password).
+    # ships it commented and the user edits it into agami.env by hand (the same hand-off as the password).
     return text
 
 
@@ -103,7 +103,7 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         return f"ERROR carried bundle templates not found at {_BUNDLE_SRC}", 1
     if not (artifacts / "local").is_dir():
         # `local/` marks a real agami-artifacts dir (i.e. /agami-connect has run) — it is the precondition,
-        # NOT something we stage (creds now travel in .env via DATASOURCE_URL; the model is staged below).
+        # NOT something we stage (creds now travel in agami.env via DATASOURCE_URL; the model is staged below).
         return f"ERROR no agami-artifacts at {artifacts} (run /agami-connect first)", 1
     if target == artifacts or target.is_relative_to(artifacts) or artifacts.is_relative_to(target):
         # Else the copytree(artifacts -> target/artifacts) would recurse into the bundle it just created.
@@ -116,7 +116,7 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         (target / "deploy.sh").chmod(0o755)
 
         # Stage the MODEL only — never a secret. `local/` (credentials + .pgpass) is excluded: the
-        # deployed server reads warehouse creds from DATASOURCE_URL in .env, so no 600-mode file is
+        # deployed server reads warehouse creds from DATASOURCE_URL in agami.env, so no 600-mode file is
         # copied into a shippable bundle or mounted into the container (the uid-mismatch crash this
         # replaces). symlinks=True keeps links as links; dirs_exist_ok so a re-run refreshes in place.
         staged = target / "artifacts"
@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--profiles", default="bundled-db,edge", help="COMPOSE_PROFILES (default: single-server)")
     p.add_argument("--image-tag", default="latest", help="ghcr.io/agamiai/agami-core tag to pull")
     # Deliberately NO --password / --app-database-url / secret args: a credential never travels on the
-    # command line (it would leak into chat logs / shell history). The user edits those into .env.
+    # command line (it would leak into chat logs / shell history). The user edits those into agami.env.
     args = p.parse_args(argv)
 
     status, code = prepare(args)
