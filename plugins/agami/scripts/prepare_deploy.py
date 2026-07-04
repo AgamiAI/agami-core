@@ -89,8 +89,9 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
     if not _BUNDLE_SRC.is_dir():
         return f"ERROR carried bundle templates not found at {_BUNDLE_SRC}", 1
     if not (artifacts / "local").is_dir():
-        # No staged model/creds to ship — the deploy would have nothing to serve.
-        return f"ERROR no artifacts (model + credentials) found at {artifacts} — run /agami-connect first", 1
+        # `local/` marks a real agami-artifacts dir (i.e. /agami-connect has run) — it is the precondition,
+        # NOT something we stage (creds now travel in .env via DATASOURCE_URL; the model is staged below).
+        return f"ERROR no agami-artifacts at {artifacts} (run /agami-connect first)", 1
     if target == artifacts or target.is_relative_to(artifacts) or artifacts.is_relative_to(target):
         # Else the copytree(artifacts -> target/artifacts) would recurse into the bundle it just created.
         return f"ERROR --target must not be inside --artifacts-dir (or vice versa): {target}", 1
