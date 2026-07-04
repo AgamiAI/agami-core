@@ -6,7 +6,7 @@
 ## What's here
 - `docker-compose.yml` — Caddy (auto-TLS, the only public service) + agami + bundled Postgres.
 - `Caddyfile` — TLS for your hostname.
-- `.env` — your config (filled by `/agami-deploy`; `deploy_preflight` generated the signing secret).
+- `agami.env` — your config (filled by `/agami-deploy`; `deploy_preflight` generated the signing secret).
 - `artifacts/` — your semantic model + warehouse credentials (mounted read-only).
 - `deploy.sh` — pulls the image and brings the stack up.
 

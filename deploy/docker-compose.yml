@@ -1,4 +1,4 @@
-# agami self-host stack. The default `docker compose up` (with COMPOSE_PROFILES=bundled-db,edge in .env)
+# agami self-host stack. `./deploy.sh` (compose with `--env-file agami.env`, COMPOSE_PROFILES=bundled-db,edge)
 # brings up the secure VM deployment: Caddy terminates TLS and is the ONLY public service; agami and
 # Postgres live on the internal network with no published ports. Toggle the profiles for the variants:
 #   bundled-db,edge   (default)  — Caddy TLS + agami + bundled Postgres on a VM
@@ -27,9 +27,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
-    env_file: .env
+    env_file: agami.env
     environment:
-      # Bundled Postgres by default; set APP_DATABASE_URL in .env to point at managed Postgres instead.
+      # Bundled Postgres by default; set APP_DATABASE_URL in agami.env to point at managed Postgres instead.
       AGAMI_DB_URL: ${APP_DATABASE_URL:-postgresql://agami:${POSTGRES_PASSWORD:-agami-bundled-local}@postgres:5432/agami}
       AGAMI_ARTIFACTS_DIR: /artifacts
       HOST: 0.0.0.0
@@ -46,7 +46,7 @@ services:
     environment:
       POSTGRES_DB: agami
       POSTGRES_USER: agami
-      # A bundled-local default — fine because the DB is never exposed; override it in .env if you like.
+      # A bundled-local default — fine because the DB is never exposed; override it in agami.env if you like.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agami-bundled-local}
     volumes:
       - pgdata:/var/lib/postgresql/data

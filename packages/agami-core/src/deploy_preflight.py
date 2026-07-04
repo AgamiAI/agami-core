@@ -1,11 +1,11 @@
-"""Host-side deploy preflight — validate the `.env` and fill in what the operator shouldn't have to.
+"""Host-side deploy preflight — validate `agami.env` and fill in what the operator shouldn't have to.
 
 Run before `docker compose up` (the `deploy.sh` wrapper / the `/agami-deploy` skill call it). It checks the
 hard-floor inputs are present, **generates and persists** `AGAMI_SIGNING_SECRET` once (an ephemeral secret
 would break every connected Claude on the next restart), and derives `AGAMI_PUBLIC_HOST` (the bare hostname
 Caddy needs for its TLS site) from `PUBLIC_BASE_URL`. Idempotent — a re-run reuses the persisted values.
 
-    python -m deploy_preflight [path/to/.env]   # default: ./.env
+    python -m deploy_preflight [path/to/agami.env]   # default: ./agami.env
 """
 
 from __future__ import annotations
@@ -52,10 +52,10 @@ def _set_env(env_path: Path, key: str, value: str) -> None:
 
 
 def prepare_env(env_path: Path) -> list[str]:
-    """Validate + complete the `.env` in place. Returns a list of human-readable errors (empty = ready).
+    """Validate + complete `agami.env` in place. Returns a list of human-readable errors (empty = ready).
     Generates `AGAMI_SIGNING_SECRET` and derives `AGAMI_PUBLIC_HOST` when absent — both idempotent."""
     if not env_path.exists():
-        return [f"{env_path} not found — copy .env.example to .env and fill it in"]
+        return [f"{env_path} not found — copy agami.env.example to agami.env and fill it in"]
     env = _parse_env(env_path.read_text())
 
     errors = [f"{k} is required" for k in _REQUIRED if not env.get(k)]
@@ -101,10 +101,10 @@ def prepare_env(env_path: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    env_path = Path(args[0]) if args else Path(".env")
+    env_path = Path(args[0]) if args else Path("agami.env")
     errors = prepare_env(env_path)
     if errors:
-        print("deploy_preflight: .env is not ready:", file=sys.stderr)
+        print("deploy_preflight: agami.env is not ready:", file=sys.stderr)
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         return 1

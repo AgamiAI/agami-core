@@ -1,10 +1,10 @@
 """
 Tests for plugins/agami/scripts/prepare_deploy.py — the `/agami-deploy` bundle scaffolder.
 
-It copies the carried bundle templates, stages the model artifacts, and writes a `.env` with the
+It copies the carried bundle templates, stages the model artifacts, and writes a `agami.env` with the
 NON-SECRET values only. The contract these tests pin: a complete bundle is produced, the right
-COMPOSE_PROFILES land per toggle, no password ever passes through the helper, an existing `.env` is
-preserved, and the generated `.env` passes deploy_preflight.
+COMPOSE_PROFILES land per toggle, no password ever passes through the helper, an existing `agami.env` is
+preserved, and the generated `agami.env` passes deploy_preflight.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def test_prepares_a_complete_bundle(tmp_path):
     assert code == 0 and status.startswith("PREPARED ")
 
     # The carried templates are all present + the image-based compose pulls (no build context).
-    for name in ("docker-compose.yml", "Caddyfile", "deploy.sh", "README.md", ".env"):
+    for name in ("docker-compose.yml", "Caddyfile", "deploy.sh", "README.md", "agami.env"):
         assert (target / name).exists(), name
     compose = (target / "docker-compose.yml").read_text()
     assert "image: ghcr.io/agamiai/agami-core:" in compose
@@ -66,9 +66,20 @@ def test_prepares_a_complete_bundle(tmp_path):
     # The MODEL is staged so the bundle is self-contained + shippable...
     assert (target / "artifacts" / "demo" / "org.yaml").exists()
     # ...but no secret travels: `local/` (credentials + .pgpass) is excluded entirely (creds come from
-    # DATASOURCE_URL in .env now), so no 600-mode file lands in a shippable bundle or a mounted volume.
+    # DATASOURCE_URL in agami.env now), so no 600-mode file lands in a shippable bundle or a mounted volume.
     assert not (target / "artifacts" / "local").exists()
     assert list(target.glob("artifacts/**/credentials")) == []
+
+
+def test_config_is_visible_agami_env_wired_through_compose_and_deploy(tmp_path):
+    """The editable config is `agami.env` (visible in Finder), NOT a hidden `.env`; and the shipped compose
+    + deploy.sh reference it (compose won't auto-load a non-`.env` name, so it goes via env_file/--env-file)."""
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
+    assert (target / "agami.env").exists()
+    assert not (target / ".env").exists()
+    assert "env_file: agami.env" in (target / "docker-compose.yml").read_text()
+    assert "--env-file agami.env" in (target / "deploy.sh").read_text()
 
 
 def test_local_secrets_are_never_staged(tmp_path):
@@ -128,11 +139,11 @@ def test_widen_does_not_chmod_through_a_dir_symlink(tmp_path):
 
 
 def test_env_ships_a_datasource_url_hint_left_unset(tmp_path):
-    """The warehouse DSN is a Phase-2 hand-off (a credential): .env carries a commented hint, and the
+    """The warehouse DSN is a Phase-2 hand-off (a credential): agami.env carries a commented hint, and the
     helper never sets it to a value (same discipline as APP_DATABASE_URL / the admin password)."""
     target = tmp_path / "bundle"
     prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
-    env = (target / ".env").read_text()
+    env = (target / "agami.env").read_text()
     assert "# DATASOURCE_URL=" in env       # the hint ships
     # No line assigns DATASOURCE_URL a live value (commented hint only) — checked per-line so it holds
     # even at the start of the file, and doesn't false-match the `DATASOURCE_URL__<NAME>` form.
@@ -142,7 +153,7 @@ def test_env_ships_a_datasource_url_hint_left_unset(tmp_path):
 def test_env_has_non_secrets_and_a_blank_password(tmp_path):
     target = tmp_path / "bundle"
     prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
-    env = (target / ".env").read_text()
+    env = (target / "agami.env").read_text()
     assert "PUBLIC_BASE_URL=https://agami.acme.example" in env
     assert "AGAMI_ADMIN_USERNAME=you@example.com" in env
     assert "AGAMI_ADMIN_FIRST_NAME=Alex" in env
@@ -156,7 +167,7 @@ def test_env_has_non_secrets_and_a_blank_password(tmp_path):
 def test_env_is_chmod_600(tmp_path):
     target = tmp_path / "bundle"
     prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
-    mode = stat.S_IMODE((target / ".env").stat().st_mode)
+    mode = stat.S_IMODE((target / "agami.env").stat().st_mode)
     assert mode == 0o600, oct(mode)
 
 
@@ -167,9 +178,9 @@ def test_env_is_chmod_600(tmp_path):
 def test_tier2_toggles_set_profiles(tmp_path, profiles):
     target = tmp_path / "bundle"
     prepare_deploy.prepare(_args(target, _artifacts(tmp_path), profiles=profiles))
-    env = (target / ".env").read_text()
+    env = (target / "agami.env").read_text()
     assert f"COMPOSE_PROFILES={profiles}" in env
-    # APP_DATABASE_URL is a credential — the helper never writes it (the user edits .env by hand); the
+    # APP_DATABASE_URL is a credential — the helper never writes it (the user edits agami.env by hand); the
     # external-DB case ships it only as the commented template hint.
     assert "\nAPP_DATABASE_URL=" not in env
 
@@ -204,11 +215,11 @@ def test_existing_env_is_preserved(tmp_path):
     art = _artifacts(tmp_path)
     prepare_deploy.prepare(_args(target, art))
     # Simulate the user typing a password + a generated secret, then a re-run.
-    env_path = target / ".env"
+    env_path = target / "agami.env"
     env_path.write_text("AGAMI_ADMIN_PASSWORD=typed-by-user\nAGAMI_SIGNING_SECRET=deadbeef\n", encoding="utf-8")
     status, code = prepare_deploy.prepare(_args(target, art))
     assert code == 0 and status.startswith("PREPARED_KEPT_ENV ")
-    # The user's filled .env is untouched (no clobbered password / wiped secret).
+    # The user's filled agami.env is untouched (no clobbered password / wiped secret).
     kept = env_path.read_text()
     assert "AGAMI_ADMIN_PASSWORD=typed-by-user" in kept
     assert "AGAMI_SIGNING_SECRET=deadbeef" in kept
@@ -244,10 +255,10 @@ def test_target_inside_artifacts_is_rejected(tmp_path):
 
 
 def test_generated_env_passes_deploy_preflight(tmp_path):
-    """The .env (once a password is set) satisfies deploy_preflight: secret generated, host derived."""
+    """The agami.env (once a password is set) satisfies deploy_preflight: secret generated, host derived."""
     target = tmp_path / "bundle"
     prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
-    env_path = target / ".env"
+    env_path = target / "agami.env"
     # The user supplies the password by editing the file (here, simulated).
     env_path.write_text(
         env_path.read_text().replace("AGAMI_ADMIN_PASSWORD=", "AGAMI_ADMIN_PASSWORD=a-strong-pw"),

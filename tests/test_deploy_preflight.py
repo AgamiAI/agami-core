@@ -1,4 +1,4 @@
-"""The host-side deploy preflight: validate the `.env`, persist the signing secret, derive the host."""
+"""The host-side deploy preflight: validate the `agami.env`, persist the signing secret, derive the host."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ _COMPLETE = (
 
 
 def _env(tmp_path: Path, text: str) -> Path:
-    p = tmp_path / ".env"
+    p = tmp_path / "agami.env"
     p.write_text(text)
     return p
 
@@ -39,7 +39,7 @@ def test_missing_auth_method_is_an_error(tmp_path):
 
 def test_signing_secret_is_generated_then_stable(tmp_path):
     p = _env(tmp_path, _COMPLETE)
-    assert deploy_preflight.prepare_env(p) == []  # complete .env → ready
+    assert deploy_preflight.prepare_env(p) == []  # complete agami.env → ready
     first = deploy_preflight._parse_env(p.read_text())["AGAMI_SIGNING_SECRET"]
     assert len(first) >= 32  # a real generated secret
     deploy_preflight.prepare_env(p)  # re-run (a redeploy)
@@ -95,4 +95,4 @@ def test_provider_with_its_oidc_client_is_accepted(tmp_path):
 
 
 def test_missing_env_file_is_a_clear_error(tmp_path):
-    assert deploy_preflight.main([str(tmp_path / "nope.env")]) == 1  # no .env → clean exit 1
+    assert deploy_preflight.main([str(tmp_path / "nope.env")]) == 1  # no agami.env → clean exit 1
