@@ -99,6 +99,21 @@ def test_staged_model_is_world_readable(tmp_path):
     assert stat.S_IMODE((prof / "org.yaml").stat().st_mode) & 0o004     # file: others readable
 
 
+def test_widen_does_not_chmod_through_a_dir_symlink(tmp_path):
+    """The widening must never follow a directory symlink out of the bundle and chmod external files
+    (rglob('**') would on Python ≤3.12; os.walk(followlinks=False) does not)."""
+    art = _artifacts(tmp_path)
+    external = tmp_path / "outside"
+    external.mkdir()
+    secret = external / "secret.txt"
+    secret.write_text("x", encoding="utf-8")
+    secret.chmod(0o600)
+    # A directory symlink inside the model pointing at the external dir (copied into the bundle as a link).
+    (art / "demo" / "link").symlink_to(external, target_is_directory=True)
+    prepare_deploy.prepare(_args(tmp_path / "bundle", art))
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600  # untouched — not widened through the symlink
+
+
 def test_env_ships_a_datasource_url_hint_left_unset(tmp_path):
     """The warehouse DSN is a Phase-2 hand-off (a credential): .env carries a commented hint, and the
     helper never sets it to a value (same discipline as APP_DATABASE_URL / the admin password)."""
@@ -106,7 +121,9 @@ def test_env_ships_a_datasource_url_hint_left_unset(tmp_path):
     prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
     env = (target / ".env").read_text()
     assert "# DATASOURCE_URL=" in env       # the hint ships
-    assert "\nDATASOURCE_URL=" not in env    # but is never written as a live value by the helper
+    # No line assigns DATASOURCE_URL a live value (commented hint only) — checked per-line so it holds
+    # even at the start of the file, and doesn't false-match the `DATASOURCE_URL__<NAME>` form.
+    assert not any(ln.lstrip().startswith("DATASOURCE_URL=") for ln in env.splitlines())
 
 
 def test_env_has_non_secrets_and_a_blank_password(tmp_path):

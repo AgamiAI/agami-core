@@ -18,6 +18,7 @@ Stdout is a single status line (first token machine-readable); the skill reads i
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import stat
 import sys
@@ -63,22 +64,34 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
     return text
 
 
+def _widen_one(path: Path) -> None:
+    """`a+rX` on a single path: add read for all, plus execute/traverse for a directory (or a file that
+    already has an execute bit). Add-only — never removes a bit, so a read-only snapshot stays readable
+    and never wider. A symlink is skipped so a link's target (possibly outside the bundle) is untouched."""
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        return
+    mode = stat.S_IMODE(st.st_mode)
+    add = 0o444  # a+r
+    if stat.S_ISDIR(st.st_mode) or (mode & 0o111):  # a+X: dirs, or files already carrying an execute bit
+        add |= 0o111
+    path.chmod(mode | add)
+
+
 def _grant_world_read(root: Path) -> None:
-    """`chmod -R a+rX` in Python over the staged model: add read for all, and traverse (execute) for
-    directories (and any file already executable). The deployed container runs as uid 10001, not the
-    operator who owns these files, and mounts them read-only — without this the boot-time model load
-    fails "Permission denied" on ORGANIZATION.md and the container crash-loops. Add-only (never removes
-    a bit, so a read-only snapshot stays readable and never wider); symlinks are skipped so a link's
-    target outside the bundle is never touched. Only non-secret model files reach here — `local/`
-    (credentials + .pgpass) is excluded from staging."""
-    for path in [root, *root.rglob("*")]:
-        if path.is_symlink():
-            continue
-        mode = stat.S_IMODE(path.stat().st_mode)
-        add = 0o444  # a+r
-        if path.is_dir() or (mode & 0o111):  # a+X: dirs, or files that already carry an execute bit
-            add |= 0o111
-        path.chmod(mode | add)
+    """`chmod -R a+rX` over the staged model. The deployed container runs as uid 10001, not the operator
+    who owns these files, and mounts them read-only — without this the boot-time model load fails
+    "Permission denied" on ORGANIZATION.md and the container crash-loops. Only non-secret model files
+    reach here (`local/` is excluded from staging).
+
+    Uses `os.walk(followlinks=False)` — NOT `rglob("**")`, which follows directory symlinks on Python
+    ≤3.12 and could chmod files *outside* the bundle — and it streams rather than materializing every
+    path, so a large model doesn't build a giant list."""
+    _widen_one(root)
+    for dirpath, dirnames, filenames in os.walk(root):  # followlinks=False (default): never enters a symlinked dir
+        base = Path(dirpath)
+        for name in (*dirnames, *filenames):
+            _widen_one(base / name)
 
 
 def prepare(args: argparse.Namespace) -> tuple[str, int]:
