@@ -85,6 +85,19 @@ def test_local_secrets_are_never_staged(tmp_path):
     assert list(target.glob("artifacts/**/.pgpass")) == []
 
 
+def test_rerun_purges_a_stale_local_from_an_older_bundle(tmp_path):
+    """A bundle made by an OLDER prepare_deploy staged `local/` (with credentials). Re-running must
+    delete that stale secret — `ignore=` only skips copying, and `dirs_exist_ok` merges, so without an
+    explicit purge the old credentials file would linger in the mounted volume."""
+    art = _artifacts(tmp_path)
+    target = tmp_path / "bundle"
+    stale = target / "artifacts" / "local"
+    stale.mkdir(parents=True)
+    (stale / "credentials").write_text("[demo]\nhost = stale\n", encoding="utf-8")
+    prepare_deploy.prepare(_args(target, art))
+    assert not (target / "artifacts" / "local").exists()
+
+
 def test_staged_model_is_world_readable(tmp_path):
     """The container runs as a different uid and mounts the model read-only — every staged dir must be
     world-traversable and every file world-readable, else the boot-time load crashes (issue #1's fix)."""

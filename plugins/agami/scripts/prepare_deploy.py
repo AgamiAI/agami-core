@@ -67,7 +67,7 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
 def _widen_one(path: Path) -> None:
     """`a+rX` on a single path: add read for all, plus execute/traverse for a directory (or a file that
     already has an execute bit). Add-only — never removes a bit, so a read-only snapshot stays readable
-    and never wider. A symlink is skipped so a link's target (possibly outside the bundle) is untouched."""
+    (perms only widen, never narrow). A symlink is skipped so a link's target (possibly outside the bundle) is untouched."""
     st = path.lstat()
     if stat.S_ISLNK(st.st_mode):
         return
@@ -120,6 +120,10 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         # copied into a shippable bundle or mounted into the container (the uid-mismatch crash this
         # replaces). symlinks=True keeps links as links; dirs_exist_ok so a re-run refreshes in place.
         staged = target / "artifacts"
+        # `dirs_exist_ok=True` merges into an existing bundle, and `ignore` only skips COPYING `local/` —
+        # it does NOT delete a `local/` a PRIOR (older) prepare_deploy staged. Purge it explicitly, so a
+        # re-run over an old bundle can't keep a stale credentials file sitting in the mounted volume.
+        shutil.rmtree(staged / "local", ignore_errors=True)
         shutil.copytree(
             artifacts, staged, symlinks=True, dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("local"),
