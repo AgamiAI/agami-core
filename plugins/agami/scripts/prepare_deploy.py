@@ -121,9 +121,13 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         # replaces). symlinks=True keeps links as links; dirs_exist_ok so a re-run refreshes in place.
         staged = target / "artifacts"
         # `dirs_exist_ok=True` merges into an existing bundle, and `ignore` only skips COPYING `local/` —
-        # it does NOT delete a `local/` a PRIOR (older) prepare_deploy staged. Purge it explicitly, so a
-        # re-run over an old bundle can't keep a stale credentials file sitting in the mounted volume.
-        shutil.rmtree(staged / "local", ignore_errors=True)
+        # it does NOT delete a `local/` a PRIOR (older) prepare_deploy staged. Purge it explicitly so a
+        # re-run over an old bundle can't keep a stale credentials file in the mounted volume. Fail-CLOSED:
+        # NOT `ignore_errors` — a failed purge (a perms/read-only issue) must surface as an ERROR, never
+        # silently leave the secret behind. A missing `local/` is fine (nothing to purge).
+        stale_local = staged / "local"
+        if stale_local.exists():
+            shutil.rmtree(stale_local)
         shutil.copytree(
             artifacts, staged, symlinks=True, dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("local"),
