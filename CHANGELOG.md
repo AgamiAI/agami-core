@@ -10,6 +10,28 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.3.5] — 2026-07-04
+
+### Fixed
+
+- **Self-host deploy no longer crash-loops on artifact permissions.** The team
+  server runs as a non-root container user; the deploy now stages the model
+  **world-readable**, so the boot-time model load can't fail `Permission denied`
+  on `ORGANIZATION.md` under a mismatched host owner.
+- **claude.ai connects to a self-hosted server.** The `/mcp` endpoint no longer
+  answers the bare (no-trailing-slash) URL with a `307` redirect that the MCP
+  client won't follow — the server normalizes it internally, so `{base}/mcp`
+  works on every deploy profile (including the Caddy-less Cloud Run one).
+
+### Changed
+
+- **Warehouse credentials come from the environment (`DATASOURCE_URL`), not a
+  mounted file.** The executor resolves a connection DSN from
+  `DATASOURCE_URL[__<datasource>]` env-first, falling back to the local
+  `credentials` file — one code path, no fork. The self-host bundle now carries
+  the DSN in `.env` and **ships no secret**: `local/` (credentials, `.pgpass`)
+  is never staged, and a re-run purges any stale copy from an older bundle.
+
 ## [0.3.4] — 2026-07-03
 
 ### Fixed
@@ -130,6 +152,7 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
+[0.3.5]: https://github.com/AgamiAI/agami-core/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/AgamiAI/agami-core/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/AgamiAI/agami-core/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/AgamiAI/agami-core/compare/v0.3.1...v0.3.2
