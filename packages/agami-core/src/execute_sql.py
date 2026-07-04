@@ -86,6 +86,12 @@ def _err(msg: str, *, code: int = 2) -> int:
     return code
 
 
+def _env_token(profile: str) -> str:
+    """The env-var suffix for a datasource: the profile id upper-cased with every non-alphanumeric char
+    folded to `_` (so `sales-pg` → `SALES_PG`, used as `DATASOURCE_URL__SALES_PG`)."""
+    return "".join(c if c.isalnum() else "_" for c in profile).upper()
+
+
 def _env_datasource_dsn(profile: str) -> str | None:
     """A warehouse DSN supplied via the environment for `profile`, or None.
 
@@ -113,7 +119,7 @@ def _env_datasource_dsn(profile: str) -> str | None:
       - The token folds every non-alphanumeric char to `_`, so profiles differing only in
         punctuation (`sales-pg` vs `sales.pg`) map to the same var — name profiles distinctly.
     """
-    token = "".join(c if c.isalnum() else "_" for c in profile).upper()
+    token = _env_token(profile)
     for name in (f"DATASOURCE_URL__{token}", "DATASOURCE_URL"):
         val = os.environ.get(name)
         if val and val.strip():
@@ -142,7 +148,7 @@ def _load_credentials(profile: str) -> dict[str, str]:
     if not CREDENTIALS_PATH.exists():
         sys.stderr.write(
             f"No warehouse credentials for profile [{profile}]. Set DATASOURCE_URL "
-            f"(or DATASOURCE_URL__{''.join(c if c.isalnum() else '_' for c in profile).upper()}) "
+            f"(or DATASOURCE_URL__{_env_token(profile)}) "
             "in the environment, or create <artifacts_dir>/local/credentials via the agami `init` skill.\n"
             "Never type credentials into chat — they belong in the environment or the file.\n"
         )
