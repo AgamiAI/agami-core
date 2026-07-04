@@ -98,7 +98,9 @@ def _env_key(line: str) -> str | None:
     """The KEY of an `agami.env` line (`KEY=…` or `# KEY=…`), or None for prose/blank. A key is
     UPPER_SNAKE (letters/digits/underscore), so a comment sentence that happens to contain `=`
     (e.g. `?sslmode=require`) isn't mistaken for a setting."""
-    s = line.lstrip("#").lstrip()
+    # Whitespace FIRST, then the comment marker(s): an INDENTED commented key ("  # KEY=…") must still be
+    # recognized, else _merge_env would think it's missing and re-append it (a duplicate).
+    s = line.lstrip().lstrip("#").lstrip()
     key = s.split("=", 1)[0].strip() if "=" in s else ""
     return key if key and all(c.isupper() or c.isdigit() or c == "_" for c in key) else None
 
@@ -186,10 +188,13 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         datasources = getattr(args, "datasources", None)
         dslist = [s.strip() for s in datasources.split(",") if s.strip()] if datasources else None
         if dslist:
-            # Warn (don't fail) on a name that isn't a model here — staging it silently would deploy a
-            # server missing that datasource. A warning to stderr keeps the stdout status line clean.
             available = {d.name for d in artifacts.iterdir() if d.is_dir() and (d / "org.yaml").is_file()}
             unknown = [d for d in dslist if d not in available]
+            # Fail fast if NONE of the requested datasources exist — a modelless bundle would only break
+            # later at runtime. If SOME are unknown, warn (stderr keeps the stdout status line clean) and
+            # stage the valid ones.
+            if not any(d in available for d in dslist):
+                return f"ERROR --datasources matched no model in {artifacts}: {', '.join(dslist)}", 1
             if unknown:
                 sys.stderr.write(f"warning: --datasources not found (staged nothing for them): {', '.join(unknown)}\n")
         shutil.copytree(

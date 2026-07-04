@@ -45,7 +45,7 @@ def _args(target: Path, artifacts: Path, **over) -> argparse.Namespace:
         admin_first="Alex",
         admin_last="Kim",
         profiles="bundled-db,edge",
-        image_tag="latest",
+        image_tag=None,  # match the CLI default (None → fresh builds pin 'latest'; a re-run leaves the pin)
         datasources=None,
     )
     base.update(over)
@@ -302,6 +302,15 @@ def test_merge_preserves_secrets_and_surfaces_new_keys():
     assert "AGAMI_ADMIN_PASSWORD" not in new_keys and "PUBLIC_BASE_URL" not in new_keys
 
 
+def test_merge_recognizes_an_indented_commented_key_and_wont_duplicate():
+    """An indented `  # KEY=…` in the existing file must be seen as present, else the template's KEY would
+    be re-appended (a duplicate). Guards the _env_key strip order."""
+    existing = "  # DATASOURCE_URL=postgresql://<user>:<password>@h/db\nAGAMI_ADMIN_PASSWORD=x\n"
+    merged, new_keys = prepare_deploy._merge_env(existing, _TEMPLATE, None)
+    assert "DATASOURCE_URL" not in new_keys        # already present (indented comment) → not re-added
+    assert merged.count("DATASOURCE_URL=") == 1
+
+
 def test_merge_bumps_image_tag_only_when_passed():
     existing = "AGAMI_IMAGE_TAG=0.3.4\nAGAMI_ADMIN_PASSWORD=x\n"
     # A model-only re-stage passes no tag → the pin is left alone (no silent version change).
@@ -341,3 +350,11 @@ def test_unknown_datasource_name_warns_but_does_not_fail(tmp_path, capsys):
     assert code == 0 and status.startswith("PREPARED ")
     assert (target / "artifacts" / "demo" / "org.yaml").exists()
     assert "nope" in capsys.readouterr().err
+
+
+def test_all_unknown_datasources_fails_fast(tmp_path):
+    """If NONE of the requested datasources exist, error out — don't build a modelless bundle that only
+    breaks later at runtime."""
+    art = _artifacts(tmp_path)  # model `demo`
+    status, code = prepare_deploy.prepare(_args(tmp_path / "bundle", art, datasources="nope,alsonope"))
+    assert code == 1 and status.startswith("ERROR ") and "matched no model" in status
