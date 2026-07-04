@@ -72,9 +72,11 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/prepare_deploy.py" \
   --public-base-url "https://<host>" \
   --admin-email "<email>" --admin-first "<first>" --admin-last "<last>" \
   --profiles "bundled-db,edge"
-  # add --datasources "a,b" to stage a subset; on a version UPGRADE add --image-tag "<version>"
-  # (omit --image-tag on a model-only re-stage so an existing pin isn't changed)
 ```
+
+**Append these flags to the command when they apply** (add each as another `\`-continued line): `--datasources
+"a,b"` to stage a subset of models; on a **version upgrade** `--image-tag "<version>"` to bump it (omit it on a
+model-only re-stage so an existing pin isn't changed).
 
 (Use `--profiles "bundled-db,tunnel"` for the tunnel, or `--profiles "edge"` for managed Postgres — then
 have the user set `APP_DATABASE_URL` in `agami.env` by hand, never on the command line.)

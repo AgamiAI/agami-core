@@ -213,7 +213,7 @@ def test_helper_takes_no_password_argument(tmp_path):
 
 def test_rerun_upgrades_in_place_and_preserves_typed_secrets(tmp_path):
     """A re-run over an existing bundle UPGRADES non-destructively: the typed password + generated secret
-    survive byte-for-byte, and the status is UPGRADED (not a fresh PREPARED)."""
+    values are preserved (line endings normalize to LF), and the status is UPGRADED (not a fresh PREPARED)."""
     target = tmp_path / "bundle"
     art = _artifacts(tmp_path)
     prepare_deploy.prepare(_args(target, art))
