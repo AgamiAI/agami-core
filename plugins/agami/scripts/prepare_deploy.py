@@ -106,10 +106,12 @@ def _env_key(line: str) -> str | None:
 
 
 def _merge_env(existing: str, template: str, image_tag: str | None) -> tuple[str, list[str]]:
-    """Non-destructive upgrade of an existing `agami.env`: **keep every existing line/value** (never touch a
+    """Non-destructive upgrade of an existing `agami.env`: **preserve every existing value** (never touch a
     typed password / generated secret), **append any template key not already present** (as the template's
     own line — a commented hint or a value, so a key new in this version like `DATASOURCE_URL` shows up), and
-    — only when `image_tag` is given — bump the non-secret `AGAMI_IMAGE_TAG`. Returns (merged_text, new_keys)."""
+    — only when `image_tag` is given — bump the non-secret `AGAMI_IMAGE_TAG`. The output is LF-normalized
+    (docker's `env_file` + the generated file use LF; a value's content is unchanged by that). Returns
+    (merged_text, new_keys)."""
     present = {k for line in existing.splitlines() if (k := _env_key(line))}
     merged = existing if existing.endswith("\n") else existing + "\n"
     new_lines: list[str] = []
@@ -127,7 +129,8 @@ def _merge_env(existing: str, template: str, image_tag: str | None) -> tuple[str
         )
     if image_tag is not None:
         merged = _set_key(merged, "AGAMI_IMAGE_TAG", image_tag)
-    return merged, new_keys
+    # Normalize to LF so appending LF lines to a CRLF file (Windows) can't produce mixed newlines.
+    return merged.replace("\r\n", "\n").replace("\r", "\n"), new_keys
 
 
 def _stage_ignore(artifacts: Path, datasources: list[str] | None):
@@ -197,6 +200,13 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
                 return f"ERROR --datasources matched no model in {artifacts}: {', '.join(dslist)}", 1
             if unknown:
                 sys.stderr.write(f"warning: --datasources not found (staged nothing for them): {', '.join(unknown)}\n")
+            # On a re-run, drop any previously-staged model NOT in the chosen set — copytree(dirs_exist_ok)
+            # merges and won't delete, so without this a dropped datasource would linger and still be served.
+            chosen = set(dslist)
+            if staged.exists():
+                for d in staged.iterdir():
+                    if d.is_dir() and (d / "org.yaml").is_file() and d.name not in chosen:
+                        shutil.rmtree(d)
         shutil.copytree(
             artifacts, staged, symlinks=True, dirs_exist_ok=True,
             ignore=_stage_ignore(artifacts, dslist),  # drops `local/`, and non-chosen models when dslist set

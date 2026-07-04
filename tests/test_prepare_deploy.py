@@ -322,6 +322,14 @@ def test_merge_bumps_image_tag_only_when_passed():
     assert bumped.count("AGAMI_IMAGE_TAG=") == 1
 
 
+def test_merge_normalizes_crlf_to_lf():
+    """A CRLF existing file (Windows) must not yield mixed newlines after a merge; values are unchanged."""
+    existing = "AGAMI_ADMIN_PASSWORD=typed\r\nAGAMI_SIGNING_SECRET=deadbeef\r\n"
+    merged, _ = prepare_deploy._merge_env(existing, _TEMPLATE, "0.3.5")
+    assert "\r" not in merged
+    assert "AGAMI_ADMIN_PASSWORD=typed" in merged and "AGAMI_SIGNING_SECRET=deadbeef" in merged
+
+
 def test_merge_reports_no_new_keys_when_file_has_them_all():
     merged, new_keys = prepare_deploy._merge_env(_TEMPLATE, _TEMPLATE, None)
     assert new_keys == []
@@ -350,6 +358,20 @@ def test_unknown_datasource_name_warns_but_does_not_fail(tmp_path, capsys):
     assert code == 0 and status.startswith("PREPARED ")
     assert (target / "artifacts" / "demo" / "org.yaml").exists()
     assert "nope" in capsys.readouterr().err
+
+
+def test_rerun_with_datasources_drops_a_previously_staged_model(tmp_path):
+    """Dropping a datasource on a re-run must actually remove it from the bundle (copytree merges; it won't
+    delete on its own) — else the server would keep serving a model the operator meant to drop."""
+    art = _artifacts(tmp_path)  # model `demo`
+    (art / "ops").mkdir()
+    (art / "ops" / "org.yaml").write_text("name: ops\n", encoding="utf-8")
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, art))                       # first run stages all → demo + ops
+    assert (target / "artifacts" / "ops").exists()
+    prepare_deploy.prepare(_args(target, art, datasources="demo"))   # re-run: only demo
+    assert (target / "artifacts" / "demo").exists()
+    assert not (target / "artifacts" / "ops").exists()               # stale ops purged
 
 
 def test_all_unknown_datasources_fails_fast(tmp_path):
