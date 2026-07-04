@@ -15,9 +15,10 @@ is importable). Connect-side and query-database both shell out to:
 The --sql-file form is preferred over --sql so SQL containing quotes,
 backticks, or `$` doesn't get mangled by the shell.
 
-Connects ONLY to the host/port in <artifacts_dir>/local/credentials (the sole credential
-source — no env-var bypass). Never substitutes localhost. Never asks for
-credentials. Hard exits with a clear message if credentials are missing.
+Credentials resolve env-first then file: a DSN in DATASOURCE_URL[__<PROFILE>] (the
+self-host channel), else <artifacts_dir>/local/credentials. Connects ONLY to the
+host/port that resolution yields. Never substitutes localhost. Never asks for
+credentials. Hard exits with a clear message if neither source has them.
 
 Drivers (install only what you need):
     pip install psycopg2-binary             # Postgres / Redshift
@@ -85,20 +86,49 @@ def _err(msg: str, *, code: int = 2) -> int:
     return code
 
 
-def _load_credentials(profile: str) -> dict[str, str]:
-    """Resolve credentials from <artifacts_dir>/local/credentials (the ONLY source).
+def _env_datasource_dsn(profile: str) -> str | None:
+    """A warehouse DSN supplied via the environment for `profile`, or None.
 
-    Within the selected profile:
-      - If `url = ...` is set, parse it as a DSN (overrides per-field values)
-      - Otherwise read host / port / user / password / database / type / sslmode
+    Two forms, checked in order:
+      1. DATASOURCE_URL__<PROFILE> — per-datasource. <PROFILE> is the profile id
+         upper-cased with every non-alphanumeric char folded to `_` (so `sales-pg`
+         → DATASOURCE_URL__SALES_PG). Lets a deployment carry heterogeneous
+         warehouses side by side, one var each.
+      2. DATASOURCE_URL — the single-datasource default.
 
-    Credentials come only from the file — there is no env-var bypass. This keeps
-    the one credential path auditable (chmod 600, never on a command line).
+    This is the container / self-host credential channel (cf. how the model reads
+    from Postgres when configured, else the file): env carries no file mode and is
+    inherited by this subprocess, so it sidesteps the mounted-secret + chmod-600
+    problems the file has under a container uid that doesn't own it.
     """
+    token = "".join(c if c.isalnum() else "_" for c in profile).upper()
+    return os.environ.get(f"DATASOURCE_URL__{token}") or os.environ.get("DATASOURCE_URL")
+
+
+def _load_credentials(profile: str) -> dict[str, str]:
+    """Resolve credentials for `profile`, env-first then the file.
+
+    Source order:
+      1. A DSN from the environment (DATASOURCE_URL[__<PROFILE>]) — the self-host
+         channel; parsed by `_parse_dsn`, no file read, no chmod gate.
+      2. <artifacts_dir>/local/credentials (the local-plugin default), where within
+         the selected profile a `url = ...` DSN (merged with per-field overrides) or
+         per-field host / port / user / password / database / type / sslmode is read.
+
+    The env is an added *source*, not a fork: the file path — and its chmod-600 gate
+    (never on a command line) — is unchanged, and is skipped only when a deployment
+    opts into the env var (and so has no file to protect).
+    """
+    dsn = _env_datasource_dsn(profile)
+    if dsn:
+        return _parse_dsn(dsn)
+
     if not CREDENTIALS_PATH.exists():
         sys.stderr.write(
-            "<artifacts_dir>/local/credentials is missing. Run the agami `init` skill to set it up.\n"
-            "Never type credentials into chat — they belong in the file.\n"
+            f"No warehouse credentials for profile [{profile}]. Set DATASOURCE_URL "
+            f"(or DATASOURCE_URL__{''.join(c if c.isalnum() else '_' for c in profile).upper()}) "
+            "in the environment, or create <artifacts_dir>/local/credentials via the agami `init` skill.\n"
+            "Never type credentials into chat — they belong in the environment or the file.\n"
         )
         sys.exit(2)
 
