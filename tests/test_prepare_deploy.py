@@ -46,6 +46,7 @@ def _args(target: Path, artifacts: Path, **over) -> argparse.Namespace:
         admin_last="Kim",
         profiles="bundled-db,edge",
         image_tag="latest",
+        datasources=None,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -210,16 +211,16 @@ def test_helper_takes_no_password_argument(tmp_path):
         )
 
 
-def test_existing_env_is_preserved(tmp_path):
+def test_rerun_upgrades_in_place_and_preserves_typed_secrets(tmp_path):
+    """A re-run over an existing bundle UPGRADES non-destructively: the typed password + generated secret
+    survive byte-for-byte, and the status is UPGRADED (not a fresh PREPARED)."""
     target = tmp_path / "bundle"
     art = _artifacts(tmp_path)
     prepare_deploy.prepare(_args(target, art))
-    # Simulate the user typing a password + a generated secret, then a re-run.
     env_path = target / "agami.env"
     env_path.write_text("AGAMI_ADMIN_PASSWORD=typed-by-user\nAGAMI_SIGNING_SECRET=deadbeef\n", encoding="utf-8")
     status, code = prepare_deploy.prepare(_args(target, art))
-    assert code == 0 and status.startswith("PREPARED_KEPT_ENV ")
-    # The user's filled agami.env is untouched (no clobbered password / wiped secret).
+    assert code == 0 and status.startswith("UPGRADED ")
     kept = env_path.read_text()
     assert "AGAMI_ADMIN_PASSWORD=typed-by-user" in kept
     assert "AGAMI_SIGNING_SECRET=deadbeef" in kept
@@ -269,3 +270,63 @@ def test_generated_env_passes_deploy_preflight(tmp_path):
     after = env_path.read_text()
     assert "AGAMI_SIGNING_SECRET=" in after
     assert "AGAMI_PUBLIC_HOST=agami.acme.example" in after
+
+
+# --- ACE-031: upgrade-aware re-run (_merge_env) + multi-datasource selection ---
+
+_TEMPLATE = (
+    "COMPOSE_PROFILES=bundled-db,edge\n"
+    "AGAMI_IMAGE_TAG=latest\n"
+    "PUBLIC_BASE_URL=https://agami.your-domain.example\n"
+    "AGAMI_ADMIN_PASSWORD=\n"
+    "# DATASOURCE_URL=postgresql://<user>:<password>@your-warehouse.example:5432/analytics?sslmode=require\n"
+    "# APP_DATABASE_URL=postgresql://user@your-managed-pg.example:5432/agami?sslmode=require\n"
+)
+
+
+def test_merge_preserves_secrets_and_surfaces_new_keys():
+    existing = (
+        "AGAMI_ADMIN_PASSWORD=typed-by-user\n"
+        "AGAMI_SIGNING_SECRET=deadbeef\n"
+        "PUBLIC_BASE_URL=https://me.example\n"
+    )
+    merged, new_keys = prepare_deploy._merge_env(existing, _TEMPLATE, None)
+    # Existing values are byte-preserved — including a password even though the template ships it blank.
+    assert "AGAMI_ADMIN_PASSWORD=typed-by-user" in merged
+    assert "AGAMI_SIGNING_SECRET=deadbeef" in merged
+    assert "PUBLIC_BASE_URL=https://me.example" in merged
+    assert merged.count("PUBLIC_BASE_URL=") == 1  # not re-appended
+    # Keys new in this version are appended + reported; an already-present key is neither.
+    assert "DATASOURCE_URL" in new_keys and "COMPOSE_PROFILES" in new_keys
+    assert "# DATASOURCE_URL=" in merged
+    assert "AGAMI_ADMIN_PASSWORD" not in new_keys and "PUBLIC_BASE_URL" not in new_keys
+
+
+def test_merge_bumps_image_tag_only_when_passed():
+    existing = "AGAMI_IMAGE_TAG=0.3.4\nAGAMI_ADMIN_PASSWORD=x\n"
+    # A model-only re-stage passes no tag → the pin is left alone (no silent version change).
+    kept, _ = prepare_deploy._merge_env(existing, _TEMPLATE, None)
+    assert "AGAMI_IMAGE_TAG=0.3.4" in kept
+    # An upgrade passes the new tag → bumped in place, no duplicate.
+    bumped, _ = prepare_deploy._merge_env(existing, _TEMPLATE, "0.3.5")
+    assert "AGAMI_IMAGE_TAG=0.3.5" in bumped and "AGAMI_IMAGE_TAG=0.3.4" not in bumped
+    assert bumped.count("AGAMI_IMAGE_TAG=") == 1
+
+
+def test_merge_reports_no_new_keys_when_file_has_them_all():
+    merged, new_keys = prepare_deploy._merge_env(_TEMPLATE, _TEMPLATE, None)
+    assert new_keys == []
+    assert "added on upgrade" not in merged  # nothing appended
+
+
+def test_selective_datasources_stages_only_chosen(tmp_path):
+    """`--datasources` stages only the named models; others drop, install-global files always stay."""
+    art = _artifacts(tmp_path)  # has model `demo`
+    (art / "ops").mkdir()
+    (art / "ops" / "org.yaml").write_text("name: ops\n", encoding="utf-8")
+    (art / "USER_MEMORY.md").write_text("hi\n", encoding="utf-8")
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, art, datasources="demo"))
+    assert (target / "artifacts" / "demo" / "org.yaml").exists()
+    assert not (target / "artifacts" / "ops").exists()        # not chosen → dropped
+    assert (target / "artifacts" / "USER_MEMORY.md").exists()  # install-global → always staged
