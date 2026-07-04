@@ -100,6 +100,16 @@ def _env_datasource_dsn(profile: str) -> str | None:
     from Postgres when configured, else the file): env carries no file mode and is
     inherited by this subprocess, so it sidesteps the mounted-secret + chmod-600
     problems the file has under a container uid that doesn't own it.
+
+    Scope / gotchas (deliberately minimal — the file remains the fuller channel):
+      - A DSN carries the same expressiveness as the file's `url = ...` field, so the
+        env channel supports the schemes `_parse_dsn` handles (postgres / redshift /
+        mysql / snowflake / bigquery / sqlite). A warehouse type without a DSN scheme
+        (databricks, oracle, sqlserver, trino, duckdb) still uses the per-field file.
+      - An empty value is treated as unset (falls through to the next source) — set the
+        var to a real DSN to take effect; don't set it to "" expecting to *disable* one.
+      - The token folds every non-alphanumeric char to `_`, so profiles differing only in
+        punctuation (`sales-pg` vs `sales.pg`) map to the same var — name profiles distinctly.
     """
     token = "".join(c if c.isalnum() else "_" for c in profile).upper()
     return os.environ.get(f"DATASOURCE_URL__{token}") or os.environ.get("DATASOURCE_URL")
