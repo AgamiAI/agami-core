@@ -10,6 +10,20 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.3.6] — 2026-07-04
+
+### Changed
+
+- **`/agami-deploy` is easier to find and safe to re-run.** The config file is now
+  a **visible `agami.env`** (not a hidden `.env`), and the skill opens it for you.
+  A **re-run upgrades in place, non-destructively**: your typed password/secret and
+  DSN are kept, any setting new in a version is surfaced (e.g. `DATASOURCE_URL`),
+  and the image tag bumps only when you pass one — so a model update is just
+  re-run + restart, and a version upgrade tells you exactly what's new.
+- **Multi-datasource deploys are an explicit choice.** With more than one model,
+  the skill asks which to deploy (all or a subset) and names the per-datasource
+  `DATASOURCE_URL__<NAME>` to set; dropping one on a re-run removes it cleanly.
+
 ## [0.3.5] — 2026-07-04
 
 ### Fixed
@@ -152,6 +166,7 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
+[0.3.6]: https://github.com/AgamiAI/agami-core/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/AgamiAI/agami-core/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/AgamiAI/agami-core/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/AgamiAI/agami-core/compare/v0.3.2...v0.3.3
