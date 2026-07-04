@@ -68,6 +68,15 @@ def test_profile_id_is_normalized_to_an_env_token(monkeypatch):
     assert _env_datasource_dsn("SALES.PG") == "postgresql://u:p@h:5432/db"
 
 
+def test_env_dsn_is_stripped_and_whitespace_only_is_unset(monkeypatch):
+    """A trailing newline (common from secret stores / `.env`) is stripped; blank → unset."""
+    monkeypatch.setenv("DATASOURCE_URL", "  postgresql://u:p@h:5432/db\n")
+    assert _env_datasource_dsn("default") == "postgresql://u:p@h:5432/db"
+    # A whitespace-only per-datasource var must NOT shadow the real generic one — it falls through.
+    monkeypatch.setenv("DATASOURCE_URL__SALES", "   \n")
+    assert _env_datasource_dsn("sales") == "postgresql://u:p@h:5432/db"
+
+
 # --- type + params come from the DSN (reusing _parse_dsn) -------------------
 
 def test_snowflake_env_dsn_carries_scheme_type_and_query_params(monkeypatch, tmp_path):

@@ -106,13 +106,19 @@ def _env_datasource_dsn(profile: str) -> str | None:
         env channel supports the schemes `_parse_dsn` handles (postgres / redshift /
         mysql / snowflake / bigquery / sqlite). A warehouse type without a DSN scheme
         (databricks, oracle, sqlserver, trino, duckdb) still uses the per-field file.
-      - An empty value is treated as unset (falls through to the next source) — set the
-        var to a real DSN to take effect; don't set it to "" expecting to *disable* one.
+      - The value is stripped (secret stores / `.env` / `$(cat file)` commonly append a
+        trailing newline, which would otherwise mis-parse), and an empty-or-whitespace-only
+        value is treated as unset (falls through to the next source) — set the var to a real
+        DSN to take effect; don't set it to "" expecting to *disable* one.
       - The token folds every non-alphanumeric char to `_`, so profiles differing only in
         punctuation (`sales-pg` vs `sales.pg`) map to the same var — name profiles distinctly.
     """
     token = "".join(c if c.isalnum() else "_" for c in profile).upper()
-    return os.environ.get(f"DATASOURCE_URL__{token}") or os.environ.get("DATASOURCE_URL")
+    for name in (f"DATASOURCE_URL__{token}", "DATASOURCE_URL"):
+        val = os.environ.get(name)
+        if val and val.strip():
+            return val.strip()  # match the file path's per-field .strip()
+    return None
 
 
 def _load_credentials(profile: str) -> dict[str, str]:
