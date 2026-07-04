@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Scaffold an `/agami-deploy` bundle on the user's machine: copy the carried templates, stage the
-model artifacts, and write a `.env` with the NON-SECRET values the skill gathered.
+model artifacts, and write `agami.env` with the NON-SECRET values the skill gathered.
 
 This helper never touches a secret: the admin password is typed by the user into the file afterwards
 (the agami-connect hand-off pattern), `deploy_preflight` generates the signing secret, and an external
-`APP_DATABASE_URL` (itself a credential) is likewise edited into `.env` by the user — never passed here
-on the command line. So that a re-run can't wipe a password the user already typed or a secret already
-generated, an EXISTING `.env` is preserved untouched — only the other bundle files (and the artifacts
+`APP_DATABASE_URL` (itself a credential) is likewise edited into `agami.env` by the user — never passed
+here on the command line. So that a re-run can't wipe a password the user already typed or a secret already
+generated, an EXISTING `agami.env` is preserved untouched — only the other bundle files (and the artifacts
 copy) are refreshed.
 
 Stdout is a single status line (first token machine-readable); the skill reads it and acts. Stdlib only.
 
-  PREPARED <target>           fresh bundle written; user must set AGAMI_ADMIN_PASSWORD next      [0]
-  PREPARED_KEPT_ENV <target>  bundle refreshed; an existing .env was preserved (not overwritten)  [0]
-  ERROR <message>             templates missing / artifacts missing / write failed                [1]
+  PREPARED <target>           fresh bundle written; user must set AGAMI_ADMIN_PASSWORD next        [0]
+  PREPARED_KEPT_ENV <target>  bundle refreshed; an existing agami.env was preserved (not overwritten) [0]
+  ERROR <message>             templates missing / artifacts missing / write failed                  [1]
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import stat
 import sys
 from pathlib import Path
 
-# The non-.env files copied verbatim into the bundle. `.env` is generated from `.env.example` (below),
+# The files copied verbatim into the bundle. `agami.env` is generated from `agami.env.example` (below),
 # never copied as-is, so the user gets a real config rather than a template full of placeholders.
 _VERBATIM = ("docker-compose.yml", "Caddyfile", "deploy.sh", "README.md")
 
@@ -50,7 +50,7 @@ def _set_key(text: str, key: str, value: str) -> str:
 
 
 def _build_env(example: str, args: argparse.Namespace) -> str:
-    """The `.env` for a fresh bundle: the non-secret answers written onto the template. The admin
+    """The `agami.env` for a fresh bundle: the non-secret answers written onto the template. The admin
     password line is left blank (the user types it); the signing secret is left for deploy_preflight."""
     text = example if example.endswith("\n") else example + "\n"
     text = _set_key(text, "COMPOSE_PROFILES", args.profiles)
@@ -60,7 +60,7 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
     text = _set_key(text, "AGAMI_ADMIN_FIRST_NAME", args.admin_first)
     text = _set_key(text, "AGAMI_ADMIN_LAST_NAME", args.admin_last)
     # External/managed Postgres (APP_DATABASE_URL) is a credential, so it is NOT set here — the template
-    # ships it commented and the user edits it into .env by hand (the same hand-off as the password).
+    # ships it commented and the user edits it into agami.env by hand (the same hand-off as the password).
     return text
 
 
@@ -103,7 +103,7 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         return f"ERROR carried bundle templates not found at {_BUNDLE_SRC}", 1
     if not (artifacts / "local").is_dir():
         # `local/` marks a real agami-artifacts dir (i.e. /agami-connect has run) — it is the precondition,
-        # NOT something we stage (creds now travel in .env via DATASOURCE_URL; the model is staged below).
+        # NOT something we stage (creds now travel in agami.env via DATASOURCE_URL; the model is staged below).
         return f"ERROR no agami-artifacts at {artifacts} (run /agami-connect first)", 1
     if target == artifacts or target.is_relative_to(artifacts) or artifacts.is_relative_to(target):
         # Else the copytree(artifacts -> target/artifacts) would recurse into the bundle it just created.
@@ -116,7 +116,7 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         (target / "deploy.sh").chmod(0o755)
 
         # Stage the MODEL only — never a secret. `local/` (credentials + .pgpass) is excluded: the
-        # deployed server reads warehouse creds from DATASOURCE_URL in .env, so no 600-mode file is
+        # deployed server reads warehouse creds from DATASOURCE_URL in agami.env, so no 600-mode file is
         # copied into a shippable bundle or mounted into the container (the uid-mismatch crash this
         # replaces). symlinks=True keeps links as links; dirs_exist_ok so a re-run refreshes in place.
         staged = target / "artifacts"
@@ -136,13 +136,16 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
         # the staged copy to world-readable/traversable so the read-only mount is readable regardless.
         _grant_world_read(staged)
 
-        env_path = target / ".env"
+        # The operator-editable config is `agami.env` — a visible name (a dot-file like `.env` is hidden in
+        # Finder, and this is the one file the user must open). docker-compose reads it via `--env-file` in
+        # deploy.sh + the `env_file:` directive, since it no longer auto-loads by the `.env` name.
+        env_path = target / "agami.env"
         if env_path.exists():
-            # Never clobber a .env that may already hold a typed password / a generated signing secret —
+            # Never clobber an agami.env that may already hold a typed password / a generated signing secret —
             # but do reassert chmod 600 in case an editor/umask loosened it (the file holds secrets).
             env_path.chmod(0o600)
             return f"PREPARED_KEPT_ENV {target}", 0
-        example = (_BUNDLE_SRC / ".env.example").read_text(encoding="utf-8")
+        example = (_BUNDLE_SRC / "agami.env.example").read_text(encoding="utf-8")
         env_path.write_text(_build_env(example, args), encoding="utf-8")
         env_path.chmod(0o600)
     except OSError as e:
@@ -162,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--profiles", default="bundled-db,edge", help="COMPOSE_PROFILES (default: single-server)")
     p.add_argument("--image-tag", default="latest", help="ghcr.io/agamiai/agami-core tag to pull")
     # Deliberately NO --password / --app-database-url / secret args: a credential never travels on the
-    # command line (it would leak into chat logs / shell history). The user edits those into .env.
+    # command line (it would leak into chat logs / shell history). The user edits those into agami.env.
     args = p.parse_args(argv)
 
     status, code = prepare(args)
