@@ -18,7 +18,9 @@ Stdout is a single status line (first token machine-readable); the skill reads i
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -62,6 +64,36 @@ def _build_env(example: str, args: argparse.Namespace) -> str:
     return text
 
 
+def _widen_one(path: Path) -> None:
+    """`a+rX` on a single path: add read for all, plus execute/traverse for a directory (or a file that
+    already has an execute bit). Add-only — never removes a bit, so a read-only snapshot stays readable
+    (perms only widen, never narrow). A symlink is skipped so a link's target (possibly outside the bundle) is untouched."""
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        return
+    mode = stat.S_IMODE(st.st_mode)
+    add = 0o444  # a+r
+    if stat.S_ISDIR(st.st_mode) or (mode & 0o111):  # a+X: dirs, or files already carrying an execute bit
+        add |= 0o111
+    path.chmod(mode | add)
+
+
+def _grant_world_read(root: Path) -> None:
+    """`chmod -R a+rX` over the staged model. The deployed container runs as uid 10001, not the operator
+    who owns these files, and mounts them read-only — without this the boot-time model load fails
+    "Permission denied" on ORGANIZATION.md and the container crash-loops. Only non-secret model files
+    reach here (`local/` is excluded from staging).
+
+    Uses `os.walk(followlinks=False)` — NOT `rglob("**")`, which follows directory symlinks on Python
+    ≤3.12 and could chmod files *outside* the bundle — and it streams rather than materializing every
+    path, so a large model doesn't build a giant list."""
+    _widen_one(root)
+    for dirpath, dirnames, filenames in os.walk(root):  # followlinks=False (default): never enters a symlinked dir
+        base = Path(dirpath)
+        for name in (*dirnames, *filenames):
+            _widen_one(base / name)
+
+
 def prepare(args: argparse.Namespace) -> tuple[str, int]:
     """Returns (status_line, exit_code). The status line's first token is machine-readable."""
     target = Path(args.target).expanduser().resolve()
@@ -70,8 +102,9 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
     if not _BUNDLE_SRC.is_dir():
         return f"ERROR carried bundle templates not found at {_BUNDLE_SRC}", 1
     if not (artifacts / "local").is_dir():
-        # No staged model/creds to ship — the deploy would have nothing to serve.
-        return f"ERROR no artifacts (model + credentials) found at {artifacts} — run /agami-connect first", 1
+        # `local/` marks a real agami-artifacts dir (i.e. /agami-connect has run) — it is the precondition,
+        # NOT something we stage (creds now travel in .env via DATASOURCE_URL; the model is staged below).
+        return f"ERROR no agami-artifacts at {artifacts} (run /agami-connect first)", 1
     if target == artifacts or target.is_relative_to(artifacts) or artifacts.is_relative_to(target):
         # Else the copytree(artifacts -> target/artifacts) would recurse into the bundle it just created.
         return f"ERROR --target must not be inside --artifacts-dir (or vice versa): {target}", 1
@@ -82,10 +115,26 @@ def prepare(args: argparse.Namespace) -> tuple[str, int]:
             shutil.copy2(_BUNDLE_SRC / name, target / name)
         (target / "deploy.sh").chmod(0o755)
 
-        # Stage the model + warehouse credentials so the bundle is self-contained + shippable. copy2
-        # preserves the chmod-600 on local/credentials; symlinks=True keeps links as links rather than
-        # materializing their targets into the bundle. dirs_exist_ok so a re-run refreshes in place.
-        shutil.copytree(artifacts, target / "artifacts", symlinks=True, dirs_exist_ok=True)
+        # Stage the MODEL only — never a secret. `local/` (credentials + .pgpass) is excluded: the
+        # deployed server reads warehouse creds from DATASOURCE_URL in .env, so no 600-mode file is
+        # copied into a shippable bundle or mounted into the container (the uid-mismatch crash this
+        # replaces). symlinks=True keeps links as links; dirs_exist_ok so a re-run refreshes in place.
+        staged = target / "artifacts"
+        # `dirs_exist_ok=True` merges into an existing bundle, and `ignore` only skips COPYING `local/` —
+        # it does NOT delete a `local/` a PRIOR (older) prepare_deploy staged. Purge it explicitly so a
+        # re-run over an old bundle can't keep a stale credentials file in the mounted volume. Fail-CLOSED:
+        # NOT `ignore_errors` — a failed purge (a perms/read-only issue) must surface as an ERROR, never
+        # silently leave the secret behind. A missing `local/` is fine (nothing to purge).
+        stale_local = staged / "local"
+        if stale_local.exists():
+            shutil.rmtree(stale_local)
+        shutil.copytree(
+            artifacts, staged, symlinks=True, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("local"),
+        )
+        # The model is non-secret, but the container runs as a different uid than the file owner — widen
+        # the staged copy to world-readable/traversable so the read-only mount is readable regardless.
+        _grant_world_read(staged)
 
         env_path = target / ".env"
         if env_path.exists():

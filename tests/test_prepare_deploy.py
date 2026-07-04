@@ -63,9 +63,80 @@ def test_prepares_a_complete_bundle(tmp_path):
     assert "image: ghcr.io/agamiai/agami-core:" in compose
     assert "build:" not in compose
 
-    # The model + credentials are staged so the bundle is self-contained + shippable.
+    # The MODEL is staged so the bundle is self-contained + shippable...
     assert (target / "artifacts" / "demo" / "org.yaml").exists()
-    assert (target / "artifacts" / "local" / "credentials").exists()
+    # ...but no secret travels: `local/` (credentials + .pgpass) is excluded entirely (creds come from
+    # DATASOURCE_URL in .env now), so no 600-mode file lands in a shippable bundle or a mounted volume.
+    assert not (target / "artifacts" / "local").exists()
+    assert list(target.glob("artifacts/**/credentials")) == []
+
+
+def test_local_secrets_are_never_staged(tmp_path):
+    """`local/` — credentials AND .pgpass — must not enter a shippable bundle (the field tester had to
+    chown both to the container uid; with them gone, neither exists to fix)."""
+    art = _artifacts(tmp_path)
+    pgpass = art / "local" / ".pgpass"
+    pgpass.write_text("db.example:5432:*:u:p\n", encoding="utf-8")
+    pgpass.chmod(0o600)
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, art))
+    assert not (target / "artifacts" / "local").exists()
+    assert list(target.glob("artifacts/**/credentials")) == []
+    assert list(target.glob("artifacts/**/.pgpass")) == []
+
+
+def test_rerun_purges_a_stale_local_from_an_older_bundle(tmp_path):
+    """A bundle made by an OLDER prepare_deploy staged `local/` (with credentials). Re-running must
+    delete that stale secret — `ignore=` only skips copying, and `dirs_exist_ok` merges, so without an
+    explicit purge the old credentials file would linger in the mounted volume."""
+    art = _artifacts(tmp_path)
+    target = tmp_path / "bundle"
+    stale = target / "artifacts" / "local"
+    stale.mkdir(parents=True)
+    (stale / "credentials").write_text("[demo]\nhost = stale\n", encoding="utf-8")
+    prepare_deploy.prepare(_args(target, art))
+    assert not (target / "artifacts" / "local").exists()
+
+
+def test_staged_model_is_world_readable(tmp_path):
+    """The container runs as a different uid and mounts the model read-only — every staged dir must be
+    world-traversable and every file world-readable, else the boot-time load crashes (issue #1's fix)."""
+    art = _artifacts(tmp_path)
+    # Simulate a restrictive owner-only source (umask 077); the widening must repair it in the bundle.
+    (art / "demo" / "org.yaml").chmod(0o600)
+    (art / "demo").chmod(0o700)
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, art))
+    prof = target / "artifacts" / "demo"
+    assert stat.S_IMODE(prof.stat().st_mode) & 0o005 == 0o005          # dir: others r-x (traversable)
+    assert stat.S_IMODE((prof / "org.yaml").stat().st_mode) & 0o004     # file: others readable
+
+
+def test_widen_does_not_chmod_through_a_dir_symlink(tmp_path):
+    """The widening must never follow a directory symlink out of the bundle and chmod external files
+    (rglob('**') would on Python ≤3.12; os.walk(followlinks=False) does not)."""
+    art = _artifacts(tmp_path)
+    external = tmp_path / "outside"
+    external.mkdir()
+    secret = external / "secret.txt"
+    secret.write_text("x", encoding="utf-8")
+    secret.chmod(0o600)
+    # A directory symlink inside the model pointing at the external dir (copied into the bundle as a link).
+    (art / "demo" / "link").symlink_to(external, target_is_directory=True)
+    prepare_deploy.prepare(_args(tmp_path / "bundle", art))
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600  # untouched — not widened through the symlink
+
+
+def test_env_ships_a_datasource_url_hint_left_unset(tmp_path):
+    """The warehouse DSN is a Phase-2 hand-off (a credential): .env carries a commented hint, and the
+    helper never sets it to a value (same discipline as APP_DATABASE_URL / the admin password)."""
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
+    env = (target / ".env").read_text()
+    assert "# DATASOURCE_URL=" in env       # the hint ships
+    # No line assigns DATASOURCE_URL a live value (commented hint only) — checked per-line so it holds
+    # even at the start of the file, and doesn't false-match the `DATASOURCE_URL__<NAME>` form.
+    assert not any(ln.lstrip().startswith("DATASOURCE_URL=") for ln in env.splitlines())
 
 
 def test_env_has_non_secrets_and_a_blank_password(tmp_path):
