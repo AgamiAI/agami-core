@@ -83,6 +83,15 @@ def test_config_is_visible_agami_env_wired_through_compose_and_deploy(tmp_path):
     assert "--env-file agami.env" in (target / "deploy.sh").read_text()
 
 
+def test_staged_compose_caps_container_logs(tmp_path):
+    """The shipped compose caps per-container log growth — the default json-file driver is unbounded and
+    would slowly fill a small VM disk on a long-running deploy."""
+    target = tmp_path / "bundle"
+    prepare_deploy.prepare(_args(target, _artifacts(tmp_path)))
+    compose = (target / "docker-compose.yml").read_text()
+    assert "logging:" in compose and 'max-size: "10m"' in compose and 'max-file: "3"' in compose
+
+
 def test_local_secrets_are_never_staged(tmp_path):
     """`local/` — credentials AND .pgpass — must not enter a shippable bundle (the field tester had to
     chown both to the container uid; with them gone, neither exists to fix)."""
