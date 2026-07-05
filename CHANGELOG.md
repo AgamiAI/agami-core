@@ -10,6 +10,18 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Added
+
+- **Read-only database user guidance.** `/agami-connect` and `/agami-deploy` now
+  recommend connecting agami with a **read-only** database user — agami only ever
+  runs read-only SELECT queries, so read access is all it needs. A new
+  [readonly-grants.md](plugins/agami/shared/readonly-grants.md) ships copy-paste
+  `CREATE USER` / `GRANT SELECT` SQL for every supported dialect (Postgres/Redshift,
+  MySQL, Snowflake, SQL Server, Oracle, Databricks, Trino, BigQuery). Ask agami for
+  "the read-only grant" to get the exact SQL for your database.
+
 ## [0.3.6] — 2026-07-04
 
 ### Changed

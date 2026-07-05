@@ -26,6 +26,16 @@ chmod 600 <artifacts_dir>/local/credentials
 `agami` refuses to read the file unless it's `chmod 600` — the same protection
 `ssh` uses for private keys.
 
+## Use a read-only user
+
+`agami` only ever runs read-only SELECT queries, so the `user` above only needs
+read access. Connecting a **read-only database user** is the safest choice,
+especially against a production database. Copy-paste `CREATE USER` / `GRANT SELECT`
+SQL for every dialect (Postgres, MySQL, Snowflake, SQL Server, Oracle, Databricks,
+Trino, BigQuery) is in
+[`plugins/agami/shared/readonly-grants.md`](../plugins/agami/shared/readonly-grants.md)
+— or just ask agami for "the read-only grant" for your database.
+
 ## Multiple databases
 
 Add more `[<profile>]` sections. Switch with `AGAMI_PROFILE=staging`:

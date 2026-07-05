@@ -14,6 +14,8 @@ You: Snowflake
 ✓ Wrote <artifacts_dir>/local/credentials.example with a [main] section for Snowflake.
   Fill it in (account, user, password OR authenticator=externalbrowser,
   warehouse, role, database, schema) then save as <artifacts_dir>/local/credentials.
+  Tip: agami only runs read-only queries — a read-only DB user is safest.
+  Ask for "the read-only grant" to get the exact SQL for your database.
 
 # After filling in the file:
 $ /agami-connect

@@ -76,6 +76,8 @@ When you're ready to connect your own database:
 /agami-connect
 
 # 2. Fill in the template, then save + lock it down
+#    (agami only runs read-only queries, so use a read-only DB user if you can —
+#     ask agami for "the read-only grant" to get the exact GRANT SQL)
 $EDITOR <artifacts_dir>/local/credentials.example
 mv <artifacts_dir>/local/credentials.example <artifacts_dir>/local/credentials
 chmod 600 <artifacts_dir>/local/credentials
