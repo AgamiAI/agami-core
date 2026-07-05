@@ -75,7 +75,7 @@ services:
     logging: *default-logging
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}  # from your Cloudflare Zero Trust tunnel
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}  # from your Cloudflare Zero Trust tunnel
 
 volumes:
   pgdata:
