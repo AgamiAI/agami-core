@@ -182,6 +182,7 @@ def _db_type_for(profile: str, creds: dict[str, dict[str, str]]) -> str:
 # Read-only SQL guard (mirrors shared/sql-generation-rules.md → Safety Rules)
 # ---------------------------------------------------------------------------
 
+
 def check_read_only(sql: str) -> str | None:
     """Return None if the SQL is a safe single read-only statement, else a reason string.
 
@@ -307,10 +308,49 @@ def _resolve_receipt(profile: str, sql: str) -> dict | None:
 
 
 def tool_list_datasources(_args: dict[str, Any]) -> str:
-    """Local analog of Ask Agami `list_organizations`: enumerate local profiles."""
+    """Analog of Ask Agami `list_organizations`: enumerate the datasources this deployment serves.
+
+    Two backends behind one seam, exactly like `_load_org` / `_load_memory`: a served deployment
+    (AGAMI_DB_URL set) reads the models from the store — the credentials file never ships to the
+    container — while the local skill reads the on-disk profiles. Before this seam existed, the
+    tool only ever read the credentials file, so it reported "no datasources" on every self-hosted
+    server even with a model deployed and querying fine (get_datasource_schema / execute_sql work
+    because they already went through the store)."""
+    active = resolve_profile()
+    from store import Store  # stdlib-light; the DB driver is imported lazily inside
+
+    store = Store.from_env()
+    if store is not None:
+        try:
+            from model_store import count_model_tables, list_datasources
+
+            out = [
+                {
+                    "datasource": ds,
+                    "database_type": _served_db_type(ds),
+                    "table_count": count_model_tables(store, ds),
+                    "model_present": True,
+                    "is_active": ds == active,
+                }
+                for ds in list_datasources(store)
+                if ds  # skip the "" sentinel row install-global memory keys on
+            ]
+        finally:
+            store.close()
+        if out:
+            return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
+        return json.dumps(
+            {
+                "datasources": [],
+                "note": "No models deployed to this server yet. Load one with the deploy's model "
+                "loader (model_deploy scans <artifacts_dir>/*/org.yaml).",
+            },
+            indent=2,
+        )
+
+    # Local skill path: enumerate the credentials-file profiles + their on-disk models.
     creds = _credentials_sections()
     artifacts = resolve_artifacts_dir()
-    active = resolve_profile()
     out = []
     for profile in sorted(creds.keys()):
         pdir = artifacts / profile
@@ -339,6 +379,16 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             indent=2,
         )
     return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
+
+
+def _served_db_type(datasource: str) -> str:
+    """Best-effort database-type label for a served datasource. The store holds the model, not the
+    warehouse credentials, so derive the type from the `DATASOURCE_URL[__<datasource>]` scheme the
+    executor already resolves. Display-only ("" when no DSN is set — the model still serves)."""
+    from execute_sql import _env_datasource_dsn  # sibling module; no import cycle
+
+    dsn = _env_datasource_dsn(datasource)
+    return _db_type_for(datasource, {datasource: {"url": dsn}}) if dsn else ""
 
 
 def _read_text(path: Path) -> str | None:
@@ -994,7 +1044,9 @@ def record_tool_call(
             "success": success,
             "error_kind": error_kind,
             "user_question": args.get("user_question"),
-            "agent_query": args.get("raw_query"),  # the existing arg is the agent's framing of the query
+            "agent_query": args.get(
+                "raw_query"
+            ),  # the existing arg is the agent's framing of the query
             "thread_id": args.get("thread_id"),
             "correlation_id": args.get("correlation_id"),  # the turn (one user question)
         }

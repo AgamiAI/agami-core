@@ -234,6 +234,37 @@ def test_list_datasources_is_sorted(env):
     s.close()
 
 
+def test_tool_list_datasources_reads_the_served_store(env):
+    """Regression: on a served deploy (AGAMI_DB_URL set) the credentials file never ships, so the
+    tool must enumerate the deployed models from the store instead of reporting empty. Previously it
+    read only the credentials INI and returned {"datasources": [], "note": "...credentials file..."}
+    on every self-hosted server, even while get_datasource_schema / execute_sql worked."""
+    import json
+
+    import tools
+
+    _seed(env, "SALES_DATA")
+    result = json.loads(tools.tool_list_datasources({}))
+
+    assert [d["datasource"] for d in result["datasources"]] == ["SALES_DATA"]
+    entry = result["datasources"][0]
+    assert entry["model_present"] is True
+    assert entry["table_count"] >= 1  # ORG seeds `orders` + `products`
+    assert "note" not in result  # the "run agami-connect" note must NOT fire when a model is served
+
+
+def test_tool_list_datasources_served_but_empty_gives_a_deploy_hint(env):
+    """A served deployment with no model yet returns an honest 'deploy a model' note — not the
+    local 'run the agami-connect skill' one, which doesn't apply on a server."""
+    import json
+
+    import tools
+
+    result = json.loads(tools.tool_list_datasources({}))
+    assert result["datasources"] == []
+    assert "model_deploy" in result["note"]
+
+
 # --- gating + empty state ----------------------------------------------------
 
 

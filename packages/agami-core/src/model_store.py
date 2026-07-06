@@ -144,6 +144,13 @@ def list_datasources(store: Store) -> list[str]:
     return [r["datasource"] for r in rows]
 
 
+def count_model_tables(store: Store, datasource: str) -> int:
+    """How many modeled tables the served datasource has — a cheap COUNT for the datasource
+    listing, so `list_datasources` doesn't have to rebuild the whole Organization just to size it."""
+    rows = store.query("SELECT count(*) AS n FROM model_table WHERE datasource = ?", (datasource,))
+    return int(rows[0]["n"]) if rows else 0
+
+
 # ---------------------------------------------------------------------------
 # Memory (ORGANIZATION.md / USER_MEMORY.md) + model_version — served from the DB too, so a DB-only
 # deploy reads NO files at runtime (get_datasource_schema's domain context + the receipt's version
@@ -391,11 +398,13 @@ def _group_turns(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # user_question, so they'd mask the real question that the execute_sql did report. Earliest-with-
         # one stays drift-proof (a later call's drifted question can't win over the first real one).
         question = next((c["user_question"] for c in tc if c.get("user_question")), None)
-        turns.append({
-            "question": question,
-            "started": tc[0]["ts"],
-            "calls": tc,
-        })
+        turns.append(
+            {
+                "question": question,
+                "started": tc[0]["ts"],
+                "calls": tc,
+            }
+        )
     return turns
 
 
@@ -419,8 +428,13 @@ def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
         key = (r["actor"], r["thread_id"]) if r["thread_id"] else r["id"]
         s = sessions.get(key)
         if s is None:
-            s = {"key": key, "thread_id": r["thread_id"], "actor": r["actor"],
-                 "datasource": r["datasource"], "calls": []}
+            s = {
+                "key": key,
+                "thread_id": r["thread_id"],
+                "actor": r["actor"],
+                "datasource": r["datasource"],
+                "calls": [],
+            }
             sessions[key] = s
             order.append(key)
         s["calls"].append(r)
