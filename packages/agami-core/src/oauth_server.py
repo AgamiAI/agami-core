@@ -503,10 +503,15 @@ def _grant_refresh_token(store: Store, form: dict[str, str]) -> Response:
         return _oauth_error("invalid_grant", "refresh token has been revoked")
     if _now().isoformat() > row["expires_at"]:
         return _oauth_error("invalid_grant", "refresh token has expired")
-    # Bind to the issuing client when the client sends one — RFC 6749 §6 doesn't require client_id
-    # for a public client, so a missing one is allowed (the token secret + hash-at-rest are the gate).
+    # Bind to the issuing client only when we have a client_id on BOTH sides — RFC 6749 §6 doesn't
+    # require client_id for a public client, and an authorize can complete without one (so the token's
+    # stored client_id may be blank). Enforce the match only when both are present; a missing one on
+    # either side just skips the check (the token secret + hash-at-rest are the real gate). Requiring
+    # them to match when one is blank would spuriously reject a client that authorized without a
+    # client_id but refreshes with one.
     client_id = form.get("client_id", "")
-    if client_id and client_id != (row["client_id"] or ""):
+    stored_client = row["client_id"] or ""
+    if client_id and stored_client and client_id != stored_client:
         return _oauth_error("invalid_grant", "client mismatch")
 
     # Rotate atomically: only the request that flips revoked 0→1 may renew (closes the double-rotate

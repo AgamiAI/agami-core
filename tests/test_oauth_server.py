@@ -519,6 +519,23 @@ def test_refresh_rejects_missing_unknown_and_wrong_client(env):
     assert _refresh(c, first["refresh_token"])["access_token"]
 
 
+def test_refresh_with_client_id_when_the_token_has_no_client(env):
+    # An authorize can complete without a client_id, so a refresh token's stored client_id may be
+    # blank. A later refresh that DOES send a client_id must not spuriously fail the bind check —
+    # binding is only enforced when BOTH sides present one. (We blank the stored client_id directly
+    # rather than re-run authorize, to keep the test focused on the bind logic.)
+    c = TestClient(mcp_http.build_app())
+    pair = _token_pair(c)
+    s = Store.from_env()
+    try:
+        s.execute("UPDATE oauth_refresh_token SET client_id = ? WHERE revoked = 0", ("",))
+        s.commit()
+    finally:
+        s.close()
+    # refresh WITH a client_id succeeds (blank stored client_id → binding skipped, not a mismatch)
+    assert _refresh(c, pair["refresh_token"], client_id="cid")["access_token"]
+
+
 def test_refresh_token_expiry_is_enforced(env):
     c = TestClient(mcp_http.build_app())
     first = _token_pair(c)
