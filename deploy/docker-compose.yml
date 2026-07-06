@@ -7,11 +7,20 @@
 #   (none)            — agami only, behind the platform's own TLS (e.g. Cloud Run); set APP_DATABASE_URL
 name: agami
 
+# Cap per-container log growth (default json-file is unbounded) so a long-running deploy can't fill the
+# disk — 3 rotated files × 10 MB per service. Applied to every service via the `*default-logging` anchor.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   caddy:
     image: caddy:2
     profiles: ["edge"]
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"
@@ -27,6 +36,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     env_file: agami.env
     environment:
       # Bundled Postgres by default; set APP_DATABASE_URL in agami.env to point at managed Postgres instead.
@@ -43,6 +53,7 @@ services:
     image: postgres:16
     profiles: ["bundled-db"]
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: agami
       POSTGRES_USER: agami
@@ -61,9 +72,10 @@ services:
     image: cloudflare/cloudflared:latest
     profiles: ["tunnel"]
     restart: unless-stopped
+    logging: *default-logging
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}  # from your Cloudflare Zero Trust tunnel
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}  # from your Cloudflare Zero Trust tunnel
 
 volumes:
   pgdata:
