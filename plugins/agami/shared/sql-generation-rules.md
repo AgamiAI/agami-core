@@ -132,6 +132,8 @@ For growth rates (QoQ, MoM, YoY):
 - Never include actual credential values in SQL comments or strings
 - Use `NULLIF(denominator, 0)` to guard against division by zero
 
+**These are enforced, not just guidance.** Every query runs through a read-only gate (`sql_guard`, at the executor chokepoint) that rejects anything other than a single `SELECT` / `WITH...SELECT` — multi-statement SQL, data-modifying CTEs, transaction-control / session-state / prepared statements, `SELECT ... INTO`, row-level locks, and dangerous server-side functions (`pg_read_file`, `lo_export`, `dblink`, `copy_program`, `pg_sleep`, advisory locks, `query_to_xml`, …). A rejected query never reaches the database. Generate read-only SQL and this gate stays invisible.
+
 ---
 
 ## Performance Hints

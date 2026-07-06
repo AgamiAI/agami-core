@@ -787,6 +787,20 @@ def main() -> int:
 
     profile = args.profile or _resolve_default_profile()
 
+    # Read-only / dangerous-SQL guard — the hard security gate, at the shared executor
+    # chokepoint so EVERY caller (both MCP servers, the agami-query skill, cron) is
+    # protected, not just whichever path happened to pre-check. This is NOT bypassable
+    # via --no-safety: that flag skips only the *semantic-model* pass (fan/chasm +
+    # default_filters), never write / RCE / DoS protection. Same gate the MCP tool layer
+    # fail-fast pre-checks (tools.check_read_only -> sql_guard).
+    import sql_guard
+
+    guard_reason = sql_guard.check_read_only(sql)
+    if guard_reason is not None:
+        json.dump({"error": {"kind": "permission", "remediation": guard_reason}}, sys.stderr)
+        sys.stderr.write("\n")
+        return 1
+
     # Semantic-model safety pass (fan/chasm pre-flight + default_filters). Inert when
     # there's no model for the profile, so this is safe for every caller.
     if not args.no_safety:
