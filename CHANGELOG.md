@@ -22,6 +22,44 @@ below corresponds to one such version.
   MySQL, Snowflake, SQL Server, Oracle, Databricks, Trino, BigQuery). Ask agami for
   "the read-only grant" to get the exact SQL for your database.
 
+### Fixed
+
+- **`list_datasources` no longer reports empty on a self-hosted server.** On a
+  served deployment the warehouse/model is reached through the store, and the local
+  `credentials` file never ships to the container — but `list_datasources` was the
+  one tool still reading only that file, so it always returned "No profiles found …
+  run agami-connect", even while `get_datasource_schema` and `execute_sql` worked
+  against the deployed model. Because clients are told to call it first, they'd
+  conclude nothing was connected. It now enumerates the served models from the store
+  (the same seam every other tool already uses), and only falls back to the
+  credentials file for the local plugin.
+
+### Security
+
+- **Hardened the read-only `execute_sql` gate.** SQL execution now runs through a
+  single guard (`sql_guard`) at the shared executor, so the stdio server, the hosted
+  HTTP server, the skills, and cron are all protected identically (previously the
+  check lived only on the MCP tool path; a direct `python -m execute_sql` call — used
+  by the skills and cron — was unguarded). Beyond "must start with `SELECT`/`WITH`",
+  it now rejects multi-statement SQL (including bypasses hidden in string literals,
+  comments, or double-quoted identifiers), data-modifying CTEs, transaction-control /
+  session-state / prepared statements, `SELECT ... INTO`, row-level locks, and
+  dangerous server-side functions (`pg_read_file`, `lo_export`, `dblink`,
+  `copy_program`, `pg_sleep`, advisory locks, `query_to_xml`, …). Legitimate analytics
+  SQL is unaffected — a large false-positive corpus pins that. Enforcement is not
+  bypassable via `--no-safety` (that flag only skips the semantic-model pass).
+- **Closed a dollar-quote statement-stacking bypass in that gate.** A `'` inside a
+  Postgres/Snowflake/DuckDB `$$…$$` (or `$tag$…$tag$`) string desynced the literal
+  stripper and could smuggle a second statement (`SELECT $$'$$ ; DROP TABLE x -- '`)
+  past the multi-statement check. The gate now neutralizes comments and string /
+  dollar literals in a single lexer-faithful pass (first-opened construct wins),
+  refuses dialect-ambiguous MySQL comment forms (a bare `--x` and executable
+  `/*! … */` comments), and also blocks sequence writes (`setval`/`nextval`) and
+  server/replication control
+  (`pg_stat_reset*`, `pg_switch_wal`, `pg_drop_replication_slot`, …). The guard module
+  is also now packaged in the built wheel (it was missing from `py-modules`, which
+  would have broken `import sql_guard` in an installed/containerized deploy).
+
 ## [0.3.6] — 2026-07-04
 
 ### Changed

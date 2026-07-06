@@ -51,3 +51,45 @@ re-ingests the model on boot. **No rebuild, no new VM, no database access** — 
 - **Always deploy via `./deploy.sh`** (it runs the preflight). If you `docker compose up` directly without
   having run the preflight, `AGAMI_PUBLIC_HOST` is unset and Caddy fails to start (loudly, never insecurely) —
   run `python -m deploy_preflight agami.env` first.
+
+## Runtime identity on serverless platforms
+
+The **Cloud Run / serverless** variant above runs the container under a **cloud identity**, and every
+managed-container platform hands you an over-privileged *default* one unless you say otherwise. Because
+`/mcp` and `/admin` are internet-facing, a compromised container can read that identity's token from the
+platform metadata endpoint and inherit all of its cloud permissions. So run agami under a **dedicated,
+least-privilege identity** that can do only two things: read the specific secrets agami uses
+(`AGAMI_SIGNING_SECRET`, `APP_DATABASE_URL`, `DATASOURCE_URL`, `AGAMI_ADMIN_PASSWORD`) and reach the
+database. Nothing else. Never the platform default.
+
+- **GCP Cloud Run** — the default Compute Engine service account has project **Editor**; don't use it.
+  Create a dedicated SA, grant `roles/cloudsql.client` (if you use Cloud SQL) and
+  `roles/secretmanager.secretAccessor` **per secret** (not project-wide), then deploy with `--service-account`:
+  ```bash
+  gcloud iam service-accounts create agami-run
+  gcloud projects add-iam-policy-binding PROJECT \
+    --member=serviceAccount:agami-run@PROJECT.iam.gserviceaccount.com \
+    --role=roles/cloudsql.client
+  # grant secret access PER-SECRET, not project-wide:
+  for s in agami-signing-secret app-database-url datasource-url agami-admin-password; do
+    gcloud secrets add-iam-policy-binding "$s" \
+      --member=serviceAccount:agami-run@PROJECT.iam.gserviceaccount.com \
+      --role=roles/secretmanager.secretAccessor
+  done
+  gcloud run deploy agami --service-account=agami-run@PROJECT.iam.gserviceaccount.com ...
+  ```
+- **AWS ECS / Fargate / App Runner** — give the task a dedicated **task role** with only
+  `secretsmanager:GetSecretValue` on the specific secret ARNs (and `rds-db:connect` only if you use RDS
+  IAM auth). Keep it separate from the **execution** role, and don't attach broad managed policies
+  (`AdministratorAccess`, `PowerUserAccess`).
+- **Azure Container Apps / ACI** — assign a **user-assigned managed identity** with a Key Vault access
+  policy / RBAC role scoped to `get` on those specific secrets only — not a subscription- or vault-wide role.
+- **VM / docker-compose (the default bundle)** — the platform doesn't assign the *container* its own
+  identity here, and the container already runs as a non-root user (`uid 10001`). But on a cloud VM (GCE,
+  EC2, an Azure VM) the VM's own attached identity is still reachable from the box via the instance metadata
+  endpoint, so keep that identity scoped to only what the deployment needs (or block the container's route to
+  metadata) — the same least-privilege rule, one level down.
+
+This is defense-in-depth **alongside** the read-only `DATASOURCE_URL` database user and the app-layer
+SELECT-only enforcement: the read-only user limits database damage; a least-privilege runtime identity
+limits cloud-account damage.
