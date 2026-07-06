@@ -4,7 +4,7 @@ agami only ever runs **read-only SELECT** queries (query generation refuses `INS
 
 Create the user with one of the blocks below, then put **its** credentials in your profile: the `user` / `password` (or `url = …`) in `<artifacts_dir>/local/credentials` for the single-player flow, or the `DATASOURCE_URL` in `agami.env` for a self-host deploy.
 
-Replace `<password>` / `<db>` / `<schema>` / `<warehouse>` / `<catalog>` with your values. For **multiple schemas**, repeat the `USAGE` + `SELECT` grants once per schema.
+Replace the `<…>` placeholders — `<password>`, `<db>`, `<schema>`, `<warehouse>`, `<catalog>`, `<project>`, `<dataset>`, and the `agami_ro` user/role name — with your values (each block uses only some of them). For **multiple schemas**, repeat the `USAGE` + `SELECT` grants once per schema.
 
 ## PostgreSQL / Redshift
 
@@ -47,7 +47,9 @@ GRANT ROLE agami_ro TO USER agami_ro_user;
 
 Put `role = agami_ro` in your Snowflake profile so the read-only role is the one used.
 
-## SQL Server / Azure SQL
+## SQL Server / Azure SQL Managed Instance
+
+A server login plus a database user mapped to it (`db_datareader` is the built-in read-only role):
 
 ```sql
 CREATE LOGIN agami_ro WITH PASSWORD = '<password>';
@@ -56,7 +58,16 @@ CREATE USER agami_ro FOR LOGIN agami_ro;
 ALTER ROLE db_datareader ADD MEMBER agami_ro;   -- SELECT on every table/view
 ```
 
-(On Azure SQL create the login in `master`, then the user in your database. `db_datareader` is the built-in read-only role.)
+(On a Managed Instance, create the login in `master` first.)
+
+## Azure SQL Database
+
+Azure SQL Database doesn't support server logins — create a **contained user** with its own password, connected to the target database:
+
+```sql
+CREATE USER agami_ro WITH PASSWORD = '<password>';
+ALTER ROLE db_datareader ADD MEMBER agami_ro;   -- SELECT on every table/view
+```
 
 ## Oracle
 
@@ -100,4 +111,4 @@ bq add-iam-policy-binding --member="serviceAccount:agami-ro@<project>.iam.gservi
 
 ## SQLite / DuckDB
 
-File-based — there's no user or role. The control is filesystem permissions: point agami at a **read-only copy** of the file, or mark the file read-only for the account agami runs as. (agami already opens local SQLite / DuckDB files in read-only mode.)
+File-based — there's no user or role. Safety comes from agami's **read-only SQL guard** (it refuses anything that isn't a `SELECT`) plus **filesystem permissions**. DuckDB files are additionally opened in read-only mode; SQLite is not, so for a hard guarantee point agami at a **read-only copy** of the file, or mark the file read-only for the account agami runs as.

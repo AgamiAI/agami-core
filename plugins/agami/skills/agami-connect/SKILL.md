@@ -304,7 +304,8 @@ Show the read-only **Tip** line only for dialects with a user/role concept (`pos
 `redshift`, `mysql`, `snowflake`, `sqlserver`, `oracle`, `databricks`, `trino`); **omit** it for
 `sqlite` / `duckdb` (file-based, no user) and when BigQuery auth is ADC. If the user asks for the
 grant, read [`shared/readonly-grants.md`](../../shared/readonly-grants.md), pick the `$DB_TYPE`
-block, and fill `<db>` / `<schema>` / `<user>` from the values they entered.
+block, and fill in whatever `<…>` placeholders it uses (e.g. `<db>` / `<schema>` / `<warehouse>` /
+`<catalog>` / `<project>` / `<dataset>`) from the values they entered.
 
 ### 0a.10 — On re-entry: promote the filled-in template, then continue
 The user filled in `<artifacts_dir>/local/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
