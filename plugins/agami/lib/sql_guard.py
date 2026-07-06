@@ -26,23 +26,94 @@ import re
 # analytics SQL fits in ~10KB; 50KB is conservative.
 _MAX_SQL_CHARS = 50_000
 
-# Match SQL comments (line `--` and block `/* */`).
-# CRITICAL: callers MUST sub with a SINGLE SPACE, never with empty string.
-# Replacing with empty welds adjacent tokens together (`SELECT/**/INTO` ->
-# `SELECTINTO`) and defeats the `\b` word-boundary in every downstream regex.
-#
-# Line comments stop at `\r` OR `\n` — Postgres' scanner ends `--` at either.
-# Stopping only at `\n` is exploitable: `SELECT 1 --x\r;DROP TABLE y\n` would be
-# scrubbed to `SELECT 1 ` by a `[^\n]*`-only regex (the `\r;DROP...` is eaten as
-# part of the comment), masking a multi-statement attack.
-_SQL_COMMENT_RE = re.compile(r"--[^\r\n]*|/\*.*?\*/", re.DOTALL)
+# Opening delimiter of a Postgres / Snowflake / DuckDB dollar-quoted string —
+# `$$` or a tagged `$name$`. A positional parameter (`$1`) is NOT an opener (no
+# second `$`), so those pass through untouched. `_neutralize` finds the matching
+# close tag itself (a backreference can't express "same literal tag" inside the
+# single-pass scan cleanly, so the scan does the find).
+_DOLLAR_OPEN_RE = re.compile(r"\$(?:[A-Za-z_]\w*)?\$")
 
-# Single-quoted string literals so `;` / keywords inside them don't trip the
-# deny-list. PG / Redshift / Snowflake all support doubled-quote escaping inside
-# literals. Double-quoted IDENTIFIERS are handled separately (the gate strips the
-# quote chars via `.replace('"', '')` so `"pg_sleep"(10)` reduces to `pg_sleep(10)`
-# and the dangerous-function regex catches it).
-_SQL_SINGLE_QUOTED_RE = re.compile(r"'(?:''|[^'])*'")
+
+def _neutralize(sql: str) -> str:
+    """Blank out comments and string / dollar-quoted literals, and drop the quote
+    delimiters of double-quoted identifiers (keeping their content), in a SINGLE
+    left-to-right pass so the FIRST-opened construct wins — exactly how the database
+    lexer resolves them.
+
+    A stack of independent regex subs (one per construct) CANNOT do this: whichever
+    regex runs first is blind to the others, so a `'` inside a `$$...$$` body, or a
+    `$$` inside a `-- ...` comment, desyncs it and can smuggle an injected
+    `; DROP ...` past the multi-statement check. The scan below never desyncs
+    because at each position it commits to whatever opens there and skips to that
+    construct's own close. Under-matching (an unterminated literal running to EOF)
+    only ever fails *safe* — a stray `;` stays visible and trips the guard.
+
+    Only this analysis copy is transformed; the ORIGINAL sql is what executes.
+    Neutralized spans collapse to a single space (never empty — welding tokens like
+    `SELECT/**/INTO` -> `SELECTINTO` would defeat the `\\b` word boundaries below).
+
+    Escapes: `''` inside a single-quoted literal and `""` inside a double-quoted
+    identifier are treated as doubled-delimiter escapes (standard SQL). Backslash is
+    deliberately NOT an escape here — engines disagree (MySQL yes, standard PG no),
+    and not honoring it can only stop a literal *early* (fail safe), never late.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        two = sql[i : i + 2]
+        if two == "--":  # line comment — ends at CR or LF (PG scanner ends at either)
+            j = i + 2
+            while j < n and sql[j] not in "\r\n":
+                j += 1
+            out.append(" ")
+            i = j
+        elif two == "/*":  # block comment
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            out.append(" ")
+        elif sql[i] == "'":  # single-quoted string literal
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":  # doubled '' escape
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(" ")
+            i = j
+        elif sql[i] == '"':  # double-quoted identifier — keep content, drop quotes
+            j, buf = i + 1, []
+            while j < n:
+                if sql[j] == '"':
+                    if j + 1 < n and sql[j + 1] == '"':  # doubled "" escape
+                        buf.append('"')
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                buf.append(sql[j])
+                j += 1
+            # A pathological identifier like "a;b" reduces to a;b and trips the
+            # multi-statement check — a deliberate, safe-direction hardening choice.
+            out.append("".join(buf))
+            i = j
+        elif sql[i] == "$":  # dollar-quoted string literal ($$...$$ or $tag$...$tag$)
+            m = _DOLLAR_OPEN_RE.match(sql, i)
+            if m:
+                tag = m.group(0)
+                close = sql.find(tag, m.end())
+                i = n if close == -1 else close + len(tag)
+                out.append(" ")
+            else:
+                out.append("$")
+                i += 1
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
 
 # Allowed opening keyword. `WITH` covers CTEs whose final clause is a SELECT.
 # Leading `(` / whitespace is tolerated so a parenthesized set operation —
@@ -99,9 +170,18 @@ _DANGEROUS_FN_RE = re.compile(
     r"dblink\w*|"
     # Shell out via COPY
     r"copy_program|"
+    # Sequence mutation — `setval`/`nextval` WRITE (advance / reset a sequence),
+    # a real data change that starts with SELECT and so slips the keyword deny.
+    r"nextval|setval|"
     # Backend / process control
     r"pg_terminate_backend|pg_cancel_backend|pg_reload_conf|"
     r"pg_rotate_logfile|pg_logfile_rotate|"
+    # Server / replication / stats control — reset monitoring counters, force a WAL
+    # switch, or drop a replication slot (can break downstream replication). Same
+    # side-effecting family as the log/conf calls above. `pg_stat_reset\w*` covers
+    # `pg_stat_reset_shared` / `_single_table_counters` / etc.
+    r"pg_stat_reset\w*|pg_stat_statements_reset|pg_switch_wal|"
+    r"pg_create_restore_point|pg_drop_replication_slot|pg_replication_slot_advance|"
     # Session-state mutation that bypasses the `SET` keyword deny.
     r"set_config|current_setting|"
     # Session-survival advisory locks — survive connection return and can DoS.
@@ -136,19 +216,11 @@ def check_read_only(sql: str | None) -> str | None:
             "Real analytics SQL fits well under this."
         )
 
-    # CRITICAL: strip string literals BEFORE comments. The reverse order is
-    # exploitable — `SELECT '--'; DROP TABLE x` has `--` inside a literal, but the
-    # comment regex would otherwise eat from the `--` through end-of-line (taking
-    # the injected `; DROP ...` with it) and the multi-statement check would pass.
-    # Replacing literals first kills any embedded `--` / `/*` before the comment
-    # regex runs.
-    #
-    # Then strip PG-quoted identifier delimiters (`"`) so `"pg_sleep"(10)` reduces
-    # to `pg_sleep(10)` and the dangerous-function regex catches it. The trade-off:
-    # a pathological column named `"a;b"` ends up as `a;b` and trips the
-    # multi-statement check — a deliberate hardening choice.
-    stripped = _SQL_COMMENT_RE.sub(" ", _SQL_SINGLE_QUOTED_RE.sub("''", sql))
-    stripped = stripped.replace('"', "").strip()
+    # Blank out comments and string / dollar literals, and unwrap double-quoted
+    # identifiers (`"pg_sleep"(10)` -> `pg_sleep(10)`), in one lexer-faithful pass so
+    # nothing hidden inside a literal or comment can reach the checks below. See
+    # `_neutralize` for why a single scan is required rather than layered regexes.
+    stripped = _neutralize(sql).strip()
 
     # Allow exactly one trailing `;`. Any other `;` indicates a second statement —
     # the classic statement-stacking bypass (`COMMIT; DROP SCHEMA public CASCADE`).

@@ -294,6 +294,17 @@ def test_rejects_select_into_write_path(sql: str) -> None:
         "SELECT pg_terminate_backend(123)",
         "SELECT pg_cancel_backend(123)",
         "SELECT pg_reload_conf()",
+        # Sequence mutation — real writes that open with SELECT.
+        "SELECT setval('users_id_seq', 100)",
+        "SELECT nextval('order_seq')",
+        # Server / replication / stats control.
+        "SELECT pg_stat_reset()",
+        "SELECT pg_stat_reset_shared('bgwriter')",
+        "SELECT pg_stat_statements_reset()",
+        "SELECT pg_switch_wal()",
+        "SELECT pg_create_restore_point('x')",
+        "SELECT pg_drop_replication_slot('s')",
+        "SELECT pg_replication_slot_advance('s', '0/0')",
         # Post-audit additions.
         "SELECT set_config('statement_timeout', '0', false)",
         "SELECT current_setting('statement_timeout')",
@@ -407,16 +418,23 @@ def test_red_team_unicode_whitespace_does_not_bypass_deny(sql: str) -> None:
 @pytest.mark.parametrize(
     "sql",
     [
-        # Dollar-quoted strings are NOT stripped — their contents stay visible to the
-        # deny-list. Conservative rejection on pathological cases is intentional.
-        "SELECT $$;DROP TABLE x;$$",
-        "SELECT $$pg_sleep(10)$$",
-        "SELECT $tag$DROP TABLE x$tag$",
+        # Dollar-quote statement stacking. A `'` inside a `$$...$$` / `$tag$...$tag$`
+        # body used to desync the single-quote stripper and smuggle a real second
+        # statement past the multi-statement check. The lexer-faithful scan
+        # neutralizes the whole dollar body, so the injected `;` stays visible and is
+        # blocked. (Regression: arbitrary statement execution regardless of DB role.)
+        r"SELECT $$'$$ ; DROP TABLE users -- '",
+        r"SELECT $tag$'$tag$ ; DELETE FROM accounts -- '",
+        r"SELECT $$won't$$ ; CREATE TABLE evil(x int) -- '",
+        # A `$$` that OPENS inside a line comment must not be treated as a real
+        # dollar-quote and swallow the statement that follows the newline.
+        "SELECT 1 --$$\n;DROP TABLE x--$$",
+        # A DO-block is procedural, not a SELECT — rejected on the opening-keyword check.
         "DO $$ BEGIN DELETE FROM users; END $$",
     ],
 )
-def test_red_team_dollar_quoted_conservatively_rejected(sql: str) -> None:
-    assert check_read_only(sql) is not None, f"Dollar-quoted bypass: {sql!r}"
+def test_red_team_dollar_quoted_stacking_blocked(sql: str) -> None:
+    assert check_read_only(sql) is not None, f"Dollar-quote stacking NOT blocked: {sql!r}"
 
 
 @pytest.mark.parametrize(
@@ -503,6 +521,11 @@ def test_red_team_stacked_keywords(sql: str) -> None:
         "SELECT DISTINCT ON (customer_id) customer_id, created_at, amount FROM orders ORDER BY customer_id, created_at DESC",
         # ----- generate_series -----
         "SELECT d::date FROM generate_series('2026-01-01'::date, '2026-12-31'::date, INTERVAL '1 day') AS d",
+        # ----- Dollar-quoted string CONSTANTS (a value, not executable code). The
+        # keywords/`;` inside are inert data; blocking these was an old false positive. -----
+        "SELECT $$plain label$$ AS note FROM stats",
+        "SELECT $tag$O'Brien$tag$ AS name",
+        "SELECT $$multi\nline\ntext$$ AS body FROM docs",
     ],
 )
 def test_false_positive_guard_legitimate_analytics_sql(sql: str) -> None:
