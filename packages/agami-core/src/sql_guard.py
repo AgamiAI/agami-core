@@ -31,7 +31,13 @@ _MAX_SQL_CHARS = 50_000
 # second `$`), so those pass through untouched. `_neutralize` finds the matching
 # close tag itself (a backreference can't express "same literal tag" inside the
 # single-pass scan cleanly, so the scan does the find).
-_DOLLAR_OPEN_RE = re.compile(r"\$(?:[A-Za-z_]\w*)?\$")
+#
+# `\w*` accepts digit-led tags (`$1$`) too, which Postgres itself rejects (a real
+# tag follows identifier rules and can't start with a digit). Being STRICTER than
+# the grammar here is deliberate: treating any `$…$`-delimited span as an opaque
+# literal only ever neutralizes *more*, so it can never hide a token the database
+# would execute — it just refuses to let a `$1$`-looking region desync the scan.
+_DOLLAR_OPEN_RE = re.compile(r"\$\w*\$")
 
 
 class _GuardReject(Exception):

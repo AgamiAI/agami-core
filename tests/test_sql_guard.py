@@ -426,6 +426,10 @@ def test_red_team_unicode_whitespace_does_not_bypass_deny(sql: str) -> None:
         r"SELECT $$'$$ ; DROP TABLE users -- '",
         r"SELECT $tag$'$tag$ ; DELETE FROM accounts -- '",
         r"SELECT $$won't$$ ; CREATE TABLE evil(x int) -- '",
+        # Numeric-tag `$1$` is not a real PG dollar-quote (tags can't start with a
+        # digit), so the raw payload is a DB syntax error — but the scan still treats
+        # any `$…$` span as opaque, so a `'` inside can't desync it and expose the `;`.
+        r"SELECT $1$'$1$ ; DROP TABLE users -- '",
         # A `$$` that OPENS inside a line comment must not be treated as a real
         # dollar-quote and swallow the statement that follows the newline.
         "SELECT 1 --$$\n;DROP TABLE x--$$",
@@ -558,6 +562,9 @@ def test_red_team_stacked_keywords(sql: str) -> None:
         "SELECT $$plain label$$ AS note FROM stats",
         "SELECT $tag$O'Brien$tag$ AS name",
         "SELECT $$multi\nline\ntext$$ AS body FROM docs",
+        # ----- Positional parameters ($1, $2) are NOT dollar-quote openers -----
+        "SELECT id, name FROM users WHERE id = $1",
+        "SELECT * FROM orders WHERE customer_id = $1 AND status = $2",
     ],
 )
 def test_false_positive_guard_legitimate_analytics_sql(sql: str) -> None:
