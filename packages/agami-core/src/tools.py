@@ -322,13 +322,14 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
     store = Store.from_env()
     if store is not None:
         try:
-            from model_store import count_model_tables, list_datasources
+            from model_store import list_datasources, model_table_counts
 
+            counts = model_table_counts(store)  # one grouped query, not one COUNT per datasource
             out = [
                 {
                     "datasource": ds,
                     "database_type": _served_db_type(ds),
-                    "table_count": count_model_tables(store, ds),
+                    "table_count": counts.get(ds, 0),
                     "model_present": True,
                     "is_active": ds == active,
                 }

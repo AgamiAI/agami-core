@@ -144,11 +144,13 @@ def list_datasources(store: Store) -> list[str]:
     return [r["datasource"] for r in rows]
 
 
-def count_model_tables(store: Store, datasource: str) -> int:
-    """How many modeled tables the served datasource has — a cheap COUNT for the datasource
-    listing, so `list_datasources` doesn't have to rebuild the whole Organization just to size it."""
-    rows = store.query("SELECT count(*) AS n FROM model_table WHERE datasource = ?", (datasource,))
-    return int(rows[0]["n"]) if rows else 0
+def model_table_counts(store: Store) -> dict[str, int]:
+    """`{datasource: table_count}` for every served datasource, in ONE grouped query — so the
+    datasource listing sizes itself without a per-datasource round trip (no N+1) and without
+    rebuilding the whole Organization. A datasource with no modeled tables simply won't appear in
+    the map; the caller defaults it to 0."""
+    rows = store.query("SELECT datasource, count(*) AS n FROM model_table GROUP BY datasource")
+    return {r["datasource"]: int(r["n"]) for r in rows}
 
 
 # ---------------------------------------------------------------------------
