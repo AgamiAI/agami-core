@@ -47,16 +47,16 @@ _CODE_TTL = timedelta(minutes=10)  # authorization codes are short-lived
 
 def _ttl_from_env(var: str, default: timedelta) -> timedelta:
     """A token lifetime in seconds from `var`, else `default`. A missing / non-numeric / non-positive
-    value falls back to the default — so a typo or garbage can't accidentally zero out or blank the
-    lifetime. A valid positive value is honored as-is; tuning the lifetime is the operator's call."""
-    raw = os.environ.get(var, "").strip()
-    if not raw:
-        return default
+    / out-of-range value all fall back to the default — so a typo or garbage can't zero out, blank, or
+    overflow the lifetime. A valid positive value is honored as-is; tuning it is the operator's call."""
     try:
-        seconds = int(raw)
-    except ValueError:
+        seconds = int(os.environ.get(var, "").strip())
+        if seconds <= 0:
+            return default
+        return timedelta(seconds=seconds)
+    except (ValueError, OverflowError):
+        # non-numeric / empty (ValueError) or absurdly large (OverflowError from timedelta) → default
         return default
-    return timedelta(seconds=seconds) if seconds > 0 else default
 
 
 def _access_ttl() -> timedelta:
@@ -489,8 +489,13 @@ def _grant_refresh_token(store: Store, form: dict[str, str]) -> Response:
     if row is None:
         return _oauth_error("invalid_grant", "refresh token is invalid")
     if row["revoked"]:
-        # A revoked token being presented == a rotated/stolen token replayed → burn the whole family
-        # so a thief and the victim both lose it (one re-login is the accepted cost of theft detection).
+        # We got here because the token was ALREADY revoked when we read it — i.e. it was rotated (or
+        # stolen) and is being replayed *after* that rotation committed. Burn the whole family so a
+        # thief and the victim both lose it. NOTE this is a different case from a truly-concurrent
+        # double-use (two requests that both read revoked=0): that loser never reaches here — it's
+        # caught by the atomic rowcount guard below and gets a plain invalid_grant, no family kill. A
+        # client that loses a rotation response and retries the old token DOES land here — one re-login
+        # is the accepted cost of theft detection (see ACE-033 Decisions; OAuth 2.1 reuse detection).
         store.execute(
             "UPDATE oauth_refresh_token SET revoked = 1 WHERE family = ?", (row["family"],)
         )

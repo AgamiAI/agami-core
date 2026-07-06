@@ -574,7 +574,8 @@ def test_token_ttls_are_env_configurable_and_fail_safe(env, monkeypatch):
 
     monkeypatch.setenv("AGAMI_ACCESS_TOKEN_TTL", "1800")  # explicit override
     assert oauth_server._access_ttl() == timedelta(seconds=1800)
-    for bad in ("not-a-number", "0", "-5", ""):  # garbage / non-positive → default (fail-safe)
+    # garbage / non-positive / out-of-range (would overflow timedelta) → default (fail-safe, no crash)
+    for bad in ("not-a-number", "0", "-5", "", "999999999999999"):
         monkeypatch.setenv("AGAMI_ACCESS_TOKEN_TTL", bad)
         assert oauth_server._access_ttl() == timedelta(hours=1)
 
