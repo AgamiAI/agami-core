@@ -333,7 +333,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                     "is_active": ds == active,
                 }
                 for ds in list_datasources(store)
-                if ds  # skip the "" sentinel row install-global memory keys on
+                if ds  # defensive: only real, named datasources (never an empty name)
             ]
         finally:
             store.close()
