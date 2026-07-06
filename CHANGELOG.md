@@ -10,7 +10,7 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
-## [Unreleased]
+## [0.3.8] — 2026-07-06
 
 ### Added
 
@@ -238,6 +238,7 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
+[0.3.8]: https://github.com/AgamiAI/agami-core/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/AgamiAI/agami-core/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/AgamiAI/agami-core/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/AgamiAI/agami-core/compare/v0.3.4...v0.3.5
