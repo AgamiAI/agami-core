@@ -34,6 +34,17 @@ _MAX_SQL_CHARS = 50_000
 _DOLLAR_OPEN_RE = re.compile(r"\$(?:[A-Za-z_]\w*)?\$")
 
 
+class _GuardReject(Exception):
+    """Raised from the scan when SQL uses a construct whose meaning is
+    dialect-ambiguous and therefore cannot be neutralized safely with one lexer
+    (see the MySQL comment forms in `_neutralize`). Carries the caller-facing reason.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def _neutralize(sql: str) -> str:
     """Blank out comments and string / dollar-quoted literals, and drop the quote
     delimiters of double-quoted identifiers (keeping their content), in a SINGLE
@@ -62,12 +73,27 @@ def _neutralize(sql: str) -> str:
     while i < n:
         two = sql[i : i + 2]
         if two == "--":  # line comment — ends at CR or LF (PG scanner ends at either)
+            # MySQL/MariaDB only treat `--` as a comment when the next char is
+            # whitespace/EOL/EOF; `--0` there parses as `- -0`, so blanking it (PG's
+            # rule) would hide a following `;DROP`. The two dialects genuinely
+            # disagree, so refuse the ambiguous form rather than pick one.
+            nxt = sql[i + 2] if i + 2 < n else ""
+            if nxt and nxt not in " \t\r\n\f":
+                raise _GuardReject(
+                    "an inline '--' comment must be followed by whitespace "
+                    "(bare '--x' is a comment in Postgres but an operator in MySQL)"
+                )
             j = i + 2
             while j < n and sql[j] not in "\r\n":
                 j += 1
             out.append(" ")
             i = j
         elif two == "/*":  # block comment
+            # `/*! ... */` (and versioned `/*!NNNNN ... */`) is a MySQL *executable*
+            # comment — the server runs its body as live SQL. Blanking it as an
+            # ordinary comment would smuggle whatever it contains past every check.
+            if sql[i + 2 : i + 3] == "!":
+                raise _GuardReject("MySQL executable comments ('/*! ... */') are not allowed")
             end = sql.find("*/", i + 2)
             i = n if end == -1 else end + 2
             out.append(" ")
@@ -201,6 +227,8 @@ def check_read_only(sql: str | None) -> str | None:
     Rejection ladder (each step has its own message so the caller can correct):
       0. Empty SQL
       1. SQL longer than `_MAX_SQL_CHARS`
+      1b. Dialect-ambiguous comment form (bare `--x`, MySQL `/*! ... */`) — raised
+          from `_neutralize` because it can't be neutralized safely with one lexer
       2. Multi-statement (any `;` outside literals/comments, except one trailing `;`)
       3. Doesn't open with SELECT or WITH (leading `(` tolerated)
       4. Contains a forbidden keyword (DML/DDL/TCL/session/pub-sub/lock/prepared/INTO)
@@ -220,7 +248,10 @@ def check_read_only(sql: str | None) -> str | None:
     # identifiers (`"pg_sleep"(10)` -> `pg_sleep(10)`), in one lexer-faithful pass so
     # nothing hidden inside a literal or comment can reach the checks below. See
     # `_neutralize` for why a single scan is required rather than layered regexes.
-    stripped = _neutralize(sql).strip()
+    try:
+        stripped = _neutralize(sql).strip()
+    except _GuardReject as reject:
+        return reject.reason
 
     # Allow exactly one trailing `;`. Any other `;` indicates a second statement —
     # the classic statement-stacking bypass (`COMMIT; DROP SCHEMA public CASCADE`).

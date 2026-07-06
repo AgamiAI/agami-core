@@ -440,6 +440,38 @@ def test_red_team_dollar_quoted_stacking_blocked(sql: str) -> None:
 @pytest.mark.parametrize(
     "sql",
     [
+        # MySQL/MariaDB `--` is a comment ONLY when followed by whitespace; `--0` is
+        # `- -0`, so blanking it PG-style would hide the stacked `;DROP`. Refuse the
+        # dialect-ambiguous form.
+        "SELECT 1--0;DROP TABLE users",
+        "SELECT 1--x\nUNION SELECT 2",
+        # MySQL executable comments run their body as live SQL server-side.
+        "SELECT 1/*!;DROP TABLE t*/",
+        "SELECT 1/*!50000 ;DROP TABLE t*/",
+        "SELECT * FROM t /*!UNION SELECT * FROM secrets*/",
+    ],
+)
+def test_red_team_mysql_comment_lexing_blocked(sql: str) -> None:
+    assert check_read_only(sql) is not None, f"MySQL comment bypass NOT blocked: {sql!r}"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The whitespace-led `--` comment is a comment in BOTH dialects — must pass.
+        "SELECT 1 -- 0;DROP\n",
+        "SELECT 1 --\tvalue FROM t",
+        # A plain `/* ... */` block (not `/*!`) stays a normal comment.
+        "SELECT 1 /* note */ FROM t",
+    ],
+)
+def test_unambiguous_comments_still_pass(sql: str) -> None:
+    assert check_read_only(sql) is None, f"Legit comment wrongly rejected: {sql!r}"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
         "SELECT 1; SET statement_timeout = 0; SELECT 2",
         "SELECT pg_sleep(10) FROM dual",
         "WITH x AS (LISTEN ch) SELECT 1",
