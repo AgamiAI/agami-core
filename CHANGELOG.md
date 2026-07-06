@@ -12,6 +12,18 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`list_datasources` no longer reports empty on a self-hosted server.** On a
+  served deployment the warehouse/model is reached through the store, and the local
+  `credentials` file never ships to the container — but `list_datasources` was the
+  one tool still reading only that file, so it always returned "No profiles found …
+  run agami-connect", even while `get_datasource_schema` and `execute_sql` worked
+  against the deployed model. Because clients are told to call it first, they'd
+  conclude nothing was connected. It now enumerates the served models from the store
+  (the same seam every other tool already uses), and only falls back to the
+  credentials file for the local plugin.
+
 ### Security
 
 - **Hardened the read-only `execute_sql` gate.** SQL execution now runs through a
