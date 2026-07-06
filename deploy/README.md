@@ -60,8 +60,8 @@ least-privilege identity** that can do only two things: read the specific secret
 database. Nothing else. Never the platform default.
 
 - **GCP Cloud Run** — the default Compute Engine service account has project **Editor**; don't use it.
-  Create a dedicated SA, grant `roles/cloudsql.client` (if you use Cloud SQL) and `secretAccessor`
-  **per secret** (not project-wide), then deploy with `--service-account`:
+  Create a dedicated SA, grant `roles/cloudsql.client` (if you use Cloud SQL) and
+  `roles/secretmanager.secretAccessor` **per secret** (not project-wide), then deploy with `--service-account`:
   ```bash
   gcloud iam service-accounts create agami-run
   gcloud projects add-iam-policy-binding PROJECT \
@@ -81,9 +81,11 @@ database. Nothing else. Never the platform default.
   (`AdministratorAccess`, `PowerUserAccess`).
 - **Azure Container Apps / ACI** — assign a **user-assigned managed identity** with a Key Vault access
   policy / RBAC role scoped to `get` on those specific secrets only — not a subscription- or vault-wide role.
-- **VM / docker-compose (the default bundle)** — this doesn't apply the same way: there's no ambient cloud
-  identity to inherit, and the container already runs as a non-root user (`uid 10001`). Just don't run the
-  host itself with cloud credentials broader than the deployment needs.
+- **VM / docker-compose (the default bundle)** — the platform doesn't assign the *container* its own
+  identity here, and the container already runs as a non-root user (`uid 10001`). But on a cloud VM (GCE,
+  EC2, an Azure VM) the VM's own attached identity is still reachable from the box via the instance metadata
+  endpoint, so keep that identity scoped to only what the deployment needs (or block the container's route to
+  metadata) — the same least-privilege rule, one level down.
 
 This is defense-in-depth **alongside** the read-only `DATASOURCE_URL` database user and the app-layer
 SELECT-only enforcement: the read-only user limits database damage; a least-privilege runtime identity
