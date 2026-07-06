@@ -10,7 +10,7 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
-## [Unreleased]
+## [0.3.7] — 2026-07-06
 
 ### Added
 
@@ -21,6 +21,14 @@ below corresponds to one such version.
   `CREATE USER` / `GRANT SELECT` SQL for every supported dialect (Postgres/Redshift,
   MySQL, Snowflake, SQL Server, Oracle, Databricks, Trino, BigQuery). Ask agami for
   "the read-only grant" to get the exact SQL for your database.
+
+### Changed
+
+- **Self-host compose caps container log growth.** Every service now uses the
+  `json-file` driver with `max-size: 10m` / `max-file: 3` (≤30 MB per container), so
+  a long-running deploy on a small VM can't silently fill the disk — no VM-side
+  `daemon.json` step needed. Also silenced a harmless `CLOUDFLARE_TUNNEL_TOKEN … not
+  set` warning on non-tunnel deploys.
 
 ### Fixed
 
@@ -216,6 +224,7 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
+[0.3.7]: https://github.com/AgamiAI/agami-core/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/AgamiAI/agami-core/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/AgamiAI/agami-core/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/AgamiAI/agami-core/compare/v0.3.3...v0.3.4
