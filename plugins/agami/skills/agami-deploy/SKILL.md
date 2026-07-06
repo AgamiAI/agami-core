@@ -105,6 +105,8 @@ credentials — the user types them by hand; you never see them, they stay in th
 >   - **several** → one per datasource: **`DATASOURCE_URL__<TOKEN>=`**, where `<TOKEN>` is the datasource id
 >     upper-cased with every non-alphanumeric char turned to `_` (so `sales-pg` → `DATASOURCE_URL__SALES_PG`).
 >     *(List the exact var names for the datasources they chose in Phase 1.4.)*
+>     agami only runs read-only SELECTs, so the warehouse user only needs read access — a read-only user is
+>     safest. Ask for "the read-only grant" and I'll hand you the SQL ([`shared/readonly-grants.md`](../../shared/readonly-grants.md)).
 > - *(only if you chose managed Postgres)* **`APP_DATABASE_URL=`** — your Postgres URL.
 >
 > Then tell me to continue.

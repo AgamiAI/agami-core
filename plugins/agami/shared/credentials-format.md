@@ -20,6 +20,10 @@ Resolution order when a skill needs to know which profile to use:
 2. **If the file is missing, invoke agami-connect Phase 0a.** Init writes `credentials.example`, sets `<artifacts_dir>/local/` permissions, and tells the user to fill it in. The user edits the template in place and comes back; agami promotes it (`mv` → `<artifacts_dir>/local/credentials`, `chmod 600`) — no manual save/chmod. Never ask "where's your database?" — that's what credentials are for.
 3. **Connect ONLY to the host/port in the file.** Never substitute `localhost` as a fallback. Never probe for a "running database nearby" — if the credentials file says `host = remote-prod.example.com`, that's the only acceptable target.
 
+## Use a read-only user (recommended)
+
+agami only ever runs read-only SELECT queries, so the `user` you put here only needs read access. Connecting a **read-only database user** is the safest posture (especially against production) and never limits what agami can do. Copy-paste `CREATE USER` / `GRANT SELECT` SQL for every dialect is in [`readonly-grants.md`](readonly-grants.md).
+
 ## Format
 
 ```ini

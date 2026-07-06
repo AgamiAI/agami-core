@@ -141,6 +141,9 @@ Use the **Write tool**. Shared header first, then the `$DB_TYPE` body with `[$PR
 # Fill in your values below, then come back and say "introspect my database".
 # agami moves this file to <artifacts_dir>/local/credentials and chmod-600s it for you — no
 # manual save or chmod needed. (Don't rename it yourself.)
+# agami only runs read-only SELECT queries, so a read-only database user is all it needs
+# (and the safest thing to connect). Copy-paste GRANT SQL for your database:
+# plugins/agami/shared/readonly-grants.md — or ask agami for "the read-only grant".
 # Format reference: plugins/agami/shared/credentials-format.md
 # Switch profiles with AGAMI_PROFILE=<name>.
 ```
@@ -289,10 +292,20 @@ Next:
 2. Come back and say "introspect my database" — I'll secure the file and run the
    full introspect → enrich → seed flow.
 
+Tip: agami only runs read-only queries, so a read-only database user is all it needs
+(and safest). Want the exact GRANT SQL for your database? Just ask.
+
 Heads-up: a cold cloud warehouse (Snowflake especially) makes introspect the slow
 step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
 ```
 **End the turn.** Do NOT continue to Phase 1.
+
+Show the read-only **Tip** line only for dialects with a user/role concept (`postgres`,
+`redshift`, `mysql`, `snowflake`, `sqlserver`, `oracle`, `databricks`, `trino`); **omit** it for
+`sqlite` / `duckdb` (file-based, no user) and when BigQuery auth is ADC. If the user asks for the
+grant, read [`shared/readonly-grants.md`](../../shared/readonly-grants.md), pick the `$DB_TYPE`
+block, and fill in whatever `<…>` placeholders it uses (e.g. `<db>` / `<schema>` / `<warehouse>` /
+`<catalog>` / `<project>` / `<dataset>`) from the values they entered.
 
 ### 0a.10 — On re-entry: promote the filled-in template, then continue
 The user filled in `<artifacts_dir>/local/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
