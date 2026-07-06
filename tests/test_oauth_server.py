@@ -418,3 +418,166 @@ def test_non_jwt_bearer_is_rejected_when_signing_secret_set(env):
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
     )
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Refresh-token grant (ACE-033) — silent renewal of the short-lived access JWT, with rotation +
+# reuse-detection so a connected client (claude.ai) isn't forced to re-login every hour.
+# ---------------------------------------------------------------------------
+
+
+def _token_pair(client: TestClient) -> dict:
+    """Run the full authorization-code exchange and return the token body (access + refresh)."""
+    code = _authorize_code(client)
+    r = client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": VERIFIER,
+            "redirect_uri": REDIRECT,
+        },
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _refresh(client: TestClient, refresh_token: str, *, client_id: str = "cid") -> dict:
+    r = client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        },
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_authorization_code_issues_a_refresh_token(env):
+    c = TestClient(mcp_http.build_app())
+    body = _token_pair(c)
+    assert body["refresh_token"]  # the code exchange now returns a refresh token
+    assert body["token_type"] == "Bearer" and body["expires_in"] == 3600
+
+
+def test_refresh_grant_rotates_and_renews(env):
+    c = TestClient(mcp_http.build_app())
+    first = _token_pair(c)
+    second = _refresh(c, first["refresh_token"])
+    # a fresh, verifiable access JWT for the same subject
+    claims = jwt.decode(second["access_token"], SECRET, algorithms=["HS256"], issuer=BASE)
+    assert claims["sub"] == "admin"
+    # rotation: a NEW refresh token, different from the one presented
+    assert second["refresh_token"] and second["refresh_token"] != first["refresh_token"]
+    # the successor keeps renewing (the chain works)
+    third = _refresh(c, second["refresh_token"])
+    assert third["refresh_token"] and third["refresh_token"] != second["refresh_token"]
+
+
+def test_refresh_token_reuse_revokes_the_family(env):
+    c = TestClient(mcp_http.build_app())
+    first = _token_pair(c)
+    second = _refresh(c, first["refresh_token"])  # rotates → `first` is now revoked
+    # replaying the revoked (old) token is treated as a stolen-token replay → rejected
+    replay = c.post(
+        "/oauth/token",
+        data={"grant_type": "refresh_token", "refresh_token": first["refresh_token"]},
+    )
+    assert replay.status_code == 400 and replay.json()["error"] == "invalid_grant"
+    # ...and the whole family is now dead: the previously-valid successor stops working too
+    dead = c.post(
+        "/oauth/token",
+        data={"grant_type": "refresh_token", "refresh_token": second["refresh_token"]},
+    )
+    assert dead.status_code == 400 and dead.json()["error"] == "invalid_grant"
+
+
+def test_refresh_rejects_missing_unknown_and_wrong_client(env):
+    c = TestClient(mcp_http.build_app())
+    # missing / unknown token
+    assert c.post("/oauth/token", data={"grant_type": "refresh_token"}).status_code == 400
+    assert (
+        c.post(
+            "/oauth/token", data={"grant_type": "refresh_token", "refresh_token": "nope"}
+        ).status_code
+        == 400
+    )
+    first = _token_pair(c)
+    # a wrong client_id (when one is supplied) is rejected — and does NOT rotate the token
+    wrong = c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": first["refresh_token"],
+            "client_id": "someone-else",
+        },
+    )
+    assert wrong.status_code == 400 and wrong.json()["error"] == "invalid_grant"
+    # the token still works with the right client (the failed attempt didn't burn it)
+    assert _refresh(c, first["refresh_token"])["access_token"]
+
+
+def test_refresh_token_expiry_is_enforced(env):
+    c = TestClient(mcp_http.build_app())
+    first = _token_pair(c)
+    s = Store.from_env()
+    try:
+        s.execute(
+            "UPDATE oauth_refresh_token SET expires_at = ? WHERE revoked = 0",
+            ("2000-01-01T00:00:00+00:00",),
+        )
+        s.commit()
+    finally:
+        s.close()
+    expired = c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": first["refresh_token"],
+            "client_id": "cid",
+        },
+    )
+    assert expired.status_code == 400 and expired.json()["error"] == "invalid_grant"
+
+
+def test_refresh_token_is_stored_hashed_not_plaintext(env):
+    import oauth_server
+
+    c = TestClient(mcp_http.build_app())
+    rt = _token_pair(c)["refresh_token"]
+    s = Store.from_env()
+    try:
+        stored = [r["token_hash"] for r in s.query("SELECT token_hash FROM oauth_refresh_token")]
+    finally:
+        s.close()
+    assert rt not in stored  # never the plaintext
+    assert oauth_server._hash_token(rt) in stored  # the sha256 hash is what's persisted
+
+
+def test_metadata_advertises_refresh_grant(env):
+    c = TestClient(mcp_http.build_app())
+    meta = c.get("/.well-known/oauth-authorization-server").json()
+    assert meta["grant_types_supported"] == ["authorization_code", "refresh_token"]
+
+
+def test_token_ttls_are_env_configurable_and_fail_safe(env, monkeypatch):
+    from datetime import timedelta
+
+    import oauth_server
+
+    monkeypatch.delenv("AGAMI_ACCESS_TOKEN_TTL", raising=False)
+    monkeypatch.delenv("AGAMI_REFRESH_TOKEN_TTL", raising=False)
+    assert oauth_server._access_ttl() == timedelta(hours=1)  # defaults
+    assert oauth_server._refresh_ttl() == timedelta(days=30)
+
+    monkeypatch.setenv("AGAMI_ACCESS_TOKEN_TTL", "1800")  # explicit override
+    assert oauth_server._access_ttl() == timedelta(seconds=1800)
+    # garbage / non-positive / out-of-range (would overflow timedelta) → default (fail-safe, no crash)
+    for bad in ("not-a-number", "0", "-5", "", "999999999999999"):
+        monkeypatch.setenv("AGAMI_ACCESS_TOKEN_TTL", bad)
+        assert oauth_server._access_ttl() == timedelta(hours=1)
+
+    monkeypatch.setenv("AGAMI_ACCESS_TOKEN_TTL", "1800")  # and the override reaches the wire
+    assert _token_pair(TestClient(mcp_http.build_app()))["expires_in"] == 1800

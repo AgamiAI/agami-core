@@ -43,7 +43,33 @@ if TYPE_CHECKING:
     from oidc import Identity  # for type hints only — runtime imports oidc lazily (egress module)
 
 _CODE_TTL = timedelta(minutes=10)  # authorization codes are short-lived
-_JWT_TTL = timedelta(hours=1)
+
+
+def _ttl_from_env(var: str, default: timedelta) -> timedelta:
+    """A token lifetime in seconds from `var`, else `default`. A missing / non-numeric / non-positive
+    / out-of-range value all fall back to the default — so a typo or garbage can't zero out, blank, or
+    overflow the lifetime. A valid positive value is honored as-is; tuning it is the operator's call."""
+    try:
+        seconds = int(os.environ.get(var, "").strip())
+        if seconds <= 0:
+            return default
+        return timedelta(seconds=seconds)
+    except (ValueError, OverflowError):
+        # non-numeric / empty (ValueError) or absurdly large (OverflowError from timedelta) → default
+        return default
+
+
+def _access_ttl() -> timedelta:
+    """Access-token (JWT) lifetime — short by design; a leaked one expires fast. Default 1h."""
+    return _ttl_from_env("AGAMI_ACCESS_TOKEN_TTL", timedelta(hours=1))
+
+
+def _refresh_ttl() -> timedelta:
+    """Refresh-token lifetime — the *idle* window (an actively-refreshing session rotates forward
+    indefinitely). Default 30 days."""
+    return _ttl_from_env("AGAMI_REFRESH_TOKEN_TTL", timedelta(days=30))
+
+
 # Claude's fixed OAuth callback (the connector redirects here after authorize). The .com host is the
 # announced future move; allow both so the connection survives the switch.
 _CLAUDE_CALLBACKS = (
@@ -84,7 +110,7 @@ def issue_jwt(subject: str) -> str:
         "sub": subject,
         "iss": public_base_url(),
         "iat": int(now.timestamp()),
-        "exp": int((now + _JWT_TTL).timestamp()),
+        "exp": int((now + _access_ttl()).timestamp()),
     }
     return jwt.encode(payload, _signing_secret(), algorithm="HS256")
 
@@ -343,53 +369,158 @@ def _issue_authorization_code(
     return RedirectResponse(f"{redirect_uri}?{query}", status_code=302)
 
 
-async def token(request: Request) -> Response:
-    """Exchange an authorization code + PKCE verifier for a self-signed JWT. Enforces single-use,
-    expiry, redirect match, and PKCE — any failure is a 400 with no token in the body."""
-    form = await _form(request)
-    if form.get("grant_type") != "authorization_code":
-        return _oauth_error("unsupported_grant_type", "only authorization_code is supported")
+def _hash_token(token: str) -> str:
+    """Refresh tokens are stored as their sha256 hex, never in plaintext — a DB read can't mint one."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
+
+def _issue_refresh_token(
+    store: Store, *, client_id: str, username: str, family: str | None = None
+) -> str:
+    """Mint + persist (hash only) a refresh token for `username`, in `family` (a fresh lineage when
+    None). The caller commits. Returns the plaintext token — the only place it ever exists."""
+    token = secrets.token_urlsafe(32)
+    store.execute(
+        "INSERT INTO oauth_refresh_token (token_hash, family, client_id, username, expires_at, "
+        "revoked, created) VALUES (?, ?, ?, ?, ?, 0, ?)",
+        (
+            _hash_token(token),
+            family or secrets.token_urlsafe(16),
+            client_id,
+            username,
+            (_now() + _refresh_ttl()).isoformat(),
+            _now().isoformat(),
+        ),
+    )
+    return token
+
+
+def _token_response(
+    store: Store, *, username: str, client_id: str, family: str | None
+) -> JSONResponse:
+    """The shared token body: a fresh access JWT + a fresh/rotated refresh token. Commits the
+    refresh-token write together with whatever the caller already staged (code burn / rotate)."""
+    refresh_token = _issue_refresh_token(
+        store, client_id=client_id, username=username, family=family
+    )
+    store.commit()
+    return JSONResponse(
+        {
+            "access_token": issue_jwt(username),
+            "token_type": "Bearer",
+            "expires_in": int(_access_ttl().total_seconds()),
+            "refresh_token": refresh_token,
+        }
+    )
+
+
+async def token(request: Request) -> Response:
+    """The OAuth token endpoint — dispatch by grant. `authorization_code` exchanges a code (+ PKCE)
+    for an access JWT + a refresh token; `refresh_token` renews without re-login (RFC 6749 §6)."""
+    form = await _form(request)
+    grant = form.get("grant_type")
     store = _open_store()
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
-        rows = store.query("SELECT * FROM oauth_state WHERE code = ?", (form.get("code", ""),))
-        row = rows[0] if rows else None
-        if row is None or row["used"]:
-            return _oauth_error("invalid_grant", "code is invalid or already used")
-        if _now().isoformat() > row["expires_at"]:
-            return _oauth_error("invalid_grant", "code has expired")
-        if form.get("redirect_uri", "") != (row["redirect_uri"] or ""):
-            return _oauth_error("invalid_grant", "redirect_uri mismatch")
-        if not _verify_pkce(form.get("code_verifier", ""), row["code_challenge"]):
-            return _oauth_error("invalid_grant", "PKCE verification failed")
-        # Confirm we can sign (secret present AND strong enough) BEFORE burning the code, so a
-        # misconfigured server doesn't consume the code on a request it can't fulfil.
-        try:
-            _signing_secret()
-        except RuntimeError:
-            return _oauth_error("server_error", "token signing is not configured", status=500)
-
-        # Single-use, atomically: only the request that flips used 0→1 may issue a token. The
-        # conditional UPDATE + rowcount check closes the read-then-write race two concurrent
-        # exchanges would otherwise win together (double-issued JWTs for one code).
-        burned = store.execute(
-            "UPDATE oauth_state SET used = 1 WHERE code = ? AND used = 0", (row["code"],)
-        )
-        store.commit()
-        if burned.rowcount != 1:
-            return _oauth_error("invalid_grant", "code is invalid or already used")
-        access_token = issue_jwt(row["username"])
-        return JSONResponse(
-            {
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": int(_JWT_TTL.total_seconds()),
-            }
+        if grant == "authorization_code":
+            return _grant_authorization_code(store, form)
+        if grant == "refresh_token":
+            return _grant_refresh_token(store, form)
+        return _oauth_error(
+            "unsupported_grant_type", "only authorization_code and refresh_token are supported"
         )
     finally:
         store.close()
+
+
+def _grant_authorization_code(store: Store, form: dict[str, str]) -> Response:
+    """Exchange an authorization code + PKCE verifier for a token pair. Enforces single-use, expiry,
+    redirect match, and PKCE — any failure is a 400 with no token in the body."""
+    rows = store.query("SELECT * FROM oauth_state WHERE code = ?", (form.get("code", ""),))
+    row = rows[0] if rows else None
+    if row is None or row["used"]:
+        return _oauth_error("invalid_grant", "code is invalid or already used")
+    if _now().isoformat() > row["expires_at"]:
+        return _oauth_error("invalid_grant", "code has expired")
+    if form.get("redirect_uri", "") != (row["redirect_uri"] or ""):
+        return _oauth_error("invalid_grant", "redirect_uri mismatch")
+    if not _verify_pkce(form.get("code_verifier", ""), row["code_challenge"]):
+        return _oauth_error("invalid_grant", "PKCE verification failed")
+    # Confirm we can sign (secret present AND strong enough) BEFORE burning the code, so a
+    # misconfigured server doesn't consume the code on a request it can't fulfil.
+    try:
+        _signing_secret()
+    except RuntimeError:
+        return _oauth_error("server_error", "token signing is not configured", status=500)
+
+    # Single-use, atomically: only the request that flips used 0→1 may issue a token. The
+    # conditional UPDATE + rowcount check closes the read-then-write race two concurrent exchanges
+    # would otherwise win together (double-issued tokens for one code). Committed with the refresh
+    # insert in _token_response, so code-burn and token issuance are one transaction.
+    burned = store.execute(
+        "UPDATE oauth_state SET used = 1 WHERE code = ? AND used = 0", (row["code"],)
+    )
+    if burned.rowcount != 1:
+        store.commit()
+        return _oauth_error("invalid_grant", "code is invalid or already used")
+    return _token_response(
+        store, username=row["username"], client_id=row["client_id"] or "", family=None
+    )
+
+
+def _grant_refresh_token(store: Store, form: dict[str, str]) -> Response:
+    """Renew an access token from a refresh token (RFC 6749 §6), rotating the refresh token: the
+    presented token is revoked and a successor issued in the same family. Reuse of an already-revoked
+    token (a replay of a rotated/stolen token) revokes the whole family — OAuth 2.1 reuse detection."""
+    presented = form.get("refresh_token", "")
+    if not presented:
+        return _oauth_error("invalid_request", "refresh_token is required")
+    # Confirm we can sign BEFORE mutating a token row, mirroring the auth-code path.
+    try:
+        _signing_secret()
+    except RuntimeError:
+        return _oauth_error("server_error", "token signing is not configured", status=500)
+
+    rows = store.query(
+        "SELECT * FROM oauth_refresh_token WHERE token_hash = ?", (_hash_token(presented),)
+    )
+    row = rows[0] if rows else None
+    if row is None:
+        return _oauth_error("invalid_grant", "refresh token is invalid")
+    if row["revoked"]:
+        # We got here because the token was ALREADY revoked when we read it — i.e. it was rotated (or
+        # stolen) and is being replayed *after* that rotation committed. Burn the whole family so a
+        # thief and the victim both lose it. NOTE this is a different case from a truly-concurrent
+        # double-use (two requests that both read revoked=0): that loser never reaches here — it's
+        # caught by the atomic rowcount guard below and gets a plain invalid_grant, no family kill. A
+        # client that loses a rotation response and retries the old token DOES land here — one re-login
+        # is the accepted cost of theft detection (see ACE-033 Decisions; OAuth 2.1 reuse detection).
+        store.execute(
+            "UPDATE oauth_refresh_token SET revoked = 1 WHERE family = ?", (row["family"],)
+        )
+        store.commit()
+        return _oauth_error("invalid_grant", "refresh token has been revoked")
+    if _now().isoformat() > row["expires_at"]:
+        return _oauth_error("invalid_grant", "refresh token has expired")
+    # Bind to the issuing client when the client sends one — RFC 6749 §6 doesn't require client_id
+    # for a public client, so a missing one is allowed (the token secret + hash-at-rest are the gate).
+    client_id = form.get("client_id", "")
+    if client_id and client_id != (row["client_id"] or ""):
+        return _oauth_error("invalid_grant", "client mismatch")
+
+    # Rotate atomically: only the request that flips revoked 0→1 may renew (closes the double-rotate
+    # race); a loser here gets a plain invalid_grant, NOT family revocation (it's a race, not a replay).
+    burned = store.execute(
+        "UPDATE oauth_refresh_token SET revoked = 1 WHERE token_hash = ? AND revoked = 0",
+        (row["token_hash"],),
+    )
+    if burned.rowcount != 1:
+        store.commit()
+        return _oauth_error("invalid_grant", "refresh token is invalid")
+    return _token_response(
+        store, username=row["username"], client_id=row["client_id"] or "", family=row["family"]
+    )
 
 
 # ---------------------------------------------------------------------------
