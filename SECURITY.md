@@ -33,4 +33,24 @@ Out of scope:
 - Vulnerabilities in Claude Code itself (report those to Anthropic).
 - Issues that require physical access to a user's machine or already-compromised credentials.
 
+## SQL execution model
+
+`execute_sql` is read-only by construction. A single gate (`sql_guard`) runs at the
+shared executor, so every path that can run SQL — the stdio server, the hosted HTTP
+server, the skills, and cron — is protected identically. It rejects, before any
+database connection is opened:
+
+- anything that isn't a single `SELECT` / `WITH...SELECT` (DML, DDL, `SELECT ... INTO`);
+- multi-statement SQL, including bypasses hidden in string literals, comments, or
+  double-quoted identifiers;
+- data-modifying CTEs (`WITH ... DELETE/INSERT/UPDATE ... RETURNING`);
+- transaction-control, session-state, and prepared statements, and row-level locks;
+- dangerous server-side functions — file I/O (`pg_read_file`, `lo_export`), OS/command
+  execution (`copy_program`), remote SQL (`dblink*`), and resource-exhaustion (`pg_sleep`,
+  advisory locks).
+
+This is defense in depth at the application layer; you should still connect with a
+read-only database role. A guard bypass — SQL that mutates data or reaches a blocked
+function yet passes the gate — is in scope for a report.
+
 Thank you for helping keep agami-core and its users safe.

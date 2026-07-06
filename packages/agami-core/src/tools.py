@@ -182,37 +182,18 @@ def _db_type_for(profile: str, creds: dict[str, dict[str, str]]) -> str:
 # Read-only SQL guard (mirrors shared/sql-generation-rules.md → Safety Rules)
 # ---------------------------------------------------------------------------
 
-_COMMENT_LINE = re.compile(r"--[^\n]*")
-_COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.DOTALL)
-# Data-modifying statements that could ride after a leading WITH (Postgres
-# allows `WITH x AS (...) DELETE ...`). DDL (DROP/CREATE/ALTER/TRUNCATE) cannot
-# follow WITH, and a single statement that begins with SELECT/WITH otherwise
-# cannot mutate — so guarding these four keywords + the leading-token + the
-# single-statement rule is sufficient without the false positives of scanning
-# every DDL keyword (which collide with identifiers like create_date).
-_MUTATION = re.compile(r"\b(INSERT|UPDATE|DELETE|MERGE)\b", re.IGNORECASE)
-
-
-def _strip_comments(sql: str) -> str:
-    return _COMMENT_BLOCK.sub(" ", _COMMENT_LINE.sub(" ", sql))
-
-
 def check_read_only(sql: str) -> str | None:
-    """Return None if the SQL is a safe single read-only statement, else a reason string."""
-    stripped = _strip_comments(sql).strip()
-    # Tolerate a single trailing semicolon; reject any interior one (multi-statement).
-    if stripped.endswith(";"):
-        stripped = stripped[:-1].strip()
-    if not stripped:
-        return "empty statement"
-    if ";" in stripped:
-        return "multiple statements are not allowed — send one SELECT"
-    head = stripped.lstrip("(").split(None, 1)[0].upper() if stripped else ""
-    if head not in ("SELECT", "WITH"):
-        return f"only SELECT / WITH...SELECT is allowed (statement starts with {head or '?'})"
-    if _MUTATION.search(stripped):
-        return "statement contains a data-modifying keyword (INSERT/UPDATE/DELETE/MERGE)"
-    return None
+    """Return None if the SQL is a safe single read-only statement, else a reason string.
+
+    Thin fail-fast wrapper over the shared `sql_guard` — the SAME gate the executor
+    (`execute_sql.py`) enforces — so the stdio server, the HTTP/OAuth server, the
+    agami-query skill, and cron all reject writes / DDL / dangerous functions
+    identically. Blocking here also avoids spawning the executor subprocess for a
+    query that would be rejected anyway.
+    """
+    import sql_guard
+
+    return sql_guard.check_read_only(sql)
 
 
 # ---------------------------------------------------------------------------

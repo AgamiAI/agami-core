@@ -175,7 +175,13 @@ A stdio MCP server has **no authentication**, and that is correct:
 - It does **not** widen your attack surface beyond already having `psql` + a
   `.pgpass` on your laptop.
 - **Read-only is enforced**: `execute_sql` rejects anything that isn't a single
-  `SELECT` / `WITH...SELECT` (see `shared/sql-generation-rules.md → Safety Rules`).
+  `SELECT` / `WITH...SELECT`. The gate (`sql_guard`) also blocks multi-statement SQL
+  (including comment- and quoted-identifier-hidden bypasses), data-modifying CTEs,
+  transaction-control / session-state / prepared statements, row-level locks, and
+  dangerous server-side functions (`pg_read_file`, `lo_export`, `dblink`,
+  `copy_program`, `pg_sleep`, …). It runs at the shared executor so the stdio server,
+  the hosted HTTP server, the skills, and cron are all guarded identically (see
+  `shared/sql-generation-rules.md → Safety Rules`).
 - **It is stdio-only on purpose.** It never binds a network port. Doing so would
   create an *unauthenticated network listener* exposing query execution. If you
   need networked, multi-user serving with auth + RBAC + audit, that is the hosted

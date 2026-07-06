@@ -10,6 +10,23 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Security
+
+- **Hardened the read-only `execute_sql` gate.** SQL execution now runs through a
+  single guard (`sql_guard`) at the shared executor, so the stdio server, the hosted
+  HTTP server, the skills, and cron are all protected identically (previously the
+  check lived only on the MCP tool path; a direct `python -m execute_sql` call — used
+  by the skills and cron — was unguarded). Beyond "must start with `SELECT`/`WITH`",
+  it now rejects multi-statement SQL (including bypasses hidden in string literals,
+  comments, or double-quoted identifiers), data-modifying CTEs, transaction-control /
+  session-state / prepared statements, `SELECT ... INTO`, row-level locks, and
+  dangerous server-side functions (`pg_read_file`, `lo_export`, `dblink`,
+  `copy_program`, `pg_sleep`, advisory locks, `query_to_xml`, …). Legitimate analytics
+  SQL is unaffected — a large false-positive corpus pins that. Enforcement is not
+  bypassable via `--no-safety` (that flag only skips the semantic-model pass).
+
 ## [0.3.6] — 2026-07-04
 
 ### Changed
