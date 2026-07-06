@@ -430,6 +430,11 @@ def test_red_team_unicode_whitespace_does_not_bypass_deny(sql: str) -> None:
         # digit), so the raw payload is a DB syntax error — but the scan still treats
         # any `$…$` span as opaque, so a `'` inside can't desync it and expose the `;`.
         r"SELECT $1$'$1$ ; DROP TABLE users -- '",
+        # An UNTERMINATED `$tag$` opener must not blank to EOF and swallow the trailing
+        # `; DROP ...` (a fail-open the `$…$`-as-opaque broadening introduced): with no
+        # matching close tag, the `;` stays visible and trips the guard.
+        r"SELECT 1 AS $tag$; DROP TABLE users",
+        r"SELECT 1 $$x ; DROP TABLE users",
         # A `$$` that OPENS inside a line comment must not be treated as a real
         # dollar-quote and swallow the statement that follows the newline.
         "SELECT 1 --$$\n;DROP TABLE x--$$",

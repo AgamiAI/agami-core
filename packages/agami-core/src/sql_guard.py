@@ -132,11 +132,15 @@ def _neutralize(sql: str) -> str:
             out.append("".join(buf))
             i = j
         elif sql[i] == "$":  # dollar-quoted string literal ($$...$$ or $tag$...$tag$)
+            # Only a `$tag$` with a MATCHING close delimiter is a literal we can blank.
+            # An unterminated opener must NOT swallow to EOF — that would hide a trailing
+            # `; DROP ...` from the multi-statement check (fail-open). Treating it as a
+            # bare `$` instead leaves everything after it visible, so the scan fails safe
+            # (the DB rejects an unterminated dollar-quote anyway).
             m = _DOLLAR_OPEN_RE.match(sql, i)
-            if m:
-                tag = m.group(0)
-                close = sql.find(tag, m.end())
-                i = n if close == -1 else close + len(tag)
+            close = sql.find(m.group(0), m.end()) if m else -1
+            if m and close != -1:
+                i = close + len(m.group(0))
                 out.append(" ")
             else:
                 out.append("$")
