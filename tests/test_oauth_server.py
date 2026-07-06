@@ -491,7 +491,7 @@ def test_refresh_token_reuse_revokes_the_family(env):
         "/oauth/token",
         data={"grant_type": "refresh_token", "refresh_token": second["refresh_token"]},
     )
-    assert dead.status_code == 400
+    assert dead.status_code == 400 and dead.json()["error"] == "invalid_grant"
 
 
 def test_refresh_rejects_missing_unknown_and_wrong_client(env):

@@ -47,8 +47,8 @@ _CODE_TTL = timedelta(minutes=10)  # authorization codes are short-lived
 
 def _ttl_from_env(var: str, default: timedelta) -> timedelta:
     """A token lifetime in seconds from `var`, else `default`. A missing / non-numeric / non-positive
-    value falls back to the default — a bad knob can never make a token live *longer* than intended
-    (it just ignores the garbage), so the fail-safe direction is the secure one."""
+    value falls back to the default — so a typo or garbage can't accidentally zero out or blank the
+    lifetime. A valid positive value is honored as-is; tuning the lifetime is the operator's call."""
     raw = os.environ.get(var, "").strip()
     if not raw:
         return default
