@@ -67,6 +67,7 @@ def _actor_from_scope(scope: dict, auth: AuthProvider) -> str | None:
             return getattr(revalidated, "subject", None) if revalidated is not None else None
     return None
 
+
 # The brand assets (logo, provider icons, favicon) served at /static — packaged alongside this module.
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -121,9 +122,7 @@ def _unauthenticated(base: str, request: Request | None = None) -> Response:
         "Access-Control-Expose-Headers": "WWW-Authenticate",
     }
     if request is not None and "text/html" in (request.headers.get("accept") or ""):
-        return HTMLResponse(
-            admin.mcp_landing_body_html(base), status_code=401, headers=headers
-        )
+        return HTMLResponse(admin.mcp_landing_body_html(base), status_code=401, headers=headers)
     return JSONResponse({"error": "Not authenticated"}, status_code=401, headers=headers)
 
 
@@ -246,7 +245,7 @@ async def _auth_server(request: Request) -> JSONResponse:
             "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
         },
         headers={"Access-Control-Allow-Origin": "*"},
@@ -314,7 +313,9 @@ def build_app() -> Starlette:
     # cookie), so fail fast with a clear message instead. (Set this to the public https URL even when
     # TLS terminates at a proxy — the browser↔proxy hop is what must be https.)
     if not base.startswith("https://"):
-        raise RuntimeError("PUBLIC_BASE_URL must be https:// (OAuth + the Secure admin cookie need TLS).")
+        raise RuntimeError(
+            "PUBLIC_BASE_URL must be https:// (OAuth + the Secure admin cookie need TLS)."
+        )
     bootstrap_paths()
     auth_provider = _build_auth_provider()
     session_manager = StreamableHTTPSessionManager(
@@ -354,7 +355,9 @@ def build_app() -> Starlette:
                     store.commit()
                 except Exception:  # noqa: BLE001 — a concurrent boot won the seed; not fatal
                     store.conn.rollback()
-                    _log.warning("admin seed skipped (already seeded or a concurrent boot won the race)")
+                    _log.warning(
+                        "admin seed skipped (already seeded or a concurrent boot won the race)"
+                    )
             finally:
                 store.close()
         async with session_manager.run():

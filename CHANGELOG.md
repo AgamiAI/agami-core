@@ -10,6 +10,20 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Added
+
+- **OAuth refresh tokens — no more hourly re-login on the self-hosted server.** The token
+  endpoint now issues a `refresh_token` and supports the `refresh_token` grant (RFC 6749 §6),
+  so a connected client (claude.ai) silently renews the short-lived access token instead of
+  redoing the full login every hour. Refresh tokens **rotate** on each use with **reuse
+  detection** (replaying a rotated/stolen token revokes the whole family), are stored **hashed,
+  never in plaintext**, and are revocable. Access tokens stay short-lived (1h). Both lifetimes are
+  now env-configurable (`AGAMI_ACCESS_TOKEN_TTL` / `AGAMI_REFRESH_TOKEN_TTL`, seconds) with the
+  same defaults when unset (access 1h, refresh 30-day idle). No action needed on upgrade — the
+  new `oauth_refresh_token` table migrates in automatically on boot.
+
 ## [0.3.7] — 2026-07-06
 
 ### Added
