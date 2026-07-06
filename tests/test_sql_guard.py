@@ -294,6 +294,17 @@ def test_rejects_select_into_write_path(sql: str) -> None:
         "SELECT pg_terminate_backend(123)",
         "SELECT pg_cancel_backend(123)",
         "SELECT pg_reload_conf()",
+        # Sequence mutation — real writes that open with SELECT.
+        "SELECT setval('users_id_seq', 100)",
+        "SELECT nextval('order_seq')",
+        # Server / replication / stats control.
+        "SELECT pg_stat_reset()",
+        "SELECT pg_stat_reset_shared('bgwriter')",
+        "SELECT pg_stat_statements_reset()",
+        "SELECT pg_switch_wal()",
+        "SELECT pg_create_restore_point('x')",
+        "SELECT pg_drop_replication_slot('s')",
+        "SELECT pg_replication_slot_advance('s', '0/0')",
         # Post-audit additions.
         "SELECT set_config('statement_timeout', '0', false)",
         "SELECT current_setting('statement_timeout')",
@@ -407,16 +418,64 @@ def test_red_team_unicode_whitespace_does_not_bypass_deny(sql: str) -> None:
 @pytest.mark.parametrize(
     "sql",
     [
-        # Dollar-quoted strings are NOT stripped — their contents stay visible to the
-        # deny-list. Conservative rejection on pathological cases is intentional.
-        "SELECT $$;DROP TABLE x;$$",
-        "SELECT $$pg_sleep(10)$$",
-        "SELECT $tag$DROP TABLE x$tag$",
+        # Dollar-quote statement stacking. A `'` inside a `$$...$$` / `$tag$...$tag$`
+        # body used to desync the single-quote stripper and smuggle a real second
+        # statement past the multi-statement check. The lexer-faithful scan
+        # neutralizes the whole dollar body, so the injected `;` stays visible and is
+        # blocked. (Regression: arbitrary statement execution regardless of DB role.)
+        r"SELECT $$'$$ ; DROP TABLE users -- '",
+        r"SELECT $tag$'$tag$ ; DELETE FROM accounts -- '",
+        r"SELECT $$won't$$ ; CREATE TABLE evil(x int) -- '",
+        # Numeric-tag `$1$` is not a real PG dollar-quote (tags can't start with a
+        # digit), so the raw payload is a DB syntax error — but the scan still treats
+        # any `$…$` span as opaque, so a `'` inside can't desync it and expose the `;`.
+        r"SELECT $1$'$1$ ; DROP TABLE users -- '",
+        # An UNTERMINATED `$tag$` opener must not blank to EOF and swallow the trailing
+        # `; DROP ...` (a fail-open the `$…$`-as-opaque broadening introduced): with no
+        # matching close tag, the `;` stays visible and trips the guard.
+        r"SELECT 1 AS $tag$; DROP TABLE users",
+        r"SELECT 1 $$x ; DROP TABLE users",
+        # A `$$` that OPENS inside a line comment must not be treated as a real
+        # dollar-quote and swallow the statement that follows the newline.
+        "SELECT 1 --$$\n;DROP TABLE x--$$",
+        # A DO-block is procedural, not a SELECT — rejected on the opening-keyword check.
         "DO $$ BEGIN DELETE FROM users; END $$",
     ],
 )
-def test_red_team_dollar_quoted_conservatively_rejected(sql: str) -> None:
-    assert check_read_only(sql) is not None, f"Dollar-quoted bypass: {sql!r}"
+def test_red_team_dollar_quoted_stacking_blocked(sql: str) -> None:
+    assert check_read_only(sql) is not None, f"Dollar-quote stacking NOT blocked: {sql!r}"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # MySQL/MariaDB `--` is a comment ONLY when followed by whitespace; `--0` is
+        # `- -0`, so blanking it PG-style would hide the stacked `;DROP`. Refuse the
+        # dialect-ambiguous form.
+        "SELECT 1--0;DROP TABLE users",
+        "SELECT 1--x\nUNION SELECT 2",
+        # MySQL executable comments run their body as live SQL server-side.
+        "SELECT 1/*!;DROP TABLE t*/",
+        "SELECT 1/*!50000 ;DROP TABLE t*/",
+        "SELECT * FROM t /*!UNION SELECT * FROM secrets*/",
+    ],
+)
+def test_red_team_mysql_comment_lexing_blocked(sql: str) -> None:
+    assert check_read_only(sql) is not None, f"MySQL comment bypass NOT blocked: {sql!r}"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The whitespace-led `--` comment is a comment in BOTH dialects — must pass.
+        "SELECT 1 -- 0;DROP\n",
+        "SELECT 1 --\tvalue FROM t",
+        # A plain `/* ... */` block (not `/*!`) stays a normal comment.
+        "SELECT 1 /* note */ FROM t",
+    ],
+)
+def test_unambiguous_comments_still_pass(sql: str) -> None:
+    assert check_read_only(sql) is None, f"Legit comment wrongly rejected: {sql!r}"
 
 
 @pytest.mark.parametrize(
@@ -503,6 +562,14 @@ def test_red_team_stacked_keywords(sql: str) -> None:
         "SELECT DISTINCT ON (customer_id) customer_id, created_at, amount FROM orders ORDER BY customer_id, created_at DESC",
         # ----- generate_series -----
         "SELECT d::date FROM generate_series('2026-01-01'::date, '2026-12-31'::date, INTERVAL '1 day') AS d",
+        # ----- Dollar-quoted string CONSTANTS (a value, not executable code). The
+        # keywords/`;` inside are inert data; blocking these was an old false positive. -----
+        "SELECT $$plain label$$ AS note FROM stats",
+        "SELECT $tag$O'Brien$tag$ AS name",
+        "SELECT $$multi\nline\ntext$$ AS body FROM docs",
+        # ----- Positional parameters ($1, $2) are NOT dollar-quote openers -----
+        "SELECT id, name FROM users WHERE id = $1",
+        "SELECT * FROM orders WHERE customer_id = $1 AND status = $2",
     ],
 )
 def test_false_positive_guard_legitimate_analytics_sql(sql: str) -> None:

@@ -46,6 +46,10 @@ and the other tools just read the model. Nothing leaves your environment.
 | `AGAMI_ORG_ID` | no | The single configured org id (default `local`). The server is single-tenant by default. |
 | `AGAMI_SIGNING_SECRET` | yes (auth) | ≥32-byte secret the server signs its own session JWTs with. When set, the server validates real tokens (the password / OIDC login flow); unset ⇒ the bearer-presence local default. |
 
+> **Serverless note:** on a managed-container platform (Cloud Run, ECS/Fargate, Container Apps) the server
+> runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See
+> [Runtime identity on serverless platforms](../deploy/README.md#runtime-identity-on-serverless-platforms).
+
 ## Optional: social login (OIDC)
 
 "Sign in with Google / Microsoft" is **off by default**. Configure a provider's client id/secret to

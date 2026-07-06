@@ -29,6 +29,7 @@ Drivers (install only what you need):
 
 Exit codes:
     0  — success, CSV on stdout
+    1  — SQL rejected by the read-only guard (kind="permission" JSON on stderr)
     2  — usage / config error (missing credentials, bad profile, etc.)
     3  — driver missing for the configured db type
     4  — connection / authentication failed

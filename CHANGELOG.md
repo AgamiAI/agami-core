@@ -38,6 +38,17 @@ below corresponds to one such version.
   `copy_program`, `pg_sleep`, advisory locks, `query_to_xml`, …). Legitimate analytics
   SQL is unaffected — a large false-positive corpus pins that. Enforcement is not
   bypassable via `--no-safety` (that flag only skips the semantic-model pass).
+- **Closed a dollar-quote statement-stacking bypass in that gate.** A `'` inside a
+  Postgres/Snowflake/DuckDB `$$…$$` (or `$tag$…$tag$`) string desynced the literal
+  stripper and could smuggle a second statement (`SELECT $$'$$ ; DROP TABLE x -- '`)
+  past the multi-statement check. The gate now neutralizes comments and string /
+  dollar literals in a single lexer-faithful pass (first-opened construct wins),
+  refuses dialect-ambiguous MySQL comment forms (a bare `--x` and executable
+  `/*! … */` comments), and also blocks sequence writes (`setval`/`nextval`) and
+  server/replication control
+  (`pg_stat_reset*`, `pg_switch_wal`, `pg_drop_replication_slot`, …). The guard module
+  is also now packaged in the built wheel (it was missing from `py-modules`, which
+  would have broken `import sql_guard` in an installed/containerized deploy).
 
 ## [0.3.6] — 2026-07-04
 
