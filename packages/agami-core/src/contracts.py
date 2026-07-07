@@ -1,8 +1,8 @@
-"""Shared pydantic contracts for the 5 product tools.
+"""Shared pydantic contracts for the 4 product tools.
 
 These pin the **data shapes** the product tools exchange — `list_datasources`,
-`get_datasource_schema`, `get_prompt_examples`, `execute_sql` (incl. the trust `receipt`),
-`log_feedback` — plus the `ActivitySink` log records, so downstream consumers build against
+`get_datasource_schema`, `get_prompt_examples`, `execute_sql` (incl. the trust `receipt`)
+— plus the `ActivitySink` log records, so downstream consumers build against
 fixed shapes instead of inventing their own.
 
 Source of truth = the **existing** local tool I/O in `mcp_harness.py` (the JSON each tool emits)
@@ -54,13 +54,6 @@ class ExecuteSqlRequest(_Contract):
     area: str | None = None
     raw_query: str | None = None
     max_rows: int | None = None
-
-
-class LogFeedbackRequest(_Contract):
-    raw_query: str
-    rating: str
-    notes: str | None = None
-    datasource: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -186,17 +179,6 @@ class ExecuteSqlResult(_Contract):
 
 
 # ---------------------------------------------------------------------------
-# log_feedback
-# ---------------------------------------------------------------------------
-
-
-class LogFeedbackResult(_Contract):
-    ok: bool
-    rating: str
-    logged_to: str
-
-
-# ---------------------------------------------------------------------------
 # ActivitySink payloads (the existing _append_jsonl records in mcp_harness)
 # ---------------------------------------------------------------------------
 
@@ -208,15 +190,6 @@ class QueryExecutionRecord(_Contract):
     row_count: int
     source: str
     question: str | None = None  # the user's NL question (may be absent)
-
-
-class FeedbackRecord(_Contract):
-    ts: str
-    profile: str
-    question: str
-    rating: str
-    source: str
-    notes: str | None = None
 
 
 class ToolCallRecord(_Contract):

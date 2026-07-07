@@ -226,14 +226,14 @@ def test_initialize_and_tools_list():
     for token in ("examples-first", "receipt", "review_state"):
         assert token in instr, token
 
-    # The MCP surface is exactly the 5 product tools on stdio (mirrored by HTTP). The granular
+    # The MCP surface is exactly the 4 product tools on stdio (mirrored by HTTP). The granular
     # traversal tools / identify_entity / pre_flight_check / save_correction are deliberately NOT
     # MCP tools (subsumed / folded / skill-operations) — asserted here so the omission can't
     # silently regress. See tests/test_tools_registry.py for the cross-transport assertion.
     tools = {t["name"] for t in by_id[2]["result"]["tools"]}
     assert tools == {
         "list_datasources", "get_datasource_schema",
-        "get_prompt_examples", "execute_sql", "log_feedback",
+        "get_prompt_examples", "execute_sql",
     }
 
 

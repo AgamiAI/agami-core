@@ -1,7 +1,7 @@
 """The shared TOOLS registry — one impl, both transports.
 
 Both the stdio entrypoint (mcp_harness) and the HTTP entrypoint (mcp_http) import the SAME
-`tools.TOOLS` object, so the surface can't drift. These assert the surface is exactly the 5
+`tools.TOOLS` object, so the surface can't drift. These assert the surface is exactly the 4
 product tools, the dropped tools are gone, and the registry the two transports share is identical.
 """
 
@@ -15,11 +15,11 @@ PRODUCT_TOOLS = {
     "get_datasource_schema",
     "get_prompt_examples",
     "execute_sql",
-    "log_feedback",
 }
-# Subsumed by the smart get_datasource_schema / folded / internal / skill-operation — deliberately
-# NOT on the MCP surface of either transport.
+# Subsumed by the smart get_datasource_schema / folded / internal / skill-operation, or (log_feedback)
+# simply removed from the surface. Deliberately NOT on the MCP surface of either transport.
 DROPPED_FROM_MCP = {
+    "log_feedback",
     "list_subject_areas",
     "get_subject_area_bundle",
     "get_table_context",
@@ -29,7 +29,7 @@ DROPPED_FROM_MCP = {
 }
 
 
-def test_surface_is_exactly_the_five_product_tools():
+def test_surface_is_exactly_the_four_product_tools():
     assert set(tools.TOOLS) == PRODUCT_TOOLS
 
 

@@ -10,7 +10,7 @@ You are setting up the local agami **MCP server** so the user can query their
 database from the **Claude Desktop app** (or any client that reads a
 `claude_desktop_config.json`-style file). This is the local mirror of the hosted
 "Ask Agami" connector: same tool surface (`list_datasources`,
-`get_datasource_schema`, `get_prompt_examples`, `execute_sql`, `log_feedback`),
+`get_datasource_schema`, `get_prompt_examples`, `execute_sql`),
 but backed by the user's local model + local execution. Everything stays on the
 machine; the server is stdio-only, has no auth, and makes no network call.
 

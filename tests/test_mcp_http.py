@@ -22,7 +22,6 @@ PRODUCT_TOOLS = {
     "get_datasource_schema",
     "get_prompt_examples",
     "execute_sql",
-    "log_feedback",
 }
 
 
@@ -163,8 +162,8 @@ def test_mcp_bare_path_is_not_307_redirected(base_url):
     assert bare.status_code == slashed.status_code  # parity with the trailing-slash form
 
 
-def test_http_tools_list_is_the_same_five(base_url):
-    """Authed end-to-end: initialize → tools/list over HTTP returns exactly the 5 product tools —
+def test_http_tools_list_is_the_same_four(base_url):
+    """Authed end-to-end: initialize → tools/list over HTTP returns exactly the 4 product tools —
     the same surface stdio advertises (mirrored, not forked)."""
     headers = {
         "Authorization": "Bearer present",

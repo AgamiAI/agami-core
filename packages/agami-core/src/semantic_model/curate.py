@@ -313,7 +313,7 @@ def _trust(obj) -> dict:
 def _metric_item(area: Optional[str], mm) -> dict:
     # Fields match the review-items vocabulary (entity_type) AND the dashboard
     # ITEMS_JSON contract (rule_1, signals, extra_lines, …) so the card renders the
-    # calculation and the feedback generator emits `by <email> role=` for sign-off.
+    # calculation and the review block emits `by <email> role=` for sign-off.
     binding_lines = [{"label": d, "text": sql} for d, sql in (mm.bindings or {}).items()]
     primary_sql = next(iter((mm.bindings or {}).values()), "")
     return {"kind": "metric", "entity_type": "metric", "rule": 1, "rule_1": True,

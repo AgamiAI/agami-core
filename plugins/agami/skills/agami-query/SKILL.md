@@ -88,7 +88,7 @@ The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`org.yaml`
 
 **Don't run a separate existence probe either** (no `ls org.yaml`, and never probe for the plugin's own scripts — `sm`, `execute_sql.py`, `semantic_model/` always ship with the plugin). That same first `sm areas` call doubles as the check: model present → you get the map; absent → the CLI returns `{"error":"no_model"}` with **exit code 3** → invoke `agami-connect` and stop.
 
-Drive everything through the CLI — the `sm` wrapper resolves the interpreter + deps. (These granular steps are CLI operations; on the MCP surface they're folded into the smart `get_datasource_schema`, which advertises the 5 product tools — so don't invoke the steps below as MCP tools.)
+Drive everything through the CLI — the `sm` wrapper resolves the interpreter + deps. (These granular steps are CLI operations; on the MCP surface they're folded into the smart `get_datasource_schema`, which advertises the 4 product tools — so don't invoke the steps below as MCP tools.)
 
 ```bash
 ROOT="<artifacts_dir>/<profile>"

@@ -1,4 +1,4 @@
-"""The DB write path — execute_sql/log_feedback log to the DB when AGAMI_DB_URL is set (Slice D).
+"""The DB write path — execute_sql logs to the DB when AGAMI_DB_URL is set (Slice D).
 
 `DbActivitySink` conforms to the `ports.ActivitySink` Protocol by shape (no inheritance) and is
 backend-agnostic (one class — SQLite here, Postgres in prod). The local jsonl path is unchanged
@@ -6,8 +6,6 @@ when AGAMI_DB_URL is unset.
 """
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
@@ -60,19 +58,6 @@ def test_record_query_writes_one_row(tmp_path, monkeypatch):
     ]
 
 
-def test_log_feedback_writes_to_db(tmp_path, monkeypatch):
-    url = _fresh_db(tmp_path)
-    monkeypatch.setenv("AGAMI_DB_URL", url)
-    out = json.loads(
-        tools.tool_log_feedback({"raw_query": "how many?", "rating": "good", "datasource": "main"})
-    )
-    assert out["ok"] is True and out["logged_to"] == "database"
-    s = Store.connect(url)
-    rows = s.query("SELECT datasource, question, rating FROM feedback")
-    s.close()
-    assert rows == [{"datasource": "main", "question": "how many?", "rating": "Good"}]
-
-
 def test_record_query_is_best_effort_on_db_error(tmp_path, monkeypatch):
     # AGAMI_DB_URL points at a DB with NO migrations applied, so the INSERT into query_executions
     # fails. _record_query must swallow it — a logging failure can't break a successful query.
@@ -89,10 +74,3 @@ def test_record_query_is_best_effort_on_db_error(tmp_path, monkeypatch):
             "source": "mcp_server",
         }
     )
-
-
-def test_local_jsonl_path_unchanged_when_db_unset(tmp_path, monkeypatch):
-    monkeypatch.delenv("AGAMI_DB_URL", raising=False)
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
-    out = json.loads(tools.tool_log_feedback({"raw_query": "q", "rating": "bad"}))
-    assert out["ok"] is True and out["logged_to"].endswith("feedback.jsonl")  # still the file

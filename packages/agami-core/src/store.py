@@ -1,7 +1,7 @@
 """Backend-portable store — the thin DB layer the hosted server serves from.
 
 A shared/multi-instance server can't keep state in local files, so the model + prompt examples are
-served from a database and query logs/feedback are written to it. The backend is **Postgres in
+served from a database and query logs are written to it. The backend is **Postgres in
 production** (cloud-neutral, networked, multi-instance-safe), but the schema + queries are kept
 **portable** so the same code runs on **SQLite** — which is what the test suite uses (no DB service
 needed in CI) and is fine for a small single-instance self-host.

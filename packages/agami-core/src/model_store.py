@@ -300,7 +300,7 @@ def select_examples(
 
 
 class DbActivitySink:
-    """Write `query_executions` + `feedback` to the DB (one class, any backend the Store opens —
+    """Write `query_executions` + `tool_calls` to the DB (one class, any backend the Store opens —
     not a Postgres/SQLite pair). Conforms structurally to the `ports.ActivitySink` Protocol; the
     server's single execute_sql chokepoint logs one row per query through it."""
 
@@ -318,22 +318,6 @@ class DbActivitySink:
                 record.question,
                 record.sql,
                 record.row_count,
-                record.source,
-            ),
-        )
-        self._store.commit()
-
-    def record_feedback(self, record: Any) -> None:
-        self._store.execute(
-            "INSERT INTO feedback (id, ts, datasource, question, rating, notes, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                uuid4().hex,
-                record.ts,
-                record.profile,
-                record.question,
-                record.rating,
-                record.notes,
                 record.source,
             ),
         )
