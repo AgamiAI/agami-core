@@ -728,6 +728,16 @@ def _model_safety(sql: str, profile: str, area: str | None):
         sys.stderr.write(f"[agami] could not load semantic model; skipping safety pass: {e}\n")
         return sql, None
 
+    # Table-scope guard — a query may only reference tables the semantic model
+    # declares; any other table in the connected database is refused. Runs FIRST
+    # so the fan/chasm and sensitive checks below only evaluate in-scope tables.
+    ts = RT.check_table_scope(sql, org)
+    if ts.action == "refuse":
+        json.dump({"error": {"kind": "table_out_of_scope", "tables": ts.offending_tables,
+                             "reason": ts.reason, "suggestion": ts.suggestion}}, sys.stderr)
+        sys.stderr.write("\n")
+        return sql, 1
+
     pf = RT.pre_flight_check(sql, org)
     if pf.risk and pf.action == "refuse":
         json.dump({"error": {"kind": "preflight_refused", "risk": pf.risk,
