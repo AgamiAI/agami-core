@@ -480,6 +480,81 @@ def check_sensitive_projection(sql: str, org: Organization) -> SensitiveCheckRes
     )
 
 
+# ---------------------------------------------------------------------------
+# Table-scope guard
+#
+# Enforced in the SAME shared safety pass as the fan/chasm pre-flight and the
+# sensitive-column guard (execute_sql.py:_model_safety), so EVERY entry point
+# that runs SQL through the engine only ever touches tables the semantic model
+# declares — a query referencing any other table in the connected database is
+# refused, by construction rather than by each LLM obeying a prose rule. This is
+# table-level scoping only; which columns of a modeled table may be projected is
+# the sensitive-projection guard's job.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TableScopeResult:
+    action: str  # "allow" | "refuse"
+    offending_tables: list[str] = field(default_factory=list)  # bare names not in the model
+    reason: str = ""
+    suggestion: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "offending_tables": self.offending_tables,
+                "reason": self.reason, "suggestion": self.suggestion}
+
+
+def check_table_scope(sql: str, org: Organization) -> TableScopeResult:
+    """Refuse a query that references a table not declared in the semantic model.
+
+    Only *physical* table references count: CTE names (defined by WITH) and
+    derived/subquery aliases are not tables and are never treated as undeclared.
+    Matching is on the bare table name, case-insensitively (unquoted identifiers
+    fold case in Postgres and friends), against the model's declared tables via
+    `_model_table_index`, whose keys already exclude review_state='rejected'
+    tables (dropped at load time) — so an excluded table is correctly refused.
+
+    Degrades to allow when sqlglot is unavailable or the SQL doesn't parse (the
+    same posture as the fan/chasm and sensitive gates; the upstream read-only
+    guard already rejects multi-statement / DDL input). A model with zero
+    declared tables also allows — there is nothing to scope against.
+    """
+    if not _HAVE_SQLGLOT:
+        return TableScopeResult("allow")
+    allow = {name.lower() for name in _model_table_index(org)}
+    if not allow:
+        return TableScopeResult("allow")
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return TableScopeResult("allow")
+    if tree is None or not isinstance(tree, exp.Select):
+        return TableScopeResult("allow")
+
+    cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+    offending: set[str] = set()
+    for tbl in tree.find_all(exp.Table):
+        name = tbl.name
+        if not name or name.lower() in cte_names:
+            continue  # a CTE reference, not a physical table
+        if name.lower() not in allow:
+            offending.add(name)
+    if not offending:
+        return TableScopeResult("allow")
+
+    tables = sorted(offending)
+    return TableScopeResult(
+        "refuse",
+        offending_tables=tables,
+        reason="query references table(s) not in the semantic model: "
+               + ", ".join(tables)
+               + " — only tables declared in the model may be queried.",
+        suggestion="Add the table to the model (agami-connect / '/agami-model'), "
+                   "or remove it from the query.",
+    )
+
+
 def _cardinality_index(org: Organization) -> list[Relationship]:
     rels: list[Relationship] = []
     for sa in org.subject_areas:
