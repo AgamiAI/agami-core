@@ -1,4 +1,4 @@
-"""The 5-tool pydantic contracts mirror the existing local tool I/O.
+"""The 4-tool pydantic contracts mirror the existing local tool I/O.
 
 The load-bearing check: a real sample of each tool's **current** stdio output parses into its
 contract and dumps back **without loss** — proving the contracts match the local,
@@ -17,9 +17,7 @@ from contracts import (  # noqa: E402
     DatasourceSchemaResult,
     ErrorResult,
     ExecuteSqlResult,
-    FeedbackRecord,
     ListDatasourcesResult,
-    LogFeedbackResult,
     PromptExamplesResult,
     QueryExecutionRecord,
 )
@@ -121,15 +119,6 @@ def test_execute_sql_error_roundtrip():
     assert _roundtrip(ErrorResult, sample) == sample
 
 
-def test_log_feedback_roundtrip():
-    sample = {
-        "ok": True,
-        "rating": "Good",
-        "logged_to": "/home/you/agami-artifacts/local/feedback.jsonl",
-    }
-    assert _roundtrip(LogFeedbackResult, sample) == sample
-
-
 def test_activity_sink_records_roundtrip():
     q = {
         "ts": "2026-06-25T00:00:00Z",
@@ -140,15 +129,6 @@ def test_activity_sink_records_roundtrip():
         "source": "mcp_server",
     }
     assert _roundtrip(QueryExecutionRecord, q) == q
-    f = {
-        "ts": "2026-06-25T00:00:01Z",
-        "profile": "acme",
-        "question": "how many orders?",
-        "rating": "Good",
-        "notes": "spot on",
-        "source": "mcp_server",
-    }
-    assert _roundtrip(FeedbackRecord, f) == f
 
 
 def test_contracts_tolerate_richer_payload_losslessly():

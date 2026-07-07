@@ -20,7 +20,7 @@ your AI client  ──spawns──▶  python3 -m mcp_harness   (stdio child pro
 
 ## What it exposes
 
-Five tools, mirroring the hosted connector so the client experience is identical:
+Four tools, mirroring the hosted connector so the client experience is identical:
 
 | Tool | What it does |
 |---|---|
@@ -28,7 +28,6 @@ Five tools, mirroring the hosted connector so the client experience is identical
 | `get_datasource_schema` | Return the semantic model: the subject-area index, full per-table detail for requested `dataset_names`, plus `ORGANIZATION.md` / `USER_MEMORY.md`. |
 | `get_prompt_examples` | Return the curated `examples.yaml` few-shot library. |
 | `execute_sql` | Run **one read-only** `SELECT` / `WITH...SELECT` locally and return `{columns, rows, row_count, ...}`. DML/DDL/multi-statement are rejected. |
-| `log_feedback` | Append thumbs-up/down to `<artifacts_dir>/local/feedback.jsonl`. |
 
 The NL→SQL *intelligence* stays on the client side (the model generates SQL from
 the schema + examples these tools return) — exactly as with the hosted connector.

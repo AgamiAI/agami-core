@@ -370,7 +370,7 @@ def test_build_app_fails_fast_on_present_but_weak_signing_secret(env, monkeypatc
 
 def test_end_to_end_oauth_then_mcp_tools_list(env):
     # The whole point: a token minted via the OAuth flow is accepted by the transport, and the
-    # tools/list comes back with exactly the 5 product tools.
+    # tools/list comes back with exactly the 4 product tools.
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -404,7 +404,6 @@ def test_end_to_end_oauth_then_mcp_tools_list(env):
         "get_datasource_schema",
         "get_prompt_examples",
         "execute_sql",
-        "log_feedback",
     }
 
 

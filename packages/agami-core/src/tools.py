@@ -6,11 +6,11 @@ The shared MCP tool registry + implementations — one impl, both transports.
 entrypoint (`mcp_harness`) and the HTTP entrypoint (`mcp_http`) advertise, so a client sees the
 same surface and behavior whether it connects over stdio (Claude Desktop) or HTTP (claude.ai).
 
-The surface is the **5 product tools**: `list_datasources`, `get_datasource_schema` (adaptive),
-`get_prompt_examples`, `execute_sql`, `log_feedback`.
+The surface is the **4 product tools**: `list_datasources`, `get_datasource_schema` (adaptive),
+`get_prompt_examples`, `execute_sql`.
 
 Design constraints (match the rest of agami):
-  - The execute_sql + log_feedback tools are pure-stdlib. The model-backed tools import the
+  - The execute_sql tool is pure-stdlib. The model-backed tools import the
     `semantic_model` package (Pydantic) lazily and surface a clear "install the model deps" error
     if it's absent — so execution still works on a bare install.
   - **No data leaves the machine.** SQL is executed locally by shelling out to `execute_sql` (the
@@ -41,7 +41,6 @@ AGAMI_LOCAL = agami_paths.local_dir()
 CREDENTIALS_PATH = agami_paths.credentials_path()
 CONFIG_PATH = agami_paths.config_path()
 QUERY_LOG = agami_paths.query_log_path()
-FEEDBACK_LOG = AGAMI_LOCAL / "feedback.jsonl"
 TOOL_CALL_LOG = AGAMI_LOCAL / "tool_calls.jsonl"
 
 SERVER_NAME = "agami"
@@ -61,7 +60,7 @@ def server_version() -> str:
         return "0.0.0"
 
 
-# Client-facing usage guidance, surfaced by both transports. Describes the 5-tool flow;
+# Client-facing usage guidance, surfaced by both transports. Describes the 4-tool flow;
 # no save_correction (that's a skill operation, not on the MCP surface).
 SERVER_INSTRUCTIONS = (
     "agami local datasource agent. The NL→SQL intelligence runs on your side; these tools provide "
@@ -92,13 +91,12 @@ def bootstrap_paths() -> None:
     installs never create ~/.agami, so the migration is a no-op once there's nothing to move (it's
     a backward-compat shim, safe to drop in a later cleanup). Every entrypoint calls this so the
     paths reflect the resolved (possibly migrated) artifacts dir."""
-    global AGAMI_LOCAL, CREDENTIALS_PATH, CONFIG_PATH, QUERY_LOG, FEEDBACK_LOG, TOOL_CALL_LOG
+    global AGAMI_LOCAL, CREDENTIALS_PATH, CONFIG_PATH, QUERY_LOG, TOOL_CALL_LOG
     agami_paths.bootstrap()
     AGAMI_LOCAL = agami_paths.local_dir()
     CREDENTIALS_PATH = agami_paths.credentials_path()
     CONFIG_PATH = agami_paths.config_path()
     QUERY_LOG = agami_paths.query_log_path()
-    FEEDBACK_LOG = AGAMI_LOCAL / "feedback.jsonl"
     TOOL_CALL_LOG = AGAMI_LOCAL / "tool_calls.jsonl"
 
 
@@ -915,35 +913,6 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     return json.dumps(result, indent=2, default=str)
 
 
-def tool_log_feedback(args: dict[str, Any]) -> str:
-    """Local analog of Ask Agami `log_feedback`: append to <artifacts_dir>/local/feedback.jsonl."""
-    raw_query = args.get("raw_query")
-    rating = args.get("rating")
-    if not raw_query or not rating:
-        return json.dumps(
-            {"error": {"kind": "other", "remediation": "raw_query and rating are required."}}
-        )
-    norm = str(rating).strip().lower()
-    good = {"good", "positive", "thumbs_up", "👍", "up", "yes"}
-    bad = {"bad", "negative", "thumbs_down", "👎", "down", "no"}
-    rating_value = "Good" if norm in good else "Bad" if norm in bad else str(rating)
-    logged = _record_feedback(
-        {
-            "ts": _now_iso(),
-            "profile": resolve_profile(args.get("datasource")),
-            "question": raw_query,
-            "rating": rating_value,
-            "notes": args.get("notes"),
-            "source": "mcp_server",
-        }
-    )
-    if logged is None:
-        return json.dumps(
-            {"error": {"kind": "other", "remediation": f"Could not write {FEEDBACK_LOG}."}}
-        )
-    return json.dumps({"ok": True, "rating": rating_value, "logged_to": logged})
-
-
 def _now_iso() -> str:
     # Avoid Date.now-style nondeterminism concerns: use UTC wall clock here is fine
     # (this is a long-running server process, not a replayed workflow).
@@ -979,27 +948,6 @@ def _record_query(rec: dict[str, Any]) -> None:
         DbActivitySink(store).record_query_execution(QueryExecutionRecord(**rec))
     except Exception:
         pass  # best-effort: never fail the query because logging failed
-    finally:
-        store.close()
-
-
-def _record_feedback(rec: dict[str, Any]) -> str | None:
-    """Record feedback through the DB sink (AGAMI_DB_URL) or the local jsonl. Returns where it
-    landed ('database' or the file path), or None if the write failed (feedback is the user's
-    explicit action, so a failure surfaces — unlike incidental query logging). Closes the store."""
-    from store import Store
-
-    store = Store.from_env()
-    if store is None:
-        return str(FEEDBACK_LOG) if _append_jsonl(FEEDBACK_LOG, rec) else None
-    try:
-        from contracts import FeedbackRecord
-        from model_store import DbActivitySink
-
-        DbActivitySink(store).record_feedback(FeedbackRecord(**rec))
-        return "database"
-    except Exception:
-        return None
     finally:
         store.close()
 
@@ -1227,33 +1175,6 @@ TOOLS: dict[str, dict[str, Any]] = {
                 "max_rows": {"type": "integer", "description": "Row cap (clamped 1–10000)."},
             },
             "required": ["sql"],
-            "additionalProperties": False,
-        },
-    },
-    "log_feedback": {
-        "handler": tool_log_feedback,
-        "description": (
-            "Record thumbs-up/down feedback for a question to the local feedback.jsonl. "
-            "Local analog of the hosted log_feedback."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "raw_query": {"type": "string", "description": "The NL question the user asked."},
-                "rating": {
-                    "type": "string",
-                    "description": "good/bad (also accepts positive/negative/👍/👎).",
-                },
-                "notes": {"type": "string", "description": "Optional free-text comment."},
-                "datasource": {
-                    "type": "string",
-                    "description": "Profile name; defaults to the active profile.",
-                },
-                "user_question": _USER_QUESTION_PROP,
-                "thread_id": _THREAD_ID_PROP,
-                "correlation_id": _CORRELATION_ID_PROP,
-            },
-            "required": ["raw_query", "rating"],
             "additionalProperties": False,
         },
     },

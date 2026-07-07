@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 import agami_paths
-from contracts import FeedbackRecord, QueryExecutionRecord
+from contracts import QueryExecutionRecord
 from ports import GovernanceVerdict, Org, Principal
 
 
@@ -32,26 +32,19 @@ def _append_jsonl(path: Path, record: dict) -> bool:
 
 
 class FileActivitySink:
-    """Default ``ActivitySink`` — appends query/feedback records to the same jsonl files the local
+    """Default ``ActivitySink`` — appends query-execution records to the same jsonl files the local
     skill uses (``<artifacts_dir>/local/...``). A Postgres adapter can replace this."""
 
-    def __init__(self, query_log: Path | None = None, feedback_log: Path | None = None) -> None:
+    def __init__(self, query_log: Path | None = None) -> None:
         # Resolve lazily by default (the artifacts dir may not be bootstrapped at construction);
         # paths can be injected for testing.
         self._query_log = query_log
-        self._feedback_log = feedback_log
 
     def _query_log_path(self) -> Path:
         return self._query_log or agami_paths.query_log_path()
 
-    def _feedback_log_path(self) -> Path:
-        return self._feedback_log or (agami_paths.local_dir() / "feedback.jsonl")
-
     def record_query_execution(self, record: QueryExecutionRecord) -> None:
         _append_jsonl(self._query_log_path(), record.model_dump())
-
-    def record_feedback(self, record: FeedbackRecord) -> None:
-        _append_jsonl(self._feedback_log_path(), record.model_dump())
 
 
 class SingleTenantOrgResolver:

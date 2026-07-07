@@ -388,7 +388,7 @@ def test_all_tools_expose_thread_and_correlation_ids():
     import tools
 
     for name in ("list_datasources", "get_datasource_schema", "get_prompt_examples",
-                 "execute_sql", "log_feedback"):
+                 "execute_sql"):
         props = tools.TOOLS[name]["inputSchema"]["properties"]
         assert "thread_id" in props and "correlation_id" in props, name
 

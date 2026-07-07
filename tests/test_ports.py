@@ -89,12 +89,11 @@ def test_warn_only_governance_never_blocks():
 
 
 def test_file_activity_sink_writes_jsonl(tmp_path):
-    from contracts import FeedbackRecord, QueryExecutionRecord
+    from contracts import QueryExecutionRecord
     from oss_adapters import FileActivitySink
 
     ql = tmp_path / "query.jsonl"
-    fl = tmp_path / "feedback.jsonl"
-    sink = FileActivitySink(query_log=ql, feedback_log=fl)
+    sink = FileActivitySink(query_log=ql)
 
     sink.record_query_execution(
         QueryExecutionRecord(
@@ -106,18 +105,6 @@ def test_file_activity_sink_writes_jsonl(tmp_path):
             source="mcp_server",
         )
     )
-    sink.record_feedback(
-        FeedbackRecord(
-            ts="2026-06-25T00:00:01Z",
-            profile="acme",
-            question="how many?",
-            rating="Good",
-            notes=None,
-            source="mcp_server",
-        )
-    )
 
     qrec = json.loads(ql.read_text().splitlines()[0])
     assert qrec["profile"] == "acme" and qrec["row_count"] == 1 and qrec["source"] == "mcp_server"
-    frec = json.loads(fl.read_text().splitlines()[0])
-    assert frec["rating"] == "Good" and frec["question"] == "how many?"
