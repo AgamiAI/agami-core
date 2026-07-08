@@ -106,6 +106,43 @@ def test_no_env_falls_through_to_the_file(monkeypatch, tmp_path):
     assert out["host"] == "filehost" and out["type"] == "postgres"
 
 
+# --- per-field BigQuery: service_account alias normalizes to the path key ---
+
+def test_bigquery_service_account_alias_normalizes_in_file(monkeypatch, tmp_path):
+    """A per-field `service_account = ...` maps to `service_account_path` (what the
+    BigQuery executor reads) — the friendlier spelling must not be silently ignored."""
+    creds = tmp_path / "credentials"
+    creds.write_text(
+        "[gcp]\ntype = bigquery\nproject = my-proj\n"
+        "service_account = /abs/path/key.json\n",
+        encoding="utf-8",
+    )
+    import os
+    if os.name == "posix":
+        creds.chmod(0o600)
+    monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", creds)
+
+    out = _load_credentials("gcp")
+    assert out["service_account_path"] == "/abs/path/key.json"
+
+
+def test_bigquery_explicit_service_account_path_is_not_clobbered(monkeypatch, tmp_path):
+    """If both `service_account_path` and the alias appear, the explicit path wins."""
+    creds = tmp_path / "credentials"
+    creds.write_text(
+        "[gcp]\ntype = bigquery\nproject = my-proj\n"
+        "service_account_path = /explicit/key.json\n"
+        "service_account = /alias/key.json\n",
+        encoding="utf-8",
+    )
+    import os
+    if os.name == "posix":
+        creds.chmod(0o600)
+    monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", creds)
+
+    assert _load_credentials("gcp")["service_account_path"] == "/explicit/key.json"
+
+
 # --- neither source → an error that names both -----------------------------
 
 def test_missing_both_sources_names_env_and_file(monkeypatch, tmp_path, capsys):
