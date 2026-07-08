@@ -230,6 +230,28 @@ def test_sensitive_projection_allows_aggregate_filter_and_nonsensitive():
         assert RT.check_sensitive_projection(sql, org).action == "allow", sql
 
 
+def test_sensitive_projection_refuses_set_operation_arm():
+    """A sensitive column projected in ANY set-operation arm is refused. A UNION parses
+    to exp.SetOperation (not exp.Select), so a gate that only inspects the root SELECT
+    would let `SELECT id … UNION SELECT email …` slip PII straight past the gate."""
+    org = L.load_organization(MODEL_DIR)
+    for sql in [
+        "SELECT id FROM customers UNION SELECT email FROM customers",
+        "SELECT full_name FROM customers UNION ALL SELECT email FROM customers",
+        "SELECT id FROM customers INTERSECT SELECT email FROM customers",
+        "(SELECT id FROM customers) UNION (SELECT email FROM customers)",
+    ]:
+        assert RT.check_sensitive_projection(sql, org).action == "refuse", sql
+
+
+def test_sensitive_projection_allows_union_of_nonsensitive():
+    """A set operation whose every arm projects only non-sensitive columns still passes —
+    the arm-walking fix must not over-refuse a clean UNION."""
+    org = L.load_organization(MODEL_DIR)
+    sql = "SELECT id FROM customers UNION SELECT country FROM customers"
+    assert RT.check_sensitive_projection(sql, org).action == "allow", sql
+
+
 @pytest.fixture
 def wired_artifacts(tmp_path):
     """A temp artifacts dir wired to the sample exactly as Phase 0s does."""

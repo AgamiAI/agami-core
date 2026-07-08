@@ -427,6 +427,26 @@ def _direct_from_tables(tree: "exp.Select") -> set[str]:
     return names
 
 
+def _output_selects(node: "exp.Expression") -> list["exp.Select"]:
+    """The SELECTs whose projection reaches the query OUTPUT: the top-level SELECT, or
+    — for a set operation (UNION / INTERSECT / EXCEPT) — every arm.
+
+    sqlglot parses `A UNION B` to an exp.SetOperation, NOT an exp.Select, so a gate
+    that inspects only `isinstance(tree, exp.Select)` silently skips every set-operation
+    arm (the bypass this closes for the sensitive-projection and fan/chasm gates, mirroring
+    the table-scope fix). Nested subquery / CTE SELECTs are excluded on purpose: their
+    projections feed an enclosing query, not the final result, so a sensitive column a
+    WHERE-subquery projects but the outer query only filters on is not exposed and must
+    not be refused."""
+    if isinstance(node, exp.Select):
+        return [node]
+    if isinstance(node, exp.SetOperation):  # base of Union / Intersect / Except
+        return _output_selects(node.this) + _output_selects(node.expression)
+    if isinstance(node, (exp.Subquery, exp.Paren)):  # `(SELECT …) UNION (SELECT …)`
+        return _output_selects(node.this) if node.this is not None else []
+    return []
+
+
 def check_sensitive_projection(sql: str, org: Organization) -> SensitiveCheckResult:
     """Refuse a query that PROJECTS a `sensitive` column's raw values; allow the
     column in COUNT, filters, GROUP BY, and joins. Degrades to allow when sqlglot
@@ -440,32 +460,35 @@ def check_sensitive_projection(sql: str, org: Organization) -> SensitiveCheckRes
         tree = sqlglot.parse_one(sql, error_level="ignore")
     except Exception:
         return SensitiveCheckResult("allow")
-    if tree is None or not isinstance(tree, exp.Select):
+    # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not
+    # exp.Select — gate on "contains a SELECT" and scan every OUTPUT-bearing arm, else
+    # `… UNION SELECT ssn FROM customers` would project a sensitive column past this gate.
+    if tree is None or tree.find(exp.Select) is None:
         return SensitiveCheckResult("allow")
 
-    scope = _tables_in_scope(tree)
-    direct = _direct_from_tables(tree)
     offending: set[str] = set()
-
-    for proj in tree.expressions:
-        # (a) a raw projection of a sensitive column, not protected by COUNT
-        for col in proj.find_all(exp.Column):
-            if col.name not in allnames or _count_protects(col):
-                continue
-            tbl = _resolve_col_table(col, scope)
-            if tbl is None:
-                offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
-            elif tbl in by_table and col.name in by_table[tbl]:
-                offending.add(f"{tbl}.{col.name}")
-            # same-named column on a non-sensitive table → not offending
-        # (b) `*` / `t.*` that would expand a directly-FROM'd table holding sensitive cols
-        is_star = isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
-        if is_star:
-            qualifier = proj.table if isinstance(proj, exp.Column) else None
-            tables = {scope.get(qualifier, qualifier)} if qualifier else direct
-            for tbl in tables:
-                for c in sorted(by_table.get(tbl, set())):
-                    offending.add(f"{tbl}.{c}")
+    for sel in _output_selects(tree):
+        scope = _tables_in_scope(sel)
+        direct = _direct_from_tables(sel)
+        for proj in sel.expressions:
+            # (a) a raw projection of a sensitive column, not protected by COUNT
+            for col in proj.find_all(exp.Column):
+                if col.name not in allnames or _count_protects(col):
+                    continue
+                tbl = _resolve_col_table(col, scope)
+                if tbl is None:
+                    offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
+                elif tbl in by_table and col.name in by_table[tbl]:
+                    offending.add(f"{tbl}.{col.name}")
+                # same-named column on a non-sensitive table → not offending
+            # (b) `*` / `t.*` that would expand a directly-FROM'd table holding sensitive cols
+            is_star = isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
+            if is_star:
+                qualifier = proj.table if isinstance(proj, exp.Column) else None
+                tables = {scope.get(qualifier, qualifier)} if qualifier else direct
+                for tbl in tables:
+                    for c in sorted(by_table.get(tbl, set())):
+                        offending.add(f"{tbl}.{c}")
 
     if not offending:
         return SensitiveCheckResult("allow")
@@ -790,16 +813,37 @@ def _many_side_facing_one(rels: list[Relationship], table: str, dim: str) -> boo
 
 
 def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
-    """Detect fan-trap / chasm-trap and decide rewrite-vs-refuse-vs-allow."""
+    """Detect fan-trap / chasm-trap and decide rewrite-vs-refuse-vs-allow.
+
+    A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not exp.Select;
+    each arm is analyzed on its own and a trap in ANY arm refuses the whole query. Arms
+    are not auto-rewritten (splicing a rewrite into one arm of a set operation is out of
+    scope), so a rewriteable arm-trap becomes a refuse. Degrades to allow when sqlglot is
+    unavailable, the SQL doesn't parse, or it contains no SELECT."""
     if not _HAVE_SQLGLOT:
         return PreFlightResult(None, "allow", sql, reason="sqlglot unavailable; skipped")
     try:
         tree = sqlglot.parse_one(sql, error_level="ignore")
     except Exception as e:
         return PreFlightResult(None, "allow", sql, reason=f"unparseable; skipped ({e})")
-    if tree is None or not isinstance(tree, exp.Select):
-        return PreFlightResult(None, "allow", sql, reason="not a SELECT; skipped")
+    if tree is None or tree.find(exp.Select) is None:
+        return PreFlightResult(None, "allow", sql, reason="no SELECT; skipped")
+    if isinstance(tree, exp.Select):
+        return _preflight_select(tree, org, sql, allow_rewrite=True)
+    # Set operation: analyze each arm; a trap in any arm inflates that arm's aggregate.
+    for arm in _output_selects(tree):
+        res = _preflight_select(arm, org, arm.sql(), allow_rewrite=False)
+        if res.risk and res.action == "refuse":
+            # tie the arm's diagnosis back to the full set-operation query
+            return PreFlightResult(res.risk, "refuse", sql, reason=res.reason,
+                                   suggestion=res.suggestion, triggering_joins=res.triggering_joins)
+    return PreFlightResult(None, "allow", sql, reason="no fan/chasm or aggregation issue in any arm")
 
+
+def _preflight_select(tree: "exp.Select", org: Organization, sql: str, allow_rewrite: bool) -> PreFlightResult:
+    """Fan/chasm + aggregation-semantics analysis of a SINGLE SELECT. `sql` is that
+    select's own text (used for the join rewrite + messages). When `allow_rewrite` is
+    False (a set-operation arm), a rewriteable fan trap is refused, not rewritten."""
     rels = _cardinality_index(org)
     tables_in_scope = _tables_in_scope(tree)  # alias -> table
     table_set = set(tables_in_scope.values())
@@ -854,7 +898,7 @@ def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
         # AND the SELECT is aggregation-only (no raw rows).
         many_aliases = {a for a, t in tables_in_scope.items() if t in many_tables}
         referenced_elsewhere = _tables_referenced_outside_from(tree, tables_in_scope) & many_tables
-        if not has_raw_columns and not referenced_elsewhere:
+        if allow_rewrite and not has_raw_columns and not referenced_elsewhere:
             rewritten = _drop_fanout_joins(sql, many_aliases | many_tables)
             if rewritten and rewritten.strip() != sql.strip():
                 return PreFlightResult(
