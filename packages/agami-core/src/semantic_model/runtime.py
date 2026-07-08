@@ -529,7 +529,11 @@ def check_table_scope(sql: str, org: Organization) -> TableScopeResult:
         tree = sqlglot.parse_one(sql, error_level="ignore")
     except Exception:
         return TableScopeResult("allow")
-    if tree is None or not isinstance(tree, exp.Select):
+    # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.Union, not exp.Select,
+    # so gate on "contains a SELECT" rather than "is a SELECT" — otherwise every
+    # set-operation arm would bypass the guard. A non-SELECT statement has no SELECT
+    # node and still degrades to allow (the upstream read-only guard owns those).
+    if tree is None or tree.find(exp.Select) is None:
         return TableScopeResult("allow")
 
     cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
@@ -551,6 +555,180 @@ def check_table_scope(sql: str, org: Organization) -> TableScopeResult:
                + ", ".join(tables)
                + " — only tables declared in the model may be queried.",
         suggestion="Add the table to the model (agami-connect / '/agami-model'), "
+                   "or remove it from the query.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# SELECT * ban + column-scope guard
+#
+# Companions to the table-scope guard, enforced in the same _model_safety pass.
+# The star ban forces every projected column to be named; the column-scope guard
+# then refuses any column that binds to a declared table but is not one that table
+# declares (a hallucinated column, or a physical column the model excluded). Both
+# run AFTER check_table_scope, so every physical table in scope is known-declared.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StarCheckResult:
+    action: str  # "allow" | "refuse"
+    reason: str = ""
+    suggestion: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "reason": self.reason, "suggestion": self.suggestion}
+
+
+def check_no_select_star(sql: str) -> StarCheckResult:
+    """Refuse a query whose projection list contains `*` or `t.*`.
+
+    A star defeats column-level scoping (an undeclared column hides behind it) and
+    stops `check_column_scope` from validating what is actually returned, so every
+    projected column must be named. Applies to EVERY select in the tree — outer
+    query, subqueries, CTE bodies, and set-operation (UNION/…) arms — so a star
+    can't hide one level down. `COUNT(*)` and other `agg(*)` are fine: the star sits
+    inside the aggregate, so the projection itself is not a star.
+
+    Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, or it is
+    not a SELECT-bearing statement (the upstream read-only guard owns non-SELECTs).
+    """
+    if not _HAVE_SQLGLOT:
+        return StarCheckResult("allow")
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return StarCheckResult("allow")
+    if tree is None or tree.find(exp.Select) is None:
+        return StarCheckResult("allow")
+    for select in tree.find_all(exp.Select):
+        for proj in select.expressions:
+            if isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star)):
+                return StarCheckResult(
+                    "refuse",
+                    reason="query uses SELECT * — every column must be named so it can be "
+                           "checked against the semantic model.",
+                    suggestion="List the columns explicitly instead of '*'.",
+                )
+    return StarCheckResult("allow")
+
+
+@dataclass
+class ColumnScopeResult:
+    action: str  # "allow" | "refuse"
+    columns: list[str] = field(default_factory=list)  # offending "table.column" / "column"
+    reason: str = ""
+    suggestion: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "columns": self.columns,
+                "reason": self.reason, "suggestion": self.suggestion}
+
+
+def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
+    """Refuse a query that references a column not declared on the table it binds to.
+
+    Strict where a column visibly binds to a declared physical table — qualified by
+    that table (or its alias), or the single in-scope declared table for a bare
+    column; fail-open where the column comes from a CTE/subquery output or a
+    select-list alias we can't attribute to a physical table. This mirrors the
+    table-scope and fan/chasm gates' degrade-to-allow posture, so legitimate complex
+    SQL never false-refuses, while the common hallucinated-column case (including
+    columns inside a CTE/subquery body, which bind directly to their physical table)
+    is still caught. Matching is case-insensitive (unquoted identifiers fold case),
+    consistent with `check_table_scope`. Runs AFTER the table-scope + star gates, so
+    every physical table in scope is known-declared and no `*` remains.
+
+    Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, it is not
+    a SELECT, or the model declares no columns.
+    """
+    if not _HAVE_SQLGLOT:
+        return ColumnScopeResult("allow")
+    colidx = _column_index(org)
+    if not colidx:
+        return ColumnScopeResult("allow")
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return ColumnScopeResult("allow")
+    if tree is None or tree.find(exp.Select) is None:
+        return ColumnScopeResult("allow")
+
+    # case-insensitive declared-column index: lower(table) -> {lower(column)}
+    declared = {t.lower(): {c.lower() for c in cols} for t, cols in colidx.items()}
+    cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+
+    def _enclosing_select(node):
+        p = node.parent
+        while p is not None and not isinstance(p, exp.Select):
+            p = p.parent
+        return p
+
+    # Resolve scoping PER enclosing SELECT, keyed by object identity — exp nodes hash
+    # by structure, so two identical set-operation arms would collide on the node
+    # itself. For each select we track the physical tables it reads directly, and
+    # whether it also reads from a CTE ref / derived subquery (in which case a bare
+    # column we can't match may legitimately be that source's output → fail-open).
+    alias_to_table: dict[str, str] = {}    # alias/name -> bare physical table (global; for qualified refs)
+    direct_phys: dict[int, set[str]] = {}  # id(select) -> {bare physical table read directly}
+    has_derived: dict[int, bool] = {}      # id(select) -> reads a CTE ref / derived subquery directly
+    for tbl in tree.find_all(exp.Table):
+        name = (tbl.name or "").lower()
+        if not name:
+            continue
+        sel = _enclosing_select(tbl)
+        if name in cte_names:
+            if sel is not None:
+                has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
+            continue
+        alias_to_table[tbl.alias_or_name.lower()] = name
+        if sel is not None:
+            direct_phys.setdefault(id(sel), set()).add(name)
+    for sq in tree.find_all(exp.Subquery):
+        # a derived table in FROM/JOIN (NOT a WHERE/scalar subquery, which adds no columns to its select)
+        if isinstance(sq.parent, (exp.From, exp.Join)):
+            sel = _enclosing_select(sq)
+            if sel is not None:
+                has_derived[id(sel)] = True
+
+    # select-list output names (`AS x`) are aliases, not base columns
+    output_aliases = {a.alias.lower() for a in tree.find_all(exp.Alias) if a.alias}
+
+    offending: set[str] = set()
+    for col in tree.find_all(exp.Column):
+        name = col.name
+        if not name:
+            continue
+        lname = name.lower()
+        if col.table:
+            phys = alias_to_table.get(col.table.lower())
+            if phys is None:
+                continue  # qualified by a CTE/derived alias — validated at its own source
+            if phys in declared and lname not in declared[phys]:
+                offending.add(f"{phys}.{name}")
+            continue
+        # unqualified: judge against the tables its own SELECT reads directly
+        if lname in output_aliases:
+            continue  # a select-list output alias, not a base column
+        sel = _enclosing_select(col)
+        local = {t for t in direct_phys.get(id(sel), set()) if t in declared} if sel is not None else set()
+        if any(lname in declared[t] for t in local):
+            continue  # declared on a table this select reads (possibly ambiguous — don't false-reject)
+        if sel is not None and has_derived.get(id(sel), False):
+            continue  # fail-open: may be an output column of this select's CTE/derived source
+        if not local:
+            continue  # no declared physical table in this scope to judge against — fail-open
+        offending.add(name)
+
+    if not offending:
+        return ColumnScopeResult("allow")
+    cols = sorted(offending)
+    return ColumnScopeResult(
+        "refuse",
+        columns=cols,
+        reason="query references column(s) not in the semantic model: " + ", ".join(cols)
+               + " — only columns declared on the model's tables may be queried.",
+        suggestion="Add the column to the model (agami-connect / '/agami-model'), "
                    "or remove it from the query.",
     )
 
