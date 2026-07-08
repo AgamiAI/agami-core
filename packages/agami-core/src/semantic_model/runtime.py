@@ -664,14 +664,28 @@ def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
             p = p.parent
         return p
 
+    def _select_chain(node):
+        """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
+        chain, p = [], node
+        while p is not None:
+            if isinstance(p, exp.Select):
+                chain.append(p)
+            p = p.parent
+        return chain
+
     # Resolve scoping PER enclosing SELECT, keyed by object identity — exp nodes hash
     # by structure, so two identical set-operation arms would collide on the node
-    # itself. For each select we track the physical tables it reads directly, and
-    # whether it also reads from a CTE ref / derived subquery (in which case a bare
-    # column we can't match may legitimately be that source's output → fail-open).
-    alias_to_table: dict[str, str] = {}    # alias/name -> bare physical table (global; for qualified refs)
-    direct_phys: dict[int, set[str]] = {}  # id(select) -> {bare physical table read directly}
-    has_derived: dict[int, bool] = {}      # id(select) -> reads a CTE ref / derived subquery directly
+    # itself. SQL table aliases AND select-list output names are per-SELECT (an inner
+    # scope can reuse a name), so they are never flattened into one global map — that
+    # would let an inner alias validate an outer column against the wrong table, or an
+    # inner `AS x` mask an unrelated outer column `x`. For each select we track the
+    # physical tables it reads directly (alias -> bare table), its output aliases, and
+    # whether it reads from a CTE ref / derived subquery (→ a bare column we can't
+    # match may be that source's output, so fail-open).
+    alias_by_select: dict[int, dict[str, str]] = {}  # id(select) -> {alias -> bare physical table}
+    direct_phys: dict[int, set[str]] = {}            # id(select) -> {bare physical table read directly}
+    has_derived: dict[int, bool] = {}                # id(select) -> reads a CTE ref / derived subquery directly
+    output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
     for tbl in tree.find_all(exp.Table):
         name = (tbl.name or "").lower()
         if not name:
@@ -681,8 +695,8 @@ def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
             if sel is not None:
                 has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
             continue
-        alias_to_table[tbl.alias_or_name.lower()] = name
         if sel is not None:
+            alias_by_select.setdefault(id(sel), {})[tbl.alias_or_name.lower()] = name
             direct_phys.setdefault(id(sel), set()).add(name)
     for sq in tree.find_all(exp.Subquery):
         # a derived table in FROM/JOIN (NOT a WHERE/scalar subquery, which adds no columns to its select)
@@ -690,9 +704,12 @@ def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
             sel = _enclosing_select(sq)
             if sel is not None:
                 has_derived[id(sel)] = True
-
-    # select-list output names (`AS x`) are aliases, not base columns
-    output_aliases = {a.alias.lower() for a in tree.find_all(exp.Alias) if a.alias}
+    for al in tree.find_all(exp.Alias):
+        if not al.alias:
+            continue
+        sel = _enclosing_select(al)
+        if sel is not None:
+            output_by_select.setdefault(id(sel), set()).add(al.alias.lower())
 
     offending: set[str] = set()
     for col in tree.find_all(exp.Column):
@@ -700,17 +717,25 @@ def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
         if not name:
             continue
         lname = name.lower()
+        chain = _select_chain(col)
+        sel = chain[0] if chain else None
         if col.table:
-            phys = alias_to_table.get(col.table.lower())
+            # resolve the qualifier within the column's own scope, walking outward:
+            # a correlated ref sees ancestor aliases; an inner alias shadows an outer.
+            qual = col.table.lower()
+            phys = None
+            for s in chain:
+                phys = alias_by_select.get(id(s), {}).get(qual)
+                if phys is not None:
+                    break
             if phys is None:
                 continue  # qualified by a CTE/derived alias — validated at its own source
             if phys in declared and lname not in declared[phys]:
                 offending.add(f"{phys}.{name}")
             continue
         # unqualified: judge against the tables its own SELECT reads directly
-        if lname in output_aliases:
-            continue  # a select-list output alias, not a base column
-        sel = _enclosing_select(col)
+        if sel is not None and lname in output_by_select.get(id(sel), set()):
+            continue  # a select-list output alias of THIS select, not a base column
         local = {t for t in direct_phys.get(id(sel), set()) if t in declared} if sel is not None else set()
         if any(lname in declared[t] for t in local):
             continue  # declared on a table this select reads (possibly ambiguous — don't false-reject)

@@ -151,6 +151,30 @@ def test_quoted_identifier_undeclared_refused():
 
 
 # ===========================================================================
+# Per-SELECT scope correctness (regressions for the global-map bugs)
+# ===========================================================================
+
+def test_alias_reused_across_scopes_resolves_locally():
+    # `o` aliases orders in the outer query and customers in the correlated
+    # subquery. A global alias map would resolve outer `o.amount` against the wrong
+    # table (last-write-wins) and false-refuse; per-select resolution keeps it valid.
+    res = rt.check_column_scope(
+        "SELECT o.amount FROM orders o "
+        "WHERE EXISTS (SELECT 1 FROM customers o WHERE o.id = 1)", _scope_org())
+    assert res.action == "allow"
+
+
+def test_nested_output_alias_does_not_mask_outer_column():
+    # An inner `AS bogus` must NOT let an unrelated outer `bogus` slip through. A
+    # global output-alias set would skip the outer column; per-select scoping refuses.
+    res = rt.check_column_scope(
+        "SELECT bogus FROM orders WHERE id IN (SELECT id AS bogus FROM customers)",
+        _scope_org())
+    assert res.action == "refuse"
+    assert res.columns == ["bogus"]
+
+
+# ===========================================================================
 # Documented accepted fail-opens -> allow (the intended boundary)
 # ===========================================================================
 
