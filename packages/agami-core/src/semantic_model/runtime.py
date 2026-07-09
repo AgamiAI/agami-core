@@ -427,6 +427,26 @@ def _direct_from_tables(tree: "exp.Select") -> set[str]:
     return names
 
 
+def _output_selects(node: "exp.Expression") -> list["exp.Select"]:
+    """The SELECTs whose projection reaches the query OUTPUT: the top-level SELECT, or
+    — for a set operation (UNION / INTERSECT / EXCEPT) — every arm.
+
+    sqlglot parses `A UNION B` to an exp.SetOperation, NOT an exp.Select, so a gate
+    that inspects only `isinstance(tree, exp.Select)` silently skips every set-operation
+    arm (the bypass this closes for the sensitive-projection and fan/chasm gates, mirroring
+    the table-scope fix). Nested subquery / CTE SELECTs are excluded on purpose: their
+    projections feed an enclosing query, not the final result, so a sensitive column a
+    WHERE-subquery projects but the outer query only filters on is not exposed and must
+    not be refused."""
+    if isinstance(node, exp.Select):
+        return [node]
+    if isinstance(node, exp.SetOperation):  # base of Union / Intersect / Except
+        return _output_selects(node.this) + _output_selects(node.expression)
+    if isinstance(node, (exp.Subquery, exp.Paren)):  # `(SELECT …) UNION (SELECT …)`
+        return _output_selects(node.this) if node.this is not None else []
+    return []
+
+
 def check_sensitive_projection(sql: str, org: Organization) -> SensitiveCheckResult:
     """Refuse a query that PROJECTS a `sensitive` column's raw values; allow the
     column in COUNT, filters, GROUP BY, and joins. Degrades to allow when sqlglot
@@ -440,32 +460,35 @@ def check_sensitive_projection(sql: str, org: Organization) -> SensitiveCheckRes
         tree = sqlglot.parse_one(sql, error_level="ignore")
     except Exception:
         return SensitiveCheckResult("allow")
-    if tree is None or not isinstance(tree, exp.Select):
+    # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not
+    # exp.Select — gate on "contains a SELECT" and scan every OUTPUT-bearing arm, else
+    # `… UNION SELECT ssn FROM customers` would project a sensitive column past this gate.
+    if tree is None or tree.find(exp.Select) is None:
         return SensitiveCheckResult("allow")
 
-    scope = _tables_in_scope(tree)
-    direct = _direct_from_tables(tree)
     offending: set[str] = set()
-
-    for proj in tree.expressions:
-        # (a) a raw projection of a sensitive column, not protected by COUNT
-        for col in proj.find_all(exp.Column):
-            if col.name not in allnames or _count_protects(col):
-                continue
-            tbl = _resolve_col_table(col, scope)
-            if tbl is None:
-                offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
-            elif tbl in by_table and col.name in by_table[tbl]:
-                offending.add(f"{tbl}.{col.name}")
-            # same-named column on a non-sensitive table → not offending
-        # (b) `*` / `t.*` that would expand a directly-FROM'd table holding sensitive cols
-        is_star = isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
-        if is_star:
-            qualifier = proj.table if isinstance(proj, exp.Column) else None
-            tables = {scope.get(qualifier, qualifier)} if qualifier else direct
-            for tbl in tables:
-                for c in sorted(by_table.get(tbl, set())):
-                    offending.add(f"{tbl}.{c}")
+    for sel in _output_selects(tree):
+        scope = _tables_in_scope(sel)
+        direct = _direct_from_tables(sel)
+        for proj in sel.expressions:
+            # (a) a raw projection of a sensitive column, not protected by COUNT
+            for col in proj.find_all(exp.Column):
+                if col.name not in allnames or _count_protects(col):
+                    continue
+                tbl = _resolve_col_table(col, scope)
+                if tbl is None:
+                    offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
+                elif tbl in by_table and col.name in by_table[tbl]:
+                    offending.add(f"{tbl}.{col.name}")
+                # same-named column on a non-sensitive table → not offending
+            # (b) `*` / `t.*` that would expand a directly-FROM'd table holding sensitive cols
+            is_star = isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
+            if is_star:
+                qualifier = proj.table if isinstance(proj, exp.Column) else None
+                tables = {scope.get(qualifier, qualifier)} if qualifier else direct
+                for tbl in tables:
+                    for c in sorted(by_table.get(tbl, set())):
+                        offending.add(f"{tbl}.{c}")
 
     if not offending:
         return SensitiveCheckResult("allow")
@@ -529,7 +552,11 @@ def check_table_scope(sql: str, org: Organization) -> TableScopeResult:
         tree = sqlglot.parse_one(sql, error_level="ignore")
     except Exception:
         return TableScopeResult("allow")
-    if tree is None or not isinstance(tree, exp.Select):
+    # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.Union, not exp.Select,
+    # so gate on "contains a SELECT" rather than "is a SELECT" — otherwise every
+    # set-operation arm would bypass the guard. A non-SELECT statement has no SELECT
+    # node and still degrades to allow (the upstream read-only guard owns those).
+    if tree is None or tree.find(exp.Select) is None:
         return TableScopeResult("allow")
 
     cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
@@ -551,6 +578,205 @@ def check_table_scope(sql: str, org: Organization) -> TableScopeResult:
                + ", ".join(tables)
                + " — only tables declared in the model may be queried.",
         suggestion="Add the table to the model (agami-connect / '/agami-model'), "
+                   "or remove it from the query.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# SELECT * ban + column-scope guard
+#
+# Companions to the table-scope guard, enforced in the same _model_safety pass.
+# The star ban forces every projected column to be named; the column-scope guard
+# then refuses any column that binds to a declared table but is not one that table
+# declares (a hallucinated column, or a physical column the model excluded). Both
+# run AFTER check_table_scope, so every physical table in scope is known-declared.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StarCheckResult:
+    action: str  # "allow" | "refuse"
+    reason: str = ""
+    suggestion: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "reason": self.reason, "suggestion": self.suggestion}
+
+
+def check_no_select_star(sql: str) -> StarCheckResult:
+    """Refuse a query whose projection list contains `*` or `t.*`.
+
+    A star defeats column-level scoping (an undeclared column hides behind it) and
+    stops `check_column_scope` from validating what is actually returned, so every
+    projected column must be named. Applies to EVERY select in the tree — outer
+    query, subqueries, CTE bodies, and set-operation (UNION/…) arms — so a star
+    can't hide one level down. `COUNT(*)` and other `agg(*)` are fine: the star sits
+    inside the aggregate, so the projection itself is not a star.
+
+    Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, or it is
+    not a SELECT-bearing statement (the upstream read-only guard owns non-SELECTs).
+    """
+    if not _HAVE_SQLGLOT:
+        return StarCheckResult("allow")
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return StarCheckResult("allow")
+    if tree is None or tree.find(exp.Select) is None:
+        return StarCheckResult("allow")
+    for select in tree.find_all(exp.Select):
+        for proj in select.expressions:
+            if isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star)):
+                return StarCheckResult(
+                    "refuse",
+                    reason="query uses SELECT * — every column must be named so it can be "
+                           "checked against the semantic model.",
+                    suggestion="List the columns explicitly instead of '*'.",
+                )
+    return StarCheckResult("allow")
+
+
+@dataclass
+class ColumnScopeResult:
+    action: str  # "allow" | "refuse"
+    columns: list[str] = field(default_factory=list)  # offending "table.column" / "column"
+    reason: str = ""
+    suggestion: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "columns": self.columns,
+                "reason": self.reason, "suggestion": self.suggestion}
+
+
+def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
+    """Refuse a query that references a column not declared on the table it binds to.
+
+    Strict where a column visibly binds to a declared physical table — qualified by
+    that table (or its alias), or the single in-scope declared table for a bare
+    column; fail-open where the column comes from a CTE/subquery output or a
+    select-list alias we can't attribute to a physical table. This mirrors the
+    table-scope and fan/chasm gates' degrade-to-allow posture, so legitimate complex
+    SQL never false-refuses, while the common hallucinated-column case (including
+    columns inside a CTE/subquery body, which bind directly to their physical table)
+    is still caught. Matching is case-insensitive (unquoted identifiers fold case),
+    consistent with `check_table_scope`. Runs AFTER the table-scope + star gates, so
+    every physical table in scope is known-declared and no `*` remains.
+
+    Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, it is not
+    a SELECT, or the model declares no columns.
+    """
+    if not _HAVE_SQLGLOT:
+        return ColumnScopeResult("allow")
+    colidx = _column_index(org)
+    if not colidx:
+        return ColumnScopeResult("allow")
+    try:
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return ColumnScopeResult("allow")
+    if tree is None or tree.find(exp.Select) is None:
+        return ColumnScopeResult("allow")
+
+    # case-insensitive declared-column index: lower(table) -> {lower(column)}
+    declared = {t.lower(): {c.lower() for c in cols} for t, cols in colidx.items()}
+    cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+
+    def _enclosing_select(node):
+        p = node.parent
+        while p is not None and not isinstance(p, exp.Select):
+            p = p.parent
+        return p
+
+    def _select_chain(node):
+        """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
+        chain, p = [], node
+        while p is not None:
+            if isinstance(p, exp.Select):
+                chain.append(p)
+            p = p.parent
+        return chain
+
+    # Resolve scoping PER enclosing SELECT, keyed by object identity — exp nodes hash
+    # by structure, so two identical set-operation arms would collide on the node
+    # itself. SQL table aliases AND select-list output names are per-SELECT (an inner
+    # scope can reuse a name), so they are never flattened into one global map — that
+    # would let an inner alias validate an outer column against the wrong table, or an
+    # inner `AS x` mask an unrelated outer column `x`. For each select we track the
+    # physical tables it reads directly (alias -> bare table), its output aliases, and
+    # whether it reads from a CTE ref / derived subquery (→ a bare column we can't
+    # match may be that source's output, so fail-open).
+    alias_by_select: dict[int, dict[str, str]] = {}  # id(select) -> {alias -> bare physical table}
+    direct_phys: dict[int, set[str]] = {}            # id(select) -> {bare physical table read directly}
+    has_derived: dict[int, bool] = {}                # id(select) -> reads a CTE ref / derived subquery directly
+    output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
+    for tbl in tree.find_all(exp.Table):
+        name = (tbl.name or "").lower()
+        if not name:
+            continue
+        sel = _enclosing_select(tbl)
+        if name in cte_names:
+            if sel is not None:
+                has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
+            continue
+        if sel is not None:
+            alias_by_select.setdefault(id(sel), {})[tbl.alias_or_name.lower()] = name
+            direct_phys.setdefault(id(sel), set()).add(name)
+    for sq in tree.find_all(exp.Subquery):
+        # a derived table in FROM/JOIN (NOT a WHERE/scalar subquery, which adds no columns to its select)
+        if isinstance(sq.parent, (exp.From, exp.Join)):
+            sel = _enclosing_select(sq)
+            if sel is not None:
+                has_derived[id(sel)] = True
+    for al in tree.find_all(exp.Alias):
+        if not al.alias:
+            continue
+        sel = _enclosing_select(al)
+        if sel is not None:
+            output_by_select.setdefault(id(sel), set()).add(al.alias.lower())
+
+    offending: set[str] = set()
+    for col in tree.find_all(exp.Column):
+        name = col.name
+        if not name:
+            continue
+        lname = name.lower()
+        chain = _select_chain(col)
+        sel = chain[0] if chain else None
+        if col.table:
+            # resolve the qualifier within the column's own scope, walking outward:
+            # a correlated ref sees ancestor aliases; an inner alias shadows an outer.
+            qual = col.table.lower()
+            phys = None
+            for s in chain:
+                phys = alias_by_select.get(id(s), {}).get(qual)
+                if phys is not None:
+                    break
+            if phys is None:
+                continue  # qualified by a CTE/derived alias — validated at its own source
+            if phys in declared and lname not in declared[phys]:
+                offending.add(f"{phys}.{name}")
+            continue
+        # unqualified: judge against the tables its own SELECT reads directly
+        if sel is not None and lname in output_by_select.get(id(sel), set()):
+            continue  # a select-list output alias of THIS select, not a base column
+        local = {t for t in direct_phys.get(id(sel), set()) if t in declared} if sel is not None else set()
+        if any(lname in declared[t] for t in local):
+            continue  # declared on a table this select reads (possibly ambiguous — don't false-reject)
+        if sel is not None and has_derived.get(id(sel), False):
+            continue  # fail-open: may be an output column of this select's CTE/derived source
+        if not local:
+            continue  # no declared physical table in this scope to judge against — fail-open
+        offending.add(name)
+
+    if not offending:
+        return ColumnScopeResult("allow")
+    cols = sorted(offending)
+    return ColumnScopeResult(
+        "refuse",
+        columns=cols,
+        reason="query references column(s) not in the semantic model: " + ", ".join(cols)
+               + " — only columns declared on the model's tables may be queried.",
+        suggestion="Add the column to the model (agami-connect / '/agami-model'), "
                    "or remove it from the query.",
     )
 
@@ -587,16 +813,37 @@ def _many_side_facing_one(rels: list[Relationship], table: str, dim: str) -> boo
 
 
 def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
-    """Detect fan-trap / chasm-trap and decide rewrite-vs-refuse-vs-allow."""
+    """Detect fan-trap / chasm-trap and decide rewrite-vs-refuse-vs-allow.
+
+    A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not exp.Select;
+    each arm is analyzed on its own and a trap in ANY arm refuses the whole query. Arms
+    are not auto-rewritten (splicing a rewrite into one arm of a set operation is out of
+    scope), so a rewriteable arm-trap becomes a refuse. Degrades to allow when sqlglot is
+    unavailable, the SQL doesn't parse, or it contains no SELECT."""
     if not _HAVE_SQLGLOT:
         return PreFlightResult(None, "allow", sql, reason="sqlglot unavailable; skipped")
     try:
         tree = sqlglot.parse_one(sql, error_level="ignore")
     except Exception as e:
         return PreFlightResult(None, "allow", sql, reason=f"unparseable; skipped ({e})")
-    if tree is None or not isinstance(tree, exp.Select):
-        return PreFlightResult(None, "allow", sql, reason="not a SELECT; skipped")
+    if tree is None or tree.find(exp.Select) is None:
+        return PreFlightResult(None, "allow", sql, reason="no SELECT; skipped")
+    if isinstance(tree, exp.Select):
+        return _preflight_select(tree, org, sql, allow_rewrite=True)
+    # Set operation: analyze each arm; a trap in any arm inflates that arm's aggregate.
+    for arm in _output_selects(tree):
+        res = _preflight_select(arm, org, arm.sql(), allow_rewrite=False)
+        if res.risk and res.action == "refuse":
+            # tie the arm's diagnosis back to the full set-operation query
+            return PreFlightResult(res.risk, "refuse", sql, reason=res.reason,
+                                   suggestion=res.suggestion, triggering_joins=res.triggering_joins)
+    return PreFlightResult(None, "allow", sql, reason="no fan/chasm or aggregation issue in any arm")
 
+
+def _preflight_select(tree: "exp.Select", org: Organization, sql: str, allow_rewrite: bool) -> PreFlightResult:
+    """Fan/chasm + aggregation-semantics analysis of a SINGLE SELECT. `sql` is that
+    select's own text (used for the join rewrite + messages). When `allow_rewrite` is
+    False (a set-operation arm), a rewriteable fan trap is refused, not rewritten."""
     rels = _cardinality_index(org)
     tables_in_scope = _tables_in_scope(tree)  # alias -> table
     table_set = set(tables_in_scope.values())
@@ -651,7 +898,7 @@ def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
         # AND the SELECT is aggregation-only (no raw rows).
         many_aliases = {a for a, t in tables_in_scope.items() if t in many_tables}
         referenced_elsewhere = _tables_referenced_outside_from(tree, tables_in_scope) & many_tables
-        if not has_raw_columns and not referenced_elsewhere:
+        if allow_rewrite and not has_raw_columns and not referenced_elsewhere:
             rewritten = _drop_fanout_joins(sql, many_aliases | many_tables)
             if rewritten and rewritten.strip() != sql.strip():
                 return PreFlightResult(

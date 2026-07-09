@@ -738,6 +738,24 @@ def _model_safety(sql: str, profile: str, area: str | None):
         sys.stderr.write("\n")
         return sql, 1
 
+    # SELECT * ban — force every projected column to be named, so the column-scope
+    # guard below can check what is actually returned (and nothing hides behind *).
+    star = RT.check_no_select_star(sql)
+    if star.action == "refuse":
+        json.dump({"error": {"kind": "select_star",
+                             "reason": star.reason, "suggestion": star.suggestion}}, sys.stderr)
+        sys.stderr.write("\n")
+        return sql, 1
+
+    # Column-scope guard — a column that binds to a declared table must be one that
+    # table declares (a hallucinated column, or a physical column the model excluded).
+    cs = RT.check_column_scope(sql, org)
+    if cs.action == "refuse":
+        json.dump({"error": {"kind": "column_out_of_scope", "columns": cs.columns,
+                             "reason": cs.reason, "suggestion": cs.suggestion}}, sys.stderr)
+        sys.stderr.write("\n")
+        return sql, 1
+
     pf = RT.pre_flight_check(sql, org)
     if pf.risk and pf.action == "refuse":
         json.dump({"error": {"kind": "preflight_refused", "risk": pf.risk,

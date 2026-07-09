@@ -67,6 +67,26 @@ def test_explicit_cross_product_allowed():
     assert pf.action == "allow" and pf.risk is None
 
 
+def test_fan_trap_in_a_set_operation_arm_is_refused():
+    """A fan/chasm trap in ANY set-operation arm refuses the whole query. The set
+    operation parses to exp.SetOperation, so gating on isinstance(tree, exp.Select) would
+    skip every arm. Arms are not auto-rewritten, so a would-be auto_rewrite fan trap
+    (see test_fan_trap_auto_rewrite) becomes a refuse when it sits inside a UNION arm."""
+    org = _sales_org()
+    fan = ("SELECT SUM(orders.total_amount) FROM orders "
+           "JOIN order_items ON order_items.order_id = orders.id")
+    pf = rt.pre_flight_check(f"SELECT 1 AS n UNION ALL {fan}", org)
+    assert pf.risk == "fan_trap" and pf.action == "refuse"
+
+
+def test_clean_set_operation_passes_preflight():
+    """A set operation with no trapped arm still passes — arm-walking must not over-refuse."""
+    org = _sales_org()
+    pf = rt.pre_flight_check(
+        "SELECT id FROM orders UNION SELECT id FROM customers", org)
+    assert pf.action == "allow" and pf.risk is None
+
+
 def test_aggregating_many_side_is_allowed():
     # aggregating the MANY side (order_items) is legitimate, not a fan trap
     org = _sales_org()

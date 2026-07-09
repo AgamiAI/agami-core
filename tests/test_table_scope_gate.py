@@ -93,6 +93,21 @@ def test_empty_model_allows():
     assert rt.check_table_scope("SELECT * FROM anything", org).action == "allow"
 
 
+def test_set_operation_arm_scoped():
+    # A UNION parses to exp.Union, not exp.Select: the guard must still scope every
+    # arm (regression for the set-operation bypass), not blanket-allow.
+    res = rt.check_table_scope(
+        "SELECT id FROM orders UNION SELECT id FROM secret_table", _scope_org())
+    assert res.action == "refuse"
+    assert res.offending_tables == ["secret_table"]
+
+
+def test_set_operation_all_declared_allowed():
+    res = rt.check_table_scope(
+        "SELECT id FROM orders UNION ALL SELECT id FROM customers", _scope_org())
+    assert res.action == "allow"
+
+
 def test_non_select_degrades_to_allow():
     # Non-SELECT is the upstream read-only guard's job; this gate defers (allow).
     assert rt.check_table_scope("DELETE FROM orders", _scope_org()).action == "allow"
