@@ -1,16 +1,16 @@
 # Privacy
 
-**The short version:** agami runs no server of its own, has no telemetry, and makes no network calls. Your credentials, semantic model, query results, charts, and exports all stay in local files on your machine.
+**The short version:** used the normal way — as a skill inside Claude Code, or the local stdio server in Claude Desktop — agami makes no network calls of its own and has no telemetry. Your credentials, semantic model, query results, charts, and exports all stay in local files on your machine. (The self-hosted team server is a network service you deliberately stand up for your org — a separate, opt-in deployment, covered near the end.)
 
 But agami works *through* an AI assistant — Claude Code, or Claude Desktop / claude.ai via the local MCP server — and that assistant is what turns your question into SQL. So the assistant sends the model provider (Anthropic, under its terms) the things any AI assistant would need: your question, the part of your semantic model it's reasoning over, the SQL, and the results it shows you. That's inherent to using an LLM — not something agami adds. This page is precise about who sees what.
 
 ---
 
-## agami itself sends nothing
+## The local path makes no network calls
 
-There is no outbound network call in agami's own code — no telemetry, no analytics, no install ping, no agami server in the loop. You can grep the source: there is no `curl` / `requests.post` / socket call in any skill or script path, and a test (`tests/test_privacy_no_network.py`) fails the build if any script introduces one.
+When you use agami locally — the skill scripts plus the on-machine library (the SQL executor and the stdio MCP server) — there is no outbound network call of any kind: no telemetry, no analytics, no install ping. `tests/test_privacy_no_network.py` enforces this: it scans every shipped skill script and the local library modules and fails the build if one gains a `curl` / `requests.post` / socket call. (It deliberately excludes the two **server** modules, `mcp_http` and `oidc` — the self-hosted team server *is* a network service by design; that's the opt-in deploy covered below, not the local path.)
 
-So none of this is ever collected, transmitted, or logged **by agami**:
+So none of this is ever collected, transmitted, or logged by the local agami path:
 
 - Your credentials, database hostnames, IPs, ports, tokens
 - File paths, environment variables, working-directory contents, git history
@@ -73,6 +73,12 @@ After your first successful query, `agami-query` asks once, in chat, whether you
 - It speaks the MCP **stdio** transport — a child process of your AI client, reading/writing OS pipes. It **never binds a network port** and makes **no network call** of its own. `tests/test_mcp_harness.py` enforces this (the source is asserted to contain no socket/http/urllib/requests primitives).
 - It reads only the local paths listed above and executes SQL locally via `execute_sql.py`. Only the rows you'd see anyway are returned to your client. (What that client then sends to the model is the same as the section above — it's still an LLM assistant.)
 - It has **no authentication** because it needs none: the trust boundary is your OS user account. (Networked, authenticated, multi-user serving is the [self-hosted team server](open-vs-hosted.md).)
+
+---
+
+## The self-hosted team server (opt-in)
+
+If you [deploy the team server](../deploy/README.md) so your org can share one model, that server *is* a network service by design — it serves your model to your team over HTTPS. Your data still stays in your environment: it holds only the semantic model (never a live database connection), runs SQL locally against your own warehouse, and is **zero-egress by default**. Single sign-on — which would call an identity provider — is a hosted-tier feature, so a self-hosted server makes no outbound call of its own at all.
 
 ---
 

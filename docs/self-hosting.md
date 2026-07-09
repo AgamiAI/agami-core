@@ -45,11 +45,11 @@ and the other tools just read the model. Nothing leaves your environment.
 | `AGAMI_DB_URL` | yes (server) | The store: `postgresql://…` in prod, `sqlite://…` for a small/local run. `APP_DATABASE_URL` is accepted as an alias for the cloud-platform convention (`AGAMI_DB_URL` wins if both are set). Unset ⇒ the local file path. |
 | `PUBLIC_BASE_URL` | yes (server) | Backs OAuth/MCP discovery + the `WWW-Authenticate` resource URL. Set it explicitly — it can't be auto-detected behind a proxy/LB; the server fails fast at startup if it's missing. |
 | `AGAMI_ORG_ID` | no | The single configured org id (default `local`). The server is single-tenant by default. |
-| `AGAMI_SIGNING_SECRET` | yes (auth) | ≥32-byte secret the server signs its own session JWTs with. When set, the server validates real tokens (the admin password login flow); unset ⇒ the bearer-presence local default. |
+| `AGAMI_SIGNING_SECRET` | yes (auth) | ≥32-byte secret the server signs its session JWTs with — this is what turns on **real per-user login** (admin password + per-user `/mcp` OAuth). **Required for any internet-facing deploy;** the `/agami-deploy` bundle generates and persists it for you. Unset ⇒ a local bearer-presence default only (single-user, not per-user). |
 
-Admins sign in to `/admin` with a **username and password**; team members get per-user OAuth on `/mcp`.
-Single sign-on (Google / Microsoft) is part of the hosted cloud — see
-[what's free vs hosted](open-vs-hosted.md).
+So on a real deploy (signing secret set — the bundle does this for you), admins sign in to `/admin` with a
+**username and password**, and each team member authenticates individually to `/mcp`. Single sign-on
+(Google / Microsoft) is part of the hosted cloud — see [what's free vs hosted](open-vs-hosted.md).
 
 > **Serverless note:** on a managed-container platform (Cloud Run, ECS/Fargate, Container Apps) the server
 > runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See
