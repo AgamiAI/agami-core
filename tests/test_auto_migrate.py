@@ -177,3 +177,89 @@ def test_startup_is_fail_closed_on_migration_error(env, monkeypatch):
     with pytest.raises(RuntimeError, match="migration blew up"):
         with TestClient(mcp_http.build_app()):
             pass
+
+
+# --- migration overlays (extra roots layered on top of migrations/core) ------
+
+
+def test_no_overlay_keeps_bare_core_ids(tmp_path):
+    # Default path (no overlay) is byte-identical to today: core ids are bare filenames.
+    core = tmp_path / "core"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_a (a INTEGER);")
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    ran = s.run_migrations(core, overlay_dirs=[])
+    s.close()
+    assert ran == ["001_core.sql"]  # no namespace prefix on core
+
+
+def test_overlay_applies_core_then_overlay_and_is_idempotent(tmp_path):
+    core = tmp_path / "core"
+    ov = tmp_path / "ov_a"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_b (a INTEGER);")
+    _write_migration(ov, "001_a.sql", "CREATE TABLE t_a (b INTEGER);")
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    first = s.run_migrations(core, overlay_dirs=[ov])
+    second = s.run_migrations(core, overlay_dirs=[ov])  # nothing pending now
+    ids = {r["id"] for r in s.query("SELECT id FROM schema_migrations")}
+    s.close()
+    assert first == ["001_core.sql", "ov_a:001_a.sql"]  # core first, then overlay
+    assert second == []  # idempotent
+    assert {"001_core.sql", "ov_a:001_a.sql"} <= ids
+
+
+def test_same_filename_in_core_and_overlay_does_not_collide(tmp_path):
+    # Core and an overlay both ship 001_init.sql — namespaced overlay ids keep them distinct on the pk.
+    core = tmp_path / "core"
+    ov = tmp_path / "ov_b"
+    _write_migration(core, "001_init.sql", "CREATE TABLE core_init (a INTEGER);")
+    _write_migration(ov, "001_init.sql", "CREATE TABLE ov_init (b INTEGER);")
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    ran = s.run_migrations(core, overlay_dirs=[ov])
+    tables = {r["name"] for r in s.query("SELECT name FROM sqlite_master WHERE type='table'")}
+    s.close()
+    assert ran == ["001_init.sql", "ov_b:001_init.sql"]  # both applied, distinct ids
+    assert {"core_init", "ov_init"} <= tables  # both DDLs actually ran (no skip-on-collision)
+
+
+def test_overlay_added_after_core_resumes(tmp_path):
+    # An overlay registered AFTER core was already migrated lands on the next run (resume-safe).
+    core = tmp_path / "core"
+    ov = tmp_path / "ov_c"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_c (a INTEGER);")
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    s.run_migrations(core, overlay_dirs=[])  # core only, first
+    _write_migration(ov, "001_c.sql", "CREATE TABLE t_c (b INTEGER);")
+    ran = s.run_migrations(core, overlay_dirs=[ov])  # core skipped, overlay is new
+    s.close()
+    assert ran == ["ov_c:001_c.sql"]
+
+
+def test_overlays_apply_in_the_given_order(tmp_path):
+    core = tmp_path / "core"
+    ov1 = tmp_path / "ov_1"
+    ov2 = tmp_path / "ov_2"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_d (a INTEGER);")
+    _write_migration(ov1, "001_one.sql", "CREATE TABLE one (a INTEGER);")
+    _write_migration(ov2, "001_two.sql", "CREATE TABLE two (a INTEGER);")
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    ran = s.run_migrations(core, overlay_dirs=[ov1, ov2])
+    s.close()
+    assert ran == ["001_core.sql", "ov_1:001_one.sql", "ov_2:001_two.sql"]  # core → ov1 → ov2
+
+
+def test_register_migration_overlay_is_used_by_no_arg_run(tmp_path, monkeypatch):
+    # The mcp_http lifespan calls run_migrations() with no args — a registered overlay must apply.
+    import store as store_mod
+
+    monkeypatch.setattr(store_mod, "_MIGRATION_OVERLAYS", [])  # isolate the module global
+    core = tmp_path / "core"
+    ov = tmp_path / "ov_reg"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_e (a INTEGER);")
+    _write_migration(ov, "001_reg.sql", "CREATE TABLE reg (a INTEGER);")
+    store_mod.register_migration_overlay(ov)
+    store_mod.register_migration_overlay(ov)  # dedup: registering twice is a no-op
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    ran = s.run_migrations(core)  # overlay_dirs defaults to the registered list
+    s.close()
+    assert store_mod._MIGRATION_OVERLAYS == [ov]  # deduped
+    assert ran == ["001_core.sql", "ov_reg:001_reg.sql"]  # the registered overlay applied

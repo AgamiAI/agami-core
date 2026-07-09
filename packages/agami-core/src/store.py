@@ -38,6 +38,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Extra migration roots layered on top of migrations/core. A consumer registers its root here at
+# boot so the mcp_http lifespan's `run_migrations()` (no args) applies it — no call-site edit.
+_MIGRATION_OVERLAYS: list[Path] = []
+
+
+def register_migration_overlay(path: Path) -> None:
+    """Register an extra migration root, applied AFTER migrations/core in registration order.
+
+    Lets a consumer overlay its own tables without editing core's tree. Roots should have
+    distinct directory names — the name namespaces their tracking ids so an overlay file can't
+    collide with a core file on the schema_migrations primary key."""
+    if path not in _MIGRATION_OVERLAYS:
+        _MIGRATION_OVERLAYS.append(path)
+
+
 class Store:
     """A DB-API connection + its dialect, with portable execute/query helpers.
 
@@ -109,8 +124,16 @@ class Store:
 
     # --- migrations ---------------------------------------------------------
 
-    def run_migrations(self, migrations_dir: Path | None = None) -> list[str]:
-        """Apply un-applied `NNN_*.sql` in order; return the filenames newly applied. Idempotent.
+    def run_migrations(
+        self, migrations_dir: Path | None = None, overlay_dirs: list[Path] | None = None
+    ) -> list[str]:
+        """Apply un-applied `NNN_*.sql` in order; return the tracking ids newly applied. Idempotent.
+
+        Applies `migrations/core` first, then any overlay roots in order — a consumer layers
+        its own tables on top of core without editing core's tree. `overlay_dirs` overrides the
+        registered overlays (`register_migration_overlay`); pass `[]` to force core-only. Core ids stay
+        the bare filename (so already-migrated DBs are byte-identical); overlay ids are namespaced by
+        their root's name, so a core and an overlay file with the same name can't collide on the pk.
 
         On Postgres a **session advisory lock** brackets the read-applied + apply so that when several
         instances boot together (e.g. Cloud Run) exactly one migrates and the rest wait, then re-read the
@@ -118,6 +141,10 @@ class Store:
         collide on the `schema_migrations` primary key. SQLite is single-writer, so the lock is a no-op.
         A failing migration propagates (fail-closed: a half-migrated schema must not serve)."""
         migrations_dir = migrations_dir or MIGRATIONS_DIR
+        overlays = overlay_dirs if overlay_dirs is not None else list(_MIGRATION_OVERLAYS)
+        # (namespace, root): core is un-namespaced (bare ids, backwards-compatible); each overlay is
+        # namespaced by its directory name so its ids can't collide with core's on the pk.
+        roots = [("", migrations_dir)] + [(root.name, root) for root in overlays]
         # pg_advisory_lock (session-level, NOT released by commit) — must use the session variant so the
         # per-migration commits in the loop below don't drop it mid-apply.
         locked = self.dialect == "postgres"
@@ -130,16 +157,18 @@ class Store:
             self.commit()
             applied = {r["id"] for r in self.query("SELECT id FROM schema_migrations")}
             ran: list[str] = []
-            for path in sorted(migrations_dir.glob("*.sql")):
-                if path.name in applied:
-                    continue
-                self._run_script(path.read_text())
-                self.execute(
-                    "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
-                    (path.name, _now_iso()),
-                )
-                self.commit()
-                ran.append(path.name)
+            for namespace, root in roots:
+                for path in sorted(root.glob("*.sql")):
+                    mid = f"{namespace}:{path.name}" if namespace else path.name
+                    if mid in applied:
+                        continue
+                    self._run_script(path.read_text())
+                    self.execute(
+                        "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+                        (mid, _now_iso()),
+                    )
+                    self.commit()
+                    ran.append(mid)
         except Exception:
             if locked:
                 # A failed migration leaves the psycopg2 connection in an aborted-transaction state, so roll
