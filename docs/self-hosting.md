@@ -54,8 +54,9 @@ So on a real deploy (signing secret set — the bundle does this for you), admin
 
 Instead of a password, the admin can sign in with **one** Google or Microsoft account. Set
 `AGAMI_ADMIN_PROVIDER=google` (or `microsoft`) and that provider's OIDC client — for Google,
-`AGAMI_OIDC_GOOGLE_CLIENT_ID` + `AGAMI_OIDC_GOOGLE_CLIENT_SECRET`; for Microsoft, the `MICROSOFT` vars plus
-`AGAMI_OIDC_MICROSOFT_TENANT` pinned to a single tenant id. It's off unless configured, and this basic
+`AGAMI_OIDC_GOOGLE_CLIENT_ID` + `AGAMI_OIDC_GOOGLE_CLIENT_SECRET`; for Microsoft,
+`AGAMI_OIDC_MICROSOFT_CLIENT_ID` + `AGAMI_OIDC_MICROSOFT_CLIENT_SECRET` plus `AGAMI_OIDC_MICROSOFT_TENANT`
+pinned to a single tenant id. It's off unless configured, and this basic
 single-provider login is **free**. Per-org (multi-tenant) SSO, SAML, and SCIM are hosted **Enterprise SSO**
 — see [what's free vs hosted](open-vs-hosted.md).
 
