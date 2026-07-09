@@ -1,14 +1,15 @@
-# Self-hosting the team server
+# Self-hosting: manual install & configuration reference
 
-Beyond the local single-player setup, agami ships an **HTTP MCP server** so a team can point their
-Claude at one shared, governed model. It's **cloud-neutral** — a VM + Postgres, or a stateless
-platform (Cloud Run / Container Apps) + managed Postgres. No GCP service is required to boot: no
-Cloud SQL connector, no Secret Manager, no Cloud Logging (a regression test enforces this).
+> **Most people should not read this page.** The one-command path — [**deploy/README.md**](../deploy/README.md),
+> driven by the `/agami-deploy` skill — writes a ready-to-run Docker bundle (docker-compose + Caddy
+> auto-TLS + a filled `.env`) from the published image `ghcr.io/agamiai/agami-core`, no clone and no
+> build. This page is the **by-hand alternative and the environment-variable reference** — for when you
+> want to run the server without the bundle (a bare `pip install`, a serverless platform, etc.).
 
-> **The easy path:** the **`/agami-deploy`** skill writes a ready-to-run bundle (docker-compose +
-> Caddy auto-TLS + a filled `.env`) that pulls the published image `ghcr.io/agamiai/agami-core` — no
-> clone, no build. See [deploy/README.md](../deploy/README.md). The manual steps below are for when
-> you'd rather wire it up yourself.
+agami's **HTTP MCP server** lets a team point their Claude at one shared, governed model. It's
+**cloud-neutral** — a VM + Postgres, or a stateless platform (Cloud Run / Container Apps) + managed
+Postgres. No GCP service is required to boot: no Cloud SQL connector, no Secret Manager, no Cloud
+Logging (a regression test enforces this).
 
 ## Install
 
@@ -44,24 +45,15 @@ and the other tools just read the model. Nothing leaves your environment.
 | `AGAMI_DB_URL` | yes (server) | The store: `postgresql://…` in prod, `sqlite://…` for a small/local run. `APP_DATABASE_URL` is accepted as an alias for the cloud-platform convention (`AGAMI_DB_URL` wins if both are set). Unset ⇒ the local file path. |
 | `PUBLIC_BASE_URL` | yes (server) | Backs OAuth/MCP discovery + the `WWW-Authenticate` resource URL. Set it explicitly — it can't be auto-detected behind a proxy/LB; the server fails fast at startup if it's missing. |
 | `AGAMI_ORG_ID` | no | The single configured org id (default `local`). The server is single-tenant by default. |
-| `AGAMI_SIGNING_SECRET` | yes (auth) | ≥32-byte secret the server signs its own session JWTs with. When set, the server validates real tokens (the password / OIDC login flow); unset ⇒ the bearer-presence local default. |
+| `AGAMI_SIGNING_SECRET` | yes (auth) | ≥32-byte secret the server signs its own session JWTs with. When set, the server validates real tokens (the admin password login flow); unset ⇒ the bearer-presence local default. |
+
+Admins sign in to `/admin` with a **username and password**; team members get per-user OAuth on `/mcp`.
+Single sign-on (Google / Microsoft) is part of the hosted cloud — see
+[what's free vs hosted](open-vs-hosted.md).
 
 > **Serverless note:** on a managed-container platform (Cloud Run, ECS/Fargate, Container Apps) the server
 > runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See
 > [Runtime identity on serverless platforms](../deploy/README.md#runtime-identity-on-serverless-platforms).
 
-## Optional: social login (OIDC)
-
-"Sign in with Google / Microsoft" is **off by default**. Configure a provider's client id/secret to
-enable it (the option is hidden when unset; username/password still works):
-
-| Variable | Provider | Notes |
-|----------|----------|-------|
-| `AGAMI_OIDC_GOOGLE_CLIENT_ID` / `_SECRET` | Google | requires `email_verified` |
-| `AGAMI_OIDC_MICROSOFT_CLIENT_ID` / `_SECRET` | Microsoft | also set `AGAMI_OIDC_MICROSOFT_TENANT` to a **pinned** tenant id (not `common`/`organizations`) — the tenant is the trust boundary |
-| `AGAMI_PUBLIC_SIGNUP` | — | default off. When on, an unknown verified email self-provisions a **demo** account — intended only for a dedicated "Try for free" instance whose data is non-sensitive. Leave off for any real deployment (it's onboarded-only: an admin must add the user first). |
-
-**Egress note:** OIDC is the one feature where the **hosted** server reaches out — it calls the
-identity provider to verify a login. Everything else stays local. If you want a strictly no-egress
-deployment, leave OIDC unconfigured (or run the local stdio server, `python -m mcp_harness`); the
-skill and the query path never make a network call regardless.
+The serving path stays **LLM-free and zero-egress**: the client is the brain, `execute_sql` runs SQL
+against your own database, and nothing leaves your environment.

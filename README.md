@@ -87,35 +87,28 @@ the model from scratch so I can see it work"** the first time. Either way it tak
 a few minutes — it's the demo of *how* the receipts you saw in step 3 are earned.
 Full flow: [docs/usage.md](docs/usage.md).
 
-### Real database
+### Your own database
 
-When you're ready to connect your own database:
+Connecting your database is a short back-and-forth with agami — you fill in one
+template, and it handles the rest:
 
-```bash
-# 1. Run connect — picks your DB type, writes a credentials template (first run only)
-/agami-connect
+1. **Start setup.** Run `/agami-connect` (or just say *"connect to my database"*).
+   agami asks which database you use, has you name the connection, and writes a
+   credentials template for you to fill in.
+2. **Fill in the template.** Open the file agami points you to, add your connection
+   details, and save it — leave the filename as-is. agami only ever runs **read-only**
+   queries, so a read-only database user is all it needs; ask agami for *"the read-only
+   grant"* and it gives you the exact SQL to create one.
+3. **Say *"introspect my database"*** (or just *"continue"*). agami takes it from there:
+   it locks the file down for you (no manual `chmod`), reads your schema, builds the
+   semantic model, and seeds a few validated example queries. You don't move or rename
+   anything.
+4. **Ask a question** — *"how many orders did we ship last month?"*
 
-# 2. Fill in the template, then save + lock it down
-#    (agami only runs read-only queries, so use a read-only DB user if you can —
-#     ask agami for "the read-only grant" to get the exact GRANT SQL)
-$EDITOR <artifacts_dir>/local/credentials.example
-mv <artifacts_dir>/local/credentials.example <artifacts_dir>/local/credentials
-chmod 600 <artifacts_dir>/local/credentials
-
-# 3. Re-run connect to introspect: build the semantic model + seed examples
-/agami-connect
-
-# 4. Ask a question
-how many orders did we ship last month?
-```
-
-`/agami-connect` is one-stop: it picks up missing credentials, introspects the
-live DB, computes confidence on every entity, auto-approves the high-signal ones
-(FK joins, DBA-commented fields, structural names), gates a metric sign-off
-*before* generating seed examples, and leaves the low-confidence long tail in an
-optional panel that self-approves as you query. Full flow:
-[docs/usage.md](docs/usage.md). Credentials per dialect:
-[docs/credentials.md](docs/credentials.md).
+That's the whole setup. Along the way agami scores its confidence in every join and
+entity, auto-approves the clear ones (real foreign keys, well-named columns), and asks
+you to sign off the judgment calls. Full walkthrough: [docs/usage.md](docs/usage.md).
+Connection details for each database: [docs/credentials.md](docs/credentials.md).
 
 ## Install
 
@@ -217,10 +210,10 @@ It gathers your hostname and admin identity, writes `docker-compose.yml` + a fil
 (referencing the published `ghcr.io/agamiai/agami-core` image — no clone, no build), and either runs
 `docker compose up` locally or prints the exact VM steps and the shareable `/mcp` URL.
 
-- **Step-by-step deploy (VM, DNS, TLS, the variants — Cloudflare Tunnel, managed Postgres, Cloud Run):
-  [deploy/README.md](deploy/README.md).**
-- Env-var contract, the `pip install "agami-core[server]"` path, and Google / Microsoft (OIDC) login:
-  [docs/self-hosting.md](docs/self-hosting.md).
+**The full step-by-step — VM, DNS/TLS, and every variant (Cloudflare Tunnel, managed Postgres,
+Cloud Run) — is in [deploy/README.md](deploy/README.md).** (Prefer to wire it up by hand instead of
+using the bundle? The [manual install + environment-variable reference](docs/self-hosting.md) covers
+that.) Admins sign in with a password; teammates get per-user access to `/mcp`.
 
 It's cloud-neutral (a VM + Postgres, or a serverless platform + managed Postgres), configured entirely
 by environment variables, and **LLM-free + zero-egress by default**. Self-hosting this for people
@@ -235,7 +228,7 @@ by environment variables, and **LLM-free + zero-egress by default**. Self-hostin
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop
 - [Deploy a shared team server](deploy/README.md) — the Docker bundle, step-by-step (VM, DNS/TLS, variants)
-- [Self-hosting reference](docs/self-hosting.md) — the HTTP server, env-var contract, OIDC login
+- [Self-hosting reference](docs/self-hosting.md) — manual (non-Docker) install + the environment-variable reference
 - [Troubleshooting & uninstall](docs/troubleshooting.md)
 - [Fair-code vs hosted](docs/open-vs-hosted.md) · [Privacy](docs/privacy.md)
 

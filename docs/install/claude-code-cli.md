@@ -70,11 +70,11 @@ Try invoking it:
 /agami-connect
 ```
 
-On first run, the skill detects there are no credentials and walks you through the DB-type picker, then writes a `<artifacts_dir>/local/credentials.example` template you fill in. (No separate `/agami-init` — the setup flow lives in `/agami-connect` Phase 0a.)
+On first run, the skill sees there are no credentials, walks you through the DB-type picker, and writes a `<artifacts_dir>/local/credentials.example` template for you to fill in. (There's no separate `/agami-init` — setup lives inside `/agami-connect`.)
 
 ## 6. Set up credentials
 
-`agami-connect` Phase 0a writes a template at `<artifacts_dir>/local/credentials.example`. Edit it with your DB connection, save as `<artifacts_dir>/local/credentials`, run `chmod 600 <artifacts_dir>/local/credentials`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials) for format.
+`/agami-connect` writes a template at `<artifacts_dir>/local/credentials.example` the first time you connect. Fill in your connection details, save it (leave the filename as-is), then say *"introspect my database"* — agami moves it into place and locks it down (`chmod 600`) for you; you don't move or `chmod` anything by hand. Full format and per-database fields: [docs/credentials.md](../credentials.md).
 
 ## Updating
 

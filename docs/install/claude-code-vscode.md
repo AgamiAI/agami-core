@@ -39,13 +39,11 @@ Try a skill in the Claude pane chat input:
 /agami-connect
 ```
 
-If you haven't set up credentials yet, the skill walks you through the DB-type picker and writes `<artifacts_dir>/local/credentials.example` for you to fill in. (No separate `/agami-init` — its setup flow was folded into `/agami-connect` Phase 0a.)
+If you haven't set up credentials yet, the skill walks you through the DB-type picker and writes `<artifacts_dir>/local/credentials.example` for you to fill in. (There's no separate `/agami-init` — setup lives inside `/agami-connect`.)
 
 ## 5. Set up credentials
 
-Same as the CLI: edit `<artifacts_dir>/local/credentials.example`, save as `<artifacts_dir>/local/credentials`, `chmod 600`. See the [main README's "Setup credentials" section](../../README.md#setup-credentials).
-
-The terminal-side `chmod` works identically — the skill's `init` flow walks you through it via Bash inside the Claude pane.
+Same as the CLI: agami writes `<artifacts_dir>/local/credentials.example`, you fill it in and save it, then say *"introspect my database"* — agami moves it into place and locks it down (`chmod 600`) for you, all through Bash inside the Claude pane. Format and per-database fields: [docs/credentials.md](../credentials.md).
 
 ## VS Code-specific notes
 

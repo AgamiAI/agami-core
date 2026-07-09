@@ -53,11 +53,12 @@ Prefer the raw tools? `dev.py` is only a wrapper — the equivalents are below.
 
 ### Tests on their own
 
-The suite needs `pydantic`, `pyyaml`, and `sqlglot` to import the semantic-model code (DB-driver
-tests skip cleanly without a database). `uvx` pulls them in for the run:
+The suite imports the `agami-core` library, so install it editable with its `[model,server]` extras
+(that pulls in `pydantic` / `pyyaml` / `sqlglot` plus the server deps; DB-driver tests skip cleanly
+without a database). `uvx` wires it up for the run:
 
 ```bash
-uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot pytest tests/ -q
+uvx --with pytest-cov --with-editable "packages/agami-core[model,server]" pytest tests/ -q
 ```
 
 The privacy test (`tests/test_privacy_no_network.py`) is a contract: no shipped script may make a
@@ -70,8 +71,8 @@ no test exercises) — the quickest way to confirm a change is tested, regardles
 Under the hood that's:
 
 ```bash
-uvx --with pytest-cov --with pydantic --with pyyaml --with sqlglot \
-  pytest tests/ -q --cov=plugins --cov-report=xml
+uvx --with pytest-cov --with-editable "packages/agami-core[model,server]" \
+  pytest tests/ -q --cov=plugins --cov=packages/agami-core/src --cov-report=xml
 uvx diff-cover coverage.xml --compare-branch=origin/main
 ```
 
@@ -96,7 +97,7 @@ So: **bump the version on any commit that changes user-visible behavior.**
 
 ### When to bump what
 
-The version lives in three files. They should always match:
+The version lives in **three places across two files**. They must always match:
 
 - `.claude-plugin/marketplace.json` — `metadata.version` and `plugins[0].version`
 - `plugins/agami/.claude-plugin/plugin.json` — `version`

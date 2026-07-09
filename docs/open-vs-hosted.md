@@ -17,6 +17,9 @@ Run agami on your own machines, for your own people (multi-user included):
 - **Corrections** + the `examples.yaml` few-shot library.
 - The **local MCP server** (`agami serve`) — stdio, no auth, no network.
   See [mcp-server.md](mcp-server.md).
+- The **self-hosted team server** (`/agami-deploy`) — an HTTPS MCP server your whole
+  org connects to, with a password-protected admin console and per-user access to the
+  query surface. See [deploy/README.md](../deploy/README.md).
 
 ## Paid — the hosted cloud
 
@@ -24,8 +27,11 @@ For teams that need it served, and for serving people **outside** your organizat
 
 - A **multi-tenant model registry** over a remote MCP endpoint.
 - **Shared, governed** examples + context across a team.
+- **Feedback capture**: user corrections and query feedback rolled into the shared
+  model and evals.
 - **Continuous evals**: scheduled runs, regression alerting, golden-dataset management.
-- **CI-gated deploys** and org-scale governance (SSO, RBAC, audit).
+- **Single sign-on (Google / Microsoft)** and org-scale governance (**RBAC**, audit).
+- **CI-gated deploys**.
 
 Moving from local to hosted is a **backend swap** — the local server and the hosted
 connector expose the same tools, so you point at a different backend, not a new product.

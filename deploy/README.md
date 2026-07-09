@@ -90,6 +90,6 @@ database. Nothing else. Never the platform default.
   endpoint, so keep that identity scoped to only what the deployment needs (or block the container's route to
   metadata) — the same least-privilege rule, one level down.
 
-This is defense-in-depth **alongside** the read-only `DATASOURCE_URL` database user and the app-layer
-SELECT-only enforcement: the read-only user limits database damage; a least-privilege runtime identity
-limits cloud-account damage.
+Think of it as two separate safety nets that work together: the **read-only database user** limits what
+a breach could do to your data, and a **least-privilege runtime identity** limits what it could do to
+your cloud account. Keep both.

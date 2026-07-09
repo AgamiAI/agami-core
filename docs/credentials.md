@@ -3,9 +3,11 @@
 `agami` reads database connection details from `<artifacts_dir>/local/credentials`.
 Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`.
 
-`/agami-connect` creates a template at `<artifacts_dir>/local/credentials.example`
-on first run (its Phase 0a). Edit it and save as
-`<artifacts_dir>/local/credentials`:
+The first time you connect, `/agami-connect` writes a template at
+`<artifacts_dir>/local/credentials.example`. Fill in your connection details, save it
+(leave the filename as-is), then say *"introspect my database"* — agami moves it to
+`<artifacts_dir>/local/credentials` and locks it down for you. You don't rename or
+`chmod` anything by hand. A filled-in file looks like this:
 
 ```ini
 [default]
@@ -17,14 +19,10 @@ user     = myuser
 password = mypassword
 ```
 
-Then **make it readable only by you**:
-
-```bash
-chmod 600 <artifacts_dir>/local/credentials
-```
-
-`agami` refuses to read the file unless it's `chmod 600` — the same protection
-`ssh` uses for private keys.
+`agami` refuses to read the file unless it's readable only by you (`chmod 600`, the
+same protection `ssh` uses for private keys) — which is why agami sets that for you. If
+you ever create the file by hand instead, run `chmod 600 <artifacts_dir>/local/credentials`
+yourself.
 
 ## Use a read-only user
 
@@ -129,5 +127,5 @@ The skill picks the first available connection method, in this order:
 | **DuckDB** universal binary | `duckdb` on `PATH` (covers Postgres / MySQL / SQLite, not Snowflake / BigQuery) | `brew install duckdb` (or [duckdb.org](https://duckdb.org/)) |
 | **Python driver** (fallback) | Python + `psycopg2-binary` / `pymysql` / `snowflake-connector-python` / `google-cloud-bigquery` | `pip install psycopg2-binary pymysql snowflake-connector-python google-cloud-bigquery` |
 
-`/agami-connect` Phase 0a tells you exactly what to install for your OS if nothing
-is detected.
+If none of these is on your machine, `/agami-connect` notices during setup and offers
+to install what's needed for your OS — you don't have to work it out yourself.
