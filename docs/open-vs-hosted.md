@@ -19,7 +19,8 @@ Run agami on your own machines, for your own people (multi-user included):
   See [mcp-server.md](mcp-server.md).
 - The **self-hosted team server** (`/agami-deploy`) — an HTTPS MCP server your whole
   org connects to, with a password-protected admin console and per-user access to the
-  query surface. See [deploy/README.md](../deploy/README.md).
+  query surface. Basic **single sign-on** (one Google or Microsoft account) is included.
+  See [deploy/README.md](../deploy/README.md).
 
 ## Paid — the hosted cloud
 
@@ -30,7 +31,9 @@ For teams that need it served, and for serving people **outside** your organizat
 - **Feedback capture**: user corrections and query feedback rolled into the shared
   model and evals.
 - **Continuous evals**: scheduled runs, regression alerting, golden-dataset management.
-- **Single sign-on (Google / Microsoft)** and org-scale governance (**RBAC**, audit).
+- **Enterprise SSO**: per-org (multi-tenant) identity, **SAML**, and **SCIM**
+  provisioning — plus org-scale governance (**RBAC**, audit). (Basic single-provider
+  SSO is free, above.)
 - **CI-gated deploys**.
 
 Moving from local to hosted is a **backend swap** — the local server and the hosted

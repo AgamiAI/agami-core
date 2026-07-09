@@ -48,12 +48,21 @@ and the other tools just read the model. Nothing leaves your environment.
 | `AGAMI_SIGNING_SECRET` | yes (auth) | ≥32-byte secret the server signs its session JWTs with — this is what turns on **real per-user login** (admin password + per-user `/mcp` OAuth). **Required for any internet-facing deploy;** the `/agami-deploy` bundle generates and persists it for you. Unset ⇒ a local bearer-presence default only (single-user, not per-user). |
 
 So on a real deploy (signing secret set — the bundle does this for you), admins sign in to `/admin` with a
-**username and password**, and each team member authenticates individually to `/mcp`. Single sign-on
-(Google / Microsoft) is part of the hosted cloud — see [what's free vs hosted](open-vs-hosted.md).
+**username and password**, and each team member authenticates individually to `/mcp`.
+
+### Optional: single sign-on (Google / Microsoft)
+
+Instead of a password, the admin can sign in with **one** Google or Microsoft account. Set
+`AGAMI_ADMIN_PROVIDER=google` (or `microsoft`) and that provider's OIDC client — for Google,
+`AGAMI_OIDC_GOOGLE_CLIENT_ID` + `AGAMI_OIDC_GOOGLE_CLIENT_SECRET`; for Microsoft, the `MICROSOFT` vars plus
+`AGAMI_OIDC_MICROSOFT_TENANT` pinned to a single tenant id. It's off unless configured, and this basic
+single-provider login is **free**. Per-org (multi-tenant) SSO, SAML, and SCIM are hosted **Enterprise SSO**
+— see [what's free vs hosted](open-vs-hosted.md).
 
 > **Serverless note:** on a managed-container platform (Cloud Run, ECS/Fargate, Container Apps) the server
 > runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See
 > [Runtime identity on serverless platforms](../deploy/README.md#runtime-identity-on-serverless-platforms).
 
-The serving path stays **LLM-free and zero-egress**: the client is the brain, `execute_sql` runs SQL
-against your own database, and nothing leaves your environment.
+The serving path is **LLM-free and zero-egress by default**: the client is the brain, `execute_sql` runs SQL
+against your own database, and nothing leaves your environment. (The one exception is single sign-on, if you
+turn it on — the server calls Google/Microsoft to verify a login.)

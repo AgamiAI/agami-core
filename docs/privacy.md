@@ -78,7 +78,7 @@ After your first successful query, `agami-query` asks once, in chat, whether you
 
 ## The self-hosted team server (opt-in)
 
-If you [deploy the team server](../deploy/README.md) so your org can share one model, that server *is* a network service by design — it serves your model to your team over HTTPS. Your data still stays in your environment: it holds only the semantic model (never a live database connection), runs SQL locally against your own warehouse, and is **zero-egress by default**. Single sign-on — which would call an identity provider — is a hosted-tier feature, so a self-hosted server makes no outbound call of its own at all.
+If you [deploy the team server](../deploy/README.md) so your org can share one model, that server *is* a network service by design — it serves your model to your team over HTTPS. Your data still stays in your environment: it holds only the semantic model (never a live database connection), runs SQL locally against your own warehouse, and is **zero-egress by default**. The one thing that reaches out is **single sign-on**, if you turn it on: to verify a login the server calls Google/Microsoft (the identity provider). Leave SSO off — the default — and it makes no outbound call of its own.
 
 ---
 
