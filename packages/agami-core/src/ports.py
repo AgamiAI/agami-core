@@ -102,3 +102,22 @@ class GovernancePolicy(Protocol):
     OSS default = warn-only ("basic governance warning"); enforcement is a paid tier."""
 
     def evaluate(self, ctx: object | None = None) -> GovernanceVerdict: ...
+
+
+# ---------------------------------------------------------------------------
+# Composition-root container — the four adapters passed as one argument
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Adapters:
+    """The four port adapters, bundled so ``mcp_http.create_app`` takes them as one argument.
+
+    A consumer builds this with its own implementations of the four ports (its own ``OrgResolver``,
+    ``AuthProvider``, ``ActivitySink``, and ``GovernancePolicy``); passing ``adapters=None`` to
+    ``create_app`` uses the OSS defaults (``mcp_http.default_adapters``)."""
+
+    activity_sink: ActivitySink
+    org_resolver: OrgResolver
+    auth_provider: AuthProvider
+    governance: GovernancePolicy

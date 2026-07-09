@@ -27,8 +27,13 @@ from pathlib import Path
 import admin
 import onboarding
 import user_store
-from oss_adapters import PresenceAuthProvider, SingleTenantOrgResolver
-from ports import AuthProvider, Org
+from oss_adapters import (
+    FileActivitySink,
+    PresenceAuthProvider,
+    SingleTenantOrgResolver,
+    WarnOnlyGovernancePolicy,
+)
+from ports import Adapters, AuthProvider, Org
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -91,6 +96,18 @@ def _build_org_resolver() -> SingleTenantOrgResolver:
     (org, datasource)) plus an authz check — not a resolver swap, so the seam lives here now."""
     org_id = os.environ.get("AGAMI_ORG_ID", "").strip() or "local"
     return SingleTenantOrgResolver(Org(id=org_id))
+
+
+def default_adapters() -> Adapters:
+    """The OSS default adapters bundled for the composition root (env-driven auth + org, exactly as
+    today). `create_app(adapters=None)` uses these — so a plain deploy is unchanged; a consumer
+    passes its own `Adapters(...)` to swap org-resolution/auth/sink/governance without forking core."""
+    return Adapters(
+        activity_sink=FileActivitySink(),
+        org_resolver=_build_org_resolver(),
+        auth_provider=_build_auth_provider(),
+        governance=WarnOnlyGovernancePolicy(),
+    )
 
 
 def public_base_url() -> str:
@@ -252,24 +269,26 @@ async def _auth_server(request: Request) -> JSONResponse:
     )
 
 
-def build_server():
-    """A low-level MCP Server whose tool surface IS the shared registry — list_tools / call_tool
-    read straight from `tools.TOOLS`, so HTTP advertises exactly what stdio does (no duplicate defs)."""
+def build_server(registry: dict | None = None):
+    """A low-level MCP Server whose tool surface IS the given registry — list_tools / call_tool read
+    from it, so HTTP advertises exactly what stdio does (no duplicate defs). Defaults to the shared
+    `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools)."""
     import mcp.types as mt
     from mcp.server.lowlevel import Server
 
+    registry = TOOLS if registry is None else registry
     server = Server(SERVER_NAME, version=server_version(), instructions=SERVER_INSTRUCTIONS)
 
     @server.list_tools()
     async def _list_tools() -> list:
         return [
             mt.Tool(name=name, description=meta["description"], inputSchema=meta["inputSchema"])
-            for name, meta in TOOLS.items()
+            for name, meta in registry.items()
         ]
 
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict) -> list:
-        meta = TOOLS.get(name)
+        meta = registry.get(name)
         if meta is None:
             raise ValueError(f"Unknown tool: {name}")
         # Record every tool call to the admin activity log — timed, attributed to the authenticated
@@ -299,9 +318,13 @@ def build_server():
     return server
 
 
-def build_app() -> Starlette:
-    """The ASGI app: the `.well-known` discovery routes + the streamable-HTTP MCP endpoint at /mcp,
-    behind the bearer-presence auth middleware."""
+def create_app(extra_tools: dict = {}, adapters: Adapters | None = None) -> Starlette:
+    """The ASGI app + the composition factory: the `.well-known` discovery routes + the
+    streamable-HTTP MCP endpoint at /mcp, behind the auth middleware. Merges `extra_tools` over a
+    COPY of the shared TOOLS (never mutating the global) and injects the four port `adapters` (OSS
+    defaults when None). `create_app()` with no args == the historical `build_app()` behavior.
+
+    `extra_tools={}` is read-only here (merged, never mutated), so the shared default is safe."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
@@ -317,9 +340,12 @@ def build_app() -> Starlette:
             "PUBLIC_BASE_URL must be https:// (OAuth + the Secure admin cookie need TLS)."
         )
     bootstrap_paths()
-    auth_provider = _build_auth_provider()
+    adapters = adapters or default_adapters()
+    auth_provider = adapters.auth_provider
+    # Merge the consumer's extra tools over a COPY of TOOLS — the module global is never mutated.
+    registry = {**TOOLS, **extra_tools}
     session_manager = StreamableHTTPSessionManager(
-        app=build_server(), json_response=True, stateless=True
+        app=build_server(registry), json_response=True, stateless=True
     )
 
     async def handle_mcp(scope, receive, send):
@@ -389,9 +415,15 @@ def build_app() -> Starlette:
         # Outermost: normalize the bare `/mcp` → `/mcp/` before routing so Starlette's Mount doesn't
         # 307-redirect it (claude.ai posts `{base}/mcp` and won't follow the redirect). See _NormalizeMcpSlash.
         Middleware(_NormalizeMcpSlash),
-        Middleware(_AuthMiddleware, resolver=_build_org_resolver(), auth=auth_provider),
+        Middleware(_AuthMiddleware, resolver=adapters.org_resolver, auth=auth_provider),
     ]
     return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
+
+
+def build_app() -> Starlette:
+    """Backwards-compatible entrypoint — `create_app()` with the OSS defaults and no extra tools, so
+    the existing `python -m mcp_http` / `main()` path is unchanged."""
+    return create_app()
 
 
 def main() -> int:
