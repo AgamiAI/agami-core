@@ -24,7 +24,7 @@
 
 In Claude Code — CLI, VS Code, or Cursor:
 
-```
+```bash
 /plugin marketplace add AgamiAI/agami-core
 /plugin install agami-core@agami
 /agami-connect sample          # zero setup: no database, no credentials
@@ -49,7 +49,7 @@ Point an AI agent at a database and it answers by **guessing** — at the join, 
 - 🧩 **A portable semantic model** — plain, git-native YAML you own (subject areas, tables, entities, metrics, relationships). No lock-in.
 - 🗄️ **Works with your database** — Postgres · Supabase · Redshift · MySQL · Snowflake · BigQuery · SQL Server · Oracle · Databricks · Trino · DuckDB · SQLite.
 - 🛠️ **Zero infra to start** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
-- 👥 **Shareable with your team** — when you're ready, [deploy one governed server](deploy/README.md) your whole team and business users query from their own Claude over a URL — self-hosted, still zero-egress.
+- 👥 **Shareable with your team** — when you're ready, [deploy one governed server](deploy/README.md) that your whole team and business users query from their own Claude over a URL — self-hosted, still zero-egress.
 
 ## Quickstart (under 5 minutes)
 
@@ -209,7 +209,7 @@ read-only user, and **no data leaves your environment**.
 
 The paved path is one command in Claude:
 
-```
+```bash
 /agami-deploy      # writes a ready-to-run Docker bundle: published image + HTTPS (Caddy) + OAuth + admin
 ```
 
