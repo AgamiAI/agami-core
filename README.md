@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="plugins/agami/shared/agami-logo-dark.svg">
-    <img src="plugins/agami/shared/agami-logo-light.svg" alt="agami" width="240">
+    <source media="(prefers-color-scheme: dark)" srcset="plugins/agami/shared/agami-logo-light.svg">
+    <img src="plugins/agami/shared/agami-logo-dark.svg" alt="agami" width="240">
   </picture>
 </p>
 
@@ -11,14 +11,33 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-fair--code-blue.svg" alt="License: fair-code"></a>
-  <img src="https://img.shields.io/badge/version-0.3.3-blue" alt="Version">
-  <img src="https://img.shields.io/badge/status-pre--public-orange" alt="Status">
-  <a href="#quickstart-under-5-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
+  <a href="https://github.com/AgamiAI/agami-core/releases"><img src="https://img.shields.io/github/v/tag/AgamiAI/agami-core?label=version&sort=semver&color=blue" alt="Version"></a>
+  <a href="#get-started-in-2-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
+  <a href="deploy/README.md"><img src="https://img.shields.io/badge/self--host-Docker-2496ED?logo=docker&logoColor=white" alt="Self-host with Docker"></a>
 </p>
 
 <!-- HERO VISUAL: drop docs/assets/demo.gif (a ~10s sample-flow capture) and uncomment the line below.
      See docs/assets/README.md for what to capture. A visual is the highest-leverage addition here. -->
 <!-- <p align="center"><img src="docs/assets/demo.gif" alt="agami: a governed answer with its provenance receipt" width="760"></p> -->
+
+## Get started in 2 minutes
+
+In Claude Code — CLI, VS Code, or Cursor:
+
+```bash
+/plugin marketplace add AgamiAI/agami-core
+/plugin install agami-core@agami
+/agami-connect sample          # zero setup: no database, no credentials
+who are the top 5 customers by total spend?
+```
+
+That last line returns a **governed answer with a receipt** (the exact SQL, the joins used, the model version) — and it crosses a fan trap a naive agent would silently double-count. Three ways to go from here:
+
+- 🧪 **No database?** The commands above answer from a built-in sample — nothing leaves your machine.
+- 🗄️ **Have a database?** Run `/agami-connect` to introspect it into a governed semantic model, then just ask questions.
+- 👥 **Want your team on it?** [**Deploy a shared server »**](deploy/README.md) — teammates and business users point their own Claude (claude.ai or the desktop app) at **one URL** and query your governed model. They install nothing.
+
+Each path is walked through in full below ([Quickstart](#quickstart-under-5-minutes) · [Install](#install) · [Deploy a shared server](#deploy-a-shared-server-for-your-team)).
 
 Point an AI agent at a database and it answers by **guessing** — at the join, at what *"revenue"* means, at which rows it's allowed to read. **agami-core** is the governed layer between the agent and your data: it turns your schema into a semantic model where every join is FK-derived or human-approved, every metric is **signed off** by name and role, and every answer ships a **receipt** — the exact SQL, the model version it pinned, and who vouched for each definition. The rules live in the model, **not the prompt**. And it all runs on your machine — credentials, schema, and results never leave it.
 
@@ -29,7 +48,8 @@ Point an AI agent at a database and it answers by **guessing** — at the join, 
 - 🔒 **Local and private** — runs inside Claude Code via Bash/Read/Write. Credentials, schema, and results never touch a server we operate.
 - 🧩 **A portable semantic model** — plain, git-native YAML you own (subject areas, tables, entities, metrics, relationships). No lock-in.
 - 🗄️ **Works with your database** — Postgres · Supabase · Redshift · MySQL · Snowflake · BigQuery · SQL Server · Oracle · Databricks · Trino · DuckDB · SQLite.
-- 🛠️ **Zero infra** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
+- 🛠️ **Zero infra to start** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
+- 👥 **Shareable with your team** — when you're ready, [deploy one governed server](deploy/README.md) that your whole team and business users query from their own Claude over a URL — self-hosted, still zero-egress.
 
 ## Quickstart (under 5 minutes)
 
@@ -111,7 +131,7 @@ The same plugin works across Claude Code CLI, VS Code, and Cursor.
 /plugin marketplace add AgamiAI/agami-core
 /plugin install agami-core@agami
 ```
-Verify with `/plugin list` → you should see `agami-core@agami v0.3.3`.
+Verify with `/plugin list` → you should see `agami-core@agami` installed.
 
 **VS Code / Cursor** — install the **Claude Code** extension, type `/plugin` in the
 chat to open **Manage Plugins**, add the `AgamiAI/agami-core` marketplace, then install
@@ -157,8 +177,9 @@ typing the slash command.
 | `/agami-query` | Answers a natural-language question: picks examples + relationships, generates and runs SQL, formats the result + chart, and surfaces a provenance receipt. Flags any unreviewed entry it relied on. (Usually you don't type this — plain language routes here.) |
 | `/agami-model` | One dashboard to **browse, curate, and sign off** the model: every table/field/metric/entity/join, per-table/column Exclude/Include, edits, new metrics. The **Review** tab is the trust-layer sign-off queue. Open it on the queue with `/agami-model review`. |
 | `/agami-save-correction` | Records a correction and routes it to the right home (SQL example, column metadata, display preference, business concept, or a new metric), showing its classification before writing. Attribution surfaces on future answers it influences. |
-| `/agami-reconcile` | Point it at a legacy dashboard's CSV; it generates each question, runs it through agami, and shows a side-by-side diff with tolerances. Validate the model against numbers you already trust. |
+| `/agami-reconcile` | Point it at an existing dashboard — a **screenshot** (Metabase / Power BI / Tableau / Looker) or a CSV of known numbers; it generates each question, runs it through agami, and shows a side-by-side diff with tolerances. Validate the model against numbers you already trust. |
 | `/agami-serve` | Use agami from the **Claude Desktop** app: wires up the optional local MCP server (same tools as the hosted connector, backed by your local model + execution — stdio, read-only, no network). See [docs/mcp-server.md](docs/mcp-server.md). |
+| `/agami-deploy` | **Deploy a shared team server.** Writes a ready-to-run Docker bundle (the published image + HTTPS + OAuth + an admin console) so a team can stand up one governed server their Claude connects to. Business users query it over a URL — no local setup. Detailed steps: [deploy/README.md](deploy/README.md). |
 
 ## Privacy
 
@@ -177,15 +198,34 @@ cloud (a multi-tenant model registry over a remote MCP endpoint, shared governed
 always-on evals). The boundary, stated plainly:
 [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
-## Self-hosting the team server
+## Deploy a shared server for your team
 
-Beyond the local single-player setup, agami ships an **HTTP MCP server** so a team can point their
-Claude at one shared, governed model. It's cloud-neutral (a VM + Postgres, or a stateless platform
-like Cloud Run + managed Postgres), configured entirely by environment variables, and **LLM-free +
-zero-egress by default**. The full setup — the `pip install "agami-core[server]"` install, the
-env-var contract, and optional Google / Microsoft (OIDC) login — is in
-**[docs/self-hosting.md](docs/self-hosting.md)**. For a one-command deploy bundle, use the
-`/agami-deploy` skill.
+The local setup is single-player. To put your **whole team — and non-technical business users — on
+one governed model**, deploy agami's **HTTP MCP server** to your own host. Everyone then connects
+their own Claude (claude.ai as a custom connector, or the desktop app) to **one HTTPS URL** and asks
+questions in plain language. They install nothing, touch no credentials, and only ever see the model
+you've governed. An admin console (`/admin`) controls who's allowed in; the warehouse stays behind a
+read-only user, and **no data leaves your environment**.
+
+The paved path is one command in Claude:
+
+```bash
+/agami-deploy      # writes a ready-to-run Docker bundle: published image + HTTPS (Caddy) + OAuth + admin
+```
+
+It gathers your hostname and admin identity, writes `docker-compose.yml` + a filled `agami.env`
+(referencing the published `ghcr.io/agamiai/agami-core` image — no clone, no build), and either runs
+`docker compose up` locally or prints the exact VM steps and the shareable `/mcp` URL.
+
+- **Step-by-step deploy (VM, DNS, TLS, the variants — Cloudflare Tunnel, managed Postgres, Cloud Run):
+  [deploy/README.md](deploy/README.md).**
+- Env-var contract, the `pip install "agami-core[server]"` path, and Google / Microsoft (OIDC) login:
+  [docs/self-hosting.md](docs/self-hosting.md).
+
+It's cloud-neutral (a VM + Postgres, or a serverless platform + managed Postgres), configured entirely
+by environment variables, and **LLM-free + zero-egress by default**. Self-hosting this for people
+**inside your organization is free**; exposing data to people outside it is the paid line
+([fair-code vs hosted](docs/open-vs-hosted.md)).
 
 ## Documentation
 
@@ -194,7 +234,8 @@ env-var contract, and optional Google / Microsoft (OIDC) login — is in
 - [The trust layer](docs/trust-layer.md) — confidence, sign-off, receipts, snapshots
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop
-- [Self-hosting the team server](docs/self-hosting.md) — the HTTP server, env-var contract, OIDC
+- [Deploy a shared team server](deploy/README.md) — the Docker bundle, step-by-step (VM, DNS/TLS, variants)
+- [Self-hosting reference](docs/self-hosting.md) — the HTTP server, env-var contract, OIDC login
 - [Troubleshooting & uninstall](docs/troubleshooting.md)
 - [Fair-code vs hosted](docs/open-vs-hosted.md) · [Privacy](docs/privacy.md)
 
