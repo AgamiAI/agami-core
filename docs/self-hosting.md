@@ -1,10 +1,10 @@
 # Self-hosting: manual install & configuration reference
 
-> **Most people should not read this page.** The one-command path — [**deploy/README.md**](../deploy/README.md),
-> driven by the `/agami-deploy` skill — writes a ready-to-run Docker bundle (docker-compose + Caddy
-> auto-TLS + a filled `.env`) from the published image `ghcr.io/agamiai/agami-core`, no clone and no
-> build. This page is the **by-hand alternative and the environment-variable reference** — for when you
-> want to run the server without the bundle (a bare `pip install`, a serverless platform, etc.).
+> **Deploying agami? Start with [deploy/README.md](../deploy/README.md).** The `/agami-deploy` skill
+> writes a ready-to-run Docker bundle there (docker-compose + Caddy auto-TLS + a filled `.env`) from the
+> published image `ghcr.io/agamiai/agami-core` — no clone, no build. **This page is the reference** for
+> the pieces that bundle sets for you: the manual (non-Docker) `pip install` path, and the full list of
+> environment variables — handy for a serverless platform or a hand-rolled setup.
 
 agami's **HTTP MCP server** lets a team point their Claude at one shared, governed model. It's
 **cloud-neutral** — a VM + Postgres, or a stateless platform (Cloud Run / Container Apps) + managed
