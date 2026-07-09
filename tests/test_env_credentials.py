@@ -106,6 +106,53 @@ def test_no_env_falls_through_to_the_file(monkeypatch, tmp_path):
     assert out["host"] == "filehost" and out["type"] == "postgres"
 
 
+# --- per-field BigQuery: service_account alias normalizes to the path key ---
+
+def _bq_creds(tmp_path, *extra_lines):
+    """Write a minimal BigQuery credentials file (chmod 600) with the given extra
+    per-field lines, and return its path — the per-field form these tests exercise."""
+    creds = tmp_path / "credentials"
+    creds.write_text(
+        "[gcp]\ntype = bigquery\nproject = my-proj\n" + "".join(f"{ln}\n" for ln in extra_lines),
+        encoding="utf-8",
+    )
+    import os
+    if os.name == "posix":
+        creds.chmod(0o600)
+    return creds
+
+
+@pytest.mark.parametrize("alias", ["service_account", "credentials_path"])
+def test_bigquery_alias_normalizes_to_path_key(monkeypatch, tmp_path, alias):
+    """Both per-field spellings (`service_account`, `credentials_path`) map to
+    `service_account_path` (what the BigQuery executor reads) — the friendlier
+    spellings the docs use must not be silently ignored (falling back to ADC)."""
+    monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", _bq_creds(tmp_path, f"{alias} = /abs/path/key.json"))
+
+    assert _load_credentials("gcp")["service_account_path"] == "/abs/path/key.json"
+
+
+def test_bigquery_explicit_service_account_path_wins_over_alias(monkeypatch, tmp_path):
+    """When both the explicit `service_account_path` and an alias appear, the explicit
+    path wins and the alias does NOT clobber it — pins the `not …get(...)` guard, which
+    without it would let the alias overwrite the explicitly-set path."""
+    monkeypatch.setattr(
+        execute_sql,
+        "CREDENTIALS_PATH",
+        _bq_creds(tmp_path, "service_account_path = /explicit/key.json", "service_account = /alias/key.json"),
+    )
+
+    assert _load_credentials("gcp")["service_account_path"] == "/explicit/key.json"
+
+
+def test_bigquery_empty_alias_falls_through_to_adc(monkeypatch, tmp_path):
+    """An empty `service_account =` must not synthesize a `service_account_path` — it
+    stays unset so the client falls back to ADC, rather than loading a key from ''."""
+    monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", _bq_creds(tmp_path, "service_account ="))
+
+    assert "service_account_path" not in _load_credentials("gcp")
+
+
 # --- neither source → an error that names both -----------------------------
 
 def test_missing_both_sources_names_env_and_file(monkeypatch, tmp_path, capsys):

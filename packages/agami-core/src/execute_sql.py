@@ -183,6 +183,14 @@ def _load_credentials(profile: str) -> dict[str, str]:
 
     section = {k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[profile].items()}
 
+    # Accept the friendlier `service_account` / `credentials_path` spellings in the
+    # per-field form too — the BigQuery executor reads `service_account_path`, and the
+    # DSN parser already treats all three as equivalent. Without this, a per-field
+    # `service_account = ...` would be silently ignored (falling back to ADC).
+    for alias in ("service_account", "credentials_path"):
+        if section.get(alias) and not section.get("service_account_path"):
+            section["service_account_path"] = section[alias]
+
     # If the profile has `url = ...` (e.g. a Supabase / Neon / RDS DSN), parse it
     # and merge with any per-field overrides (sslmode, etc.) defined alongside.
     if "url" in section and section["url"]:
