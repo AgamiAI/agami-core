@@ -10,6 +10,20 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.3.9] — 2026-07-10
+
+### Added
+
+- **Composition seams for downstream extension (no-op by default).**
+  `mcp_http.create_app(extra_tools={}, adapters=None)` lets a downstream consumer add MCP tools and
+  inject the `ports.py` adapters without forking or monkeypatching core, and `tools.register(...)`
+  adds a tool to the shared registry with a duplicate-name guard. An existing deploy is unaffected —
+  `create_app()` with no arguments behaves exactly as before, and `execute_sql`'s schema is unchanged.
+  (#100)
+- **Migration-overlay seam.** The store can layer additional migration roots on top of core's, so a
+  downstream package can ship its own migrations alongside agami-core's (empty/duplicate namespaces
+  and non-directory roots are rejected). No change for a default install. (#101)
+
 ## [0.3.8] — 2026-07-06
 
 ### Added
