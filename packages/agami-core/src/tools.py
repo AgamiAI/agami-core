@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1179,3 +1180,19 @@ TOOLS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+
+def register(
+    name: str,
+    handler: Callable[[dict[str, Any]], str],
+    description: str,
+    inputSchema: dict[str, Any],
+) -> None:
+    """Add a tool to the shared TOOLS registry — the supported consumer extension point.
+
+    Raises on a duplicate name so a consumer can't silently shadow a core tool (e.g. execute_sql).
+    Note create_app merges a consumer's extra tools over a *copy* of TOOLS; register() mutates the
+    module global directly (the stdio path uses it), so its dup-guard is the safety net either way."""
+    if name in TOOLS:
+        raise ValueError(f"tool {name!r} is already registered")
+    TOOLS[name] = {"handler": handler, "description": description, "inputSchema": inputSchema}
