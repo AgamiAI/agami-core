@@ -261,7 +261,7 @@ def test_register_migration_overlay_is_used_by_no_arg_run(tmp_path, monkeypatch)
     s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
     ran = s.run_migrations(core)  # overlay_dirs defaults to the registered list
     s.close()
-    assert store_mod._MIGRATION_OVERLAYS == [ov]  # deduped
+    assert store_mod._MIGRATION_OVERLAYS == [ov.resolve()]  # deduped + normalized on registration
     assert ran == ["001_core.sql", "ov_reg:001_reg.sql"]  # the registered overlay applied
 
 
@@ -293,3 +293,28 @@ def test_empty_overlay_namespace_raises(tmp_path):
     with pytest.raises(ValueError, match="empty directory name"):
         s.run_migrations(core, overlay_dirs=[root_like])
     s.close()
+
+
+def test_nonexistent_overlay_root_raises(tmp_path):
+    # A registered overlay that isn't a directory would silently apply nothing (glob yields empty);
+    # fail fast instead so the misconfiguration is loud.
+    core = tmp_path / "core"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_h (a INTEGER);")
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    with pytest.raises(ValueError, match="not a directory"):
+        s.run_migrations(core, overlay_dirs=[tmp_path / "does_not_exist"])
+    s.close()
+
+
+def test_register_overlay_normalizes_path(tmp_path, monkeypatch):
+    # Different spellings of the same directory dedupe on registration (normalized via resolve()),
+    # so they don't slip through as duplicate roots the namespace guard would then reject.
+    import store as store_mod
+
+    monkeypatch.setattr(store_mod, "_MIGRATION_OVERLAYS", [])
+    ov = tmp_path / "a" / "ov"
+    _write_migration(ov, "001_x.sql", "CREATE TABLE t_x (a INTEGER);")
+    alt = tmp_path / "a" / "ov" / ".." / "ov"  # different spelling, same dir after resolve()
+    store_mod.register_migration_overlay(ov)
+    store_mod.register_migration_overlay(alt)
+    assert store_mod._MIGRATION_OVERLAYS == [ov.resolve()]  # collapsed to one

@@ -50,6 +50,10 @@ def register_migration_overlay(path: Path) -> None:
     have a distinct, non-empty directory name — the name namespaces its tracking ids so an overlay
     file can't collide with a core file on the schema_migrations primary key; `run_migrations`
     raises on an empty or duplicated overlay name."""
+    # Normalize first so different spellings of one dir (relative/absolute/symlinked) dedupe here
+    # rather than slipping through as duplicate roots that the run_migrations namespace guard then
+    # rejects. resolve() doesn't require the path to exist (strict=False); run_migrations checks that.
+    path = path.resolve()
     if path not in _MIGRATION_OVERLAYS:
         _MIGRATION_OVERLAYS.append(path)
 
@@ -144,6 +148,12 @@ class Store:
         A failing migration propagates (fail-closed: a half-migrated schema must not serve)."""
         migrations_dir = migrations_dir or MIGRATIONS_DIR
         overlays = overlay_dirs if overlay_dirs is not None else list(_MIGRATION_OVERLAYS)
+        # A registered overlay that doesn't exist (or isn't a directory) would silently apply nothing —
+        # `glob` on a bad path yields an empty iterator — so a misconfigured overlay would be skipped
+        # with no signal. Fail fast so the misconfig is loud rather than an unmigrated schema.
+        not_dirs = [str(root) for root in overlays if not root.is_dir()]
+        if not_dirs:
+            raise ValueError(f"overlay migration root is not a directory: {not_dirs}")
         # Overlay tracking ids are namespaced by the root's directory name. Fail fast (before any lock
         # or DDL) if a name is empty — an empty name falls back to a BARE id that collides with core —
         # or duplicated across overlays — two roots would then map distinct files to the same id. Left
