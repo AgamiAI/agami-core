@@ -46,9 +46,10 @@ _MIGRATION_OVERLAYS: list[Path] = []
 def register_migration_overlay(path: Path) -> None:
     """Register an extra migration root, applied AFTER migrations/core in registration order.
 
-    Lets a consumer overlay its own tables without editing core's tree. Roots should have
-    distinct directory names — the name namespaces their tracking ids so an overlay file can't
-    collide with a core file on the schema_migrations primary key."""
+    Lets a consumer overlay its own tables without editing core's tree. Each overlay root must
+    have a distinct, non-empty directory name — the name namespaces its tracking ids so an overlay
+    file can't collide with a core file on the schema_migrations primary key; `run_migrations`
+    raises on an empty or duplicated overlay name."""
     if path not in _MIGRATION_OVERLAYS:
         _MIGRATION_OVERLAYS.append(path)
 
@@ -134,6 +135,7 @@ class Store:
         registered overlays (`register_migration_overlay`); pass `[]` to force core-only. Core ids stay
         the bare filename (so already-migrated DBs are byte-identical); overlay ids are namespaced by
         their root's name, so a core and an overlay file with the same name can't collide on the pk.
+        Overlay roots must have distinct, non-empty directory names — this raises `ValueError` otherwise.
 
         On Postgres a **session advisory lock** brackets the read-applied + apply so that when several
         instances boot together (e.g. Cloud Run) exactly one migrates and the rest wait, then re-read the
@@ -142,6 +144,20 @@ class Store:
         A failing migration propagates (fail-closed: a half-migrated schema must not serve)."""
         migrations_dir = migrations_dir or MIGRATIONS_DIR
         overlays = overlay_dirs if overlay_dirs is not None else list(_MIGRATION_OVERLAYS)
+        # Overlay tracking ids are namespaced by the root's directory name. Fail fast (before any lock
+        # or DDL) if a name is empty — an empty name falls back to a BARE id that collides with core —
+        # or duplicated across overlays — two roots would then map distinct files to the same id. Left
+        # unchecked, either surfaces mid-apply as a schema_migrations pk violation or a skipped migration.
+        namespaces = [root.name for root in overlays]
+        if "" in namespaces:
+            raise ValueError(
+                "overlay migration root has an empty directory name; give each overlay a distinct name"
+            )
+        dupes = sorted({n for n in namespaces if namespaces.count(n) > 1})
+        if dupes:
+            raise ValueError(
+                f"overlay migration roots share a directory name: {dupes}; names must be distinct"
+            )
         # (namespace, root): core is un-namespaced (bare ids, backwards-compatible); each overlay is
         # namespaced by its directory name so its ids can't collide with core's on the pk.
         roots = [("", migrations_dir)] + [(root.name, root) for root in overlays]

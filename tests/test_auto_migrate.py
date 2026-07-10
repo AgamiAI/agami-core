@@ -263,3 +263,33 @@ def test_register_migration_overlay_is_used_by_no_arg_run(tmp_path, monkeypatch)
     s.close()
     assert store_mod._MIGRATION_OVERLAYS == [ov]  # deduped
     assert ran == ["001_core.sql", "ov_reg:001_reg.sql"]  # the registered overlay applied
+
+
+def test_duplicate_overlay_namespace_raises(tmp_path):
+    # Two overlay roots with the SAME basename share a namespace → fail fast, no partial apply.
+    core = tmp_path / "core"
+    a_ov = tmp_path / "a" / "ov"
+    b_ov = tmp_path / "b" / "ov"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_f (a INTEGER);")
+    _write_migration(a_ov, "001_a.sql", "CREATE TABLE t_a (a INTEGER);")
+    _write_migration(b_ov, "001_b.sql", "CREATE TABLE t_b (a INTEGER);")
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    with pytest.raises(ValueError, match="share a directory name"):
+        s.run_migrations(core, overlay_dirs=[a_ov, b_ov])
+    tables = {r["name"] for r in s.query("SELECT name FROM sqlite_master WHERE type='table'")}
+    s.close()
+    assert "t_a" not in tables and "t_b" not in tables  # nothing applied
+    assert "schema_migrations" not in tables  # guard runs before the tracking table is created
+
+
+def test_empty_overlay_namespace_raises(tmp_path):
+    # An overlay root with an empty directory name (a filesystem root) would produce BARE ids that
+    # collide with core — reject it before touching the filesystem.
+    core = tmp_path / "core"
+    _write_migration(core, "001_core.sql", "CREATE TABLE core_g (a INTEGER);")
+    root_like = Path(tmp_path.anchor)  # .name == "" (filesystem root)
+    assert root_like.name == ""  # precondition
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    with pytest.raises(ValueError, match="empty directory name"):
+        s.run_migrations(core, overlay_dirs=[root_like])
+    s.close()
