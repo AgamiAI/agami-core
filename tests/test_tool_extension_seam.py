@@ -95,6 +95,17 @@ def test_create_app_extra_tools_none_matches_no_args(base_url):
     assert r.headers.get("www-authenticate", "").startswith("Bearer ")
 
 
+def test_create_app_rejects_a_malformed_extra_tool(base_url):
+    # A consumer entry missing a required field (or a non-callable handler) fails fast at
+    # construction with a clear error — not later as a KeyError/500 inside tools/list or tools/call.
+    with pytest.raises(ValueError, match="handler, description, inputSchema"):
+        mcp_http.create_app(extra_tools={"bad": {"description": "no handler/schema"}})
+    with pytest.raises(ValueError, match="must be callable"):
+        mcp_http.create_app(
+            extra_tools={"bad": {"handler": "x", "description": "d", "inputSchema": {}}}
+        )
+
+
 # --- create_app: adapter injection ----------------------------------------
 
 

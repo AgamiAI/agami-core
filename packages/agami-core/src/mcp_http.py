@@ -33,7 +33,7 @@ from oss_adapters import (
     SingleTenantOrgResolver,
     WarnOnlyGovernancePolicy,
 )
-from ports import Adapters, AuthProvider, Org
+from ports import Adapters, AuthProvider, Org, OrgResolver
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -191,7 +191,7 @@ class _AuthMiddleware(BaseHTTPMiddleware):
     open. On a request that passes auth, resolve the single-tenant org and attach it to
     request.state.org — the explicit single-tenant contract + the multi-tenant seam."""
 
-    def __init__(self, app, resolver: SingleTenantOrgResolver, auth: AuthProvider) -> None:
+    def __init__(self, app, resolver: OrgResolver, auth: AuthProvider) -> None:
         super().__init__(app)
         self._resolver = resolver
         self._auth = auth
@@ -346,6 +346,15 @@ def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None
     bootstrap_paths()
     adapters = adapters or default_adapters()
     auth_provider = adapters.auth_provider
+    # Validate consumer-supplied tools up front so a malformed entry fails at construction with a
+    # clear error, not later as a KeyError/500 inside tools/list or tools/call.
+    for tool_name, meta in (extra_tools or {}).items():
+        if not isinstance(meta, dict) or not {"handler", "description", "inputSchema"} <= set(meta):
+            raise ValueError(
+                f"extra tool {tool_name!r} must be a dict with handler, description, inputSchema"
+            )
+        if not callable(meta["handler"]):
+            raise ValueError(f"extra tool {tool_name!r} handler must be callable")
     # Merge the consumer's extra tools over a COPY of TOOLS — the module global is never mutated.
     registry = {**TOOLS, **(extra_tools or {})}
     session_manager = StreamableHTTPSessionManager(
