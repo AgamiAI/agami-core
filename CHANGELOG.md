@@ -252,6 +252,7 @@ First version tracked in this changelog. Earlier history lives in the git log.
   other clients — stdio, no auth, no network.
 - Fan-trap / chasm-trap pre-flight that refuses to silently double-count.
 
+[0.3.9]: https://github.com/AgamiAI/agami-core/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/AgamiAI/agami-core/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/AgamiAI/agami-core/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/AgamiAI/agami-core/compare/v0.3.5...v0.3.6
