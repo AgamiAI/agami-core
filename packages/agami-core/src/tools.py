@@ -1184,7 +1184,7 @@ TOOLS: dict[str, dict[str, Any]] = {
 
 def register(
     name: str,
-    handler: Callable[[dict], str],
+    handler: Callable[[dict[str, Any]], str],
     description: str,
     inputSchema: dict[str, Any],
 ) -> None:

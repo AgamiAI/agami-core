@@ -100,8 +100,9 @@ def _build_org_resolver() -> SingleTenantOrgResolver:
 
 def default_adapters() -> Adapters:
     """The OSS default adapters bundled for the composition root (env-driven auth + org, exactly as
-    today). `create_app(adapters=None)` uses these — so a plain deploy is unchanged; a consumer
-    passes its own `Adapters(...)` to swap org-resolution/auth/sink/governance without forking core."""
+    today). `create_app(adapters=None)` uses these — so a plain deploy is unchanged. `create_app`
+    wires `auth_provider` + `org_resolver` into the request path; `activity_sink` + `governance` are
+    carried on the container for consumers and not yet referenced by a core call site."""
     return Adapters(
         activity_sink=FileActivitySink(),
         org_resolver=_build_org_resolver(),
@@ -318,13 +319,16 @@ def build_server(registry: dict | None = None):
     return server
 
 
-def create_app(extra_tools: dict = {}, adapters: Adapters | None = None) -> Starlette:
+def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None) -> Starlette:
     """The ASGI app + the composition factory: the `.well-known` discovery routes + the
     streamable-HTTP MCP endpoint at /mcp, behind the auth middleware. Merges `extra_tools` over a
-    COPY of the shared TOOLS (never mutating the global) and injects the four port `adapters` (OSS
-    defaults when None). `create_app()` with no args == the historical `build_app()` behavior.
+    COPY of the shared TOOLS (never mutating the global) and wires the `adapters` into the request
+    path (auth + org resolution; OSS defaults when None). `create_app()` with no args == the
+    historical `build_app()` behavior.
 
-    `extra_tools={}` is read-only here (merged, never mutated), so the shared default is safe."""
+    Reusing an existing tool name in `extra_tools` overrides that tool in this app's registry copy —
+    intentional at the composition root (the caller opts in explicitly). `tools.register` is the
+    guarded path that refuses a duplicate name."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
@@ -343,7 +347,7 @@ def create_app(extra_tools: dict = {}, adapters: Adapters | None = None) -> Star
     adapters = adapters or default_adapters()
     auth_provider = adapters.auth_provider
     # Merge the consumer's extra tools over a COPY of TOOLS — the module global is never mutated.
-    registry = {**TOOLS, **extra_tools}
+    registry = {**TOOLS, **(extra_tools or {})}
     session_manager = StreamableHTTPSessionManager(
         app=build_server(registry), json_response=True, stateless=True
     )

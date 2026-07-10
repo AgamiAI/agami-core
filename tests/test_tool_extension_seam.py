@@ -87,6 +87,14 @@ def test_create_app_does_not_mutate_the_global_registry(base_url):
     assert set(tools.TOOLS) == before  # a second create_app() would be clean
 
 
+def test_create_app_extra_tools_none_matches_no_args(base_url):
+    # extra_tools defaults to None (not a mutable {}); an explicit None must behave like no args.
+    c = TestClient(mcp_http.create_app(extra_tools=None))
+    r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert r.status_code == 401  # same auth challenge as build_app() / create_app()
+    assert r.headers.get("www-authenticate", "").startswith("Bearer ")
+
+
 # --- create_app: adapter injection ----------------------------------------
 
 

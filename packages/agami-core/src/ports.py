@@ -115,7 +115,9 @@ class Adapters:
 
     A consumer builds this with its own implementations of the four ports (its own ``OrgResolver``,
     ``AuthProvider``, ``ActivitySink``, and ``GovernancePolicy``); passing ``adapters=None`` to
-    ``create_app`` uses the OSS defaults (``mcp_http.default_adapters``)."""
+    ``create_app`` uses the OSS defaults (``mcp_http.default_adapters``). Today ``create_app`` wires
+    ``auth_provider`` + ``org_resolver`` into the request path; ``activity_sink`` + ``governance``
+    are carried here for consumers and not yet referenced by a core call site."""
 
     activity_sink: ActivitySink
     org_resolver: OrgResolver
