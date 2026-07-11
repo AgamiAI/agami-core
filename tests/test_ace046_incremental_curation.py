@@ -16,9 +16,12 @@ import pytest
 pytest.importorskip("pydantic")
 pytest.importorskip("sqlglot")
 
+yaml = pytest.importorskip("yaml")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
+from semantic_model import curate  # noqa: E402
 from semantic_model import models as m  # noqa: E402
 from semantic_model import snapshot as S  # noqa: E402
 from semantic_model import validator as v  # noqa: E402
@@ -93,7 +96,9 @@ def _mini_model(root: Path) -> None:
 
 def _expected_hash_and_manifest(root: Path) -> tuple[str, dict[str, str]]:
     """Independently recompute the rolling model hash + per-file shas, to prove the folded
-    single-pass computation is byte-identical to computing them separately."""
+    single-pass computation is byte-identical to computing them separately. Note: this pins the
+    hash/manifest *math*, not file *selection* — it reuses `_model_files` (unchanged in this diff),
+    so a bug in file discovery would be invisible here (covered elsewhere by the snapshot tests)."""
     h = hashlib.sha256()
     manifest: dict[str, str] = {}
     for p in S._model_files(root):
@@ -259,3 +264,73 @@ def test_cache_is_bounded_across_many_distinct_models(monkeypatch):
     for i in range(200):  # 200 distinct single-area models → would be 200 entries unbounded
         v.validate(_org(_area(f"model{i:03d}")), cache=cache)
     assert len(cache) <= 20  # capped, not linear in the number of models seen
+
+
+def test_bound_never_evicts_the_model_being_validated(monkeypatch):
+    # The invariant _bound_cache promises: the model CURRENTLY being validated keeps all its area
+    # entries even when the cache is over cap — only foreign-model areas are evicted. Pre-fill with
+    # foreign entries to the cap, then validate a 4-area model and assert all four survive.
+    monkeypatch.setattr(v, "_CACHE_MAX", 5)
+    cache: dict = {}
+    for i in range(5):
+        v.validate(_org(_area(f"foreign{i}")), cache=cache)
+    current = _org(_area("k0"), _area("k1"), _area("k2"), _area("k3"))
+    v.validate(current, cache=cache)
+    cached_names = {k[0] for k in cache}
+    assert {"k0", "k1", "k2", "k3"} <= cached_names  # every current-model area retained despite cap
+
+
+# ------------------------------------------------------------- curate.* wiring (the integration)
+
+
+def _write_two_area_model(root: Path) -> None:
+    """A real on-disk two-area model (sales, crm), each one valid table — the shape curate writes to.
+    Kept minimal so it validates cleanly and an enrichment write to one area is a real edit."""
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "org.yaml").write_text(yaml.safe_dump({
+        "organization": "shop", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/sales", "subject_areas/crm"],
+    }))
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    for area, table in (("sales", "orders"), ("crm", "customers")):
+        (root / "subject_areas" / area / "tables").mkdir(parents=True)
+        (root / "subject_areas" / area / "metrics").mkdir(parents=True)
+        (root / "subject_areas" / area / "subject_area.yaml").write_text(yaml.safe_dump({
+            "name": area,
+            "tables": [{"storage_connection": "c", "schema": "public", "table": table}],
+        }))
+        (root / "subject_areas" / area / "tables" / f"{table}.yaml").write_text(yaml.safe_dump({
+            "name": table, "schema": "public", "storage_connection": "c", "grain": ["id"],
+            "description": table,
+            "columns": [{"name": "id", "type": "integer", "primary_key": True}],
+        }))
+
+
+def _metric_item(name: str, table: str) -> dict:
+    return {"name": name, "calculation": f"count of {table}", "bindings": {"PostgreSQL": "COUNT(*)"},
+            "source_tables": [table], "confidence": "inferred", "review_state": "unreviewed"}
+
+
+def test_curate_write_shares_the_validation_cache_across_calls(tmp_path, monkeypatch):
+    # The delivered behaviour: curate's write paths pass the shared _VALIDATION_CACHE, so across two
+    # enrichment writes only the CHANGED area re-validates. This guards the actual wiring — stripping
+    # `cache=_VALIDATION_CACHE` from curate makes the second call re-validate 'sales' and fails here.
+    _write_two_area_model(tmp_path)
+    curate._VALIDATION_CACHE.clear()
+
+    seen: list[str] = []
+    real = v._validate_area
+    monkeypatch.setattr(v, "_validate_area",
+                        lambda sa, org, ot: (seen.append(sa.name), real(sa, org, ot))[1])
+
+    res1 = curate.write_items(tmp_path, "sales", "metric", [_metric_item("m1", "orders")])
+    assert res1.validated and not res1.skipped, res1.skipped
+    assert set(seen) == {"sales", "crm"}   # cold shared cache → both areas validated
+    assert curate._VALIDATION_CACHE        # the shared cache was actually used (wiring present)
+
+    seen.clear()
+    res2 = curate.write_items(tmp_path, "crm", "metric", [_metric_item("m2", "customers")])
+    assert res2.validated and not res2.skipped, res2.skipped
+    assert seen == ["crm"]  # only the edited area re-runs; 'sales' served from the shared cache
