@@ -736,10 +736,16 @@ def _model_safety(sql: str, profile: str, area: str | None):
         sys.stderr.write(f"[agami] could not load semantic model; skipping safety pass: {e}\n")
         return sql, None
 
+    # Build the shared guard context ONCE — parse the SQL + build each model index a single
+    # time — and thread it through the battery below, instead of every guard re-parsing and
+    # rebuilding its index (audit P2 / ACE-045). Behaviour-preserving: a guard given `ctx`
+    # returns the same verdict as one that builds its own.
+    ctx = RT.build_guard_context(sql, org)
+
     # Table-scope guard — a query may only reference tables the semantic model
     # declares; any other table in the connected database is refused. Runs FIRST
     # so the fan/chasm and sensitive checks below only evaluate in-scope tables.
-    ts = RT.check_table_scope(sql, org)
+    ts = RT.check_table_scope(sql, org, ctx=ctx)
     if ts.action == "refuse":
         json.dump({"error": {"kind": "table_out_of_scope", "tables": ts.offending_tables,
                              "reason": ts.reason, "suggestion": ts.suggestion}}, sys.stderr)
@@ -748,7 +754,7 @@ def _model_safety(sql: str, profile: str, area: str | None):
 
     # SELECT * ban — force every projected column to be named, so the column-scope
     # guard below can check what is actually returned (and nothing hides behind *).
-    star = RT.check_no_select_star(sql)
+    star = RT.check_no_select_star(sql, ctx=ctx)
     if star.action == "refuse":
         json.dump({"error": {"kind": "select_star",
                              "reason": star.reason, "suggestion": star.suggestion}}, sys.stderr)
@@ -757,14 +763,14 @@ def _model_safety(sql: str, profile: str, area: str | None):
 
     # Column-scope guard — a column that binds to a declared table must be one that
     # table declares (a hallucinated column, or a physical column the model excluded).
-    cs = RT.check_column_scope(sql, org)
+    cs = RT.check_column_scope(sql, org, ctx=ctx)
     if cs.action == "refuse":
         json.dump({"error": {"kind": "column_out_of_scope", "columns": cs.columns,
                              "reason": cs.reason, "suggestion": cs.suggestion}}, sys.stderr)
         sys.stderr.write("\n")
         return sql, 1
 
-    pf = RT.pre_flight_check(sql, org)
+    pf = RT.pre_flight_check(sql, org, ctx=ctx)
     if pf.risk and pf.action == "refuse":
         json.dump({"error": {"kind": "preflight_refused", "risk": pf.risk,
                              "reason": pf.reason, "suggestion": pf.suggestion,
@@ -774,19 +780,20 @@ def _model_safety(sql: str, profile: str, area: str | None):
     if pf.risk and pf.action == "auto_rewrite" and pf.rewritten_sql:
         sys.stderr.write(f"[agami] auto-corrected {pf.risk}: ran rewritten SQL. {pf.reason}\n")
         sql = pf.rewritten_sql
+        ctx = RT.build_guard_context(sql, org)  # SQL changed -> refresh the shared context
 
     # Sensitive-column (PII) guard — refuse to PROJECT raw sensitive values. Same
     # deterministic chokepoint as the fan/chasm pre-flight, so the agami-query skill,
     # the local MCP server, and cron all protect PII identically (not just whichever
     # path happened to read a prose rule). Aggregates / filters / joins are allowed.
-    sens = RT.check_sensitive_projection(sql, org)
+    sens = RT.check_sensitive_projection(sql, org, ctx=ctx)
     if sens.action == "refuse":
         json.dump({"error": {"kind": "sensitive_columns", "columns": sens.columns,
                              "reason": sens.reason, "suggestion": sens.suggestion}}, sys.stderr)
         sys.stderr.write("\n")
         return sql, 1
 
-    new_sql, applied = RT.apply_default_filters(sql, org, area=area)
+    new_sql, applied = RT.apply_default_filters(sql, org, area=area, ctx=ctx)
     if applied:
         sys.stderr.write(f"[agami] applied default_filters: {applied}\n")
         sql = new_sql
