@@ -595,6 +595,50 @@ def test_ace050_authorize_clears_used_and_expired_codes(env):
         s.close()
 
 
+def test_ace050_query_executions_ts_index_exists(env):
+    # The retained query log is never pruned, so it must stay fast to read newest-first — index ts
+    # (migration 011). The test DB is sqlite, so check its catalog.
+    s = Store.from_env()
+    try:
+        idx = s.query(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_query_executions_ts'"
+        )
+        assert idx, "idx_query_executions_ts should be created by migration 011"
+    finally:
+        s.close()
+
+
+def test_ace050_hygiene_never_deletes_query_or_activity_logs(env):
+    # The headline guarantee: the hygiene paths (refresh rotation, authorize code cleanup) must NEVER
+    # touch the user-visible query/activity history. Seed both logs, run the hygiene chokepoints, and
+    # assert every seeded row survives.
+    c = TestClient(mcp_http.build_app())
+    s = Store.from_env()
+    try:
+        s.execute(
+            "INSERT INTO query_executions (id, ts, datasource, question, sql, row_count, source) "
+            "VALUES ('q1', ?, 'acme', 'q', 'SELECT 1', 1, 'mcp_server')",
+            ("2020-01-01T00:00:00+00:00",),
+        )
+        s.execute(
+            "INSERT INTO tool_calls (id, ts, tool_name, success) VALUES ('t1', ?, 'execute_sql', 1)",
+            ("2020-01-01T00:00:00+00:00",),
+        )
+        s.commit()
+    finally:
+        s.close()
+
+    pair = _token_pair(c)  # authorize (runs code cleanup) + issue
+    _refresh(c, pair["refresh_token"])  # refresh (runs token hygiene)
+
+    s = Store.from_env()
+    try:
+        assert s.query("SELECT id FROM query_executions WHERE id = 'q1'"), "query log must be retained"
+        assert s.query("SELECT id FROM tool_calls WHERE id = 't1'"), "activity log must be retained"
+    finally:
+        s.close()
+
+
 def test_refresh_rejects_missing_unknown_and_wrong_client(env):
     c = TestClient(mcp_http.build_app())
     # missing / unknown token
