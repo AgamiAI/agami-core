@@ -54,12 +54,34 @@ def test_index_find_matches_linear_find_for_every_case():
         ("orders", None), ("sales.orders", None), ("customers", None), ("missing", None),
         ("orders", "alpha"), ("orders", "beta"), ("orders", "gamma"),  # gamma = TableRef fallback
         ("sales.orders", "beta"), ("customers", "gamma"), ("customers", "alpha"),
-        ("orders", "nosucharea"), ("", None),
+        ("orders", "nosucharea"), ("", None), ("orders", ""),  # "" area is falsy → org-wide
     ]
     for name, area in cases:
         linear = L._find_table(org, name, area)                 # the old scan
         viaidx = L._find_table(org, name, area, index=idx)      # the O(1) path
         assert viaidx is linear, f"index diverged from linear for ({name!r}, {area!r})"
+
+
+def test_index_matches_linear_with_duplicate_area_names():
+    # Area names are NOT enforced unique. `_find_table` resolves an area via subject_area(), which
+    # returns the FIRST area of that name — so the index's per-area maps must be first-wins too.
+    a1 = m.SubjectArea(name="sales", tables=[_ref("only_first")], tables_defined=[_tbl("only_first")])
+    a2 = m.SubjectArea(name="sales", tables=[_ref("only_second")], tables_defined=[_tbl("only_second")])
+    org = m.Organization(organization="O",
+                         storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")],
+                         subject_areas=[a1, a2])
+    idx = L.build_table_index(org)
+    for name in ("only_first", "only_second", "missing"):
+        assert L._find_table(org, name, "sales", index=idx) is L._find_table(org, name, "sales")
+
+
+def test_collect_default_filters_index_matches_linear():
+    org = _org_with_clash_and_fallback()
+    idx = L.build_table_index(org)
+    for area in (None, "alpha", "gamma"):
+        base = L.collect_default_filters(org, ["orders", "customers"], area=area)
+        withidx = L.collect_default_filters(org, ["orders", "customers"], area=area, index=idx)
+        assert withidx == base
 
 
 def test_get_table_context_byte_identical_with_and_without_index():

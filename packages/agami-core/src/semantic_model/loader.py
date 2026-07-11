@@ -328,8 +328,11 @@ def build_table_index(org: Organization) -> TableIndex:
             org_wide.setdefault(t.name, (t, rank))
             amap.setdefault(t.name, (t, rank))
             rank += 1
-        per_area[sa.name] = amap
-        area_refs[sa.name] = {ref.table for ref in sa.tables}
+        # Area names are NOT enforced unique; `_find_table` resolves an area via
+        # `org.subject_area(area)`, which returns the FIRST area of that name — so the per-area maps
+        # must be first-wins too (setdefault), or a duplicate name would resolve the wrong area.
+        per_area.setdefault(sa.name, amap)
+        area_refs.setdefault(sa.name, {ref.table for ref in sa.tables})
     return TableIndex(org_wide=org_wide, per_area=per_area, area_refs=area_refs)
 
 

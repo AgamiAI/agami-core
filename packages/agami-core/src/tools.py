@@ -709,23 +709,20 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
 
     from semantic_model import loader as L
 
-    # Build the O(1) name→table index once for this call so the full-mode table assembly resolves
-    # each table by lookup instead of re-scanning the whole model per table (ACE-047).
-    index = L.build_table_index(org)
-
     requested = args.get("dataset_names") or []
     requested_mode = (args.get("mode") or "auto").lower()
     metrics = _all_metrics(org)
 
     if requested:
-        # Explicit table scope — full detail for the named tables, no budget downgrade.
+        # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
+        # O(1) name→table index so this resolves each table by lookup, not a per-table rescan (P12).
         wanted = [str(n).split(".")[-1] for n in requested]
         result: dict[str, Any] = {
             "datasource": profile,
             "organization": org.description or None,
             "mode": "full",
             "requested_mode": requested_mode,
-            "tables": _table_contexts(org, wanted, L, index=index),
+            "tables": _table_contexts(org, wanted, L, index=L.build_table_index(org)),
             "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
             "large_tables": _large_tables(org),
         }
@@ -737,6 +734,10 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         )
         if mode not in _SCHEMA_MODE_DOWNGRADE:
             mode = "summary"
+        # Only full mode assembles the per-table `tables` block (the sole index consumer), and the
+        # loop only ever DOWNGRADES from full — so build the index iff we start at full, else the
+        # index-mode wide-model path (the one this optimizes) would pay a wasted O(tables) build.
+        index = L.build_table_index(org) if mode == "full" else None
         truncated = False
         while True:
             result = _schema_payload(org, profile, mode, matched, metrics, L, index=index)
