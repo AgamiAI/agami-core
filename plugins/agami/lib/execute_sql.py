@@ -366,7 +366,13 @@ def _execute_postgres(creds: dict[str, str], sql: str) -> int:
         return _err(f"Postgres connect failed: {e}", code=4)
     try:
         with conn:
-            with conn.cursor() as cur:
+            # A server-side (named) cursor so the row cap bounds TRANSFER, not just what we write:
+            # psycopg2's default client-side cursor buffers the ENTIRE result before we can fetchmany,
+            # so a runaway result would still be pulled whole. The named cursor streams from the
+            # server in bounded batches (ACE-038). Read-only SELECTs (the only thing the guard admits)
+            # are exactly what a server-side cursor supports.
+            with conn.cursor(name="agami_bounded") as cur:
+                cur.itersize = _resolve_row_cap() + 1  # server fetch batch = the bounded window
                 cur.execute(sql)
                 _write_cursor_csv(cur)
     except Exception as e:
@@ -518,22 +524,33 @@ def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
         except Exception:
             pass
 
+    cap = _resolve_row_cap()
     try:
         if job_config_kwargs:
             job_config = bigquery.QueryJobConfig(**job_config_kwargs)
             job = client.query(sql, job_config=job_config)
         else:
             job = client.query(sql)
-        results = job.result()  # waits for completion; raises on error
+        # BigQuery has no DB-API cursor, so it can't funnel through `_write_cursor_csv`; apply the
+        # same bounded-fetch cap here. `max_results=cap+1` bounds what the API returns (transfer),
+        # and the (cap+1)th row flags truncation — the never-silent guarantee holds for BigQuery too.
+        results = job.result(max_results=cap + 1)  # waits for completion; raises on error
     except Exception as e:
         return _err(f"BigQuery execution error: {e}", code=5)
 
-    # Stream rows to stdout as CSV. results.schema gives column metadata.
     writer = csv.writer(sys.stdout)
     if results.schema:
         writer.writerow([f.name for f in results.schema])
+        written = 0
+        truncated = False
         for row in results:
+            if written >= cap:
+                truncated = True
+                break
             writer.writerow([row[i] for i in range(len(results.schema))])
+            written += 1
+        if truncated:
+            _flag_truncated(cap)
 
     return 0
 
@@ -703,12 +720,45 @@ def _execute_duckdb(creds: dict[str, str], sql: str) -> int:
     return 0
 
 
+_DEFAULT_MAX_ROWS = 1000  # rows materialized per result before truncation (ACE-038)
+_max_rows_override: int | None = None  # per-call cap from --max-rows (ACE-044); set in main()
+
+
+def _resolve_row_cap() -> int:
+    """Effective result-row cap. `AGAMI_SQL_MAX_ROWS` is the operator-configurable DEPLOYMENT cap
+    (default 1000 when unset) — an operator owns their availability tradeoff and may set it higher OR
+    lower than 1000; it is NOT a hard 1000 ceiling. A per-call `--max-rows` can only LOWER it for a
+    single call (cap = min(env, --max-rows)). A missing/invalid/zero env value falls back to 1000."""
+    raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
+    cap = int(raw) if raw.isdigit() else _DEFAULT_MAX_ROWS
+    if cap <= 0:
+        cap = _DEFAULT_MAX_ROWS  # "0" / "00" → the default, never an empty result
+    if _max_rows_override is not None and _max_rows_override > 0:
+        cap = min(cap, _max_rows_override)
+    return cap
+
+
+def _flag_truncated(cap: int) -> None:
+    """Signal a bounded-fetch truncation to the caller — a non-error `{"truncated": …}` marker on
+    stderr (distinct from the guards' `{"error": …}`), so a truncated result is never mistaken for a
+    complete one (ACE-038/044). Shared by every engine's materialization path. One write so the
+    marker is always a single line, even if other notices surround it."""
+    sys.stderr.write(json.dumps({"truncated": {"row_cap": cap}}) + "\n")
+
+
 def _write_cursor_csv(cur: Any) -> None:
+    """Stream at most the row cap to stdout as CSV. `fetchmany(cap + 1)` — never `fetchall` — so a
+    huge result can't be buffered whole; the (cap+1)th row means the result was truncated, flagged
+    on stderr. The SQL itself is untouched (no injected LIMIT)."""
+    cap = _resolve_row_cap()
     writer = csv.writer(sys.stdout)
     if cur.description is not None:
         writer.writerow([d[0] for d in cur.description])
-        for row in cur.fetchall():
+        rows = cur.fetchmany(cap + 1)
+        for row in rows[:cap]:
             writer.writerow(row)
+        if len(rows) > cap:
+            _flag_truncated(cap)
 
 
 def _hosted() -> bool:
@@ -881,7 +931,13 @@ def main() -> int:
                    help="Subject area for the semantic-model safety pass (pre-flight + default_filters).")
     p.add_argument("--no-safety", action="store_true",
                    help="Skip the semantic-model pre-flight / default_filters pass.")
+    p.add_argument("--max-rows", type=int, default=None,
+                   help="Lower the row cap for this call (never raises it). Effective cap = "
+                        "min(this, AGAMI_SQL_MAX_ROWS) — the env is the deployment cap, default 1000.")
     args = p.parse_args()
+
+    global _max_rows_override
+    _max_rows_override = args.max_rows  # per-call cap (ACE-044); the sink reads it via _resolve_row_cap
 
     if args.sql_file:
         sql = Path(os.path.expanduser(args.sql_file)).read_text()
