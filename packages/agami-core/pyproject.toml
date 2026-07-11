@@ -32,6 +32,7 @@ model = [
 # install so the local executor/skill stay stdlib-lean — only a hosted deployment installs it.
 server = [
   "mcp>=1.2",
+  "anyio>=4",           # async_offload.run_blocking offloads blocking work off the loop (ACE-048)
   "uvicorn>=0.30",
   "psycopg2-binary>=2.9",
   "argon2-cffi>=23",
