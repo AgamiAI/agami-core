@@ -475,7 +475,10 @@ def test_refresh_grant_rotates_and_renews(env):
     assert third["refresh_token"] and third["refresh_token"] != second["refresh_token"]
 
 
-def test_refresh_token_reuse_revokes_the_family(env):
+def test_refresh_token_reuse_revokes_the_family(env, monkeypatch):
+    # Stolen-token reuse detection is a 'rotate'-mode feature (it needs the revoked old row to
+    # replay against); the 'overwrite' default forgoes it by design. Pin rotate for this test.
+    monkeypatch.setenv("AGAMI_REFRESH_TOKEN_MODE", "rotate")
     c = TestClient(mcp_http.build_app())
     first = _token_pair(c)
     second = _refresh(c, first["refresh_token"])  # rotates → `first` is now revoked
@@ -491,6 +494,73 @@ def test_refresh_token_reuse_revokes_the_family(env):
         data={"grant_type": "refresh_token", "refresh_token": second["refresh_token"]},
     )
     assert dead.status_code == 400 and dead.json()["error"] == "invalid_grant"
+
+
+def test_ace050_overwrite_default_keeps_one_row_and_kills_old_tokens(env):
+    # Default mode is 'overwrite': each refresh UPDATEs the session's single row in place, so no heap
+    # of dead tokens accumulates and every superseded token stops authenticating.
+    c = TestClient(mcp_http.build_app())
+    first = _token_pair(c)
+    second = _refresh(c, first["refresh_token"])
+    third = _refresh(c, second["refresh_token"])
+    assert third["refresh_token"] not in (first["refresh_token"], second["refresh_token"])
+
+    s = Store.from_env()
+    try:
+        n = s.query("SELECT COUNT(*) AS n FROM oauth_refresh_token")[0]["n"]
+        assert n == 1  # one row for the session, updated in place — no accumulation
+    finally:
+        s.close()
+
+    for stale in (first["refresh_token"], second["refresh_token"]):
+        r = c.post(
+            "/oauth/token",
+            data={"grant_type": "refresh_token", "refresh_token": stale, "client_id": "cid"},
+        )
+        assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+
+
+def test_ace050_rotate_mode_prunes_only_expired_revoked_rows(env, monkeypatch):
+    # 'rotate' keeps revoked rows for reuse detection but must prune the ones past expiry (dead
+    # weight — the theft signal is moot once the token could no longer authenticate anyway).
+    monkeypatch.setenv("AGAMI_REFRESH_TOKEN_MODE", "rotate")
+    c = TestClient(mcp_http.build_app())
+    pair = _token_pair(c)
+
+    s = Store.from_env()
+    try:
+        # Seed two revoked rows directly: one already expired, one still within its window.
+        for th, exp in (("expired_revoked", "2000-01-01T00:00:00+00:00"),
+                        ("live_revoked", "2999-01-01T00:00:00+00:00")):
+            s.execute(
+                "INSERT INTO oauth_refresh_token (token_hash, family, client_id, username, "
+                "expires_at, revoked, created) VALUES (?, 'fam', 'cid', 'admin', ?, 1, ?)",
+                (th, exp, "2000-01-01T00:00:00+00:00"),
+            )
+        s.commit()
+    finally:
+        s.close()
+
+    _refresh(c, pair["refresh_token"])  # a rotate refresh triggers the expired-revoked cleanup
+
+    s = Store.from_env()
+    try:
+        hashes = {r["token_hash"] for r in s.query("SELECT token_hash FROM oauth_refresh_token")}
+        assert "expired_revoked" not in hashes  # pruned
+        assert "live_revoked" in hashes  # kept — still inside its validity window
+    finally:
+        s.close()
+
+
+def test_ace050_refresh_mode_flag_default_and_validation(monkeypatch):
+    import oauth_server
+
+    monkeypatch.delenv("AGAMI_REFRESH_TOKEN_MODE", raising=False)
+    assert oauth_server._refresh_token_mode() == "overwrite"  # default
+    monkeypatch.setenv("AGAMI_REFRESH_TOKEN_MODE", "ROTATE")
+    assert oauth_server._refresh_token_mode() == "rotate"  # case-insensitive
+    monkeypatch.setenv("AGAMI_REFRESH_TOKEN_MODE", "garbage")
+    assert oauth_server._refresh_token_mode() == "overwrite"  # invalid → default
 
 
 def test_refresh_rejects_missing_unknown_and_wrong_client(env):
