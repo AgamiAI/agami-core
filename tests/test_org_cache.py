@@ -7,21 +7,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
 import tools  # noqa: E402
 
-
-@pytest.fixture(autouse=True)
-def _isolate_cache():
-    tools._ORG_CACHE.clear()
-    tools._current_org_ctx.set(None)
-    yield
-    tools._ORG_CACHE.clear()
-    tools._current_org_ctx.set(None)
+# Cache isolation between tests is handled once in tests/conftest.py::_reset_org_cache (autouse) —
+# no per-file duplicate here.
 
 
 def test_loads_once_then_serves_warm(monkeypatch):

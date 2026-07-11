@@ -93,9 +93,13 @@ def _parse_sql(sql: str) -> "exp.Expression | None":
         return None
 
 
-def build_guard_context(sql: str, org: Organization) -> GuardContext:
+def build_guard_context(sql: str, org: Organization) -> "GuardContext | None":
     """Parse `sql` once and build each guard index once, so the _model_safety battery shares
-    them instead of every guard redoing the work (audit P2 / ACE-045)."""
+    them instead of every guard redoing the work (audit P2 / ACE-045). Returns None when sqlglot
+    is unavailable: every guard then short-circuits to allow before it touches the context, so
+    building the indices would be pure wasted work in that fallback path."""
+    if not _HAVE_SQLGLOT:
+        return None
     return GuardContext(
         sql=sql,
         tree=_parse_sql(sql),
@@ -888,13 +892,10 @@ def pre_flight_check(sql: str, org: Organization,
     unavailable, the SQL doesn't parse, or it contains no SELECT."""
     if not _HAVE_SQLGLOT:
         return PreFlightResult(None, "allow", sql, reason="sqlglot unavailable; skipped")
-    if ctx is not None:
-        tree = ctx.tree
-    else:
-        try:
-            tree = sqlglot.parse_one(sql, error_level="ignore")
-        except Exception as e:
-            return PreFlightResult(None, "allow", sql, reason=f"unparseable; skipped ({e})")
+    # Parse via the same centralized helper the ctx path used (ACE-045), so a ctx and a non-ctx
+    # call are byte-identical: _parse_sql swallows an unparseable statement to None exactly as a
+    # prebuilt ctx.tree would be None, and both then report the one "no SELECT; skipped" reason.
+    tree = ctx.tree if ctx is not None else _parse_sql(sql)
     if tree is None or tree.find(exp.Select) is None:
         return PreFlightResult(None, "allow", sql, reason="no SELECT; skipped")
     if isinstance(tree, exp.Select):
