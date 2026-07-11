@@ -711,30 +711,73 @@ def _write_cursor_csv(cur: Any) -> None:
             writer.writerow(row)
 
 
+def _hosted() -> bool:
+    """The served (hosted) path is signalled by a configured database — the same signal
+    `tools._load_org` / `Store.from_env` use. On it, a missing model is a safety failure (fail
+    closed); locally (no DB) a not-yet-built model legitimately means 'no model yet'."""
+    return bool(os.environ.get("AGAMI_DB_URL") or os.environ.get("APP_DATABASE_URL"))
+
+
+def _resolve_guard_model(profile: str):
+    """Resolve the semantic model for the safety pass, mirroring `tools._load_org` (ACE-051): from
+    the DB when one is configured (hosted — the `/artifacts` disk mount may be absent), else the
+    on-disk YAML (local). Returns an `Organization` or None if neither is available.
+
+    The DB import is lazy AND env-guarded on purpose: the local executor runs from a stdlib-lean
+    mirror that does not ship `store`/`model_store`, so we only reach for them when a DB is set.
+    Any DB-load failure degrades to disk rather than crashing the executor."""
+    from semantic_model import loader as L
+
+    if _hosted():
+        try:
+            from model_store import load_organization as _load_db
+            from store import Store
+
+            store = Store.from_env()
+            if store is not None:
+                try:
+                    org = _load_db(store, profile)
+                finally:
+                    store.close()
+                if org is not None:
+                    return org
+        except Exception as e:
+            sys.stderr.write(f"[agami] hosted model load from DB failed, trying disk: {e}\n")
+
+    root = Path(os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")) / profile
+    if (root / "org.yaml").exists():
+        try:
+            return L.load_organization(root)
+        except Exception as e:
+            sys.stderr.write(f"[agami] could not load semantic model from disk: {e}\n")
+    return None
+
+
 def _model_safety(sql: str, profile: str, area: str | None):
     """Semantic-model safety pass before execution: fan-trap / chasm-trap pre-flight
-    + default_filters auto-application, reading the model at <artifacts>/<profile>/.
+    + default_filters auto-application, over a model resolved from the DB (hosted) or disk (local).
 
     Returns (sql_to_run, exit_code). exit_code is None to continue, or an int to
-    short-circuit (a fan/chasm-trap refusal the caller must consume). Inert (returns
-    the SQL unchanged) when there is no model, or the model package isn't importable.
+    short-circuit (a refusal the caller must consume). Inert (returns the SQL unchanged) when the
+    model package isn't importable, or — on the LOCAL path only — when there is no model yet. On the
+    HOSTED path a model that can't be resolved fails closed (refuses), never runs unguarded (ACE-051).
     """
     try:
-        from semantic_model import loader as L
         from semantic_model import runtime as RT
     except Exception:
         return sql, None  # model package not available -> no-op
-    artifacts = Path(
-        os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")
-    )
-    root = artifacts / profile
-    if not (root / "org.yaml").exists():
-        return sql, None  # no model for this profile -> no-op
-    try:
-        org = L.load_organization(root)
-    except Exception as e:
-        sys.stderr.write(f"[agami] could not load semantic model; skipping safety pass: {e}\n")
-        return sql, None
+
+    org = _resolve_guard_model(profile)
+    if org is None:
+        if _hosted():
+            # Fail closed: a served query with no resolvable model must be refused, never run with
+            # the fan/chasm/scope/PII guards silently off.
+            json.dump({"error": {"kind": "model_unavailable", "reason":
+                       "no semantic model could be resolved (checked DB and disk); refusing to run "
+                       "unguarded on the hosted server"}}, sys.stderr)
+            sys.stderr.write("\n")
+            return sql, 1
+        return sql, None  # local: no model yet -> no-op (unchanged)
 
     # Build the shared guard context ONCE — parse the SQL + build each model index a single
     # time — and thread it through the battery below, instead of every guard re-parsing and
