@@ -34,6 +34,7 @@ Nothing here imports Pydantic-free; the whole module is v2-only.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -278,7 +279,69 @@ def _load_cross_metrics(root: Path, org_doc: dict) -> list[Metric]:
 # ---------------------------------------------------------------------------
 
 
-def _find_table(org: Organization, table_name: str, area: Optional[str] = None) -> Optional[Table]:
+@dataclass(frozen=True)
+class TableIndex:
+    """O(1) name→Table lookup that reproduces `_find_table` EXACTLY, so the schema hot path stops
+    linear-scanning the whole model per table (ACE-047, scalability-audit finding P12). Match rule:
+    a defined table's name equals the query OR its bare form; on a name clash the first table in
+    scan order wins; area scoping and the TableRef multi-area fallback are preserved. Built once
+    from the cached model and threaded through get_table_context; byte-identical to the scan."""
+
+    org_wide: dict[str, tuple[Table, int]]           # t.name -> (table, global scan rank)
+    per_area: dict[str, dict[str, tuple[Table, int]]]  # area -> {t.name -> (table, rank)}
+    area_refs: dict[str, set[str]]                   # area -> {ref.table} for the fallback test
+
+    @staticmethod
+    def _pick(m: dict[str, tuple[Table, int]], query: str, bare: str) -> Optional[Table]:
+        # Return the earlier-in-scan-order table among a name-match and a bare-match — exactly what
+        # `_find_table`'s in-order `t.name == query or t.name == bare` scan would have returned.
+        a = m.get(query)
+        b = m.get(bare) if bare != query else None
+        if a and b:
+            return a[0] if a[1] <= b[1] else b[0]
+        return a[0] if a else (b[0] if b else None)
+
+    def find(self, table_name: str, area: Optional[str] = None) -> Optional[Table]:
+        bare = bare_name(table_name)
+        if area:
+            hit = self._pick(self.per_area.get(area, {}), table_name, bare)
+            if hit is not None:
+                return hit
+            refs = self.area_refs.get(area, set())
+            if table_name in refs or bare in refs:
+                return self._pick(self.org_wide, table_name, bare)
+            return None
+        return self._pick(self.org_wide, table_name, bare)
+
+
+def build_table_index(org: Organization) -> TableIndex:
+    """Build the O(1) name→Table index once per schema call (ACE-047). Scan order (areas, then
+    tables) matches `_find_table`, and first-occurrence-wins via setdefault keeps a clash resolving
+    identically."""
+    org_wide: dict[str, tuple[Table, int]] = {}
+    per_area: dict[str, dict[str, tuple[Table, int]]] = {}
+    area_refs: dict[str, set[str]] = {}
+    rank = 0
+    for sa in org.subject_areas:
+        amap: dict[str, tuple[Table, int]] = {}
+        for t in sa.tables_defined:
+            org_wide.setdefault(t.name, (t, rank))
+            amap.setdefault(t.name, (t, rank))
+            rank += 1
+        # Area names are NOT enforced unique; `_find_table` resolves an area via
+        # `org.subject_area(area)`, which returns the FIRST area of that name — so the per-area maps
+        # must be first-wins too (setdefault), or a duplicate name would resolve the wrong area.
+        per_area.setdefault(sa.name, amap)
+        area_refs.setdefault(sa.name, {ref.table for ref in sa.tables})
+    return TableIndex(org_wide=org_wide, per_area=per_area, area_refs=area_refs)
+
+
+def _find_table(
+    org: Organization, table_name: str, area: Optional[str] = None,
+    *, index: Optional[TableIndex] = None,
+) -> Optional[Table]:
+    if index is not None:
+        return index.find(table_name, area)
     bare = bare_name(table_name)
     areas = [org.subject_area(area)] if area else org.subject_areas
     for sa in areas:
@@ -307,6 +370,7 @@ def collect_default_filters(
     *,
     area: Optional[str] = None,
     params: Optional[dict[str, str]] = None,
+    index: Optional[TableIndex] = None,
 ) -> list[str]:
     """Union of default_filters for the in-scope tables, with :param substitution.
 
@@ -318,7 +382,7 @@ def collect_default_filters(
     out: list[str] = []
     seen: set[str] = set()
     for name in table_names:
-        table = _find_table(org, name, area)
+        table = _find_table(org, name, area, index=index)
         if table is None:
             continue
         alias = _table_alias(table.name)
@@ -380,18 +444,22 @@ def get_table_context(
     columns: Optional[list[str]] = None,
     include: Optional[list[str]] = None,
     params: Optional[dict[str, str]] = None,
+    index: Optional[TableIndex] = None,
 ) -> dict[str, Any]:
     """Compound context fetch — the primary mechanism for keeping inference rounds
     low. Returns columns (full detail for the requested set, honoring
     expose_column_groups), plus any of: default_filters, relationships, caveats,
     value_transforms, metrics.
+
+    Pass `index` (from `build_table_index`) to resolve tables in O(1) instead of a per-table linear
+    scan — used by the schema hot path on wide models (ACE-047). Behaviour is identical either way.
     """
     include = include or list(DEFAULT_CONTEXT_INCLUDE)
     sa = org.subject_area(area) if area else None
     result: dict[str, Any] = {"tables": {}}
 
     for name in tables:
-        table = _find_table(org, name, area)
+        table = _find_table(org, name, area, index=index)
         if table is None:
             result["tables"][name] = {"error": "not found in scope"}
             continue
@@ -415,7 +483,7 @@ def get_table_context(
             tinfo["caveats"] = table.caveats
         if "default_filters" in include:
             tinfo["default_filters"] = collect_default_filters(
-                org, [table.name], area=area, params=params
+                org, [table.name], area=area, params=params, index=index
             )
         if "performance_hints" in include and table.performance_hints:
             tinfo["performance_hints"] = table.performance_hints.model_dump(exclude_none=True)
