@@ -607,8 +607,9 @@ def _large_tables(org) -> dict[str, int]:
     return out
 
 
-def _table_contexts(org, table_names: list[str], L) -> dict[str, Any]:
-    """Full get_table_context for the named tables, grouped back into a {name: ctx} map."""
+def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
+    """Full get_table_context for the named tables, grouped back into a {name: ctx} map. `index`
+    (from L.build_table_index) resolves tables in O(1) instead of a per-table linear scan (ACE-047)."""
     area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
     by_area: dict[str | None, list[str]] = {}
     for t in table_names:
@@ -620,13 +621,15 @@ def _table_contexts(org, table_names: list[str], L) -> dict[str, Any]:
             tbls,
             area=area,
             include=["default_filters", "relationships", "caveats", "value_transforms", "metrics"],
+            index=index,
         )
         contexts.update(ctx.get("tables", {}))
     return contexts
 
 
 def _schema_payload(
-    org, profile: str, mode: str, matched: list[str], metrics: dict[str, tuple[Any, str | None]], L
+    org, profile: str, mode: str, matched: list[str], metrics: dict[str, tuple[Any, str | None]], L,
+    index=None,
 ) -> dict[str, Any]:
     """Build the structured schema payload at the given verbosity. `metric_index` + `large_tables`
     are always present (the never-hide net); `metrics` carries FULL detail for the matched set, or
@@ -665,7 +668,7 @@ def _schema_payload(
         ]
     if mode == "full":
         result["tables"] = _table_contexts(
-            org, [t.name for sa in org.subject_areas for t in sa.tables_defined], L
+            org, [t.name for sa in org.subject_areas for t in sa.tables_defined], L, index=index
         )
     # metrics in full: the matched set (a query/metric_names limits them); else every metric in
     # full mode (back-compat); else none (rely on metric_index).
@@ -706,6 +709,10 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
 
     from semantic_model import loader as L
 
+    # Build the O(1) name→table index once for this call so the full-mode table assembly resolves
+    # each table by lookup instead of re-scanning the whole model per table (ACE-047).
+    index = L.build_table_index(org)
+
     requested = args.get("dataset_names") or []
     requested_mode = (args.get("mode") or "auto").lower()
     metrics = _all_metrics(org)
@@ -718,7 +725,7 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
             "organization": org.description or None,
             "mode": "full",
             "requested_mode": requested_mode,
-            "tables": _table_contexts(org, wanted, L),
+            "tables": _table_contexts(org, wanted, L, index=index),
             "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
             "large_tables": _large_tables(org),
         }
@@ -732,7 +739,7 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
             mode = "summary"
         truncated = False
         while True:
-            result = _schema_payload(org, profile, mode, matched, metrics, L)
+            result = _schema_payload(org, profile, mode, matched, metrics, L, index=index)
             if len(json.dumps(result, default=str)) <= _SCHEMA_CHAR_BUDGET:
                 break
             nxt = _SCHEMA_MODE_DOWNGRADE[mode]
