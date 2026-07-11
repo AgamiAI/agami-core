@@ -632,7 +632,11 @@ async def oidc_start(request: Request) -> Response:
         },
         csrf,
     )
-    url = oidc.authorize_url(p, state=state, nonce=nonce, redirect_uri=_oidc_callback_uri())
+    # authorize_url resolves the IdP discovery doc (cached after the first call) — offload so a first-call
+    # network fetch doesn't freeze the loop (ACE-048).
+    url = await run_blocking(
+        oidc.authorize_url, p, state=state, nonce=nonce, redirect_uri=_oidc_callback_uri()
+    )
     resp = RedirectResponse(url, status_code=302)
     resp.set_cookie(
         _CSRF_COOKIE,
@@ -658,7 +662,11 @@ async def admin_oidc_start(request: Request) -> Response:
     nonce = secrets.token_urlsafe(16)
     csrf = secrets.token_urlsafe(16)
     state = _mint_oidc_state({"purpose": "admin_login", "provider": p.key, "nonce": nonce}, csrf)
-    url = oidc.authorize_url(p, state=state, nonce=nonce, redirect_uri=_oidc_callback_uri())
+    # authorize_url resolves the IdP discovery doc (cached after the first call) — offload so a first-call
+    # network fetch doesn't freeze the loop (ACE-048).
+    url = await run_blocking(
+        oidc.authorize_url, p, state=state, nonce=nonce, redirect_uri=_oidc_callback_uri()
+    )
     resp = RedirectResponse(url, status_code=302)
     resp.set_cookie(
         _CSRF_COOKIE,
@@ -689,8 +697,14 @@ async def oidc_callback(request: Request) -> Response:
     if not q.get("code"):
         return _oauth_error("invalid_request", "missing code")
     try:
-        id_token = oidc.exchange_code(p, code=q.get("code", ""), redirect_uri=_oidc_callback_uri())
-        identity = oidc.verify_id_token(p, id_token, nonce=claims.get("nonce", ""))
+        # The IdP token exchange (a network round-trip, up to a 10 s timeout) + the JWKS-backed ID-token
+        # verification run off the event loop so a slow/unreachable IdP never freezes other requests (ACE-048).
+        id_token = await run_blocking(
+            oidc.exchange_code, p, code=q.get("code", ""), redirect_uri=_oidc_callback_uri()
+        )
+        identity = await run_blocking(
+            oidc.verify_id_token, p, id_token, nonce=claims.get("nonce", "")
+        )
     except Exception:
         # Bad signature/aud/iss/sub/nonce/unverified-email/exchange error — all collapse to one verdict.
         return _oauth_error("access_denied", "OIDC verification failed", status=403)
