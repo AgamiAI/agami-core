@@ -563,6 +563,38 @@ def test_ace050_refresh_mode_flag_default_and_validation(monkeypatch):
     assert oauth_server._refresh_token_mode() == "overwrite"  # invalid → default
 
 
+def test_ace050_authorize_clears_used_and_expired_codes(env):
+    # One-time codes are single-use, short-lived tickets; the authorize chokepoint prunes used or
+    # expired ones (spent tickets), but never a valid, unused code.
+    c = TestClient(mcp_http.build_app())
+    s = Store.from_env()
+    try:
+        seeded = [
+            ("used_code", "2999-01-01T00:00:00+00:00", 1),  # used → prune
+            ("expired_code", "2000-01-01T00:00:00+00:00", 0),  # expired → prune
+            ("valid_code", "2999-01-01T00:00:00+00:00", 0),  # valid + unused → keep
+        ]
+        for code, exp, used in seeded:
+            s.execute(
+                "INSERT INTO oauth_state (code, client_id, redirect_uri, code_challenge, username, "
+                "expires_at, used, created) VALUES (?, 'cid', ?, 'ch', 'admin', ?, ?, ?)",
+                (code, REDIRECT, exp, used, "2000-01-01T00:00:00+00:00"),
+            )
+        s.commit()
+    finally:
+        s.close()
+
+    _authorize_code(c)  # a fresh authorize runs the spent-code cleanup
+
+    s = Store.from_env()
+    try:
+        codes = {r["code"] for r in s.query("SELECT code FROM oauth_state")}
+        assert "used_code" not in codes and "expired_code" not in codes  # spent tickets pruned
+        assert "valid_code" in codes  # valid, unused code preserved
+    finally:
+        s.close()
+
+
 def test_refresh_rejects_missing_unknown_and_wrong_client(env):
     c = TestClient(mcp_http.build_app())
     # missing / unknown token

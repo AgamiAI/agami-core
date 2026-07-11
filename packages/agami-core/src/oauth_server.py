@@ -358,6 +358,17 @@ async def authorize(request: Request) -> Response:
         store.close()
 
 
+def _cleanup_spent_codes(store: Store) -> None:
+    """Remove used or expired one-time authorization codes (ACE-050). They're single-use, short-lived
+    tickets — once used or past `expires_at` they carry no information and only pile up. Valid, unused
+    codes are untouched. Run opportunistically on the authorize chokepoint (no background job);
+    staged with the caller's commit."""
+    store.execute(
+        "DELETE FROM oauth_state WHERE used = 1 OR expires_at < ?",
+        (_now().isoformat(),),
+    )
+
+
 def _issue_authorization_code(
     store: Store,
     *,
@@ -370,6 +381,7 @@ def _issue_authorization_code(
     """Mint a fresh authorization code for an authenticated user and 302 back to the client. Shared
     by the password path and the OIDC callback so both resume the same OAuth token exchange."""
     code = secrets.token_urlsafe(32)
+    _cleanup_spent_codes(store)  # clear spent/expired tickets while we're here (ACE-050)
     store.execute(
         "INSERT INTO oauth_state (code, client_id, redirect_uri, code_challenge, username, "
         "expires_at, used, created) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
