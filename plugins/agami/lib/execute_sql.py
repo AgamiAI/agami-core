@@ -703,12 +703,36 @@ def _execute_duckdb(creds: dict[str, str], sql: str) -> int:
     return 0
 
 
+_DEFAULT_MAX_ROWS = 1000  # rows materialized per result before truncation (ACE-038)
+_max_rows_override: int | None = None  # per-call cap from --max-rows (ACE-044); set in main()
+
+
+def _resolve_row_cap() -> int:
+    """Effective result-row cap = min(per-call `--max-rows`, `AGAMI_SQL_MAX_ROWS` env, default 1000).
+    Bounds what a single query materializes; the executed SQL is never modified (no injected LIMIT).
+    A missing/invalid env value falls back to the default."""
+    raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
+    cap = int(raw) if raw.isdigit() and int(raw) > 0 else _DEFAULT_MAX_ROWS
+    if _max_rows_override is not None and _max_rows_override > 0:
+        cap = min(cap, _max_rows_override)
+    return cap
+
+
 def _write_cursor_csv(cur: Any) -> None:
+    """Stream at most the row cap to stdout as CSV. `fetchmany(cap + 1)` — never `fetchall` — so a
+    huge result can't be buffered whole; the (cap+1)th row means the result was truncated, flagged
+    on stderr as a non-error `{"truncated": …}` signal the caller surfaces (a truncated result must
+    never be mistaken for a complete one). The SQL itself is untouched (no injected LIMIT)."""
+    cap = _resolve_row_cap()
     writer = csv.writer(sys.stdout)
     if cur.description is not None:
         writer.writerow([d[0] for d in cur.description])
-        for row in cur.fetchall():
+        rows = cur.fetchmany(cap + 1)
+        for row in rows[:cap]:
             writer.writerow(row)
+        if len(rows) > cap:
+            json.dump({"truncated": {"row_cap": cap}}, sys.stderr)
+            sys.stderr.write("\n")
 
 
 def _hosted() -> bool:
@@ -881,7 +905,12 @@ def main() -> int:
                    help="Subject area for the semantic-model safety pass (pre-flight + default_filters).")
     p.add_argument("--no-safety", action="store_true",
                    help="Skip the semantic-model pre-flight / default_filters pass.")
+    p.add_argument("--max-rows", type=int, default=None,
+                   help="Cap rows returned for this call. Effective cap = min(this, AGAMI_SQL_MAX_ROWS, 1000).")
     args = p.parse_args()
+
+    global _max_rows_override
+    _max_rows_override = args.max_rows  # per-call cap (ACE-044); the sink reads it via _resolve_row_cap
 
     if args.sql_file:
         sql = Path(os.path.expanduser(args.sql_file)).read_text()
