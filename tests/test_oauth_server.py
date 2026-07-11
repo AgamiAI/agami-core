@@ -530,8 +530,10 @@ def test_ace050_rotate_mode_prunes_only_expired_revoked_rows(env, monkeypatch):
     s = Store.from_env()
     try:
         # Seed two revoked rows directly: one already expired, one still within its window.
-        for th, exp in (("expired_revoked", "2000-01-01T00:00:00+00:00"),
-                        ("live_revoked", "2999-01-01T00:00:00+00:00")):
+        for th, exp in (
+            ("expired_revoked", "2000-01-01T00:00:00+00:00"),
+            ("live_revoked", "2999-01-01T00:00:00+00:00"),
+        ):
             s.execute(
                 "INSERT INTO oauth_refresh_token (token_hash, family, client_id, username, "
                 "expires_at, revoked, created) VALUES (?, 'fam', 'cid', 'admin', ?, 1, ?)",
