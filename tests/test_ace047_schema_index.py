@@ -127,3 +127,39 @@ def test_tool_output_byte_identical_with_and_without_index(monkeypatch, tmp_path
     without_index = tools.tool_get_datasource_schema({"datasource": "acme", **args})
 
     assert with_index == without_index
+
+
+def test_e2e_wide_model_all_lookups_via_index_and_linear_in_table_count(monkeypatch, tmp_path):
+    # The done-bar: on a 300-table model, full-mode assembly resolves EVERY table through the O(1)
+    # index (the linear scan is never entered), and the number of lookups is linear in the table
+    # count — not the O(tables^2) rescan the index replaces. Counts work, not wall-time (non-flaky).
+    import tools
+
+    n_tables = 300
+    art = tmp_path / "art"
+    _write_model(art / "acme", n_areas=10, tables_per_area=30, wide=False, big=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    scan_calls = {"n": 0}
+    real_find_table = L._find_table
+
+    def counting_find_table(org, name, area=None, *, index=None):
+        if index is None:
+            scan_calls["n"] += 1  # a fall-through to the old linear scan
+        return real_find_table(org, name, area, index=index)
+
+    find_calls = {"n": 0}
+    real_index_find = L.TableIndex.find
+
+    def counting_index_find(self, name, area=None):
+        find_calls["n"] += 1
+        return real_index_find(self, name, area)
+
+    monkeypatch.setattr(L, "_find_table", counting_find_table)
+    monkeypatch.setattr(L.TableIndex, "find", counting_index_find)
+
+    tools.tool_get_datasource_schema({"datasource": "acme", "mode": "full"})
+
+    assert scan_calls["n"] == 0                    # no lookup fell back to the linear scan
+    assert find_calls["n"] >= n_tables             # every table was resolved
+    assert find_calls["n"] <= n_tables * 4         # a constant #lookups per table — LINEAR, not n^2
