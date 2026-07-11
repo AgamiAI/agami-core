@@ -189,6 +189,20 @@ def authenticate(store: Store, username: str, password: str) -> Principal | None
     return Principal(subject=username)
 
 
+def authenticate_with_own_store(username: str, password: str) -> Principal | None:
+    """`authenticate`, but opening (and closing) its OWN Store — so an async handler can run the whole
+    credential check (DB reads + the ~50-100 ms argon2 verify) in a worker thread via `run_blocking`
+    without sharing its event-loop Store across threads (SQLite forbids cross-thread connection use).
+    Returns None when no datastore is configured (the login handlers treat that as a failed login)."""
+    store = Store.from_env()
+    if store is None:
+        return None
+    try:
+        return authenticate(store, username, password)
+    finally:
+        store.close()
+
+
 def seed_admin_from_env(store: Store) -> str | None:
     """Seed the initial admin from the AGAMI_ADMIN_* env. Returns the seeded username (the email), or
     None if there's nothing to seed / the admin already exists.

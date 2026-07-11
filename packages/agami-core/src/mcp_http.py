@@ -27,6 +27,7 @@ from pathlib import Path
 import admin
 import onboarding
 import user_store
+from async_offload import run_blocking
 from oss_adapters import (
     FileActivitySink,
     PresenceAuthProvider,
@@ -314,8 +315,12 @@ def build_server(registry: dict | None = None):
             raised = True
             raise
         finally:
+            # The per-call audit write opens a fresh Store + INSERT + close; run it off the event loop so
+            # it doesn't add DB latency to every tool call on the loop (ACE-048). `_actor_ctx.get()` is read
+            # here (on the loop) and passed in. Still best-effort — a logging failure never breaks the tool.
             try:
-                record_tool_call(
+                await run_blocking(
+                    record_tool_call,
                     name=name,
                     arguments=arguments,
                     result_text=result_text,
@@ -457,7 +462,12 @@ def main() -> int:
     public_base_url()  # fail fast if unset
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(build_app(), host=host, port=port)
+    # Bind via the import-string factory (not a built instance) so `WORKERS=N` can fork N worker processes —
+    # uvicorn re-imports `build_app` in each worker (ACE-048). Multi-worker is safe: session state is stateless
+    # JWT + Postgres, boot migrations are guarded by a pg advisory lock (store.run_migrations), and the admin
+    # seed tolerates a concurrent-boot race (lifespan). WORKERS defaults to 1 (unchanged single-process behaviour).
+    workers = int(os.environ.get("WORKERS", "1"))
+    uvicorn.run("mcp_http:build_app", factory=True, host=host, port=port, workers=workers)
     return 0
 
 
