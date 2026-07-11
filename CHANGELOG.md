@@ -10,6 +10,22 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Changed
+
+- **OAuth refresh-token storage is now configurable — default `overwrite` (ACE-050).**
+  `AGAMI_REFRESH_TOKEN_MODE` selects `overwrite` (default: each refresh UPDATEs the session's single
+  token row in place — one row per session, no growing heap of dead tokens) or `rotate` (the prior
+  behaviour: insert-new + revoke-old, keeping OAuth 2.1 **stolen-token reuse detection**, plus a
+  cleanup that prunes only already-expired revoked rows). **Upgrade note:** the new default
+  `overwrite` trades away reuse detection — a replayed stolen refresh token simply fails to
+  authenticate instead of revoking the whole family. A deployment that wants family-revocation must
+  set `AGAMI_REFRESH_TOKEN_MODE=rotate`. Also: used/expired one-time authorization codes are now
+  cleared at authorize, and the query/activity logs (`query_executions` / `tool_calls`) are
+  explicitly **retained** — never deleted by any default path — with a new `idx_query_executions_ts`
+  index to keep newest-first reads fast as history grows.
+
 ## [0.3.9] — 2026-07-10
 
 ### Added

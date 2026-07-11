@@ -71,6 +71,19 @@ def _refresh_ttl() -> timedelta:
     return _ttl_from_env("AGAMI_REFRESH_TOKEN_TTL", timedelta(days=30))
 
 
+def _refresh_token_mode() -> str:
+    """How a refresh renews its token, config-selected (ACE-050) — both modes ship here, so
+    agami-hosted picks its mode by flag, never a fork:
+      - 'overwrite' (default): UPDATE the presented token's row in place → one row per session,
+        no heap of dead tokens. Trades away stolen-token reuse detection (a replayed old token just
+        finds no row → invalid_grant) — the accepted self-host tradeoff.
+      - 'rotate': INSERT-new + revoke-old (keeps reuse detection), plus a cleanup of only *expired*
+        revoked rows so it stops piling up. agami-hosted selects this.
+    An unknown / blank value falls back to the 'overwrite' default."""
+    mode = os.environ.get("AGAMI_REFRESH_TOKEN_MODE", "").strip().lower()
+    return mode if mode in {"overwrite", "rotate"} else "overwrite"
+
+
 # Claude's fixed OAuth callback (the connector redirects here after authorize). The .com host is the
 # announced future move; allow both so the connection survives the switch.
 _CLAUDE_CALLBACKS = (
@@ -345,6 +358,17 @@ async def authorize(request: Request) -> Response:
         store.close()
 
 
+def _cleanup_spent_codes(store: Store) -> None:
+    """Remove used or expired one-time authorization codes (ACE-050). They're single-use, short-lived
+    tickets — once used or past `expires_at` they carry no information and only pile up. Valid, unused
+    codes are untouched. Run opportunistically on the authorize chokepoint (no background job);
+    staged with the caller's commit."""
+    store.execute(
+        "DELETE FROM oauth_state WHERE used = 1 OR expires_at < ?",
+        (_now().isoformat(),),
+    )
+
+
 def _issue_authorization_code(
     store: Store,
     *,
@@ -357,6 +381,7 @@ def _issue_authorization_code(
     """Mint a fresh authorization code for an authenticated user and 302 back to the client. Shared
     by the password path and the OIDC callback so both resume the same OAuth token exchange."""
     code = secrets.token_urlsafe(32)
+    _cleanup_spent_codes(store)  # clear spent/expired tickets while we're here (ACE-050)
     store.execute(
         "INSERT INTO oauth_state (code, client_id, redirect_uri, code_challenge, username, "
         "expires_at, used, created) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
@@ -401,15 +426,20 @@ def _issue_refresh_token(
     return token
 
 
-def _token_response(
-    store: Store, *, username: str, client_id: str, family: str | None
-) -> JSONResponse:
-    """The shared token body: a fresh access JWT + a fresh/rotated refresh token. Commits the
-    refresh-token write together with whatever the caller already staged (code burn / rotate)."""
-    refresh_token = _issue_refresh_token(
-        store, client_id=client_id, username=username, family=family
+def _cleanup_expired_revoked(store: Store) -> None:
+    """Prune only EXPIRED revoked refresh rows ('rotate' mode, ACE-050). A revoked row's sole
+    remaining purpose is stolen-token reuse detection, which can only fire inside the token's
+    validity window — once it's past `expires_at` the row is pure dead weight, so removing it loses
+    no theft signal while stopping the revoked-row heap from growing forever. Staged with the
+    caller's transaction (committed by `_token_response`)."""
+    store.execute(
+        "DELETE FROM oauth_refresh_token WHERE revoked = 1 AND expires_at < ?",
+        (_now().isoformat(),),
     )
-    store.commit()
+
+
+def _token_body(username: str, refresh_token: str) -> JSONResponse:
+    """The OAuth token response body: a fresh access JWT + the given refresh token."""
     return JSONResponse(
         {
             "access_token": issue_jwt(username),
@@ -418,6 +448,19 @@ def _token_response(
             "refresh_token": refresh_token,
         }
     )
+
+
+def _token_response(
+    store: Store, *, username: str, client_id: str, family: str | None
+) -> JSONResponse:
+    """The shared token body for the INSERT path (initial issue + 'rotate' refresh): mint a NEW
+    refresh row, then commit it together with whatever the caller already staged (code burn /
+    rotate / expired-revoked cleanup)."""
+    refresh_token = _issue_refresh_token(
+        store, client_id=client_id, username=username, family=family
+    )
+    store.commit()
+    return _token_body(username, refresh_token)
 
 
 async def token(request: Request) -> Response:
@@ -476,9 +519,11 @@ def _grant_authorization_code(store: Store, form: dict[str, str]) -> Response:
 
 
 def _grant_refresh_token(store: Store, form: dict[str, str]) -> Response:
-    """Renew an access token from a refresh token (RFC 6749 §6), rotating the refresh token: the
-    presented token is revoked and a successor issued in the same family. Reuse of an already-revoked
-    token (a replay of a rotated/stolen token) revokes the whole family — OAuth 2.1 reuse detection."""
+    """Renew an access token from a refresh token (RFC 6749 §6), replacing the presented token with a
+    successor. How that successor is persisted is set by `AGAMI_REFRESH_TOKEN_MODE` (ACE-050):
+    'overwrite' (default) updates the row in place (one row per session); 'rotate' revokes-old +
+    issues-new and keeps OAuth 2.1 reuse detection (a replay of a revoked token burns the family).
+    Validation (lookup, revoked/expiry/client checks) is identical for both."""
     presented = form.get("refresh_token", "")
     if not presented:
         return _oauth_error("invalid_request", "refresh_token is required")
@@ -520,8 +565,28 @@ def _grant_refresh_token(store: Store, form: dict[str, str]) -> Response:
     if client_id and stored_client and client_id != stored_client:
         return _oauth_error("invalid_grant", "client mismatch")
 
-    # Rotate atomically: only the request that flips revoked 0→1 may renew (closes the double-rotate
-    # race); a loser here gets a plain invalid_grant, NOT family revocation (it's a race, not a replay).
+    if _refresh_token_mode() == "overwrite":
+        # Overwrite in place: the presented row BECOMES the successor (new hash + expiry), so a
+        # session keeps exactly one row and no dead-token heap accumulates (ACE-050). The atomic
+        # `revoked = 0` guard still closes the double-rotate race. Reuse detection is forgone — a
+        # replayed old token now simply finds no row (invalid_grant), not a family burn.
+        new_token = secrets.token_urlsafe(32)
+        rotated = store.execute(
+            "UPDATE oauth_refresh_token SET token_hash = ?, expires_at = ? "
+            "WHERE token_hash = ? AND revoked = 0",
+            (_hash_token(new_token), (_now() + _refresh_ttl()).isoformat(), row["token_hash"]),
+        )
+        if rotated.rowcount != 1:
+            store.commit()
+            return _oauth_error("invalid_grant", "refresh token is invalid")
+        store.commit()
+        return _token_body(row["username"], new_token)
+
+    # 'rotate' mode: revoke the presented token and issue a successor in the same family, keeping the
+    # revoked row for stolen-token reuse detection. Atomic: only the request that flips revoked 0→1
+    # may renew (closes the double-rotate race); a loser here gets a plain invalid_grant, NOT family
+    # revocation (it's a race, not a replay). Prune only already-expired revoked rows so the heap
+    # stops growing without losing any live theft signal.
     burned = store.execute(
         "UPDATE oauth_refresh_token SET revoked = 1 WHERE token_hash = ? AND revoked = 0",
         (row["token_hash"],),
@@ -529,6 +594,7 @@ def _grant_refresh_token(store: Store, form: dict[str, str]) -> Response:
     if burned.rowcount != 1:
         store.commit()
         return _oauth_error("invalid_grant", "refresh token is invalid")
+    _cleanup_expired_revoked(store)
     return _token_response(
         store, username=row["username"], client_id=row["client_id"] or "", family=row["family"]
     )
