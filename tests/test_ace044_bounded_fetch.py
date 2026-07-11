@@ -99,6 +99,11 @@ def test_effective_cap_is_min_of_env_and_per_call(monkeypatch):
     monkeypatch.delenv("AGAMI_SQL_MAX_ROWS", raising=False)
     execute_sql._max_rows_override = None
     assert execute_sql._resolve_row_cap() == 1000  # missing env → default
+    # The env is the operator's DEPLOYMENT cap, not a hard 1000 ceiling — it may raise the default.
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "5000")
+    assert execute_sql._resolve_row_cap() == 5000
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "0")  # invalid → falls back to default, never 0
+    assert execute_sql._resolve_row_cap() == 1000
 
 
 def test_sqlite_end_to_end_caps_without_rewriting_sql(tmp_path, monkeypatch, capsys):

@@ -725,11 +725,14 @@ _max_rows_override: int | None = None  # per-call cap from --max-rows (ACE-044);
 
 
 def _resolve_row_cap() -> int:
-    """Effective result-row cap = min(per-call `--max-rows`, `AGAMI_SQL_MAX_ROWS` env, default 1000).
-    Bounds what a single query materializes; the executed SQL is never modified (no injected LIMIT).
-    A missing/invalid env value falls back to the default."""
+    """Effective result-row cap. `AGAMI_SQL_MAX_ROWS` is the operator-configurable DEPLOYMENT cap
+    (default 1000 when unset) — an operator owns their availability tradeoff and may set it higher OR
+    lower than 1000; it is NOT a hard 1000 ceiling. A per-call `--max-rows` can only LOWER it for a
+    single call (cap = min(env, --max-rows)). A missing/invalid/zero env value falls back to 1000."""
     raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
-    cap = int(raw) if raw.isdigit() and int(raw) > 0 else _DEFAULT_MAX_ROWS
+    cap = int(raw) if raw.isdigit() else _DEFAULT_MAX_ROWS
+    if cap <= 0:
+        cap = _DEFAULT_MAX_ROWS  # "0" / "00" → the default, never an empty result
     if _max_rows_override is not None and _max_rows_override > 0:
         cap = min(cap, _max_rows_override)
     return cap
@@ -738,9 +741,9 @@ def _resolve_row_cap() -> int:
 def _flag_truncated(cap: int) -> None:
     """Signal a bounded-fetch truncation to the caller — a non-error `{"truncated": …}` marker on
     stderr (distinct from the guards' `{"error": …}`), so a truncated result is never mistaken for a
-    complete one (ACE-038/044). Shared by every engine's materialization path."""
-    json.dump({"truncated": {"row_cap": cap}}, sys.stderr)
-    sys.stderr.write("\n")
+    complete one (ACE-038/044). Shared by every engine's materialization path. One write so the
+    marker is always a single line, even if other notices surround it."""
+    sys.stderr.write(json.dumps({"truncated": {"row_cap": cap}}) + "\n")
 
 
 def _write_cursor_csv(cur: Any) -> None:
@@ -929,7 +932,8 @@ def main() -> int:
     p.add_argument("--no-safety", action="store_true",
                    help="Skip the semantic-model pre-flight / default_filters pass.")
     p.add_argument("--max-rows", type=int, default=None,
-                   help="Cap rows returned for this call. Effective cap = min(this, AGAMI_SQL_MAX_ROWS, 1000).")
+                   help="Lower the row cap for this call (never raises it). Effective cap = "
+                        "min(this, AGAMI_SQL_MAX_ROWS) — the env is the deployment cap, default 1000.")
     args = p.parse_args()
 
     global _max_rows_override
