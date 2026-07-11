@@ -366,7 +366,13 @@ def _execute_postgres(creds: dict[str, str], sql: str) -> int:
         return _err(f"Postgres connect failed: {e}", code=4)
     try:
         with conn:
-            with conn.cursor() as cur:
+            # A server-side (named) cursor so the row cap bounds TRANSFER, not just what we write:
+            # psycopg2's default client-side cursor buffers the ENTIRE result before we can fetchmany,
+            # so a runaway result would still be pulled whole. The named cursor streams from the
+            # server in bounded batches (ACE-038). Read-only SELECTs (the only thing the guard admits)
+            # are exactly what a server-side cursor supports.
+            with conn.cursor(name="agami_bounded") as cur:
+                cur.itersize = _resolve_row_cap() + 1  # server fetch batch = the bounded window
                 cur.execute(sql)
                 _write_cursor_csv(cur)
     except Exception as e:

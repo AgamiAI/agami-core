@@ -97,3 +97,58 @@ def test_sqlite_end_to_end_caps_without_rewriting_sql(tmp_path, monkeypatch, cap
     assert json.loads(out.err.strip())["truncated"]["row_cap"] == 4
     # The cap came from the bounded fetch, not a rewrite: the SQL passed to sqlite is the caller's
     # verbatim (no LIMIT) — _write_cursor_csv never sees or edits the SQL.
+
+
+def test_postgres_uses_a_server_side_named_cursor(monkeypatch, capsys):
+    # Postgres needs a NAMED (server-side) cursor so the cap bounds transfer — psycopg2's default
+    # cursor buffers the whole result. Inject a fake psycopg2 and assert the cursor is named + the
+    # SQL is passed verbatim + the bounded fetchmany(cap+1) is used.
+    seen: dict = {}
+
+    class FakeCur:
+        def __init__(self, name):
+            seen["name"] = name
+            self.description = [("n",)]
+            self.itersize = None
+            self._rows = [(i,) for i in range(3)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql):
+            seen["sql"] = sql
+
+        def fetchmany(self, n):
+            seen["fetchmany"] = n
+            return self._rows[:n]
+
+    class FakeConn:
+        def cursor(self, name=None):
+            return FakeCur(name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def close(self):
+            pass
+
+    class FakePG:
+        @staticmethod
+        def connect(**kw):
+            return FakeConn()
+
+    monkeypatch.setitem(sys.modules, "psycopg2", FakePG)
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "2")
+    creds = {"host": "h", "port": "5432", "user": "u", "password": "p", "database": "d"}
+
+    rc = execute_sql._execute_postgres(creds, "SELECT n FROM t")
+    assert rc == 0
+    assert seen["name"] == "agami_bounded"     # server-side cursor (bounds transfer, not just writes)
+    assert seen["sql"] == "SELECT n FROM t"    # SQL verbatim — no injected LIMIT
+    assert seen["fetchmany"] == 3              # cap(2)+1
