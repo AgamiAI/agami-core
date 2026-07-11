@@ -23,7 +23,6 @@ from semantic_model import models as m  # noqa: E402
 from semantic_model import snapshot as S  # noqa: E402
 from semantic_model import validator as v  # noqa: E402
 
-
 # --------------------------------------------------------------------------- validator memoize
 
 
@@ -216,3 +215,36 @@ def test_table_change_forces_full_revalidate(monkeypatch):
     res2 = v.validate(org2, cache=cache)
     assert sorted(calls) == ["alpha", "beta", "gamma"]
     assert _findings_tuple(res2) == _findings_tuple(v.validate(org2))
+
+
+# --------------------------------------------------------------------------------- E2E (done bar)
+
+
+def test_enrichment_validation_work_is_linear_not_quadratic(monkeypatch):
+    # The done-bar decidably: simulate agami-connect enriching a 50-area model one area at a time,
+    # re-validating with a shared cache after each edit. Total per-area validations must grow
+    # LINEARLY with the number of edits (one changed area re-runs per edit), not quadratically
+    # (whole-model re-validate per edit). We count work, not wall-time, so it's not flaky.
+    N = 50
+    count = {"n": 0}
+    real = v._validate_area
+    monkeypatch.setattr(v, "_validate_area",
+                        lambda sa, org, ot: (count.__setitem__("n", count["n"] + 1),
+                                             real(sa, org, ot))[1])
+
+    areas = [_area(f"area{i:03d}") for i in range(N)]
+    cache: dict = {}
+
+    v.validate(_org(*areas), cache=cache)  # initial cold pass
+    assert count["n"] == N  # every area validated once
+
+    count["n"] = 0
+    for i in range(N):
+        areas[i] = _area(f"area{i:03d}", extra_rels=1)  # "enrich" area i (content only, no tables)
+        v.validate(_org(*areas), cache=cache)
+    assert count["n"] == N  # exactly one area re-validated per edit — LINEAR, not N*N
+    assert count["n"] < N * N  # emphatically not quadratic
+
+    # End-of-run parity: the incrementally-cached verdict equals a from-scratch full validate.
+    final = _org(*areas)
+    assert _findings_tuple(v.validate(final, cache=cache)) == _findings_tuple(v.validate(final))
