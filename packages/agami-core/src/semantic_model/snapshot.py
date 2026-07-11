@@ -54,21 +54,33 @@ def _model_files(root: Path) -> list[Path]:
     return out
 
 
-def _file_sha(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+def _hash_and_manifest(
+    root: Path, files: list[Path], *, want_manifest: bool = True
+) -> tuple[str, dict[str, str]]:
+    """Read each model file ONCE and derive the rolling 12-char model hash (path + bytes, in sorted
+    order) — and, when `want_manifest`, the per-file manifest shas from the same bytes. Folding the
+    manifest build into the hash pass is what drops a changed-model snapshot from two whole-tree byte
+    reads to one (ACE-046); the hash-only callers skip the extra per-file digest. Both outputs are
+    byte-identical to computing them separately."""
+    h = hashlib.sha256()
+    manifest: dict[str, str] = {}
+    for p in files:
+        rel = str(p.relative_to(root)).replace(os.sep, "/")
+        data = p.read_bytes()
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(data)
+        h.update(b"\0")
+        if want_manifest:
+            manifest[rel] = hashlib.sha256(data).hexdigest()
+    return h.hexdigest()[:12], manifest
 
 
 def compute_model_hash(root: str | os.PathLike) -> str:
     """12-char content hash over the model tree (path + bytes of each file)."""
     root = Path(root)
-    h = hashlib.sha256()
-    for p in _model_files(root):
-        rel = str(p.relative_to(root)).replace(os.sep, "/")
-        h.update(rel.encode("utf-8"))
-        h.update(b"\0")
-        h.update(p.read_bytes())
-        h.update(b"\0")
-    return h.hexdigest()[:12]
+    digest, _ = _hash_and_manifest(root, _model_files(root), want_manifest=False)
+    return digest
 
 
 def _snapshot_dirs_newest_first(snaps: Path) -> list[Path]:
@@ -99,7 +111,9 @@ def write_snapshot(root: str | os.PathLike) -> str | None:
         root = Path(root)
         if not (root / "org.yaml").exists():
             return None  # not a model root — nothing to snapshot
-        digest = compute_model_hash(root)
+        # One pass: the hash (to name the dir) and the manifest shas (written only on a new dir)
+        # come from a single read of each file, not two.
+        digest, manifest_files = _hash_and_manifest(root, _model_files(root))
         snaps = root / SNAPSHOT_DIR
         snaps.mkdir(exist_ok=True)
         d = snaps / digest
@@ -110,8 +124,7 @@ def write_snapshot(root: str | os.PathLike) -> str | None:
             manifest = {
                 "schema_version": 1,
                 "model_hash": digest,
-                "files": {str(p.relative_to(root)).replace(os.sep, "/"): _file_sha(p)
-                          for p in _model_files(root)},
+                "files": manifest_files,
             }
             (d / "manifest.json").write_text(
                 json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

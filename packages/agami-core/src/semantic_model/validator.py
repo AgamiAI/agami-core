@@ -37,6 +37,7 @@ list[str] contract while adding structured findings for the review dashboard.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -113,9 +114,85 @@ class ValidationResult:
 # ---------------------------------------------------------------------------
 
 
-def validate(org: Organization) -> ValidationResult:
+# An incremental-validation cache (ACE-046): per-area findings keyed by everything a per-area rule
+# reads — the area's own content AND the org-wide table registry. An enrichment run passes one of
+# these across edits so only the edited area's rules re-run; a normal `validate(org)` (cache=None)
+# is unchanged. Because the key pins every input, a cache hit is byte-identical to recomputing.
+# Key = (area name, area content sha, org-table-registry sha) → that area's findings.
+ValidationCache = dict[tuple[str, str, str], "list[Finding]"]
+
+# Hard ceiling so a long-lived process (e.g. the HTTP server) that validates many distinct models
+# through one shared cache can't grow it without bound. Content-addressed, so evicting an entry only
+# costs a cold recompute; we evict foreign-model areas first and never the current model's.
+_CACHE_MAX = 1024
+
+
+def _sig(obj) -> str:
+    """Content hash of a model object (pydantic v2). Stable across loads of identical YAML."""
+    return hashlib.sha256(obj.model_dump_json().encode("utf-8")).hexdigest()
+
+
+def _org_tables_sig(org_tables: dict[str, Table]) -> str:
+    """Signature of the org-wide table registry — the ONLY cross-area input the per-area rules read
+    (`_check_table_refs_resolve` = table-name existence; `_check_expose_column_groups` = a referenced
+    table's column_groups). Folding it into every area's key means any table add/remove/rename
+    invalidates every cached area (a full revalidate), while a metric/entity/relationship edit —
+    which never touches tables — leaves it stable, so only the edited area re-runs."""
+    h = hashlib.sha256()
+    for name in sorted(org_tables):
+        h.update(name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(org_tables[name].model_dump_json().encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _bound_cache(cache: ValidationCache, org: Organization) -> None:
+    """Cap total cache size for long-lived processes. Evict oldest entries for areas NOT in the
+    current model first (insertion order); never evict the current model's areas, so a single large
+    model doesn't thrash. Only triggers well past any real model's area count."""
+    if len(cache) <= _CACHE_MAX:
+        return
+    current = {sa.name for sa in org.subject_areas}
+    for k in [k for k in cache if k[0] not in current]:
+        if len(cache) <= _CACHE_MAX:
+            break
+        del cache[k]
+
+
+def _validate_area(
+    sa: SubjectArea, org: Organization, org_tables: dict[str, Table]
+) -> list[Finding]:
+    """Run one area's per-area rule battery into its own result and return just its findings, so a
+    run cache can reuse them verbatim when the area (and the table registry) are unchanged."""
+    ares = ValidationResult()
+    # Build the area's {name: table} index once and share it across every check that needs it
+    # (entity mappings + each relationship's FK-type check), instead of rebuilding it per
+    # relationship — that per-rel rebuild was the O(R×T) cost this pass eliminates (ACE-046).
+    defined = _all_tables(sa)
+    _check_subject_area_sizing(sa, ares)
+    _check_table_refs_resolve(sa, ares, org_tables)
+    _check_expose_column_groups(sa, ares, org_tables)
+    _check_deep_table_column_groups(sa, ares)
+    _check_default_filters_columns(sa, ares)
+    _check_value_transforms(sa, ares)
+    _check_choice_fields(sa, ares)
+    _check_entity_mappings(sa, ares, defined)
+    for rel in sa.relationships:
+        _check_relationship(rel, sa, org, ares, cross=False, defined=defined)
+    return ares.findings
+
+
+def validate(org: Organization, *, cache: "ValidationCache | None" = None) -> ValidationResult:
     """Run every cross-cutting rule. Returns a ValidationResult (never raises on
-    a model-level problem — those surface as the model failing to parse upstream)."""
+    a model-level problem — those surface as the model failing to parse upstream).
+
+    When `cache` is supplied (an enrichment run reusing one dict across edits), each area's
+    per-area findings are memoized by (area name, area content, table-registry signature): only a
+    changed area re-runs its rules. The cross-area + org-level rules always run fresh — they are
+    cheap and can depend on any area. The result is identical to a full validate, because the key
+    pins every input a per-area rule reads. Default `cache=None` validates everything, so all other
+    callers are unchanged."""
     res = ValidationResult()
 
     _check_storage_connection_refs(org, res)
@@ -123,17 +200,22 @@ def validate(org: Organization) -> ValidationResult:
     # defined in another area (multi-membership without duplication — the design
     # doc's "defined once, TableRef'd from each subject area" pattern).
     org_tables = _org_tables(org)
+    reg_sig = _org_tables_sig(org_tables) if cache is not None else ""
     for sa in org.subject_areas:
-        _check_subject_area_sizing(sa, res)
-        _check_table_refs_resolve(sa, res, org_tables)
-        _check_expose_column_groups(sa, res, org_tables)
-        _check_deep_table_column_groups(sa, res)
-        _check_default_filters_columns(sa, res)
-        _check_value_transforms(sa, res)
-        _check_choice_fields(sa, res)
-        _check_entity_mappings(sa, res)
-        for rel in sa.relationships:
-            _check_relationship(rel, sa, org, res, cross=False)
+        if cache is not None:
+            key = (sa.name, _sig(sa), reg_sig)
+            findings = cache.get(key)
+            if findings is None:
+                findings = _validate_area(sa, org, org_tables)
+                # Drop this area's entries at prior content/registry signatures before storing the
+                # current one — keeps steady-state to ~one entry per area within a model.
+                for stale in [k for k in cache if k[0] == sa.name and k != key]:
+                    del cache[stale]
+                cache[key] = findings
+                _bound_cache(cache, org)
+        else:
+            findings = _validate_area(sa, org, org_tables)
+        res.findings.extend(findings)
 
     for rel in org.cross_subject_area_relationships:
         _check_cross_relationship(rel, org, res)
@@ -316,8 +398,9 @@ def _check_choice_fields(sa: SubjectArea, res: ValidationResult) -> None:
                     )
 
 
-def _check_entity_mappings(sa: SubjectArea, res: ValidationResult) -> None:
-    defined = _all_tables(sa)
+def _check_entity_mappings(
+    sa: SubjectArea, res: ValidationResult, defined: dict[str, Table]
+) -> None:
     for ent in sa.entities:
         for mp in ent.maps_to:
             table = defined.get(mp.table)
@@ -341,6 +424,7 @@ def _check_relationship(
     res: ValidationResult,
     *,
     cross: bool,
+    defined: dict[str, Table],
 ) -> None:
     # cardinality required (structural gate, check #17) — models enforces non-null,
     # re-assert the value domain here for a clear validator-level error too.
@@ -377,7 +461,7 @@ def _check_relationship(
         return  # user took explicit ownership; skip simple-form type check
 
     # FK type-compatibility on the simple form (Gap 3)
-    _check_fk_type_compat(rel, sa, res)
+    _check_fk_type_compat(rel, res, defined)
 
 
 def _check_cross_relationship(
@@ -398,8 +482,11 @@ def _check_cross_relationship(
             f"{rel.to_subject_area!r}",
         )
 
-    # trust-block parity + on: parse + cardinality (reuse intra checks)
-    _check_relationship(rel, sa_from or SubjectArea(name="<unknown>"), org, res, cross=True)
+    # trust-block parity + on: parse + cardinality (reuse intra checks). The FK-type check resolves
+    # against the FROM area's tables, exactly as before — the cross edge's to_table lives in another
+    # area, so it stays unresolved here (unchanged behaviour).
+    sa_for_rel = sa_from or SubjectArea(name="<unknown>")
+    _check_relationship(rel, sa_for_rel, org, res, cross=True, defined=_all_tables(sa_for_rel))
 
     # executable must match the endpoints' storage connections
     conn_from = _table_connection(sa_from, rel.from_table) if sa_from else None
@@ -583,8 +670,9 @@ def _check_metric_binding_columns(org: Organization, res: ValidationResult) -> N
 # ---------------------------------------------------------------------------
 
 
-def _check_fk_type_compat(rel: Relationship, sa: SubjectArea, res: ValidationResult) -> None:
-    defined = _all_tables(sa)
+def _check_fk_type_compat(
+    rel: Relationship, res: ValidationResult, defined: dict[str, Table]
+) -> None:
     from_t = defined.get(rel.from_table)
     to_t = defined.get(rel.to_table)
     if not (from_t and to_t and rel.from_column and rel.to_column):
