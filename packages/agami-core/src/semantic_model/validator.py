@@ -124,6 +124,10 @@ def validate(org: Organization) -> ValidationResult:
     # doc's "defined once, TableRef'd from each subject area" pattern).
     org_tables = _org_tables(org)
     for sa in org.subject_areas:
+        # Build the area's {name: table} index once and share it across every check that needs it
+        # (entity mappings + each relationship's FK-type check), instead of rebuilding it per
+        # relationship — that per-rel rebuild was the O(R×T) cost this pass eliminates (ACE-046).
+        defined = _all_tables(sa)
         _check_subject_area_sizing(sa, res)
         _check_table_refs_resolve(sa, res, org_tables)
         _check_expose_column_groups(sa, res, org_tables)
@@ -131,9 +135,9 @@ def validate(org: Organization) -> ValidationResult:
         _check_default_filters_columns(sa, res)
         _check_value_transforms(sa, res)
         _check_choice_fields(sa, res)
-        _check_entity_mappings(sa, res)
+        _check_entity_mappings(sa, res, defined)
         for rel in sa.relationships:
-            _check_relationship(rel, sa, org, res, cross=False)
+            _check_relationship(rel, sa, org, res, cross=False, defined=defined)
 
     for rel in org.cross_subject_area_relationships:
         _check_cross_relationship(rel, org, res)
@@ -316,8 +320,9 @@ def _check_choice_fields(sa: SubjectArea, res: ValidationResult) -> None:
                     )
 
 
-def _check_entity_mappings(sa: SubjectArea, res: ValidationResult) -> None:
-    defined = _all_tables(sa)
+def _check_entity_mappings(
+    sa: SubjectArea, res: ValidationResult, defined: dict[str, Table]
+) -> None:
     for ent in sa.entities:
         for mp in ent.maps_to:
             table = defined.get(mp.table)
@@ -341,6 +346,7 @@ def _check_relationship(
     res: ValidationResult,
     *,
     cross: bool,
+    defined: dict[str, Table],
 ) -> None:
     # cardinality required (structural gate, check #17) — models enforces non-null,
     # re-assert the value domain here for a clear validator-level error too.
@@ -377,7 +383,7 @@ def _check_relationship(
         return  # user took explicit ownership; skip simple-form type check
 
     # FK type-compatibility on the simple form (Gap 3)
-    _check_fk_type_compat(rel, sa, res)
+    _check_fk_type_compat(rel, res, defined)
 
 
 def _check_cross_relationship(
@@ -398,8 +404,11 @@ def _check_cross_relationship(
             f"{rel.to_subject_area!r}",
         )
 
-    # trust-block parity + on: parse + cardinality (reuse intra checks)
-    _check_relationship(rel, sa_from or SubjectArea(name="<unknown>"), org, res, cross=True)
+    # trust-block parity + on: parse + cardinality (reuse intra checks). The FK-type check resolves
+    # against the FROM area's tables, exactly as before — the cross edge's to_table lives in another
+    # area, so it stays unresolved here (unchanged behaviour).
+    sa_for_rel = sa_from or SubjectArea(name="<unknown>")
+    _check_relationship(rel, sa_for_rel, org, res, cross=True, defined=_all_tables(sa_for_rel))
 
     # executable must match the endpoints' storage connections
     conn_from = _table_connection(sa_from, rel.from_table) if sa_from else None
@@ -583,8 +592,9 @@ def _check_metric_binding_columns(org: Organization, res: ValidationResult) -> N
 # ---------------------------------------------------------------------------
 
 
-def _check_fk_type_compat(rel: Relationship, sa: SubjectArea, res: ValidationResult) -> None:
-    defined = _all_tables(sa)
+def _check_fk_type_compat(
+    rel: Relationship, res: ValidationResult, defined: dict[str, Table]
+) -> None:
     from_t = defined.get(rel.from_table)
     to_t = defined.get(rel.to_table)
     if not (from_t and to_t and rel.from_column and rel.to_column):
