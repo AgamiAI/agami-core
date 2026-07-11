@@ -67,6 +67,28 @@ def test_sink_no_flag_when_result_is_within_cap(monkeypatch, capsys):
     assert out.err.strip() == ""  # not truncated → no flag
 
 
+def test_sink_exactly_cap_rows_is_complete_not_truncated(monkeypatch, capsys):
+    # The off-by-one boundary: a result of EXACTLY cap rows is complete — it must NOT flag truncation
+    # (only a (cap+1)th row does). Guards `len(rows) > cap` against a `>= cap` regression.
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "3")
+    cur = _FakeCur(1, 3)  # exactly cap rows
+    execute_sql._write_cursor_csv(cur)
+    out = capsys.readouterr()
+
+    assert len(out.out.strip().splitlines()) == 1 + 3  # header + all 3 rows written
+    assert out.err.strip() == ""  # exactly cap → NOT truncated
+
+
+def test_sink_empty_result_writes_header_only_no_flag(monkeypatch, capsys):
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "5")
+    cur = _FakeCur(2, 0)  # columns present, zero rows
+    execute_sql._write_cursor_csv(cur)
+    out = capsys.readouterr()
+
+    assert out.out.strip().splitlines() == ["c0,c1"]  # header only
+    assert out.err.strip() == ""  # no rows → no truncation flag
+
+
 def test_effective_cap_is_min_of_env_and_per_call(monkeypatch):
     monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "1000")
     assert execute_sql._resolve_row_cap() == 1000  # env only
@@ -152,6 +174,54 @@ def test_postgres_uses_a_server_side_named_cursor(monkeypatch, capsys):
     assert seen["name"] == "agami_bounded"     # server-side cursor (bounds transfer, not just writes)
     assert seen["sql"] == "SELECT n FROM t"    # SQL verbatim — no injected LIMIT
     assert seen["fetchmany"] == 3              # cap(2)+1
+
+
+def test_bigquery_bounds_and_flags_like_the_sink(monkeypatch, capsys):
+    # BigQuery has no DB-API cursor so it can't use _write_cursor_csv; it must apply the SAME cap +
+    # truncation flag itself. Mock the google client and drive a 10-row result at cap 4.
+    import types
+
+    class _Field:
+        def __init__(self, name):
+            self.name = name
+
+    class _Res:
+        schema = [_Field("n")]
+
+        def __init__(self, rows):
+            self._rows = rows
+
+        def __iter__(self):
+            return iter(self._rows)
+
+    class _Job:
+        def __init__(self, total):
+            self._total = total
+
+        def result(self, max_results=None):
+            k = self._total if max_results is None else min(self._total, max_results)
+            return _Res([[i] for i in range(k)])
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        def query(self, sql, **kw):
+            return _Job(10)  # 10 rows available
+
+    gcloud = types.ModuleType("google.cloud")
+    gcloud.bigquery = types.SimpleNamespace(Client=_Client, QueryJobConfig=lambda **k: object())
+    goauth = types.ModuleType("google.oauth2")
+    goauth.service_account = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "google.cloud", gcloud)
+    monkeypatch.setitem(sys.modules, "google.oauth2", goauth)
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "4")
+
+    rc = execute_sql._execute_bigquery({"project": "p"}, "SELECT n FROM t")
+    out = capsys.readouterr()
+    assert rc == 0
+    assert out.out.strip().splitlines() == ["n", "0", "1", "2", "3"]  # capped at 4, not all 10
+    assert json.loads(out.err.strip())["truncated"]["row_cap"] == 4
 
 
 def test_executor_truncated_parses_the_stderr_flag():

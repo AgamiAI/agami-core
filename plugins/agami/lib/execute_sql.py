@@ -524,22 +524,33 @@ def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
         except Exception:
             pass
 
+    cap = _resolve_row_cap()
     try:
         if job_config_kwargs:
             job_config = bigquery.QueryJobConfig(**job_config_kwargs)
             job = client.query(sql, job_config=job_config)
         else:
             job = client.query(sql)
-        results = job.result()  # waits for completion; raises on error
+        # BigQuery has no DB-API cursor, so it can't funnel through `_write_cursor_csv`; apply the
+        # same bounded-fetch cap here. `max_results=cap+1` bounds what the API returns (transfer),
+        # and the (cap+1)th row flags truncation — the never-silent guarantee holds for BigQuery too.
+        results = job.result(max_results=cap + 1)  # waits for completion; raises on error
     except Exception as e:
         return _err(f"BigQuery execution error: {e}", code=5)
 
-    # Stream rows to stdout as CSV. results.schema gives column metadata.
     writer = csv.writer(sys.stdout)
     if results.schema:
         writer.writerow([f.name for f in results.schema])
+        written = 0
+        truncated = False
         for row in results:
+            if written >= cap:
+                truncated = True
+                break
             writer.writerow([row[i] for i in range(len(results.schema))])
+            written += 1
+        if truncated:
+            _flag_truncated(cap)
 
     return 0
 
@@ -724,11 +735,18 @@ def _resolve_row_cap() -> int:
     return cap
 
 
+def _flag_truncated(cap: int) -> None:
+    """Signal a bounded-fetch truncation to the caller — a non-error `{"truncated": …}` marker on
+    stderr (distinct from the guards' `{"error": …}`), so a truncated result is never mistaken for a
+    complete one (ACE-038/044). Shared by every engine's materialization path."""
+    json.dump({"truncated": {"row_cap": cap}}, sys.stderr)
+    sys.stderr.write("\n")
+
+
 def _write_cursor_csv(cur: Any) -> None:
     """Stream at most the row cap to stdout as CSV. `fetchmany(cap + 1)` — never `fetchall` — so a
     huge result can't be buffered whole; the (cap+1)th row means the result was truncated, flagged
-    on stderr as a non-error `{"truncated": …}` signal the caller surfaces (a truncated result must
-    never be mistaken for a complete one). The SQL itself is untouched (no injected LIMIT)."""
+    on stderr. The SQL itself is untouched (no injected LIMIT)."""
     cap = _resolve_row_cap()
     writer = csv.writer(sys.stdout)
     if cur.description is not None:
@@ -737,8 +755,7 @@ def _write_cursor_csv(cur: Any) -> None:
         for row in rows[:cap]:
             writer.writerow(row)
         if len(rows) > cap:
-            json.dump({"truncated": {"row_cap": cap}}, sys.stderr)
-            sys.stderr.write("\n")
+            _flag_truncated(cap)
 
 
 def _hosted() -> bool:
