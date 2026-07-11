@@ -248,3 +248,14 @@ def test_enrichment_validation_work_is_linear_not_quadratic(monkeypatch):
     # End-of-run parity: the incrementally-cached verdict equals a from-scratch full validate.
     final = _org(*areas)
     assert _findings_tuple(v.validate(final, cache=cache)) == _findings_tuple(v.validate(final))
+
+
+def test_cache_is_bounded_across_many_distinct_models(monkeypatch):
+    # A long-lived process validating many DISTINCT models through one shared cache must not grow
+    # without bound: foreign-model areas are evicted past the cap, so size stays bounded — while the
+    # current model's areas are always retained (correctness = a miss just recomputes).
+    monkeypatch.setattr(v, "_CACHE_MAX", 20)
+    cache: dict = {}
+    for i in range(200):  # 200 distinct single-area models → would be 200 entries unbounded
+        v.validate(_org(_area(f"model{i:03d}")), cache=cache)
+    assert len(cache) <= 20  # capped, not linear in the number of models seen

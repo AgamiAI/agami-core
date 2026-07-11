@@ -118,7 +118,13 @@ class ValidationResult:
 # reads — the area's own content AND the org-wide table registry. An enrichment run passes one of
 # these across edits so only the edited area's rules re-run; a normal `validate(org)` (cache=None)
 # is unchanged. Because the key pins every input, a cache hit is byte-identical to recomputing.
-ValidationCache = dict
+# Key = (area name, area content sha, org-table-registry sha) → that area's findings.
+ValidationCache = dict[tuple[str, str, str], "list[Finding]"]
+
+# Hard ceiling so a long-lived process (e.g. the HTTP server) that validates many distinct models
+# through one shared cache can't grow it without bound. Content-addressed, so evicting an entry only
+# costs a cold recompute; we evict foreign-model areas first and never the current model's.
+_CACHE_MAX = 1024
 
 
 def _sig(obj) -> str:
@@ -139,6 +145,19 @@ def _org_tables_sig(org_tables: dict[str, Table]) -> str:
         h.update(org_tables[name].model_dump_json().encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
+
+
+def _bound_cache(cache: ValidationCache, org: Organization) -> None:
+    """Cap total cache size for long-lived processes. Evict oldest entries for areas NOT in the
+    current model first (insertion order); never evict the current model's areas, so a single large
+    model doesn't thrash. Only triggers well past any real model's area count."""
+    if len(cache) <= _CACHE_MAX:
+        return
+    current = {sa.name for sa in org.subject_areas}
+    for k in [k for k in cache if k[0] not in current]:
+        if len(cache) <= _CACHE_MAX:
+            break
+        del cache[k]
 
 
 def _validate_area(
@@ -188,11 +207,12 @@ def validate(org: Organization, *, cache: "ValidationCache | None" = None) -> Va
             findings = cache.get(key)
             if findings is None:
                 findings = _validate_area(sa, org, org_tables)
-                # Keep the cache bounded to ~one entry per area: drop this area's entries at prior
-                # content/registry signatures before storing the current one.
+                # Drop this area's entries at prior content/registry signatures before storing the
+                # current one — keeps steady-state to ~one entry per area within a model.
                 for stale in [k for k in cache if k[0] == sa.name and k != key]:
                     del cache[stale]
                 cache[key] = findings
+                _bound_cache(cache, org)
         else:
             findings = _validate_area(sa, org, org_tables)
         res.findings.extend(findings)

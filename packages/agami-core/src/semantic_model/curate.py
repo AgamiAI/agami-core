@@ -38,8 +38,9 @@ from .models import CrossSubjectAreaRelationship, Entity, Metric, Organization, 
 # Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
 # model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
 # time — only re-runs the changed area's rules instead of the whole model on every edit. Safe to
-# share process-wide: entries are content-addressed, so a hit is always a byte-identical result.
-_VALIDATION_CACHE: dict = {}
+# share process-wide: entries are content-addressed, so a hit is always a byte-identical result;
+# `validate` self-bounds its size.
+_VALIDATION_CACHE: V.ValidationCache = {}
 
 # ---------------------------------------------------------------------------
 # Read views
