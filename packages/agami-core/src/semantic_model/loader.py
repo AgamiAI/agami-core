@@ -282,7 +282,7 @@ def _load_cross_metrics(root: Path, org_doc: dict) -> list[Metric]:
 @dataclass(frozen=True)
 class TableIndex:
     """O(1) name→Table lookup that reproduces `_find_table` EXACTLY, so the schema hot path stops
-    linear-scanning the whole model per table (ACE-047, audit P12). Match rule: a defined table's
+    linear-scanning the whole model per table (ACE-047, scalability-audit finding P12). Match rule: a defined table's
     name equals the query OR its bare form; on a name clash the first table in scan order wins;
     area scoping and the TableRef multi-area fallback are preserved. Built once from the cached
     model and threaded through get_table_context; byte-identical to the scan it replaces."""

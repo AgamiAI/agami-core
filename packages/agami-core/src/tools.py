@@ -715,7 +715,8 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
 
     if requested:
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
-        # O(1) name→table index so this resolves each table by lookup, not a per-table rescan (P12).
+        # O(1) name→table index so this resolves each table by lookup, not a per-table rescan
+        # (scalability-audit finding P12).
         wanted = [str(n).split(".")[-1] for n in requested]
         result: dict[str, Any] = {
             "datasource": profile,
@@ -735,8 +736,9 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         if mode not in _SCHEMA_MODE_DOWNGRADE:
             mode = "summary"
         # Only full mode assembles the per-table `tables` block (the sole index consumer), and the
-        # loop only ever DOWNGRADES from full — so build the index iff we start at full, else the
-        # index-mode wide-model path (the one this optimizes) would pay a wasted O(tables) build.
+        # loop only ever DOWNGRADES from full — so build the index iff we start at full, else a
+        # wide model that starts in `mode="index"` (the case this optimizes) would pay a wasted
+        # O(tables) index build it never uses.
         index = L.build_table_index(org) if mode == "full" else None
         truncated = False
         while True:
