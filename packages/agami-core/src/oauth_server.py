@@ -26,12 +26,13 @@ from uuid import uuid4
 
 import jwt
 import ui
+from async_offload import run_blocking
 from ports import Principal
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from store import Store
 from user_store import (
-    authenticate,
+    authenticate_with_own_store,
     bind_oidc_subject,
     claim_pending_oidc,
     create_user,
@@ -323,7 +324,12 @@ async def authorize(request: Request) -> Response:
         if providers:
             return _login_form(form, providers=providers)
 
-        principal = authenticate(store, form.get("username", ""), form.get("password", ""))
+        # The whole credential check (DB reads + the ~50-100 ms argon2 verify) runs off the event loop so a
+        # login never freezes concurrent requests (ACE-048). It opens its OWN Store in the worker thread — the
+        # handler's loop-thread `store` (used above and below) is never shared across threads.
+        principal = await run_blocking(
+            authenticate_with_own_store, form.get("username", ""), form.get("password", "")
+        )
         if principal is None:
             return _login_form(form, error="Invalid username or password.", providers=providers)
 

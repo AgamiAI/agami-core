@@ -21,6 +21,7 @@ from urllib.parse import quote
 import jwt
 import ui
 import user_store
+from async_offload import run_blocking
 
 # Reuse the OAuth provider's shared HS256 secret accessor + store opener + the admin OIDC-start handler
 # so the admin surface signs with the same key, reads the same datastore, and runs the same hardened
@@ -235,7 +236,7 @@ def _call_card(c: dict[str, Any]) -> str:
         body = ""
     ds = ui.esc(c.get("datasource") or "—")
     lat = (str(c["execution_ms"]) + " ms") if c.get("execution_ms") is not None else ""
-    rows_bit = f' · {c["row_count"]} rows' if c.get("row_count") is not None else ""
+    rows_bit = f" · {c['row_count']} rows" if c.get("row_count") is not None else ""
     return (
         '<div style="border-top:1px solid var(--line);padding:9px 0 11px">'
         f"{head}{body}"
@@ -569,16 +570,12 @@ async def admin_login(request: Request) -> Response:
     # Email is the identity: normalize the typed address (trim + lowercase) so login is
     # case-insensitive and matches the normalized username the seed stored.
     typed = form.get("username", "").strip().lower()
-    store = _open_store()
-    try:
-        principal = (
-            user_store.authenticate(store, typed, form.get("password", ""))
-            if store is not None
-            else None
-        )
-    finally:
-        if store is not None:
-            store.close()
+    # The whole credential check (DB reads + the ~50-100 ms argon2 verify) runs off the event loop in a worker
+    # thread with its OWN Store, so an admin login never freezes concurrent requests and no loop-thread Store is
+    # shared across threads (ACE-048). No datastore configured → None → the generic "invalid" re-render below.
+    principal = await run_blocking(
+        user_store.authenticate_with_own_store, typed, form.get("password", "")
+    )
     if principal is None:
         # Same generic message for wrong password, unknown user, or disabled — no enumeration oracle.
         # Keep the social button on the re-render so a failed password attempt doesn't hide it.
