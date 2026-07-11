@@ -25,3 +25,17 @@ def _reset_org_cache():
     yield
     tools._ORG_CACHE.clear()
     tools._current_org_ctx.set(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_validation_cache():
+    """The incremental-curation-validation cache (ACE-046) is module-global too; clear it around
+    each test so one test's cached per-area findings can't bleed into the next."""
+    try:
+        from semantic_model import curate
+    except Exception:
+        yield
+        return
+    curate._VALIDATION_CACHE.clear()
+    yield
+    curate._VALIDATION_CACHE.clear()

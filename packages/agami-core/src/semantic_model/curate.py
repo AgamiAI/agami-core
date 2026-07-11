@@ -35,6 +35,12 @@ from .loader import _read_yaml as _load
 from .loader import load_organization
 from .models import CrossSubjectAreaRelationship, Entity, Metric, Organization, Relationship
 
+# Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
+# model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
+# time — only re-runs the changed area's rules instead of the whole model on every edit. Safe to
+# share process-wide: entries are content-addressed, so a hit is always a byte-identical result.
+_VALIDATION_CACHE: dict = {}
+
 # ---------------------------------------------------------------------------
 # Read views
 # ---------------------------------------------------------------------------
@@ -434,7 +440,7 @@ def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) ->
         odoc.pop("key_terminology", None)
     _dump(orgp, odoc)
     try:
-        vres = V.validate(load_organization(root, include_rejected=True))
+        vres = V.validate(load_organization(root, include_rejected=True), cache=_VALIDATION_CACHE)
         res.validated = vres.ok
         if not vres.ok:
             res.errors = vres.errors
@@ -472,7 +478,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
     # validate the whole model after the batch
     try:
         org = load_organization(root, include_rejected=True)
-        vres = V.validate(org)
+        vres = V.validate(org, cache=_VALIDATION_CACHE)
         res.validated = vres.ok
         if not vres.ok:
             res.errors = vres.errors
@@ -774,7 +780,7 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
 
     # validate the whole model; revert the batch on any failure
     try:
-        vres = V.validate(load_organization(root, include_rejected=True))
+        vres = V.validate(load_organization(root, include_rejected=True), cache=_VALIDATION_CACHE)
         res.validated = vres.ok
         if not vres.ok:
             res.errors = vres.errors
@@ -842,7 +848,7 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
     if not res.applied:
         return res
     try:
-        vres = V.validate(load_organization(root, include_rejected=True))
+        vres = V.validate(load_organization(root, include_rejected=True), cache=_VALIDATION_CACHE)
         res.validated = vres.ok
         if not vres.ok:
             res.errors = vres.errors

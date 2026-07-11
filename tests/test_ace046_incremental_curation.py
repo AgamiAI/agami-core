@@ -139,3 +139,80 @@ def test_snapshot_hash_and_manifest_are_byte_identical(tmp_path):
     manifest = json.loads((r / ".snapshots" / digest / "manifest.json").read_text())
     assert manifest["model_hash"] == exp_hash
     assert manifest["files"] == exp_manifest  # per-file shas byte-identical
+
+
+# ------------------------------------------------------------------ incremental validation (cache)
+
+
+def _area(name: str, *, ftype: str = "integer", extra_rels: int = 0) -> m.SubjectArea:
+    """An area with two uniquely-named tables (so table names don't collide across areas) and a
+    baseline FK relationship; `ftype` drives the FK type-compat verdict, `extra_rels` grows the
+    area's content without touching its tables."""
+    ta, tb = f"{name}_a", f"{name}_b"
+    a = m.Table(name=ta, schema="s", storage_connection="c", grain=["x"], description="d",
+                columns=[m.Column(name="x", type=ftype)])
+    b = m.Table(name=tb, schema="s", storage_connection="c", grain=["y"], description="d",
+                columns=[m.Column(name="y", type="integer")])
+    rels = [m.Relationship(from_table=ta, to_table=tb, from_column="x", to_column="y",
+                           relationship="many_to_one", confidence="inferred")
+            for _ in range(1 + extra_rels)]
+    refs = [m.TableRef(storage_connection="c", schema="s", table=ta),
+            m.TableRef(storage_connection="c", schema="s", table=tb)]
+    return m.SubjectArea(name=name, tables=refs, tables_defined=[a, b], relationships=rels)
+
+
+def _findings_tuple(res):
+    return [(f.severity, f.code, f.message) for f in res.findings]
+
+
+def test_cached_validate_is_identical_to_full_validate():
+    # A 3-area model, one area carrying an FK type mismatch → a real finding. The cached path must
+    # produce the exact same findings (same order, severity, code, message) as a full validate.
+    org = _org(_area("alpha"), _area("beta", ftype="string"), _area("gamma"))
+    full = v.validate(org)
+    cached = v.validate(org, cache={})
+    assert _findings_tuple(cached) == _findings_tuple(full)
+    assert "fk_type_mismatch" in {f.code for f in cached.findings}
+
+
+def test_only_the_changed_area_revalidates(monkeypatch):
+    calls: list[str] = []
+    real = v._validate_area
+
+    def spy(sa, org, org_tables):
+        calls.append(sa.name)
+        return real(sa, org, org_tables)
+
+    monkeypatch.setattr(v, "_validate_area", spy)
+
+    cache: dict = {}
+    org1 = _org(_area("alpha"), _area("beta"), _area("gamma"))
+    v.validate(org1, cache=cache)
+    assert calls == ["alpha", "beta", "gamma"]  # cold cache → all three run
+
+    # Same alpha + gamma content, beta grows by one relationship (no table change).
+    calls.clear()
+    org2 = _org(_area("alpha"), _area("beta", extra_rels=1), _area("gamma"))
+    res2 = v.validate(org2, cache=cache)
+    assert calls == ["beta"]  # only the edited area re-runs; alpha + gamma are cache hits
+    assert _findings_tuple(res2) == _findings_tuple(v.validate(org2))  # still correct
+
+
+def test_table_change_forces_full_revalidate(monkeypatch):
+    calls: list[str] = []
+    real = v._validate_area
+    monkeypatch.setattr(v, "_validate_area",
+                        lambda sa, org, ot: (calls.append(sa.name), real(sa, org, ot))[1])
+
+    cache: dict = {}
+    org1 = _org(_area("alpha"), _area("beta"), _area("gamma"))
+    v.validate(org1, cache=cache)
+    calls.clear()
+
+    # Add a column to alpha's table → the org-wide table registry changes → every area's key misses,
+    # so all three re-run even though beta/gamma are untouched (conservative, verdict-preserving).
+    org2 = _org(_area("alpha"), _area("beta"), _area("gamma"))
+    org2.subject_areas[0].tables_defined[0].columns.append(m.Column(name="z", type="integer"))
+    res2 = v.validate(org2, cache=cache)
+    assert sorted(calls) == ["alpha", "beta", "gamma"]
+    assert _findings_tuple(res2) == _findings_tuple(v.validate(org2))
