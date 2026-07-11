@@ -152,3 +152,39 @@ def test_postgres_uses_a_server_side_named_cursor(monkeypatch, capsys):
     assert seen["name"] == "agami_bounded"     # server-side cursor (bounds transfer, not just writes)
     assert seen["sql"] == "SELECT n FROM t"    # SQL verbatim — no injected LIMIT
     assert seen["fetchmany"] == 3              # cap(2)+1
+
+
+def test_executor_truncated_parses_the_stderr_flag():
+    import tools
+
+    assert tools._executor_truncated('{"truncated": {"row_cap": 1000}}') is True
+    # mixed with other notices on stderr
+    assert tools._executor_truncated('[agami] applied default_filters: x\n{"truncated": {"row_cap": 5}}') is True
+    assert tools._executor_truncated('[agami] applied default_filters: x') is False
+    assert tools._executor_truncated("") is False
+    assert tools._executor_truncated(None) is False
+    assert tools._executor_truncated('{"error": {"kind": "permission"}}') is False  # not a truncation
+
+
+def test_tool_execute_sql_passes_max_rows_and_surfaces_truncation(monkeypatch):
+    import tools
+
+    captured: dict = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = "n\n0\n1\n"
+        stderr = '{"truncated": {"row_cap": 2}}'
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(tools, "_resolve_units", lambda *a: {})
+    monkeypatch.setattr(tools, "_resolve_receipt", lambda *a: None)
+
+    resp = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme", "max_rows": 2}))
+    cmd = captured["cmd"]
+    assert "--max-rows" in cmd and cmd[cmd.index("--max-rows") + 1] == "2"  # capped at the source
+    assert resp["truncated"] is True  # executor's flag surfaced into the response

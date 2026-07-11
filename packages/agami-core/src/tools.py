@@ -847,6 +847,20 @@ def _classify_exit(code: int) -> str:
     }.get(code, "other")
 
 
+def _executor_truncated(stderr: str | None) -> bool:
+    """True if execute_sql flagged a bounded-fetch truncation (ACE-038/044). The executor emits a
+    non-error `{"truncated": {"row_cap": N}}` line on stderr alongside any other notices; scan for it."""
+    for line in (stderr or "").splitlines():
+        line = line.strip()
+        if line.startswith("{") and '"truncated"' in line:
+            try:
+                if isinstance(json.loads(line).get("truncated"), dict):
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
 def tool_execute_sql(args: dict[str, Any]) -> str:
     """Local analog of Ask Agami `execute_sql`: run a read-only SELECT locally.
 
@@ -886,6 +900,10 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     cmd = [sys.executable, "-m", "execute_sql", "--profile", profile, "--sql", sql]
     if args.get("area"):
         cmd += ["--area", str(args["area"])]
+    if max_rows is not None:
+        # ACE-044: cap at the source so the executor's bounded fetch (fetchmany(cap+1)) never
+        # materializes the whole result — not a client-side trim after the fact.
+        cmd += ["--max-rows", str(max_rows)]
 
     started = time.monotonic()
     try:
@@ -919,7 +937,9 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     rows_all = list(reader)
     columns = rows_all[0] if rows_all else []
     data_rows = rows_all[1:] if len(rows_all) > 1 else []
-    truncated = False
+    # The executor caps at the source now (ACE-038/044) and flags it on stderr; surface that so a
+    # truncated result is never presented as complete. Keep the client-side trim as a backstop.
+    truncated = _executor_truncated(proc.stderr)
     if max_rows is not None and len(data_rows) > max_rows:
         data_rows = data_rows[:max_rows]
         truncated = True
