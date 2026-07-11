@@ -46,6 +46,7 @@ from tools import (
     SERVER_INSTRUCTIONS,
     SERVER_NAME,
     TOOLS,
+    _current_org_ctx,
     bootstrap_paths,
     record_tool_call,
     server_version,
@@ -71,6 +72,15 @@ def _actor_from_scope(scope: dict, auth: AuthProvider) -> str | None:
             revalidated = auth.validate_token(value[7:].strip().decode("latin-1"))
             return getattr(revalidated, "subject", None) if revalidated is not None else None
     return None
+
+
+def _org_id_from_scope(scope: dict) -> str | None:
+    """The resolved org id for this /mcp request — the org the auth middleware attached to the ASGI scope
+    state (`request.state.org`). None under presence auth / single-tenant, where the tool layer falls back
+    to AGAMI_ORG_ID / 'local'. Keeps the per-process model cache tenant-safe (ACE-045): cache entries key on
+    this, so under a multi-tenant resolver one org never gets another's cached model."""
+    org = (scope.get("state") or {}).get("org")
+    return getattr(org, "id", None)
 
 
 # The brand assets (logo, provider icons, favicon) served at /static — packaged alongside this module.
@@ -362,15 +372,17 @@ def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None
     )
 
     async def handle_mcp(scope, receive, send):
-        # Set the actor for this request's tool calls, then run the MCP dispatch in the same task so the
-        # contextvar reaches `_call_tool`. Prefer the principal the middleware validated (on scope state);
-        # fall back to re-validating the bearer from the scope headers if it didn't propagate.
+        # Set the actor + resolved org for this request's tool calls, then run the MCP dispatch in the same
+        # task so the contextvars reach `_call_tool` and the per-process model cache. Prefer what the auth
+        # middleware attached to the scope state; the actor falls back to re-validating the bearer.
         actor = _actor_from_scope(scope, auth_provider)
         token = _actor_ctx.set(actor)
+        org_token = _current_org_ctx.set(_org_id_from_scope(scope))
         try:
             await session_manager.handle_request(scope, receive, send)
         finally:
             _actor_ctx.reset(token)
+            _current_org_ctx.reset(org_token)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette):

@@ -58,6 +58,57 @@ from .models import (
 # exists in <table>.<column>. Injected so runtime stays DB-agnostic.
 Prober = Callable[[str, str, str], bool]
 
+
+# ---------------------------------------------------------------------------
+# Per-invocation guard context (ACE-045)
+#
+# The _model_safety battery (execute_sql.py) runs ~6 guards that EACH re-parse the SQL
+# (sqlglot ×6) and rebuild their model index from scratch. `GuardContext` does that
+# shared work ONCE — the SQL parsed once, each index built once — and is threaded through
+# the guards via an optional `ctx=`. A guard given `ctx` returns the SAME verdict as one
+# that builds its own (behaviour-preserving); `ctx=None` keeps the standalone callers
+# (e.g. cli.py) working unchanged. `tree` is None when the SQL doesn't parse — guards then
+# degrade to allow, exactly as the inline parse-and-except did before.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GuardContext:
+    sql: str
+    tree: "exp.Expression | None"
+    column_index: "dict[str, dict[str, Column]]"
+    cardinality_index: "list[Relationship]"
+    sensitive_by_table: "tuple[dict[str, set[str]], set[str]]"
+    model_table_index: "dict[str, tuple]"
+
+
+def _parse_sql(sql: str) -> "exp.Expression | None":
+    """Parse SQL for the guard battery; None if sqlglot is unavailable or the SQL does not
+    parse (guards degrade to allow). Centralized so a GuardContext parses exactly once."""
+    if not _HAVE_SQLGLOT:
+        return None
+    try:
+        return sqlglot.parse_one(sql, error_level="ignore")
+    except Exception:
+        return None
+
+
+def build_guard_context(sql: str, org: Organization) -> "GuardContext | None":
+    """Parse `sql` once and build each guard index once, so the _model_safety battery shares
+    them instead of every guard redoing the work (audit P2 / ACE-045). Returns None when sqlglot
+    is unavailable: every guard then short-circuits to allow before it touches the context, so
+    building the indices would be pure wasted work in that fallback path."""
+    if not _HAVE_SQLGLOT:
+        return None
+    return GuardContext(
+        sql=sql,
+        tree=_parse_sql(sql),
+        column_index=_column_index(org),
+        cardinality_index=_cardinality_index(org),
+        sensitive_by_table=_sensitive_by_table(org),
+        model_table_index=_model_table_index(org),
+    )
+
 # Ambiguity threshold — "ask, don't guess" when top-two are within this delta.
 AMBIGUITY_DELTA = 0.15
 
@@ -447,19 +498,26 @@ def _output_selects(node: "exp.Expression") -> list["exp.Select"]:
     return []
 
 
-def check_sensitive_projection(sql: str, org: Organization) -> SensitiveCheckResult:
+def check_sensitive_projection(sql: str, org: Organization,
+                               ctx: "GuardContext | None" = None) -> SensitiveCheckResult:
     """Refuse a query that PROJECTS a `sensitive` column's raw values; allow the
     column in COUNT, filters, GROUP BY, and joins. Degrades to allow when sqlglot
-    is unavailable or the SQL doesn't parse (same posture as the fan/chasm pass)."""
+    is unavailable or the SQL doesn't parse (same posture as the fan/chasm pass).
+
+    `ctx` (ACE-045): reuse the once-parsed tree + once-built sensitive index instead of
+    redoing both; `ctx=None` keeps the standalone path byte-identical."""
     if not _HAVE_SQLGLOT:
         return SensitiveCheckResult("allow")
-    by_table, allnames = _sensitive_by_table(org)
+    by_table, allnames = ctx.sensitive_by_table if ctx is not None else _sensitive_by_table(org)
     if not allnames:
         return SensitiveCheckResult("allow")
-    try:
-        tree = sqlglot.parse_one(sql, error_level="ignore")
-    except Exception:
-        return SensitiveCheckResult("allow")
+    if ctx is not None:
+        tree = ctx.tree
+    else:
+        try:
+            tree = sqlglot.parse_one(sql, error_level="ignore")
+        except Exception:
+            return SensitiveCheckResult("allow")
     # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not
     # exp.Select — gate on "contains a SELECT" and scan every OUTPUT-bearing arm, else
     # `… UNION SELECT ssn FROM customers` would project a sensitive column past this gate.
@@ -528,7 +586,8 @@ class TableScopeResult:
                 "reason": self.reason, "suggestion": self.suggestion}
 
 
-def check_table_scope(sql: str, org: Organization) -> TableScopeResult:
+def check_table_scope(sql: str, org: Organization,
+                      ctx: "GuardContext | None" = None) -> TableScopeResult:
     """Refuse a query that references a table not declared in the semantic model.
 
     Only *physical* table references count: CTE names (defined by WITH) and
@@ -545,13 +604,16 @@ def check_table_scope(sql: str, org: Organization) -> TableScopeResult:
     """
     if not _HAVE_SQLGLOT:
         return TableScopeResult("allow")
-    allow = {name.lower() for name in _model_table_index(org)}
+    allow = {name.lower() for name in (ctx.model_table_index if ctx is not None else _model_table_index(org))}
     if not allow:
         return TableScopeResult("allow")
-    try:
-        tree = sqlglot.parse_one(sql, error_level="ignore")
-    except Exception:
-        return TableScopeResult("allow")
+    if ctx is not None:
+        tree = ctx.tree
+    else:
+        try:
+            tree = sqlglot.parse_one(sql, error_level="ignore")
+        except Exception:
+            return TableScopeResult("allow")
     # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.Union, not exp.Select,
     # so gate on "contains a SELECT" rather than "is a SELECT" — otherwise every
     # set-operation arm would bypass the guard. A non-SELECT statement has no SELECT
@@ -603,7 +665,7 @@ class StarCheckResult:
         return {"action": self.action, "reason": self.reason, "suggestion": self.suggestion}
 
 
-def check_no_select_star(sql: str) -> StarCheckResult:
+def check_no_select_star(sql: str, ctx: "GuardContext | None" = None) -> StarCheckResult:
     """Refuse a query whose projection list contains `*` or `t.*`.
 
     A star defeats column-level scoping (an undeclared column hides behind it) and
@@ -618,10 +680,13 @@ def check_no_select_star(sql: str) -> StarCheckResult:
     """
     if not _HAVE_SQLGLOT:
         return StarCheckResult("allow")
-    try:
-        tree = sqlglot.parse_one(sql, error_level="ignore")
-    except Exception:
-        return StarCheckResult("allow")
+    if ctx is not None:
+        tree = ctx.tree
+    else:
+        try:
+            tree = sqlglot.parse_one(sql, error_level="ignore")
+        except Exception:
+            return StarCheckResult("allow")
     if tree is None or tree.find(exp.Select) is None:
         return StarCheckResult("allow")
     for select in tree.find_all(exp.Select):
@@ -648,7 +713,8 @@ class ColumnScopeResult:
                 "reason": self.reason, "suggestion": self.suggestion}
 
 
-def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
+def check_column_scope(sql: str, org: Organization,
+                       ctx: "GuardContext | None" = None) -> ColumnScopeResult:
     """Refuse a query that references a column not declared on the table it binds to.
 
     Strict where a column visibly binds to a declared physical table — qualified by
@@ -667,13 +733,16 @@ def check_column_scope(sql: str, org: Organization) -> ColumnScopeResult:
     """
     if not _HAVE_SQLGLOT:
         return ColumnScopeResult("allow")
-    colidx = _column_index(org)
+    colidx = ctx.column_index if ctx is not None else _column_index(org)
     if not colidx:
         return ColumnScopeResult("allow")
-    try:
-        tree = sqlglot.parse_one(sql, error_level="ignore")
-    except Exception:
-        return ColumnScopeResult("allow")
+    if ctx is not None:
+        tree = ctx.tree
+    else:
+        try:
+            tree = sqlglot.parse_one(sql, error_level="ignore")
+        except Exception:
+            return ColumnScopeResult("allow")
     if tree is None or tree.find(exp.Select) is None:
         return ColumnScopeResult("allow")
 
@@ -812,7 +881,8 @@ def _many_side_facing_one(rels: list[Relationship], table: str, dim: str) -> boo
     return False
 
 
-def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
+def pre_flight_check(sql: str, org: Organization,
+                     ctx: "GuardContext | None" = None) -> PreFlightResult:
     """Detect fan-trap / chasm-trap and decide rewrite-vs-refuse-vs-allow.
 
     A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not exp.Select;
@@ -822,17 +892,17 @@ def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
     unavailable, the SQL doesn't parse, or it contains no SELECT."""
     if not _HAVE_SQLGLOT:
         return PreFlightResult(None, "allow", sql, reason="sqlglot unavailable; skipped")
-    try:
-        tree = sqlglot.parse_one(sql, error_level="ignore")
-    except Exception as e:
-        return PreFlightResult(None, "allow", sql, reason=f"unparseable; skipped ({e})")
+    # Parse via the same centralized helper the ctx path used (ACE-045), so a ctx and a non-ctx
+    # call are byte-identical: _parse_sql swallows an unparseable statement to None exactly as a
+    # prebuilt ctx.tree would be None, and both then report the one "no SELECT; skipped" reason.
+    tree = ctx.tree if ctx is not None else _parse_sql(sql)
     if tree is None or tree.find(exp.Select) is None:
         return PreFlightResult(None, "allow", sql, reason="no SELECT; skipped")
     if isinstance(tree, exp.Select):
-        return _preflight_select(tree, org, sql, allow_rewrite=True)
+        return _preflight_select(tree, org, sql, allow_rewrite=True, ctx=ctx)
     # Set operation: analyze each arm; a trap in any arm inflates that arm's aggregate.
     for arm in _output_selects(tree):
-        res = _preflight_select(arm, org, arm.sql(), allow_rewrite=False)
+        res = _preflight_select(arm, org, arm.sql(), allow_rewrite=False, ctx=ctx)
         if res.risk and res.action == "refuse":
             # tie the arm's diagnosis back to the full set-operation query
             return PreFlightResult(res.risk, "refuse", sql, reason=res.reason,
@@ -840,11 +910,15 @@ def pre_flight_check(sql: str, org: Organization) -> PreFlightResult:
     return PreFlightResult(None, "allow", sql, reason="no fan/chasm or aggregation issue in any arm")
 
 
-def _preflight_select(tree: "exp.Select", org: Organization, sql: str, allow_rewrite: bool) -> PreFlightResult:
+def _preflight_select(tree: "exp.Select", org: Organization, sql: str, allow_rewrite: bool,
+                      ctx: "GuardContext | None" = None) -> PreFlightResult:
     """Fan/chasm + aggregation-semantics analysis of a SINGLE SELECT. `sql` is that
     select's own text (used for the join rewrite + messages). When `allow_rewrite` is
-    False (a set-operation arm), a rewriteable fan trap is refused, not rewritten."""
-    rels = _cardinality_index(org)
+    False (a set-operation arm), a rewriteable fan trap is refused, not rewritten.
+
+    `ctx` supplies the shared cardinality/column indices (ACE-045); `tree` is always the
+    caller's own SELECT (a set-op arm ≠ `ctx.tree`), so only the indices come from `ctx`."""
+    rels = ctx.cardinality_index if ctx is not None else _cardinality_index(org)
     tables_in_scope = _tables_in_scope(tree)  # alias -> table
     table_set = set(tables_in_scope.values())
 
@@ -934,7 +1008,7 @@ def _preflight_select(tree: "exp.Select", org: Organization, sql: str, allow_rew
     # No structural (join) trap. Now the SEMANTIC checks the fan/chasm detector is
     # blind to (scorecard #4): aggregation-class violations (#2) and semi-additive
     # rollups over time (#3) — these need NO join, so cardinality analysis can't see them.
-    semantic = _check_aggregation_semantics(tree, org, tables_in_scope, sql)
+    semantic = _check_aggregation_semantics(tree, org, tables_in_scope, sql, ctx=ctx)
     if semantic is not None:
         return semantic
 
@@ -1028,9 +1102,10 @@ def _groups_by_time(tree: "exp.Select", scope: dict[str, str],
 
 
 def _check_aggregation_semantics(
-    tree: "exp.Select", org: Organization, scope: dict[str, str], sql: str
+    tree: "exp.Select", org: Organization, scope: dict[str, str], sql: str,
+    ctx: "GuardContext | None" = None,
 ) -> Optional[PreFlightResult]:
-    colidx = _column_index(org)
+    colidx = ctx.column_index if ctx is not None else _column_index(org)
 
     # --- #2: aggregation-class violations (SUM of a rate/id, AVG of an id) ---
     for select_expr in tree.expressions:
@@ -1428,6 +1503,7 @@ def apply_default_filters(
     *,
     area: Optional[str] = None,
     params: Optional[dict[str, str]] = None,
+    ctx: "GuardContext | None" = None,
 ) -> tuple[str, list[str]]:
     """Conservatively AND each in-scope table's default_filters into the SQL's WHERE.
 
@@ -1443,10 +1519,16 @@ def apply_default_filters(
     params = params or {}
     if not _HAVE_SQLGLOT:
         return sql, []
-    try:
-        tree = sqlglot.parse_one(sql, error_level="ignore")
-    except Exception:
-        return sql, []
+    if ctx is not None:
+        # apply_default_filters MUTATES its tree to inject WHEREs; work on a COPY so the
+        # shared ctx.tree the read-only guards used stays pristine (ACE-045). ctx must be
+        # built from this same `sql`, which _model_safety guarantees.
+        tree = ctx.tree.copy() if ctx.tree is not None else None
+    else:
+        try:
+            tree = sqlglot.parse_one(sql, error_level="ignore")
+        except Exception:
+            return sql, []
     if not isinstance(tree, exp.Select):
         return sql, []
 

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -240,7 +241,7 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
     model deps (pydantic/sqlglot) aren't installed — execute_sql stays pure-stdlib;
     numbers still format exactly via units.py, just without a currency symbol."""
     try:
-        org = _load_org(profile)
+        org = get_cached_org(profile)
         from semantic_model import runtime as RT
 
         return RT.resolve_result_units(org, sql)
@@ -272,6 +273,47 @@ def _model_version(profile: str) -> str | None:
         return None
 
 
+# The org id for the current request's tool calls (ACE-045). The HTTP server sets this per request from
+# the OrgResolver-resolved org; unset (stdio / single-tenant) it falls back to AGAMI_ORG_ID / "local".
+_current_org_ctx: ContextVar[str | None] = ContextVar("agami_current_org_id", default=None)
+
+
+def _current_org_id() -> str:
+    """The org id to scope this process's model cache by: the request's resolved org when the HTTP server
+    set it (per-request under a multi-tenant resolver), else AGAMI_ORG_ID / 'local' (single-tenant / stdio)."""
+    return _current_org_ctx.get() or os.environ.get("AGAMI_ORG_ID") or "local"
+
+
+# Per-process semantic-model cache (ACE-045). The long-lived server loads the whole model 2-3x per query
+# (_resolve_units + _resolve_receipt) and re-loads it every query; caching serves it warm across queries and
+# users. Keyed (org_id, datasource, model_version): org-scoped so a multi-tenant server never serves one org's
+# model to another, and invalidated when the model version bumps. The execute_sql subprocess is a fresh process
+# per query and does NOT share this (its win is the Slice-1 GuardContext, not a cross-query cache).
+_ORG_CACHE: dict[tuple[str, str, "str | None"], Any] = {}
+
+
+def get_cached_org(profile: str):
+    """Load the semantic model for `profile`, cached per process and keyed (org, datasource, version).
+    Reuses one Organization across the loads within a query AND across queries, until the model version
+    changes; a cache miss falls back to a fresh `_load_org`."""
+    version = _model_version(profile)  # cheap: one DB row / dir listing, not a full model load
+    if version is None:
+        # No version to detect a model change by (e.g. file mode with no snapshot) — don't cache,
+        # so we can never serve a stale model. The DB-backed server always has a version.
+        return _load_org(profile)
+    org_id = _current_org_id()
+    key = (org_id, profile, version)
+    cached = _ORG_CACHE.get(key)
+    if cached is not None:
+        return cached
+    org = _load_org(profile)
+    # Drop any stale (org, datasource) entry at a previous version so the cache stays bounded.
+    for stale in [k for k in _ORG_CACHE if k[0] == org_id and k[1] == profile and k != key]:
+        del _ORG_CACHE[stale]
+    _ORG_CACHE[key] = org
+    return org
+
+
 def _domain_memory(profile: str) -> tuple[str, str | None]:
     """(ORGANIZATION.md text, USER_MEMORY.md text) for the domain-context block — from the DB when
     AGAMI_DB_URL is set (no file read at runtime), else from disk."""
@@ -298,7 +340,7 @@ def _resolve_receipt(profile: str, sql: str) -> dict | None:
     touch / what's unapproved' panel is identical in Claude Code and Claude Desktop.
     Returns None only if the model deps aren't importable (execute_sql stays usable)."""
     try:
-        org = _load_org(profile)
+        org = get_cached_org(profile)
         from semantic_model import runtime as RT
 
         return RT.assemble_receipt(org, sql, model_version=_model_version(profile))
@@ -647,7 +689,7 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     """
     profile = resolve_profile(args.get("datasource"))
     try:
-        org = _load_org(profile)
+        org = get_cached_org(profile)
     except FileNotFoundError as e:
         return json.dumps({"error": {"kind": "not_found", "remediation": str(e)}}, indent=2)
     except ImportError:
