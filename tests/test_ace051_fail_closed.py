@@ -71,7 +71,9 @@ def test_hosted_fail_closed_refuses_when_no_model(tmp_path, monkeypatch, capsys)
     from store import Store
 
     url = "sqlite://" + str(tmp_path / "empty.db")
-    Store.connect(url).run_migrations()
+    s = Store.connect(url)
+    s.run_migrations()
+    s.close()
     monkeypatch.setenv("AGAMI_DB_URL", url)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "no_artifacts"))
 
@@ -138,7 +140,9 @@ def test_hosted_falls_back_to_disk_when_db_has_no_model(tmp_path, monkeypatch, c
     from store import Store
 
     url = "sqlite://" + str(tmp_path / "empty.db")
-    Store.connect(url).run_migrations()  # migrated, no model
+    s = Store.connect(url)
+    s.run_migrations()  # migrated, no model
+    s.close()
     _write_disk(tmp_path / "art" / "acme")
     monkeypatch.setenv("AGAMI_DB_URL", url)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "art"))
@@ -156,6 +160,20 @@ def test_hosted_db_load_error_falls_back_to_disk(tmp_path, monkeypatch):
 
     sql, code = execute_sql._model_safety("SELECT id FROM orders", "acme", None)
     assert code is None  # disk model resolved + guards passed the declared query
+
+
+def test_refusal_stderr_is_a_single_clean_json_object(tmp_path, monkeypatch, capsys):
+    # A DB that ERRORS on load + no disk model, on hosted → fail closed. The load failure must NOT
+    # write freeform diagnostics (which would precede the JSON refusal → mixed/unparseable stderr,
+    # and could leak DB connection details). stderr must be exactly one JSON refusal object.
+    monkeypatch.setenv("AGAMI_DB_URL", "postgres://user:pw@127.0.0.1:1/nope")  # unreachable → raises
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "no_disk"))  # no disk model either
+
+    _, code = execute_sql._model_safety("SELECT id FROM orders", "acme", None)
+    assert code == 1
+    err = capsys.readouterr().err.strip()
+    assert json.loads(err)["error"]["kind"] == "model_unavailable"  # parses whole → single object
+    assert "127.0.0.1" not in err and "pw" not in err  # no connection details leaked
 
 
 def test_hosted_fail_closed_when_model_package_unimportable(tmp_path, monkeypatch, capsys):

@@ -728,6 +728,11 @@ def _resolve_guard_model(profile: str):
     Any DB-load failure degrades to disk rather than crashing the executor."""
     from semantic_model import loader as L
 
+    # Any load failure below degrades to the next source (DB → disk → None), silently: a freeform
+    # error line here would (a) leak DB connection details from the exception and (b) precede the
+    # JSON refusal `_model_safety` emits when both sources are absent on hosted, breaking the
+    # single-JSON-object contract callers parse. The observable signal is the fail-closed refusal
+    # itself, not a diagnostic line.
     if _hosted():
         try:
             from model_store import load_organization as _load_db
@@ -741,15 +746,15 @@ def _resolve_guard_model(profile: str):
                     store.close()
                 if org is not None:
                     return org
-        except Exception as e:
-            sys.stderr.write(f"[agami] hosted model load from DB failed, trying disk: {e}\n")
+        except Exception:
+            pass  # DB unreachable/misconfigured -> fall through to disk
 
     root = Path(os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")) / profile
     if (root / "org.yaml").exists():
         try:
             return L.load_organization(root)
-        except Exception as e:
-            sys.stderr.write(f"[agami] could not load semantic model from disk: {e}\n")
+        except Exception:
+            pass  # unparseable/absent on disk -> None (hosted then fails closed)
     return None
 
 
