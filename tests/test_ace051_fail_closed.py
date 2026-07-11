@@ -122,5 +122,58 @@ def test_disk_db_verdict_parity(tmp_path, monkeypatch, capsys):
         capsys.readouterr()
         return code
 
-    for sql in ("SELECT id FROM sqlite_master", "SELECT id FROM orders"):
-        assert verdict(hosted=True, sql=sql) == verdict(hosted=False, sql=sql)
+    # Query BOTH declared tables + an undeclared table + a bad column, so a lossy DB round-trip that
+    # drops a table (customers) or mangles a column can't hide behind identical verdicts.
+    for sql in (
+        "SELECT id FROM sqlite_master",   # undeclared table → refuse (both)
+        "SELECT id FROM orders",          # declared → allow (both)
+        "SELECT id FROM customers",       # the OTHER declared table → allow only if it survived
+        "SELECT nope FROM orders",        # undeclared column → refuse only if the column set survived
+    ):
+        assert verdict(hosted=True, sql=sql) == verdict(hosted=False, sql=sql), sql
+
+
+def test_hosted_falls_back_to_disk_when_db_has_no_model(tmp_path, monkeypatch, capsys):
+    # Hosted, DB configured but EMPTY, yet a disk model exists → guards run off disk (not fail-closed).
+    from store import Store
+
+    url = "sqlite://" + str(tmp_path / "empty.db")
+    Store.connect(url).run_migrations()  # migrated, no model
+    _write_disk(tmp_path / "art" / "acme")
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "art"))
+
+    _, code = execute_sql._model_safety("SELECT id FROM sqlite_master", "acme", None)
+    assert code == 1  # refused by the disk-sourced model, NOT model_unavailable
+    assert json.loads(capsys.readouterr().err.strip())["error"]["kind"] == "table_out_of_scope"
+
+
+def test_hosted_db_load_error_falls_back_to_disk(tmp_path, monkeypatch):
+    # A DB that errors on load must degrade to the disk model, not crash or fail open.
+    _write_disk(tmp_path / "art" / "acme")
+    monkeypatch.setenv("AGAMI_DB_URL", "postgres://user:pw@127.0.0.1:1/nope")  # unreachable
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "art"))
+
+    sql, code = execute_sql._model_safety("SELECT id FROM orders", "acme", None)
+    assert code is None  # disk model resolved + guards passed the declared query
+
+
+def test_hosted_fail_closed_when_model_package_unimportable(tmp_path, monkeypatch, capsys):
+    # Even the model PACKAGE being unavailable must fail closed on hosted — the guards can't run at
+    # all, which is the same "can't guarantee safety" condition as a missing model. Force the very
+    # first `from semantic_model import runtime` to raise, so the except branch is what's exercised.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def boom(name, _globals=None, _locals=None, fromlist=(), level=0):
+        if name == "semantic_model" and fromlist and "runtime" in fromlist:
+            raise ImportError("forced: semantic_model.runtime unavailable")
+        return real_import(name, _globals, _locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", boom)
+    monkeypatch.setenv("AGAMI_DB_URL", "sqlite://" + str(tmp_path / "x.db"))
+
+    _, code = execute_sql._model_safety("SELECT id FROM orders", "acme", None)
+    assert code == 1  # fail closed — no DB load is even attempted (we never resolve a model)
+    assert json.loads(capsys.readouterr().err.strip())["error"]["kind"] == "model_unavailable"

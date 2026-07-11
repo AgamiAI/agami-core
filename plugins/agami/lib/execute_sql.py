@@ -765,7 +765,18 @@ def _model_safety(sql: str, profile: str, area: str | None):
     try:
         from semantic_model import runtime as RT
     except Exception:
-        return sql, None  # model package not available -> no-op
+        # The model package (pydantic) isn't importable, so the guards can't run at all. On the
+        # hosted served path that is the same "can't guarantee safety" condition as a missing model
+        # — fail closed. Locally it stays a no-op (a bare install legitimately has no model). (The
+        # sqlglot-unavailable / unparseable-SQL degrade-to-allow is a distinct fail-open owned by
+        # ACE-037, not closed here.)
+        if _hosted():
+            json.dump({"error": {"kind": "model_unavailable", "reason":
+                       "semantic-model package not importable; refusing to run unguarded on the "
+                       "hosted server"}}, sys.stderr)
+            sys.stderr.write("\n")
+            return sql, 1
+        return sql, None  # local: model package not available -> no-op
 
     org = _resolve_guard_model(profile)
     if org is None:
