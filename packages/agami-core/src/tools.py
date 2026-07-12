@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -290,6 +291,11 @@ def _current_org_id() -> str:
 # model to another, and invalidated when the model version bumps. The execute_sql subprocess is a fresh process
 # per query and does NOT share this (its win is the Slice-1 GuardContext, not a cross-query cache).
 _ORG_CACHE: dict[tuple[str, str, "str | None"], Any] = {}
+# Tool handlers now run in parallel worker threads (mcp_http off-loads them), so this process-global
+# cache is genuinely concurrent. The lock keeps a miss provably race-free: the fast path (a hit) stays
+# lock-free, and only concurrent misses serialize — one loads, the rest double-check and reuse it,
+# which also avoids the eviction loop mutating the dict while another thread iterates it.
+_ORG_CACHE_LOCK = threading.Lock()
 
 
 def get_cached_org(profile: str):
@@ -303,15 +309,19 @@ def get_cached_org(profile: str):
         return _load_org(profile)
     org_id = _current_org_id()
     key = (org_id, profile, version)
-    cached = _ORG_CACHE.get(key)
+    cached = _ORG_CACHE.get(key)  # fast path: a hit is a single atomic dict.get, no lock
     if cached is not None:
         return cached
-    org = _load_org(profile)
-    # Drop any stale (org, datasource) entry at a previous version so the cache stays bounded.
-    for stale in [k for k in _ORG_CACHE if k[0] == org_id and k[1] == profile and k != key]:
-        del _ORG_CACHE[stale]
-    _ORG_CACHE[key] = org
-    return org
+    with _ORG_CACHE_LOCK:
+        cached = _ORG_CACHE.get(key)  # double-check: another thread may have loaded it meanwhile
+        if cached is not None:
+            return cached
+        org = _load_org(profile)
+        # Drop any stale (org, datasource) entry at a previous version so the cache stays bounded.
+        for stale in [k for k in _ORG_CACHE if k[0] == org_id and k[1] == profile and k != key]:
+            del _ORG_CACHE[stale]
+        _ORG_CACHE[key] = org
+        return org
 
 
 def _domain_memory(profile: str) -> tuple[str, str | None]:
