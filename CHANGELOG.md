@@ -10,6 +10,42 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.4.1] — 2026-07-12
+
+The self-hosted HTTP server now runs SQL **in-process** by default — no per-query subprocess fork,
+no CSV round-trip — behind a swappable execution seam. Plus a correctness fix for Postgres/Redshift.
+
+### Added
+
+- **Executor seam (`ports.Executor`).** `execute_sql` is split into a shared, un-bypassable *guarded
+  envelope* (read-only guard → semantic-model safety → resolve datasource → execute) and a swappable
+  **`Executor` port**. The built-in executor is the default and behaviour is unchanged; a consumer can
+  inject a custom executor (e.g. pooled / per-user-RBAC) via `create_app(adapters=…)` **behind the same
+  guard** — one execution implementation, never forked.
+
+### Changed
+
+- **The HTTP server executes queries in-process by default.** Previously every query forked
+  `python -m execute_sql`; now the served path runs through the executor seam in-process — no fork, no
+  CSV serialize/re-parse round-trip, native rows. The local stdio path and the `python -m execute_sql`
+  CLI still fork (the throwaway-process isolation is kept for the single-user tool). Successful query
+  results are identical to before.
+- **The per-call row cap is request-scoped.** `--max-rows` now rides a `ContextVar` (was a module
+  global), so concurrent in-process queries with different caps can't affect each other.
+
+### Fixed
+
+- **Postgres/Redshift queries returned 0 rows through the Python executor.** A psycopg2 server-side
+  (named) cursor reports `description = None` until the first fetch, and the result collector read it
+  *before* fetching — so it concluded "no result set" and returned empty. It now fetches first, then
+  reads the description. SQLite/MySQL/etc. (client-side cursors) were unaffected. (Present since the
+  server-side cursor was introduced for bounded transfer.)
+
+### Performance
+
+- **Tool handler runs off the event loop.** The heavy query handler is offloaded via `run_blocking`
+  (completing the async-offload work), so one slow query no longer stalls the server's event loop.
+
 ## [0.4.0] — 2026-07-12
 
 Runtime scalability & safety hardening: the server stays responsive and bounded as model size,
