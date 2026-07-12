@@ -195,13 +195,13 @@ def _load_credentials(profile: str) -> dict[str, str]:
         return _parse_dsn(dsn)
 
     if not CREDENTIALS_PATH.exists():
-        sys.stderr.write(
+        raise ExecutorError(
             f"No warehouse credentials for profile [{profile}]. Set DATASOURCE_URL "
             f"(or DATASOURCE_URL__{_env_token(profile)}) "
             "in the environment, or create <artifacts_dir>/local/credentials via the agami `init` skill.\n"
-            "Never type credentials into chat — they belong in the environment or the file.\n"
+            "Never type credentials into chat — they belong in the environment or the file.",
+            code=2,
         )
-        sys.exit(2)
 
     # chmod check: refuse if too permissive. POSIX only — Windows file modes don't
     # map to Unix permission bits (NTFS ACLs guard the file; a stat() there reports
@@ -209,11 +209,11 @@ def _load_credentials(profile: str) -> dict[str, str]:
     if os.name == "posix":
         mode = stat.S_IMODE(CREDENTIALS_PATH.stat().st_mode)
         if mode not in ALLOWED_PERMS:
-            sys.stderr.write(
+            raise ExecutorError(
                 f"<artifacts_dir>/local/credentials must be chmod 600 (currently {oct(mode)[2:]})\n"
-                f"Run: chmod 600 <artifacts_dir>/local/credentials\n"
+                f"Run: chmod 600 <artifacts_dir>/local/credentials",
+                code=2,
             )
-            sys.exit(2)
 
     # IMPORTANT: enable inline-comment stripping for both `#` and `;`. Without
     # this, a credentials line like `account = xy12345  # locator + region`
@@ -223,11 +223,11 @@ def _load_credentials(profile: str) -> dict[str, str]:
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     cfg.read(CREDENTIALS_PATH)
     if profile not in cfg:
-        sys.stderr.write(
+        raise ExecutorError(
             f"Profile [{profile}] not found in <artifacts_dir>/local/credentials. "
-            f"Sections present: {cfg.sections()}\n"
+            f"Sections present: {cfg.sections()}",
+            code=2,
         )
-        sys.exit(2)
 
     section = {k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[profile].items()}
 
@@ -336,12 +336,12 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
         result = {"type": "sqlite", "path": path or u.path.lstrip("/")}
         return result
     else:
-        sys.stderr.write(
+        raise ExecutorError(
             f"Unsupported scheme {raw_scheme!r}. "
             f"Supported: postgresql[+driver], postgres[+driver], redshift, "
-            f"mysql[+driver], mariadb, snowflake, sqlite.\n"
+            f"mysql[+driver], mariadb, snowflake, sqlite.",
+            code=2,
         )
-        sys.exit(2)
 
     # Snowflake's URL is account-shaped, not host:port. The "hostname" portion
     # of `snowflake://user:pw@xy12345.us-east-1.aws/MYDB/PUBLIC` is the account

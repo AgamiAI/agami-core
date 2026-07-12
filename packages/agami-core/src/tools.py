@@ -975,14 +975,13 @@ def _run_in_process(
     except execute_sql.ExecutorError as exc:
         return {"error": {"kind": _classify_exit(exc.code), "remediation": exc.msg}}
     except SystemExit as exc:
-        # Fail-closed net: some deep helpers (_load_credentials / _parse_dsn) still `sys.exit(2)` on a
-        # bad profile/DSN. In-process that SystemExit would escape the tool envelope and could take
-        # down the host, so convert it to a tool error. (Converting those helpers to raise is a
-        # follow-up; the subprocess/CLI path keeps sys.exit for byte-identical exit codes. The
-        # detailed message already went to the server log via their stderr write.)
+        # Defence-in-depth. The known credential/DSN failures now raise ExecutorError (handled above,
+        # carrying their detailed message), so this net catches only a residual/future sys.exit deep
+        # in a driver — ensuring an in-process query can never take down the host; it becomes a
+        # fail-closed tool error instead.
         code = exc.code if isinstance(exc.code, int) else 2
         return {"error": {"kind": _classify_exit(code),
-                          "remediation": "Credentials or datasource configuration error."}}
+                          "remediation": "Datasource configuration error."}}
     finally:
         execute_sql._max_rows_override = prev_cap
 

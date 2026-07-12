@@ -262,6 +262,28 @@ def test_set_injected_executor_rejects_a_bad_shape():
     assert tools._INJECTED_EXECUTOR is None  # rejected, nothing stored
 
 
+def test_injected_executor_credential_error_surfaces_detailed_remediation(monkeypatch):
+    # Parity with the subprocess path: a bad-profile ExecutorError carries its detailed message, so
+    # the in-process tool envelope surfaces the SAME remediation the CLI stderr would (not a generic
+    # string). This is why _load_credentials/_parse_dsn raise instead of sys.exit.
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+
+    def _bad(profile):
+        raise execute_sql.ExecutorError(
+            "No warehouse credentials for profile [acme]. Set DATASOURCE_URL ...", code=2
+        )
+
+    monkeypatch.setattr(execute_sql, "_load_credentials", _bad)
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    tools.set_injected_executor(_SpyExecutor())
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
+
+    assert "DATASOURCE_URL" in out["error"]["remediation"]  # detailed, not the generic net string
+
+
 def test_injected_executor_systemexit_is_caught_not_fatal(monkeypatch):
     # A deep sys.exit (a bad profile/DSN in _load_credentials/_parse_dsn) must NOT escape in-process
     # and kill the host — it becomes a fail-closed tool error.

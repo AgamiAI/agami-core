@@ -155,10 +155,11 @@ def test_bigquery_empty_alias_falls_through_to_adc(monkeypatch, tmp_path):
 
 # --- neither source → an error that names both -----------------------------
 
-def test_missing_both_sources_names_env_and_file(monkeypatch, tmp_path, capsys):
+def test_missing_both_sources_names_env_and_file(monkeypatch, tmp_path):
+    # _load_credentials now raises ExecutorError (safe in-process); the detailed message that used to
+    # go to stderr now rides the exception, so callers (main() / the in-process tool) can surface it.
     monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", tmp_path / "absent")
-    with pytest.raises(SystemExit):
+    with pytest.raises(execute_sql.ExecutorError) as ei:
         _load_credentials("default")
-    err = capsys.readouterr().err
-    assert "DATASOURCE_URL" in err
-    assert "credentials" in err
+    assert "DATASOURCE_URL" in ei.value.msg
+    assert "credentials" in ei.value.msg

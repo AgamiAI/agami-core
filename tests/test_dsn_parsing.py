@@ -19,7 +19,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-from execute_sql import _parse_dsn  # noqa: E402
+from execute_sql import ExecutorError, _parse_dsn  # noqa: E402
 
 # --- Postgres family -------------------------------------------------------
 
@@ -251,12 +251,13 @@ def test_bigquery_no_credentials_means_adc():
 
 # --- Rejection -------------------------------------------------------------
 
-def test_unsupported_scheme_exits():
-    with pytest.raises(SystemExit) as exc:
+def test_unsupported_scheme_raises():
+    # _parse_dsn now raises ExecutorError (code 2), not sys.exit, so it's safe to call in-process.
+    with pytest.raises(ExecutorError) as exc:
         _parse_dsn("redis://u:p@host:6379/0")
     assert exc.value.code == 2
 
 
-def test_random_string_exits():
-    with pytest.raises(SystemExit):
+def test_random_string_raises():
+    with pytest.raises(ExecutorError):
         _parse_dsn("not a url at all")
