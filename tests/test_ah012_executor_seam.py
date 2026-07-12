@@ -1,0 +1,163 @@
+"""AH-012 — the executor seam. `execute_sql` is split into a single un-bypassable guarded envelope
+(`execute_guarded`: read-only guard -> semantic-model safety -> resolve datasource ->
+`executor.execute(vetted_sql)`) and a swappable `Executor` port. These tests pin the load-bearing
+invariants: the guard runs BEFORE the executor, the executor only ever sees already-vetted SQL, there
+is no path to an executor around the guard (fail-closed, REQ-002/REQ-014), and the built-in executor
+returns NATIVE-typed rows while the subprocess wire still serializes byte-identical CSV.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
+if str(PKG_SRC) not in sys.path:
+    sys.path.insert(0, str(PKG_SRC))
+
+import execute_sql  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_override():
+    # _max_rows_override is a module global (ACE-044); isolate every test from it.
+    execute_sql._max_rows_override = None
+    yield
+    execute_sql._max_rows_override = None
+
+
+class _SpyExecutor:
+    """Records every call so a test can assert what SQL/creds/profile reached the connect-and-run
+    step — and that it was reached at all (or not, when a guard refuses first)."""
+
+    def __init__(self, result: execute_sql.ExecResult | None = None):
+        self.calls: list[tuple[str, dict, str]] = []
+        self._result = result or execute_sql.ExecResult(columns=["c"], rows=[(1,)], truncated=False)
+
+    def execute(self, vetted_sql: str, creds: dict, *, profile: str) -> execute_sql.ExecResult:
+        self.calls.append((vetted_sql, creds, profile))
+        return self._result
+
+
+# --- the guard is un-bypassable: no path to the executor around it -----------------------------
+
+
+def test_readonly_guard_refuses_before_the_executor_is_reached():
+    # A write statement is refused by the hard read-only gate; the executor is NEVER constructed a
+    # query for. This is the "no public path reaches an executor without the guard" invariant.
+    spy = _SpyExecutor()
+    with pytest.raises(execute_sql.GuardRefused) as ei:
+        execute_sql.execute_guarded("DELETE FROM t", "acme", None, executor=spy)
+    assert ei.value.code == 1
+    assert ei.value.envelope["error"]["kind"] == "permission"
+    assert spy.calls == []  # executor never reached
+
+
+def test_readonly_guard_still_fires_under_no_safety():
+    # --no-safety skips ONLY the semantic-model pass, never the write/RCE/DoS read-only gate.
+    spy = _SpyExecutor()
+    with pytest.raises(execute_sql.GuardRefused) as ei:
+        execute_sql.execute_guarded("DROP TABLE t", "acme", None, executor=spy, no_safety=True)
+    assert ei.value.code == 1
+    assert spy.calls == []
+
+
+def test_model_safety_refusal_short_circuits_before_the_executor(monkeypatch):
+    # A model-safety refusal already wrote its JSON to stderr, so the envelope is None and only the
+    # exit code is carried; the executor must not run.
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, 1))
+    spy = _SpyExecutor()
+    with pytest.raises(execute_sql.GuardRefused) as ei:
+        execute_sql.execute_guarded("SELECT 1", "acme", None, executor=spy)
+    assert ei.value.code == 1 and ei.value.envelope is None
+    assert spy.calls == []
+
+
+# --- the executor only ever receives already-vetted SQL ----------------------------------------
+
+
+def test_executor_receives_vetted_sql_and_resolved_creds(monkeypatch):
+    # The default_filters rewrite happens in the model pass; the executor sees the POST-guard SQL and
+    # the resolved datasource creds — never raw user input, never an unresolved profile.
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: ("SELECT 1 AS c /*vetted*/", None))
+    spy = _SpyExecutor()
+
+    result = execute_sql.execute_guarded("SELECT 1 AS c", "acme", "sales", executor=spy)
+
+    assert spy.calls == [("SELECT 1 AS c /*vetted*/", {"type": "sqlite", "path": ":memory:"}, "acme")]
+    assert result.rows == [(1,)]
+
+
+def test_no_safety_bypasses_the_model_pass_but_still_runs(monkeypatch):
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+
+    def _boom(*a, **k):
+        raise AssertionError("_model_safety must be skipped when no_safety=True")
+
+    monkeypatch.setattr(execute_sql, "_model_safety", _boom)
+    spy = _SpyExecutor()
+
+    result = execute_sql.execute_guarded("SELECT 1 AS c", "acme", None, executor=spy, no_safety=True)
+
+    assert spy.calls[0][0] == "SELECT 1 AS c"  # raw SQL passed straight to the executor, unrewritten
+    assert result.rows == [(1,)]
+
+
+# --- the built-in executor: native rows in, byte-identical CSV out ------------------------------
+
+
+def test_builtin_executor_satisfies_the_executor_port():
+    import ports
+
+    assert isinstance(execute_sql.BUILTIN_EXECUTOR, ports.Executor)  # 5th port, by shape
+
+
+def test_builtin_executor_returns_native_typed_rows_and_emits_identical_csv(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t (n INTEGER, s TEXT)")
+    con.executemany("INSERT INTO t (n, s) VALUES (?, ?)", [(1, "a"), (2, None)])
+    con.commit()
+    con.close()
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": str(db)})
+
+    result = execute_sql.execute_guarded(
+        "SELECT n, s FROM t ORDER BY n", "acme", None,
+        executor=execute_sql.BUILTIN_EXECUTOR, no_safety=True,
+    )
+
+    # Native fidelity (Sandeep's concern): ints stay ints, SQL NULL stays None — NOT "" and not "2".
+    assert result.columns == ["n", "s"]
+    assert result.rows == [(1, "a"), (2, None)]
+
+    # The subprocess/CLI wire still serializes byte-identical CSV at the edge (NULL renders as an
+    # empty field there — the ambiguity lives only in the text wire, not in the native rows).
+    execute_sql._emit_result_csv(result)
+    assert capsys.readouterr().out == "n,s\r\n1,a\r\n2,\r\n"
+
+
+def test_collect_cursor_bounds_and_preserves_native_types(monkeypatch):
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "2")
+
+    class _Cur:
+        description = [("n",), ("s",)]
+
+        def fetchmany(self, k):
+            return [(1, "a"), (2, None), (3, "c")][:k]
+
+    r = execute_sql._collect_cursor(_Cur())
+    assert r.columns == ["n", "s"]
+    assert r.rows == [(1, "a"), (2, None)]  # cap 2, native None preserved
+    assert r.truncated is True  # a (cap+1)th row was available
+
+
+def test_builtin_executor_raises_executor_error_on_unknown_db():
+    with pytest.raises(execute_sql.ExecutorError) as ei:
+        execute_sql._builtin_execute("SELECT 1", {"type": "nosuchdb"}, profile="acme")
+    assert ei.value.code == 2
+    assert "Unsupported db type" in ei.value.msg
