@@ -25,6 +25,12 @@ below corresponds to one such version.
   cleared at authorize, and the query/activity logs (`query_executions` / `tool_calls`) are
   explicitly **retained** — never deleted by any default path — with a new `idx_query_executions_ts`
   index to keep newest-first reads fast as history grows.
+- **Read-only datasource role is now a stated deploy obligation, not a suggestion (ACE-036).** The
+  self-host guide and `readonly-grants.md` now frame the SELECT-only role as the **required**
+  `DATASOURCE_URL` posture for a deploy (single-player stays *recommended*), spell out the app-role vs
+  operator/owner-role split, and clarify that the role guarantees integrity/confinement but **not**
+  availability/recon (per-statement timeout + row cap + recon denial are app-side). Docs only — no
+  behaviour or config change.
 
 ## [0.3.9] — 2026-07-10
 
