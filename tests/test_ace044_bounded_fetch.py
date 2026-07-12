@@ -46,6 +46,36 @@ class _FakeCur:
         return self._rows
 
 
+class _NamedCur:
+    """Mimics a psycopg2 **server-side (named) cursor**: `description` is None until the first fetch,
+    then reports the columns. The Postgres/Redshift path (`cursor(name="agami_bounded")`, ACE-038)
+    behaves exactly this way — the previous `_FakeCur` set `description` at construction and so never
+    reproduced it, masking a bug where every real Postgres row was dropped."""
+
+    def __init__(self, columns: list[str], rows: list[tuple]):
+        self._columns = columns
+        self._rows = rows
+        self.description = None  # None until the first fetch, like a real named cursor
+
+    def fetchmany(self, n: int):
+        self.description = [(c,) for c in self._columns]  # populated only after the first fetch
+        return self._rows[:n]
+
+
+def test_collect_cursor_reads_description_after_fetch_for_named_cursors(monkeypatch):
+    # Regression: a server-side named cursor reports description=None until the first fetch, so
+    # `_collect_cursor` must fetch FIRST. Under the pre-fix (read-before-fetch) this returned empty
+    # columns/rows — i.e. every Postgres/Redshift query silently returned 0 rows.
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "1000")
+    cur = _NamedCur(["name", "region"], [("Alice", "NA"), ("Bob", "EU")])
+
+    result = execute_sql._collect_cursor(cur)
+
+    assert result.columns == ["name", "region"]  # would be [] before the fix
+    assert result.rows == [("Alice", "NA"), ("Bob", "EU")]
+    assert result.truncated is False
+
+
 def test_sink_bounds_at_cap_and_flags_truncation(monkeypatch, capsys):
     monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "3")
     cur = _FakeCur(2, 10)  # 10 rows available, cap 3

@@ -806,16 +806,19 @@ def _collect_cursor(cur: Any) -> ExecResult:
     `fetchmany(cap + 1)` — never `fetchall` — so a huge result can't be buffered whole; a (cap+1)th
     row means the result was truncated. The SQL itself is untouched (no injected LIMIT). This is the
     single bounded-fetch implementation both the CSV wire (`_write_cursor_csv`) and the in-process
-    executor path share, so the row cap is enforced once, identically, for every caller."""
+    executor path share, so the row cap is enforced once, identically, for every caller.
+
+    Fetch FIRST, then read ``cur.description``: a psycopg2 **server-side (named) cursor** — which the
+    Postgres/Redshift path uses to bound transfer (ACE-038) — reports ``description is None`` until the
+    first fetch, so reading it beforehand would drop EVERY row of a real Postgres result. Client-side
+    cursors (sqlite/mysql/…) set ``description`` at execute, so fetch-first is equally correct there."""
     cap = _resolve_row_cap()
+    fetched = cur.fetchmany(cap + 1)
     if cur.description is None:
-        # No result set (a non-row statement). `_emit_result_csv` writes nothing for empty columns,
-        # matching the old sink. A description that is an *empty list* (a zero-column result set)
-        # would diverge from the old bare-header line, but the read-only guard admits only
-        # SELECT/WITH…SELECT, which always project >= 1 column — so that case can't reach here.
+        # A statement with no result set. The read-only guard admits only SELECT/WITH…SELECT (which
+        # always have a result set), so this is defensive; emit nothing, matching the old sink.
         return ExecResult(columns=[], rows=[], truncated=False)
     columns = [d[0] for d in cur.description]
-    fetched = cur.fetchmany(cap + 1)
     truncated = len(fetched) > cap
     return ExecResult(columns=columns, rows=[tuple(r) for r in fetched[:cap]], truncated=truncated)
 
