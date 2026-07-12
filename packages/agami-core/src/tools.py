@@ -954,6 +954,9 @@ def _run_in_process(
     try:
         result = execute_sql.execute_guarded(sql, profile, area, executor=executor)
     except execute_sql.GuardRefused as refusal:
+        # A read-only refusal (envelope present) is already caught by tool_execute_sql's upstream
+        # check_read_only fast-fail, so in practice only the model-safety branch (envelope None) is
+        # reached here; both are handled for defence-in-depth.
         if refusal.envelope is not None:
             return {"error": refusal.envelope["error"]}
         # A model-safety refusal wrote its detail to the server log (stderr); surface a clean refusal.

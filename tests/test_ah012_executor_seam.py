@@ -1,9 +1,14 @@
 """AH-012 — the executor seam. `execute_sql` is split into a single un-bypassable guarded envelope
 (`execute_guarded`: read-only guard -> semantic-model safety -> resolve datasource ->
 `executor.execute(vetted_sql)`) and a swappable `Executor` port. These tests pin the load-bearing
-invariants: the guard runs BEFORE the executor, the executor only ever sees already-vetted SQL, there
-is no path to an executor around the guard (fail-closed, REQ-002/REQ-014), and the built-in executor
-returns NATIVE-typed rows while the subprocess wire still serializes byte-identical CSV.
+invariants: the guard runs BEFORE the executor, the executor only ever sees already-vetted SQL, and
+there is no path to an executor around the guard (fail-closed, REQ-002/REQ-014).
+
+On result fidelity: the built-in executor returns NATIVE-typed rows (`ExecResult`) — NULL as None,
+ints as int — and the subprocess wire still serializes byte-identical CSV. The in-process TOOL edge
+(`tools._run_in_process`) currently textualizes those rows to match the CSV wire so both execution
+paths return identical JSON; native-typed rows at the MCP JSON edge are a deliberately deferred
+decision (see the AH-012 spec), so the tool-edge tests assert the stringified form on purpose.
 """
 
 from __future__ import annotations
@@ -284,6 +289,22 @@ def test_injected_executor_model_safety_refusal_returns_clean_error(monkeypatch)
     assert out["error"]["kind"] == "permission"
     assert "semantic-model safety pass" in out["error"]["remediation"]
     assert fake.calls == []  # refused before the executor
+
+
+def test_injected_executor_textualizes_null_as_empty_at_the_tool_edge(monkeypatch):
+    # The deferred-decision contract: at the MCP JSON edge the in-process path renders SQL NULL as
+    # "" (matching the CSV wire), NOT "None". Pins the one coercion a future native-typed switch flips.
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n", "s"], rows=[(1, None)], truncated=False))
+    tools.set_injected_executor(fake)
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT n, s FROM t", "datasource": "acme"}))
+
+    assert out["rows"] == [["1", ""]]  # int -> "1", NULL -> "" (never "None")
 
 
 def test_injected_executor_backstop_trims_to_max_rows(monkeypatch):

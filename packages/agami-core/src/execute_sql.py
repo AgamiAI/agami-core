@@ -802,6 +802,10 @@ def _collect_cursor(cur: Any) -> ExecResult:
     executor path share, so the row cap is enforced once, identically, for every caller."""
     cap = _resolve_row_cap()
     if cur.description is None:
+        # No result set (a non-row statement). `_emit_result_csv` writes nothing for empty columns,
+        # matching the old sink. A description that is an *empty list* (a zero-column result set)
+        # would diverge from the old bare-header line, but the read-only guard admits only
+        # SELECT/WITH…SELECT, which always project >= 1 column — so that case can't reach here.
         return ExecResult(columns=[], rows=[], truncated=False)
     columns = [d[0] for d in cur.description]
     fetched = cur.fetchmany(cap + 1)

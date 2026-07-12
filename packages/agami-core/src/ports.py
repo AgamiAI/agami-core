@@ -134,7 +134,7 @@ class Executor(Protocol):
 
 @dataclass(frozen=True)
 class Adapters:
-    """The four port adapters, bundled so ``mcp_http.create_app`` takes them as one argument.
+    """The port adapters, bundled so ``mcp_http.create_app`` takes them as one argument.
 
     A consumer builds this with its own implementations of the ports (its own ``OrgResolver``,
     ``AuthProvider``, ``ActivitySink``, ``GovernancePolicy``, and optionally an ``Executor``);
