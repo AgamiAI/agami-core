@@ -251,6 +251,35 @@ def test_injected_executor_error_maps_to_the_same_envelope(monkeypatch):
     assert "connect failed" in out["error"]["remediation"]
 
 
+def test_set_injected_executor_rejects_a_bad_shape():
+    import tools
+
+    class _NotAnExecutor:
+        pass  # no .execute method
+
+    with pytest.raises(TypeError):
+        tools.set_injected_executor(_NotAnExecutor())
+    assert tools._INJECTED_EXECUTOR is None  # rejected, nothing stored
+
+
+def test_injected_executor_systemexit_is_caught_not_fatal(monkeypatch):
+    # A deep sys.exit (a bad profile/DSN in _load_credentials/_parse_dsn) must NOT escape in-process
+    # and kill the host — it becomes a fail-closed tool error.
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+
+    def _exit(*a, **k):
+        raise SystemExit(2)
+
+    monkeypatch.setattr(execute_sql, "execute_guarded", _exit)
+    tools.set_injected_executor(_SpyExecutor())
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
+
+    assert "error" in out  # a tool error envelope, not a process exit
+
+
 def test_default_no_injected_executor_forks_the_subprocess(monkeypatch):
     import tools
 

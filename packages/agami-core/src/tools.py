@@ -880,8 +880,18 @@ _INJECTED_EXECUTOR: Any | None = None
 
 def set_injected_executor(executor: Any | None) -> None:
     """Register (or clear) the composition-root executor. Called once by ``mcp_http.create_app`` from
-    ``adapters.executor``; ``None`` keeps the default subprocess path."""
+    ``adapters.executor``; ``None`` keeps the default subprocess path. Validates the shape at
+    registration so a malformed adapter fails fast at app construction, not as an ``AttributeError``
+    at query time."""
     global _INJECTED_EXECUTOR
+    if executor is not None:
+        import ports
+
+        if not isinstance(executor, ports.Executor):  # runtime_checkable: has execute(...)
+            raise TypeError(
+                "injected executor must satisfy ports.Executor "
+                "(an execute(vetted_sql, creds, *, profile) method)"
+            )
     _INJECTED_EXECUTOR = executor
 
 
@@ -964,6 +974,15 @@ def _run_in_process(
                           "remediation": "Query refused by the semantic-model safety pass."}}
     except execute_sql.ExecutorError as exc:
         return {"error": {"kind": _classify_exit(exc.code), "remediation": exc.msg}}
+    except SystemExit as exc:
+        # Fail-closed net: some deep helpers (_load_credentials / _parse_dsn) still `sys.exit(2)` on a
+        # bad profile/DSN. In-process that SystemExit would escape the tool envelope and could take
+        # down the host, so convert it to a tool error. (Converting those helpers to raise is a
+        # follow-up; the subprocess/CLI path keeps sys.exit for byte-identical exit codes. The
+        # detailed message already went to the server log via their stderr write.)
+        code = exc.code if isinstance(exc.code, int) else 2
+        return {"error": {"kind": _classify_exit(code),
+                          "remediation": "Credentials or datasource configuration error."}}
     finally:
         execute_sql._max_rows_override = prev_cap
 
