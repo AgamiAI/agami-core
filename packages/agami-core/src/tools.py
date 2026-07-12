@@ -901,7 +901,12 @@ def _finalize_execution(
 ) -> str:
     """Shape a successful result (units + exact-render markdown + trust receipt), log the execution
     through the single sink, and return the tool JSON. Shared by both execution paths — the subprocess
-    fork and the in-process executor — so a query returns the identical envelope whichever ran it."""
+    fork and the in-process executor — so a **successful** query returns the identical result envelope
+    whichever ran it. (A guard *refusal* is not yet identical across paths: the subprocess surfaces
+    execute_sql's stderr JSON as the remediation, while the in-process path returns a clean generic
+    refusal with the structured detail in the server log. Full structured-refusal parity needs
+    `_model_safety` to *return* its envelope — it currently writes it to stderr, pinned by the
+    fail-closed guard tests — so it's tracked as a follow-up, not folded into this seam.)"""
     # Deterministic, exact rendering — so the numbers a user verifies don't depend on
     # how the host LLM chooses to format them. `markdown` is the table to display
     # verbatim; `rows` stays raw (exact CSV values) for charting / programmatic use.
@@ -969,9 +974,12 @@ def _run_in_process(
         # reached here; both are handled for defence-in-depth.
         if refusal.envelope is not None:
             return {"error": refusal.envelope["error"]}
-        # A model-safety refusal wrote its detail to the server log (stderr); surface a clean refusal.
+        # A model-safety refusal wrote its structured detail to the server log (stderr); surface a
+        # clean refusal here. (The subprocess path instead surfaces that stderr JSON as remediation —
+        # the not-yet-identical refusal envelope tracked as a follow-up.)
         return {"error": {"kind": "permission",
-                          "remediation": "Query refused by the semantic-model safety pass."}}
+                          "remediation": "Query refused by the semantic-model safety pass "
+                                         "(see server logs for the specific rule)."}}
     except execute_sql.ExecutorError as exc:
         return {"error": {"kind": _classify_exit(exc.code), "remediation": exc.msg}}
     except SystemExit as exc:
@@ -1003,7 +1011,9 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
 
     Two execution paths behind the same guard: the default forks the execute_sql subprocess
     (isolation, byte-identical local/single-user); an injected executor (AH-012) runs in-process with
-    native rows. Both funnel through `_finalize_execution` so the returned envelope is identical.
+    native rows. Both funnel through `_finalize_execution`, so a **successful** query's result
+    envelope is identical either way (a guard refusal's envelope is not yet identical across paths —
+    see `_finalize_execution` and the tracked structured-refusal-parity follow-up).
     """
     sql = args.get("sql")
     if not isinstance(sql, str) or not sql.strip():
