@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import agami_paths
+from guardrail import Refusal, Verdict
 
 if TYPE_CHECKING:
     # ``Executor`` is the 5th port; imported only for type-checkers. At runtime ``execute_sql`` never
@@ -82,6 +83,7 @@ def _resolve_default_profile() -> str:
     if CONFIG_PATH.exists():
         try:
             import json as _json
+
             cfg = _json.loads(CONFIG_PATH.read_text())
             active = cfg.get("active_profile")
             if isinstance(active, str) and active:
@@ -126,13 +128,14 @@ class ExecutorError(Exception):
 
 
 class GuardRefused(Exception):
-    """A guard refusal short-circuiting the envelope. ``envelope`` is the JSON error object the
-    caller must emit (the read-only guard's ``permission`` refusal), or ``None`` when the refusal
-    JSON was already written to stderr by ``_model_safety`` (carry only the exit ``code``)."""
+    """A guard refusal short-circuiting the executor. Carries the typed ``Refusal`` (the shared
+    guardrail shape) so BOTH callers build the SAME envelope from it: the subprocess ``main`` emits
+    ``Envelope.refused(refusal)`` JSON to stderr, and the in-process MCP handler returns it directly.
+    No stderr round-trip — so a model-safety refusal keeps its structured detail on both paths."""
 
-    def __init__(self, envelope: dict | None, *, code: int) -> None:
+    def __init__(self, refusal: Refusal, *, code: int) -> None:
         super().__init__()
-        self.envelope = envelope
+        self.refusal = refusal
         self.code = code
 
 
@@ -259,9 +262,12 @@ def _load_credentials(profile: str) -> dict[str, str]:
 # Schemes we accept. Strip "+driver" suffixes (e.g. postgresql+asyncpg, postgres+psycopg2).
 _POSTGRES_SCHEMES = {"postgres", "postgresql"}
 _MYSQL_SCHEMES = {"mysql", "mariadb"}
-_REDSHIFT_SCHEMES = {"redshift"}        # speaks Postgres wire protocol; port 5439, SSL required
-_SNOWFLAKE_SCHEMES = {"snowflake"}      # native CLI (snowsql) + snowflake-connector-python
-_BIGQUERY_SCHEMES = {"bigquery", "bq"}  # google-cloud-bigquery — auth via service-account JSON or ADC
+_REDSHIFT_SCHEMES = {"redshift"}  # speaks Postgres wire protocol; port 5439, SSL required
+_SNOWFLAKE_SCHEMES = {"snowflake"}  # native CLI (snowsql) + snowflake-connector-python
+_BIGQUERY_SCHEMES = {
+    "bigquery",
+    "bq",
+}  # google-cloud-bigquery — auth via service-account JSON or ADC
 
 
 def _parse_dsn(dsn: str) -> dict[str, str]:
@@ -330,7 +336,7 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
         return out
     elif base_scheme == "sqlite":
         # sqlite:///absolute/path or sqlite:relative/path
-        path = dsn[len("sqlite://"):]
+        path = dsn[len("sqlite://") :]
         if path.startswith("/"):
             path = path[1:] if path[1:2] == "/" else path  # handle `sqlite:////abs`
         # Trailing path normalization
@@ -555,9 +561,7 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
         except Exception:
             pass
         try:
-            creds_obj = service_account.Credentials.from_service_account_file(
-                sa_path_expanded
-            )
+            creds_obj = service_account.Credentials.from_service_account_file(sa_path_expanded)
             client_kwargs["credentials"] = creds_obj
         except Exception as e:
             raise ExecutorError(f"BigQuery credentials load failed: {e}", code=2)
@@ -606,6 +610,7 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
 
 def _run_sqlite(creds: dict[str, str], sql: str) -> ExecResult:
     import sqlite3  # always available in stdlib
+
     _require(creds, "path")
     path = os.path.expanduser(creds["path"])
     try:
@@ -632,9 +637,12 @@ def _run_sqlserver(creds: dict[str, str], sql: str) -> ExecResult:
     _require(creds, "host", "user", "password")
     try:
         conn = pymssql.connect(
-            server=creds["host"], port=int(creds.get("port", 1433)),
-            user=creds["user"], password=creds["password"],
-            database=creds.get("database", ""), login_timeout=15,
+            server=creds["host"],
+            port=int(creds.get("port", 1433)),
+            user=creds["user"],
+            password=creds["password"],
+            database=creds.get("database", ""),
+            login_timeout=15,
         )
     except Exception as e:
         raise ExecutorError(f"SQL Server connect failed: {e}", code=4)
@@ -662,8 +670,9 @@ def _run_oracle(creds: dict[str, str], sql: str) -> ExecResult:
     dsn = creds.get("dsn") or creds.get("url")
     if not dsn:
         _require(creds, "host", "service_name")
-        dsn = oracledb.makedsn(creds["host"], int(creds.get("port", 1521)),
-                               service_name=creds["service_name"])
+        dsn = oracledb.makedsn(
+            creds["host"], int(creds.get("port", 1521)), service_name=creds["service_name"]
+        )
     try:
         conn = oracledb.connect(user=creds["user"], password=creds["password"], dsn=dsn)
     except Exception as e:
@@ -694,7 +703,8 @@ def _run_databricks(creds: dict[str, str], sql: str) -> ExecResult:
     _require(creds, "host", "http_path", "token")
     try:
         conn = dbsql.connect(
-            server_hostname=creds["host"], http_path=creds["http_path"],
+            server_hostname=creds["host"],
+            http_path=creds["http_path"],
             access_token=creds["token"],
         )
     except Exception as e:
@@ -725,9 +735,13 @@ def _run_trino(creds: dict[str, str], sql: str) -> ExecResult:
         if creds.get("password"):
             auth = trino.auth.BasicAuthentication(creds["user"], creds["password"])
         conn = trino.dbapi.connect(
-            host=creds["host"], port=int(creds.get("port", 8080)), user=creds["user"],
-            catalog=creds.get("catalog"), schema=creds.get("schema"),
-            http_scheme="https" if creds.get("password") else "http", auth=auth,
+            host=creds["host"],
+            port=int(creds.get("port", 8080)),
+            user=creds["user"],
+            catalog=creds.get("catalog"),
+            schema=creds.get("schema"),
+            http_scheme="https" if creds.get("password") else "http",
+            auth=auth,
         )
     except Exception as e:
         raise ExecutorError(f"Trino connect failed: {e}", code=4)
@@ -883,7 +897,9 @@ def _resolve_guard_model(profile: str):
         except Exception:
             pass  # DB unreachable/misconfigured -> fall through to disk
 
-    root = Path(os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")) / profile
+    root = (
+        Path(os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")) / profile
+    )
     if (root / "org.yaml").exists():
         try:
             return L.load_organization(root)
@@ -892,15 +908,23 @@ def _resolve_guard_model(profile: str):
     return None
 
 
-def _model_safety(sql: str, profile: str, area: str | None):
+def _refusal_from_verdict(kind: str, verdict: Verdict) -> Refusal:
+    """Build the shared ``Refusal`` from a safety ``Verdict``. A safety verdict always refuses
+    (``policy(safety)`` is ``reject`` in every tier), so the guard chain refuses unconditionally on a
+    non-None verdict. ``kind`` is the caller-supplied refusal kind (the verdict's ``rule`` names the
+    gate, e.g. ``read_only``; the refusal ``kind`` is the outward vocabulary, e.g. ``permission``)."""
+    return Refusal(kind=kind, reason=verdict.detail, remediation=verdict.remediation)
+
+
+def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusal | None]:
     """Semantic-model safety pass before execution: fan-trap / chasm-trap pre-flight
     + default_filters auto-application, over a model resolved from the DB (hosted) or disk (local).
 
-    Returns (sql_to_run, exit_code). exit_code is None to continue, or an int to
-    short-circuit (a refusal the caller must consume). Inert (returns the SQL unchanged) when the
-    model package isn't importable, or — on the LOCAL path only — when there is no model yet. On the
-    HOSTED path a model that can't be resolved fails closed (refuses), never runs unguarded (ACE-051).
-    """
+    Returns (sql_to_run, refusal). ``refusal`` is None to continue, or a typed ``Refusal`` the caller
+    (``execute_guarded``) raises as a ``GuardRefused`` — so both the subprocess and in-process paths
+    build the same envelope from it. Inert (returns the SQL unchanged) when the model package isn't
+    importable, or — on the LOCAL path only — when there is no model yet. On the HOSTED path a model
+    that can't be resolved fails closed (refuses), never runs unguarded (ACE-051)."""
     try:
         from semantic_model import runtime as RT
     except Exception:
@@ -910,11 +934,11 @@ def _model_safety(sql: str, profile: str, area: str | None):
         # sqlglot-unavailable / unparseable-SQL degrade-to-allow is a distinct fail-open owned by
         # ACE-037, not closed here.)
         if _hosted():
-            json.dump({"error": {"kind": "model_unavailable", "reason":
-                       "semantic-model package not importable; refusing to run unguarded on the "
-                       "hosted server"}}, sys.stderr)
-            sys.stderr.write("\n")
-            return sql, 1
+            return sql, Refusal(
+                "model_unavailable",
+                "semantic-model package not importable; refusing to run unguarded on the "
+                "hosted server",
+            )
         return sql, None  # local: model package not available -> no-op
 
     org = _resolve_guard_model(profile)
@@ -922,11 +946,11 @@ def _model_safety(sql: str, profile: str, area: str | None):
         if _hosted():
             # Fail closed: a served query with no resolvable model must be refused, never run with
             # the fan/chasm/scope/PII guards silently off.
-            json.dump({"error": {"kind": "model_unavailable", "reason":
-                       "no semantic model could be resolved (checked DB and disk); refusing to run "
-                       "unguarded on the hosted server"}}, sys.stderr)
-            sys.stderr.write("\n")
-            return sql, 1
+            return sql, Refusal(
+                "model_unavailable",
+                "no semantic model could be resolved (checked DB and disk); refusing to run "
+                "unguarded on the hosted server",
+            )
         return sql, None  # local: no model yet -> no-op (unchanged)
 
     # Build the shared guard context ONCE — parse the SQL + build each model index a single
@@ -939,37 +963,24 @@ def _model_safety(sql: str, profile: str, area: str | None):
     # declares; any other table in the connected database is refused. Runs FIRST
     # so the fan/chasm and sensitive checks below only evaluate in-scope tables.
     ts = RT.check_table_scope(sql, org, ctx=ctx)
-    if ts.action == "refuse":
-        json.dump({"error": {"kind": "table_out_of_scope", "tables": ts.offending_tables,
-                             "reason": ts.reason, "suggestion": ts.suggestion}}, sys.stderr)
-        sys.stderr.write("\n")
-        return sql, 1
+    if ts is not None:
+        return sql, _refusal_from_verdict("table_out_of_scope", ts)
 
     # SELECT * ban — force every projected column to be named, so the column-scope
     # guard below can check what is actually returned (and nothing hides behind *).
     star = RT.check_no_select_star(sql, ctx=ctx)
-    if star.action == "refuse":
-        json.dump({"error": {"kind": "select_star",
-                             "reason": star.reason, "suggestion": star.suggestion}}, sys.stderr)
-        sys.stderr.write("\n")
-        return sql, 1
+    if star is not None:
+        return sql, _refusal_from_verdict("select_star", star)
 
     # Column-scope guard — a column that binds to a declared table must be one that
     # table declares (a hallucinated column, or a physical column the model excluded).
     cs = RT.check_column_scope(sql, org, ctx=ctx)
-    if cs.action == "refuse":
-        json.dump({"error": {"kind": "column_out_of_scope", "columns": cs.columns,
-                             "reason": cs.reason, "suggestion": cs.suggestion}}, sys.stderr)
-        sys.stderr.write("\n")
-        return sql, 1
+    if cs is not None:
+        return sql, _refusal_from_verdict("column_out_of_scope", cs)
 
     pf = RT.pre_flight_check(sql, org, ctx=ctx)
     if pf.risk and pf.action == "refuse":
-        json.dump({"error": {"kind": "preflight_refused", "risk": pf.risk,
-                             "reason": pf.reason, "suggestion": pf.suggestion,
-                             "triggering_joins": pf.triggering_joins}}, sys.stderr)
-        sys.stderr.write("\n")
-        return sql, 1
+        return sql, Refusal("preflight_refused", pf.reason, pf.suggestion or "")
     if pf.risk and pf.action == "auto_rewrite" and pf.rewritten_sql:
         sys.stderr.write(f"[agami] auto-corrected {pf.risk}: ran rewritten SQL. {pf.reason}\n")
         sql = pf.rewritten_sql
@@ -981,10 +992,7 @@ def _model_safety(sql: str, profile: str, area: str | None):
     # path happened to read a prose rule). Aggregates / filters / joins are allowed.
     sens = RT.check_sensitive_projection(sql, org, ctx=ctx)
     if sens.action == "refuse":
-        json.dump({"error": {"kind": "sensitive_columns", "columns": sens.columns,
-                             "reason": sens.reason, "suggestion": sens.suggestion}}, sys.stderr)
-        sys.stderr.write("\n")
-        return sql, 1
+        return sql, Refusal("sensitive_columns", sens.reason, sens.suggestion or "")
 
     new_sql, applied = RT.apply_default_filters(sql, org, area=area, ctx=ctx)
     if applied:
@@ -1128,20 +1136,19 @@ def execute_guarded(
     ``no_safety``, which skips only the semantic-model pass, never write/RCE/DoS protection) ->
     semantic-model safety pass (fan/chasm pre-flight + scope + PII + ``default_filters`` rewrite) ->
     resolve the datasource -> ``executor.execute(vetted_sql, …)``. The executor only ever receives
-    SQL both guards have passed. Raises ``GuardRefused`` on a refusal (the read-only refusal carries
-    its JSON envelope for the caller to emit; a model-safety refusal already wrote its JSON to stderr
-    and carries only the exit code) and ``ExecutorError`` on a connect/run failure — so the
-    subprocess ``main`` and the in-process MCP handler apply the same guard and surface errors
-    identically. The row cap rides the request-scoped ``_max_rows_override`` ContextVar the caller sets."""
+    SQL both guards have passed. Raises ``GuardRefused`` carrying the typed ``Refusal`` on a refusal,
+    and ``ExecutorError`` on a connect/run failure — so the subprocess ``main`` and the in-process MCP
+    handler apply the same guard and build the same envelope. The row cap rides the request-scoped
+    ``_max_rows_override`` ContextVar the caller sets."""
     import sql_guard
 
-    reason = sql_guard.check_read_only(sql)
-    if reason is not None:
-        raise GuardRefused({"error": {"kind": "permission", "remediation": reason}}, code=1)
+    verdict = sql_guard.check_read_only(sql)
+    if verdict is not None:
+        raise GuardRefused(_refusal_from_verdict("permission", verdict), code=1)
     if not no_safety:
-        sql, rc = _model_safety(sql, profile, area)
-        if rc is not None:
-            raise GuardRefused(None, code=rc)
+        sql, refusal = _model_safety(sql, profile, area)
+        if refusal is not None:
+            raise GuardRefused(refusal, code=1)
     creds = _load_credentials(profile)
     return executor.execute(sql, creds, profile=profile)
 
@@ -1164,13 +1171,23 @@ def main() -> int:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--sql", help="SQL statement (use --sql-file for SQL with special characters)")
     src.add_argument("--sql-file", help="Path to a file containing one SQL statement")
-    p.add_argument("--area", default=None,
-                   help="Subject area for the semantic-model safety pass (pre-flight + default_filters).")
-    p.add_argument("--no-safety", action="store_true",
-                   help="Skip the semantic-model pre-flight / default_filters pass.")
-    p.add_argument("--max-rows", type=int, default=None,
-                   help="Lower the row cap for this call (never raises it). Effective cap = "
-                        "min(this, AGAMI_SQL_MAX_ROWS) — the env is the deployment cap, default 1000.")
+    p.add_argument(
+        "--area",
+        default=None,
+        help="Subject area for the semantic-model safety pass (pre-flight + default_filters).",
+    )
+    p.add_argument(
+        "--no-safety",
+        action="store_true",
+        help="Skip the semantic-model pre-flight / default_filters pass.",
+    )
+    p.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Lower the row cap for this call (never raises it). Effective cap = "
+        "min(this, AGAMI_SQL_MAX_ROWS) — the env is the deployment cap, default 1000.",
+    )
     args = p.parse_args()
 
     # Per-call cap (ACE-044); the sink reads it via _resolve_row_cap. No token/reset kept: main() is
@@ -1187,18 +1204,18 @@ def main() -> int:
 
     # Route through the single guarded envelope with the built-in executor: guard -> model-safety ->
     # resolve -> connect-and-run, returning native rows we then serialize to stdout as CSV (the
-    # subprocess wire). Same guard, same verdicts, same connect-per-query behaviour as before — the
-    # split just makes the connect-and-run step swappable in-process (AH-012). The guard is the hard
-    # security gate for EVERY caller (both MCP servers, the agami-query skill, cron), NOT bypassable
-    # via --no-safety (which skips only the semantic-model pass, never write/RCE/DoS protection).
+    # subprocess wire). The guard is the hard security gate for EVERY caller (both MCP servers, the
+    # agami-query skill, cron), NOT bypassable via --no-safety (which skips only the semantic-model
+    # pass, never write/RCE/DoS protection).
     try:
         result = execute_guarded(
             sql, profile, args.area, executor=BUILTIN_EXECUTOR, no_safety=args.no_safety
         )
     except GuardRefused as refusal:
-        if refusal.envelope is not None:  # read-only refusal: emit its JSON (model-safety already did)
-            json.dump(refusal.envelope, sys.stderr)
-            sys.stderr.write("\n")
+        # Emit the shared refusal as one JSON line to stderr — the subprocess wire the MCP tool relays
+        # into a refused Envelope, and a direct CLI caller reads alongside the exit code.
+        json.dump({"refusal": refusal.refusal.as_dict()}, sys.stderr)
+        sys.stderr.write("\n")
         return refusal.code
     except ExecutorError as exc:
         sys.stderr.write(f"{exc.msg}\n")

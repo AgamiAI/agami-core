@@ -26,14 +26,21 @@ if str(PKG_SRC) not in sys.path:
     sys.path.insert(0, str(PKG_SRC))
 
 import execute_sql  # noqa: E402
+from guardrail import Refusal  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _reset_override():
-    # _max_rows_override is a request-scoped ContextVar (ACE-028); isolate every test from it.
+def _reset_seam_state():
+    # Isolate every test from the process-global seam state: the _max_rows_override ContextVar
+    # (ACE-028) and the injected executor (leaving one set would make a later subprocess-path test
+    # run in-process instead).
+    import tools
+
     execute_sql._max_rows_override.set(None)
+    tools.set_injected_executor(None)
     yield
     execute_sql._max_rows_override.set(None)
+    tools.set_injected_executor(None)
 
 
 class _SpyExecutor:
@@ -59,7 +66,7 @@ def test_readonly_guard_refuses_before_the_executor_is_reached():
     with pytest.raises(execute_sql.GuardRefused) as ei:
         execute_sql.execute_guarded("DELETE FROM t", "acme", None, executor=spy)
     assert ei.value.code == 1
-    assert ei.value.envelope["error"]["kind"] == "permission"
+    assert ei.value.refusal.kind == "permission"  # GuardRefused carries the typed Refusal
     assert spy.calls == []  # executor never reached
 
 
@@ -73,13 +80,15 @@ def test_readonly_guard_still_fires_under_no_safety():
 
 
 def test_model_safety_refusal_short_circuits_before_the_executor(monkeypatch):
-    # A model-safety refusal already wrote its JSON to stderr, so the envelope is None and only the
-    # exit code is carried; the executor must not run.
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, 1))
+    # A model-safety refusal short-circuits with its typed Refusal carried on the exception (so both
+    # the subprocess and in-process paths build the same envelope); the executor must not run.
+    monkeypatch.setattr(
+        execute_sql, "_model_safety", lambda s, p, a: (s, Refusal("preflight_refused", "fan-trap"))
+    )
     spy = _SpyExecutor()
     with pytest.raises(execute_sql.GuardRefused) as ei:
         execute_sql.execute_guarded("SELECT 1", "acme", None, executor=spy)
-    assert ei.value.code == 1 and ei.value.envelope is None
+    assert ei.value.code == 1 and ei.value.refusal.kind == "preflight_refused"
     assert spy.calls == []
 
 
@@ -218,7 +227,7 @@ def test_injected_executor_runs_in_process_with_vetted_sql_and_no_fork(monkeypat
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme"}))
 
     assert fake.calls[0][0] == "SELECT n FROM t /*vetted*/"  # executor saw POST-guard SQL only
-    assert out["columns"] == ["n"] and out["rows"] == [["1"], ["2"]] and out["row_count"] == 2
+    assert out["data"]["columns"] == ["n"] and out["data"]["rows"] == [["1"], ["2"]] and out["data"]["row_count"] == 2
 
 
 def test_injected_executor_is_unreachable_for_a_write(monkeypatch):
@@ -231,7 +240,7 @@ def test_injected_executor_is_unreachable_for_a_write(monkeypatch):
     tools.set_injected_executor(fake)
     out = json.loads(tools.tool_execute_sql({"sql": "DELETE FROM t"}))
 
-    assert out["error"]["kind"] == "permission"  # refused by the read-only guard
+    assert out["refusal"]["kind"] == "permission"  # refused by the read-only guard
     assert fake.calls == []  # the injected executor was never reached — un-bypassable
 
 
@@ -249,8 +258,8 @@ def test_injected_executor_error_maps_to_the_same_envelope(monkeypatch):
     tools.set_injected_executor(_Boom())
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
 
-    assert out["error"]["kind"] == tools._classify_exit(4)
-    assert "connect failed" in out["error"]["remediation"]
+    assert out["refusal"]["kind"] == tools._classify_exit(4)
+    assert "connect failed" in out["refusal"]["reason"]  # ExecutorError msg rides the refusal reason
 
 
 def test_set_injected_executor_rejects_a_bad_shape():
@@ -283,7 +292,7 @@ def test_injected_executor_credential_error_surfaces_detailed_remediation(monkey
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
 
-    assert "DATASOURCE_URL" in out["error"]["remediation"]  # detailed, not the generic net string
+    assert "DATASOURCE_URL" in out["refusal"]["reason"]  # detailed, not the generic net string
 
 
 def test_injected_executor_systemexit_is_caught_not_fatal(monkeypatch):
@@ -301,7 +310,7 @@ def test_injected_executor_systemexit_is_caught_not_fatal(monkeypatch):
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
 
-    assert "error" in out  # a tool error envelope, not a process exit
+    assert out["status"] == "refused"  # a refused envelope, not a process exit
 
 
 def test_default_no_injected_executor_forks_the_subprocess(monkeypatch):
@@ -325,22 +334,28 @@ def test_default_no_injected_executor_forks_the_subprocess(monkeypatch):
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme"}))
 
     assert "-m" in captured["cmd"] and "execute_sql" in captured["cmd"]  # forked the CLI executor
-    assert out["rows"] == [["1"]]
+    assert out["data"]["rows"] == [["1"]]
 
 
-def test_injected_executor_model_safety_refusal_returns_clean_error(monkeypatch):
+def test_injected_executor_model_safety_refusal_returns_the_typed_refusal(monkeypatch):
+    # In-process now surfaces the SAME typed model-safety Refusal the subprocess path does (the
+    # detail rides GuardRefused, no longer lost to stderr) — full structured-refusal parity.
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
     monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, 1))  # refuse
+    monkeypatch.setattr(
+        execute_sql,
+        "_model_safety",
+        lambda s, p, a: (s, Refusal("table_out_of_scope", "table foo is not in the model")),
+    )
     fake = _SpyExecutor()
     tools.set_injected_executor(fake)
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
 
-    assert out["error"]["kind"] == "permission"
-    assert "semantic-model safety pass" in out["error"]["remediation"]
+    assert out["status"] == "refused" and out["refusal"]["kind"] == "table_out_of_scope"
+    assert "not in the model" in out["refusal"]["reason"]  # the real detail, not a generic string
     assert fake.calls == []  # refused before the executor
 
 
@@ -357,7 +372,7 @@ def test_injected_executor_textualizes_null_as_empty_at_the_tool_edge(monkeypatc
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT n, s FROM t", "datasource": "acme"}))
 
-    assert out["rows"] == [["1", ""]]  # int -> "1", NULL -> "" (never "None")
+    assert out["data"]["rows"] == [["1", ""]]  # int -> "1", NULL -> "" (never "None")
 
 
 def test_injected_executor_backstop_trims_to_max_rows(monkeypatch):
@@ -371,7 +386,7 @@ def test_injected_executor_backstop_trims_to_max_rows(monkeypatch):
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme", "max_rows": 2}))
 
-    assert out["rows"] == [["1"], ["2"]] and out["truncated"] is True
+    assert out["data"]["rows"] == [["1"], ["2"]] and out["data"]["truncated"] is True
 
 
 # --- main() (the subprocess CLI entry) translates the envelope's outcomes byte-identically --------
@@ -388,7 +403,7 @@ def test_main_read_only_refusal_writes_json_and_returns_1(tmp_path, monkeypatch,
     rc = execute_sql.main()
 
     assert rc == 1
-    assert json.loads(capsys.readouterr().err.strip())["error"]["kind"] == "permission"
+    assert json.loads(capsys.readouterr().err.strip())["refusal"]["kind"] == "permission"
 
 
 def test_main_executor_error_writes_message_and_returns_code(tmp_path, monkeypatch, capsys):

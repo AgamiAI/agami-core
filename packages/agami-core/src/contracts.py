@@ -57,19 +57,10 @@ class ExecuteSqlRequest(_Contract):
 
 
 # ---------------------------------------------------------------------------
-# Errors (every tool may return {"error": {"kind", "remediation"}, ...})
+# Errors: execute_sql returns the shared guardrail Envelope (status / refusal — see
+# `guardrail.py`); the other tools return a plain `{"error": {kind, remediation}}` body. Neither
+# needs a pydantic type here.
 # ---------------------------------------------------------------------------
-
-
-class ToolError(_Contract):
-    kind: str
-    remediation: str
-
-
-class ErrorResult(_Contract):
-    error: ToolError
-    sql: str | None = None
-    execution_ms: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +201,19 @@ class ToolCallRecord(_Contract):
     agent_query: str | None = None
     thread_id: str | None = None
     correlation_id: str | None = None  # the turn: one user question -> N agent sub-queries
+
+
+class GuardrailAuditRecord(_Contract):
+    """The verdict trail for one execute_sql call, keyed by the response Envelope's `audit_id`.
+    Written best-effort at the shared executor chokepoint on every surface (see `guardrail_audit`)."""
+
+    audit_id: str
+    ts: str
+    status: str  # 'ok' | 'refused'
+    datasource: str | None = None
+    refusal_kind: str | None = None
+    sql: str | None = None
+    row_count: int | None = None
+    execution_ms: int | None = None
+    correlation_id: str | None = None
+    source: str | None = None

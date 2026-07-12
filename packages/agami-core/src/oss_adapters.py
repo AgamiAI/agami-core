@@ -16,7 +16,8 @@ from pathlib import Path
 
 import agami_paths
 from contracts import QueryExecutionRecord
-from ports import GovernanceVerdict, Org, Principal
+from guardrail import Verdict
+from ports import Org, Principal
 
 
 def _append_jsonl(path: Path, record: dict) -> bool:
@@ -70,8 +71,10 @@ class PresenceAuthProvider:
 
 
 class WarnOnlyGovernancePolicy:
-    """Default ``GovernancePolicy`` — never blocks (``allowed=True``); any warnings are advisory
-    ("basic governance warning"). Enforcement is a paid tier."""
+    """Default ``GovernancePolicy``. The name is the OSS *posture* — governance only ever warns,
+    it never enforces — but the default adapter itself has no governance rules wired, so ``evaluate``
+    emits **no** findings (an empty ``Verdict`` list): nothing is annotated, rewritten, or blocked. A
+    paid tier supplies its own adapter that returns governance-class ``Verdict``s."""
 
-    def evaluate(self, ctx: object | None = None) -> GovernanceVerdict:
-        return GovernanceVerdict(allowed=True, warnings=[])
+    def evaluate(self, ctx: object | None = None) -> list[Verdict]:
+        return []

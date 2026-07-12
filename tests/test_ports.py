@@ -14,7 +14,6 @@ from ports import (
     ActivitySink,
     AuthProvider,
     GovernancePolicy,
-    GovernanceVerdict,
     Org,
     OrgResolver,
     Principal,
@@ -83,9 +82,10 @@ def test_presence_auth_accepts_nonempty_rejects_empty():
 def test_warn_only_governance_never_blocks():
     from oss_adapters import WarnOnlyGovernancePolicy
 
-    v = WarnOnlyGovernancePolicy().evaluate()
-    assert isinstance(v, GovernanceVerdict)
-    assert v.allowed is True
+    # The OSS default emits no governance findings (an empty Verdict list), so nothing is
+    # warned/rewritten/blocked. Enforcement is a paid adapter that returns governance Verdicts.
+    verdicts = WarnOnlyGovernancePolicy().evaluate()
+    assert verdicts == []
 
 
 def test_file_activity_sink_writes_jsonl(tmp_path):
