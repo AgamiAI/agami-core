@@ -54,7 +54,7 @@ from _agami_lib import ensure_importable  # noqa: E402
 
 ensure_importable()
 import agami_paths  # noqa: E402
-from execute_sql import _parse_dsn  # reuse DSN parsing logic  # noqa: E402
+from execute_sql import ExecutorError, _parse_dsn  # reuse DSN parsing logic  # noqa: E402
 
 # NOTE: never bootstrap() at import — this module is imported by build_duckdb_attach and
 # tests. The one-shot legacy migration runs only from main() (and the other entry points).
@@ -96,7 +96,13 @@ def _load_section(profile: str) -> dict[str, str]:
 
     section = {k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[profile].items()}
     if "url" in section and section["url"]:
-        from_dsn = _parse_dsn(section["url"])
+        # `_parse_dsn` now raises ExecutorError (not sys.exit) on a bad scheme so it's safe in-process;
+        # this script keeps its clean CLI UX (message on stderr, exit 2) by translating it here.
+        try:
+            from_dsn = _parse_dsn(section["url"])
+        except ExecutorError as e:
+            sys.stderr.write(e.msg + "\n")
+            sys.exit(2)
         merged = dict(from_dsn)
         for k, v in section.items():
             if k == "url":

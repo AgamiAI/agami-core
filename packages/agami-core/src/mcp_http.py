@@ -51,6 +51,7 @@ from tools import (
     bootstrap_paths,
     record_tool_call,
     server_version,
+    set_injected_executor,
 )
 
 _log = logging.getLogger(__name__)
@@ -367,6 +368,9 @@ def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None
     bootstrap_paths()
     adapters = adapters or default_adapters()
     auth_provider = adapters.auth_provider
+    # AH-012: register the composition-root executor (None = the default subprocess path). Behind the
+    # shared guard in `tool_execute_sql`; a hosted consumer injects a pooled/RBAC/tunnel executor here.
+    set_injected_executor(adapters.executor)
     # Validate consumer-supplied tools up front so a malformed entry fails at construction with a
     # clear error, not later as a KeyError/500 inside tools/list or tools/call.
     for tool_name, meta in (extra_tools or {}).items():

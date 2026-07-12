@@ -871,12 +871,149 @@ def _executor_truncated(stderr: str | None) -> bool:
     return False
 
 
+# The composition-root executor (AH-012). ``None`` (the default) means "fork the execute_sql
+# subprocess" — the byte-identical local/single-user path. A consumer injects a ``ports.Executor``
+# via ``create_app(adapters=…)`` to run execution IN-PROCESS behind the same guard (no fork, native
+# rows). Process-global on purpose: the executor is a composition-root singleton, not per-request.
+_INJECTED_EXECUTOR: Any | None = None
+
+
+def set_injected_executor(executor: Any | None) -> None:
+    """Register (or clear) the composition-root executor. Called once by ``mcp_http.create_app`` from
+    ``adapters.executor``; ``None`` keeps the default subprocess path. Validates the shape at
+    registration so a malformed adapter fails fast at app construction, not as an ``AttributeError``
+    at query time."""
+    global _INJECTED_EXECUTOR
+    if executor is not None:
+        import ports
+
+        if not isinstance(executor, ports.Executor):  # runtime_checkable: has execute(...)
+            raise TypeError(
+                "injected executor must satisfy ports.Executor "
+                "(an execute(vetted_sql, creds, *, profile) method)"
+            )
+    _INJECTED_EXECUTOR = executor
+
+
+def _finalize_execution(
+    columns: list, data_rows: list, truncated: bool, *, profile: str, sql: str,
+    execution_ms: int, args: dict[str, Any],
+) -> str:
+    """Shape a successful result (units + exact-render markdown + trust receipt), log the execution
+    through the single sink, and return the tool JSON. Shared by both execution paths — the subprocess
+    fork and the in-process executor — so a **successful** query returns the identical result envelope
+    whichever ran it. (A guard *refusal* is not yet identical across paths: the subprocess surfaces
+    execute_sql's stderr JSON as the remediation, while the in-process path returns a clean generic
+    refusal with the structured detail in the server log. Full structured-refusal parity needs
+    `_model_safety` to *return* its envelope — it currently writes it to stderr, pinned by the
+    fail-closed guard tests — so it's tracked as a follow-up, not folded into this seam.)"""
+    # Deterministic, exact rendering — so the numbers a user verifies don't depend on
+    # how the host LLM chooses to format them. `markdown` is the table to display
+    # verbatim; `rows` stays raw (exact CSV values) for charting / programmatic use.
+    unit_map = _resolve_units(profile, sql)
+    try:
+        from semantic_model import units  # stdlib-only; safe even without model deps
+
+        markdown = units.format_table(columns, data_rows, unit_map)
+    except Exception:
+        markdown = None
+
+    result = {
+        "columns": columns,
+        "rows": data_rows,
+        "row_count": len(data_rows),
+        "truncated": truncated,
+        "units": unit_map,
+        "markdown": markdown,  # exact, full numbers (currency symbol + grouping) — render as-is
+        "sql": sql,
+        "execution_ms": execution_ms,
+        # Trust receipt — provenance + anything unapproved this answer used. Same assembler
+        # the agami-query skill renders, so Desktop gets the same trust panel. Clients should
+        # surface receipt.warnings and any receipt.metrics whose review_state != "approved"
+        # (offer to approve/correct via the save_correction tool).
+        "receipt": _resolve_receipt(profile, sql),
+    }
+
+    # Log the execution through the single chokepoint: the DB sink when AGAMI_DB_URL is set (one
+    # query_executions row), else the local jsonl the skills use. Best-effort either way.
+    _record_query(
+        {
+            "ts": _now_iso(),
+            "profile": profile,
+            "question": args.get("raw_query"),
+            "sql": sql,
+            "row_count": len(data_rows),
+            "source": "mcp_server",
+        }
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+def _run_in_process(
+    sql: str, profile: str, area: str | None, max_rows: int | None, executor: Any
+) -> tuple[list, list, bool] | dict:
+    """Run through the in-process executor behind the shared guarded envelope (no subprocess, no CSV
+    round-trip). Returns ``(columns, data_rows, truncated)`` on success, or an error dict on a guard
+    refusal / execution failure — the same error shape the subprocess branch produces.
+
+    Rows are textualized to match the subprocess CSV wire (``None`` → ``""``, else ``str``) so the
+    two paths return observably identical JSON. Native-typed rows are a deliberately deferred decision
+    (see the AH-012 spec); flipping this one coercion is the follow-up once that's settled."""
+    import execute_sql
+
+    # The per-call cap rides execute_sql's module global (ACE-044). ACE-028, which makes in-process
+    # the real serving path, must thread the cap per-call instead — this global is not safe under
+    # concurrent in-process queries with different caps. Save/restore keeps it inert by default.
+    prev_cap = execute_sql._max_rows_override
+    execute_sql._max_rows_override = max_rows
+    try:
+        result = execute_sql.execute_guarded(sql, profile, area, executor=executor)
+    except execute_sql.GuardRefused as refusal:
+        # A read-only refusal (envelope present) is already caught by tool_execute_sql's upstream
+        # check_read_only fast-fail, so in practice only the model-safety branch (envelope None) is
+        # reached here; both are handled for defence-in-depth.
+        if refusal.envelope is not None:
+            return {"error": refusal.envelope["error"]}
+        # A model-safety refusal wrote its structured detail to the server log (stderr); surface a
+        # clean refusal here. (The subprocess path instead surfaces that stderr JSON as remediation —
+        # the not-yet-identical refusal envelope tracked as a follow-up.)
+        return {"error": {"kind": "permission",
+                          "remediation": "Query refused by the semantic-model safety pass "
+                                         "(see server logs for the specific rule)."}}
+    except execute_sql.ExecutorError as exc:
+        return {"error": {"kind": _classify_exit(exc.code), "remediation": exc.msg}}
+    except SystemExit as exc:
+        # Defence-in-depth. The known credential/DSN failures now raise ExecutorError (handled above,
+        # carrying their detailed message), so this net catches only a residual/future sys.exit deep
+        # in a driver — ensuring an in-process query can never take down the host; it becomes a
+        # fail-closed tool error instead.
+        code = exc.code if isinstance(exc.code, int) else 2
+        return {"error": {"kind": _classify_exit(code),
+                          "remediation": "Datasource configuration error."}}
+    finally:
+        execute_sql._max_rows_override = prev_cap
+
+    columns = list(result.columns)
+    data_rows = [["" if v is None else str(v) for v in row] for row in result.rows]
+    truncated = result.truncated
+    if max_rows is not None and len(data_rows) > max_rows:  # backstop, matches the subprocess branch
+        data_rows = data_rows[:max_rows]
+        truncated = True
+    return columns, data_rows, truncated
+
+
 def tool_execute_sql(args: dict[str, Any]) -> str:
     """Local analog of Ask Agami `execute_sql`: run a read-only SELECT locally.
 
     Routes through the sibling execute_sql.py (Tier-3 Python executor) so all
     DB types are handled identically and nothing but the rows leaves the
     process. Enforces the same read-only guarantee as the hosted connector.
+
+    Two execution paths behind the same guard: the default forks the execute_sql subprocess
+    (isolation, byte-identical local/single-user); an injected executor (AH-012) runs in-process with
+    native rows. Both funnel through `_finalize_execution`, so a **successful** query's result
+    envelope is identical either way (a guard refusal's envelope is not yet identical across paths —
+    see `_finalize_execution` and the tracked structured-refusal-parity follow-up).
     """
     sql = args.get("sql")
     if not isinstance(sql, str) or not sql.strip():
@@ -902,6 +1039,23 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
         max_rows = None
     if max_rows is not None:
         max_rows = max(1, min(max_rows, 10_000))
+
+    area = str(args["area"]) if args.get("area") else None
+
+    # In-process path (AH-012): a consumer injected an executor, so run behind the shared guarded
+    # envelope with no subprocess and no CSV round-trip. Falls through to the subprocess fork below
+    # when no executor is injected (the default) — that path stays byte-identical.
+    if _INJECTED_EXECUTOR is not None:
+        started = time.monotonic()
+        outcome = _run_in_process(sql, profile, area, max_rows, _INJECTED_EXECUTOR)
+        execution_ms = int((time.monotonic() - started) * 1000)
+        if isinstance(outcome, dict):  # guard refusal / execution error
+            return json.dumps({**outcome, "sql": sql, "execution_ms": execution_ms}, indent=2)
+        columns, data_rows, truncated = outcome
+        return _finalize_execution(
+            columns, data_rows, truncated,
+            profile=profile, sql=sql, execution_ms=execution_ms, args=args,
+        )
 
     # The model safety pass (fan/chasm pre-flight + default_filters) runs inside
     # execute_sql.py; pass the subject area so default_filters scope correctly.
@@ -954,46 +1108,10 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
         data_rows = data_rows[:max_rows]
         truncated = True
 
-    # Deterministic, exact rendering — so the numbers a user verifies don't depend on
-    # how the host LLM chooses to format them. `markdown` is the table to display
-    # verbatim; `rows` stays raw (exact CSV values) for charting / programmatic use.
-    unit_map = _resolve_units(profile, sql)
-    try:
-        from semantic_model import units  # stdlib-only; safe even without model deps
-
-        markdown = units.format_table(columns, data_rows, unit_map)
-    except Exception:
-        markdown = None
-
-    result = {
-        "columns": columns,
-        "rows": data_rows,
-        "row_count": len(data_rows),
-        "truncated": truncated,
-        "units": unit_map,
-        "markdown": markdown,  # exact, full numbers (currency symbol + grouping) — render as-is
-        "sql": sql,
-        "execution_ms": execution_ms,
-        # Trust receipt — provenance + anything unapproved this answer used. Same assembler
-        # the agami-query skill renders, so Desktop gets the same trust panel. Clients should
-        # surface receipt.warnings and any receipt.metrics whose review_state != "approved"
-        # (offer to approve/correct via the save_correction tool).
-        "receipt": _resolve_receipt(profile, sql),
-    }
-
-    # Log the execution through the single chokepoint: the DB sink when AGAMI_DB_URL is set (one
-    # query_executions row), else the local jsonl the skills use. Best-effort either way.
-    _record_query(
-        {
-            "ts": _now_iso(),
-            "profile": profile,
-            "question": args.get("raw_query"),
-            "sql": sql,
-            "row_count": len(data_rows),
-            "source": "mcp_server",
-        }
+    return _finalize_execution(
+        columns, data_rows, truncated,
+        profile=profile, sql=sql, execution_ms=execution_ms, args=args,
     )
-    return json.dumps(result, indent=2, default=str)
 
 
 def _now_iso() -> str:

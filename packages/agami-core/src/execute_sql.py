@@ -46,10 +46,18 @@ import os
 import stat
 import sys
 import urllib.parse
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import agami_paths
+
+if TYPE_CHECKING:
+    # ``Executor`` is the 5th port; imported only for type-checkers. At runtime ``execute_sql`` never
+    # imports ``ports`` (it ships in the stdlib-lean plugin mirror without it), so the annotation on
+    # ``execute_guarded`` stays a lazy string (``from __future__ import annotations``).
+    from ports import Executor
 
 # Credentials + config now live under <artifacts_dir>/local/ (the consolidated,
 # gitignored replacement for ~/.agami). The path is stable regardless of migration
@@ -85,6 +93,46 @@ def _resolve_default_profile() -> str:
 def _err(msg: str, *, code: int = 2) -> int:
     sys.stderr.write(f"{msg}\n")
     return code
+
+
+@dataclass(frozen=True)
+class ExecResult:
+    """What an executor returns: columns + rows with **native Python types preserved** (ints,
+    Decimals, datetimes, ``None``), not stringified. Serializing to text — CSV for the subprocess
+    wire, JSON at the MCP-tool edge — is the *caller's* single, final step, so an in-process
+    executor never pays a serialize→re-parse round-trip and never loses a type or confuses NULL
+    with "". ``truncated`` mirrors the ``fetchmany(cap + 1)`` bound: True when the result was capped.
+
+    This lives here (not in ``ports``) because ``execute_sql`` ships in the stdlib-lean plugin
+    mirror, which does not include ``ports``; ``ports.Executor`` references it under TYPE_CHECKING.
+    """
+
+    columns: list[str]
+    rows: list[tuple]
+    truncated: bool = False
+
+
+class ExecutorError(Exception):
+    """A connect / credential / run failure raised by the built-in executor. Carries the exact
+    stderr message and exit code the subprocess CLI emits, so ``main`` reproduces today's bytes and
+    the in-process caller gets a catchable error instead of a process exit. Replaces the old
+    ``return _err(...)`` returns inside the per-engine run functions."""
+
+    def __init__(self, msg: str, *, code: int) -> None:
+        super().__init__(msg)
+        self.msg = msg
+        self.code = code
+
+
+class GuardRefused(Exception):
+    """A guard refusal short-circuiting the envelope. ``envelope`` is the JSON error object the
+    caller must emit (the read-only guard's ``permission`` refusal), or ``None`` when the refusal
+    JSON was already written to stderr by ``_model_safety`` (carry only the exit ``code``)."""
+
+    def __init__(self, envelope: dict | None, *, code: int) -> None:
+        super().__init__()
+        self.envelope = envelope
+        self.code = code
 
 
 def _env_token(profile: str) -> str:
@@ -147,13 +195,13 @@ def _load_credentials(profile: str) -> dict[str, str]:
         return _parse_dsn(dsn)
 
     if not CREDENTIALS_PATH.exists():
-        sys.stderr.write(
+        raise ExecutorError(
             f"No warehouse credentials for profile [{profile}]. Set DATASOURCE_URL "
             f"(or DATASOURCE_URL__{_env_token(profile)}) "
             "in the environment, or create <artifacts_dir>/local/credentials via the agami `init` skill.\n"
-            "Never type credentials into chat — they belong in the environment or the file.\n"
+            "Never type credentials into chat — they belong in the environment or the file.",
+            code=2,
         )
-        sys.exit(2)
 
     # chmod check: refuse if too permissive. POSIX only — Windows file modes don't
     # map to Unix permission bits (NTFS ACLs guard the file; a stat() there reports
@@ -161,11 +209,11 @@ def _load_credentials(profile: str) -> dict[str, str]:
     if os.name == "posix":
         mode = stat.S_IMODE(CREDENTIALS_PATH.stat().st_mode)
         if mode not in ALLOWED_PERMS:
-            sys.stderr.write(
+            raise ExecutorError(
                 f"<artifacts_dir>/local/credentials must be chmod 600 (currently {oct(mode)[2:]})\n"
-                f"Run: chmod 600 <artifacts_dir>/local/credentials\n"
+                f"Run: chmod 600 <artifacts_dir>/local/credentials",
+                code=2,
             )
-            sys.exit(2)
 
     # IMPORTANT: enable inline-comment stripping for both `#` and `;`. Without
     # this, a credentials line like `account = xy12345  # locator + region`
@@ -175,11 +223,11 @@ def _load_credentials(profile: str) -> dict[str, str]:
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     cfg.read(CREDENTIALS_PATH)
     if profile not in cfg:
-        sys.stderr.write(
+        raise ExecutorError(
             f"Profile [{profile}] not found in <artifacts_dir>/local/credentials. "
-            f"Sections present: {cfg.sections()}\n"
+            f"Sections present: {cfg.sections()}",
+            code=2,
         )
-        sys.exit(2)
 
     section = {k: (v.strip() if isinstance(v, str) else v) for k, v in cfg[profile].items()}
 
@@ -288,12 +336,12 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
         result = {"type": "sqlite", "path": path or u.path.lstrip("/")}
         return result
     else:
-        sys.stderr.write(
+        raise ExecutorError(
             f"Unsupported scheme {raw_scheme!r}. "
             f"Supported: postgresql[+driver], postgres[+driver], redshift, "
-            f"mysql[+driver], mariadb, snowflake, sqlite.\n"
+            f"mysql[+driver], mariadb, snowflake, sqlite.",
+            code=2,
         )
-        sys.exit(2)
 
     # Snowflake's URL is account-shaped, not host:port. The "hostname" portion
     # of `snowflake://user:pw@xy12345.us-east-1.aws/MYDB/PUBLIC` is the account
@@ -337,20 +385,23 @@ def _parse_dsn(dsn: str) -> dict[str, str]:
 
 
 def _require(creds: dict[str, str], *fields: str) -> None:
+    """Raise ``ExecutorError`` (not ``sys.exit``) when a required credential field is missing, so the
+    same check is safe in-process (a bad profile can't kill the server) and the subprocess ``main``
+    still surfaces the identical stderr message + exit code 2."""
     missing = [f for f in fields if not creds.get(f)]
     if missing:
-        sys.stderr.write(
+        raise ExecutorError(
             f"Credentials profile is missing required fields: {missing}. "
-            f"Edit <artifacts_dir>/local/credentials and add them.\n"
+            f"Edit <artifacts_dir>/local/credentials and add them.",
+            code=2,
         )
-        sys.exit(2)
 
 
-def _execute_postgres(creds: dict[str, str], sql: str) -> int:
+def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
     try:
         import psycopg2  # type: ignore
     except ImportError:
-        return _err("psycopg2 not installed. Run: pip install psycopg2-binary", code=3)
+        raise ExecutorError("psycopg2 not installed. Run: pip install psycopg2-binary", code=3)
     _require(creds, "host", "port", "user", "password", "database")
     try:
         conn = psycopg2.connect(
@@ -363,7 +414,7 @@ def _execute_postgres(creds: dict[str, str], sql: str) -> int:
             connect_timeout=10,
         )
     except Exception as e:
-        return _err(f"Postgres connect failed: {e}", code=4)
+        raise ExecutorError(f"Postgres connect failed: {e}", code=4)
     try:
         with conn:
             # A server-side (named) cursor so the row cap bounds TRANSFER, not just what we write:
@@ -374,19 +425,19 @@ def _execute_postgres(creds: dict[str, str], sql: str) -> int:
             with conn.cursor(name="agami_bounded") as cur:
                 cur.itersize = _resolve_row_cap() + 1  # server fetch batch = the bounded window
                 cur.execute(sql)
-                _write_cursor_csv(cur)
+                result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"Postgres execution error: {e}", code=5)
+        raise ExecutorError(f"Postgres execution error: {e}", code=5)
     finally:
         conn.close()
-    return 0
+    return result
 
 
-def _execute_mysql(creds: dict[str, str], sql: str) -> int:
+def _run_mysql(creds: dict[str, str], sql: str) -> ExecResult:
     try:
         import pymysql  # type: ignore
     except ImportError:
-        return _err("pymysql not installed. Run: pip install pymysql", code=3)
+        raise ExecutorError("pymysql not installed. Run: pip install pymysql", code=3)
     _require(creds, "host", "port", "user", "password", "database")
     try:
         conn = pymysql.connect(
@@ -400,31 +451,31 @@ def _execute_mysql(creds: dict[str, str], sql: str) -> int:
             autocommit=True,
         )
     except Exception as e:
-        return _err(f"MySQL connect failed: {e}", code=4)
+        raise ExecutorError(f"MySQL connect failed: {e}", code=4)
     try:
         with conn.cursor() as cur:
             cur.execute(sql)
-            _write_cursor_csv(cur)
+            result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"MySQL execution error: {e}", code=5)
+        raise ExecutorError(f"MySQL execution error: {e}", code=5)
     finally:
         conn.close()
-    return 0
+    return result
 
 
-def _execute_snowflake(creds: dict[str, str], sql: str) -> int:
+def _run_snowflake(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for Snowflake using snowflake-connector-python."""
     try:
         import snowflake.connector  # type: ignore
     except ImportError:
-        return _err(
+        raise ExecutorError(
             "snowflake-connector-python not installed. "
             "Run: pip install snowflake-connector-python",
             code=3,
         )
     _require(creds, "account", "user")
     if not (creds.get("password") or creds.get("authenticator")):
-        return _err(
+        raise ExecutorError(
             "Snowflake profile is missing 'password' or 'authenticator'. "
             "Add one to <artifacts_dir>/local/credentials.",
             code=2,
@@ -441,22 +492,22 @@ def _execute_snowflake(creds: dict[str, str], sql: str) -> int:
     try:
         conn = snowflake.connector.connect(**conn_kwargs)
     except Exception as e:
-        return _err(f"Snowflake connect failed: {e}", code=4)
+        raise ExecutorError(f"Snowflake connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
         cur.execute(sql)
-        _write_cursor_csv(cur)
+        result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"Snowflake execution error: {e}", code=5)
+        raise ExecutorError(f"Snowflake execution error: {e}", code=5)
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return 0
+    return result
 
 
-def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
+def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for BigQuery using google-cloud-bigquery.
 
     Required: `project`. One of: `service_account_path` (path to a JSON key
@@ -469,7 +520,7 @@ def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
         from google.cloud import bigquery  # type: ignore
         from google.oauth2 import service_account  # type: ignore
     except ImportError:
-        return _err(
+        raise ExecutorError(
             "google-cloud-bigquery not installed. "
             "Run: pip install google-cloud-bigquery",
             code=3,
@@ -487,7 +538,7 @@ def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
     if sa_path:
         sa_path_expanded = os.path.expanduser(sa_path)
         if not os.path.exists(sa_path_expanded):
-            return _err(
+            raise ExecutorError(
                 f"service_account_path '{sa_path}' doesn't exist. "
                 f"Point at the JSON key file you downloaded from GCP.",
                 code=2,
@@ -508,12 +559,12 @@ def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
             )
             client_kwargs["credentials"] = creds_obj
         except Exception as e:
-            return _err(f"BigQuery credentials load failed: {e}", code=2)
+            raise ExecutorError(f"BigQuery credentials load failed: {e}", code=2)
 
     try:
         client = bigquery.Client(**client_kwargs)
     except Exception as e:
-        return _err(f"BigQuery client init failed: {e}", code=4)
+        raise ExecutorError(f"BigQuery client init failed: {e}", code=4)
 
     # If `dataset` was set, prefix unqualified table references via the
     # default_dataset job config so the SQL can omit `<project>.<dataset>.`
@@ -531,55 +582,52 @@ def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
             job = client.query(sql, job_config=job_config)
         else:
             job = client.query(sql)
-        # BigQuery has no DB-API cursor, so it can't funnel through `_write_cursor_csv`; apply the
+        # BigQuery has no DB-API cursor, so it can't funnel through `_collect_cursor`; apply the
         # same bounded-fetch cap here. `max_results=cap+1` bounds what the API returns (transfer),
         # and the (cap+1)th row flags truncation — the never-silent guarantee holds for BigQuery too.
         results = job.result(max_results=cap + 1)  # waits for completion; raises on error
     except Exception as e:
-        return _err(f"BigQuery execution error: {e}", code=5)
+        raise ExecutorError(f"BigQuery execution error: {e}", code=5)
 
-    writer = csv.writer(sys.stdout)
-    if results.schema:
-        writer.writerow([f.name for f in results.schema])
-        written = 0
-        truncated = False
-        for row in results:
-            if written >= cap:
-                truncated = True
-                break
-            writer.writerow([row[i] for i in range(len(results.schema))])
-            written += 1
-        if truncated:
-            _flag_truncated(cap)
-
-    return 0
+    if not results.schema:
+        return ExecResult(columns=[], rows=[], truncated=False)
+    columns = [f.name for f in results.schema]
+    ncols = len(results.schema)
+    rows: list[tuple] = []
+    truncated = False
+    for row in results:
+        if len(rows) >= cap:
+            truncated = True
+            break
+        rows.append(tuple(row[i] for i in range(ncols)))
+    return ExecResult(columns=columns, rows=rows, truncated=truncated)
 
 
-def _execute_sqlite(creds: dict[str, str], sql: str) -> int:
+def _run_sqlite(creds: dict[str, str], sql: str) -> ExecResult:
     import sqlite3  # always available in stdlib
     _require(creds, "path")
     path = os.path.expanduser(creds["path"])
     try:
         conn = sqlite3.connect(path)
     except Exception as e:
-        return _err(f"SQLite connect failed: {e}", code=4)
+        raise ExecutorError(f"SQLite connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
         cur.execute(sql)
-        _write_cursor_csv(cur)
+        result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"SQLite execution error: {e}", code=5)
+        raise ExecutorError(f"SQLite execution error: {e}", code=5)
     finally:
         conn.close()
-    return 0
+    return result
 
 
-def _execute_sqlserver(creds: dict[str, str], sql: str) -> int:
+def _run_sqlserver(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for SQL Server / Azure SQL using pymssql."""
     try:
         import pymssql  # type: ignore
     except ImportError:
-        return _err("pymssql not installed. Run: pip install pymssql", code=3)
+        raise ExecutorError("pymssql not installed. Run: pip install pymssql", code=3)
     _require(creds, "host", "user", "password")
     try:
         conn = pymssql.connect(
@@ -588,27 +636,27 @@ def _execute_sqlserver(creds: dict[str, str], sql: str) -> int:
             database=creds.get("database", ""), login_timeout=15,
         )
     except Exception as e:
-        return _err(f"SQL Server connect failed: {e}", code=4)
+        raise ExecutorError(f"SQL Server connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
         cur.execute(sql)
-        _write_cursor_csv(cur)
+        result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"SQL Server execution error: {e}", code=5)
+        raise ExecutorError(f"SQL Server execution error: {e}", code=5)
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return 0
+    return result
 
 
-def _execute_oracle(creds: dict[str, str], sql: str) -> int:
+def _run_oracle(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for Oracle using python-oracledb (thin mode — no client libs)."""
     try:
         import oracledb  # type: ignore
     except ImportError:
-        return _err("python-oracledb not installed. Run: pip install oracledb", code=3)
+        raise ExecutorError("python-oracledb not installed. Run: pip install oracledb", code=3)
     _require(creds, "user", "password")
     dsn = creds.get("dsn") or creds.get("url")
     if not dsn:
@@ -618,27 +666,27 @@ def _execute_oracle(creds: dict[str, str], sql: str) -> int:
     try:
         conn = oracledb.connect(user=creds["user"], password=creds["password"], dsn=dsn)
     except Exception as e:
-        return _err(f"Oracle connect failed: {e}", code=4)
+        raise ExecutorError(f"Oracle connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
         cur.execute(sql)
-        _write_cursor_csv(cur)
+        result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"Oracle execution error: {e}", code=5)
+        raise ExecutorError(f"Oracle execution error: {e}", code=5)
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return 0
+    return result
 
 
-def _execute_databricks(creds: dict[str, str], sql: str) -> int:
+def _run_databricks(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for Databricks SQL warehouses using databricks-sql-connector."""
     try:
         from databricks import sql as dbsql  # type: ignore
     except ImportError:
-        return _err(
+        raise ExecutorError(
             "databricks-sql-connector not installed. Run: pip install databricks-sql-connector",
             code=3,
         )
@@ -649,27 +697,27 @@ def _execute_databricks(creds: dict[str, str], sql: str) -> int:
             access_token=creds["token"],
         )
     except Exception as e:
-        return _err(f"Databricks connect failed: {e}", code=4)
+        raise ExecutorError(f"Databricks connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
         cur.execute(sql)
-        _write_cursor_csv(cur)
+        result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"Databricks execution error: {e}", code=5)
+        raise ExecutorError(f"Databricks execution error: {e}", code=5)
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return 0
+    return result
 
 
-def _execute_trino(creds: dict[str, str], sql: str) -> int:
+def _run_trino(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for Trino / Presto using the trino python client."""
     try:
         import trino  # type: ignore
     except ImportError:
-        return _err("trino not installed. Run: pip install trino", code=3)
+        raise ExecutorError("trino not installed. Run: pip install trino", code=3)
     _require(creds, "host", "user")
     try:
         auth = None
@@ -681,43 +729,43 @@ def _execute_trino(creds: dict[str, str], sql: str) -> int:
             http_scheme="https" if creds.get("password") else "http", auth=auth,
         )
     except Exception as e:
-        return _err(f"Trino connect failed: {e}", code=4)
+        raise ExecutorError(f"Trino connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
         cur.execute(sql)
-        _write_cursor_csv(cur)
+        result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"Trino execution error: {e}", code=5)
+        raise ExecutorError(f"Trino execution error: {e}", code=5)
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return 0
+    return result
 
 
-def _execute_duckdb(creds: dict[str, str], sql: str) -> int:
+def _run_duckdb(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for DuckDB using the duckdb python module (file or in-memory)."""
     try:
         import duckdb  # type: ignore
     except ImportError:
-        return _err("duckdb not installed. Run: pip install duckdb", code=3)
+        raise ExecutorError("duckdb not installed. Run: pip install duckdb", code=3)
     path = creds.get("path") or creds.get("database") or ":memory:"
     try:
         conn = duckdb.connect(path, read_only=True)
     except Exception as e:
-        return _err(f"DuckDB open failed: {e}", code=4)
+        raise ExecutorError(f"DuckDB open failed: {e}", code=4)
     try:
         cur = conn.execute(sql)
-        _write_cursor_csv(cur)
+        result = _collect_cursor(cur)
     except Exception as e:
-        return _err(f"DuckDB execution error: {e}", code=5)
+        raise ExecutorError(f"DuckDB execution error: {e}", code=5)
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return 0
+    return result
 
 
 _DEFAULT_MAX_ROWS = 1000  # rows materialized per result before truncation (ACE-038)
@@ -746,19 +794,45 @@ def _flag_truncated(cap: int) -> None:
     sys.stderr.write(json.dumps({"truncated": {"row_cap": cap}}) + "\n")
 
 
-def _write_cursor_csv(cur: Any) -> None:
-    """Stream at most the row cap to stdout as CSV. `fetchmany(cap + 1)` — never `fetchall` — so a
-    huge result can't be buffered whole; the (cap+1)th row means the result was truncated, flagged
-    on stderr. The SQL itself is untouched (no injected LIMIT)."""
+def _collect_cursor(cur: Any) -> ExecResult:
+    """Fetch at most the row cap from a DB-API cursor into an ``ExecResult`` with **native types**.
+    `fetchmany(cap + 1)` — never `fetchall` — so a huge result can't be buffered whole; a (cap+1)th
+    row means the result was truncated. The SQL itself is untouched (no injected LIMIT). This is the
+    single bounded-fetch implementation both the CSV wire (`_write_cursor_csv`) and the in-process
+    executor path share, so the row cap is enforced once, identically, for every caller."""
     cap = _resolve_row_cap()
+    if cur.description is None:
+        # No result set (a non-row statement). `_emit_result_csv` writes nothing for empty columns,
+        # matching the old sink. A description that is an *empty list* (a zero-column result set)
+        # would diverge from the old bare-header line, but the read-only guard admits only
+        # SELECT/WITH…SELECT, which always project >= 1 column — so that case can't reach here.
+        return ExecResult(columns=[], rows=[], truncated=False)
+    columns = [d[0] for d in cur.description]
+    fetched = cur.fetchmany(cap + 1)
+    truncated = len(fetched) > cap
+    return ExecResult(columns=columns, rows=[tuple(r) for r in fetched[:cap]], truncated=truncated)
+
+
+def _emit_result_csv(result: ExecResult) -> None:
+    """Serialize an ``ExecResult`` to stdout as CSV — the subprocess/CLI wire. Byte-for-byte what the
+    old inline cursor→CSV writer produced: header row then data rows, and a truncation marker on
+    stderr when capped. This is the *single, final* text serialization for the fork path; the
+    in-process path skips it and returns the native rows straight to the tool edge."""
+    if not result.columns:  # cursor had no description → wrote nothing (e.g. a non-row statement)
+        return
     writer = csv.writer(sys.stdout)
-    if cur.description is not None:
-        writer.writerow([d[0] for d in cur.description])
-        rows = cur.fetchmany(cap + 1)
-        for row in rows[:cap]:
-            writer.writerow(row)
-        if len(rows) > cap:
-            _flag_truncated(cap)
+    writer.writerow(result.columns)
+    for row in result.rows:
+        writer.writerow(row)
+    if result.truncated:
+        _flag_truncated(_resolve_row_cap())
+
+
+def _write_cursor_csv(cur: Any) -> None:
+    """Collect the bounded result and write it to stdout as CSV — the per-engine sink the subprocess
+    path uses. Kept as the thin composition ``_emit_result_csv(_collect_cursor(cur))`` so the fetch
+    bound and the CSV shape stay single-sourced (and the existing bounded-fetch tests still pin it)."""
+    _emit_result_csv(_collect_cursor(cur))
 
 
 def _hosted() -> bool:
@@ -909,6 +983,159 @@ def _model_safety(sql: str, profile: str, area: str | None):
     return sql, None
 
 
+# ---------------------------------------------------------------------------
+# Executor seam (AH-012): one guarded envelope, a swappable connect-and-run step
+# ---------------------------------------------------------------------------
+#
+# `execute_guarded` is the single execution chokepoint: guard -> resolve datasource ->
+# executor.execute(vetted_sql) -> return native rows. The built-in executor (`BUILTIN_EXECUTOR`) is
+# the default connect-per-query path, unchanged; a consumer injects its own `ports.Executor`
+# (pooled / RBAC / tunnelled) *behind* the same guard — no fork of the guard, per REQ-002/REQ-014.
+# The subprocess `main` and the in-process MCP handler both go through `execute_guarded`, so the
+# guard is applied identically and can't be bypassed. The per-engine `_execute_<db>` CSV wrappers
+# below are the subprocess/CLI adapter (they emit CSV + return an exit code); `_run_<db>` is the
+# shared connect-and-run that returns native rows to either caller.
+
+
+def _emit_or_err(run: Callable[[], ExecResult]) -> int:
+    """Subprocess/CLI adapter over a ``_run_<db>`` function: write its result to stdout as CSV and
+    return exit code 0, or translate an ``ExecutorError`` into the stderr message + exit code the CLI
+    contract documents (byte-identical to what the old ``_execute_<db>`` emitted)."""
+    try:
+        _emit_result_csv(run())
+    except ExecutorError as e:
+        return _err(e.msg, code=e.code)
+    return 0
+
+
+def _execute_postgres(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_postgres(creds, sql))
+
+
+def _execute_mysql(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_mysql(creds, sql))
+
+
+def _execute_snowflake(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_snowflake(creds, sql))
+
+
+def _execute_bigquery(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_bigquery(creds, sql))
+
+
+def _execute_sqlite(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_sqlite(creds, sql))
+
+
+def _execute_sqlserver(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_sqlserver(creds, sql))
+
+
+def _execute_oracle(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_oracle(creds, sql))
+
+
+def _execute_databricks(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_databricks(creds, sql))
+
+
+def _execute_trino(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_trino(creds, sql))
+
+
+def _execute_duckdb(creds: dict[str, str], sql: str) -> int:
+    return _emit_or_err(lambda: _run_duckdb(creds, sql))
+
+
+def _builtin_execute(vetted_sql: str, creds: dict[str, str], *, profile: str) -> ExecResult:
+    """The built-in connect-and-run: dispatch on the datasource type and return native rows. Same
+    per-engine behaviour as before (redshift/supabase ride the Postgres wire); only the row-emit
+    moved to the caller. Raises ``ExecutorError`` on an unknown/missing type or a driver/connect/run
+    failure. This is what ``BUILTIN_EXECUTOR.execute`` calls."""
+    db_type = creds.get("type", "").lower()
+    if not db_type:
+        raise ExecutorError(f"Credentials profile [{profile}] is missing the 'type' field.", code=2)
+    if db_type == "postgres":
+        return _run_postgres(creds, vetted_sql)
+    if db_type == "redshift":
+        # Redshift speaks the Postgres wire protocol; psycopg2 connects fine. `_run_postgres` reads
+        # host/port/etc. directly, so the type field doesn't matter — only sslmode defaulting does.
+        if "sslmode" not in creds:
+            creds = {**creds, "sslmode": "require"}
+        return _run_postgres(creds, vetted_sql)
+    if db_type == "mysql":
+        return _run_mysql(creds, vetted_sql)
+    if db_type == "sqlite":
+        return _run_sqlite(creds, vetted_sql)
+    if db_type == "snowflake":
+        return _run_snowflake(creds, vetted_sql)
+    if db_type == "bigquery":
+        return _run_bigquery(creds, vetted_sql)
+    if db_type in ("sqlserver", "mssql"):
+        return _run_sqlserver(creds, vetted_sql)
+    if db_type == "oracle":
+        return _run_oracle(creds, vetted_sql)
+    if db_type == "databricks":
+        return _run_databricks(creds, vetted_sql)
+    if db_type in ("trino", "presto"):
+        return _run_trino(creds, vetted_sql)
+    if db_type == "duckdb":
+        return _run_duckdb(creds, vetted_sql)
+    if db_type == "supabase":
+        # Supabase is hosted Postgres.
+        return _run_postgres(creds, vetted_sql)
+    raise ExecutorError(
+        f"Unsupported db type {db_type!r}. Supported: postgres, supabase, redshift, "
+        f"mysql, sqlite, snowflake, bigquery, sqlserver, oracle, databricks, trino, duckdb.",
+        code=2,
+    )
+
+
+class _BuiltinExecutor:
+    """The default ``ports.Executor``: wraps the connect-per-query dispatch as an object so it
+    satisfies the port by shape (method-style, like the other four ports). Stateless — one shared
+    ``BUILTIN_EXECUTOR`` instance."""
+
+    def execute(self, vetted_sql: str, creds: dict[str, str], *, profile: str) -> ExecResult:
+        return _builtin_execute(vetted_sql, creds, profile=profile)
+
+
+BUILTIN_EXECUTOR = _BuiltinExecutor()
+
+
+def execute_guarded(
+    sql: str,
+    profile: str,
+    area: str | None,
+    *,
+    executor: Executor,
+    no_safety: bool = False,
+) -> ExecResult:
+    """The un-bypassable guarded envelope — the single execution chokepoint (REQ-002/REQ-014).
+
+    In fixed order: read-only / dangerous-SQL guard (the hard security gate — NOT bypassable via
+    ``no_safety``, which skips only the semantic-model pass, never write/RCE/DoS protection) ->
+    semantic-model safety pass (fan/chasm pre-flight + scope + PII + ``default_filters`` rewrite) ->
+    resolve the datasource -> ``executor.execute(vetted_sql, …)``. The executor only ever receives
+    SQL both guards have passed. Raises ``GuardRefused`` on a refusal (the read-only refusal carries
+    its JSON envelope for the caller to emit; a model-safety refusal already wrote its JSON to stderr
+    and carries only the exit code) and ``ExecutorError`` on a connect/run failure — so the
+    subprocess ``main`` and the in-process MCP handler apply the same guard and surface errors
+    identically. The row cap rides the ``_max_rows_override`` module global the caller sets."""
+    import sql_guard
+
+    reason = sql_guard.check_read_only(sql)
+    if reason is not None:
+        raise GuardRefused({"error": {"kind": "permission", "remediation": reason}}, code=1)
+    if not no_safety:
+        sql, rc = _model_safety(sql, profile, area)
+        if rc is not None:
+            raise GuardRefused(None, code=rc)
+    creds = _load_credentials(profile)
+    return executor.execute(sql, creds, profile=profile)
+
+
 def main() -> int:
     # One-shot migration of a legacy <artifacts_dir>/local into <artifacts_dir>/local/, then re-resolve
     # the paths (the migration can set the artifacts-dir pointer to a custom location).
@@ -946,64 +1173,26 @@ def main() -> int:
 
     profile = args.profile or _resolve_default_profile()
 
-    # Read-only / dangerous-SQL guard — the hard security gate, at the shared executor
-    # chokepoint so EVERY caller (both MCP servers, the agami-query skill, cron) is
-    # protected, not just whichever path happened to pre-check. This is NOT bypassable
-    # via --no-safety: that flag skips only the *semantic-model* pass (fan/chasm +
-    # default_filters), never write / RCE / DoS protection. Same gate the MCP tool layer
-    # fail-fast pre-checks (tools.check_read_only -> sql_guard).
-    import sql_guard
-
-    guard_reason = sql_guard.check_read_only(sql)
-    if guard_reason is not None:
-        json.dump({"error": {"kind": "permission", "remediation": guard_reason}}, sys.stderr)
-        sys.stderr.write("\n")
-        return 1
-
-    # Semantic-model safety pass (fan/chasm pre-flight + default_filters). Inert when
-    # there's no model for the profile, so this is safe for every caller.
-    if not args.no_safety:
-        sql, _rc = _model_safety(sql, profile, args.area)
-        if _rc is not None:
-            return _rc
-    creds = _load_credentials(profile)
-    db_type = creds.get("type", "").lower()
-    if not db_type:
-        return _err(f"Credentials profile [{profile}] is missing the 'type' field.")
-    if db_type == "postgres":
-        return _execute_postgres(creds, sql)
-    if db_type == "redshift":
-        # Redshift speaks Postgres wire protocol; psycopg2 connects fine.
-        # The credentials dict has type=redshift, but _execute_postgres reads
-        # host/port/etc. directly so the type field doesn't matter.
-        if "sslmode" not in creds:
-            creds = {**creds, "sslmode": "require"}
-        return _execute_postgres(creds, sql)
-    if db_type == "mysql":
-        return _execute_mysql(creds, sql)
-    if db_type == "sqlite":
-        return _execute_sqlite(creds, sql)
-    if db_type == "snowflake":
-        return _execute_snowflake(creds, sql)
-    if db_type == "bigquery":
-        return _execute_bigquery(creds, sql)
-    if db_type in ("sqlserver", "mssql"):
-        return _execute_sqlserver(creds, sql)
-    if db_type == "oracle":
-        return _execute_oracle(creds, sql)
-    if db_type == "databricks":
-        return _execute_databricks(creds, sql)
-    if db_type in ("trino", "presto"):
-        return _execute_trino(creds, sql)
-    if db_type == "duckdb":
-        return _execute_duckdb(creds, sql)
-    if db_type == "supabase":
-        # Supabase is hosted Postgres.
-        return _execute_postgres(creds, sql)
-    return _err(
-        f"Unsupported db type {db_type!r}. Supported: postgres, supabase, redshift, "
-        f"mysql, sqlite, snowflake, bigquery, sqlserver, oracle, databricks, trino, duckdb."
-    )
+    # Route through the single guarded envelope with the built-in executor: guard -> model-safety ->
+    # resolve -> connect-and-run, returning native rows we then serialize to stdout as CSV (the
+    # subprocess wire). Same guard, same verdicts, same connect-per-query behaviour as before — the
+    # split just makes the connect-and-run step swappable in-process (AH-012). The guard is the hard
+    # security gate for EVERY caller (both MCP servers, the agami-query skill, cron), NOT bypassable
+    # via --no-safety (which skips only the semantic-model pass, never write/RCE/DoS protection).
+    try:
+        result = execute_guarded(
+            sql, profile, args.area, executor=BUILTIN_EXECUTOR, no_safety=args.no_safety
+        )
+    except GuardRefused as refusal:
+        if refusal.envelope is not None:  # read-only refusal: emit its JSON (model-safety already did)
+            json.dump(refusal.envelope, sys.stderr)
+            sys.stderr.write("\n")
+        return refusal.code
+    except ExecutorError as exc:
+        sys.stderr.write(f"{exc.msg}\n")
+        return exc.code
+    _emit_result_csv(result)
+    return 0
 
 
 if __name__ == "__main__":
