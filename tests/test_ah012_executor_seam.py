@@ -8,6 +8,7 @@ returns NATIVE-typed rows while the subprocess wire still serializes byte-identi
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -161,3 +162,109 @@ def test_builtin_executor_raises_executor_error_on_unknown_db():
         execute_sql._builtin_execute("SELECT 1", {"type": "nosuchdb"}, profile="acme")
     assert ei.value.code == 2
     assert "Unsupported db type" in ei.value.msg
+
+
+# --- Slice 2: injection through create_app + the in-process branch in tool_execute_sql ----------
+
+
+@pytest.fixture(autouse=True)
+def _reset_injected_executor():
+    import tools
+
+    tools.set_injected_executor(None)
+    yield
+    tools.set_injected_executor(None)
+
+
+def test_create_app_registers_and_clears_the_injected_executor(monkeypatch):
+    pytest.importorskip("starlette")
+    pytest.importorskip("mcp")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://agami.example.test")
+    import mcp_http
+    import tools
+    from ports import Adapters
+
+    base = mcp_http.default_adapters()
+    fake = _SpyExecutor()
+    adapters = Adapters(
+        activity_sink=base.activity_sink, org_resolver=base.org_resolver,
+        auth_provider=base.auth_provider, governance=base.governance, executor=fake,
+    )
+    mcp_http.create_app(adapters=adapters)
+    assert tools._INJECTED_EXECUTOR is fake  # wired from adapters.executor
+
+    mcp_http.create_app()  # default adapters carry no executor
+    assert tools._INJECTED_EXECUTOR is None  # default path stays the subprocess fork
+
+
+def test_injected_executor_runs_in_process_with_vetted_sql_and_no_fork(monkeypatch):
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s + " /*vetted*/", None))
+    # a fork here would be the REQ-002 violation the seam prevents — fail loudly if it happens.
+    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: pytest.fail("must not fork a subprocess"))
+
+    fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n"], rows=[(1,), (2,)], truncated=False))
+    tools.set_injected_executor(fake)
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme"}))
+
+    assert fake.calls[0][0] == "SELECT n FROM t /*vetted*/"  # executor saw POST-guard SQL only
+    assert out["columns"] == ["n"] and out["rows"] == [["1"], ["2"]] and out["row_count"] == 2
+
+
+def test_injected_executor_is_unreachable_for_a_write(monkeypatch):
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: pytest.fail("must not fork a subprocess"))
+
+    fake = _SpyExecutor()
+    tools.set_injected_executor(fake)
+    out = json.loads(tools.tool_execute_sql({"sql": "DELETE FROM t"}))
+
+    assert out["error"]["kind"] == "permission"  # refused by the read-only guard
+    assert fake.calls == []  # the injected executor was never reached — un-bypassable
+
+
+def test_injected_executor_error_maps_to_the_same_envelope(monkeypatch):
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+
+    class _Boom:
+        def execute(self, vetted_sql, creds, *, profile):
+            raise execute_sql.ExecutorError("Postgres connect failed: refused", code=4)
+
+    tools.set_injected_executor(_Boom())
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
+
+    assert out["error"]["kind"] == tools._classify_exit(4)
+    assert "connect failed" in out["error"]["remediation"]
+
+
+def test_default_no_injected_executor_forks_the_subprocess(monkeypatch):
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "n\r\n1\r\n"
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(tools.subprocess, "run", _fake_run)
+    tools.set_injected_executor(None)  # the default
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme"}))
+
+    assert "-m" in captured["cmd"] and "execute_sql" in captured["cmd"]  # forked the CLI executor
+    assert out["rows"] == [["1"]]
