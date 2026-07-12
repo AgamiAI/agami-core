@@ -268,3 +268,78 @@ def test_default_no_injected_executor_forks_the_subprocess(monkeypatch):
 
     assert "-m" in captured["cmd"] and "execute_sql" in captured["cmd"]  # forked the CLI executor
     assert out["rows"] == [["1"]]
+
+
+def test_injected_executor_model_safety_refusal_returns_clean_error(monkeypatch):
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, 1))  # refuse
+    fake = _SpyExecutor()
+    tools.set_injected_executor(fake)
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
+
+    assert out["error"]["kind"] == "permission"
+    assert "semantic-model safety pass" in out["error"]["remediation"]
+    assert fake.calls == []  # refused before the executor
+
+
+def test_injected_executor_backstop_trims_to_max_rows(monkeypatch):
+    import tools
+
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n"], rows=[(1,), (2,), (3,)], truncated=False))
+    tools.set_injected_executor(fake)
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme", "max_rows": 2}))
+
+    assert out["rows"] == [["1"], ["2"]] and out["truncated"] is True
+
+
+# --- main() (the subprocess CLI entry) translates the envelope's outcomes byte-identically --------
+
+
+def _raise(exc):
+    raise exc
+
+
+def test_main_read_only_refusal_writes_json_and_returns_1(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", "acme", "--sql", "DELETE FROM t"])
+
+    rc = execute_sql.main()
+
+    assert rc == 1
+    assert json.loads(capsys.readouterr().err.strip())["error"]["kind"] == "permission"
+
+
+def test_main_executor_error_writes_message_and_returns_code(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        execute_sql, "execute_guarded",
+        lambda *a, **k: _raise(execute_sql.ExecutorError("Postgres connect failed: refused", code=4)),
+    )
+    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", "acme", "--sql", "SELECT 1"])
+
+    rc = execute_sql.main()
+
+    assert rc == 4
+    assert capsys.readouterr().err.strip() == "Postgres connect failed: refused"
+
+
+def test_main_success_serializes_result_to_stdout_csv(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        execute_sql, "execute_guarded",
+        lambda *a, **k: execute_sql.ExecResult(columns=["n"], rows=[(1,)], truncated=False),
+    )
+    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", "acme", "--sql", "SELECT n FROM t"])
+
+    rc = execute_sql.main()
+
+    assert rc == 0
+    assert capsys.readouterr().out == "n\r\n1\r\n"
