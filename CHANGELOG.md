@@ -10,11 +10,24 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
-## [Unreleased]
+## [0.4.0] — 2026-07-12
+
+Runtime scalability & safety hardening: the server stays responsive and bounded as model size,
+result size, and concurrent load grow. Behaviour-preserving unless a note says otherwise.
+
+### Added
+
+- **Bounded result sets.** A query now materialises at most a row cap instead of the whole result:
+  `AGAMI_SQL_MAX_ROWS` (default 1000) is the deployment cap; a per-call cap is available via the
+  executor's `--max-rows` (which can only lower it). Truncation is flagged (`result.truncated`) so a
+  cut-off result is never presented as complete. The SQL is never rewritten (no injected `LIMIT`);
+  Postgres uses a server-side cursor so the cap bounds transfer, not just what's written.
+- **Multi-worker HTTP server.** The server can run with `--workers=N` (uvicorn import-string
+  factory). MCP session state is already stateless (JWT + Postgres), so it scales horizontally.
 
 ### Changed
 
-- **OAuth refresh-token storage is now configurable — default `overwrite` (ACE-050).**
+- **OAuth refresh-token storage is now configurable — default `overwrite`.**
   `AGAMI_REFRESH_TOKEN_MODE` selects `overwrite` (default: each refresh UPDATEs the session's single
   token row in place — one row per session, no growing heap of dead tokens) or `rotate` (the prior
   behaviour: insert-new + revoke-old, keeping OAuth 2.1 **stolen-token reuse detection**, plus a
@@ -25,6 +38,24 @@ below corresponds to one such version.
   cleared at authorize, and the query/activity logs (`query_executions` / `tool_calls`) are
   explicitly **retained** — never deleted by any default path — with a new `idx_query_executions_ts`
   index to keep newest-first reads fast as history grows.
+- **Hosted safety guard is now fail-closed and DB-backed.** On the hosted server the fan/chasm-trap,
+  table/column-scope, SELECT-\* and PII guards resolve the semantic model from the database (not only
+  the `/artifacts` disk mount) and **refuse** a query when no model can be resolved — instead of
+  silently running it unguarded. The local single-player path is unchanged (a not-yet-built model is
+  still fine, not an error).
+
+### Performance (behaviour-preserving)
+
+- **Per-process semantic-model cache + single SQL parse.** The model loads once per process and the
+  SQL is parsed once per query, with the safety-guard indices built once and shared — down from a
+  reload/re-parse per query on a long-lived server. Biggest latency win.
+- **Blocking work runs off the event loop.** Password hashing (argon2), OIDC HTTP calls, and the
+  per-call audit write no longer stall the async server — one slow login can't freeze all traffic.
+- **Incremental model-authoring validation.** Curation/enrichment re-validates only the edited area,
+  and snapshots read each file once, so authoring a large (many-area) model no longer grows
+  super-linearly. Same verdicts and snapshots.
+- **Faster schema discovery.** `get_datasource_schema` resolves tables via an O(1) index instead of
+  re-scanning the model per table — byte-identical output, faster on wide models.
 
 ## [0.3.9] — 2026-07-10
 
