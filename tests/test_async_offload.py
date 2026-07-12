@@ -49,6 +49,35 @@ def test_run_blocking_propagates_the_callables_exception():
         anyio.run(_call)
 
 
+def test_offloaded_handler_keeps_org_context_in_the_worker_thread():
+    """The tool handler is now run via `run_blocking` (mcp_http `_call_tool`). That must preserve the
+    per-request org context so the org-scoped model cache (ACE-045) stays tenant-correct off-loop —
+    otherwise an offloaded handler would read the DEFAULT org and could serve one tenant another's
+    cached model. Proves run_blocking copies `_current_org_ctx` into the worker thread."""
+    import tools
+
+    main_thread = threading.get_ident()
+    seen: dict[str, object] = {}
+
+    def fake_handler(_args):
+        seen["thread"] = threading.get_ident()
+        seen["org"] = tools._current_org_id()  # reads _current_org_ctx
+        return "ok"
+
+    async def _call():
+        tools._current_org_ctx.set("tenant-A")
+        return await run_blocking(fake_handler, {})
+
+    try:
+        result = anyio.run(_call)
+    finally:
+        tools._current_org_ctx.set(None)
+
+    assert result == "ok"
+    assert seen["thread"] != main_thread  # ran off the event-loop thread
+    assert seen["org"] == "tenant-A"  # request org context propagated → tenant-correct cache
+
+
 def test_uvicorn_factory_import_string_resolves(monkeypatch):
     """`main()` binds uvicorn to the import string 'mcp_http:build_app' with factory=True — the callable
     must resolve and produce a Starlette app so multi-worker forking works."""
