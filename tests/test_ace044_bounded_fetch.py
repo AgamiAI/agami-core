@@ -192,6 +192,9 @@ def test_postgres_uses_a_server_side_named_cursor(monkeypatch, capsys):
         def __exit__(self, *a):
             return False
 
+        def cancel(self):  # the per-statement watchdog's cancel primitive (no-op here — never fires)
+            pass
+
         def close(self):
             pass
 

@@ -45,8 +45,11 @@ import json
 import os
 import stat
 import sys
+import threading
+import time
 import urllib.parse
 from collections.abc import Callable
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -424,15 +427,30 @@ def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
         raise ExecutorError(f"Postgres connect failed: {e}", code=4)
     try:
         with conn:
+            # Genuine server-side cancel: the backend aborts the statement itself after the deadline.
+            # Set per-transaction via SET LOCAL — NOT the libpq `options` startup parameter, which a
+            # transaction-mode pooler (Supabase Supavisor, PgBouncer) can reject at connect. SET LOCAL
+            # is transaction-scoped, which those poolers pass through cleanly. The watchdog's
+            # conn.cancel() (a pg_cancel request) is the client-initiated backstop.
+            with conn.cursor() as setup:
+                setup.execute(f"SET LOCAL statement_timeout = {_timeout_ms()}")
             # A server-side (named) cursor so the row cap bounds TRANSFER, not just what we write:
             # psycopg2's default client-side cursor buffers the ENTIRE result before we can fetchmany,
             # so a runaway result would still be pulled whole. The named cursor streams from the
             # server in bounded batches (ACE-038). Read-only SELECTs (the only thing the guard admits)
             # are exactly what a server-side cursor supports.
-            with conn.cursor(name="agami_bounded") as cur:
-                cur.itersize = _resolve_row_cap() + 1  # server fetch batch = the bounded window
-                cur.execute(sql)
-                result = _collect_cursor(cur)
+            cur = conn.cursor(name="agami_bounded")  # not `with`: a cancelled txn makes CLOSE raise
+            cur.itersize = _resolve_row_cap() + 1  # server fetch batch = the bounded window
+            try:
+                result = _run_bounded(lambda: _exec(cur, sql), conn.cancel)
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass  # a cancelled query leaves the txn aborted; closing the server-side cursor
+                    # would raise and mask _ResourceLimit — swallow so the timeout refusal survives
+    except _ResourceLimit:
+        raise  # timed out; `with conn` rolled back — execute_guarded maps it to a resource_limit refusal
     except Exception as e:
         raise ExecutorError(f"Postgres execution error: {e}", code=5)
     finally:
@@ -446,6 +464,7 @@ def _run_mysql(creds: dict[str, str], sql: str) -> ExecResult:
     except ImportError:
         raise ExecutorError("pymysql not installed. Run: pip install pymysql", code=3)
     _require(creds, "host", "port", "user", "password", "database")
+    secs = _resolve_timeout_s()
     try:
         conn = pymysql.connect(
             host=creds["host"],
@@ -455,18 +474,37 @@ def _run_mysql(creds: dict[str, str], sql: str) -> ExecResult:
             database=creds["database"],
             charset="utf8mb4",
             connect_timeout=10,
+            # The reliable client-side bound: a socket read/write blocked past the deadline raises on
+            # its own. Closing the connection from the watchdog thread does NOT unblock a recv() on
+            # Linux (that needs shutdown(), which pymysql's close() skips), so this — not the close —
+            # is what guarantees MySQL/MariaDB can't hang past the deadline.
+            read_timeout=secs,
+            write_timeout=secs,
             autocommit=True,
         )
     except Exception as e:
         raise ExecutorError(f"MySQL connect failed: {e}", code=4)
+    # Native server-side timeout. MySQL 5.7.8+ spells it max_execution_time (ms); MariaDB spells it
+    # max_statement_time (seconds). Try both — each is a no-op on the other dialect (a swallowed
+    # unknown-variable error) — so whichever the server is gets a genuine server-side abort.
+    for stmt in (
+        f"SET SESSION max_execution_time={secs * 1000}",
+        f"SET SESSION max_statement_time={secs}",
+    ):
+        try:
+            with conn.cursor() as _c:
+                _c.execute(stmt)
+        except Exception:
+            pass  # not this dialect; read_timeout still bounds the client
     try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            result = _collect_cursor(cur)
+        cur = conn.cursor()  # not `with` — the watchdog may close conn, so avoid a close-on-close
+        result = _run_bounded(lambda: _exec(cur, sql), lambda: _safe_close(conn))
+    except _ResourceLimit:
+        raise
     except Exception as e:
         raise ExecutorError(f"MySQL execution error: {e}", code=5)
     finally:
-        conn.close()
+        _safe_close(conn)
     return result
 
 
@@ -492,6 +530,8 @@ def _run_snowflake(creds: dict[str, str], sql: str) -> ExecResult:
         "user": creds["user"],
         "client_session_keep_alive": False,
         "login_timeout": 15,
+        # Native server-side statement timeout (seconds) — Snowflake aborts the query itself.
+        "session_parameters": {"STATEMENT_TIMEOUT_IN_SECONDS": _resolve_timeout_s()},
     }
     for k in ("password", "warehouse", "database", "schema", "role", "authenticator"):
         if creds.get(k):
@@ -502,15 +542,13 @@ def _run_snowflake(creds: dict[str, str], sql: str) -> ExecResult:
         raise ExecutorError(f"Snowflake connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
-        cur.execute(sql)
-        result = _collect_cursor(cur)
+        result = _run_bounded(lambda: _exec(cur, sql), lambda: _safe_close(conn))
+    except _ResourceLimit:
+        raise
     except Exception as e:
         raise ExecutorError(f"Snowflake execution error: {e}", code=5)
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _safe_close(conn)
     return result
 
 
@@ -573,7 +611,8 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
 
     # If `dataset` was set, prefix unqualified table references via the
     # default_dataset job config so the SQL can omit `<project>.<dataset>.`
-    job_config_kwargs: dict[str, Any] = {}
+    # `job_timeout_ms` is the native server-side job timeout — BigQuery ends the job itself.
+    job_config_kwargs: dict[str, Any] = {"job_timeout_ms": _timeout_ms()}
     if creds.get("dataset"):
         try:
             job_config_kwargs["default_dataset"] = f"{project}.{creds['dataset']}"
@@ -581,16 +620,30 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
             pass
 
     cap = _resolve_row_cap()
+    job_box: dict[str, Any] = {}
+    started = time.monotonic()
+    timeout_s = _resolve_timeout_s()
+
+    def _bq_cancel() -> None:
+        job = job_box.get("job")
+        if job is not None:
+            job.cancel()  # genuine server-side job cancel (the client-initiated backstop to job_timeout_ms)
+
     try:
-        if job_config_kwargs:
-            job_config = bigquery.QueryJobConfig(**job_config_kwargs)
-            job = client.query(sql, job_config=job_config)
-        else:
-            job = client.query(sql)
-        # BigQuery has no DB-API cursor, so it can't funnel through `_collect_cursor`; apply the
-        # same bounded-fetch cap here. `max_results=cap+1` bounds what the API returns (transfer),
-        # and the (cap+1)th row flags truncation — the never-silent guarantee holds for BigQuery too.
-        results = job.result(max_results=cap + 1)  # waits for completion; raises on error
+        with _deadline(_bq_cancel) as fired:
+            try:
+                job = client.query(sql, job_config=bigquery.QueryJobConfig(**job_config_kwargs))
+                job_box["job"] = job
+                # BigQuery has no DB-API cursor, so it can't funnel through `_collect_cursor`; apply the
+                # same bounded-fetch cap here. `max_results=cap+1` bounds what the API returns (transfer),
+                # and the (cap+1)th row flags truncation — the never-silent guarantee holds for BigQuery too.
+                results = job.result(max_results=cap + 1)  # waits for completion; raises on error
+            except Exception:
+                if _deadline_hit(fired, started, timeout_s):
+                    raise _ResourceLimit from None
+                raise
+    except _ResourceLimit:
+        raise  # execute_guarded maps a fired BigQuery deadline to a resource_limit refusal
     except Exception as e:
         raise ExecutorError(f"BigQuery execution error: {e}", code=5)
 
@@ -619,8 +672,9 @@ def _run_sqlite(creds: dict[str, str], sql: str) -> ExecResult:
         raise ExecutorError(f"SQLite connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
-        cur.execute(sql)
-        result = _collect_cursor(cur)
+        result = _run_bounded(lambda: _exec(cur, sql), conn.interrupt)
+    except _ResourceLimit:
+        raise  # timed out — execute_guarded maps it to a resource_limit refusal
     except Exception as e:
         raise ExecutorError(f"SQLite execution error: {e}", code=5)
     finally:
@@ -643,20 +697,19 @@ def _run_sqlserver(creds: dict[str, str], sql: str) -> ExecResult:
             password=creds["password"],
             database=creds.get("database", ""),
             login_timeout=15,
+            timeout=_resolve_timeout_s(),  # native per-query timeout (seconds)
         )
     except Exception as e:
         raise ExecutorError(f"SQL Server connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
-        cur.execute(sql)
-        result = _collect_cursor(cur)
+        result = _run_bounded(lambda: _exec(cur, sql), lambda: _safe_close(conn))
+    except _ResourceLimit:
+        raise
     except Exception as e:
         raise ExecutorError(f"SQL Server execution error: {e}", code=5)
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _safe_close(conn)
     return result
 
 
@@ -678,16 +731,18 @@ def _run_oracle(creds: dict[str, str], sql: str) -> ExecResult:
     except Exception as e:
         raise ExecutorError(f"Oracle connect failed: {e}", code=4)
     try:
+        conn.call_timeout = _timeout_ms()  # native round-trip timeout (ms)
+    except Exception:
+        pass  # older driver / mode; the wall-clock watchdog still bounds the query
+    try:
         cur = conn.cursor()
-        cur.execute(sql)
-        result = _collect_cursor(cur)
+        result = _run_bounded(lambda: _exec(cur, sql), lambda: _safe_close(conn))
+    except _ResourceLimit:
+        raise
     except Exception as e:
         raise ExecutorError(f"Oracle execution error: {e}", code=5)
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _safe_close(conn)
     return result
 
 
@@ -710,16 +765,20 @@ def _run_databricks(creds: dict[str, str], sql: str) -> ExecResult:
     except Exception as e:
         raise ExecutorError(f"Databricks connect failed: {e}", code=4)
     try:
+        with conn.cursor() as _c:  # best-effort native server-side bound (seconds; 0 = no timeout)
+            _c.execute(f"SET STATEMENT_TIMEOUT = {_resolve_timeout_s()}")
+    except Exception:
+        pass  # older runtime without the config; cur.cancel() below is the cross-thread cancel
+    try:
         cur = conn.cursor()
-        cur.execute(sql)
-        result = _collect_cursor(cur)
+        # cur.cancel() is a genuine server-side cancel of the running statement.
+        result = _run_bounded(lambda: _exec(cur, sql), cur.cancel)
+    except _ResourceLimit:
+        raise
     except Exception as e:
         raise ExecutorError(f"Databricks execution error: {e}", code=5)
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _safe_close(conn)
     return result
 
 
@@ -742,20 +801,21 @@ def _run_trino(creds: dict[str, str], sql: str) -> ExecResult:
             schema=creds.get("schema"),
             http_scheme="https" if creds.get("password") else "http",
             auth=auth,
+            # Native server-side cap on total query runtime.
+            session_properties={"query_max_run_time": f"{_resolve_timeout_s()}s"},
         )
     except Exception as e:
         raise ExecutorError(f"Trino connect failed: {e}", code=4)
     try:
         cur = conn.cursor()
-        cur.execute(sql)
-        result = _collect_cursor(cur)
+        # cur.cancel() cancels the running Trino query server-side.
+        result = _run_bounded(lambda: _exec(cur, sql), cur.cancel)
+    except _ResourceLimit:
+        raise
     except Exception as e:
         raise ExecutorError(f"Trino execution error: {e}", code=5)
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _safe_close(conn)
     return result
 
 
@@ -771,15 +831,15 @@ def _run_duckdb(creds: dict[str, str], sql: str) -> ExecResult:
     except Exception as e:
         raise ExecutorError(f"DuckDB open failed: {e}", code=4)
     try:
-        cur = conn.execute(sql)
-        result = _collect_cursor(cur)
+        # DuckDB runs the query in conn.execute() and returns the streaming source; conn.interrupt()
+        # aborts an in-flight query (in-process, thread-safe) — same shape as SQLite.
+        result = _run_bounded(lambda: conn.execute(sql), conn.interrupt)
+    except _ResourceLimit:
+        raise
     except Exception as e:
         raise ExecutorError(f"DuckDB execution error: {e}", code=5)
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _safe_close(conn)
     return result
 
 
@@ -857,6 +917,123 @@ def _write_cursor_csv(cur: Any) -> None:
     path uses. Kept as the thin composition ``_emit_result_csv(_collect_cursor(cur))`` so the fetch
     bound and the CSV shape stay single-sourced (and the existing bounded-fetch tests still pin it)."""
     _emit_result_csv(_collect_cursor(cur))
+
+
+# ---------------------------------------------------------------------------
+# Per-statement timeout — the availability guarantee
+#
+# A generated query can hang or exhaust the DB (recursive CTE, cartesian bomb, unbounded scan). The
+# read-only role is not mandated to carry a role-level statement_timeout, so this app-layer bound is
+# the SOLE availability guarantee: a wall-clock watchdog cancels the in-flight query after
+# AGAMI_SQL_TIMEOUT_S (default 30) — the universal backstop for every engine — layered under each
+# engine's native statement timeout where it has one (the primary, genuine DB-side cancel). A fired
+# deadline emits a `resource_limit` refusal; the query is killed, no result is returned.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TIMEOUT_S = 30  # per-statement wall-clock timeout, overridable by AGAMI_SQL_TIMEOUT_S
+
+
+def _resolve_timeout_s() -> int:
+    """Per-statement timeout in seconds — `AGAMI_SQL_TIMEOUT_S` (default 30). A missing / invalid /
+    non-positive value falls back to the default; there is no "0 = unlimited" (availability is a
+    safety obligation — a query is always bounded). Read once at the point of use, like
+    `_resolve_row_cap`."""
+    raw = os.environ.get("AGAMI_SQL_TIMEOUT_S", "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else _DEFAULT_TIMEOUT_S
+
+
+@contextmanager
+def _deadline(cancel: Callable[[], None]):
+    """Bound the enclosed statement by a wall-clock watchdog: after `_resolve_timeout_s()` seconds,
+    `cancel()` interrupts the in-flight query (per driver — `conn.cancel()` / `conn.interrupt()` /
+    `cur.cancel()`), which makes the blocked execute/fetch raise. The universal availability backstop
+    so no engine hangs past the deadline, even one with no native statement timeout. Yields an Event
+    that is set iff the deadline fired (so the caller can tell a timeout from a real error)."""
+    fired = threading.Event()
+
+    def _fire() -> None:
+        fired.set()
+        try:
+            cancel()
+        except Exception:
+            pass  # best-effort cancel; the deadline having fired is what the caller keys on
+
+    timer = threading.Timer(_resolve_timeout_s(), _fire)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield fired
+    finally:
+        timer.cancel()
+
+
+class _ResourceLimit(Exception):
+    """The per-statement deadline fired and the query was cancelled. Raised out through the engine's
+    `with conn` / transaction handling so it ROLLS BACK (a cancelled query leaves the txn aborted)
+    rather than committing; the engine re-raises it and `execute_guarded` maps it to the typed
+    `resource_limit` refusal (one refusal, both surfaces)."""
+
+
+def _timeout_ms() -> int:
+    """The statement timeout in milliseconds — for the engines whose native param takes ms."""
+    return _resolve_timeout_s() * 1000
+
+
+def _safe_close(conn: Any) -> None:
+    """Close a connection, swallowing errors — safe to call twice (the watchdog may close it to
+    interrupt an in-flight query, then the engine's `finally` closes it again)."""
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _exec(cur: Any, sql: str) -> Any:
+    """Run `sql` on a DB-API cursor and return it as the streaming source (for `_run_bounded`)."""
+    cur.execute(sql)
+    return cur
+
+
+def _resource_limit_refusal() -> Refusal:
+    """Build the typed `resource_limit` refusal for a query cancelled at the statement deadline. The
+    single source of the timeout refusal — `execute_guarded` raises it as a `GuardRefused` so both the
+    subprocess wire and the in-process path surface the identical refused Envelope."""
+    secs = _resolve_timeout_s()
+    return Refusal(
+        kind="resource_limit",
+        reason=f"the query exceeded the {secs}s statement timeout and was cancelled",
+        remediation=f"Narrow the query, or raise AGAMI_SQL_TIMEOUT_S (currently {secs}s).",
+    )
+
+
+def _deadline_hit(fired: threading.Event, started: float, timeout_s: int) -> bool:
+    """True if the query was ended by the statement deadline. Primary signal: the watchdog `fired`
+    (it sets the flag before it cancels, so a watchdog-driven kill is always flagged). Secondary
+    signal: wall-clock elapsed reached the timeout — an engine's NATIVE server timeout (set to the
+    same duration) can win the race and raise before the watchdog's callback runs, and without the
+    elapsed check that genuine timeout would be mislabeled a generic error. Either signal → the query
+    ran to the deadline, so the raise is a `resource_limit`, not a real error."""
+    return fired.is_set() or (time.monotonic() - started) >= timeout_s
+
+
+def _run_bounded(execute: Callable[[], Any], cancel: Callable[[], None]) -> ExecResult:
+    """Run a statement under the deadline and return its bounded ``ExecResult``. `execute()` runs the
+    SQL and returns the cursor/result to fetch from (a thunk so both the `cur.execute(sql)` engines and
+    DuckDB's `conn.execute(sql)` fit). On a deadline hit — the client watchdog fired OR wall-clock
+    reached the timeout (whichever mechanism, client cancel or native server timeout, killed the
+    query) — it raises `_ResourceLimit`; the engine re-raises it and `execute_guarded` maps it to a
+    single `resource_limit` refusal, so no partial result is ever returned. A non-timeout error
+    (raised before the deadline) propagates unchanged to the engine's handler."""
+    started = time.monotonic()
+    timeout_s = _resolve_timeout_s()
+    with _deadline(cancel) as fired:
+        try:
+            cur = execute()
+            return _collect_cursor(cur)
+        except Exception:
+            if _deadline_hit(fired, started, timeout_s):
+                raise _ResourceLimit from None
+            raise
 
 
 def _hosted() -> bool:
@@ -1045,9 +1222,16 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
 def _emit_or_err(run: Callable[[], ExecResult]) -> int:
     """Subprocess/CLI adapter over a ``_run_<db>`` function: write its result to stdout as CSV and
     return exit code 0, or translate an ``ExecutorError`` into the stderr message + exit code the CLI
-    contract documents (byte-identical to what the old ``_execute_<db>`` emitted)."""
+    contract documents (byte-identical to what the old ``_execute_<db>`` emitted). A per-statement
+    deadline (``_ResourceLimit``) surfaces as the shared ``resource_limit`` refusal on stderr + exit
+    code 1 — the same JSON ``execute_guarded``/``main`` emit — and ``run()`` raises it BEFORE returning
+    a result, so no partial CSV is written."""
     try:
         _emit_result_csv(run())
+    except _ResourceLimit:
+        json.dump({"refusal": _resource_limit_refusal().as_dict()}, sys.stderr)
+        sys.stderr.write("\n")
+        return 1
     except ExecutorError as e:
         return _err(e.msg, code=e.code)
     return 0
@@ -1177,7 +1361,14 @@ def execute_guarded(
         if refusal is not None:
             raise GuardRefused(refusal, code=1)
     creds = _load_credentials(profile)
-    return executor.execute(sql, creds, profile=profile)
+    try:
+        return executor.execute(sql, creds, profile=profile)
+    except _ResourceLimit:
+        # The per-statement deadline fired inside the engine (client watchdog or native server
+        # timeout). Map it to the shared refusal HERE — the one place both surfaces funnel through —
+        # so the timeout is a `resource_limit` refused Envelope with no partial data, identically for
+        # the subprocess wire and the in-process handler.
+        raise GuardRefused(_resource_limit_refusal(), code=1) from None
 
 
 def main() -> int:
