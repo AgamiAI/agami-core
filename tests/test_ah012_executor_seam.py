@@ -30,10 +30,10 @@ import execute_sql  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _reset_override():
-    # _max_rows_override is a module global (ACE-044); isolate every test from it.
-    execute_sql._max_rows_override = None
+    # _max_rows_override is a request-scoped ContextVar (ACE-028); isolate every test from it.
+    execute_sql._max_rows_override.set(None)
     yield
-    execute_sql._max_rows_override = None
+    execute_sql._max_rows_override.set(None)
 
 
 class _SpyExecutor:
@@ -181,7 +181,7 @@ def _reset_injected_executor():
     tools.set_injected_executor(None)
 
 
-def test_create_app_registers_and_clears_the_injected_executor(monkeypatch):
+def test_create_app_wires_injected_executor_and_defaults_to_builtin(monkeypatch):
     pytest.importorskip("starlette")
     pytest.importorskip("mcp")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://agami.example.test")
@@ -196,10 +196,12 @@ def test_create_app_registers_and_clears_the_injected_executor(monkeypatch):
         auth_provider=base.auth_provider, governance=base.governance, executor=fake,
     )
     mcp_http.create_app(adapters=adapters)
-    assert tools._INJECTED_EXECUTOR is fake  # wired from adapters.executor
+    assert tools._INJECTED_EXECUTOR is fake  # a consumer's explicit executor is wired from adapters
 
-    mcp_http.create_app()  # default adapters carry no executor
-    assert tools._INJECTED_EXECUTOR is None  # default path stays the subprocess fork
+    # ACE-028: the default adapters now carry the built-in executor, so a plain HTTP server runs
+    # in-process (the None-means-fork behaviour is still exercised via set_injected_executor(None)).
+    mcp_http.create_app()
+    assert tools._INJECTED_EXECUTOR is execute_sql.BUILTIN_EXECUTOR
 
 
 def test_injected_executor_runs_in_process_with_vetted_sql_and_no_fork(monkeypatch):

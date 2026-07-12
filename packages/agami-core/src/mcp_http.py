@@ -28,6 +28,7 @@ import admin
 import onboarding
 import user_store
 from async_offload import run_blocking
+from execute_sql import BUILTIN_EXECUTOR
 from oss_adapters import (
     FileActivitySink,
     PresenceAuthProvider,
@@ -111,15 +112,21 @@ def _build_org_resolver() -> SingleTenantOrgResolver:
 
 
 def default_adapters() -> Adapters:
-    """The OSS default adapters bundled for the composition root (env-driven auth + org, exactly as
-    today). `create_app(adapters=None)` uses these — so a plain deploy is unchanged. `create_app`
-    wires `auth_provider` + `org_resolver` into the request path; `activity_sink` + `governance` are
-    carried on the container for consumers and not yet referenced by a core call site."""
+    """The OSS default adapters bundled for the composition root (env-driven auth + org). Used only by
+    `create_app(adapters=None)` — the HTTP server's defaults. `create_app` wires `auth_provider` +
+    `org_resolver` into the request path and registers `executor`; `activity_sink` + `governance` are
+    carried on the container for consumers.
+
+    `executor=BUILTIN_EXECUTOR` (ACE-028) makes the HTTP server run execution **in-process** by default
+    — no per-query subprocess fork, no CSV round-trip — behind the same guard (AH-012). The forking
+    subprocess is the wrong shape for a long-running server; the local stdio path (`mcp_harness`) and
+    the `python -m execute_sql` CLI never build these adapters, so they keep the subprocess isolation."""
     return Adapters(
         activity_sink=FileActivitySink(),
         org_resolver=_build_org_resolver(),
         auth_provider=_build_auth_provider(),
         governance=WarnOnlyGovernancePolicy(),
+        executor=BUILTIN_EXECUTOR,
     )
 
 

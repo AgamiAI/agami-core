@@ -22,10 +22,10 @@ import execute_sql  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _reset_override():
-    # _max_rows_override is a module global set by main(); isolate every test from it.
-    execute_sql._max_rows_override = None
+    # _max_rows_override is a request-scoped ContextVar (ACE-028); isolate every test from it.
+    execute_sql._max_rows_override.set(None)
     yield
-    execute_sql._max_rows_override = None
+    execute_sql._max_rows_override.set(None)
 
 
 class _FakeCur:
@@ -92,12 +92,12 @@ def test_sink_empty_result_writes_header_only_no_flag(monkeypatch, capsys):
 def test_effective_cap_is_min_of_env_and_per_call(monkeypatch):
     monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "1000")
     assert execute_sql._resolve_row_cap() == 1000  # env only
-    execute_sql._max_rows_override = 50
+    execute_sql._max_rows_override.set(50)
     assert execute_sql._resolve_row_cap() == 50  # per-call is smaller → wins
     monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "20")
     assert execute_sql._resolve_row_cap() == 20  # env smaller than per-call → wins
     monkeypatch.delenv("AGAMI_SQL_MAX_ROWS", raising=False)
-    execute_sql._max_rows_override = None
+    execute_sql._max_rows_override.set(None)
     assert execute_sql._resolve_row_cap() == 1000  # missing env → default
     # The env is the operator's DEPLOYMENT cap, not a hard 1000 ceiling — it may raise the default.
     monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "5000")

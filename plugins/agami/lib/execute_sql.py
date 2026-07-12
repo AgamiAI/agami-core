@@ -47,6 +47,7 @@ import stat
 import sys
 import urllib.parse
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -769,7 +770,12 @@ def _run_duckdb(creds: dict[str, str], sql: str) -> ExecResult:
 
 
 _DEFAULT_MAX_ROWS = 1000  # rows materialized per result before truncation (ACE-038)
-_max_rows_override: int | None = None  # per-call cap from --max-rows (ACE-044); set in main()
+# Per-call cap from --max-rows (ACE-044). A ContextVar, not a plain global, so it is REQUEST-SCOPED
+# once the HTTP server runs execution in-process (ACE-028): concurrent handlers run in worker threads
+# (`run_blocking` copies the context per call, like `_current_org_ctx`), so each request's cap is
+# isolated and can't stomp another's. In the subprocess/CLI (one process, one thread) it behaves
+# exactly as the old module global did.
+_max_rows_override: ContextVar[int | None] = ContextVar("_max_rows_override", default=None)
 
 
 def _resolve_row_cap() -> int:
@@ -781,8 +787,9 @@ def _resolve_row_cap() -> int:
     cap = int(raw) if raw.isdigit() else _DEFAULT_MAX_ROWS
     if cap <= 0:
         cap = _DEFAULT_MAX_ROWS  # "0" / "00" → the default, never an empty result
-    if _max_rows_override is not None and _max_rows_override > 0:
-        cap = min(cap, _max_rows_override)
+    override = _max_rows_override.get()
+    if override is not None and override > 0:
+        cap = min(cap, override)
     return cap
 
 
@@ -1122,7 +1129,7 @@ def execute_guarded(
     its JSON envelope for the caller to emit; a model-safety refusal already wrote its JSON to stderr
     and carries only the exit code) and ``ExecutorError`` on a connect/run failure — so the
     subprocess ``main`` and the in-process MCP handler apply the same guard and surface errors
-    identically. The row cap rides the ``_max_rows_override`` module global the caller sets."""
+    identically. The row cap rides the request-scoped ``_max_rows_override`` ContextVar the caller sets."""
     import sql_guard
 
     reason = sql_guard.check_read_only(sql)
@@ -1163,8 +1170,10 @@ def main() -> int:
                         "min(this, AGAMI_SQL_MAX_ROWS) — the env is the deployment cap, default 1000.")
     args = p.parse_args()
 
-    global _max_rows_override
-    _max_rows_override = args.max_rows  # per-call cap (ACE-044); the sink reads it via _resolve_row_cap
+    # Per-call cap (ACE-044); the sink reads it via _resolve_row_cap. No token/reset kept: main() is
+    # the one-shot subprocess/CLI entry (one process, one thread), so there's no sibling request to
+    # isolate from — unlike the in-process server path, which resets the token in tools._run_in_process.
+    _max_rows_override.set(args.max_rows)
 
     if args.sql_file:
         sql = Path(os.path.expanduser(args.sql_file)).read_text()

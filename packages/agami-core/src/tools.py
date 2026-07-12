@@ -961,11 +961,11 @@ def _run_in_process(
     (see the AH-012 spec); flipping this one coercion is the follow-up once that's settled."""
     import execute_sql
 
-    # The per-call cap rides execute_sql's module global (ACE-044). ACE-028, which makes in-process
-    # the real serving path, must thread the cap per-call instead — this global is not safe under
-    # concurrent in-process queries with different caps. Save/restore keeps it inert by default.
-    prev_cap = execute_sql._max_rows_override
-    execute_sql._max_rows_override = max_rows
+    # The per-call cap rides execute_sql's `_max_rows_override` ContextVar (ACE-028) — request-scoped,
+    # so concurrent in-process queries with different caps don't stomp each other. Set/reset via the
+    # token (the `_current_org_ctx` pattern); `run_blocking` copied this request's context into the
+    # worker thread, so the set is isolated to this call.
+    cap_token = execute_sql._max_rows_override.set(max_rows)
     try:
         result = execute_sql.execute_guarded(sql, profile, area, executor=executor)
     except execute_sql.GuardRefused as refusal:
@@ -991,7 +991,7 @@ def _run_in_process(
         return {"error": {"kind": _classify_exit(code),
                           "remediation": "Datasource configuration error."}}
     finally:
-        execute_sql._max_rows_override = prev_cap
+        execute_sql._max_rows_override.reset(cap_token)
 
     columns = list(result.columns)
     data_rows = [["" if v is None else str(v) for v in row] for row in result.rows]
