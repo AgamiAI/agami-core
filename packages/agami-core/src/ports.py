@@ -1,4 +1,4 @@
-"""The four port Protocols — the seams adapters plug into.
+"""The five port Protocols — the seams adapters plug into.
 
 agami-core keeps one MCP implementation across deployments; deployment-specific behavior is
 swapped at the composition root through these ports, never by forking a tool:
@@ -7,6 +7,8 @@ swapped at the composition root through these ports, never by forking a tool:
   - ``OrgResolver``      — single vs multi tenancy as a config flag, not a schema fork
   - ``AuthProvider``     — bearer token → principal (presence by default)
   - ``GovernancePolicy`` — warn-only by default; enforcement is a paid concern
+  - ``Executor``         — the connect-and-run step, *behind* the shared guard (built-in by default;
+                           a consumer injects a pooled/RBAC/tunnel executor without forking the guard)
 
 These are **interfaces only** — `typing.Protocol`, so an adapter satisfies a port by shape, with
 no import coupling back to core. The OSS default adapters live in ``oss_adapters`` (so the local
@@ -30,6 +32,12 @@ if TYPE_CHECKING:
     # `from __future__ import annotations` the method annotations are lazy strings, and
     # @runtime_checkable only checks method *names*, so isinstance() works without these.
     from contracts import QueryExecutionRecord
+
+    # ``ExecResult`` is defined in ``execute_sql`` (not here): it is the executor's result type and
+    # ``execute_sql`` ships in the stdlib-lean plugin mirror that does NOT include this module, so it
+    # cannot import ``ports`` at runtime. Referencing it under TYPE_CHECKING keeps the ``Executor``
+    # annotation resolvable for type-checkers without a runtime import cycle.
+    from execute_sql import ExecResult
 
 # ---------------------------------------------------------------------------
 # Seam value types (minimal — a consumer extends them when it needs more)
@@ -63,7 +71,7 @@ class GovernanceVerdict:
 
 
 # ---------------------------------------------------------------------------
-# The four ports
+# The five ports
 # ---------------------------------------------------------------------------
 
 
@@ -104,8 +112,23 @@ class GovernancePolicy(Protocol):
     def evaluate(self, ctx: object | None = None) -> GovernanceVerdict: ...
 
 
+@runtime_checkable
+class Executor(Protocol):
+    """Connect to a datasource and run **already-vetted** SQL — the only swappable part of the
+    execution path. It runs *inside* the guarded envelope (guard → executor → shape/log), so it
+    **only ever receives SQL the guard already passed**, never raw user input; it does no guarding,
+    logging, or governance itself. This is the seam a hosted consumer overrides to supply a
+    pooled / per-user-RBAC / SSH-tunnel executor **behind agami-core's one guard** — no fork.
+
+    ``profile`` is the datasource identity a pooling executor keys its reused connection on. The
+    built-in OSS default (subprocess/direct connect-per-query) implements this same shape, so a
+    plain deploy is unchanged."""
+
+    def execute(self, vetted_sql: str, creds: dict[str, str], *, profile: str) -> ExecResult: ...
+
+
 # ---------------------------------------------------------------------------
-# Composition-root container — the four adapters passed as one argument
+# Composition-root container — the adapters passed as one argument
 # ---------------------------------------------------------------------------
 
 
@@ -113,13 +136,19 @@ class GovernancePolicy(Protocol):
 class Adapters:
     """The four port adapters, bundled so ``mcp_http.create_app`` takes them as one argument.
 
-    A consumer builds this with its own implementations of the four ports (its own ``OrgResolver``,
-    ``AuthProvider``, ``ActivitySink``, and ``GovernancePolicy``); passing ``adapters=None`` to
-    ``create_app`` uses the OSS defaults (``mcp_http.default_adapters``). Today ``create_app`` wires
-    ``auth_provider`` + ``org_resolver`` into the request path; ``activity_sink`` + ``governance``
-    are carried here for consumers and not yet referenced by a core call site."""
+    A consumer builds this with its own implementations of the ports (its own ``OrgResolver``,
+    ``AuthProvider``, ``ActivitySink``, ``GovernancePolicy``, and optionally an ``Executor``);
+    passing ``adapters=None`` to ``create_app`` uses the OSS defaults (``mcp_http.default_adapters``).
+    Today ``create_app`` wires ``auth_provider`` + ``org_resolver`` into the request path;
+    ``activity_sink`` + ``governance`` are carried here for consumers and not yet referenced by a
+    core call site.
+
+    ``executor`` is optional and defaults to ``None`` — meaning "use the built-in executor" (the
+    subprocess/direct connect-per-query path, byte-identical to today). A consumer sets it to run
+    execution in-process behind the shared guard (see ``tools.tool_execute_sql``)."""
 
     activity_sink: ActivitySink
     org_resolver: OrgResolver
     auth_provider: AuthProvider
     governance: GovernancePolicy
+    executor: Executor | None = None
