@@ -57,12 +57,13 @@ def test_row_cap_is_isolated_per_context(monkeypatch):
     assert execute_sql._max_rows_override.get() is None  # the outer context is untouched by either
 
 
-def test_run_blocking_isolates_the_cap_across_worker_threads():
+def test_run_blocking_isolates_the_cap_across_worker_threads(monkeypatch):
     # The real offload path: two `run_blocking` calls (worker threads, each a copied context) set
     # different caps concurrently and must not see each other's. Guards the ACE-028 concurrency claim.
     anyio = pytest.importorskip("anyio")
     from async_offload import run_blocking
 
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "1000")
     seen: dict[str, int] = {}
 
     def _work(key: str, cap: int):
@@ -73,20 +74,11 @@ def test_run_blocking_isolates_the_cap_across_worker_threads():
         seen[key] = execute_sql._resolve_row_cap()
 
     async def _call():
-        import os
-
-        os.environ["AGAMI_SQL_MAX_ROWS"] = "1000"
         async with anyio.create_task_group() as tg:
             tg.start_soon(lambda: run_blocking(_work, "a", 10))
             tg.start_soon(lambda: run_blocking(_work, "b", 500))
 
-    try:
-        anyio.run(_call)
-    finally:
-        import os
-
-        os.environ.pop("AGAMI_SQL_MAX_ROWS", None)
-
+    anyio.run(_call)
     assert seen == {"a": 10, "b": 500}  # no cross-request stomp
 
 

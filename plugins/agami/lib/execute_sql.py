@@ -1170,7 +1170,10 @@ def main() -> int:
                         "min(this, AGAMI_SQL_MAX_ROWS) — the env is the deployment cap, default 1000.")
     args = p.parse_args()
 
-    _max_rows_override.set(args.max_rows)  # per-call cap (ACE-044); the sink reads it via _resolve_row_cap
+    # Per-call cap (ACE-044); the sink reads it via _resolve_row_cap. No token/reset kept: main() is
+    # the one-shot subprocess/CLI entry (one process, one thread), so there's no sibling request to
+    # isolate from — unlike the in-process server path, which resets the token in tools._run_in_process.
+    _max_rows_override.set(args.max_rows)
 
     if args.sql_file:
         sql = Path(os.path.expanduser(args.sql_file)).read_text()
