@@ -75,8 +75,8 @@ def test_run_blocking_isolates_the_cap_across_worker_threads(monkeypatch):
 
     async def _call():
         async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: run_blocking(_work, "a", 10))
-            tg.start_soon(lambda: run_blocking(_work, "b", 500))
+            tg.start_soon(run_blocking, _work, "a", 10)
+            tg.start_soon(run_blocking, _work, "b", 500)
 
     anyio.run(_call)
     assert seen == {"a": 10, "b": 500}  # no cross-request stomp

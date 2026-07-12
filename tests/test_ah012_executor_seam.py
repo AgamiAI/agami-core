@@ -181,7 +181,7 @@ def _reset_injected_executor():
     tools.set_injected_executor(None)
 
 
-def test_create_app_registers_and_clears_the_injected_executor(monkeypatch):
+def test_create_app_wires_injected_executor_and_defaults_to_builtin(monkeypatch):
     pytest.importorskip("starlette")
     pytest.importorskip("mcp")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://agami.example.test")
