@@ -1,9 +1,9 @@
 # What's free, what's hosted
 
-agami is **fair-code** (source-available): **free to self-host for your own
-organization**, paid when you expose it to people **outside** it. The short version
-of the license is in [LICENSING.md](../LICENSING.md); the binding terms are in
-[LICENSE](../LICENSE).
+agami is **fair-code** (source-available): **self-hosting for your own organization is
+free**, and the hosted cloud adds an org-scale governance layer on top (it's also the
+licensed path for serving people **outside** your organization). The short version of the
+license is in [LICENSING.md](../LICENSING.md); the binding terms are in [LICENSE](../LICENSE).
 
 ## Free — self-host for your own team
 
@@ -25,7 +25,8 @@ Run agami on your own machines, for your own people (multi-user included):
 
 ## Paid — the hosted cloud
 
-For teams that need it served, and for serving people **outside** your organization:
+The org-scale layer — advanced governance, shared context, and continuous evals — for teams
+that want it served (and the licensed path for serving people **outside** your organization):
 
 - A **multi-tenant model registry** over a remote MCP endpoint.
 - **Shared, governed** examples + context across a team.
