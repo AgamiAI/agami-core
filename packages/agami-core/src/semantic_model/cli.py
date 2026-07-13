@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +39,23 @@ from . import validator as V
 def _print_json(obj) -> None:
     json.dump(obj, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
+
+
+def _utc_now_iso() -> str:
+    """ISO-8601 UTC (`...Z`) — the sign-off timestamp format the validator expects."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _stamp_approve_ops(ops: list) -> list:
+    """Stamp `at` on any `approve` op that lacks one. curate.apply deliberately can't read
+    the clock itself (`op.get("at")` — "caller stamps"); an approve op without `at` records
+    `signed_off_at: null` and the validator then rejects the whole batch. The CLI process
+    *can* read the clock, so it stamps here — one place, for every CLI caller."""
+    now = _utc_now_iso()
+    for op in ops:
+        if isinstance(op, dict) and op.get("op") == "approve" and not op.get("at"):
+            op["at"] = now
+    return ops
 
 
 def cmd_validate(args) -> int:
@@ -280,8 +298,31 @@ def cmd_curate(args) -> int:
         ops = json.load(fh)
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
+    _stamp_approve_ops(ops)
     res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
     _print_json(res.as_dict())
+    return 0 if res.validated else 1
+
+
+def cmd_approve_queue(args) -> int:
+    """Sign off the whole pending review queue in one call — the first-class no-browser
+    path (the HTML explorer's CLI equivalent). Reads the same queue `review-queue` builds
+    (Rule 1 metrics/named-filters + Rule 2 joins/entities), turns each item into a
+    self-stamped `approve` op, and applies via curate.apply. `--kind` narrows to one item
+    type; `--dry-run` prints the ops without touching the model."""
+    from . import curate
+    org = L.load_organization(args.root)
+    queue = curate.review_queue(org)
+    kinds = set(args.kind) if args.kind else None
+    ops = [{"op": "approve", "kind": it["kind"], "area": it["area"],
+            "name": it["name"], "at": _utc_now_iso()}
+           for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
+           if kinds is None or it["kind"] in kinds]
+    if args.dry_run:
+        _print_json({"dry_run": True, "count": len(ops), "ops": ops})
+        return 0
+    res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
+    _print_json({"approved": len(ops), **res.as_dict()})
     return 0 if res.validated else 1
 
 
@@ -1110,6 +1151,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
     sp.add_argument("--role", default=None, help="sign-off role for approve ops")
     sp.set_defaults(func=cmd_curate)
+
+    sp = sub.add_parser("approve-queue",
+                        help="sign off the whole pending review queue in one call (no-browser path)")
+    sp.add_argument("root")
+    sp.add_argument("--signer", default=None, help="sign-off email recorded on each item")
+    sp.add_argument("--role", default=None, help="sign-off role recorded on each item")
+    sp.add_argument("--kind", action="append", choices=["metric", "entity", "relationship"],
+                    help="restrict to one item kind (repeatable); default approves all")
+    sp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="print the approve ops that would be applied, without applying them")
+    sp.set_defaults(func=cmd_approve_queue)
 
     sp = sub.add_parser("add", help="create metric/entity YAMLs from a JSON file (validated, revertable)")
     sp.add_argument("root")
