@@ -202,6 +202,15 @@ def check_read_only(sql: str) -> Verdict | None:
     return sql_guard.check_read_only(sql)
 
 
+def check_no_recon(sql: str) -> Verdict | None:
+    """Return None if the SQL calls no recon/metadata function and reads no system catalog, else a
+    safety Verdict (`recon`). Thin fail-fast wrapper over the SAME `sql_guard` gate the executor
+    enforces — blocking here avoids spawning the executor subprocess for a recon query."""
+    import sql_guard
+
+    return sql_guard.check_no_recon(sql)
+
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
@@ -866,6 +875,125 @@ def _classify_exit(code: int) -> str:
     }.get(code, "other")
 
 
+# Value-free, user-facing messages per error kind. These NEVER echo the raw driver text (schema /
+# column / value names) — that goes only to the server-side audit trail. The kinds mirror the shared
+# taxonomy in plugins/agami/shared/db_error_classifier.md (whose remediations these paraphrase without
+# the object/host placeholders).
+_ERROR_KINDS: dict[str, tuple[str, str]] = {
+    "auth": (
+        "Authentication to the database failed.",
+        "Check the datasource credentials and retry.",
+    ),
+    "dsn": (
+        "The datasource host or path could not be resolved.",
+        "Check the datasource connection settings.",
+    ),
+    "network": (
+        "Network error reaching the database.",
+        "Confirm the database is reachable (VPN / firewall / port) and retry.",
+    ),
+    "driver_missing": (
+        "The database driver is not installed on the server.",
+        "Install the driver for this datasource on the server.",
+    ),
+    "permission": (
+        "The database user lacks SELECT permission on a referenced object.",
+        "Grant the read-only role SELECT on the referenced tables, then retry.",
+    ),
+    "column_not_found": (
+        "The query referenced a column that does not exist.",
+        "Re-check the query against the current schema; re-introspect if the model has drifted.",
+    ),
+    "table_not_found": (
+        "The query referenced a table that does not exist.",
+        "Re-check the query against the current schema; re-introspect if the model has drifted.",
+    ),
+    "syntax": (
+        "The generated SQL had a syntax error.",
+        "Re-run the query — generation usually self-corrects.",
+    ),
+    "timeout": (
+        "The query was canceled (it timed out).",
+        "Add a filter, a LIMIT, or a date range to reduce the scan, then retry.",
+    ),
+    "other": ("The query failed; the details were logged for the operator.", ""),
+}
+
+
+def _classify_db_error(stderr: str | None, returncode: int) -> tuple[str, str, str]:
+    """Classify an executor operational failure into a ``(kind, reason, remediation)``.
+
+    The RICH ``kind`` (mirroring ``db_error_classifier.md``) drives the assistant's handling; the
+    ``reason`` / ``remediation`` are FIXED, value-free strings from ``_ERROR_KINDS`` — they never echo
+    the raw driver text, which is captured separately for the server-side audit trail only. Detection
+    layers the exit-code prior with stderr-substring refinement."""
+    text = (stderr or "").lower()
+
+    def has(*needles: str) -> bool:
+        return any(n in text for n in needles)
+
+    if returncode == 3 or has("no module named", "modulenotfounderror", "command not found"):
+        kind = "driver_missing"
+    elif has(
+        "permission denied",
+        "insufficient_privileges",
+        "command denied",
+        "insufficient_access_or_readonly",
+    ):
+        kind = "permission"
+    elif has(
+        "canceling statement",
+        "statement_timeout",
+        "query was canceled",
+        "querycanceled",
+        "lost connection during query",
+    ):
+        kind = "timeout"
+    elif has(
+        "no such column", "unknown column", "undefinedcolumn", "invalid identifier", "invalid_field"
+    ) or ("column" in text and has("does not exist", "not found")):
+        kind = "column_not_found"
+    elif has("no such table", "undefinedtable") or (
+        has("relation", "table", "object") and has("does not exist", "doesn't exist", "not found")
+    ):
+        # `object` covers Snowflake `Object '<name>' does not exist` (the name is between the words,
+        # so it's not a contiguous substring) — checked before `syntax` so it wins over Snowflake's
+        # `SQL compilation error` prefix.
+        kind = "table_not_found"
+    elif has("syntax error", "syntaxerror", "compilation error", "error in your sql syntax"):
+        kind = "syntax"
+    elif has(
+        "could not translate host",
+        "name or service not known",
+        "getaddrinfo",
+        "unknown mysql server host",
+        "can't connect",
+        "no such file or directory",
+    ):
+        kind = "dsn"
+    elif has(
+        "connection refused",
+        "timed out",
+        "connection reset",
+        "could not connect",
+        "wrong_version_number",
+    ):
+        kind = "network"
+    elif has(
+        "password authentication failed",
+        "no pg_hba",
+        "incorrect username or password",
+        "access denied",
+    ):
+        kind = "auth"
+    else:
+        # No substring matched — fall back to the exit-code prior (2→dsn, 3→driver_missing,
+        # 4→auth, 5→syntax, else→other).
+        kind = _classify_exit(returncode)
+    reason, remediation = _ERROR_KINDS.get(kind, _ERROR_KINDS["other"])
+    return kind, reason, remediation
+
+
 def _executor_truncated(stderr: str | None) -> bool:
     """True if execute_sql flagged a bounded-fetch truncation (ACE-038/044). The executor emits a
     non-error `{"truncated": {"row_cap": N}}` line on stderr alongside any other notices; scan for it."""
@@ -963,12 +1091,16 @@ def _finalize_execution(
 
 def _run_in_process(
     sql: str, profile: str, area: str | None, max_rows: int | None, executor: Any
-) -> tuple[list, list, bool] | Refusal:
+) -> tuple[list, list, bool] | tuple[Refusal, str | None]:
     """Run through the in-process executor behind the shared guarded envelope (no subprocess, no CSV
-    round-trip). Returns ``(columns, data_rows, truncated)`` on success, or the typed ``Refusal`` on a
-    guard refusal / execution failure — the SAME refusal the subprocess path produces (``GuardRefused``
-    now carries the typed ``Refusal``, incl. the model-safety detail), so the two paths build an
-    identical refused Envelope.
+    round-trip). Returns ``(columns, data_rows, truncated)`` on success, or ``(Refusal, error_detail)``
+    on a guard refusal / execution failure — the SAME refusal the subprocess path produces.
+
+    A guard refusal (read-only / recon / model-safety) carries its own clean typed ``Refusal`` and no
+    ``error_detail``. An execution/config failure (``ExecutorError``) is classified into a VALUE-FREE
+    ``Refusal`` via ``_classify_db_error`` — mirroring the subprocess ``_refusal_from_stderr`` — with
+    the raw driver text returned SEPARATELY as ``error_detail`` for the server-side audit trail only,
+    never in the refusal reason (which would leak schema / column / value names, or a DSN).
 
     Rows are textualized to match the subprocess CSV wire (``None`` → ``""``, else ``str``) so the
     two paths return observably identical JSON. Native-typed rows are a deliberately deferred decision
@@ -982,14 +1114,20 @@ def _run_in_process(
     try:
         result = execute_sql.execute_guarded(sql, profile, area, executor=executor)
     except execute_sql.GuardRefused as refusal:
-        return refusal.refusal  # typed Refusal (read-only OR model-safety) — identical to subprocess
+        return refusal.refusal, None  # typed Refusal (read-only / recon / model-safety) — already clean
     except execute_sql.ExecutorError as exc:
-        return Refusal(_classify_exit(exc.code), reason=exc.msg)
+        # Sanitize like the subprocess wire: a value-free classified refusal out, the raw driver text
+        # to the audit trail only. Parity with `_refusal_from_stderr` closes the in-process leak.
+        kind, reason, remediation = _classify_db_error(exc.msg, exc.code)
+        return (
+            Refusal(kind=kind, reason=reason, remediation=remediation),
+            (exc.msg or "").strip()[:500] or None,
+        )
     except SystemExit as exc:
         # Defence-in-depth: a residual/future sys.exit deep in a driver becomes a fail-closed refusal
         # rather than taking down the host process.
         code = exc.code if isinstance(exc.code, int) else 2
-        return Refusal(_classify_exit(code), reason="Datasource configuration error.")
+        return Refusal(_classify_exit(code), reason="Datasource configuration error."), None
     finally:
         execute_sql._max_rows_override.reset(cap_token)
 
@@ -1002,10 +1140,15 @@ def _run_in_process(
     return columns, data_rows, truncated
 
 
-def _refusal_from_stderr(stderr: str | None, returncode: int) -> Refusal:
-    """Build a Refusal from the executor's stderr. A guardrail refusal is a `{"refusal": {...}}`
-    line (safety / model gates); anything else is an execution/config failure classified by exit
-    code. Raw stderr is used only as the reason for the latter — never as a guardrail reason."""
+def _refusal_from_stderr(stderr: str | None, returncode: int) -> tuple[Refusal, str | None]:
+    """Build a ``(Refusal, error_detail)`` from the executor's stderr.
+
+    A guardrail refusal is a ``{"refusal": {...}}`` line (safety / model gates) — its reason is
+    already clean → ``(Refusal(...), None)``. Anything else is an execution/config failure: it is
+    classified into a value-free message (``_classify_db_error``) and the RAW stderr is returned
+    SEPARATELY as ``error_detail`` for the server-side audit trail ONLY. Raw driver text (schema /
+    column / value names) never crosses the boundary in the ``Refusal`` — the previous behavior of
+    surfacing stderr as the reason leaked exactly that."""
     for line in (stderr or "").splitlines():
         line = line.strip()
         if line.startswith("{") and '"refusal"' in line:
@@ -1014,15 +1157,17 @@ def _refusal_from_stderr(stderr: str | None, returncode: int) -> Refusal:
             except ValueError:
                 continue
             if isinstance(r, dict) and r.get("kind"):
-                return Refusal(
-                    kind=r["kind"],
-                    reason=r.get("reason", ""),
-                    remediation=r.get("remediation", ""),
+                return (
+                    Refusal(
+                        kind=r["kind"],
+                        reason=r.get("reason", ""),
+                        remediation=r.get("remediation", ""),
+                    ),
+                    None,
                 )
-    return Refusal(
-        kind=_classify_exit(returncode),
-        reason=(stderr or "").strip() or "execute_sql.py failed",
-    )
+    kind, reason, remediation = _classify_db_error(stderr, returncode)
+    error_detail = (stderr or "").strip()[:500] or None
+    return Refusal(kind=kind, reason=reason, remediation=remediation), error_detail
 
 
 def _envelope_json(env: Envelope) -> str:
@@ -1035,6 +1180,7 @@ def _finish(
     *,
     sql: str | None = None,
     execution_ms: int | None = None,
+    error_detail: str | None = None,
 ) -> str:
     """Record the guardrail audit row keyed by ``env.audit_id``, then return the Envelope JSON.
 
@@ -1056,6 +1202,7 @@ def _finish(
                 "execution_ms": execution_ms,
                 "correlation_id": args.get("correlation_id"),
                 "source": "mcp_server",
+                "error_detail": error_detail,  # raw driver text, server-side only
             }
         )
     except Exception as exc:
@@ -1084,9 +1231,7 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     sql = args.get("sql")
     if not isinstance(sql, str) or not sql.strip():
         return _finish(
-            Envelope.refused(
-                Refusal("other", "Pass a non-empty `sql` string."), audit_id=audit_id
-            ),
+            Envelope.refused(Refusal("other", "Pass a non-empty `sql` string."), audit_id=audit_id),
             args,
         )
 
@@ -1096,6 +1241,14 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
             Envelope.refused(
                 Refusal("permission", verdict.detail, verdict.remediation), audit_id=audit_id
             ),
+            args,
+            sql=sql,
+        )
+
+    recon = check_no_recon(sql)
+    if recon is not None:
+        return _finish(
+            Envelope.refused(Refusal("recon", recon.detail, recon.remediation), audit_id=audit_id),
             args,
             sql=sql,
         )
@@ -1118,12 +1271,14 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
         started = time.monotonic()
         outcome = _run_in_process(sql, profile, area, max_rows, _INJECTED_EXECUTOR)
         execution_ms = int((time.monotonic() - started) * 1000)
-        if isinstance(outcome, Refusal):  # guard refusal / execution error
+        if isinstance(outcome[0], Refusal):  # guard refusal / execution error → (Refusal, error_detail)
+            refusal, error_detail = outcome
             return _finish(
-                Envelope.refused(outcome, audit_id=audit_id),
+                Envelope.refused(refusal, audit_id=audit_id),
                 args,
                 sql=sql,
                 execution_ms=execution_ms,
+                error_detail=error_detail,
             )
         columns, data_rows, truncated = outcome
         return _finalize_execution(
@@ -1160,13 +1315,13 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     execution_ms = int((time.monotonic() - started) * 1000)
 
     if proc.returncode != 0:
+        refusal, error_detail = _refusal_from_stderr(proc.stderr, proc.returncode)
         return _finish(
-            Envelope.refused(
-                _refusal_from_stderr(proc.stderr, proc.returncode), audit_id=audit_id
-            ),
+            Envelope.refused(refusal, audit_id=audit_id),
             args,
             sql=sql,
             execution_ms=execution_ms,
+            error_detail=error_detail,
         )
 
     # Parse the RFC-4180 CSV emitted on stdout.

@@ -50,11 +50,16 @@ REFUSAL_KINDS: tuple[str, ...] = (
     # data-protection / governance — emitted by those gates
     "sensitive_columns",
     "preflight_refused",
-    # operational / execution failures — from the executor + DB driver
+    # operational / execution failures — from the executor + DB driver (classified from stderr;
+    # `permission` reuses the safety kind above). The rich column/table/network kinds mirror
+    # db_error_classifier.md.
     "timeout",
     "dsn",
+    "network",
     "driver_missing",
     "auth",
+    "column_not_found",
+    "table_not_found",
     "syntax",
     "other",
 )

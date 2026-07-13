@@ -1347,19 +1347,25 @@ def execute_guarded(
 ) -> ExecResult:
     """The un-bypassable guarded envelope — the single execution chokepoint (REQ-002/REQ-014).
 
-    In fixed order: read-only / dangerous-SQL guard (the hard security gate — NOT bypassable via
-    ``no_safety``, which skips only the semantic-model pass, never write/RCE/DoS protection) ->
-    semantic-model safety pass (fan/chasm pre-flight + scope + PII + ``default_filters`` rewrite) ->
-    resolve the datasource -> ``executor.execute(vetted_sql, …)``. The executor only ever receives
-    SQL both guards have passed. Raises ``GuardRefused`` carrying the typed ``Refusal`` on a refusal,
-    and ``ExecutorError`` on a connect/run failure — so the subprocess ``main`` and the in-process MCP
-    handler apply the same guard and build the same envelope. The row cap rides the request-scoped
-    ``_max_rows_override`` ContextVar the caller sets."""
+    In fixed order: read-only / dangerous-SQL guard -> recon / metadata deny-list (both hard security
+    gates — NOT bypassable via ``no_safety``, which skips only the semantic-model pass, never
+    write/RCE/DoS protection) -> semantic-model safety pass (fan/chasm pre-flight + scope + PII +
+    ``default_filters`` rewrite) -> resolve the datasource -> ``executor.execute(vetted_sql, …)``. The
+    executor only ever receives SQL every guard has passed. Raises ``GuardRefused`` carrying the typed
+    ``Refusal`` on a refusal, and ``ExecutorError`` on a connect/run failure — so the subprocess
+    ``main`` and the in-process MCP handler apply the same guards and build the same envelope. The row
+    cap rides the request-scoped ``_max_rows_override`` ContextVar the caller sets."""
     import sql_guard
 
     verdict = sql_guard.check_read_only(sql)
     if verdict is not None:
         raise GuardRefused(_refusal_from_verdict("permission", verdict), code=1)
+    # Recon / metadata deny-list — refuse server-fingerprinting + system-catalog introspection
+    # (version(), current_user, information_schema, pg_* relations) as a distinct `recon` refusal.
+    # A hard gate, at the chokepoint so BOTH surfaces get it, and NOT bypassable via no_safety.
+    recon = sql_guard.check_no_recon(sql)
+    if recon is not None:
+        raise GuardRefused(_refusal_from_verdict("recon", recon), code=1)
     if not no_safety:
         sql, refusal = _model_safety(sql, profile, area)
         if refusal is not None:
@@ -1424,11 +1430,11 @@ def main() -> int:
 
     profile = args.profile or _resolve_default_profile()
 
-    # Route through the single guarded envelope with the built-in executor: guard -> model-safety ->
-    # resolve -> connect-and-run, returning native rows we then serialize to stdout as CSV (the
-    # subprocess wire). The guard is the hard security gate for EVERY caller (both MCP servers, the
-    # agami-query skill, cron), NOT bypassable via --no-safety (which skips only the semantic-model
-    # pass, never write/RCE/DoS protection).
+    # Route through the single guarded envelope with the built-in executor: guard -> recon deny-list
+    # -> model-safety -> resolve -> connect-and-run, returning native rows we then serialize to stdout
+    # as CSV (the subprocess wire). The guard is the hard security gate for EVERY caller (both MCP
+    # servers, the agami-query skill, cron), NOT bypassable via --no-safety (which skips only the
+    # semantic-model pass, never write/RCE/DoS protection).
     try:
         result = execute_guarded(
             sql, profile, args.area, executor=BUILTIN_EXECUTOR, no_safety=args.no_safety

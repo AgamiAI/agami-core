@@ -66,6 +66,9 @@ def test_refused_query_writes_a_refused_audit_row(db):
     assert row["datasource"] == "sales"
     assert row["correlation_id"] == "turn-1"
     assert row["row_count"] is None
+    assert (
+        row["error_detail"] is None
+    )  # a guardrail refusal has a clean reason — no raw detail stored
 
 
 def test_ok_query_writes_an_ok_audit_row(db, monkeypatch):
@@ -82,6 +85,133 @@ def test_ok_query_writes_an_ok_audit_row(db, monkeypatch):
     assert row["refusal_kind"] is None
     assert row["sql"] == "SELECT n FROM t"
     assert row["row_count"] == 1
+
+
+def test_operational_error_puts_raw_in_audit_not_in_envelope(db, monkeypatch):
+    # A DB execution error: the RAW driver text (schema / column / value names) must be captured in
+    # the audit row's error_detail (for the operator) but NEVER surface in the Envelope refusal.
+    class _ErrProc:
+        returncode = 5
+        stdout = ""
+        stderr = "permission denied for table salaries"
+
+    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: _ErrProc())
+
+    resp = json.loads(tools.tool_execute_sql({"sql": "SELECT x FROM t", "datasource": "sales"}))
+    assert resp["status"] == "refused"
+    assert resp["refusal"]["kind"] == "permission"
+    assert "salaries" not in json.dumps(
+        resp
+    )  # the raw object name is absent from the whole response
+
+    (row,) = _audit_rows(db)
+    assert row["audit_id"] == resp["audit_id"]
+    assert row["refusal_kind"] == "permission"
+    assert "salaries" in (row["error_detail"] or "")  # but IS captured server-side for the operator
+
+
+def test_recon_query_writes_a_recon_audit_row(db):
+    # A recon query is refused before any subprocess — the recon refusal audits with kind=recon and,
+    # being a guardrail refusal, stores no raw error_detail.
+    resp = json.loads(tools.tool_execute_sql({"sql": "SELECT current_user", "datasource": "sales"}))
+    assert resp["status"] == "refused" and resp["refusal"]["kind"] == "recon"
+
+    (row,) = _audit_rows(db)
+    assert row["audit_id"] == resp["audit_id"]
+    assert row["refusal_kind"] == "recon"
+    assert row["error_detail"] is None
+
+
+def test_jsonl_fallback_carries_error_detail_on_operational_failure(tmp_path, monkeypatch):
+    # The default OSS deployment (no AGAMI_DB_URL) writes audit to the local jsonl — an operational
+    # failure's RAW text must land there (and only there), not in the response.
+    monkeypatch.delenv("AGAMI_DB_URL", raising=False)
+    log = tmp_path / "guardrail_audit.jsonl"
+    monkeypatch.setattr(tools, "GUARDRAIL_AUDIT_LOG", log)
+
+    class _ErrProc:
+        returncode = 5
+        stdout = ""
+        stderr = "permission denied for table salaries"
+
+    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: _ErrProc())
+
+    resp = json.loads(tools.tool_execute_sql({"sql": "SELECT x FROM t", "datasource": "sales"}))
+    assert resp["status"] == "refused" and "salaries" not in json.dumps(resp)
+
+    rec = json.loads(log.read_text().splitlines()[0])
+    assert "salaries" in (rec.get("error_detail") or "")
+
+
+def test_audit_insert_degrades_on_pre_013_schema(tmp_path):
+    # New code against an un-migrated DB (guardrail_audit WITHOUT error_detail): the audit row must
+    # SURVIVE (minus the raw detail), not be silently dropped by the best-effort recorder.
+    from contracts import GuardrailAuditRecord  # noqa: PLC0415
+    from model_store import DbActivitySink  # noqa: PLC0415
+
+    s = Store.connect("sqlite://" + str(tmp_path / "old.db"))
+    s.execute(
+        "CREATE TABLE guardrail_audit (audit_id TEXT PRIMARY KEY, ts TEXT NOT NULL, datasource TEXT, "
+        "status TEXT NOT NULL, refusal_kind TEXT, sql TEXT, row_count INTEGER, execution_ms INTEGER, "
+        "correlation_id TEXT, source TEXT)"  # the pre-013 10-column schema
+    )
+    s.commit()
+
+    rec = GuardrailAuditRecord(
+        audit_id="a1",
+        ts="2026-07-12T00:00:00Z",
+        status="refused",
+        refusal_kind="syntax",
+        error_detail="permission denied for table salaries",
+    )
+    DbActivitySink(s).record_guardrail_audit(rec)  # must NOT raise and must NOT drop the row
+
+    rows = s.query("SELECT * FROM guardrail_audit")
+    s.close()
+    assert len(rows) == 1 and rows[0]["audit_id"] == "a1" and rows[0]["refusal_kind"] == "syntax"
+    assert "error_detail" not in rows[0]  # column absent; row still written without the raw detail
+
+
+def test_audit_insert_does_not_retry_on_a_non_schema_error():
+    # Copilot review: the pre-013 fallback fires ONLY for the missing error_detail column. Any OTHER
+    # insert failure must propagate on the FIRST attempt — a blind retry would mask a real DB error
+    # (e.g. a deadlock / constraint violation) AND silently drop error_detail. Pin: one execute call,
+    # no rollback, the original error re-raised.
+    from model_store import DbActivitySink  # noqa: PLC0415
+
+    class _FakeStore:
+        def __init__(self):
+            self.execute_calls = 0
+            self.rolled_back = False
+
+        def execute(self, *_a, **_k):
+            self.execute_calls += 1
+            raise RuntimeError("deadlock detected")  # NOT a missing-column signature
+
+        def rollback(self):
+            self.rolled_back = True
+
+        def commit(self):
+            pass
+
+    class _Rec:
+        audit_id = "a"
+        ts = "t"
+        datasource = None
+        status = "ok"
+        refusal_kind = None
+        sql = None
+        row_count = None
+        execution_ms = None
+        correlation_id = None
+        source = "x"
+        error_detail = "raw driver text"
+
+    store = _FakeStore()
+    with pytest.raises(RuntimeError, match="deadlock"):
+        DbActivitySink(store).record_guardrail_audit(_Rec())
+    assert store.execute_calls == 1  # first insert only — NO fallback retry on a non-schema error
+    assert store.rolled_back is False  # rollback belongs to the pre-013 path, never reached here
 
 
 def test_jsonl_fallback_when_no_datastore(tmp_path, monkeypatch):
