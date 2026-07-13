@@ -73,6 +73,28 @@ def test_refusal_line_is_found_among_interleaved_notices(monkeypatch):
     assert env["status"] == "refused" and env["refusal"]["kind"] == "sensitive_columns"
 
 
+def test_resource_limit_refusal_discards_partial_stdout(monkeypatch):
+    # The per-statement timeout emits a {"refusal": {"kind": "resource_limit"}} line from the
+    # executor. Both transports (stdio + HTTP) funnel through tool_execute_sql, so this single relay
+    # is the both-surfaces guarantee. Critically: a streaming engine may have flushed a partial CSV
+    # (e.g. the header row) to stdout before the cancel — the relay must DISCARD it on the non-zero
+    # exit, so a killed query is a refused Envelope with no data. Feed partial stdout to pin that.
+    stderr = json.dumps(
+        {
+            "refusal": {
+                "kind": "resource_limit",
+                "reason": "the query exceeded the 30s statement timeout and was cancelled",
+                "remediation": "Narrow the query, or raise AGAMI_SQL_TIMEOUT_S (currently 30s).",
+            }
+        }
+    )
+    env = _run(monkeypatch, _Proc(1, stdout="n\n1\n2\n", stderr=stderr))
+    assert env["status"] == "refused"
+    assert env["refusal"]["kind"] == "resource_limit"
+    assert "data" not in env  # the partial CSV on stdout is discarded — no partial data leaks
+    assert env["audit_id"]
+
+
 def test_bare_operational_failure_is_classified_by_exit_code(monkeypatch):
     # Exit 5 = SQL execution error with no {"refusal"} line → classified as 'syntax' by exit code.
     env = _run(monkeypatch, _Proc(5, stderr='relation "x" does not exist'))
