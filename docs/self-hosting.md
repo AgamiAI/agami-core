@@ -1,5 +1,9 @@
 # Self-hosting: manual install & configuration reference
 
+> 🧪 **Early access (in testing).** The self-hosted team server is usable today but newer than the local
+> single-player path — see the [early-access note in deploy/README.md](../deploy/README.md) and please
+> send feedback via a [GitHub issue](https://github.com/AgamiAI/agami-core/issues).
+
 > **Deploying agami? Start with [deploy/README.md](../deploy/README.md).** The `/agami-deploy` skill
 > writes a ready-to-run Docker bundle there (docker-compose + Caddy auto-TLS + a filled `.env`) from the
 > published image `ghcr.io/agamiai/agami-core` — no clone, no build. **This page is the reference** for

@@ -17,10 +17,11 @@ Run agami on your own machines, for your own people (multi-user included):
 - **Corrections** + the `examples.yaml` few-shot library.
 - The **local MCP server** (`agami serve`) — stdio, no auth, no network.
   See [mcp-server.md](mcp-server.md).
-- The **self-hosted team server** (`/agami-deploy`) — an HTTPS MCP server your whole
-  org connects to, with an admin console (sign in with a password or a single Google /
-  Microsoft **SSO** provider) and per-user access to the query surface.
-  See [deploy/README.md](../deploy/README.md).
+- The **self-hosted team server** (`/agami-deploy`) — *early access (in testing)* — an
+  HTTPS MCP server your whole org connects to, with an admin console (sign in with a
+  password or a single Google / Microsoft **SSO** provider) and per-user access to the
+  query surface. Usable today, newer than the local path; see the
+  [early-access note in deploy/README.md](../deploy/README.md).
 
 ## Paid — the hosted cloud
 
