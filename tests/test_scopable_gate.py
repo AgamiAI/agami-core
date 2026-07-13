@@ -92,6 +92,23 @@ def test_unscopable_source_in_a_set_op_arm_is_caught():
     assert v is not None and v.rule == "unscopable_sql"
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT o.id FROM orders o, (VALUES (1), (2)) AS v(x)",  # VALUES as the 2nd comma-join source
+        "SELECT o.id FROM orders o, UNNEST(ARRAY[1, 2]) AS u(x)",  # UNNEST as the 2nd comma-join source
+        "SELECT o.id FROM orders o, generate_series(1, 10) AS t(g)",  # table-fn as the 2nd source
+    ],
+)
+def test_unscopable_comma_join_source_is_caught(sql):
+    # Copilot review: an unscopable source appearing as an ADDITIONAL comma-join source — the FIRST
+    # source being a declared table — must still be refused. The gate walks EVERY FROM/JOIN source
+    # (sqlglot normalizes `FROM t1, <src>` to a Join whose `.this` is <src>; other versions hang it on
+    # `From.expressions`), so a valid leading table can't shield an unscopable trailing source.
+    v = rt.check_scopable(sql, _scope_org())
+    assert v is not None and v.rule == "unscopable_sql", sql
+
+
 def test_empty_model_allows_even_an_unscopable_query():
     # A deployment with no declared surface isn't scoping — the gate is inert (like the scope gates).
     empty = m.Organization(organization="Empty", subject_areas=[m.SubjectArea(name="s")])

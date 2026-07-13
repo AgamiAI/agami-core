@@ -600,12 +600,21 @@ def check_table_scope(
     """
     if not _HAVE_SQLGLOT:
         return None
-    allow = {
-        name.lower()
-        for name in (ctx.model_table_index if ctx is not None else _model_table_index(org))
-    }
+    index = ctx.model_table_index if ctx is not None else _model_table_index(org)
+    allow = {name.lower() for name in index}
     if not allow:
         return None
+    # name -> the set of declared (non-empty) SCHEMAS for that name. Used to catch a SCHEMA-qualified
+    # reference to a same-named table in an UNDECLARED schema — `secret_schema.orders` when the model
+    # declares only `public.orders` — which bare-name matching alone would wrongly admit, letting a
+    # query read a table the model never declared if the datasource role can see other schemas.
+    # `_model_table_index` values are `(Table, area_name)`; `Table.schema_name` is the declared schema
+    # (the field is aliased from `schema` — plain `.schema` collides with Pydantic's BaseModel.schema).
+    declared_schemas: dict[str, set[str]] = {}
+    for name, val in index.items():
+        sch = (val[0].schema_name or "").lower()
+        if sch:
+            declared_schemas.setdefault(name.lower(), set()).add(sch)
     if ctx is not None:
         tree = ctx.tree
     else:
@@ -626,8 +635,20 @@ def check_table_scope(
         name = tbl.name
         if not name or name.lower() in cte_names:
             continue  # a CTE reference, not a physical table
-        if name.lower() not in allow:
+        name_l = name.lower()
+        if name_l not in allow:
             offending.add(name)
+            continue
+        # The bare name is declared. If the reference QUALIFIES a schema, and the declared table(s) of
+        # that name carry a schema, the reference's schema must be one of them — else it targets a
+        # same-named table in an undeclared schema and is refused (confinement). An UNqualified
+        # reference matches by name as before: the datasource search_path resolves it, and we don't
+        # second-guess which schema that is.
+        q_schema = (tbl.db or "").lower()
+        if q_schema:
+            schemas = declared_schemas.get(name_l)
+            if schemas and q_schema not in schemas:
+                offending.add(f"{tbl.db}.{name}")
     if not offending:
         return None
 
@@ -897,11 +918,17 @@ def check_scopable(
     # VIEW`), so sweep the whole tree, not only From/Join `.this`.
     if tree.find(exp.Lateral) is not None:
         return _unscopable("a FROM/JOIN source is a LATERAL, not a table")
-    # VALUES / UNNEST and any other non-`Table`, non-derived-subquery FROM/JOIN source.
+    # VALUES / UNNEST and any other non-`Table`, non-derived-subquery FROM/JOIN source. A comma-join
+    # `FROM t1, <VALUES/UNNEST/...>` normalizes to a `Join` node whose `.this` is that source (so it is
+    # covered by walking From AND Join). Some sqlglot versions instead hang the additional comma-join
+    # sources off `From.expressions`, so check those too — belt-and-suspenders, so an unscopable
+    # comma-join source can't slip through on either shape (Copilot review).
     for node in tree.find_all(exp.From, exp.Join):
-        src = node.this
-        if src is not None and not isinstance(src, (exp.Table, exp.Subquery)):
-            return _unscopable(f"a FROM/JOIN source is a {type(src).__name__.upper()}, not a table")
+        for src in [node.this, *(node.args.get("expressions") or [])]:
+            if src is not None and not isinstance(src, (exp.Table, exp.Subquery)):
+                return _unscopable(
+                    f"a FROM/JOIN source is a {type(src).__name__.upper()}, not a table"
+                )
     return None
 
 

@@ -84,6 +84,32 @@ def test_schema_qualified_declared_allowed():
     assert rt.check_table_scope("SELECT * FROM public.orders", _scope_org()) is None
 
 
+def test_schema_qualified_undeclared_schema_refused():
+    # `orders` is declared, but ONLY in `public`. A reference to a same-named table in a DIFFERENT,
+    # undeclared schema targets a table the model never declared — refuse it, so bare-name matching
+    # can't admit `secret_schema.orders` when the datasource role can see more than one schema.
+    res = rt.check_table_scope("SELECT * FROM secret_schema.orders", _scope_org())
+    assert res is not None
+    assert res.rule == "table_scope"
+    assert "secret_schema.orders" in res.detail  # the offending qualified ref is named
+
+
+def test_schema_qualified_undeclared_schema_refused_in_a_join():
+    # The same-named-but-wrong-schema table hidden in a JOIN is caught too (whole-tree table sweep),
+    # and the correctly-schema'd table alongside it is NOT flagged.
+    res = rt.check_table_scope(
+        "SELECT * FROM public.orders o JOIN hr.customers c ON c.id = o.customer_id", _scope_org())
+    assert res is not None
+    assert "hr.customers" in res.detail
+    assert "public.orders" not in res.detail  # the correctly-declared schema-qualified table is fine
+
+
+def test_unqualified_name_still_matches_by_name():
+    # A bare (unqualified) reference to a declared table stays allowed — we don't require a schema
+    # qualifier; the datasource search_path resolves it. Only a WRONG explicit schema is refused.
+    assert rt.check_table_scope("SELECT * FROM orders", _scope_org()) is None
+
+
 def test_case_insensitive_match():
     assert rt.check_table_scope("SELECT * FROM ORDERS", _scope_org()) is None
 
