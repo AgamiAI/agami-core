@@ -172,6 +172,48 @@ def test_audit_insert_degrades_on_pre_013_schema(tmp_path):
     assert "error_detail" not in rows[0]  # column absent; row still written without the raw detail
 
 
+def test_audit_insert_does_not_retry_on_a_non_schema_error():
+    # Copilot review: the pre-013 fallback fires ONLY for the missing error_detail column. Any OTHER
+    # insert failure must propagate on the FIRST attempt — a blind retry would mask a real DB error
+    # (e.g. a deadlock / constraint violation) AND silently drop error_detail. Pin: one execute call,
+    # no rollback, the original error re-raised.
+    from model_store import DbActivitySink  # noqa: PLC0415
+
+    class _FakeStore:
+        def __init__(self):
+            self.execute_calls = 0
+            self.rolled_back = False
+
+        def execute(self, *_a, **_k):
+            self.execute_calls += 1
+            raise RuntimeError("deadlock detected")  # NOT a missing-column signature
+
+        def rollback(self):
+            self.rolled_back = True
+
+        def commit(self):
+            pass
+
+    class _Rec:
+        audit_id = "a"
+        ts = "t"
+        datasource = None
+        status = "ok"
+        refusal_kind = None
+        sql = None
+        row_count = None
+        execution_ms = None
+        correlation_id = None
+        source = "x"
+        error_detail = "raw driver text"
+
+    store = _FakeStore()
+    with pytest.raises(RuntimeError, match="deadlock"):
+        DbActivitySink(store).record_guardrail_audit(_Rec())
+    assert store.execute_calls == 1  # first insert only — NO fallback retry on a non-schema error
+    assert store.rolled_back is False  # rollback belongs to the pre-013 path, never reached here
+
+
 def test_jsonl_fallback_when_no_datastore(tmp_path, monkeypatch):
     # No AGAMI_DB_URL → the audit row lands in the local jsonl instead of the DB.
     monkeypatch.delenv("AGAMI_DB_URL", raising=False)

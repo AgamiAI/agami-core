@@ -374,10 +374,19 @@ class DbActivitySink:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (*base, record.error_detail),
             )
-        except Exception:
-            # Pre-013 schema (the error_detail column isn't there yet, e.g. new code against an
-            # un-migrated DB): DON'T drop the audit row — write it without the raw detail. Roll back
-            # first so a Postgres aborted-transaction doesn't fail the retry.
+        except Exception as exc:
+            # ONLY the pre-013 schema (the error_detail column isn't there yet — new code against an
+            # un-migrated DB) is retried WITHOUT the raw detail. Any OTHER failure must propagate: a
+            # blanket retry would both mask a real DB error and silently drop error_detail (Copilot
+            # review). Match the missing-column signature across drivers (sqlite "has no column named",
+            # Postgres "does not exist" / UndefinedColumn).
+            msg = str(exc).lower()
+            missing_error_detail = "error_detail" in msg and (
+                "no column" in msg or "does not exist" in msg or "undefined" in msg
+            )
+            if not missing_error_detail:
+                raise  # a genuine DB failure — surface it to the best-effort caller, don't mask it
+            # Roll back first so a Postgres aborted-transaction doesn't fail the retry.
             self._store.rollback()
             self._store.execute(
                 f"INSERT INTO guardrail_audit ({self._AUDIT_COLS}) "
