@@ -75,7 +75,7 @@ def test_action_and_class_sets_match_the_contract():
 
 def test_every_emitted_refusal_kind_is_documented():
     # `Refusal.kind` is an open str, so this pins the kinds the code ACTUALLY emits (executor gates +
-    # the tools layer + _classify_exit) against the documented REFUSAL_KINDS set, so the vocabulary
+    # the tools layer + _classify_db_error) against the documented REFUSAL_KINDS set, so the vocabulary
     # can never silently drift from reality. Keep in sync with the emit sites if you add a kind.
     emitted = {
         # execute_sql._model_safety + main + tools.tool_execute_sql pre-check (guardrail refusals)
@@ -83,15 +83,21 @@ def test_every_emitted_refusal_kind_is_documented():
         "table_out_of_scope",
         "select_star",
         "column_out_of_scope",
+        "unscopable_sql",
+        "resource_limit",
+        "recon",
         "model_unavailable",
         "preflight_refused",
         "sensitive_columns",
-        # tools.tool_execute_sql + _classify_exit (operational / execution failures)
+        # tools.tool_execute_sql + _classify_db_error (operational / execution failures)
         "other",
         "timeout",
         "dsn",
+        "network",
         "driver_missing",
         "auth",
+        "column_not_found",
+        "table_not_found",
         "syntax",
     }
     assert emitted <= set(REFUSAL_KINDS), emitted - set(REFUSAL_KINDS)

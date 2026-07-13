@@ -126,6 +126,7 @@ def test_guardrail_audit_record_roundtrip():
         "execution_ms": None,
         "correlation_id": "turn-1",
         "source": "mcp_server",
+        "error_detail": None,
     }
     assert _roundtrip(GuardrailAuditRecord, sample) == sample
 

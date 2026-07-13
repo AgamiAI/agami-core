@@ -259,7 +259,10 @@ def test_injected_executor_error_maps_to_the_same_envelope(monkeypatch):
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
 
     assert out["refusal"]["kind"] == tools._classify_exit(4)
-    assert "connect failed" in out["refusal"]["reason"]  # ExecutorError msg rides the refusal reason
+    # Sanitized (ACE-039): the raw driver text never rides the reason — a value-free classified
+    # message does; the raw goes to the server-side audit trail only. Parity with the subprocess wire.
+    assert "connect failed" not in out["refusal"]["reason"] and "refused" not in out["refusal"]["reason"]
+    assert out["refusal"]["reason"]  # a non-empty, value-free reason
 
 
 def test_set_injected_executor_rejects_a_bad_shape():
@@ -273,10 +276,11 @@ def test_set_injected_executor_rejects_a_bad_shape():
     assert tools._INJECTED_EXECUTOR is None  # rejected, nothing stored
 
 
-def test_injected_executor_credential_error_surfaces_detailed_remediation(monkeypatch):
-    # Parity with the subprocess path: a bad-profile ExecutorError carries its detailed message, so
-    # the in-process tool envelope surfaces the SAME remediation the CLI stderr would (not a generic
-    # string). This is why _load_credentials/_parse_dsn raise instead of sys.exit.
+def test_injected_executor_credential_error_is_sanitized_not_leaked(monkeypatch):
+    # Parity with the subprocess path (ACE-039): a bad-profile ExecutorError is classified into a
+    # VALUE-FREE refusal reason — the raw message (which can name a DSN / host / env var) never rides
+    # the reason; it goes to the server-side audit trail only. This is why _load_credentials/_parse_dsn
+    # raise ExecutorError (so the classifier can sanitize) rather than surfacing the raw text.
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
@@ -292,7 +296,9 @@ def test_injected_executor_credential_error_surfaces_detailed_remediation(monkey
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
 
-    assert "DATASOURCE_URL" in out["refusal"]["reason"]  # detailed, not the generic net string
+    assert out["status"] == "refused"
+    assert "DATASOURCE_URL" not in out["refusal"]["reason"]  # value-free, not the raw config text
+    assert out["refusal"]["reason"]  # a non-empty classified reason
 
 
 def test_injected_executor_systemexit_is_caught_not_fatal(monkeypatch):

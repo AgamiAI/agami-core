@@ -217,3 +217,4 @@ class GuardrailAuditRecord(_Contract):
     execution_ms: int | None = None
     correlation_id: str | None = None
     source: str | None = None
+    error_detail: str | None = None  # RAW driver error — server-side audit only, NEVER in the Envelope
