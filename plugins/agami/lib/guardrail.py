@@ -31,16 +31,21 @@ ACTIONS: tuple[str, ...] = ("allow", "reject", "mask", "row_filter", "rewrite", 
 # Every refusal kind the system emits, grouped by origin. `Refusal.kind` is an open ``str`` —
 # operational failures (`syntax` / `auth` / `driver_missing`) come from the DB driver, not a fixed
 # guardrail vocabulary — so this documents the known set (and a test pins the emit sites against it),
-# rather than a `Literal` that nothing at runtime (no mypy in CI) would actually enforce.
+# rather than a `Literal` that nothing at runtime (no mypy in CI) would actually enforce. This is the
+# canonical vocabulary for the whole safe-SQL feature: a few kinds are FORWARD-DECLARED here for the
+# gates that land in the dependent slices on top of this contract (`unscopable_sql` — fail-closed
+# scoping; `resource_limit` — the statement timeout; `recon` — the metadata deny-list), so the set is
+# defined once, in the base, and the emit-site test only asserts emitted ⊆ documented (never the
+# reverse, which would fail here until those slices land).
 REFUSAL_KINDS: tuple[str, ...] = (
     # safety — integrity / confinement / object-scope / availability / fail-closed
     "permission",
     "table_out_of_scope",
     "column_out_of_scope",
     "select_star",
-    "unscopable_sql",
-    "resource_limit",
-    "recon",
+    "unscopable_sql",  # forward-declared: emitted by the fail-closed-scoping slice
+    "resource_limit",  # forward-declared: emitted by the per-statement-timeout slice
+    "recon",  # forward-declared: emitted by the recon deny-list slice
     "model_unavailable",
     # data-protection / governance — emitted by those gates
     "sensitive_columns",
@@ -107,10 +112,13 @@ class Refusal:
     """The ``refusal`` block of a refused ``Envelope``: why the query was rejected, with a
     remediation.
 
-    A **guardrail** refusal (a safety or model gate) carries a clean ``reason`` — never raw SQL or
-    raw DB error text, which would cross the boundary between the model and the customer's database.
-    An **operational** failure (a DB syntax / connection error surfaced by the executor) currently
-    carries the driver's error text as ``reason``; sanitizing that text is handled separately."""
+    ``reason`` is ALWAYS value-free — it never carries raw SQL or raw DB driver text (schema / column
+    / value names, a DSN), which must not cross the boundary between the model and the customer's
+    database. A **guardrail** refusal (a safety or model gate) reasons from the model; an
+    **operational** failure (a DB syntax / connection error surfaced by the executor) is classified
+    into a fixed value-free reason, with the raw driver text captured separately for the server-side
+    audit trail only. (The operational-error sanitization is wired by the recon/error-hardening
+    slice; the tool layer classifies via ``_classify_db_error`` on both surfaces.)"""
 
     kind: str  # one of REFUSAL_KINDS — an open str (operational kinds come from the DB driver)
     reason: str

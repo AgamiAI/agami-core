@@ -871,11 +871,10 @@ def _resolve_guard_model(profile: str):
     the DB when one is configured (hosted — the `/artifacts` disk mount may be absent), else the
     on-disk YAML (local). Returns an `Organization` or None if neither is available.
 
-    The DB import is lazy AND env-guarded on purpose: the local executor runs from a stdlib-lean
-    mirror that does not ship `store`/`model_store`, so we only reach for them when a DB is set.
-    Any DB-load failure degrades to disk rather than crashing the executor."""
-    from semantic_model import loader as L
-
+    The DB/loader imports are lazy AND (for the DB) env-guarded on purpose: the local executor runs
+    from a stdlib-lean mirror that does not ship `store`/`model_store`, so we only reach for them when
+    a DB is set; and the loader import sits inside the disk-path try so an import failure degrades to
+    None (hosted then fails closed) rather than crashing the executor."""
     # Any load failure below degrades to the next source (DB → disk → None), silently: a freeform
     # error line here would (a) leak DB connection details from the exception and (b) precede the
     # JSON refusal `_model_safety` emits when both sources are absent on hosted, breaking the
@@ -891,7 +890,10 @@ def _resolve_guard_model(profile: str):
                 try:
                     org = _load_db(store, profile)
                 finally:
-                    store.close()
+                    try:
+                        store.close()
+                    except Exception:
+                        pass  # a close error must not discard a model that loaded fine (→ false refusal)
                 if org is not None:
                     return org
         except Exception:
@@ -902,9 +904,11 @@ def _resolve_guard_model(profile: str):
     )
     if (root / "org.yaml").exists():
         try:
+            from semantic_model import loader as L
+
             return L.load_organization(root)
         except Exception:
-            pass  # unparseable/absent on disk -> None (hosted then fails closed)
+            pass  # unparseable/absent on disk, or loader import failure -> None (hosted fails closed)
     return None
 
 

@@ -6,7 +6,7 @@ swapped at the composition root through these ports, never by forking a tool:
   - ``ActivitySink``     — where query-execution records go (file by default)
   - ``OrgResolver``      — single vs multi tenancy as a config flag, not a schema fork
   - ``AuthProvider``     — bearer token → principal (presence by default)
-  - ``GovernancePolicy`` — warn-only by default; enforcement is a paid concern
+  - ``GovernancePolicy`` — no-op by default (warn-only posture, no rules wired); enforcement is paid
   - ``Executor``         — the connect-and-run step, *behind* the shared guard (built-in by default;
                            a consumer injects a pooled/RBAC/tunnel executor without forking the guard)
 

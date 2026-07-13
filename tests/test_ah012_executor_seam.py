@@ -359,6 +359,48 @@ def test_injected_executor_model_safety_refusal_returns_the_typed_refusal(monkey
     assert fake.calls == []  # refused before the executor
 
 
+def test_injected_executor_real_pii_gate_produces_sensitive_columns_envelope(monkeypatch):
+    # A REAL sensitive-projection gate firing on a REAL model becomes a refused Envelope with kind
+    # "sensitive_columns" end-to-end (real gate -> _model_safety -> GuardRefused -> refused Envelope),
+    # closing the chain the synthetic-stderr test only stitched at the parse step. PII is top-severity,
+    # so pin the whole gate->refusal->envelope path, not just the stderr parser. The executor never runs.
+    pytest.importorskip("pydantic")
+    pytest.importorskip("sqlglot")
+    import tools
+    from semantic_model import models as m
+
+    org = m.Organization(
+        organization="o",
+        version=1,
+        subject_areas=[
+            m.SubjectArea(
+                name="area",
+                description="d",
+                tables_defined=[
+                    m.Table(
+                        name="users", schema="public", storage_connection="c", grain=["id"],
+                        columns=[
+                            m.Column(name="id", type="integer"),
+                            m.Column(name="email", type="string", sensitive=True),
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(execute_sql, "_resolve_guard_model", lambda profile: org)  # real _model_safety runs
+    fake = _SpyExecutor()
+    tools.set_injected_executor(fake)
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT email FROM users", "datasource": "acme"}))
+
+    assert out["status"] == "refused"
+    assert out["refusal"]["kind"] == "sensitive_columns"  # the REAL PII gate, not a synthetic line
+    assert "data" not in out  # a refusal carries no data (no raw sensitive values leak)
+    assert fake.calls == []  # refused BEFORE the executor ran
+
+
 def test_injected_executor_textualizes_null_as_empty_at_the_tool_edge(monkeypatch):
     # The deferred-decision contract: at the MCP JSON edge the in-process path renders SQL NULL as
     # "" (matching the CSV wire), NOT "None". Pins the one coercion a future native-typed switch flips.

@@ -108,3 +108,39 @@ def test_audit_write_is_best_effort_and_never_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tools, "_append_jsonl", _boom)
     tools._record_guardrail_audit({"audit_id": "x", "ts": "t", "status": "ok"})  # must not raise
+
+
+def test_audit_sink_failure_warns_exactly_once(tmp_path, monkeypatch, capsys):
+    # Best-effort must not be SILENT: a PERSISTENTLY unwritable sink emits a one-time warning so a dead
+    # audit trail is observable to an operator — but only ONCE (not a line per query), and never with
+    # raw sql/driver text, and never breaking the tool.
+    monkeypatch.delenv("AGAMI_DB_URL", raising=False)
+    monkeypatch.setattr(tools, "_append_jsonl", lambda *_a, **_k: False)  # log dir unwritable
+
+    for i in range(3):
+        tools._record_guardrail_audit({"audit_id": str(i), "ts": "t", "status": "ok"})  # never raises
+
+    err = capsys.readouterr().err
+    assert err.count("guardrail audit not recorded") == 1  # warned ONCE across 3 failures, not per-call
+    assert "SELECT" not in err and "status" not in err  # value-free: no sql / record contents leaked
+
+
+def test_audit_db_sink_error_warns_once(tmp_path, monkeypatch, capsys):
+    # The DB-sink branch (exception, not a False return) is also surfaced once — type only, no message.
+    url = "sqlite://" + str(tmp_path / "audit.db")
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+
+    def _boom_store(*_a, **_k):
+        raise RuntimeError("permission denied for table guardrail_audit on host db-42.internal")
+
+    monkeypatch.setattr(tools, "_append_jsonl", lambda *_a, **_k: True)
+    import store as _store
+
+    monkeypatch.setattr(_store.Store, "from_env", staticmethod(_boom_store))
+
+    tools._record_guardrail_audit({"audit_id": "a", "ts": "t", "status": "ok"})
+    tools._record_guardrail_audit({"audit_id": "b", "ts": "t", "status": "ok"})
+
+    err = capsys.readouterr().err
+    assert err.count("guardrail audit not recorded (sink error)") == 1
+    assert "db-42.internal" not in err  # value-free: the driver message never rides the warning

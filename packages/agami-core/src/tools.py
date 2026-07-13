@@ -1000,6 +1000,8 @@ def _run_in_process(
         data_rows = data_rows[:max_rows]
         truncated = True
     return columns, data_rows, truncated
+
+
 def _refusal_from_stderr(stderr: str | None, returncode: int) -> Refusal:
     """Build a Refusal from the executor's stderr. A guardrail refusal is a `{"refusal": {...}}`
     line (safety / model gates); anything else is an execution/config failure classified by exit
@@ -1056,8 +1058,10 @@ def _finish(
                 "source": "mcp_server",
             }
         )
-    except Exception:
-        pass  # best-effort — a logging failure must never break an otherwise-good result
+    except Exception as exc:
+        # best-effort — a logging failure must never break an otherwise-good result — but surface a
+        # record-BUILD failure once (a Refusal/Envelope shape drift) so it isn't invisible forever.
+        _warn_once("guardrail_audit_build", f"guardrail audit record not built: {type(exc).__name__}")
     return _envelope_json(env)
 
 
@@ -1070,9 +1074,11 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
 
     Two execution paths behind the same guard: the default forks the execute_sql subprocess
     (isolation, byte-identical local/single-user); an injected executor (AH-012) runs in-process with
-    native rows. Both funnel through `_finalize_execution`, so a **successful** query's result
-    envelope is identical either way (a guard refusal's envelope is not yet identical across paths —
-    see `_finalize_execution` and the tracked structured-refusal-parity follow-up).
+    native rows. Both funnel through the same envelope assembly, so BOTH a **successful** result and a
+    **refusal** are identical either way: a refusal is reconstructed as the same typed `Refusal`
+    (kind + reason + remediation) on both paths — the subprocess path parses the executor's
+    `{"refusal": ...}` stderr line, the in-process path catches the typed `GuardRefused` — and both
+    return `Envelope.refused(...)` through `_finish`.
     """
     audit_id = uuid4().hex
     sql = args.get("sql")
@@ -1187,6 +1193,24 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_AUDIT_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, msg: str) -> None:
+    """Emit a ONE-TIME (per-process, per-key) warning to stderr. The audit sinks are best-effort so an
+    audit-write failure never breaks a query — but "best-effort AND silent" means a PERSISTENTLY dead
+    sink (a DB role without INSERT, an unwritable log dir) loses the security record undetectably. This
+    surfaces the first such failure without spamming a line per query. Keep `msg` value-free (an
+    exception TYPE, never its text) so a driver message can't leak a DSN/schema/value through it."""
+    if key in _AUDIT_WARNED:
+        return
+    _AUDIT_WARNED.add(key)
+    try:
+        sys.stderr.write(f"[agami] {msg}\n")
+    except Exception:
+        pass
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> bool:
@@ -1306,7 +1330,8 @@ def _record_guardrail_audit(rec: dict[str, Any]) -> None:
 
         store = Store.from_env()
         if store is None:
-            _append_jsonl(GUARDRAIL_AUDIT_LOG, rec)
+            if not _append_jsonl(GUARDRAIL_AUDIT_LOG, rec):
+                _warn_once("guardrail_audit_jsonl", "guardrail audit not recorded: audit log unwritable")
             return
         try:
             from contracts import GuardrailAuditRecord
@@ -1315,8 +1340,10 @@ def _record_guardrail_audit(rec: dict[str, Any]) -> None:
             DbActivitySink(store).record_guardrail_audit(GuardrailAuditRecord(**rec))
         finally:
             store.close()
-    except Exception:
-        pass  # best-effort: never fail the tool because logging failed
+    except Exception as exc:
+        # best-effort: never fail the tool because logging failed — but surface a PERSISTENT DB-sink
+        # failure once (type only, no message text) so a dead audit trail is observable, not silent.
+        _warn_once("guardrail_audit_db", f"guardrail audit not recorded (sink error): {type(exc).__name__}")
 
 
 # ---------------------------------------------------------------------------

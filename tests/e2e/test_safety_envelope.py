@@ -132,6 +132,30 @@ def test_write_is_refused_with_one_envelope_over_http(presence_auth):
     _assert_refused(_http_execute_sql("DELETE FROM users"))
 
 
+def test_http_refusal_writes_a_guardrail_audit_row(presence_auth, tmp_path, monkeypatch):
+    # The audit fires at the shared chokepoint on BOTH surfaces (unlike tool_calls, which only the HTTP
+    # transport writes). Pin the actual claim on the HTTP transport: a refusal over HTTP writes ONE
+    # guardrail_audit row the Envelope's audit_id points at — not merely that the Envelope carries an
+    # audit_id. A regression that bypassed _finish on this surface would drop the row and be caught.
+    from store import Store
+
+    url = "sqlite://" + str(tmp_path / "audit.db")
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    s = Store.connect(url)
+    s.run_migrations()
+    s.close()
+
+    env = _http_execute_sql("DELETE FROM users")
+    assert env["status"] == "refused" and env["audit_id"]
+
+    s = Store.connect(url)
+    rows = s.query("SELECT * FROM guardrail_audit")
+    s.close()
+    match = [r for r in rows if r["audit_id"] == env["audit_id"]]
+    assert len(match) == 1  # exactly the row the Envelope points at, written over HTTP
+    assert match[0]["status"] == "refused" and match[0]["refusal_kind"] == "permission"
+
+
 def test_clean_query_returns_ok_envelope_over_http(presence_auth, monkeypatch):
     # A governed query needs no live DB here — fake the guarded executor so the test stays hermetic.
     # The HTTP transport runs execution IN-PROCESS by default (ACE-028), so fake execute_guarded (not

@@ -114,13 +114,16 @@ def test_alias_masquerade_refused():
     # validate the underlying column, not the alias it is renamed to.
     res = rt.check_column_scope("SELECT bogus AS id FROM orders", _scope_org())
     assert res is not None
-    assert "bogus" in res.detail
+    assert res.rule == "column_scope"  # gate identity (restores the precision the old .columns field pinned)
+    assert "bogus" in res.detail  # the underlying column is named…
+    assert "id" not in res.detail.split()  # …and the declared alias `id` is NOT flagged
 
 
 def test_undeclared_column_in_union_arm_refused():
     res = rt.check_column_scope(
         "SELECT id FROM orders UNION SELECT bogus FROM customers", _scope_org())
     assert res is not None
+    assert res.rule == "column_scope"  # gate identity, not merely "some refusal"
     assert "bogus" in res.detail
 
 
@@ -171,6 +174,7 @@ def test_nested_output_alias_does_not_mask_outer_column():
         "SELECT bogus FROM orders WHERE id IN (SELECT id AS bogus FROM customers)",
         _scope_org())
     assert res is not None
+    assert res.rule == "column_scope"  # gate identity, not merely "some refusal"
     assert "bogus" in res.detail
 
 
