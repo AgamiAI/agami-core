@@ -48,6 +48,30 @@ def test_timeout_env_override_and_invalid_fall_back(monkeypatch, val, expected):
     assert execute_sql._resolve_timeout_s() == expected
 
 
+def test_deadline_uses_the_passed_timeout_not_a_reread_env(monkeypatch):
+    # Copilot review: the watchdog Timer must key off the timeout the caller already resolved (and
+    # feeds to _deadline_hit), NOT a fresh env read — else a mid-flight change to AGAMI_SQL_TIMEOUT_S
+    # makes the watchdog duration and the timeout classification diverge. Pin that _deadline schedules
+    # the Timer with the PASSED value, not the (different) env value a re-read would pick up.
+    monkeypatch.setenv("AGAMI_SQL_TIMEOUT_S", "99")  # what a re-read inside _deadline would have used
+    captured = {}
+
+    class _FakeTimer:
+        def __init__(self, interval, fn):
+            captured["interval"] = interval
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(execute_sql.threading, "Timer", _FakeTimer)
+    with execute_sql._deadline(lambda: None, timeout_s=7):
+        pass
+    assert captured["interval"] == 7  # the caller's resolved value, not 99 from the env
+
+
 # ── the genuine cancel (SQLite, in-process) ──────────────────────────────────
 
 

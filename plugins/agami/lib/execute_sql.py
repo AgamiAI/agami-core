@@ -630,7 +630,7 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
             job.cancel()  # genuine server-side job cancel (the client-initiated backstop to job_timeout_ms)
 
     try:
-        with _deadline(_bq_cancel) as fired:
+        with _deadline(_bq_cancel, timeout_s) as fired:
             try:
                 job = client.query(sql, job_config=bigquery.QueryJobConfig(**job_config_kwargs))
                 job_box["job"] = job
@@ -943,12 +943,16 @@ def _resolve_timeout_s() -> int:
 
 
 @contextmanager
-def _deadline(cancel: Callable[[], None]):
-    """Bound the enclosed statement by a wall-clock watchdog: after `_resolve_timeout_s()` seconds,
-    `cancel()` interrupts the in-flight query (per driver — `conn.cancel()` / `conn.interrupt()` /
-    `cur.cancel()`), which makes the blocked execute/fetch raise. The universal availability backstop
-    so no engine hangs past the deadline, even one with no native statement timeout. Yields an Event
-    that is set iff the deadline fired (so the caller can tell a timeout from a real error)."""
+def _deadline(cancel: Callable[[], None], timeout_s: int):
+    """Bound the enclosed statement by a wall-clock watchdog: after `timeout_s` seconds, `cancel()`
+    interrupts the in-flight query (per driver — `conn.cancel()` / `conn.interrupt()` / `cur.cancel()`),
+    which makes the blocked execute/fetch raise. The universal availability backstop so no engine hangs
+    past the deadline, even one with no native statement timeout. Yields an Event that is set iff the
+    deadline fired (so the caller can tell a timeout from a real error).
+
+    `timeout_s` is passed in (not re-read from the env here) so the watchdog duration and the caller's
+    `_deadline_hit` elapsed-vs-timeout classification key off the SAME resolved value — a mid-flight
+    change to `AGAMI_SQL_TIMEOUT_S` can't make the two diverge (Copilot review)."""
     fired = threading.Event()
 
     def _fire() -> None:
@@ -958,7 +962,7 @@ def _deadline(cancel: Callable[[], None]):
         except Exception:
             pass  # best-effort cancel; the deadline having fired is what the caller keys on
 
-    timer = threading.Timer(_resolve_timeout_s(), _fire)
+    timer = threading.Timer(timeout_s, _fire)
     timer.daemon = True
     timer.start()
     try:
@@ -1026,7 +1030,7 @@ def _run_bounded(execute: Callable[[], Any], cancel: Callable[[], None]) -> Exec
     (raised before the deadline) propagates unchanged to the engine's handler."""
     started = time.monotonic()
     timeout_s = _resolve_timeout_s()
-    with _deadline(cancel) as fired:
+    with _deadline(cancel, timeout_s) as fired:
         try:
             cur = execute()
             return _collect_cursor(cur)
