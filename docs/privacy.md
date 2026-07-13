@@ -76,9 +76,9 @@ After your first successful query, `agami-query` asks once, in chat, whether you
 
 ---
 
-## The self-hosted team server (opt-in)
+## The self-hosted team server (opt-in) — Early access (in testing)
 
-If you [deploy the team server](../deploy/README.md) so your org can share one model, that server *is* a network service by design — it serves your model to your team over HTTPS. Your data still stays in your environment: it holds only the semantic model (never a live database connection), runs SQL locally against your own warehouse, and is **zero-egress by default**. The one thing that reaches out is **single sign-on**, if you turn it on: to verify a login the server calls Google/Microsoft (the identity provider). Leave SSO off — the default — and it makes no outbound call of its own.
+If you [deploy the team server](../deploy/README.md) so your org can share one model, that server *is* a network service by design — it serves your model to your team over HTTPS. (This path is **early access** — usable today, newer than the local single-player experience; [feedback via a GitHub issue](https://github.com/AgamiAI/agami-core/issues) is welcome.) Your data still stays in your environment: it holds only the semantic model (never a live database connection), runs SQL locally against your own warehouse, and is **zero-egress by default**. The one thing that reaches out is **single sign-on**, if you turn it on: to verify a login the server calls Google/Microsoft (the identity provider). Leave SSO off — the default — and it makes no outbound call of its own.
 
 ---
 

@@ -13,7 +13,6 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-fair--code-blue.svg" alt="License: fair-code"></a>
   <a href="https://github.com/AgamiAI/agami-core/releases"><img src="https://img.shields.io/github/v/tag/AgamiAI/agami-core?label=version&sort=semver&color=blue" alt="Version"></a>
   <a href="#get-started-in-2-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
-  <a href="deploy/README.md"><img src="https://img.shields.io/badge/self--host-Docker-2496ED?logo=docker&logoColor=white" alt="Self-host with Docker"></a>
 </p>
 
 <!-- HERO VISUAL: drop docs/assets/demo.gif (a ~10s sample-flow capture) and uncomment the line below.
@@ -31,13 +30,12 @@ In Claude Code — CLI, VS Code, or Cursor:
 who are the top 5 customers by total spend?
 ```
 
-That last line returns a **governed answer with a receipt** (the exact SQL, the joins used, the model version) — and it crosses a fan trap a naive agent would silently double-count. Three ways to go from here:
+That last line returns a **governed answer with a receipt** (the exact SQL, the joins used, the model version) — and it crosses a fan trap a naive agent would silently double-count. Two ways to go from here:
 
 - 🧪 **No database?** The commands above answer from a built-in sample — nothing leaves your machine.
 - 🗄️ **Have a database?** Run `/agami-connect` to introspect it into a governed semantic model, then just ask questions.
-- 👥 **Want your team on it?** [**Deploy a shared server »**](deploy/README.md) — teammates and business users point their own Claude (claude.ai or the desktop app) at **one URL** and query your governed model. They install nothing.
 
-Each path is walked through in full below ([Quickstart](#quickstart-under-5-minutes) · [Install](#install) · [Deploy a shared server](#deploy-a-shared-server-for-your-team)).
+Each path is walked through in full below ([Quickstart](#quickstart-under-5-minutes) · [Install](#install)).
 
 Point an AI agent at a database and it answers by **guessing** — at the join, at what *"revenue"* means, at which rows it's allowed to read. **agami-core** is the governed layer between the agent and your data: it turns your schema into a semantic model where every join is FK-derived or human-approved, every metric is **signed off** by name and role, and every answer ships a **receipt** — the exact SQL, the model version it pinned, and who vouched for each definition. The rules live in the model, **not the prompt**. And it all runs on your machine — credentials, schema, and results never leave it.
 
@@ -49,7 +47,7 @@ Point an AI agent at a database and it answers by **guessing** — at the join, 
 - 🧩 **A portable semantic model** — plain, git-native YAML you own (subject areas, tables, entities, metrics, relationships). No lock-in.
 - 🗄️ **Works with your database** — Postgres · Supabase · Redshift · MySQL · Snowflake · BigQuery · SQL Server · Oracle · Databricks · Trino · DuckDB · SQLite.
 - 🛠️ **Zero infra to start** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
-- 👥 **Shareable with your team** — when you're ready, [deploy one governed server](deploy/README.md) that your whole team and business users query from their own Claude over a URL — self-hosted, still zero-egress.
+- 👥 **Shareable with your team** *(early access — in testing)* — self-host [one governed server](#self-hosted-team-server--early-access-in-testing) your whole team and business users query from their own Claude over a URL, still zero-egress. The team layer is newer than the local path; we're validating it with early users.
 
 ## Quickstart (under 5 minutes)
 
@@ -172,7 +170,7 @@ typing the slash command.
 | `/agami-save-correction` | Records a correction and routes it to the right home (SQL example, column metadata, display preference, business concept, or a new metric), showing its classification before writing. Attribution surfaces on future answers it influences. |
 | `/agami-reconcile` | Point it at an existing dashboard — a **screenshot** (Metabase / Power BI / Tableau / Looker) or a CSV of known numbers; it generates each question, runs it through agami, and shows a side-by-side diff with tolerances. Validate the model against numbers you already trust. |
 | `/agami-serve` | Use agami from the **Claude Desktop** app: wires up the optional local MCP server (same tools as the hosted connector, backed by your local model + execution — stdio, read-only, no network). See [docs/mcp-server.md](docs/mcp-server.md). |
-| `/agami-deploy` | **Deploy a shared team server.** Writes a ready-to-run Docker bundle (the published image + HTTPS + OAuth + an admin console) so a team can stand up one governed server their Claude connects to. Business users query it over a URL — no local setup. Detailed steps: [deploy/README.md](deploy/README.md). |
+| `/agami-deploy` *(early access — in testing)* | **Deploy a shared team server.** Writes a ready-to-run Docker bundle (the published image + HTTPS + OAuth + an admin console) so a team can stand up one governed server their Claude connects to. Business users query it over a URL — no local setup. Newer than the local path — we're validating it with early users ([details + how to give feedback](deploy/README.md)). |
 
 ## Privacy
 
@@ -191,7 +189,12 @@ cloud (a multi-tenant model registry over a remote MCP endpoint, shared governed
 always-on evals). The boundary, stated plainly:
 [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
-## Deploy a shared server for your team
+## Self-hosted team server — Early access (in testing)
+
+> 🧪 **Early access.** This team layer is **usable today**, but it's newer than the local single-player
+> path and we're still ironing it out with early users — expect the occasional rough edge. Please send
+> feedback or report anything broken via a [**GitHub issue**](https://github.com/AgamiAI/agami-core/issues).
+> The local experience above is the stable, generally-available path.
 
 The local setup is single-player. To put your **whole team — and non-technical business users — on
 one governed model**, deploy agami's **HTTP MCP server** to your own host. Everyone then connects
@@ -227,7 +230,7 @@ by environment variables, and **LLM-free + zero-egress by default**. Self-hostin
 - [The trust layer](docs/trust-layer.md) — confidence, sign-off, receipts, snapshots
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop
-- [Deploy a shared team server](deploy/README.md) — the Docker bundle, step-by-step (VM, DNS/TLS, variants)
+- [Deploy a shared team server](deploy/README.md) *(early access — in testing)* — the Docker bundle, step-by-step (VM, DNS/TLS, variants)
 - [Self-hosting reference](docs/self-hosting.md) — manual (non-Docker) install + the environment-variable reference
 - [Troubleshooting & uninstall](docs/troubleshooting.md)
 - [Fair-code vs hosted](docs/open-vs-hosted.md) · [Privacy](docs/privacy.md)
