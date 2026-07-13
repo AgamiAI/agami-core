@@ -600,12 +600,21 @@ def check_table_scope(
     """
     if not _HAVE_SQLGLOT:
         return None
-    allow = {
-        name.lower()
-        for name in (ctx.model_table_index if ctx is not None else _model_table_index(org))
-    }
+    index = ctx.model_table_index if ctx is not None else _model_table_index(org)
+    allow = {name.lower() for name in index}
     if not allow:
         return None
+    # name -> the set of declared (non-empty) SCHEMAS for that name. Used to catch a SCHEMA-qualified
+    # reference to a same-named table in an UNDECLARED schema — `secret_schema.orders` when the model
+    # declares only `public.orders` — which bare-name matching alone would wrongly admit, letting a
+    # query read a table the model never declared if the datasource role can see other schemas.
+    # `_model_table_index` values are `(Table, area_name)`; `Table.schema_name` is the declared schema
+    # (the field is aliased from `schema` — plain `.schema` collides with Pydantic's BaseModel.schema).
+    declared_schemas: dict[str, set[str]] = {}
+    for name, val in index.items():
+        sch = (val[0].schema_name or "").lower()
+        if sch:
+            declared_schemas.setdefault(name.lower(), set()).add(sch)
     if ctx is not None:
         tree = ctx.tree
     else:
@@ -626,8 +635,20 @@ def check_table_scope(
         name = tbl.name
         if not name or name.lower() in cte_names:
             continue  # a CTE reference, not a physical table
-        if name.lower() not in allow:
+        name_l = name.lower()
+        if name_l not in allow:
             offending.add(name)
+            continue
+        # The bare name is declared. If the reference QUALIFIES a schema, and the declared table(s) of
+        # that name carry a schema, the reference's schema must be one of them — else it targets a
+        # same-named table in an undeclared schema and is refused (confinement). An UNqualified
+        # reference matches by name as before: the datasource search_path resolves it, and we don't
+        # second-guess which schema that is.
+        q_schema = (tbl.db or "").lower()
+        if q_schema:
+            schemas = declared_schemas.get(name_l)
+            if schemas and q_schema not in schemas:
+                offending.add(f"{tbl.db}.{name}")
     if not offending:
         return None
 
@@ -830,6 +851,85 @@ def check_column_scope(
         "Add the column to the model (agami-connect / '/agami-model'), "
         "or remove it from the query.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Scopability gate (fail-closed)
+#
+# The object-scope gates above only reject the `exp.Table` sources they FIND. A
+# query that passes the read-only guard but yields no scopable tree, or a
+# FROM/JOIN source that is not a plain named `exp.Table` — a table-function or
+# `ROWS FROM` (an `exp.Table` with an EMPTY name, the function in `.this`), or a
+# `VALUES` / `UNNEST` / `LATERAL` node — leaves the scope walk with nothing to
+# reject: a silent fail-OPEN the contract forbids. This gate closes it: a query
+# that can't be fully scoped is refused (`unscopable_sql`) rather than run blind.
+# Reuses the single parse in `ctx` (no second parser) and enforces only when the
+# model declares a table surface, consistent with the object-scope gates.
+# ---------------------------------------------------------------------------
+
+
+def _unscopable(detail: str) -> Verdict:
+    return safety_verdict(
+        "unscopable_sql",
+        "the query can't be scoped to the declared object surface: "
+        + detail
+        + " — only queries whose FROM/JOIN sources resolve to declared tables may run.",
+        "Query only declared tables (no table-functions, VALUES, UNNEST, or LATERAL "
+        "sources); add a source to the model if it should be queryable.",
+    )
+
+
+def check_scopable(
+    sql: str, org: Organization, ctx: "GuardContext | None" = None
+) -> Verdict | None:
+    """Refuse a query that passes read-only but cannot be fully parsed/scoped.
+
+    Returns ``None`` when every FROM/JOIN source is something the scope checks can
+    resolve — a named `exp.Table` (real table or CTE reference) or a derived
+    `exp.Subquery` (whose own sources are covered by the same whole-tree walk) —
+    else a safety ``Verdict`` (`rule=unscopable_sql`). Fail-closed when: sqlglot is
+    unavailable, the SQL doesn't parse (`tree is None`), the tree has no SELECT, a
+    source is a table-function / `ROWS FROM` (an `exp.Table` with an empty name),
+    or a source is a `VALUES` / `UNNEST` / `LATERAL` / any other non-`Table`,
+    non-`Subquery` node — anywhere in the tree, so every set-operation arm is
+    covered. Reuses ``ctx.tree`` (no second parser). Inert (allow) when the model
+    declares no tables — a deployment with no declared surface isn't scoping,
+    consistent with `check_table_scope`.
+    """
+    # No declared surface -> not scoping (matches the object-scope gates' empty-model no-op). Only
+    # the emptiness matters here, so don't build a membership set.
+    if not (ctx.model_table_index if ctx is not None else _model_table_index(org)):
+        return None
+    if not _HAVE_SQLGLOT:
+        return _unscopable("the SQL parser is unavailable")
+    tree = ctx.tree if ctx is not None else _parse_sql(sql)
+    if tree is None:
+        return _unscopable("the query did not parse")
+    if tree.find(exp.Select) is None:
+        return _unscopable("the query has no SELECT to scope")
+    # Table-functions and `ROWS FROM` parse to an `exp.Table` with an EMPTY name (the
+    # function lives in `.this`); the object-scope gates skip empty-name tables, so a
+    # whole-tree sweep catches them here — including inside a set-operation arm.
+    for tbl in tree.find_all(exp.Table):
+        if not (tbl.name or ""):
+            return _unscopable("a FROM/JOIN source is a table-function, not a named table")
+    # LATERAL is a table-generating source that can't be scoped; sqlglot attaches it under a
+    # From/Join (Postgres `LATERAL (...)`) OR as a Select `laterals` property (Hive `LATERAL
+    # VIEW`), so sweep the whole tree, not only From/Join `.this`.
+    if tree.find(exp.Lateral) is not None:
+        return _unscopable("a FROM/JOIN source is a LATERAL, not a table")
+    # VALUES / UNNEST and any other non-`Table`, non-derived-subquery FROM/JOIN source. A comma-join
+    # `FROM t1, <VALUES/UNNEST/...>` normalizes to a `Join` node whose `.this` is that source (so it is
+    # covered by walking From AND Join). Some sqlglot versions instead hang the additional comma-join
+    # sources off `From.expressions`, so check those too — belt-and-suspenders, so an unscopable
+    # comma-join source can't slip through on either shape (Copilot review).
+    for node in tree.find_all(exp.From, exp.Join):
+        for src in [node.this, *(node.args.get("expressions") or [])]:
+            if src is not None and not isinstance(src, (exp.Table, exp.Subquery)):
+                return _unscopable(
+                    f"a FROM/JOIN source is a {type(src).__name__.upper()}, not a table"
+                )
+    return None
 
 
 def _cardinality_index(org: Organization) -> list[Relationship]:

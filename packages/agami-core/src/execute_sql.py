@@ -920,6 +920,14 @@ def _refusal_from_verdict(kind: str, verdict: Verdict) -> Refusal:
     return Refusal(kind=kind, reason=verdict.detail, remediation=verdict.remediation)
 
 
+def _unscopable_posture() -> str:
+    """The unscopable-SQL rollout posture: ``enforce`` (default — fail-closed) or ``warn`` (a
+    staged-rollout escape hatch that logs and allows). ``warn`` is never the shipped default; safety
+    fails closed. This is an operational rollout knob, NOT the deployment tier — safety has no tier
+    variance and enforces in every tier."""
+    return os.environ.get("AGAMI_SQL_UNSCOPABLE_POSTURE", "enforce").strip().lower()
+
+
 def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusal | None]:
     """Semantic-model safety pass before execution: fan-trap / chasm-trap pre-flight
     + default_filters auto-application, over a model resolved from the DB (hosted) or disk (local).
@@ -962,6 +970,21 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
     # rebuilding its index (audit P2 / ACE-045). Behaviour-preserving: a guard given `ctx`
     # returns the same verdict as one that builds its own.
     ctx = RT.build_guard_context(sql, org)
+
+    # Scopability gate — refuse a query that can't be fully scoped (unparseable, or a non-`Table`
+    # FROM/JOIN source the scope walk can't reject) rather than run it blind. Runs
+    # BEFORE the object-scope gates so an unscopable query fails closed instead of reaching their
+    # degrade-to-allow branches. Posture `warn` is a staged-rollout escape hatch (logs + allows);
+    # the default `enforce` refuses. Safety fails closed regardless of tier.
+    scop = RT.check_scopable(sql, org, ctx=ctx)
+    if scop is not None:
+        if _unscopable_posture() == "warn":
+            sys.stderr.write(
+                "[agami] unscopable SQL allowed (AGAMI_SQL_UNSCOPABLE_POSTURE=warn): "
+                f"{scop.detail}\n"
+            )
+        else:
+            return sql, _refusal_from_verdict("unscopable_sql", scop)
 
     # Table-scope guard — a query may only reference tables the semantic model
     # declares; any other table in the connected database is refused. Runs FIRST
