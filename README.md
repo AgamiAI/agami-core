@@ -47,7 +47,7 @@ Point an AI agent at a database and it answers by **guessing** — at the join, 
 - 🧩 **A portable semantic model** — plain, git-native YAML you own (subject areas, tables, entities, metrics, relationships). No lock-in.
 - 🗄️ **Works with your database** — Postgres · Supabase · Redshift · MySQL · Snowflake · BigQuery · SQL Server · Oracle · Databricks · Trino · DuckDB · SQLite.
 - 🛠️ **Zero infra to start** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
-- 👥 **Shareable with your team** *(early access — in testing)* — self-host [one governed server](#self-hosted-team-server--early-access-in-testing) your whole team and business users query from their own Claude over a URL, still zero-egress. The team layer is newer than the local path; we're validating it with early users.
+- 👥 **Shareable with your team** *(early access — in testing)* — self-host [one governed server](#self-hosted-team-server--early-access-in-testing) that your whole team and business users query from their own Claude over a URL, still zero-egress. The team layer is newer than the local path; we're validating it with early users.
 
 ## Quickstart (under 5 minutes)
 
