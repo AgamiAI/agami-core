@@ -191,13 +191,29 @@ def test_same_named_nonsensitive_column_on_other_table_not_flagged():
     assert res.projections == []
 
 
-def test_quoted_case_variant_matches_current_behaviour():
-    """DESIGN QUESTION (see report): sensitive-name matching is CASE-SENSITIVE today (unlike the
-    table/column-scope guards, which case-fold). A quoted/upper-case `"SSN"` therefore does NOT
-    match the lower-case declared `ssn`, so it is allowed. Hardening this to case-insensitive
-    matching would REFUSE more, i.e. change runtime behaviour, which is out of scope for this
-    slice — so this test pins the current behaviour rather than the (arguably) desired one."""
-    res, maskable, refuse = _classify('SELECT "SSN" FROM customers')
+@pytest.mark.parametrize("sql", [
+    'SELECT "SSN" FROM customers',   # quoted upper-case
+    "SELECT SSN FROM customers",     # unquoted upper-case
+    "SELECT Ssn FROM customers",     # mixed case
+    "SELECT c.SSN FROM customers c", # qualified upper-case
+])
+def test_case_insensitive_sensitive_name_is_now_masked(sql):
+    """ACE-041 slice 3 (behaviour CHANGE — was `allow` before this slice): the sensitive-name match
+    is now CASE-INSENSITIVE, consistent with the table/column-scope gates (which fold). An upper /
+    mixed / quoted spelling of a lower-case declared `ssn` therefore matches and is a maskable
+    projection at output index 0 — this masks/refuses MORE, closing the `SELECT "SSN"` PII bypass.
+    The declared ref (`customers.ssn`) names the model column regardless of the query's casing."""
+    res, maskable, refuse = _classify(sql)
+    assert res.action == "refuse", sql
+    assert refuse == [], sql
+    assert maskable == [(0, "customers.ssn")], sql
+
+
+def test_case_insensitive_decoy_on_nonsensitive_table_still_not_flagged():
+    """The case-fold must not over-reach: `x.ssn` is a same-named column on a NON-sensitive table, so
+    an upper-case `SELECT SSN FROM x` is still allowed (it binds to `x`, which does not declare it
+    sensitive)."""
+    res, maskable, refuse = _classify("SELECT SSN FROM x")
     assert res.action == "allow"
     assert res.projections == []
 

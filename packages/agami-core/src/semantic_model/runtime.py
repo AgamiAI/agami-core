@@ -80,7 +80,7 @@ class GuardContext:
     tree: "exp.Expression | None"
     column_index: "dict[str, dict[str, Column]]"
     cardinality_index: "list[Relationship]"
-    sensitive_by_table: "tuple[dict[str, set[str]], set[str]]"
+    sensitive_by_table: "tuple[dict[str, dict[str, str]], set[str]]"
     model_table_index: "dict[str, tuple]"
 
 
@@ -473,16 +473,23 @@ class SensitiveCheckResult:
         }
 
 
-def _sensitive_by_table(org: Organization) -> tuple[dict[str, set[str]], set[str]]:
-    """(table name -> {sensitive column names}, union of all sensitive column names)."""
-    by_table: dict[str, set[str]] = {}
+def _sensitive_by_table(org: Organization) -> tuple[dict[str, dict[str, str]], set[str]]:
+    """(lower(table) -> {lower(col): "DeclaredTable.DeclaredCol"}, {lower(col) for every sensitive col}).
+
+    Keys are case-FOLDED so the sensitive-name match is case-insensitive — consistent with
+    `check_table_scope` / `check_column_scope`, which already fold (unquoted identifiers fold case in
+    Postgres and friends). Before ACE-041 slice 3 this index was case-sensitive, so `SELECT "SSN"` /
+    `SELECT SSN` slipped past a lower-case declared `ssn`; folding closes that PII bypass (it
+    masks/refuses MORE). The value preserves the DECLARED spelling so an offending ref names the
+    model's column regardless of how the query happened to spell it."""
+    by_table: dict[str, dict[str, str]] = {}
     allnames: set[str] = set()
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             for c in t.columns:
                 if getattr(c, "sensitive", False):
-                    by_table.setdefault(t.name, set()).add(c.name)
-                    allnames.add(c.name)
+                    by_table.setdefault(t.name.lower(), {})[c.name.lower()] = f"{t.name}.{c.name}"
+                    allnames.add(c.name.lower())
     return by_table, allnames
 
 
@@ -537,22 +544,25 @@ def _output_selects(node: "exp.Expression") -> list["exp.Select"]:
 def _sensitive_col_ref(
     col: "exp.Column",
     scope: dict[str, str],
-    by_table: dict[str, set[str]],
+    by_table: dict[str, dict[str, str]],
     allnames: set[str],
 ) -> Optional[str]:
     """The offending "table.column" (or bare "column") IF `col` projects a raw sensitive value,
-    else None. Byte-identical to the historical inline detection: a column whose name is sensitive
-    and is not COUNT-protected offends; it resolves to "table.column" when the table is pinned and
-    that table declares the column sensitive, to the bare name when the table is ambiguous
-    (conservative — sensitive somewhere in scope), and to None when it binds to a table that does
-    not declare it sensitive (a same-named column on a non-sensitive table)."""
-    if col.name not in allnames or _count_protects(col):
+    else None. Matching is CASE-INSENSITIVE (ACE-041 slice 3), consistent with the table/column-scope
+    gates: a column whose folded name is sensitive and is not COUNT-protected offends; it resolves to
+    the DECLARED "table.column" when the table is pinned and that table declares the column sensitive,
+    to the folded bare name when the table is ambiguous (conservative — sensitive somewhere in scope),
+    and to None when it binds to a table that does not declare it sensitive (a same-named column on a
+    non-sensitive table)."""
+    cname = col.name.lower()
+    if cname not in allnames or _count_protects(col):
         return None
     tbl = _resolve_col_table(col, scope)
     if tbl is None:
-        return col.name  # ambiguous but sensitive somewhere in scope → conservative bare name
-    if tbl in by_table and col.name in by_table[tbl]:
-        return f"{tbl}.{col.name}"
+        return cname  # ambiguous but sensitive somewhere in scope → conservative folded bare name
+    tcols = by_table.get(tbl.lower())
+    if tcols is not None and cname in tcols:
+        return tcols[cname]  # the DECLARED "table.column" ref (query casing does not leak into it)
     return None  # same-named column on a non-sensitive table → not offending
 
 
@@ -561,7 +571,7 @@ def _classify_projection(
     index: int,
     scope: dict[str, str],
     direct: set[str],
-    by_table: dict[str, set[str]],
+    by_table: dict[str, dict[str, str]],
     allnames: set[str],
     offending: set[str],
     projections: list["SensitiveProjection"],
@@ -586,8 +596,9 @@ def _classify_projection(
         qualifier = proj.table if isinstance(proj, exp.Column) else None
         tables = {scope.get(qualifier, qualifier)} if qualifier else direct
         for tbl in tables:
-            for c in sorted(by_table.get(tbl, set())):
-                ref = f"{tbl}.{c}"
+            tcols = by_table.get((tbl or "").lower(), {})
+            for ckey in sorted(tcols):  # folded key order → the historical sorted-by-name order
+                ref = tcols[ckey]  # DECLARED "table.column"
                 offending.add(ref)
                 projections.append(SensitiveProjection(ref, maskable=False, output_index=None))
         return
