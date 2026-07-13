@@ -183,9 +183,10 @@ connect with your permission). Details: [docs/privacy.md](docs/privacy.md).
 
 agami is **fair-code** (source-available). Everything here — introspection, the portable
 semantic model, NL→SQL + local execution, the trust layer, corrections, and self-hosting for
-your own team — is **free**. The hosted cloud adds the org-scale layer on top: advanced
-governance and access controls (**RBAC**, audit, enterprise **SSO** with SAML/SCIM), a shared
-multi-tenant model registry, and continuous evals. What's free vs paid, in full:
+your own organization — is **free** (serving people outside your organization needs a commercial
+license). The hosted cloud adds the org-scale layer on top: advanced governance and access
+controls (**RBAC**, audit, enterprise **SSO** with SAML/SCIM), a shared multi-tenant model
+registry, and continuous evals. What's free vs paid, in full:
 [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
 ## Self-hosted team server — Early access (in testing)
