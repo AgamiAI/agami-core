@@ -25,9 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# The repo's migration home; resolved relative to this file so it works from an installed package
-# or a checkout.
-MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "core"
+# The migrations ship INSIDE the package (see pyproject's packages/package-data), so this resolves
+# next to this module — identically from an installed wheel and from a checkout. Resolving it out of
+# the tree (e.g. parents[3]) silently yields nothing once installed: glob on a missing dir returns [].
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations" / "core"
 
 # A fixed (non-secret) key for the Postgres session advisory lock that serializes concurrent
 # migration runs — see run_migrations. The digits spell "AGAMI" in hex; any stable bigint works.
@@ -147,6 +148,10 @@ class Store:
         collide on the `schema_migrations` primary key. SQLite is single-writer, so the lock is a no-op.
         A failing migration propagates (fail-closed: a half-migrated schema must not serve)."""
         migrations_dir = migrations_dir or MIGRATIONS_DIR
+        # Same failure mode the overlays guard against, but for CORE — and far worse: a missing core root
+        # globs to nothing, so the server would boot on an EMPTY schema with no error at all. Fail loudly.
+        if not migrations_dir.is_dir():
+            raise ValueError(f"core migration root is not a directory: {migrations_dir}")
         overlays = overlay_dirs if overlay_dirs is not None else list(_MIGRATION_OVERLAYS)
         # A registered overlay that doesn't exist (or isn't a directory) would silently apply nothing —
         # `glob` on a bad path yields an empty iterator — so a misconfigured overlay would be skipped
