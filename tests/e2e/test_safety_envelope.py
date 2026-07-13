@@ -1,17 +1,14 @@
 """End-to-end: execute_sql returns ONE response Envelope on BOTH surfaces (stdio + HTTP).
 
 A safety violation → status=refused + refusal{kind} + no data; a clean query → status=ok + data +
-audit_id. The full adversarial safety corpus + the read-only-DB-role test are out of scope here;
-this locks the cross-surface Envelope shape the shared contract promises — the same shape whether a
-client connects over stdio or HTTP.
+audit_id. The full adversarial safety corpus + the read-only-DB-role floor live in
+`test_safety_corpus.py` / `test_role_floor_pg.py`; this file locks the cross-surface Envelope shape
+the shared contract promises. The stdio + HTTP drivers (and `presence_auth`) are the shared harness —
+one copy — so this file and the corpus exercise the exact same two surfaces.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -24,93 +21,11 @@ PKG_SRC = Path(__file__).resolve().parents[2] / "packages" / "agami-core" / "src
 if str(PKG_SRC) not in sys.path:
     sys.path.insert(0, str(PKG_SRC))
 
+import harness  # noqa: E402
 import tools  # noqa: E402
 
-BASE = "https://demo.example.com"
-
-
-class _FakeOkProc:
-    """A successful executor run: RFC-4180 CSV on stdout (header + one row), clean stderr."""
-
-    returncode = 0
-    stdout = "n\n5\n"
-    stderr = ""
-
-
-# --- transport drivers: each returns the execute_sql tool's Envelope (parsed) ----------------
-
-
-def _stdio_execute_sql(sql: str) -> dict:
-    """Drive execute_sql over the real stdio server (a subprocess), return the tool's Envelope."""
-    msgs = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "execute_sql", "arguments": {"sql": sql}},
-        },
-    ]
-    stdin = "".join(json.dumps(m) + "\n" for m in msgs)
-    proc = subprocess.run(
-        [sys.executable, "-m", "mcp_harness"],
-        input=stdin,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env={**os.environ},
-    )
-    by_id = {m.get("id"): m for m in (json.loads(x) for x in proc.stdout.splitlines() if x.strip())}
-    return json.loads(by_id[2]["result"]["content"][0]["text"])
-
-
-def _http_execute_sql(sql: str) -> dict:
-    """Drive execute_sql over the real HTTP transport (in-process TestClient), return the Envelope."""
-    import mcp_http
-    from starlette.testclient import TestClient
-
-    headers = {
-        "Authorization": "Bearer present",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
-    with TestClient(mcp_http.build_app()) as c:
-        init = c.post(
-            "/mcp",
-            headers=headers,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "t", "version": "1"},
-                },
-            },
-        )
-        sid = init.headers.get("mcp-session-id")
-        h2 = {**headers, **({"mcp-session-id": sid} if sid else {})}
-        c.post("/mcp", headers=h2, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
-        r = c.post(
-            "/mcp",
-            headers=h2,
-            json={
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": "execute_sql", "arguments": {"sql": sql}},
-            },
-        )
-    rpc = json.loads(re.search(r"\{.*\}", r.text, re.DOTALL).group(0))
-    return json.loads(rpc["result"]["content"][0]["text"])
-
-
-@pytest.fixture
-def presence_auth(monkeypatch):
-    """HTTP bearer-presence mode: PUBLIC_BASE_URL set, no signing secret → 'Bearer present' works."""
-    monkeypatch.setenv("PUBLIC_BASE_URL", BASE)
-    monkeypatch.delenv("AGAMI_SIGNING_SECRET", raising=False)
+_stdio_execute_sql = harness.stdio_execute_sql
+_http_execute_sql = harness.http_execute_sql
 
 
 # --- the cross-surface contract ---------------------------------------------------------------
