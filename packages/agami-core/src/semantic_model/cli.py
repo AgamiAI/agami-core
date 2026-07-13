@@ -1155,8 +1155,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("approve-queue",
                         help="sign off the whole pending review queue in one call (no-browser path)")
     sp.add_argument("root")
-    sp.add_argument("--signer", default=None, help="sign-off email recorded on each item")
-    sp.add_argument("--role", default=None, help="sign-off role recorded on each item")
+    # required: curate._set_trust only stamps signed_off_* when a signer is present, so an
+    # approve with no signer records an incomplete trust block and the validator reverts the
+    # whole batch. A sign-off must record who — mirror that at the CLI surface.
+    sp.add_argument("--signer", required=True, help="sign-off email recorded on each item")
+    sp.add_argument("--role", required=True, help="sign-off role recorded on each item")
     sp.add_argument("--kind", action="append", choices=["metric", "entity", "relationship"],
                     help="restrict to one item kind (repeatable); default approves all")
     sp.add_argument("--dry-run", action="store_true", dest="dry_run",

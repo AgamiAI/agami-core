@@ -3,11 +3,16 @@ apply (exclude/include/approve/reject) write path with validation gating."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+# case/whitespace-insensitive star projection — mirrors runtime.check_no_select_star (AST-based),
+# so the test isn't fooled by `SELECT  *` / `select *` the way a plain substring check would be.
+_STAR_PROJECTION = re.compile(r"(?i)\bselect\s*\*")
 
 pytest.importorskip("pydantic")
 pytest.importorskip("sqlglot")
@@ -269,7 +274,7 @@ def test_validate_seeds_probe_is_star_free(tmp_path):
     def runner(sql: str) -> None:
         seen_probes.append(sql)
         # mimic runtime.check_no_select_star: a projected star anywhere is refused
-        if "SELECT *" in sql or "select *" in sql:
+        if _STAR_PROJECTION.search(sql):
             raise RuntimeError('{"kind": "select_star"}')
 
     seed = {"question": "how many orders?", "sql": "SELECT COUNT(id) AS n FROM orders"}
@@ -277,4 +282,4 @@ def test_validate_seeds_probe_is_star_free(tmp_path):
 
     assert not rejected, rejected
     assert len(passing) == 1 and passing[0]["source"] == "seed"
-    assert seen_probes and "SELECT *" not in seen_probes[0]  # wrapper is star-free
+    assert seen_probes and not _STAR_PROJECTION.search(seen_probes[0])  # wrapper is star-free

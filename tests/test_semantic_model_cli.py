@@ -728,10 +728,20 @@ def test_approve_queue_signs_off_all_pending(tmp_path):
     assert mm["signed_off_at"] and mm["signed_off_by"] == "you@example.com" and mm["signed_off_role"] == "owner"
 
 
+def test_approve_queue_requires_a_signer(tmp_path):
+    """`--signer`/`--role` are required: curate only stamps signed_off_* when a signer is
+    present, so a signer-less approve would record an incomplete trust block and the whole
+    batch would revert at validation. argparse must reject the call up front instead."""
+    _model_with_pending(tmp_path)
+    with pytest.raises(SystemExit):  # argparse errors out on the missing required flags
+        _run(["approve-queue", str(tmp_path)])
+
+
 def test_approve_queue_kind_filter_and_dry_run(tmp_path):
     """`--kind` narrows to one item type; `--dry-run` prints ops without mutating the model."""
     _model_with_pending(tmp_path)
-    rc, out = _run(["approve-queue", str(tmp_path), "--kind", "metric", "--dry-run"])
+    rc, out = _run(["approve-queue", str(tmp_path), "--signer", "you@example.com",
+                    "--role", "owner", "--kind", "metric", "--dry-run"])
     assert rc == 0
     payload = json.loads(out)
     assert payload["dry_run"] is True
