@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import agami_paths
-from guardrail import Refusal, Verdict
+from guardrail import Refusal, Verdict, policy
 
 if TYPE_CHECKING:
     # ``Executor`` is the 5th port; imported only for type-checkers. At runtime ``execute_sql`` never
@@ -113,6 +113,30 @@ class ExecResult:
     columns: list[str]
     rows: list[tuple]
     truncated: bool = False
+    # ACE-041: the DECLARED "table.column" refs of any OUTPUT columns redacted to REDACTION_TOKEN by
+    # the data-protection mask plan (empty for an unmasked result). The redacted VALUES already live
+    # in `rows`; this carries the `applied[{mask}]` note both surfaces record. Immutable default `()`.
+    masked_columns: tuple[str, ...] = ()
+
+
+# ACE-041: the string a masked sensitive value is replaced with in every row of a masked output
+# column. A single named constant so the token is defined once for the redactor and the tests.
+# ACE-041: token pending author confirm
+REDACTION_TOKEN = "***"
+
+
+@dataclass(frozen=True)
+class MaskPlan:
+    """The post-execution redaction the data-protection gate proved safe: which OUTPUT column
+    positions to redact (`indices`, 0-based, aligned with the result's columns and every set-op arm)
+    and the DECLARED "table.column" refs those positions carry (`columns`, for the `applied[{mask}]`
+    note). Built by ``_model_safety`` only when ``guardrail.policy`` returns ``mask`` (every offending
+    projection is a deterministically-maskable 1:1 image of one output column), carried to
+    ``execute_guarded`` which applies it to ``result.rows``. Frozen — one plan per guarded call."""
+
+    indices: tuple[int, ...]
+    columns: tuple[str, ...]
+    token: str = REDACTION_TOKEN
 
 
 class ExecutorError(Exception):
@@ -837,11 +861,21 @@ def _collect_cursor(cur: Any) -> ExecResult:
     return ExecResult(columns=columns, rows=[tuple(r) for r in fetched[:cap]], truncated=truncated)
 
 
+def _flag_masked(columns: tuple[str, ...]) -> None:
+    """Signal which OUTPUT columns were PII-redacted to the subprocess caller — a non-error
+    ``{"masked": [...]}`` marker on stderr, the SAME metadata channel as ``{"truncated": …}`` (not a
+    new protocol). The redacted VALUES already ride the CSV on stdout; this line carries only the
+    ``applied[{mask}]`` note the parent records on the Envelope (ACE-041 slice 3)."""
+    sys.stderr.write(json.dumps({"masked": list(columns)}) + "\n")
+
+
 def _emit_result_csv(result: ExecResult) -> None:
     """Serialize an ``ExecResult`` to stdout as CSV — the subprocess/CLI wire. Byte-for-byte what the
     old inline cursor→CSV writer produced: header row then data rows, and a truncation marker on
     stderr when capped. This is the *single, final* text serialization for the fork path; the
-    in-process path skips it and returns the native rows straight to the tool edge."""
+    in-process path skips it and returns the native rows straight to the tool edge. When the rows were
+    PII-masked, the redacted VALUES are already in ``result.rows`` (masked in ``execute_guarded``
+    before this call), so the CSV carries them; a ``{"masked": …}`` stderr marker names the columns."""
     if not result.columns:  # cursor had no description → wrote nothing (e.g. a non-row statement)
         return
     writer = csv.writer(sys.stdout)
@@ -850,6 +884,8 @@ def _emit_result_csv(result: ExecResult) -> None:
         writer.writerow(row)
     if result.truncated:
         _flag_truncated(_resolve_row_cap())
+    if result.masked_columns:
+        _flag_masked(result.masked_columns)
 
 
 def _write_cursor_csv(cur: Any) -> None:
@@ -920,15 +956,23 @@ def _refusal_from_verdict(kind: str, verdict: Verdict) -> Refusal:
     return Refusal(kind=kind, reason=verdict.detail, remediation=verdict.remediation)
 
 
-def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusal | None]:
-    """Semantic-model safety pass before execution: fan-trap / chasm-trap pre-flight
-    + default_filters auto-application, over a model resolved from the DB (hosted) or disk (local).
+def _model_safety(
+    sql: str, profile: str, area: str | None
+) -> tuple[str, Refusal | None, MaskPlan | None]:
+    """Semantic-model safety pass before execution: fan-trap / chasm-trap pre-flight + scope + PII +
+    default_filters auto-application, over a model resolved from the DB (hosted) or disk (local).
 
-    Returns (sql_to_run, refusal). ``refusal`` is None to continue, or a typed ``Refusal`` the caller
-    (``execute_guarded``) raises as a ``GuardRefused`` — so both the subprocess and in-process paths
-    build the same envelope from it. Inert (returns the SQL unchanged) when the model package isn't
-    importable, or — on the LOCAL path only — when there is no model yet. On the HOSTED path a model
-    that can't be resolved fails closed (refuses), never runs unguarded (ACE-051)."""
+    Returns ``(sql_to_run, refusal, mask_plan)``:
+      - ``refusal`` is None to continue, or a typed ``Refusal`` the caller (``execute_guarded``)
+        raises as a ``GuardRefused`` — so both the subprocess and in-process paths build the same
+        envelope from it.
+      - ``mask_plan`` (ACE-041 slice 3) is None unless the PII gate proved a *maskable* sensitive
+        projection: the query then PROCEEDS and ``execute_guarded`` redacts the named output columns
+        post-execution. An *untraceable* sensitive projection sets ``refusal`` instead (fail-closed).
+
+    Inert (SQL unchanged, no refusal, no plan) when the model package isn't importable, or — on the
+    LOCAL path only — when there is no model yet. On the HOSTED path a model that can't be resolved
+    fails closed (refuses), never runs unguarded (ACE-051)."""
     try:
         from semantic_model import runtime as RT
     except Exception:
@@ -942,8 +986,8 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
                 "model_unavailable",
                 "semantic-model package not importable; refusing to run unguarded on the "
                 "hosted server",
-            )
-        return sql, None  # local: model package not available -> no-op
+            ), None
+        return sql, None, None  # local: model package not available -> no-op
 
     org = _resolve_guard_model(profile)
     if org is None:
@@ -954,8 +998,8 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
                 "model_unavailable",
                 "no semantic model could be resolved (checked DB and disk); refusing to run "
                 "unguarded on the hosted server",
-            )
-        return sql, None  # local: no model yet -> no-op (unchanged)
+            ), None
+        return sql, None, None  # local: no model yet -> no-op (unchanged)
 
     # Build the shared guard context ONCE — parse the SQL + build each model index a single
     # time — and thread it through the battery below, instead of every guard re-parsing and
@@ -968,41 +1012,79 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
     # so the fan/chasm and sensitive checks below only evaluate in-scope tables.
     ts = RT.check_table_scope(sql, org, ctx=ctx)
     if ts is not None:
-        return sql, _refusal_from_verdict("table_out_of_scope", ts)
+        return sql, _refusal_from_verdict("table_out_of_scope", ts), None
 
     # SELECT * ban — force every projected column to be named, so the column-scope
     # guard below can check what is actually returned (and nothing hides behind *).
     star = RT.check_no_select_star(sql, ctx=ctx)
     if star is not None:
-        return sql, _refusal_from_verdict("select_star", star)
+        return sql, _refusal_from_verdict("select_star", star), None
 
     # Column-scope guard — a column that binds to a declared table must be one that
     # table declares (a hallucinated column, or a physical column the model excluded).
     cs = RT.check_column_scope(sql, org, ctx=ctx)
     if cs is not None:
-        return sql, _refusal_from_verdict("column_out_of_scope", cs)
+        return sql, _refusal_from_verdict("column_out_of_scope", cs), None
 
     pf = RT.pre_flight_check(sql, org, ctx=ctx)
     if pf.risk and pf.action == "refuse":
-        return sql, Refusal("preflight_refused", pf.reason, pf.suggestion or "")
+        return sql, Refusal("preflight_refused", pf.reason, pf.suggestion or ""), None
     if pf.risk and pf.action == "auto_rewrite" and pf.rewritten_sql:
         sys.stderr.write(f"[agami] auto-corrected {pf.risk}: ran rewritten SQL. {pf.reason}\n")
         sql = pf.rewritten_sql
         ctx = RT.build_guard_context(sql, org)  # SQL changed -> refresh the shared context
 
-    # Sensitive-column (PII) guard — refuse to PROJECT raw sensitive values. Same
-    # deterministic chokepoint as the fan/chasm pre-flight, so the agami-query skill,
-    # the local MCP server, and cron all protect PII identically (not just whichever
-    # path happened to read a prose rule). Aggregates / filters / joins are allowed.
+    # Sensitive-column (PII) fail-closed on UNPARSEABLE SQL when the model declares PII (ACE-041
+    # slice 3): a statement sqlglot cannot parse cannot be proven free of a raw sensitive projection.
+    # Unlike the other model guards (which degrade to allow — that fail-open is ACE-037's to close;
+    # ACE-037 is NOT on this branch), the PII path refuses a parse FAILURE outright rather than run a
+    # possibly-PII-projecting query. Only a parse failure with sqlglot PRESENT (ctx is not None and
+    # ctx.tree is None) is closed here; sqlglot-unavailable (ctx is None) stays the ACE-037-owned
+    # fail-open, and a model with no sensitive columns has nothing to protect.
+    if ctx is not None and ctx.tree is None and ctx.sensitive_by_table[1]:
+        return sql, Refusal(
+            "sensitive_columns",
+            "the query could not be parsed to verify it does not expose sensitive columns, so it "
+            "was refused.",
+            "Simplify the SQL so it parses, then retry.",
+        ), None
+
+    # Sensitive-column (PII) guard — the deterministic chokepoint that protects PII identically for
+    # the agami-query skill, the local MCP server, and cron. A sensitive column may still be counted,
+    # filtered, grouped, or joined; only PROJECTING its raw value is offending. When it is, route the
+    # gate's verdict through the shared data-protection policy: a *maskable* projection (every
+    # offending projection is a clean 1:1 image of one output column) becomes a MASK plan and the
+    # query PROCEEDS with those columns redacted post-execution; an *untraceable* projection fails
+    # closed to a refusal (mirroring safety's "uncertainty ⇒ reject").
+    mask_plan: MaskPlan | None = None
     sens = RT.check_sensitive_projection(sql, org, ctx=ctx)
     if sens.action == "refuse":
-        return sql, Refusal("sensitive_columns", sens.reason, sens.suggestion or "")
+        all_maskable = bool(sens.projections) and all(
+            p.maskable and p.output_index is not None for p in sens.projections
+        )
+        verdict = Verdict(
+            cls="data_protection",
+            rule="sensitive_projection",
+            severity="high",
+            certainty="provable" if all_maskable else "uncertain",
+            detail=sens.reason,
+            remediation=sens.suggestion or "",
+        )
+        # data_protection enforces in every tier (tier never downgrades it), so policy's default
+        # tier is correct here: provable → "mask", anything weaker → "reject" (fail closed).
+        if policy(verdict) == "mask":
+            indices = tuple(sorted({p.output_index for p in sens.projections}))
+            mask_plan = MaskPlan(indices=indices, columns=tuple(sens.columns))
+        else:
+            return sql, Refusal("sensitive_columns", sens.reason, sens.suggestion or ""), None
 
     new_sql, applied = RT.apply_default_filters(sql, org, area=area, ctx=ctx)
     if applied:
+        # default_filters only add WHERE conditions, never change the projection list, so the mask
+        # plan's output indices stay valid against the rewritten SQL's result.
         sys.stderr.write(f"[agami] applied default_filters: {applied}\n")
         sql = new_sql
-    return sql, None
+    return sql, None, mask_plan
 
 
 # ---------------------------------------------------------------------------
@@ -1143,18 +1225,49 @@ def execute_guarded(
     SQL both guards have passed. Raises ``GuardRefused`` carrying the typed ``Refusal`` on a refusal,
     and ``ExecutorError`` on a connect/run failure — so the subprocess ``main`` and the in-process MCP
     handler apply the same guard and build the same envelope. The row cap rides the request-scoped
-    ``_max_rows_override`` ContextVar the caller sets."""
+    ``_max_rows_override`` ContextVar the caller sets.
+
+    ACE-041: when the model-safety pass returns a ``MaskPlan`` (a *maskable* sensitive projection),
+    the query runs and the named output columns are redacted here, at the single shared post-execute
+    point — so masking covers every ``_run_<db>`` AND any injected ``ports.Executor``, and composes
+    with the already-applied row cap (it redacts the capped rows in place)."""
     import sql_guard
 
     verdict = sql_guard.check_read_only(sql)
     if verdict is not None:
         raise GuardRefused(_refusal_from_verdict("permission", verdict), code=1)
+    mask_plan: MaskPlan | None = None
     if not no_safety:
-        sql, refusal = _model_safety(sql, profile, area)
+        sql, refusal, mask_plan = _model_safety(sql, profile, area)
         if refusal is not None:
             raise GuardRefused(refusal, code=1)
     creds = _load_credentials(profile)
-    return executor.execute(sql, creds, profile=profile)
+    result = executor.execute(sql, creds, profile=profile)
+    if mask_plan is not None:
+        result = _apply_mask_plan(result, mask_plan)
+    return result
+
+
+def _apply_mask_plan(result: ExecResult, plan: MaskPlan) -> ExecResult:
+    """Redact the sensitive OUTPUT columns of an executor result post-execution — the SINGLE shared
+    masking point for EVERY executor (built-in ``_run_<db>`` and an injected ``ports.Executor``).
+    Only the values at the plan's output indices become the token; every other value is untouched,
+    and the redacted rows plus the masked column refs are returned in a NEW ``ExecResult`` (it is
+    frozen). Runs on the already-row-capped rows, so it composes with the fetch bound rather than
+    fighting it. An index outside a row's width simply doesn't match (fail-safe — the value isn't
+    there to leak); by construction an output index equals its result-column position, so this holds."""
+    if not plan.indices:
+        return result
+    mask_set = set(plan.indices)
+    redacted_rows = [
+        tuple(plan.token if i in mask_set else v for i, v in enumerate(row)) for row in result.rows
+    ]
+    return ExecResult(
+        columns=result.columns,
+        rows=redacted_rows,
+        truncated=result.truncated,
+        masked_columns=plan.columns,
+    )
 
 
 def main() -> int:
