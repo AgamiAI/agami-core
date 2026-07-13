@@ -227,8 +227,10 @@ Native CLIs (optional fast path for *queries* — introspection doesn't use them
 | oracle | `import oracledb` | `oracledb` |
 | databricks | `from databricks import sql` | `databricks-sql-connector` |
 | trino | `import trino` | `trino` |
-| duckdb | `import duckdb` | `duckdb` |
+| duckdb | `import duckdb, pytz` | `duckdb pytz` |
 | sqlite | stdlib — always present | — |
+
+> **duckdb needs `pytz`** to materialize `TIMESTAMP WITH TIME ZONE` values into Python — without it a query that selects a timestamptz column fails at runtime (`Required module 'pytz' failed to import`), so it's part of the driver install, not optional.
 
 If the driver is missing, **confirm via AskUserQuestion**, then `"$PY" -m pip install --user <package>` (plain `pip install` fallback). Same "never install silently" convention as the model deps (0a.5b). Do this for `$PY` so `sm introspect` connects on the first try.
 
@@ -372,7 +374,18 @@ If `<artifacts_dir>/agami-example/org.yaml` already exists, the sample is alread
    - **6A (copy, < 1 min):** `mkdir -p "<artifacts_dir>/agami-example"` then `cp -R "$AGAMI_PLUGIN_ROOT/samples/store/model/." "<artifacts_dir>/agami-example/"`. **Validate it loads here**: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" validate "<artifacts_dir>/agami-example"`. If it fails, surface the errors and stop — never leave a half-wired profile. Then **stamp a model_version** (a *copy* doesn't go through introspect/curate, so nothing auto-stamps it): `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" snapshot "<artifacts_dir>/agami-example"` — best-effort, so the answer receipt shows a version rather than `null`. (We stamp at copy time instead of committing a static `.snapshots/` so it always matches the model's actual content; 6B gets one automatically from introspect.)
    - **6B (rebuild live — "watch it build"):** ignore the committed `model/` and run the **normal Phases 1→2** against the `agami-example` profile (`--db-type sqlite`) — the same introspect → enrich → seed pipeline a real onboarding uses, just pointed at the sample SQLite file. It takes a few minutes (the non-default option). **Don't mention tokens, cost, or billing** — surface time (~5–10 min), not scary money words.
      - **Sample carve-outs — the dataset is small + curated, so DON'T prompt (build silently over ALL tables):** skip the [Phase 1.6](#16--discover--prune-the-table-list-cheap-first-pass) **prune** page, skip the **org-description** prompt (Phase 2f / 0a), and skip the **doc/metrics intake** (Phase 1's "do you have a data dictionary / dbt repo?"). These prompts exist for a real unknown DB; for the sample they're noise. Introspect + enrich every sample table without asking.
-     - **When the model validates, OPEN THE MODEL-EXPLORER so the user sees what was built** — render it in **browse mode** (`render_model_explorer.py` for `<artifacts_dir>/agami-example`, i.e. `/agami-model` browse — **not** the `/agami-model preseed` sign-off gate that ends the turn elsewhere in this skill). This is the whole point of "watch it build"; a prose-only wrap would defeat it. Render it *together with* step 7's short dataset description + starter questions (so don't cede the turn), so the user can both look at the model and start asking. (Do **not** render the NL→SQL examples-validation page — lower-value for the curated sample.)
+     - **Clear the pre-seed gate before seeding (the silent build has no human to sign off).** Enrichment lands the sample's metrics/entities `unreviewed`, so `seed-examples` would refuse with `preseed_review_pending`. Because the sample is curated and trusted, **auto-approve the queue as a system signer** right before seeding — the silent path clears its own gate:
+       ```bash
+       bash "$AGAMI_PLUGIN_ROOT/scripts/sm" approve-queue "<artifacts_dir>/agami-example" --signer system --role system
+       ```
+       (This is only sanctioned for the curated sample; a real database keeps the human sign-off gate.)
+     - **When the model validates, OPEN THE MODEL-EXPLORER so the user sees what was built** — render it in **browse mode** (i.e. `/agami-model` browse — **not** the `/agami-model preseed` sign-off gate that ends the turn elsewhere in this skill). The script takes the profile and artifacts dir as **separate** flags (there is no `--root`); use the same invocation the [`/agami-model` skill documents](../agami-model/SKILL.md):
+       ```bash
+       python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+         --profile agami-example --artifacts-dir "<artifacts_dir>" \
+         --out "<artifacts_dir>/local/model/agami-example/<ts>.html"
+       ```
+       This is the whole point of "watch it build"; a prose-only wrap would defeat it. Render it *together with* step 7's short dataset description + starter questions (so don't cede the turn), so the user can both look at the model and start asking. (Do **not** render the NL→SQL examples-validation page — lower-value for the curated sample.)
 
    **6A** → **step 7** (describe + stop). **6B** → step 7's description + starter questions **and** open `/agami-model`. Both end with a validated `<artifacts_dir>/agami-example/` model.
 7. **Wrap up — describe the dataset, offer questions, then STOP. Do NOT auto-run a query.** This is the entire closing for the sample path: **skip the rest of Phases 3–8** (no introspect summary, no "re-introspect `<profile>`" / "when you want the real thing" framing — that pushes the user off the sample they just picked and can surface another profile's name). The user asked to *query* the sample, not watch a scripted demo — so hand them the keys, don't drive. **(Exception: 6B already opened `/agami-model` — that's the one review surface the "watch it build" path keeps; see 6B. The 6A copy path opens nothing.)**
@@ -768,6 +781,8 @@ Seeds reference **columns, tables, metrics, and entities** — so settle those *
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate-gate "$ROOT"
 ```
 → `{pii_count, preseed_count, should_open_explorer}`. **PII count** = columns flagged `sensitive` still queryable (an excluded column, or any column under an excluded table, isn't counted — so once the user excludes them it drops to 0 and the gate stops re-opening). **preseed count** = metrics + named-filters + entities needing sign-off (relationships are NOT gated — FK joins are engine-approved, inferred joins self-approve as you query).
+
+> **PII is advisory, not a seed blocker.** `should_open_explorer` can be true purely from a non-zero `pii_count` (sensitive columns still queryable) — that's a *review nudge* (the user's call to exclude or keep), **not** a gate on seed generation. Only a non-zero `preseed_count` (unreviewed metrics/entities) actually blocks `seed-examples`. Don't tell the user PII is stopping their seeds; it isn't.
 
 **If `should_open_explorer` is true → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
 - the **PII tab** — every flagged column *and* every suspected-but-unflagged one (e.g. `first_name` in `sys_user`) in one list, each with a confirm/clear toggle. This is where the user reviews PII without hunting through tables.

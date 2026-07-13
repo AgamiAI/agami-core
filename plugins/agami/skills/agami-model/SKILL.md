@@ -220,6 +220,23 @@ Then end the turn. The skill is one-shot per invocation — re-enter via the sla
 
 ---
 
+## Sign-off without a browser (`sm approve-queue`)
+
+This dashboard is HTML — it assumes a browser. On a **headless machine** (no browser, e.g. a remote/SSH-only host), sign off the whole pending queue from the CLI instead. `sm approve-queue` reads the same queue this dashboard's Review tab shows (Rule 1 metrics/named-filters + Rule 2 joins/entities), stamps each item, and applies it in one call:
+
+```bash
+ROOT="<artifacts_dir>/<profile>"
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" approve-queue "$ROOT" --signer you@example.com --role owner
+# --kind metric|entity|relationship  → narrow to one type (repeatable)
+# --dry-run                          → print the approve ops without applying
+```
+
+- **`--signer` and `--role` are required** — an approve must record *who* signed off (the validator rejects an approved entry with no sign-off stamp). The command self-stamps the `at` timestamp, so you don't build ops by hand.
+- Afterward `sm review-queue "$ROOT"` shows `total: 0` and `sm curate-gate "$ROOT"` drops `preseed_count` to 0.
+- **PII does not block seeding.** `curate-gate` may still report `should_open_explorer: true` purely because sensitive columns remain queryable — that's **advisory** (your call to exclude or keep them), **not** a gate on seed generation. Only unreviewed **pre-seed** items (metrics/entities) block `seed-examples`; approving the queue clears that.
+
+---
+
 ## What the runtime does with `rejected` entries
 
 The trust spine has always read `agami.review_state`. The model loader in [`plugins/agami/skills/agami-query/SKILL.md → Phase 1c`](../agami-query/SKILL.md#1c--index-the-model-for-fast-access) filters entries with `review_state: rejected` out of `datasets_by_name`, `datasets_by_qname`, `fields_by_qname`, and `relationships_by_endpoints`. Rejected entries:
