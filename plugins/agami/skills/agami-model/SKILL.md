@@ -232,7 +232,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" approve-queue "$ROOT" --signer you@example.
 ```
 
 - **`--signer` and `--role` are required** — an approve must record *who* signed off (the validator rejects an approved entry with no sign-off stamp). The command self-stamps the `at` timestamp, so you don't build ops by hand.
-- Afterward `sm review-queue "$ROOT"` shows `total: 0` and `sm curate-gate "$ROOT"` drops `preseed_count` to 0.
+- Afterward `sm review-queue "$ROOT"` shows `counts.total: 0` and `sm curate-gate "$ROOT"` drops `preseed_count` to 0.
 - **PII does not block seeding.** `curate-gate` may still report `should_open_explorer: true` purely because sensitive columns remain queryable — that's **advisory** (your call to exclude or keep them), **not** a gate on seed generation. Only unreviewed **pre-seed** items (metrics/entities) block `seed-examples`; approving the queue clears that.
 
 ---
