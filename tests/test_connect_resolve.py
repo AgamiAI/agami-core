@@ -155,3 +155,23 @@ def test_interpreter_falls_back_to_base_when_none_equipped(monkeypatch):
     res = CR._resolve_interpreter("postgres", configured=None)
     assert res["python3"] == base
     assert res["has_model_deps"] is False
+
+
+def test_duckdb_driver_requires_pytz(monkeypatch):
+    """ACE-062 A3: the duckdb driver probe must require pytz as well — duckdb needs it to
+    materialize TIMESTAMP WITH TIME ZONE values. An interpreter with duckdb but not pytz
+    must score has_driver=False so the skill installs pytz before the first timestamptz
+    query (rather than the query failing at runtime with 'pytz failed to import')."""
+    no_pytz, full = "/fake/duckdb-no-pytz/python3", "/fake/duckdb-pytz/python3"
+    have = {no_pytz: {"pydantic", "sqlglot", "yaml", "duckdb"},
+            full: {"pydantic", "sqlglot", "yaml", "duckdb", "pytz"}}
+    monkeypatch.setattr(CR, "_candidate_interpreters", lambda: [no_pytz, full])
+    # content-aware probe: an interpreter passes only if it has EVERY requested module
+    monkeypatch.setattr(CR, "_probe",
+                        lambda py, mods: all(m in have.get(py, set()) for m in mods if m))
+
+    res = CR._resolve_interpreter("duckdb", configured=None)
+    scored = {c["python3"]: c for c in res["candidates_scored"]}
+    assert scored[no_pytz]["has_driver"] is False   # duckdb present, pytz missing → not ready
+    assert scored[full]["has_driver"] is True
+    assert res["python3"] == full                    # the pytz-equipped interpreter is chosen

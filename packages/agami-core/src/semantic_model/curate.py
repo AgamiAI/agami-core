@@ -945,7 +945,7 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
 def validate_seeds(candidates: list[dict], runner) -> tuple[list[dict], list[dict]]:
     """Split candidate examples into (passing, rejected) by validating each SQL against
     the live DB — dialect-agnostically and scanning no data. Each SQL is wrapped to
-    return zero rows (`SELECT * FROM (<sql>) WHERE 1=0`) and run via `runner` (which
+    return zero rows (`SELECT 1 FROM (<sql>) WHERE 1=0`) and run via `runner` (which
     raises on a bad query). This is the packaged Phase-5 validation loop, so the skill
     never writes a throwaway script to EXPLAIN seeds one by one. Passing examples get
     `source: seed` / `status: confirmed` defaults; rejected carry the DB error."""
@@ -957,7 +957,11 @@ def validate_seeds(candidates: list[dict], runner) -> tuple[list[dict], list[dic
         if not sql or not q:
             rejected.append({"question": q or "?", "error": "question and sql are required"})
             continue
-        probe = "SELECT * FROM (\n" + str(sql).strip().rstrip(";") + "\n) AS _agami_seed_validate WHERE 1=0"
+        # `SELECT 1` (not `SELECT *`): the star-free wrapper still forces the DB to parse +
+        # plan the inner query and return zero rows, but the executor's SELECT-* ban
+        # (runtime.check_no_select_star) walks every SELECT in the tree — a `SELECT *` wrapper
+        # would trip the ban on itself and reject every seed regardless of its own SQL.
+        probe = "SELECT 1 FROM (\n" + str(sql).strip().rstrip(";") + "\n) AS _agami_seed_validate WHERE 1=0"
         try:
             runner(probe)
         except Exception as e:
