@@ -289,7 +289,7 @@ async def _auth_server(request: Request) -> JSONResponse:
     )
 
 
-def build_server(registry: dict | None = None):
+def build_server(registry: dict | None = None, extra_instructions: str | None = None):
     """A low-level MCP Server whose tool surface IS the given registry — list_tools / call_tool read
     from it, so HTTP advertises exactly what stdio does (no duplicate defs). Defaults to the shared
     `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools)."""
@@ -297,7 +297,12 @@ def build_server(registry: dict | None = None):
     from mcp.server.lowlevel import Server
 
     registry = TOOLS if registry is None else registry
-    server = Server(SERVER_NAME, version=server_version(), instructions=SERVER_INSTRUCTIONS)
+    # Appended, never replacing: SERVER_INSTRUCTIONS carries the PII output rule, so replace-semantics
+    # would let a consumer silently drop a safety directive.
+    instructions = SERVER_INSTRUCTIONS
+    if extra_instructions:
+        instructions = f"{instructions}\n{extra_instructions}"
+    server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
     @server.list_tools()
     async def _list_tools() -> list:
@@ -348,7 +353,11 @@ def build_server(registry: dict | None = None):
     return server
 
 
-def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None) -> Starlette:
+def create_app(
+    extra_tools: dict | None = None,
+    adapters: Adapters | None = None,
+    extra_instructions: str | None = None,
+) -> Starlette:
     """The ASGI app + the composition factory: the `.well-known` discovery routes + the
     streamable-HTTP MCP endpoint at /mcp, behind the auth middleware. Merges `extra_tools` over a
     COPY of the shared TOOLS (never mutating the global) and wires the `adapters` into the request
@@ -390,7 +399,9 @@ def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None
     # Merge the consumer's extra tools over a COPY of TOOLS — the module global is never mutated.
     registry = {**TOOLS, **(extra_tools or {})}
     session_manager = StreamableHTTPSessionManager(
-        app=build_server(registry), json_response=True, stateless=True
+        app=build_server(registry, extra_instructions=extra_instructions),
+        json_response=True,
+        stateless=True,
     )
 
     async def handle_mcp(scope, receive, send):
