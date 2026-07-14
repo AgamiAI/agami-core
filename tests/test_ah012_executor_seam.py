@@ -83,7 +83,7 @@ def test_model_safety_refusal_short_circuits_before_the_executor(monkeypatch):
     # A model-safety refusal short-circuits with its typed Refusal carried on the exception (so both
     # the subprocess and in-process paths build the same envelope); the executor must not run.
     monkeypatch.setattr(
-        execute_sql, "_model_safety", lambda s, p, a: (s, Refusal("preflight_refused", "fan-trap"))
+        execute_sql, "_model_safety", lambda s, p, a: (s, Refusal("preflight_refused", "fan-trap"), None)
     )
     spy = _SpyExecutor()
     with pytest.raises(execute_sql.GuardRefused) as ei:
@@ -99,7 +99,7 @@ def test_executor_receives_vetted_sql_and_resolved_creds(monkeypatch):
     # The default_filters rewrite happens in the model pass; the executor sees the POST-guard SQL and
     # the resolved datasource creds — never raw user input, never an unresolved profile.
     monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: ("SELECT 1 AS c /*vetted*/", None))
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: ("SELECT 1 AS c /*vetted*/", None, None))
     spy = _SpyExecutor()
 
     result = execute_sql.execute_guarded("SELECT 1 AS c", "acme", "sales", executor=spy)
@@ -218,7 +218,7 @@ def test_injected_executor_runs_in_process_with_vetted_sql_and_no_fork(monkeypat
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
     monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s + " /*vetted*/", None))
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s + " /*vetted*/", None, None))
     # a fork here would be the REQ-002 violation the seam prevents — fail loudly if it happens.
     monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: pytest.fail("must not fork a subprocess"))
 
@@ -249,7 +249,7 @@ def test_injected_executor_error_maps_to_the_same_envelope(monkeypatch):
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
     monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None, None))
 
     class _Boom:
         def execute(self, vetted_sql, creds, *, profile):
@@ -287,7 +287,7 @@ def test_injected_executor_credential_error_surfaces_detailed_remediation(monkey
         )
 
     monkeypatch.setattr(execute_sql, "_load_credentials", _bad)
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None, None))
     tools.set_injected_executor(_SpyExecutor())
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1", "datasource": "acme"}))
@@ -347,7 +347,7 @@ def test_injected_executor_model_safety_refusal_returns_the_typed_refusal(monkey
     monkeypatch.setattr(
         execute_sql,
         "_model_safety",
-        lambda s, p, a: (s, Refusal("table_out_of_scope", "table foo is not in the model")),
+        lambda s, p, a: (s, Refusal("table_out_of_scope", "table foo is not in the model"), None),
     )
     fake = _SpyExecutor()
     tools.set_injected_executor(fake)
@@ -359,11 +359,13 @@ def test_injected_executor_model_safety_refusal_returns_the_typed_refusal(monkey
     assert fake.calls == []  # refused before the executor
 
 
-def test_injected_executor_real_pii_gate_produces_sensitive_columns_envelope(monkeypatch):
-    # A REAL sensitive-projection gate firing on a REAL model becomes a refused Envelope with kind
-    # "sensitive_columns" end-to-end (real gate -> _model_safety -> GuardRefused -> refused Envelope),
-    # closing the chain the synthetic-stderr test only stitched at the parse step. PII is top-severity,
-    # so pin the whole gate->refusal->envelope path, not just the stderr parser. The executor never runs.
+def test_injected_executor_real_pii_gate_masks_a_maskable_projection(monkeypatch):
+    # BEHAVIOUR CHANGE (ACE-041 slice 3, was refuse before this slice): a REAL sensitive-projection
+    # gate firing on a REAL model for a *maskable* projection (a bare `email`, a clean 1:1 image of
+    # output column 0) now MASKS rather than refuses — the query RUNS and the value is redacted, with
+    # an `applied[{mask}]` note. This is the spec's data-protection behaviour, not a weakened safety
+    # gate: an UNTRACEABLE projection still refuses (see test_..._untraceable below and the ACE-041
+    # masking suite). Pins the whole real gate -> policy -> mask -> redacted-envelope path end-to-end.
     pytest.importorskip("pydantic")
     pytest.importorskip("sqlglot")
     import tools
@@ -390,13 +392,56 @@ def test_injected_executor_real_pii_gate_produces_sensitive_columns_envelope(mon
     )
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
     monkeypatch.setattr(execute_sql, "_resolve_guard_model", lambda profile: org)  # real _model_safety runs
-    fake = _SpyExecutor()
+    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["email"], rows=[("alice@x.io",)], truncated=False))
     tools.set_injected_executor(fake)
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT email FROM users", "datasource": "acme"}))
 
+    assert out["status"] == "ok"  # NOT refused — the query ran behind the guard
+    assert out["data"]["rows"] == [[execute_sql.REDACTION_TOKEN]]  # the raw email was redacted, not leaked
+    assert "alice@x.io" not in json.dumps(out)  # no raw sensitive value anywhere in the envelope
+    assert {"mask": "users.email"} in out["applied"]  # the applied[{mask}] note is recorded
+    assert fake.calls  # the executor RAN (masking is post-execution), then the value was redacted
+
+
+def test_injected_executor_real_pii_gate_refuses_an_untraceable_projection(monkeypatch):
+    # The safety counterpart to the mask test: an UNTRACEABLE sensitive projection (the value buried
+    # in an expression) still fails closed to a refused Envelope with kind "sensitive_columns", and
+    # the executor never runs. Masking must NOT weaken this fail-closed refusal.
+    pytest.importorskip("pydantic")
+    pytest.importorskip("sqlglot")
+    import tools
+    from semantic_model import models as m
+
+    org = m.Organization(
+        organization="o",
+        version=1,
+        subject_areas=[
+            m.SubjectArea(
+                name="area",
+                description="d",
+                tables_defined=[
+                    m.Table(
+                        name="users", schema="public", storage_connection="c", grain=["id"],
+                        columns=[
+                            m.Column(name="id", type="integer"),
+                            m.Column(name="email", type="string", sensitive=True),
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+    monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
+    monkeypatch.setattr(execute_sql, "_resolve_guard_model", lambda profile: org)
+    fake = _SpyExecutor()
+    tools.set_injected_executor(fake)
+
+    out = json.loads(tools.tool_execute_sql({"sql": "SELECT UPPER(email) FROM users", "datasource": "acme"}))
+
     assert out["status"] == "refused"
-    assert out["refusal"]["kind"] == "sensitive_columns"  # the REAL PII gate, not a synthetic line
+    assert out["refusal"]["kind"] == "sensitive_columns"  # buried value → fail closed
     assert "data" not in out  # a refusal carries no data (no raw sensitive values leak)
     assert fake.calls == []  # refused BEFORE the executor ran
 
@@ -408,7 +453,7 @@ def test_injected_executor_textualizes_null_as_empty_at_the_tool_edge(monkeypatc
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
     monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None, None))
     fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n", "s"], rows=[(1, None)], truncated=False))
     tools.set_injected_executor(fake)
 
@@ -422,7 +467,7 @@ def test_injected_executor_backstop_trims_to_max_rows(monkeypatch):
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
     monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None, None))
     fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n"], rows=[(1,), (2,), (3,)], truncated=False))
     tools.set_injected_executor(fake)
 

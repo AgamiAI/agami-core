@@ -105,7 +105,7 @@ def test_http_server_runs_in_process_by_default_no_fork(monkeypatch):
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
     monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
+    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None, None))
     monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: pytest.fail("HTTP default must not fork"))
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1 AS n", "datasource": "acme"}))
