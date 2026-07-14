@@ -134,9 +134,10 @@ server ever sees your data.
 | **DuckDB** | `duckdb` binary or module |
 | **SQLite** | `sqlite3` (Python stdlib — nothing to install) |
 
-If you have a native CLI on your `PATH`, that's used first (nothing to `pip install`); otherwise agami
-falls back to the Python driver for that database. Per-database connection fields and the read-only-grant
-SQL for every dialect are in [docs/credentials.md](docs/credentials.md).
+agami picks the first method available for your database: a **native CLI** if one's on your `PATH`
+(nothing to `pip install`), then the **DuckDB** binary where it applies (Postgres · MySQL · SQLite),
+then the **Python driver**. Per-database connection fields and the read-only-grant SQL for every dialect
+are in [docs/credentials.md](docs/credentials.md).
 
 ## Install
 
