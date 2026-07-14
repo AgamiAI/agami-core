@@ -468,7 +468,7 @@ _ALIAS_LINEAGE_BYPASS = [
 
 @pytest.mark.xfail(
     reason="ACE-041 known limitation: no alias/lineage tracking through derived-table/CTE bodies; "
-    "pre-existing in the sensitive-projection gate. Follow-up spec required.",
+    "pre-existing in the sensitive-projection gate. Tracked as follow-up spec ACE-062.",
     strict=False,
 )
 @pytest.mark.parametrize("sql", _ALIAS_LINEAGE_BYPASS)

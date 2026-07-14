@@ -121,7 +121,7 @@ class ExecResult:
 
 # ACE-041: the string a masked sensitive value is replaced with in every row of a masked output
 # column. A single named constant so the token is defined once for the redactor and the tests.
-# ACE-041: token pending author confirm
+# ACE-041: token confirmed as "***" (author, 2026-07-13).
 REDACTION_TOKEN = "***"
 
 

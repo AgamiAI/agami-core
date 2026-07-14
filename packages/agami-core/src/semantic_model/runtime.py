@@ -541,7 +541,7 @@ def _output_selects(node: "exp.Expression") -> list["exp.Select"]:
     # xfail regressions in tests/test_ace041_masking.py (`WITH t AS (SELECT ssn AS s FROM customers)
     # SELECT s FROM t` and `SELECT z FROM (SELECT ssn AS z FROM customers) q`); they xfail today and
     # flip to xpass when a future alias-lineage fix lands. Closing this needs real projection lineage
-    # through subquery/CTE bodies (a follow-up spec), which is deliberately out of ACE-041's scope."""
+    # through subquery/CTE bodies (follow-up spec ACE-062), which is deliberately out of ACE-041's scope."""
     if isinstance(node, exp.Select):
         return [node]
     if isinstance(node, exp.SetOperation):  # base of Union / Intersect / Except
