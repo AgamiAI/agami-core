@@ -350,6 +350,26 @@ class DbActivitySink:
         )
         self._store.commit()
 
+    def record_guardrail_audit(self, record: Any) -> None:
+        self._store.execute(
+            "INSERT INTO guardrail_audit (audit_id, ts, datasource, status, refusal_kind, sql, "
+            "row_count, execution_ms, correlation_id, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.audit_id,
+                record.ts,
+                record.datasource,
+                record.status,
+                record.refusal_kind,
+                record.sql,
+                record.row_count,
+                record.execution_ms,
+                record.correlation_id,
+                record.source,
+            ),
+        )
+        self._store.commit()
+
 
 # ---------------------------------------------------------------------------
 # Read path — the admin activity views (read-only).

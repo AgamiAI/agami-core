@@ -257,8 +257,8 @@ def test_rejects_row_level_locks(sql: str) -> None:
 )
 def test_row_lock_rule_names_the_lock(sql: str) -> None:
     # These use SHARE (not a deny keyword) so the row-lock rule is what fires.
-    reason = check_read_only(sql)
-    assert reason is not None and "lock" in reason.lower(), reason
+    v = check_read_only(sql)
+    assert v is not None and "lock" in v.detail.lower(), v
 
 
 @pytest.mark.parametrize(
@@ -270,9 +270,9 @@ def test_row_lock_rule_names_the_lock(sql: str) -> None:
     ],
 )
 def test_rejects_select_into_write_path(sql: str) -> None:
-    reason = check_read_only(sql)
-    assert reason is not None, f"SELECT INTO not blocked: {sql!r}"
-    assert "INTO" in reason
+    v = check_read_only(sql)
+    assert v is not None, f"SELECT INTO not blocked: {sql!r}"
+    assert "INTO" in v.detail
 
 
 @pytest.mark.parametrize(
@@ -328,9 +328,9 @@ def test_rejects_dangerous_functions(sql: str) -> None:
 def test_rejects_over_length_cap() -> None:
     payload = "SELECT 1, " + ("a, " * 30_000) + "1"
     assert len(payload) > _MAX_SQL_CHARS
-    reason = check_read_only(payload)
-    assert reason is not None
-    assert "50000" in reason or "caps" in reason
+    v = check_read_only(payload)
+    assert v is not None
+    assert "50000" in v.detail or "caps" in v.detail
 
 
 def test_length_cap_exact_boundary() -> None:
@@ -634,8 +634,8 @@ def test_executor_blocks_dangerous_sql_even_with_no_safety(tmp_path, extra) -> N
                 envelope = json.loads(line)
             except ValueError:
                 continue
-    assert envelope is not None, f"no JSON error envelope on stderr; got: {proc.stderr!r}"
-    assert envelope["error"]["kind"] == "permission", envelope
+    assert envelope is not None, f"no JSON refusal envelope on stderr; got: {proc.stderr!r}"
+    assert envelope["refusal"]["kind"] == "permission", envelope
 
 
 def test_executor_dangerous_function_blocked(tmp_path) -> None:

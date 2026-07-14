@@ -292,4 +292,5 @@ def test_tool_execute_sql_passes_max_rows_and_surfaces_truncation(monkeypatch):
     resp = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme", "max_rows": 2}))
     cmd = captured["cmd"]
     assert "--max-rows" in cmd and cmd[cmd.index("--max-rows") + 1] == "2"  # capped at the source
-    assert resp["truncated"] is True  # executor's flag surfaced into the response
+    assert resp["data"]["truncated"] is True  # executor's flag surfaced into the Envelope's data
+    assert resp["applied"] == [{"row_cap": resp["data"]["row_count"]}]  # bound noted in `applied`

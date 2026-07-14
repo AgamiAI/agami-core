@@ -13,13 +13,15 @@ expected to run under a read-only role. Postgres / Redshift are the primary conc
 are neutral enough to be safe across the other supported engines.
 
 `check_read_only(sql)` returns `None` when the SQL is a single safe read-only
-statement, else a short human-readable reason string. Callers decide how to wrap it
-(the MCP tools attach `kind="permission"`).
+statement, else a safety `Verdict` the shared executor maps to a refusal
+(`kind="permission"`). The rejection ladder itself lives in `_read_only_reason`.
 """
 
 from __future__ import annotations
 
 import re
+
+from guardrail import Verdict, safety_verdict
 
 # Hard cap on SQL length. Prevents a compromised client from POSTing a multi-MB
 # SQL blob that takes the parser / planner / this gate down a slow path. Real
@@ -231,7 +233,7 @@ _DANGEROUS_FN_RE = re.compile(
 )
 
 
-def check_read_only(sql: str | None) -> str | None:
+def _read_only_reason(sql: str | None) -> str | None:
     """Return None if `sql` is a single safe read-only statement, else a reason string.
 
     Rejection ladder (each step has its own message so the caller can correct):
@@ -295,3 +297,20 @@ def check_read_only(sql: str | None) -> str | None:
             "process-control / sleep / remote-SQL functions are blocked"
         )
     return None
+
+
+def check_read_only(sql: str | None) -> Verdict | None:
+    """Return ``None`` if ``sql`` is a single safe read-only statement, else a safety ``Verdict``.
+
+    Thin wrapper over :func:`_read_only_reason` (which owns the rejection ladder). A fired gate
+    becomes a safety-class verdict; the shared executor maps it to a refusal (``kind=permission``).
+    """
+    reason = _read_only_reason(sql)
+    if reason is None:
+        return None
+    return safety_verdict(
+        "read_only",
+        reason,
+        "Send a single read-only SELECT / WITH...SELECT — no DML, DDL, transaction/session "
+        "control, or multiple statements.",
+    )
