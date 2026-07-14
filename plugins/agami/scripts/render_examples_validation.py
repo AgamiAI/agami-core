@@ -65,6 +65,12 @@ def render(
     profile: str,
     items: list,
 ) -> str:
+    """Render the examples-validation dashboard HTML.
+
+    NOTE: mutates each item's ``n`` in place — assigning a stable global 1..N in render order
+    (see the comment below). A caller that still needs the original per-area numbers should copy
+    the items first.
+    """
     if not isinstance(items, list):
         raise ValueError("items must be a list")
     # `n` is the example's identity end-to-end: the interaction/DOM key, the `#N` label, the
@@ -131,12 +137,17 @@ def main() -> int:
     ))
     # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
-    # showed — regardless of the per-area numbers the caller wrote. Best-effort.
+    # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a
+    # failed write never leaves the items file truncated; non-fatal (the HTML already embeds the
+    # normalized numbering), so a write failure warns rather than aborting the render.
+    items_path = os.path.expanduser(args.items_file)
     try:
-        with open(os.path.expanduser(args.items_file), "w") as f:
+        tmp_path = items_path + ".tmp"
+        with open(tmp_path, "w") as f:
             json.dump(items, f)
-    except OSError:
-        pass
+        os.replace(tmp_path, items_path)
+    except OSError as e:
+        sys.stderr.write(f"warning: could not normalize {items_path}: {e}\n")
     print(f"Wrote {out_path} ({len(items)} example{'s' if len(items) != 1 else ''})")
     return 0
 
