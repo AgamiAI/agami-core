@@ -15,13 +15,13 @@
   <a href="#get-started-in-2-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
 </p>
 
-<!-- HERO VISUAL: drop docs/assets/demo.gif (a ~10s sample-flow capture) and uncomment the line below.
-     See docs/assets/README.md for what to capture. A visual is the highest-leverage addition here. -->
+<!-- HERO VISUAL: drop docs/assets/demo.gif (a ~10s sample-flow capture using the built-in
+     sample, so no real data is on screen) and uncomment the line below. -->
 <!-- <p align="center"><img src="docs/assets/demo.gif" alt="agami: a governed answer with its provenance receipt" width="760"></p> -->
 
 ## Get started in 2 minutes
 
-In Claude Code — CLI, VS Code, or Cursor:
+In the **Claude Code CLI**:
 
 ```bash
 /plugin marketplace add AgamiAI/agami-core
@@ -30,7 +30,12 @@ In Claude Code — CLI, VS Code, or Cursor:
 who are the top 5 customers by total spend?
 ```
 
-That last line returns a **governed answer with a receipt** (the exact SQL, the joins used, the model version) — and it crosses a fan trap a naive agent would silently double-count. Two ways to go from here:
+> **In VS Code or Cursor**, the two `/plugin …` commands above don't work from the chat input —
+> type `/plugin` to open the **Manage Plugins** dialog and add the marketplace + install the plugin
+> there instead (see [Install](#install)). The `/agami-connect` line and everything after it work the
+> same everywhere.
+
+That last line returns a **governed answer with a receipt** (the exact SQL, the joins used, the model version) — and the governance runs *before* the query, so the kind of silent join mistake an ungoverned agent would hand back as a confident wrong number never reaches you. Two ways to go from here:
 
 - 🧪 **No database?** The commands above answer from a built-in sample — nothing leaves your machine.
 - 🗄️ **Have a database?** Run `/agami-connect` to introspect it into a governed semantic model, then just ask questions.
@@ -70,10 +75,11 @@ who are the top 5 customers by total spend?
 /agami-connect reintrospect
 ```
 
-**Step 3** deliberately crosses a **fan trap** (orders → line items → payments),
-where a naive agent silently double-counts. agami's pre-flight catches it and
-returns the correct number *with the join receipt* — the trust layer, enforced on
-your first query.
+**Step 3 is where the governance fires.** The sample question is deliberately one
+an ungoverned agent gets *confidently wrong* — a multi-table join where a naive
+agent silently returns a bad number. agami's pre-flight catches it and returns the
+correct answer *with a join receipt* — the trust layer, enforced on your very first
+query.
 
 **Step 4 is the real point.** Natural-language querying is everywhere; what's rare
 is *where the trust comes from*. `reintrospect` re-derives the sample's model from
@@ -108,6 +114,30 @@ entity, auto-approves the clear ones (real foreign keys, well-named columns), an
 you to sign off the judgment calls. Full walkthrough: [docs/usage.md](docs/usage.md).
 Connection details for each database: [docs/credentials.md](docs/credentials.md).
 
+## Databases supported
+
+agami runs your SQL **locally**, with whatever's already on your machine — a native database CLI, the
+DuckDB universal binary, or a Python driver — picking the best option available. No agami-operated
+server ever sees your data.
+
+| Database | How agami runs the SQL |
+|---|---|
+| **PostgreSQL** · **Supabase** | `psql` CLI · DuckDB · `psycopg2` |
+| **Redshift** | `psql` · `psycopg2` (speaks the Postgres wire protocol) |
+| **MySQL** / **MariaDB** | `mysql` CLI · DuckDB · `pymysql` |
+| **Snowflake** | `snowsql` CLI · `snowflake-connector-python` |
+| **BigQuery** | `bq` CLI · `google-cloud-bigquery` |
+| **SQL Server** / Azure SQL | `pymssql` |
+| **Oracle** | `python-oracledb` (thin mode — no client libs) |
+| **Databricks** | `databricks-sql-connector` |
+| **Trino** / Presto | `trino` |
+| **DuckDB** | `duckdb` binary or module |
+| **SQLite** | `sqlite3` (Python stdlib — nothing to install) |
+
+If you have a native CLI on your `PATH`, that's used first (nothing to `pip install`); otherwise agami
+falls back to the Python driver for that database. Per-database connection fields and the read-only-grant
+SQL for every dialect are in [docs/credentials.md](docs/credentials.md).
+
 ## Install
 
 > **Platform note.** Validated on **macOS and Linux**. On **Windows** the skills
@@ -124,9 +154,10 @@ The same plugin works across Claude Code CLI, VS Code, and Cursor.
 ```
 Verify with `/plugin list` → you should see `agami-core@agami` installed.
 
-**VS Code / Cursor** — install the **Claude Code** extension, type `/plugin` in the
-chat to open **Manage Plugins**, add the `AgamiAI/agami-core` marketplace, then install
-`agami-core` from the Plugins tab.
+**VS Code / Cursor** — the slash-command install form above is **CLI-only**; in the extension you
+install through the UI. Install the **Claude Code** extension, type `/plugin` in the chat to open the
+**Manage Plugins** dialog, paste `AgamiAI/agami-core` into the marketplace input and click **Add**, then
+switch to the **Plugins** tab and click **Install** on `agami-core`.
 
 Per-host walkthroughs: [docs/install/](docs/install/).
 
