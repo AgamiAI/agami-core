@@ -10,6 +10,19 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.4.3] — 2026-07-14
+
+Documentation-only release. No behavior changes; the executor and skills from 0.4.2 are unchanged.
+
+### Changed
+
+- **`agami-core` PyPI page is now a readable landing page.** Reframed
+  `packages/agami-core/README.md` (the PyPI `long_description`) to lead with the value proposition
+  and clarify the plugin-vs-`pip` audiences, and trimmed the deep HTTP-server internals down to a
+  summary plus links to `deploy/README.md` and `docs/`. Added `[project.urls]`
+  (Homepage/Repository/Documentation/Issues) so PyPI shows sidebar navigation. Publishing this
+  version is what refreshes the live PyPI page.
+
 ## [0.4.2] — 2026-07-14
 
 Onboarding hardening for the public launch — fixes to the first-run `/agami-connect` path — plus a
