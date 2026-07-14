@@ -22,6 +22,10 @@ The first time you open the Claude pane (Cmd+Shift+P → "Claude Code: Open"), i
 
 ## 3. Add the agami marketplace and install
 
+> **Note:** in the extension you install through the **Manage Plugins** dialog, not the command line.
+> The CLI's `/plugin marketplace add …` / `/plugin install …` commands don't run from the chat input
+> here — use the dialog below.
+
 In the Claude pane's chat input, type `/plugin`. This surfaces a **Manage Plugins** option — click it.
 
 The plugins dialog opens. From here:
