@@ -53,18 +53,18 @@ import execute_sql
 Module entry points:
 
 ```bash
-python -m mcp_harness           # the stdio MCP server (Claude Desktop)
-python -m execute_sql --sql …   # the local query executor
-python -m semantic_model.cli    # the semantic-model CLI (driven by the `sm` launcher)
-python -m mcp_http              # the networked HTTP MCP server (see below)
+python -m mcp_harness                        # the stdio MCP server (Claude Desktop)
+python -m execute_sql --sql-file query.sql   # the local query executor
+python -m semantic_model.cli                 # the semantic-model CLI (driven by the `sm` launcher)
+python -m mcp_http                           # the networked HTTP MCP server (see below)
 ```
 
 ## HTTP MCP server (`[server]`) — early access, in testing
 
 The `[server]` extra adds a networked MCP transport: the **same `TOOLS` surface** as the stdio
 server, but over HTTP with OAuth and a small admin console. It's the self-host shape of the hosted
-product — deploy it to your own host and a whole team connects their own Claude to one URL, still
-zero-egress.
+product — deploy it to your own host and a whole team connects their own Claude to one URL,
+zero-egress by default (enabling OIDC/SSO adds one outbound call to your identity provider).
 
 > 🧪 **Early access.** This team/server layer is usable today but newer than the local single-player
 > path — expect the occasional rough edge, and please report anything broken via a
