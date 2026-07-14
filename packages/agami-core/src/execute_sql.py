@@ -1248,6 +1248,35 @@ def execute_guarded(
     return result
 
 
+def _mask_note(
+    declared: tuple[str, ...], indices: tuple[int, ...], out_columns: list[str]
+) -> tuple[str, ...]:
+    """The ``applied[{mask}]`` receipt for a redaction — accurate about EVERY masked output position.
+
+    ``declared`` are the model's sensitive "table.column" refs the gate named (``MaskPlan.columns``);
+    ``indices`` are the redacted 0-based output positions; ``out_columns`` are the executor's actual
+    output labels (``result.columns``), which for a set operation come from its FIRST arm. A single
+    sensitive projection redacts exactly one position whose own label IS that sensitive column, so the
+    note is just its declared ref (the spec's success criterion 1 — e.g. ``("customers.ssn",)``).
+
+    A CROSS-POSITION set operation (e.g. ``SELECT ssn, name … UNION ALL SELECT name, ssn …``) redacts
+    a SECOND output position whose first-arm label is a non-sensitive name (``name``) — necessary,
+    because that merged output column carries a raw SSN in the second arm's rows. Naming that extra
+    position by its output label keeps the receipt honest: it reflects every redacted position, not
+    only the declared columns. A position is "already named by a declared sensitive column" iff its
+    output label case-folds to the bare column name of one of the ``declared`` refs; otherwise its
+    label is appended. This never DROPS a masked position (fail-safe for a receipt) and never renames
+    the single-column case (that position's label equals its declared column's bare name)."""
+    declared_bare = {d.rsplit(".", 1)[-1].lower() for d in declared}
+    note: list[str] = list(declared)
+    for i in sorted(indices):
+        if 0 <= i < len(out_columns):
+            label = out_columns[i]
+            if label.lower() not in declared_bare and label not in note:
+                note.append(label)
+    return tuple(note)
+
+
 def _apply_mask_plan(result: ExecResult, plan: MaskPlan) -> ExecResult:
     """Redact the sensitive OUTPUT columns of an executor result post-execution — the SINGLE shared
     masking point for EVERY executor (built-in ``_run_<db>`` and an injected ``ports.Executor``).
@@ -1255,7 +1284,11 @@ def _apply_mask_plan(result: ExecResult, plan: MaskPlan) -> ExecResult:
     and the redacted rows plus the masked column refs are returned in a NEW ``ExecResult`` (it is
     frozen). Runs on the already-row-capped rows, so it composes with the fetch bound rather than
     fighting it. An index outside a row's width simply doesn't match (fail-safe — the value isn't
-    there to leak); by construction an output index equals its result-column position, so this holds."""
+    there to leak); by construction an output index equals its result-column position, so this holds.
+
+    ``masked_columns`` is the ACCURATE receipt (``_mask_note``): the declared sensitive refs PLUS the
+    output label of any extra positionally-aligned position a set operation forced us to redact, so
+    the note reflects every masked output position, not only the declared columns (ACE-041 review)."""
     if not plan.indices:
         return result
     mask_set = set(plan.indices)
@@ -1266,7 +1299,7 @@ def _apply_mask_plan(result: ExecResult, plan: MaskPlan) -> ExecResult:
         columns=result.columns,
         rows=redacted_rows,
         truncated=result.truncated,
-        masked_columns=plan.columns,
+        masked_columns=_mask_note(plan.columns, plan.indices, result.columns),
     )
 
 

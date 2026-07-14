@@ -531,7 +531,17 @@ def _output_selects(node: "exp.Expression") -> list["exp.Select"]:
     the table-scope fix). Nested subquery / CTE SELECTs are excluded on purpose: their
     projections feed an enclosing query, not the final result, so a sensitive column a
     WHERE-subquery projects but the outer query only filters on is not exposed and must
-    not be refused."""
+    not be refused.
+
+    # ACE-041 known limitation (pre-existing, NOT introduced by ACE-041): because only these
+    # OUTPUT-bearing SELECTs are walked and the sensitive match is name-based with no alias/lineage
+    # tracking, a sensitive column RENAMED inside a derived-table / CTE body escapes both mask and
+    # refuse — the outer query projects the renamed alias, which no longer name-matches the sensitive
+    # column, and this function never descends into the body that produced it. Two leaks are pinned as
+    # xfail regressions in tests/test_ace041_masking.py (`WITH t AS (SELECT ssn AS s FROM customers)
+    # SELECT s FROM t` and `SELECT z FROM (SELECT ssn AS z FROM customers) q`); they xfail today and
+    # flip to xpass when a future alias-lineage fix lands. Closing this needs real projection lineage
+    # through subquery/CTE bodies (a follow-up spec), which is deliberately out of ACE-041's scope."""
     if isinstance(node, exp.Select):
         return [node]
     if isinstance(node, exp.SetOperation):  # base of Union / Intersect / Except
