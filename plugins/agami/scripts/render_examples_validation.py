@@ -39,8 +39,7 @@ VALID_STATES = {"unreviewed", "validated", "rejected"}
 def _validate_item(item: dict, idx: int) -> None:
     if not isinstance(item, dict):
         raise ValueError(f"item {idx}: must be an object")
-    if "n" not in item or not isinstance(item["n"], int) or item["n"] < 1:
-        raise ValueError(f"item {idx}: 'n' must be a positive integer")
+    # `n` is assigned by render() (a stable global 1..N), not required from the caller.
     if "question" not in item or not isinstance(item["question"], str):
         raise ValueError(f"item {idx}: 'question' (string) is required")
     state = item.get("state", "unreviewed")
@@ -68,6 +67,16 @@ def render(
 ) -> str:
     if not isinstance(items, list):
         raise ValueError("items must be a list")
+    # `n` is the example's identity end-to-end: the interaction/DOM key, the `#N` label, the
+    # reference emitted in the "Generate feedback" block (`edit N` / `note N`), AND the apply
+    # lookup (the skill maps `N` -> that example's question). So it MUST be unique + stable per
+    # dashboard. `sm seed-validate` numbers seeds 1..k PER AREA, so a dashboard assembled from
+    # several areas collides (two `#1`s) — clicking Edit on one card then opened EVERY card that
+    # shared that `n`, and the feedback block was ambiguous. The renderer is the assembly
+    # chokepoint: renumber to a single global 1..N in render order so every consumer agrees.
+    for i, it in enumerate(items, 1):
+        if isinstance(it, dict):
+            it["n"] = i
     for i, it in enumerate(items):
         _validate_item(it, i)
 
@@ -120,6 +129,14 @@ def main() -> int:
         profile=args.profile,
         items=items,
     ))
+    # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
+    # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
+    # showed — regardless of the per-area numbers the caller wrote. Best-effort.
+    try:
+        with open(os.path.expanduser(args.items_file), "w") as f:
+            json.dump(items, f)
+    except OSError:
+        pass
     print(f"Wrote {out_path} ({len(items)} example{'s' if len(items) != 1 else ''})")
     return 0
 

@@ -10,6 +10,21 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.4.4] — 2026-07-14
+
+Onboarding fix for the examples-validation (NL→SQL) dashboard.
+
+### Fixed
+
+- **Examples-validation dashboard: Edit/Add-note no longer fires on every card.** Each example's
+  interaction state was keyed on its display number `n`, which `sm seed-validate` assigns **per
+  subject area** (1..k) — so a dashboard combining multiple areas carried duplicate `n`, and clicking
+  **Edit** (or **Add note**) on one card opened every card that shared that number. It also made the
+  "Generate feedback" block ambiguous (`edit N` could match more than one example). The renderer now
+  assigns a **stable global `1..N`** in render order — the single numbering shared by the interaction
+  key, the `#N` label, the feedback block, and the apply lookup — and normalizes the items file to
+  match, so `edit N` resolves unambiguously.
+
 ## [0.4.3] — 2026-07-14
 
 Documentation-only release. No behavior changes; the executor and skills from 0.4.2 are unchanged.
