@@ -1,4 +1,9 @@
-
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="plugins/agami/shared/agami-logo-light.svg">
+    <img src="plugins/agami/shared/agami-logo-dark.svg" alt="agami" width="240">
+  </picture>
+</p>
 
 **The trust layer between AI and your data. Local. Private. Yours.**
 
