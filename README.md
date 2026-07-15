@@ -1,13 +1,19 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="plugins/agami/shared/agami-logo-light.svg">
-    <img src="plugins/agami/shared/agami-logo-dark.svg" alt="agami" width="240">
+    <img src="plugins/agami/shared/agami-logo-dark.svg" alt="Agami logo" width="240">
   </picture>
 </p>
 
 **The trust layer between AI and your data. Local. Private. Yours.**
 
 **agami-core** — the fair-code core of [Agami](https://agami.ai).
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-fair--code-blue.svg" alt="License: fair-code"></a>
+  <a href="https://github.com/AgamiAI/agami-core/releases"><img src="https://img.shields.io/github/v/tag/AgamiAI/agami-core?label=version&sort=semver&color=blue" alt="Version"></a>
+  <a href="#get-started-in-2-minutes"><img src="https://img.shields.io/badge/try%20the%20sample-no%20database%20needed-brightgreen" alt="Try the sample"></a>
+</p>
 
 
 
