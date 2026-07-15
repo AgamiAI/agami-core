@@ -5,9 +5,7 @@
   </picture>
 </p>
 
-**The trust layer between AI and your data. Local. Private. Yours.**
-
-**agami-core** — the fair-code core of [Agami](https://agami.ai).
+<p align="center"><strong>The trust layer between AI and your data. Local. Private. Yours.</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-fair--code-blue.svg" alt="License: fair-code"></a>
