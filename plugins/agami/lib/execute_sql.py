@@ -142,15 +142,20 @@ def _env_token(profile: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in profile).upper()
 
 
-def _env_datasource_dsn(profile: str) -> str | None:
-    """A warehouse DSN supplied via the environment for `profile`, or None.
+def _env_datasource_dsn(profile: str, org_id: str = "local") -> str | None:
+    """A warehouse DSN supplied via the environment for `(org_id, profile)`, or None.
 
-    Two forms, checked in order:
-      1. DATASOURCE_URL__<PROFILE> — per-datasource. <PROFILE> is the profile id
-         upper-cased with every non-alphanumeric char folded to `_` (so `sales-pg`
-         → DATASOURCE_URL__SALES_PG). Lets a deployment carry heterogeneous
-         warehouses side by side, one var each.
-      2. DATASOURCE_URL — the single-datasource default.
+    Env var forms, checked in order:
+      1. <ORG>_DATASOURCE_URL__<PROFILE> — per-(tenant, datasource). Both tokens are the
+         id upper-cased with every non-alphanumeric char folded to `_` (so org `acme`,
+         profile `sales-pg` → ACME_DATASOURCE_URL__SALES_PG). This is how a multi-tenant
+         deployment gives each tenant its own warehouse for a same-named datasource.
+      2. <ORG>_DATASOURCE_URL — the org's single-datasource default.
+      3. DATASOURCE_URL__<PROFILE>, then 4. DATASOURCE_URL — the ORG-LESS forms, tried
+         ONLY for org `local` (the single-tenant default). A NAMED tenant (org != 'local')
+         never falls back to these: a forgotten tenant var must not silently point that
+         tenant at the shared warehouse. It returns None here, and the caller surfaces the
+         usual "no credentials" error.
 
     This is the container / self-host credential channel (cf. how the model reads
     from Postgres when configured, else the file): env carries no file mode and is
@@ -166,23 +171,30 @@ def _env_datasource_dsn(profile: str) -> str | None:
         trailing newline, which would otherwise mis-parse), and an empty-or-whitespace-only
         value is treated as unset (falls through to the next source) — set the var to a real
         DSN to take effect; don't set it to "" expecting to *disable* one.
-      - The token folds every non-alphanumeric char to `_`, so profiles differing only in
-        punctuation (`sales-pg` vs `sales.pg`) map to the same var — name profiles distinctly.
+      - Tokens fold every non-alphanumeric char to `_`, so ids differing only in
+        punctuation (`sales-pg` vs `sales.pg`) map to the same var — name orgs/profiles
+        distinctly.
     """
-    token = _env_token(profile)
-    for name in (f"DATASOURCE_URL__{token}", "DATASOURCE_URL"):
+    org_token, profile_token = _env_token(org_id), _env_token(profile)
+    names = [f"{org_token}_DATASOURCE_URL__{profile_token}", f"{org_token}_DATASOURCE_URL"]
+    if org_id == "local":
+        # Single-tenant default keeps the historical org-less vars; a named tenant does NOT.
+        names += [f"DATASOURCE_URL__{profile_token}", "DATASOURCE_URL"]
+    for name in names:
         val = os.environ.get(name)
         if val and val.strip():
             return val.strip()  # match the file path's per-field .strip()
     return None
 
 
-def _load_credentials(profile: str) -> dict[str, str]:
-    """Resolve credentials for `profile`, env-first then the file.
+def _load_credentials(profile: str, org_id: str = "local") -> dict[str, str]:
+    """Resolve credentials for `(org_id, profile)`, env-first then the file.
 
     Source order:
-      1. A DSN from the environment (DATASOURCE_URL[__<PROFILE>]) — the self-host
-         channel; parsed by `_parse_dsn`, no file read, no chmod gate.
+      1. A DSN from the environment (<ORG>_DATASOURCE_URL[__<PROFILE>], and for org 'local'
+         also the org-less DATASOURCE_URL forms) — the self-host / multi-tenant channel;
+         parsed by `_parse_dsn`, no file read, no chmod gate. See `_env_datasource_dsn` for
+         the exact precedence + the fail-closed rule for named tenants.
       2. <artifacts_dir>/local/credentials (the local-plugin default), where within
          the selected profile a `url = ...` DSN (merged with per-field overrides) or
          per-field host / port / user / password / database / type / sslmode is read.
@@ -191,7 +203,7 @@ def _load_credentials(profile: str) -> dict[str, str]:
     (never on a command line) — is unchanged, and is skipped only when a deployment
     opts into the env var (and so has no file to protect).
     """
-    dsn = _env_datasource_dsn(profile)
+    dsn = _env_datasource_dsn(profile, org_id)
     if dsn:
         return _parse_dsn(dsn)
 
@@ -1120,6 +1132,7 @@ def execute_guarded(
     area: str | None,
     *,
     executor: Executor,
+    org_id: str | None = None,
     no_safety: bool = False,
 ) -> ExecResult:
     """The un-bypassable guarded envelope — the single execution chokepoint (REQ-002/REQ-014).
@@ -1142,7 +1155,7 @@ def execute_guarded(
         sql, rc = _model_safety(sql, profile, area)
         if rc is not None:
             raise GuardRefused(None, code=rc)
-    creds = _load_credentials(profile)
+    creds = _load_credentials(profile, org_id or "local")
     return executor.execute(sql, creds, profile=profile)
 
 

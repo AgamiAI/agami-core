@@ -10,6 +10,7 @@ Run by the deploy entrypoint and re-run on restart to pick up an edited model.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,7 +19,14 @@ import model_store
 from store import Store
 
 
-def deploy_one(store: Store, datasource: str, profile_dir: Path) -> None:
+def _default_org() -> str:
+    """The org to deploy under when the caller names none. A CLI has no request, so this is exactly
+    what the server's read path falls back to (AGAMI_ORG_ID / 'local') — the two MUST agree, or the
+    model is written under one org and read under another and the server sees no model."""
+    return os.environ.get("AGAMI_ORG_ID") or "local"
+
+
+def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | None = None) -> None:
     """Load one datasource's per-datasource model (org + examples + ORGANIZATION.md + version) from
     `profile_dir` into the store. The install-global `USER_MEMORY.md` is handled once per run, separately
     (`_deploy_user_memory`) — it lives at the artifacts ROOT, not per profile.
@@ -31,6 +39,7 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path) -> None:
     from semantic_model import loader
     from semantic_model.snapshot import newest_version
 
+    org_id = org_id if org_id is not None else _default_org()
     # --- read + parse everything first (where malformed input fails, before any write) ---
     org = loader.load_organization(profile_dir)
     # Examples live per subject area (prompt_examples/<area>/examples.yaml); tag each with its area so the
@@ -50,37 +59,41 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path) -> None:
     version = newest_version(profile_dir) or "deployed"
 
     # --- then write (version last, so its presence marks a completed deploy) ---
-    model_store.write_organization(store, datasource, org)
+    model_store.write_organization(store, datasource, org, org_id=org_id)
     # Always write examples (even []) so a redeploy after REMOVING examples actually clears the stale rows —
     # write_examples is clear-then-insert, so an empty list replaces the datasource's examples with none.
-    model_store.write_examples(store, datasource, examples)
-    model_store.write_memory(store, datasource, organization=org_text)  # per-datasource only
-    model_store.write_model_version(store, datasource, version)
+    model_store.write_examples(store, datasource, examples, org_id=org_id)
+    model_store.write_memory(
+        store, datasource, organization=org_text, org_id=org_id
+    )  # per-datasource
+    model_store.write_model_version(store, datasource, version, org_id=org_id)
     store.commit()
 
 
-def _deploy_user_memory(store: Store, artifacts_dir: Path) -> None:
-    """USER_MEMORY.md is **install-global** (one shared row, keyed by the global sentinel inside
+def _deploy_user_memory(store: Store, artifacts_dir: Path, org_id: str | None = None) -> None:
+    """USER_MEMORY.md is **cross-datasource** (one row per org, keyed by the global sentinel inside
     write_memory) and lives at the artifacts ROOT — not per profile — matching how the server reads it
     (`tools._domain_memory` → `artifacts/USER_MEMORY.md`). Written once per run; absent ⇒ nothing to do."""
     f = artifacts_dir / "USER_MEMORY.md"
     if f.exists():
-        model_store.write_memory(store, "", user=f.read_text())  # datasource ignored for the global user row
+        org_id = org_id if org_id is not None else _default_org()
+        model_store.write_memory(store, "", user=f.read_text(), org_id=org_id)  # global user row
         store.commit()
 
 
-def deploy_models(store: Store, artifacts_dir: Path) -> list[str]:
+def deploy_models(store: Store, artifacts_dir: Path, org_id: str | None = None) -> list[str]:
     """Load every datasource model under `artifacts_dir` (a *directory* with an `org.yaml`) into the store.
     Returns the datasources loaded. The `local/` dir (gitignored secrets/state) and any non-directory or
     org.yaml-less entry are skipped — `local/` explicitly, so a stray `local/org.yaml` can't deploy from the
     secrets dir."""
+    org_id = org_id if org_id is not None else _default_org()
     loaded: list[str] = []
     for prof in sorted(
         p
         for p in artifacts_dir.iterdir()
         if p.is_dir() and p.name != agami_paths.LOCAL_SUBDIR and (p / "org.yaml").exists()
     ):
-        deploy_one(store, prof.name, prof)
+        deploy_one(store, prof.name, prof, org_id=org_id)
         loaded.append(prof.name)
     return loaded
 

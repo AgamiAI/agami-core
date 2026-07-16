@@ -28,6 +28,7 @@ from ports import Adapters, Org  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 BASE = "https://demo.example.com"
+AUTH = {"Authorization": "Bearer demo-token"}  # presence auth: any non-empty bearer authenticates
 PRODUCT_TOOLS = {"list_datasources", "get_datasource_schema", "get_prompt_examples", "execute_sql"}
 
 _DEMO = {
@@ -181,6 +182,44 @@ def test_create_app_uses_the_passed_adapters(base_url):
     kwargs = _auth_middleware_kwargs(mcp_http.create_app(adapters=adapters))
     assert kwargs["resolver"] is resolver  # the passed adapters are used at the composition root
     assert kwargs["auth"] is auth
+
+
+# --- a resolver may refuse -------------------------------------------------
+
+
+class _RefusingResolver:
+    """An OrgResolver that cannot place this caller — e.g. a multi-tenant one handed a principal with no
+    membership. It must not have to choose between inventing a default org and blowing up."""
+
+    def resolve_org(self, ctx=None) -> Org:
+        raise PermissionError("principal belongs to no org")
+
+
+def test_a_refusing_resolver_gives_403_not_500(base_url):
+    # Authentication has already passed by the time the resolver runs, so the refusal is "you are who you
+    # say, but you have no org" — 403. An uncaught raise would be a 500 (and leak a traceback under debug).
+    adapters = Adapters(
+        activity_sink=FileActivitySink(),
+        org_resolver=_RefusingResolver(),
+        auth_provider=PresenceAuthProvider(),
+        governance=WarnOnlyGovernancePolicy(),
+    )
+    c = TestClient(mcp_http.create_app(adapters=adapters))
+    r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=AUTH)
+    assert r.status_code == 403
+
+
+def test_the_oss_resolver_never_refuses(base_url):
+    # The refusal path is inert single-tenant: SingleTenantOrgResolver returns its one org unconditionally,
+    # so a plain deploy never sees a 403 from it. `with` runs the lifespan — this request gets PAST the
+    # resolver into the MCP session manager, which a bare TestClient never starts.
+    with TestClient(mcp_http.create_app()) as c:
+        r = c.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={**AUTH, "Accept": "application/json, text/event-stream"},
+        )
+    assert r.status_code == 200
 
 
 # --- backwards-compat: build_app() is a thin create_app() wrapper ---------

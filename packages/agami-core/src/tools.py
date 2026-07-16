@@ -215,7 +215,7 @@ def _load_org(profile: str):
         from model_store import load_organization as _load_db
 
         try:
-            org = _load_db(store, profile)
+            org = _load_db(store, profile, org_id=_current_org_id())
         finally:
             store.close()
         if org is None:
@@ -261,7 +261,7 @@ def _model_version(profile: str) -> str | None:
         from model_store import newest_model_version
 
         try:
-            return newest_model_version(store, profile)
+            return newest_model_version(store, profile, org_id=_current_org_id())
         except Exception:
             return None
         finally:
@@ -283,6 +283,11 @@ def _current_org_id() -> str:
     """The org id to scope this process's model cache by: the request's resolved org when the HTTP server
     set it (per-request under a multi-tenant resolver), else AGAMI_ORG_ID / 'local' (single-tenant / stdio)."""
     return _current_org_ctx.get() or os.environ.get("AGAMI_ORG_ID") or "local"
+
+
+# Public alias: a consumer's tool handler needs to know the org its call resolved to (to scope its own
+# store), and the request never reaches the handler — only this contextvar does.
+current_org_id = _current_org_id
 
 
 # Per-process semantic-model cache (ACE-045). The long-lived server loads the whole model 2-3x per query
@@ -334,7 +339,7 @@ def _domain_memory(profile: str) -> tuple[str, str | None]:
         from model_store import load_memory
 
         try:
-            mem = load_memory(store, profile)
+            mem = load_memory(store, profile, org_id=_current_org_id())
         finally:
             store.close()
         return mem.get("organization") or "", mem.get("user")
@@ -375,7 +380,8 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
         try:
             from model_store import list_datasources, model_table_counts
 
-            counts = model_table_counts(store)  # one grouped query, not one COUNT per datasource
+            org_id = _current_org_id()
+            counts = model_table_counts(store, org_id=org_id)  # one grouped query, not per-datasource
             out = [
                 {
                     "datasource": ds,
@@ -384,7 +390,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                     "model_present": True,
                     "is_active": ds == active,
                 }
-                for ds in list_datasources(store)
+                for ds in list_datasources(store, org_id=org_id)
                 if ds  # defensive: only real, named datasources (never an empty name)
             ]
         finally:
@@ -812,7 +818,12 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
         top_k = 10 if top_k is None else int(top_k)
         try:
             examples = select_examples(
-                store, profile, query=args.get("query"), area=args.get("area"), top_k=top_k
+                store,
+                profile,
+                query=args.get("query"),
+                area=args.get("area"),
+                top_k=top_k,
+                org_id=_current_org_id(),
             )
         finally:
             store.close()
@@ -967,7 +978,9 @@ def _run_in_process(
     # worker thread, so the set is isolated to this call.
     cap_token = execute_sql._max_rows_override.set(max_rows)
     try:
-        result = execute_sql.execute_guarded(sql, profile, area, executor=executor)
+        result = execute_sql.execute_guarded(
+            sql, profile, area, executor=executor, org_id=_current_org_id()
+        )
     except execute_sql.GuardRefused as refusal:
         # A read-only refusal (envelope present) is already caught by tool_execute_sql's upstream
         # check_read_only fast-fail, so in practice only the model-safety branch (envelope None) is
@@ -1146,6 +1159,7 @@ def _record_query(rec: dict[str, Any]) -> None:
         from contracts import QueryExecutionRecord
         from model_store import DbActivitySink
 
+        rec.setdefault("org_id", _current_org_id())  # stamp the calling tenant onto the log row
         DbActivitySink(store).record_query_execution(QueryExecutionRecord(**rec))
     except Exception:
         pass  # best-effort: never fail the query because logging failed
@@ -1217,6 +1231,7 @@ def _record_tool_call(rec: dict[str, Any]) -> None:
             from contracts import ToolCallRecord
             from model_store import DbActivitySink
 
+            rec.setdefault("org_id", _current_org_id())  # stamp the calling tenant onto the log row
             DbActivitySink(store).record_tool_call(ToolCallRecord(**rec))
         finally:
             store.close()

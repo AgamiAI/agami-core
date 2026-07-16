@@ -7,12 +7,14 @@
 CREATE TABLE query_executions (
     id         TEXT PRIMARY KEY,   -- minted by the server per query at runtime
     ts         TEXT NOT NULL,
+    org_id     TEXT NOT NULL DEFAULT 'local',   -- the tenant this query ran for
     datasource TEXT,
     question   TEXT,
     sql        TEXT NOT NULL,
     row_count  INTEGER,
     source     TEXT
 );
+CREATE INDEX idx_query_executions_org ON query_executions (org_id);
 
 CREATE TABLE feedback (
     id         TEXT PRIMARY KEY,
