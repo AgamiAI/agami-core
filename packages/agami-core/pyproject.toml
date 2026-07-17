@@ -52,7 +52,15 @@ package-dir = { "" = "src" }
 # Flat top-level modules (not under a parent package) — listed explicitly so the import
 # names stay flat regardless of disk layout.
 py-modules = ["agami_paths", "async_offload", "execute_sql", "sql_guard", "mcp_harness", "mcp_http", "tools", "ports", "contracts", "oss_adapters", "store", "model_store", "model_deploy", "deploy_preflight", "oauth_server", "oidc", "passwords", "user_store", "admin", "ui", "onboarding"]
-packages = ["semantic_model"]
+# `static` (brand assets served at /static) and `migrations` (the core schema) are DATA, not import
+# targets — but both must land NEXT TO the flat modules in site-packages, because mcp_http and store
+# resolve them as `Path(__file__).parent / …`. Shipping them as packages with their files as
+# package-data is what puts them there. Omit either and the installed wheel breaks: a missing `static`
+# raises "Directory does not exist" when building the app; a missing `migrations` is worse — it globs
+# to nothing, so the server would boot on an empty schema (now guarded in store.run_migrations).
+packages = ["semantic_model", "static", "migrations"]
 
 [tool.setuptools.package-data]
 semantic_model = ["requirements.txt"]
+static = ["**/*"]
+migrations = ["**/*"]
