@@ -10,6 +10,70 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.4.4] — 2026-07-14
+
+Onboarding fix for the examples-validation (NL→SQL) dashboard.
+
+### Fixed
+
+- **Examples-validation dashboard: Edit/Add-note no longer fires on every card.** Each example's
+  interaction state was keyed on its display number `n`, which `sm seed-validate` assigns **per
+  subject area** (1..k) — so a dashboard combining multiple areas carried duplicate `n`, and clicking
+  **Edit** (or **Add note**) on one card opened every card that shared that number. It also made the
+  "Generate feedback" block ambiguous (`edit N` could match more than one example). The renderer now
+  assigns a **stable global `1..N`** in render order — the single numbering shared by the interaction
+  key, the `#N` label, the feedback block, and the apply lookup — and normalizes the items file to
+  match, so `edit N` resolves unambiguously.
+
+## [0.4.3] — 2026-07-14
+
+Documentation-only release. No behavior changes; the executor and skills from 0.4.2 are unchanged.
+
+### Changed
+
+- **`agami-core` PyPI page is now a readable landing page.** Reframed
+  `packages/agami-core/README.md` (the PyPI `long_description`) to lead with the value proposition
+  and clarify the plugin-vs-`pip` audiences, and trimmed the deep HTTP-server internals down to a
+  summary plus links to `deploy/README.md` and `docs/`. Added `[project.urls]`
+  (Homepage/Repository/Documentation/Issues) so PyPI shows sidebar navigation. Publishing this
+  version is what refreshes the live PyPI page.
+
+## [0.4.2] — 2026-07-14
+
+Onboarding hardening for the public launch — fixes to the first-run `/agami-connect` path — plus a
+documentation pass. No breaking changes; the executor internals from 0.4.1 are unchanged.
+
+### Fixed
+
+- **Seed validation no longer rejects every seed example.** The zero-row validation probe wrapped each
+  seed as `SELECT * FROM (<sql>) WHERE 1=0`; its own `SELECT *` tripped the `SELECT *` ban and every seed
+  was rejected regardless of its SQL. The probe now projects `SELECT 1` — it still parses and plans the
+  inner query, but no longer trips the ban.
+- **DuckDB readiness now requires `pytz`.** DuckDB needs `pytz` to materialize `TIMESTAMP WITH TIME ZONE`
+  values; the driver probe only checked `import duckdb`, so an interpreter missing `pytz` scored as ready
+  and then failed at query time on any `timestamptz` column. `pytz` is now part of the DuckDB probe.
+- **Approve operations auto-stamp their timestamp.** An approve op without a `signed_off_at` recorded
+  `null` and the validator rejected the whole batch. The timestamp is now stamped at the CLI boundary
+  (where the clock is available), so sign-off batches apply cleanly.
+
+### Added
+
+- **Headless sign-off (`sm approve-queue`).** A no-browser path that reads the pending review queue
+  (Rule 1 + Rule 2), builds a self-stamped approve op per item, and applies it (`--kind` to narrow,
+  `--dry-run` to preview) — so onboarding can complete without opening the review dashboard.
+- **The no-DB sample clears its own pre-seed gate.** The sample's silent build auto-approves its pre-seed
+  queue as `signer=system` before seeding; real databases keep the human sign-off gate.
+
+### Docs
+
+- **Launch positioning.** The self-hosted team server (`/agami-deploy`) is labeled **Early access (in
+  testing)** throughout; the free-vs-paid copy leads with the value the hosted cloud adds.
+- **README.** A **Databases supported** section (all engines + how each executes), VS Code/Cursor install
+  clarified as Manage-Plugins-UI (not the CLI slash-command form), and the sample-query copy made generic.
+- **Guides.** Onboarding docs (`duckdb pytz` install, explicit render flags, the headless sign-off path),
+  a plain-English trust-layer intro, an `/agami-serve` (Claude Desktop) usage section, and an accurate
+  `migrations/core` README (the self-hosted server schema).
+
 ## [0.4.1] — 2026-07-12
 
 The self-hosted HTTP server now runs SQL **in-process** by default — no per-query subprocess fork,

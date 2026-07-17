@@ -65,6 +65,28 @@ def test_failing_migration_raises_and_is_not_recorded(tmp_path):
     assert not leaked  # and no partial DDL leaked from the half-run script
 
 
+def test_missing_core_migrations_root_raises(tmp_path):
+    # A missing core root globs to NOTHING, so the server would boot on an empty schema with no error
+    # at all. Fail loudly instead — this is the silent-empty-schema mode the in-package path removes.
+    s = Store.connect("sqlite://" + str(tmp_path / "db.sqlite"))
+    with pytest.raises(ValueError, match="core migration root is not a directory"):
+        s.run_migrations(tmp_path / "does_not_exist")
+    tables = {r["name"] for r in s.query("SELECT name FROM sqlite_master WHERE type='table'")}
+    s.close()
+    assert "schema_migrations" not in tables  # guard runs before any DDL
+
+
+def test_default_core_migrations_root_lives_inside_the_package(tmp_path):
+    # The default root must resolve NEXT TO store.py so it works identically from an installed wheel
+    # and from a checkout. Resolving out of the tree (e.g. parents[3]) still passes in a checkout but
+    # silently yields nothing once installed — exactly the failure this pins down.
+    import store as store_mod
+
+    pkg_dir = Path(store_mod.__file__).resolve().parent
+    assert store_mod.MIGRATIONS_DIR.is_relative_to(pkg_dir)  # in the package, not the repo tree
+    assert list(store_mod.MIGRATIONS_DIR.glob("*.sql"))  # and it actually ships migrations
+
+
 # --- the advisory lock (dialect-branch, no real Postgres needed) -------------
 
 

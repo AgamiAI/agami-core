@@ -1,10 +1,29 @@
 # The trust layer (in depth)
 
 Most AI data agents quietly pick a join, quietly pick a definition of "revenue",
-and quietly return a number. `agami` makes every one of those decisions
-auditable — with one knob per workspace and one queue per curator.
+and quietly return a number. agami makes every one of those decisions **auditable**:
+each one is either derived from something your database already guarantees, or
+approved by a named person — and every answer carries a receipt showing which.
 
 This page is the deep dive. For the summary, see the [README](../README.md#the-trust-layer).
+
+## How it works, in three moves
+
+1. **Every join, metric, and entity carries a trust block** — a confidence label and a
+   review state (detailed below). Things the database vouches for (declared foreign keys,
+   self-evident structural column names) auto-approve; anything the model *inferred*
+   stays `unreviewed` until a human signs it off.
+2. **You sign off what needs eyes, in one queue.** The Review tab lists the unreviewed
+   entries. **Metrics** must be signed off before the runtime treats them as truth
+   (Rule 1); **joins and entities** are usable-but-flagged until confirmed (Rule 2).
+3. **Every answer ships a receipt** — the exact SQL, the joins and metrics it used with
+   their review state, and the model snapshot it pinned. If any unreviewed entry was
+   used, the receipt says so, plainly.
+
+There is **no threshold to tune.** The trust layer is driven by review *state*
+(`unreviewed` / `approved` / `rejected` / `stale`), not a numeric score you configure —
+so "governed" means a person or the database vouched for it, not "the confidence was
+above 0.8".
 
 ## Every entry carries a confidence + a review state
 

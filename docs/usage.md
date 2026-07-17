@@ -206,6 +206,33 @@ You: export this
 
 Writes the full result (no row cap) to `<artifacts_dir>/local/exports/<ts>.csv`.
 
+### Use agami from the Claude Desktop app (`/agami-serve`)
+
+Everything above works inside Claude Code. To ask the same questions from the
+**Claude Desktop app** (or any client that reads a `claude_desktop_config.json`),
+wire up the local MCP server once:
+
+```
+You: /agami-serve
+# or: "set up agami for Claude Desktop"
+```
+
+It auto-detects the Python interpreter that has your DB driver, installs the
+agami-core package into it (so the wiring survives plugin updates), and merges an
+`agami` entry into your Claude Desktop config — backing up the previous config and
+preserving every other key. Then:
+
+1. **Fully quit** Claude Desktop (Cmd+Q on macOS — not just closing the window) and reopen it.
+2. Ask *"what datasources does agami see?"* — it should call `list_datasources`.
+
+The local server is the **mirror of the hosted Agami connector**: the same tools
+(`list_datasources`, `get_datasource_schema`, `get_prompt_examples`, `execute_sql`),
+backed by your local model and local execution. It's stdio-only, read-only, and makes
+no network call — nothing leaves your machine. Requires `/agami-connect` to have run
+first (it needs credentials + a semantic model). Re-running `/agami-serve` is safe and
+idempotent — do it after a plugin update to refresh the wiring. Full details, including
+where to find the log if the server doesn't appear: [docs/mcp-server.md](mcp-server.md).
+
 ### Reconcile against a legacy dashboard
 
 When you've inherited a number from a dashboard or a spreadsheet and want to verify
