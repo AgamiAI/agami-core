@@ -292,7 +292,11 @@ async def _auth_server(request: Request) -> JSONResponse:
 def build_server(registry: dict | None = None, extra_instructions: str | None = None):
     """A low-level MCP Server whose tool surface IS the given registry — list_tools / call_tool read
     from it, so HTTP advertises exactly what stdio does (no duplicate defs). Defaults to the shared
-    `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools)."""
+    `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools).
+
+    `extra_instructions` is APPENDED to `SERVER_INSTRUCTIONS` (never replaces it) and surfaced to the
+    model in the MCP `initialize` result — append-only so a consumer can add guidance but can't drop
+    the base protocol's safety directives (e.g. the sensitive-column output rule). None = no-op."""
     import mcp.types as mt
     from mcp.server.lowlevel import Server
 
@@ -366,7 +370,10 @@ def create_app(
 
     Reusing an existing tool name in `extra_tools` overrides that tool in this app's registry copy —
     intentional at the composition root (the caller opts in explicitly). `tools.register` is the
-    guarded path that refuses a duplicate name."""
+    guarded path that refuses a duplicate name.
+
+    `extra_instructions` is APPENDED to the base MCP instructions and surfaced to the model via the
+    MCP `initialize` result (never replaces the base protocol — see `build_server`). None = no-op."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
