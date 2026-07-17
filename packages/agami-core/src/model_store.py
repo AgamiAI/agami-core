@@ -34,10 +34,10 @@ _MODEL_TABLES = (
     "datasource_model",
 )
 
-# The org a row belongs to when nobody says otherwise — what SingleTenantOrgResolver resolves to and
-# what 012_org_scope.sql backfills, so a single-tenant caller reads and writes exactly the rows it
-# always did. A caller that FORGETS to pass an org lands here too: an org no real tenant reads, so the
-# bug loses a row rather than leaking one.
+# The org a row belongs to when nobody says otherwise — what SingleTenantOrgResolver resolves to, and
+# the DEFAULT baked into every serving table's `org_id` column, so a single-tenant caller reads and
+# writes exactly the rows it always did. A caller that FORGETS to pass an org lands here too: an org
+# no real tenant reads, so the bug loses a row rather than leaking one.
 DEFAULT_ORG = "local"
 
 

@@ -55,7 +55,7 @@ CREATE TABLE model_table (
 
 -- NOTE: `area` is part of the PK and is NOT NULL. Postgres forbids NULL in any PK column (SQLite
 -- would allow it), so org-level (cross-subject-area) metrics/entities/relationships are NOT stored
--- as area-NULL rows here — they ride inside organization.doc and are rebuilt from there. These
+-- as area-NULL rows here — they ride inside datasource_model.doc and are rebuilt from there. These
 -- tables hold per-subject-area objects only (area = the subject-area name).
 CREATE TABLE metric (
     org_id     TEXT NOT NULL DEFAULT 'local',
@@ -77,7 +77,7 @@ CREATE TABLE entity (
 );
 
 -- WITHIN-subject-area relationships only. Cross-subject-area / cross-datasource relationships are
--- org-level (Organization.cross_subject_area_relationships) and ride inside organization.doc — they
+-- org-level (Organization.cross_subject_area_relationships) and ride inside datasource_model.doc — they
 -- are rebuilt from there, not stored as rows here (which would need a null area, see the NOTE above).
 CREATE TABLE relationship (
     org_id     TEXT NOT NULL DEFAULT 'local',
