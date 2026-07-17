@@ -1,5 +1,11 @@
 # Self-hosting agami (local → team)
 
+> ### 🧪 Early access (in testing)
+> The self-hosted team server is **available to use today**, but it's newer than the local single-player
+> path and we're still ironing it out with early users — expect the occasional rough edge. If you hit
+> one (or have feedback), please [**open a GitHub issue**](https://github.com/AgamiAI/agami-core/issues).
+> The local experience is the stable, generally-available path; this is the team layer on top of it.
+
 Stand up the agami MCP server on your own host so your team can query your semantic model in Claude. We
 ship Docker; you deploy it to your own VM/cloud. The default is **secure by construction**: Caddy gives you
 automatic HTTPS and is the *only* public service — agami and Postgres stay on the internal network with no

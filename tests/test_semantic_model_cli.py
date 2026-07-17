@@ -694,3 +694,73 @@ def test_suggest_units_finds_money_columns(tmp_path):
     assert ("orders", "total") in names            # numeric + money-named
     assert ("order_items", "qty") not in names      # a count, not money
     assert all(c["column"] != "id" for c in cols)   # ids excluded
+
+
+def _model_with_pending(root: Path) -> None:
+    """Like `_model`, but the relationship is unreviewed and a proposed metric is added — so
+    the review queue is non-empty (a Rule-1 metric + a Rule-2 join) for approve-queue tests."""
+    _model(root)
+    (root / "subject_areas" / "s" / "metrics").mkdir(parents=True, exist_ok=True)
+    (root / "subject_areas" / "s" / "metrics" / "order_count.yaml").write_text(yaml.safe_dump({
+        "name": "order_count", "calculation": "count of orders",
+        "bindings": {"PostgreSQL": "COUNT(*)"}, "source_tables": ["orders"],
+        "confidence": "proposed", "review_state": "unreviewed"}))
+    (root / "subject_areas" / "s" / "relationships.yaml").write_text(yaml.safe_dump({
+        "relationships": [{"from_table": "order_items", "from_column": "order_id",
+                           "to_table": "orders", "to_column": "id", "relationship": "many_to_one",
+                           "confidence": "inferred", "review_state": "unreviewed"}]}))
+
+
+def test_approve_queue_signs_off_all_pending(tmp_path):
+    """`sm approve-queue` turns the whole pending queue into self-stamped approve ops and applies
+    them — the no-browser sign-off path. Queue → 0, gate's preseed_count → 0, sign-off recorded."""
+    _model_with_pending(tmp_path)
+    rc, out = _run(["approve-queue", str(tmp_path),
+                    "--signer", "you@example.com", "--role", "owner"])
+    assert rc == 0, out
+    assert json.loads(out)["validated"] is True
+
+    assert json.loads(_run(["review-queue", str(tmp_path)])[1])["counts"]["total"] == 0
+    assert json.loads(_run(["curate-gate", str(tmp_path)])[1])["preseed_count"] == 0
+
+    mm = yaml.safe_load((tmp_path / "subject_areas" / "s" / "metrics" / "order_count.yaml").read_text())
+    assert mm["review_state"] == "approved"
+    assert mm["signed_off_at"] and mm["signed_off_by"] == "you@example.com" and mm["signed_off_role"] == "owner"
+
+
+def test_approve_queue_requires_a_signer(tmp_path):
+    """`--signer`/`--role` are required: curate only stamps signed_off_* when a signer is
+    present, so a signer-less approve would record an incomplete trust block and the whole
+    batch would revert at validation. argparse must reject the call up front instead."""
+    _model_with_pending(tmp_path)
+    with pytest.raises(SystemExit):  # argparse errors out on the missing required flags
+        _run(["approve-queue", str(tmp_path)])
+
+
+def test_approve_queue_kind_filter_and_dry_run(tmp_path):
+    """`--kind` narrows to one item type; `--dry-run` prints ops without mutating the model."""
+    _model_with_pending(tmp_path)
+    rc, out = _run(["approve-queue", str(tmp_path), "--signer", "you@example.com",
+                    "--role", "owner", "--kind", "metric", "--dry-run"])
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["dry_run"] is True
+    assert [op["kind"] for op in payload["ops"]] == ["metric"]  # relationship excluded
+    assert all(op["at"] for op in payload["ops"])               # self-stamped
+    # nothing applied: the queue is still full
+    assert json.loads(_run(["review-queue", str(tmp_path)])[1])["counts"]["total"] == 2
+
+
+def test_curate_auto_stamps_missing_at(tmp_path):
+    """Regression (ACE-062 A2a): an approve op that omits `at` used to record signed_off_at:null
+    and the validator rejected the whole batch. `sm curate` now stamps `at` at the CLI boundary."""
+    _model_with_pending(tmp_path)
+    ops = tmp_path / "ops.json"
+    ops.write_text(json.dumps([{"op": "approve", "kind": "metric", "area": "s",
+                                "name": "order_count"}]))  # note: no "at"
+    rc, out = _run(["curate", str(tmp_path), "--ops-file", str(ops),
+                    "--signer", "you@example.com", "--role", "owner"])
+    assert rc == 0, out
+    assert json.loads(out)["validated"] is True
+    mm = yaml.safe_load((tmp_path / "subject_areas" / "s" / "metrics" / "order_count.yaml").read_text())
+    assert mm["review_state"] == "approved" and mm["signed_off_at"]  # non-null, auto-stamped

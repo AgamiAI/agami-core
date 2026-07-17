@@ -224,9 +224,11 @@ The "Python Driver Fallback" section further down shows the inline `python3 -c '
 | MySQL / MariaDB | 3306 | `mysql` | `pymysql` (`pip install pymysql`) | optional |
 | **Snowflake** | 443 (HTTPS) | `snowsql` | `snowflake-connector-python` (`pip install snowflake-connector-python`) | TLS always (managed by client) |
 | SQLite | N/A (file) | `sqlite3` | built-in `sqlite3` | n/a |
-| DuckDB | N/A (file) | `duckdb` | built-in or `pip install duckdb` | n/a |
+| DuckDB | N/A (file) | `duckdb` | built-in or `pip install duckdb pytz` | n/a |
 
 Supported end-to-end: Postgres + Redshift + MySQL + Snowflake + SQLite + **BigQuery**. SQLite also works via DuckDB. Other databases (SQL Server, Oracle, Databricks, ClickHouse) are deferred.
+
+> **Why `pytz` with DuckDB:** the DuckDB Python driver needs `pytz` to materialize `TIMESTAMP WITH TIME ZONE` values into Python — without it, any query selecting a timestamptz column fails at runtime (`Required module 'pytz' failed to import`). Install it alongside `duckdb`.
 
 ---
 

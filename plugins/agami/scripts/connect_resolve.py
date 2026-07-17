@@ -63,6 +63,10 @@ _DRIVER_MOD = {
     "sqlserver": "pymssql", "oracle": "oracledb", "databricks": "databricks.sql",
     "trino": "trino", "duckdb": "duckdb", "sqlite": "",
 }
+# Extra runtime modules a driver needs but doesn't pull in itself, folded into has_driver so
+# the "driver missing" branch installs them up front. duckdb needs pytz to materialize
+# TIMESTAMP WITH TIME ZONE values into Python — without it a timestamptz query fails at runtime.
+_DRIVER_EXTRA = {"duckdb": ["pytz"]}
 _MODEL_DEPS = ("pydantic", "sqlglot", "yaml")
 _NATIVE_TOOLS = ("psql", "mysql", "snowsql", "sqlite3", "duckdb", "bq")
 
@@ -110,8 +114,10 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
     """Score candidates on (driver + model deps); pick the best. A configured
     interpreter that still satisfies everything wins (no churn). Mirrors 0a.5 — but
     deterministically, so we never record a Python that's missing a dep."""
-    driver = _DRIVER_MOD.get((db_type or "").lower(), None)
+    db_key = (db_type or "").lower()
+    driver = _DRIVER_MOD.get(db_key, None)
     want_driver = bool(driver)
+    driver_mods = [driver, *_DRIVER_EXTRA.get(db_key, [])] if want_driver else []
     candidates = []
     if configured and os.access(configured, os.X_OK):
         candidates.append(configured)
@@ -121,7 +127,7 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
     best = None
     for py in candidates:
         has_deps = _probe(py, list(_MODEL_DEPS))
-        has_driver = _probe(py, [driver]) if want_driver else None
+        has_driver = _probe(py, driver_mods) if want_driver else None
         score = (1 if has_deps else 0) + (1 if (has_driver or not want_driver) else 0)
         # canonical path
         try:

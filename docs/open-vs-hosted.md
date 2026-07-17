@@ -1,7 +1,7 @@
 # What's free, what's hosted
 
-agami is **fair-code** (source-available): **free to self-host for your own
-organization**, paid when you expose it to people **outside** it. The short version
+agami is **fair-code** (source-available): **self-hosting for your own organization is
+free**, and the hosted cloud adds an org-scale governance layer on top. The short version
 of the license is in [LICENSING.md](../LICENSING.md); the binding terms are in
 [LICENSE](../LICENSE).
 
@@ -17,14 +17,16 @@ Run agami on your own machines, for your own people (multi-user included):
 - **Corrections** + the `examples.yaml` few-shot library.
 - The **local MCP server** (`agami serve`) — stdio, no auth, no network.
   See [mcp-server.md](mcp-server.md).
-- The **self-hosted team server** (`/agami-deploy`) — an HTTPS MCP server your whole
-  org connects to, with an admin console (sign in with a password or a single Google /
-  Microsoft **SSO** provider) and per-user access to the query surface.
-  See [deploy/README.md](../deploy/README.md).
+- The **self-hosted team server** (`/agami-deploy`) — *early access (in testing)* — an
+  HTTPS MCP server your whole org connects to, with an admin console (sign in with a
+  password or a single Google / Microsoft **SSO** provider) and per-user access to the
+  query surface. Usable today, newer than the local path; see the
+  [early-access note in deploy/README.md](../deploy/README.md).
 
 ## Paid — the hosted cloud
 
-For teams that need it served, and for serving people **outside** your organization:
+The org-scale layer — advanced governance, shared context, and continuous evals — for teams
+that want it served.
 
 - A **multi-tenant model registry** over a remote MCP endpoint.
 - **Shared, governed** examples + context across a team.

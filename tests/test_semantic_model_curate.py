@@ -3,11 +3,16 @@ apply (exclude/include/approve/reject) write path with validation gating."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+# case/whitespace-insensitive star projection — mirrors runtime.check_no_select_star (AST-based),
+# so the test isn't fooled by `SELECT  *` / `select *` the way a plain substring check would be.
+_STAR_PROJECTION = re.compile(r"(?i)\bselect\s*\*")
 
 pytest.importorskip("pydantic")
 pytest.importorskip("sqlglot")
@@ -257,3 +262,24 @@ def test_approve_cross_area_relationship_writes_org_yaml(tmp_path):
     assert res2.validated and res2.applied and not res2.skipped, res2.skipped
     cr2 = yaml.safe_load((root / "org.yaml").read_text())["cross_subject_area_relationships"][0]
     assert cr2["description"] == "invoice to its CRM account"
+
+
+def test_validate_seeds_probe_is_star_free(tmp_path):
+    """Regression (ACE-062 A1): the zero-row validation wrapper must not project `SELECT *`.
+    The executor's SELECT-* ban walks every SELECT in the tree, so a `SELECT *` wrapper would
+    trip the ban on itself and reject every seed. We simulate that ban with a runner that
+    raises on any star in the probe, and assert a legit named-column seed still passes."""
+    seen_probes: list[str] = []
+
+    def runner(sql: str) -> None:
+        seen_probes.append(sql)
+        # mimic runtime.check_no_select_star: a projected star anywhere is refused
+        if _STAR_PROJECTION.search(sql):
+            raise RuntimeError('{"kind": "select_star"}')
+
+    seed = {"question": "how many orders?", "sql": "SELECT COUNT(id) AS n FROM orders"}
+    passing, rejected = curate.validate_seeds([seed], runner)
+
+    assert not rejected, rejected
+    assert len(passing) == 1 and passing[0]["source"] == "seed"
+    assert seen_probes and not _STAR_PROJECTION.search(seen_probes[0])  # wrapper is star-free

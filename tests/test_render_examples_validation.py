@@ -138,11 +138,23 @@ def test_render_rejects_missing_required_question():
         render(title="x", profile="p", items=[bad])
 
 
-def test_render_rejects_n_not_positive():
-    bad = _example_unreviewed()
-    bad["n"] = 0
-    with pytest.raises(ValueError, match="n"):
-        render(title="x", profile="p", items=[bad])
+def test_render_renumbers_duplicate_n_to_unique_sequential():
+    """A1 regression: `sm seed-validate` numbers per-area (1..k), so a combined dashboard can
+    carry duplicate `n`. The renderer must renumber to a stable global 1..N — otherwise the
+    interaction key / `#N` label / feedback reference collide and Edit/Note on one card fires
+    for every same-`n` card. Assert the embedded items JSON has unique sequential `n`."""
+    a = _example_unreviewed()          # n=1 (per-area)
+    b = _example_validated()           # n=2
+    c = _example_errored()             # n=3
+    b["n"] = 1                         # simulate a second area also numbered from 1
+    c["n"] = 1                         # ...and a third
+    items = [a, b, c]
+    html = render(title="x", profile="p", items=items)
+    # The renderer mutates in place AND embeds the normalized numbering.
+    assert [it["n"] for it in items] == [1, 2, 3]
+    assert '"n": 1' in html and '"n": 2' in html and '"n": 3' in html
+    # No duplicate `#` labels would collide now — each card has a unique key.
+    assert len({it["n"] for it in items}) == 3
 
 
 def test_render_rejects_row_preview_not_list_of_lists():
