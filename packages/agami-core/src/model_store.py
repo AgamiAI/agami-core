@@ -25,7 +25,20 @@ from store import Store
 # reproduces the served model rather than appending duplicates / hitting PK conflicts). Must stay in
 # sync with migrations/core/001_serving.sql's serving tables; examples/memory/model_version are
 # re-seeded by their own writers, so they're not in this list.
-_MODEL_TABLES = ("relationship", "entity", "metric", "model_table", "subject_area", "organization")
+_MODEL_TABLES = (
+    "relationship",
+    "entity",
+    "metric",
+    "model_table",
+    "subject_area",
+    "datasource_model",
+)
+
+# The org a row belongs to when nobody says otherwise — what SingleTenantOrgResolver resolves to, and
+# the DEFAULT baked into every serving table's `org_id` column, so a single-tenant caller reads and
+# writes exactly the rows it always did. A caller that FORGETS to pass an org lands here too: an org
+# no real tenant reads, so the bug loses a row rather than leaking one.
+DEFAULT_ORG = "local"
 
 
 def _est_rows(table_doc: dict[str, Any]) -> int | None:
@@ -33,16 +46,22 @@ def _est_rows(table_doc: dict[str, Any]) -> int | None:
     return ph.get("estimated_row_count") if isinstance(ph, dict) else None
 
 
-def write_organization(store: Store, datasource: str, org: Organization) -> None:
+def write_organization(
+    store: Store, datasource: str, org: Organization, org_id: str = DEFAULT_ORG
+) -> None:
     """(Re)seed the serving rows for `datasource` from a loaded Organization. Idempotent — clears
     the datasource's existing model rows first, so re-running the deploy reproduces the served model."""
     for tbl in _MODEL_TABLES:
-        store.execute(f"DELETE FROM {tbl} WHERE datasource = ?", (datasource,))
+        # Scoped by org as well as datasource. Without the org predicate one tenant's redeploy would
+        # clear EVERY tenant's rows for a same-named datasource — and `prod` is the name everyone uses.
+        store.execute(
+            f"DELETE FROM {tbl} WHERE org_id = ? AND datasource = ?", (org_id, datasource)
+        )
 
     org_doc = org.model_dump(mode="json", exclude={"subject_areas"})
     store.execute(
-        "INSERT INTO organization (datasource, org_name, description, doc) VALUES (?, ?, ?, ?)",
-        (datasource, org.organization, org.description or None, json.dumps(org_doc)),
+        "INSERT INTO datasource_model (org_id, datasource, description, doc) VALUES (?, ?, ?, ?)",
+        (org_id, datasource, org.description or None, json.dumps(org_doc)),
     )
 
     for sa in org.subject_areas:
@@ -50,9 +69,10 @@ def write_organization(store: Store, datasource: str, org: Organization) -> None
             mode="json", exclude={"tables_defined", "metrics", "entities", "relationships"}
         )
         store.execute(
-            "INSERT INTO subject_area (datasource, name, description, default_time_window, "
-            "table_count, doc) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO subject_area (org_id, datasource, name, description, default_time_window, "
+            "table_count, doc) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
+                org_id,
                 datasource,
                 sa.name,
                 sa.description or None,
@@ -64,92 +84,89 @@ def write_organization(store: Store, datasource: str, org: Organization) -> None
         for t in sa.tables_defined:
             tdoc = t.model_dump(mode="json")
             store.execute(
-                "INSERT INTO model_table (datasource, area, name, est_row_count, doc) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (datasource, sa.name, t.name, _est_rows(tdoc), json.dumps(tdoc)),
+                "INSERT INTO model_table (org_id, datasource, area, name, est_row_count, doc) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (org_id, datasource, sa.name, t.name, _est_rows(tdoc), json.dumps(tdoc)),
             )
         for m in sa.metrics:
             store.execute(
-                "INSERT INTO metric (datasource, area, name, doc) VALUES (?, ?, ?, ?)",
-                (datasource, sa.name, m.name, json.dumps(m.model_dump(mode="json"))),
+                "INSERT INTO metric (org_id, datasource, area, name, doc) VALUES (?, ?, ?, ?, ?)",
+                (org_id, datasource, sa.name, m.name, json.dumps(m.model_dump(mode="json"))),
             )
         for e in sa.entities:
             edoc = e.model_dump(mode="json")
             store.execute(
-                "INSERT INTO entity (datasource, area, name, value_pattern, doc) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (datasource, sa.name, e.name, edoc.get("value_pattern"), json.dumps(edoc)),
+                "INSERT INTO entity (org_id, datasource, area, name, value_pattern, doc) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (org_id, datasource, sa.name, e.name, edoc.get("value_pattern"), json.dumps(edoc)),
             )
         for r in sa.relationships:
             rdoc = r.model_dump(mode="json")
             name = f"{rdoc.get('from_table')}->{rdoc.get('to_table')}"
             store.execute(
-                "INSERT INTO relationship (datasource, area, name, doc) VALUES (?, ?, ?, ?)",
-                (datasource, sa.name, name, json.dumps(rdoc)),
+                "INSERT INTO relationship (org_id, datasource, area, name, doc) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (org_id, datasource, sa.name, name, json.dumps(rdoc)),
             )
     store.commit()
 
 
-def load_organization(store: Store, datasource: str) -> Organization | None:
+def load_organization(
+    store: Store, datasource: str, org_id: str = DEFAULT_ORG
+) -> Organization | None:
     """Rebuild the Organization for `datasource` from rows, or None if it isn't seeded."""
-    org_rows = store.query("SELECT doc FROM organization WHERE datasource = ?", (datasource,))
+    org_rows = store.query(
+        "SELECT doc FROM datasource_model WHERE org_id = ? AND datasource = ?", (org_id, datasource)
+    )
     if not org_rows:
         return None
     org_doc: dict[str, Any] = json.loads(org_rows[0]["doc"])
 
     subject_areas = []
     for sa_row in store.query(
-        "SELECT name, doc FROM subject_area WHERE datasource = ? ORDER BY name", (datasource,)
+        "SELECT name, doc FROM subject_area WHERE org_id = ? AND datasource = ? ORDER BY name",
+        (org_id, datasource),
     ):
         sa_doc: dict[str, Any] = json.loads(sa_row["doc"])
         area = sa_row["name"]
-        sa_doc["tables_defined"] = [
-            json.loads(r["doc"])
-            for r in store.query(
-                "SELECT doc FROM model_table WHERE datasource = ? AND area = ? ORDER BY name",
-                (datasource, area),
-            )
-        ]
-        sa_doc["metrics"] = [
-            json.loads(r["doc"])
-            for r in store.query(
-                "SELECT doc FROM metric WHERE datasource = ? AND area = ? ORDER BY name",
-                (datasource, area),
-            )
-        ]
-        sa_doc["entities"] = [
-            json.loads(r["doc"])
-            for r in store.query(
-                "SELECT doc FROM entity WHERE datasource = ? AND area = ? ORDER BY name",
-                (datasource, area),
-            )
-        ]
-        sa_doc["relationships"] = [
-            json.loads(r["doc"])
-            for r in store.query(
-                "SELECT doc FROM relationship WHERE datasource = ? AND area = ? ORDER BY name",
-                (datasource, area),
-            )
-        ]
+        for field, table in (
+            ("tables_defined", "model_table"),
+            ("metrics", "metric"),
+            ("entities", "entity"),
+            ("relationships", "relationship"),
+        ):
+            sa_doc[field] = [
+                json.loads(r["doc"])
+                for r in store.query(
+                    f"SELECT doc FROM {table} WHERE org_id = ? AND datasource = ? AND area = ? "
+                    "ORDER BY name",
+                    (org_id, datasource, area),
+                )
+            ]
         subject_areas.append(sa_doc)
 
     org_doc["subject_areas"] = subject_areas
     return Organization.model_validate(org_doc)
 
 
-def list_datasources(store: Store) -> list[str]:
-    """The datasources that have a served model, sorted. The admin model view picks among these; one
-    deployment can serve several (single-tenant per datasource)."""
-    rows = store.query("SELECT datasource FROM organization ORDER BY datasource")
+def list_datasources(store: Store, org_id: str = DEFAULT_ORG) -> list[str]:
+    """The datasources `org_id` has a served model for, sorted. The admin model view picks among
+    these; one org can serve several."""
+    rows = store.query(
+        "SELECT datasource FROM datasource_model WHERE org_id = ? ORDER BY datasource", (org_id,)
+    )
     return [r["datasource"] for r in rows]
 
 
-def model_table_counts(store: Store) -> dict[str, int]:
-    """`{datasource: table_count}` for every served datasource, in ONE grouped query — so the
+def model_table_counts(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, int]:
+    """`{datasource: table_count}` for the org's served datasources, in ONE grouped query — so the
     datasource listing sizes itself without a per-datasource round trip (no N+1) and without
     rebuilding the whole Organization. A datasource with no modeled tables simply won't appear in
     the map; the caller defaults it to 0."""
-    rows = store.query("SELECT datasource, count(*) AS n FROM model_table GROUP BY datasource")
+    rows = store.query(
+        "SELECT datasource, count(*) AS n FROM model_table WHERE org_id = ? GROUP BY datasource",
+        (org_id,),
+    )
     return {r["datasource"]: int(r["n"]) for r in rows}
 
 
@@ -160,73 +177,84 @@ def model_table_counts(store: Store) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-# ORGANIZATION.md is per-datasource; USER_MEMORY.md is install-global (cross-datasource, mirroring
-# the file layout: <artifacts_dir>/<profile>/ORGANIZATION.md vs <artifacts_dir>/USER_MEMORY.md). So
-# user memory is stored once under this sentinel datasource, not duplicated per datasource.
+# ORGANIZATION.md is per-datasource; USER_MEMORY.md is cross-datasource (mirroring the file layout:
+# <artifacts_dir>/<profile>/ORGANIZATION.md vs <artifacts_dir>/USER_MEMORY.md), so it is stored once
+# under this sentinel datasource rather than duplicated per datasource. It is still keyed by org — one
+# row PER ORG, not one per install, or one tenant's user memory would be served to another's.
 _GLOBAL_DATASOURCE = ""
 
 
 def write_memory(
-    store: Store, datasource: str, *, organization: str | None = None, user: str | None = None
+    store: Store,
+    datasource: str,
+    *,
+    organization: str | None = None,
+    user: str | None = None,
+    org_id: str = DEFAULT_ORG,
 ) -> None:
-    """Seed the domain-context docs. `organization` is per-datasource; `user` is install-global
-    (one row, shared across datasources). Pass either/both; each replaces its row."""
+    """Seed the domain-context docs. `organization` is per-datasource; `user` is cross-datasource but
+    still per-org (the empty-datasource sentinel row). Pass either/both; each replaces its row."""
     if organization is not None:
         store.execute(
-            "DELETE FROM memory WHERE datasource = ? AND kind = 'organization'", (datasource,)
+            "DELETE FROM memory WHERE org_id = ? AND datasource = ? AND kind = 'organization'",
+            (org_id, datasource),
         )
         store.execute(
-            "INSERT INTO memory (datasource, kind, content) VALUES (?, 'organization', ?)",
-            (datasource, organization),
+            "INSERT INTO memory (org_id, datasource, kind, content) "
+            "VALUES (?, ?, 'organization', ?)",
+            (org_id, datasource, organization),
         )
     if user is not None:
         store.execute(
-            "DELETE FROM memory WHERE datasource = ? AND kind = 'user'", (_GLOBAL_DATASOURCE,)
+            "DELETE FROM memory WHERE org_id = ? AND datasource = ? AND kind = 'user'",
+            (org_id, _GLOBAL_DATASOURCE),
         )
         store.execute(
-            "INSERT INTO memory (datasource, kind, content) VALUES (?, 'user', ?)",
-            (_GLOBAL_DATASOURCE, user),
+            "INSERT INTO memory (org_id, datasource, kind, content) VALUES (?, ?, 'user', ?)",
+            (org_id, _GLOBAL_DATASOURCE, user),
         )
     store.commit()
 
 
-def load_memory(store: Store, datasource: str) -> dict[str, str]:
-    """{'organization': <per-datasource ORGANIZATION.md>, 'user': <global USER_MEMORY.md>} —
+def load_memory(store: Store, datasource: str, org_id: str = DEFAULT_ORG) -> dict[str, str]:
+    """{'organization': <per-datasource ORGANIZATION.md>, 'user': <the org's USER_MEMORY.md>} —
     missing keys absent."""
     out: dict[str, str] = {}
-    org = store.query(
-        "SELECT content FROM memory WHERE datasource = ? AND kind = 'organization'", (datasource,)
-    )
-    if org:
-        out["organization"] = org[0]["content"]
-    usr = store.query(
-        "SELECT content FROM memory WHERE datasource = ? AND kind = 'user'", (_GLOBAL_DATASOURCE,)
-    )
-    if usr:
-        out["user"] = usr[0]["content"]
+    for kind, ds in (("organization", datasource), ("user", _GLOBAL_DATASOURCE)):
+        rows = store.query(
+            "SELECT content FROM memory WHERE org_id = ? AND datasource = ? AND kind = ?",
+            (org_id, ds, kind),
+        )
+        if rows:
+            out[kind] = rows[0]["content"]
     return out
 
 
 def write_model_version(
-    store: Store, datasource: str, version: str, created_at: str | None = None
+    store: Store,
+    datasource: str,
+    version: str,
+    created_at: str | None = None,
+    org_id: str = DEFAULT_ORG,
 ) -> None:
     """Record a model version (the snapshot content hash the receipt pins). Idempotent per version."""
     store.execute(
-        "DELETE FROM model_version WHERE datasource = ? AND version = ?", (datasource, version)
+        "DELETE FROM model_version WHERE org_id = ? AND datasource = ? AND version = ?",
+        (org_id, datasource, version),
     )
     store.execute(
-        "INSERT INTO model_version (datasource, version, created_at) VALUES (?, ?, ?)",
-        (datasource, version, created_at),
+        "INSERT INTO model_version (org_id, datasource, version, created_at) VALUES (?, ?, ?, ?)",
+        (org_id, datasource, version, created_at),
     )
     store.commit()
 
 
-def newest_model_version(store: Store, datasource: str) -> str | None:
+def newest_model_version(store: Store, datasource: str, org_id: str = DEFAULT_ORG) -> str | None:
     """The newest recorded version for a datasource (what the receipt pins), or None."""
     rows = store.query(
-        "SELECT version FROM model_version WHERE datasource = ? "
+        "SELECT version FROM model_version WHERE org_id = ? AND datasource = ? "
         "ORDER BY created_at DESC, version DESC",
-        (datasource,),
+        (org_id, datasource),
     )
     return rows[0]["version"] if rows else None
 
@@ -243,17 +271,22 @@ def _tokens(s: str | None) -> set[str]:
     return set(_WORD_RE.findall((s or "").lower()))
 
 
-def write_examples(store: Store, datasource: str, examples: list[dict[str, Any]]) -> None:
+def write_examples(
+    store: Store, datasource: str, examples: list[dict[str, Any]], org_id: str = DEFAULT_ORG
+) -> None:
     """(Re)seed the prompt-example rows for a datasource. Each example is {area, question, sql, …};
-    area None ⇒ the org-level cross-datasource bucket."""
-    store.execute("DELETE FROM prompt_example WHERE datasource = ?", (datasource,))
+    area None ⇒ the cross-subject-area bucket."""
+    store.execute(
+        "DELETE FROM prompt_example WHERE org_id = ? AND datasource = ?", (org_id, datasource)
+    )
     for ex in examples:
         # Keep a stable id across re-seeds when the example carries one (so per-example identity
         # survives a redeploy); mint one only when absent.
         ex_id = str(ex.get("id") or uuid4().hex)
         store.execute(
-            "INSERT INTO prompt_example (datasource, area, id, question, doc) VALUES (?, ?, ?, ?, ?)",
-            (datasource, ex.get("area"), ex_id, ex.get("question", ""), json.dumps(ex)),
+            "INSERT INTO prompt_example (org_id, datasource, area, id, question, doc) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (org_id, datasource, ex.get("area"), ex_id, ex.get("question", ""), json.dumps(ex)),
         )
     store.commit()
 
@@ -265,19 +298,21 @@ def select_examples(
     area: str | None = None,
     top_k: int = 10,
     char_budget: int = _EXAMPLES_CHAR_BUDGET,
+    org_id: str = DEFAULT_ORG,
 ) -> list[dict[str, Any]]:
-    """Scope to the datasource (+ area, plus the org-level bucket), rank by word-overlap on the
-    question, and cap to top-K within a char budget — so a large library never floods the context.
-    No embeddings (that tier is deploy-time + off by default)."""
+    """Scope to the org's datasource (+ area, plus the cross-area bucket), rank by word-overlap on
+    the question, and cap to top-K within a char budget — so a large library never floods the
+    context. No embeddings (that tier is deploy-time + off by default)."""
     if area:
         rows = store.query(
-            "SELECT question, doc FROM prompt_example WHERE datasource = ? "
+            "SELECT question, doc FROM prompt_example WHERE org_id = ? AND datasource = ? "
             "AND (area = ? OR area IS NULL)",
-            (datasource, area),
+            (org_id, datasource, area),
         )
     else:
         rows = store.query(
-            "SELECT question, doc FROM prompt_example WHERE datasource = ?", (datasource,)
+            "SELECT question, doc FROM prompt_example WHERE org_id = ? AND datasource = ?",
+            (org_id, datasource),
         )
     q = _tokens(query)
     if q:
@@ -299,6 +334,13 @@ def select_examples(
 # ---------------------------------------------------------------------------
 
 
+def _record_org(record: Any) -> str:
+    """The org a log row belongs to, read off the record. Duck-typed rather than a method parameter so
+    the `ports.ActivitySink` Protocol shape is unchanged — a record without an org lands on the
+    default (an org no other tenant reads), so a missing org loses the log row, never leaks it."""
+    return getattr(record, "org_id", None) or DEFAULT_ORG
+
+
 class DbActivitySink:
     """Write `query_executions` + `tool_calls` to the DB (one class, any backend the Store opens —
     not a Postgres/SQLite pair). Conforms structurally to the `ports.ActivitySink` Protocol; the
@@ -309,11 +351,12 @@ class DbActivitySink:
 
     def record_query_execution(self, record: Any) -> None:
         self._store.execute(
-            "INSERT INTO query_executions (id, ts, datasource, question, sql, row_count, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO query_executions (id, ts, org_id, datasource, question, sql, row_count, "
+            "source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
+                _record_org(record),
                 record.profile,
                 record.question,
                 record.sql,
@@ -326,13 +369,14 @@ class DbActivitySink:
     def record_tool_call(self, record: Any) -> None:
         # `success` is a portable 0/1 (no boolean literal across SQLite/Postgres).
         self._store.execute(
-            "INSERT INTO tool_calls (id, ts, actor, tool_name, datasource, sql, row_count, "
+            "INSERT INTO tool_calls (id, ts, org_id, actor, tool_name, datasource, sql, row_count, "
             "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
             "correlation_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
+                _record_org(record),
                 record.actor,
                 record.tool_name,
                 record.datasource,
@@ -394,16 +438,18 @@ def _group_turns(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return turns
 
 
-def list_sessions(store: Store, *, limit: int = 500) -> list[dict[str, Any]]:
-    """Group **all** tool calls into conversations for the best-effort Activity view: same `thread_id`
+def list_sessions(
+    store: Store, *, limit: int = 500, org_id: str = DEFAULT_ORG
+) -> list[dict[str, Any]]:
+    """Group the org's tool calls into conversations for the best-effort Activity view: same `thread_id`
     = one conversation; a call with no `thread_id` (Claude didn't self-report) becomes its own singleton
     (grouped on its id), so the view degrades gracefully to ungrouped — and stays **audit-complete**:
     every call appears, query or not (the non-query tools — list_datasources, get_datasource_schema, …
     — fold into the conversation alongside the execute_sql calls). Grouping + aggregation are done in
     Python (portable, no dialect-specific GROUP BY)."""
     rows = store.query(
-        f"SELECT {_TOOL_CALL_COLS} FROM tool_calls ORDER BY ts DESC LIMIT ?",
-        (limit,),
+        f"SELECT {_TOOL_CALL_COLS} FROM tool_calls WHERE org_id = ? ORDER BY ts DESC LIMIT ?",
+        (org_id, limit),
     )
     sessions: dict[Any, dict[str, Any]] = {}
     order: list[Any] = []

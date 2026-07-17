@@ -104,9 +104,15 @@ def test_http_server_runs_in_process_by_default_no_fork(monkeypatch):
     assert tools._INJECTED_EXECUTOR is execute_sql.BUILTIN_EXECUTOR
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
     monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
-    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: pytest.fail("HTTP default must not fork"))
+    monkeypatch.setattr(
+        tools.subprocess, "run", lambda *a, **k: pytest.fail("HTTP default must not fork")
+    )
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT 1 AS n", "datasource": "acme"}))
     assert out["columns"] == ["n"]  # ran in-process, no subprocess
@@ -169,7 +175,9 @@ def test_in_process_default_matches_subprocess_result_envelope(monkeypatch, tmp_
     tools.set_injected_executor(None)  # subprocess fork through `python -m execute_sql`
     sub = json.loads(tools.tool_execute_sql(args))
 
-    tools.set_injected_executor(execute_sql.BUILTIN_EXECUTOR)  # in-process, as the HTTP default does
+    tools.set_injected_executor(
+        execute_sql.BUILTIN_EXECUTOR
+    )  # in-process, as the HTTP default does
     inproc = json.loads(tools.tool_execute_sql(args))
 
     assert "columns" in sub, sub  # subprocess actually produced a result (not a creds error)

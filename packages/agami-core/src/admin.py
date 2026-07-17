@@ -602,6 +602,7 @@ async def admin_logout(request: Request) -> Response:
 async def admin_home(request: Request) -> Response:
     """The console. `?tab=` picks Dashboard / Users (default) / Activity. Session-gated."""
     import model_store
+    import tools
 
     admin = current_admin(request)
     if admin is None:
@@ -613,7 +614,10 @@ async def admin_home(request: Request) -> Response:
         if tab == "dashboard":
             return HTMLResponse(dashboard_tab_html(**chrome))
         if tab == "activity":
-            sessions = model_store.list_sessions(store) if store is not None else []
+            # Admin requests skip the bearer middleware, so no request-org is set — this falls back to
+            # AGAMI_ORG_ID/'local' (the operator's own org). A cross-tenant operator view is REQ-014.
+            org_id = tools.current_org_id()
+            sessions = model_store.list_sessions(store, org_id=org_id) if store is not None else []
             return HTMLResponse(activity_tab_html(sessions, **chrome))
         users = user_store.list_users(store) if store is not None else []
     finally:
@@ -1269,6 +1273,7 @@ async def admin_model(request: Request) -> Response:
     """The read-only Model explorer. Session-gated; a pure GET projection of the served model. Query:
     `?datasource=` (defaults to the first served), `?area=`, `?view=context`."""
     import model_store
+    import tools
 
     admin = current_admin(request)
     if admin is None:
@@ -1276,20 +1281,24 @@ async def admin_model(request: Request) -> Response:
     store = _open_store()
     try:
         chrome = _admin_chrome(store, admin)
-        datasources = model_store.list_datasources(store) if store is not None else []
+        # No request-org on the admin path (bearer middleware skipped) → the operator's own org.
+        org_id = tools.current_org_id()
+        datasources = (
+            model_store.list_datasources(store, org_id=org_id) if store is not None else []
+        )
         if not datasources:
             return HTMLResponse(model_empty_html("", [], **chrome))
         datasource = request.query_params.get("datasource") or datasources[0]
         if datasource not in datasources:  # an unknown/stale datasource param → the first served
             datasource = datasources[0]
-        org = model_store.load_organization(store, datasource)
+        org = model_store.load_organization(store, datasource, org_id=org_id)
         if org is None:
             return HTMLResponse(model_empty_html(datasource, datasources, **chrome))
         view = request.query_params.get("view")
         if view == "relationships":
             return HTMLResponse(model_relationships_html(org, datasource, datasources, **chrome))
         if view == "context":
-            memory = model_store.load_memory(store, datasource)
+            memory = model_store.load_memory(store, datasource, org_id=org_id)
             return HTMLResponse(model_context_html(org, memory, datasource, datasources, **chrome))
         area_name = request.query_params.get("area")
         if area_name:
@@ -1303,7 +1312,7 @@ async def admin_model(request: Request) -> Response:
                             model_table_html(org, area, table, datasource, datasources, **chrome)
                         )
                 return HTMLResponse(model_area_html(org, area, datasource, datasources, **chrome))
-        version = model_store.newest_model_version(store, datasource)
+        version = model_store.newest_model_version(store, datasource, org_id=org_id)
         return HTMLResponse(model_overview_html(org, version, datasource, datasources, **chrome))
     finally:
         if store is not None:

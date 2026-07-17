@@ -9,7 +9,7 @@ from __future__ import annotations
 from store import Store
 
 SERVING_TABLES = {
-    "organization",
+    "datasource_model",
     "subject_area",
     "model_table",
     "metric",

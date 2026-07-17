@@ -89,7 +89,9 @@ class ActivitySink(Protocol):
 class OrgResolver(Protocol):
     """Resolve the calling context to an ``Org`` — the single/multi-tenant seam.
 
-    OSS default = single-tenant (returns the one configured org)."""
+    OSS default = single-tenant (returns the one configured org). An implementation that *can* fail to
+    place a caller raises ``PermissionError`` to refuse — the server turns that into a 403, so a
+    resolver never has to choose between a wrong default and a 500."""
 
     def resolve_org(self, ctx: object | None = None) -> Org: ...
 

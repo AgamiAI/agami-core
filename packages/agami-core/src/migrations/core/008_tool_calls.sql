@@ -14,6 +14,7 @@
 CREATE TABLE tool_calls (
     id            TEXT PRIMARY KEY,        -- minted by the server per call
     ts            TEXT NOT NULL,           -- UTC ISO8601
+    org_id        TEXT NOT NULL DEFAULT 'local',  -- the tenant this call ran for
     actor         TEXT,                    -- the authenticated user (bearer sub); NULL under presence auth
     tool_name     TEXT NOT NULL,
     datasource    TEXT,
@@ -28,6 +29,8 @@ CREATE TABLE tool_calls (
     thread_id     TEXT                     -- best-effort, self-reported (groups a conversation)
 );
 
--- The admin views read newest-first and group by conversation; index the two access paths.
+-- The admin views read newest-first and group by conversation, scoped to the operator's org; index
+-- the three access paths.
 CREATE INDEX idx_tool_calls_ts ON tool_calls (ts);
 CREATE INDEX idx_tool_calls_thread ON tool_calls (thread_id);
+CREATE INDEX idx_tool_calls_org ON tool_calls (org_id);

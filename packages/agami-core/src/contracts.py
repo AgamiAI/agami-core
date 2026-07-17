@@ -190,6 +190,7 @@ class QueryExecutionRecord(_Contract):
     row_count: int
     source: str
     question: str | None = None  # the user's NL question (may be absent)
+    org_id: str = "local"  # the tenant this ran for; defaults to the single-tenant org
 
 
 class ToolCallRecord(_Contract):
@@ -210,3 +211,4 @@ class ToolCallRecord(_Contract):
     agent_query: str | None = None
     thread_id: str | None = None
     correlation_id: str | None = None  # the turn: one user question -> N agent sub-queries
+    org_id: str = "local"  # the tenant this call ran for; defaults to the single-tenant org

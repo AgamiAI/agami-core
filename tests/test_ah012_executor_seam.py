@@ -89,18 +89,30 @@ def test_model_safety_refusal_short_circuits_before_the_executor(monkeypatch):
 def test_executor_receives_vetted_sql_and_resolved_creds(monkeypatch):
     # The default_filters rewrite happens in the model pass; the executor sees the POST-guard SQL and
     # the resolved datasource creds — never raw user input, never an unresolved profile.
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
-    monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: ("SELECT 1 AS c /*vetted*/", None))
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
+    monkeypatch.setattr(
+        execute_sql, "_model_safety", lambda s, p, a: ("SELECT 1 AS c /*vetted*/", None)
+    )
     spy = _SpyExecutor()
 
     result = execute_sql.execute_guarded("SELECT 1 AS c", "acme", "sales", executor=spy)
 
-    assert spy.calls == [("SELECT 1 AS c /*vetted*/", {"type": "sqlite", "path": ":memory:"}, "acme")]
+    assert spy.calls == [
+        ("SELECT 1 AS c /*vetted*/", {"type": "sqlite", "path": ":memory:"}, "acme")
+    ]
     assert result.rows == [(1,)]
 
 
 def test_no_safety_bypasses_the_model_pass_but_still_runs(monkeypatch):
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
 
     def _boom(*a, **k):
         raise AssertionError("_model_safety must be skipped when no_safety=True")
@@ -108,9 +120,13 @@ def test_no_safety_bypasses_the_model_pass_but_still_runs(monkeypatch):
     monkeypatch.setattr(execute_sql, "_model_safety", _boom)
     spy = _SpyExecutor()
 
-    result = execute_sql.execute_guarded("SELECT 1 AS c", "acme", None, executor=spy, no_safety=True)
+    result = execute_sql.execute_guarded(
+        "SELECT 1 AS c", "acme", None, executor=spy, no_safety=True
+    )
 
-    assert spy.calls[0][0] == "SELECT 1 AS c"  # raw SQL passed straight to the executor, unrewritten
+    assert (
+        spy.calls[0][0] == "SELECT 1 AS c"
+    )  # raw SQL passed straight to the executor, unrewritten
     assert result.rows == [(1,)]
 
 
@@ -123,18 +139,27 @@ def test_builtin_executor_satisfies_the_executor_port():
     assert isinstance(execute_sql.BUILTIN_EXECUTOR, ports.Executor)  # 5th port, by shape
 
 
-def test_builtin_executor_returns_native_typed_rows_and_emits_identical_csv(tmp_path, monkeypatch, capsys):
+def test_builtin_executor_returns_native_typed_rows_and_emits_identical_csv(
+    tmp_path, monkeypatch, capsys
+):
     db = tmp_path / "t.db"
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE t (n INTEGER, s TEXT)")
     con.executemany("INSERT INTO t (n, s) VALUES (?, ?)", [(1, "a"), (2, None)])
     con.commit()
     con.close()
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": str(db)})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": str(db)},
+    )
 
     result = execute_sql.execute_guarded(
-        "SELECT n, s FROM t ORDER BY n", "acme", None,
-        executor=execute_sql.BUILTIN_EXECUTOR, no_safety=True,
+        "SELECT n, s FROM t ORDER BY n",
+        "acme",
+        None,
+        executor=execute_sql.BUILTIN_EXECUTOR,
+        no_safety=True,
     )
 
     # Native fidelity (Sandeep's concern): ints stay ints, SQL NULL stays None — NOT "" and not "2".
@@ -192,8 +217,11 @@ def test_create_app_wires_injected_executor_and_defaults_to_builtin(monkeypatch)
     base = mcp_http.default_adapters()
     fake = _SpyExecutor()
     adapters = Adapters(
-        activity_sink=base.activity_sink, org_resolver=base.org_resolver,
-        auth_provider=base.auth_provider, governance=base.governance, executor=fake,
+        activity_sink=base.activity_sink,
+        org_resolver=base.org_resolver,
+        auth_provider=base.auth_provider,
+        governance=base.governance,
+        executor=fake,
     )
     mcp_http.create_app(adapters=adapters)
     assert tools._INJECTED_EXECUTOR is fake  # a consumer's explicit executor is wired from adapters
@@ -208,12 +236,20 @@ def test_injected_executor_runs_in_process_with_vetted_sql_and_no_fork(monkeypat
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
     monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s + " /*vetted*/", None))
     # a fork here would be the REQ-002 violation the seam prevents — fail loudly if it happens.
-    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: pytest.fail("must not fork a subprocess"))
+    monkeypatch.setattr(
+        tools.subprocess, "run", lambda *a, **k: pytest.fail("must not fork a subprocess")
+    )
 
-    fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n"], rows=[(1,), (2,)], truncated=False))
+    fake = _SpyExecutor(
+        result=execute_sql.ExecResult(columns=["n"], rows=[(1,), (2,)], truncated=False)
+    )
     tools.set_injected_executor(fake)
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme"}))
 
@@ -225,7 +261,9 @@ def test_injected_executor_is_unreachable_for_a_write(monkeypatch):
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
-    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: pytest.fail("must not fork a subprocess"))
+    monkeypatch.setattr(
+        tools.subprocess, "run", lambda *a, **k: pytest.fail("must not fork a subprocess")
+    )
 
     fake = _SpyExecutor()
     tools.set_injected_executor(fake)
@@ -239,7 +277,11 @@ def test_injected_executor_error_maps_to_the_same_envelope(monkeypatch):
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
     monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
 
     class _Boom:
@@ -272,7 +314,7 @@ def test_injected_executor_credential_error_surfaces_detailed_remediation(monkey
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
 
-    def _bad(profile):
+    def _bad(profile, org_id="local"):
         raise execute_sql.ExecutorError(
             "No warehouse credentials for profile [acme]. Set DATASOURCE_URL ...", code=2
         )
@@ -332,7 +374,11 @@ def test_injected_executor_model_safety_refusal_returns_clean_error(monkeypatch)
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
     monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, 1))  # refuse
     fake = _SpyExecutor()
     tools.set_injected_executor(fake)
@@ -350,9 +396,15 @@ def test_injected_executor_textualizes_null_as_empty_at_the_tool_edge(monkeypatc
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
     monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
-    fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n", "s"], rows=[(1, None)], truncated=False))
+    fake = _SpyExecutor(
+        result=execute_sql.ExecResult(columns=["n", "s"], rows=[(1, None)], truncated=False)
+    )
     tools.set_injected_executor(fake)
 
     out = json.loads(tools.tool_execute_sql({"sql": "SELECT n, s FROM t", "datasource": "acme"}))
@@ -364,12 +416,20 @@ def test_injected_executor_backstop_trims_to_max_rows(monkeypatch):
     import tools
 
     monkeypatch.setattr(tools, "resolve_profile", lambda ds: "acme")
-    monkeypatch.setattr(execute_sql, "_load_credentials", lambda p: {"type": "sqlite", "path": ":memory:"})
+    monkeypatch.setattr(
+        execute_sql,
+        "_load_credentials",
+        lambda p, org_id="local": {"type": "sqlite", "path": ":memory:"},
+    )
     monkeypatch.setattr(execute_sql, "_model_safety", lambda s, p, a: (s, None))
-    fake = _SpyExecutor(result=execute_sql.ExecResult(columns=["n"], rows=[(1,), (2,), (3,)], truncated=False))
+    fake = _SpyExecutor(
+        result=execute_sql.ExecResult(columns=["n"], rows=[(1,), (2,), (3,)], truncated=False)
+    )
     tools.set_injected_executor(fake)
 
-    out = json.loads(tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme", "max_rows": 2}))
+    out = json.loads(
+        tools.tool_execute_sql({"sql": "SELECT n FROM t", "datasource": "acme", "max_rows": 2})
+    )
 
     assert out["rows"] == [["1"], ["2"]] and out["truncated"] is True
 
@@ -394,8 +454,11 @@ def test_main_read_only_refusal_writes_json_and_returns_1(tmp_path, monkeypatch,
 def test_main_executor_error_writes_message_and_returns_code(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     monkeypatch.setattr(
-        execute_sql, "execute_guarded",
-        lambda *a, **k: _raise(execute_sql.ExecutorError("Postgres connect failed: refused", code=4)),
+        execute_sql,
+        "execute_guarded",
+        lambda *a, **k: _raise(
+            execute_sql.ExecutorError("Postgres connect failed: refused", code=4)
+        ),
     )
     monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", "acme", "--sql", "SELECT 1"])
 
@@ -408,12 +471,71 @@ def test_main_executor_error_writes_message_and_returns_code(tmp_path, monkeypat
 def test_main_success_serializes_result_to_stdout_csv(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     monkeypatch.setattr(
-        execute_sql, "execute_guarded",
+        execute_sql,
+        "execute_guarded",
         lambda *a, **k: execute_sql.ExecResult(columns=["n"], rows=[(1,)], truncated=False),
     )
-    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", "acme", "--sql", "SELECT n FROM t"])
+    monkeypatch.setattr(
+        sys, "argv", ["execute_sql", "--profile", "acme", "--sql", "SELECT n FROM t"]
+    )
 
     rc = execute_sql.main()
 
     assert rc == 0
     assert capsys.readouterr().out == "n\r\n1\r\n"
+
+
+# --- per-tenant env credentials: <ORG>_DATASOURCE_URL__<PROFILE>, fail-closed for named orgs -----
+
+
+@pytest.fixture
+def _clean_datasource_env(monkeypatch):
+    import os
+
+    for k in list(os.environ):
+        if "DATASOURCE_URL" in k:
+            monkeypatch.delenv(k, raising=False)
+    yield
+
+
+def test_single_tenant_local_keeps_the_orgless_fallback_chain(_clean_datasource_env, monkeypatch):
+    # org 'local' (the single-tenant default) still resolves the historical org-less vars, in order.
+    monkeypatch.setenv("DATASOURCE_URL", "generic")
+    assert execute_sql._env_datasource_dsn("prod", "local") == "generic"
+    monkeypatch.setenv("DATASOURCE_URL__PROD", "per-profile")
+    assert execute_sql._env_datasource_dsn("prod", "local") == "per-profile"  # more specific wins
+    monkeypatch.setenv("LOCAL_DATASOURCE_URL__PROD", "local-prefixed")
+    assert (
+        execute_sql._env_datasource_dsn("prod", "local") == "local-prefixed"
+    )  # most specific wins
+
+
+def test_a_named_tenant_uses_its_own_prefixed_var(_clean_datasource_env, monkeypatch):
+    monkeypatch.setenv("ACME_DATASOURCE_URL__PROD", "acme-wh")
+    monkeypatch.setenv("GLOBEX_DATASOURCE_URL__PROD", "globex-wh")
+    assert execute_sql._env_datasource_dsn("prod", "acme") == "acme-wh"
+    assert (
+        execute_sql._env_datasource_dsn("prod", "globex") == "globex-wh"
+    )  # same profile, diff org
+
+
+def test_a_named_tenant_never_falls_back_to_the_shared_datasource_url(
+    _clean_datasource_env, monkeypatch
+):
+    # The fail-closed rule: a forgotten tenant var must NOT silently point that tenant at the shared
+    # warehouse. Only 'local' gets the org-less fallback.
+    monkeypatch.setenv("DATASOURCE_URL", "shared")
+    monkeypatch.setenv("DATASOURCE_URL__PROD", "shared-per-profile")
+    assert execute_sql._env_datasource_dsn("prod", "acme") is None  # refuses, no shared fallback
+
+
+def test_org_id_threads_from_execute_guarded_into_credential_resolution(
+    _clean_datasource_env, monkeypatch
+):
+    # End-to-end through the guarded envelope: the org passed to execute_guarded picks the tenant's var.
+    monkeypatch.setenv("ACME_DATASOURCE_URL__PROD", "sqlite:///:memory:")
+    spy = _SpyExecutor()
+    execute_sql.execute_guarded(
+        "SELECT 1", "prod", None, executor=spy, org_id="acme", no_safety=True
+    )
+    assert spy.calls[0][1]["type"] == "sqlite"  # acme's DSN parsed and handed to the executor

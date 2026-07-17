@@ -233,7 +233,14 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         # Resolve the org for this request. Single-tenant returns the one configured org regardless
         # of context; nothing downstream consumes it yet (tools key on `datasource`), so this asserts
         # the contract and reserves the seam — it does not add org-scoped behavior.
-        request.state.org = self._resolver.resolve_org(request)
+        try:
+            request.state.org = self._resolver.resolve_org(request)
+        except PermissionError:
+            # A resolver may refuse a principal it cannot place. The refusal has to land as a clean 403,
+            # not the 500 an uncaught raise would give (which leaks a traceback under debug). Authentication
+            # already passed by here — this is "you are who you say, but you have no org", so 403, not 401.
+            # The OSS resolver never raises, so this path is inert single-tenant.
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
         return await call_next(request)
 
 
