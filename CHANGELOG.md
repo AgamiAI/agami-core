@@ -21,7 +21,7 @@ resolves to a single `local` org and existing deploys are byte-identical by defa
 - **Migrations and static assets now ship inside the wheel.** In a real (non-editable) `pip install`,
   `store.MIGRATIONS_DIR` resolved outside the package, so the server could boot on an **empty schema**
   with no error, and the missing `static/` dir made app construction fail. Migrations moved into the
-  package (`agami-core/src/migrations/core`), both are packaged as package-data, and `run_migrations`
+  package (`packages/agami-core/src/migrations/core`), both are packaged as package-data, and `run_migrations`
   now **raises** on a missing core-migration root instead of silently applying nothing. (Editable
   checkouts and the `pip install -e` Docker deploy were unaffected — which is why CI stayed green.)
 
