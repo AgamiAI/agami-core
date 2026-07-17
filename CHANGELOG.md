@@ -10,6 +10,35 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [0.4.5] — 2026-07-15
+
+Hosted/self-hosted server hardening: a real-wheel packaging fix, a multi-tenancy seam, and an
+append-only instructions hook. **The local plugin path is behaviour-preserving** — everything
+resolves to a single `local` org and existing deploys are byte-identical by default.
+
+### Fixed
+
+- **Migrations and static assets now ship inside the wheel.** In a real (non-editable) `pip install`,
+  `store.MIGRATIONS_DIR` resolved outside the package, so the server could boot on an **empty schema**
+  with no error, and the missing `static/` dir made app construction fail. Migrations moved into the
+  package (`agami-core/src/migrations/core`), both are packaged as package-data, and `run_migrations`
+  now **raises** on a missing core-migration root instead of silently applying nothing. (Editable
+  checkouts and the `pip install -e` Docker deploy were unaffected — which is why CI stayed green.)
+
+### Added
+
+- **Multi-tenancy: `org_id` scoping across serving, runtime logs, and credentials.** One deployment
+  can host many tenants whose datasources collide on name (e.g. `prod`). `org_id` (default `local`) is
+  threaded through every serving/runtime read+write; a redeploy DELETE is org-scoped (one tenant's
+  reseed can't wipe another's same-named datasource); per-tenant credential env vars
+  (`<ORG>_DATASOURCE_URL[__<PROFILE>]`) with a **fail-closed** rule (a named tenant never falls back to
+  the org-less DSN); and a resolver may raise `PermissionError` to refuse a caller (clean 403, not 500).
+  A plain OSS/self-host deploy is unchanged — everything resolves to `local`.
+- **Append-only `extra_instructions` seam on the HTTP composition root.** `build_server(...)` /
+  `create_app(...)` accept `extra_instructions` so a consumer can add to the model-facing MCP
+  instructions without forking core. **Append-only, never replace** — so a consumer can't silently drop
+  a safety directive (e.g. the sensitive-column output rule); no-op and byte-identical by default.
+
 ## [0.4.4] — 2026-07-14
 
 Onboarding fix for the examples-validation (NL→SQL) dashboard.
