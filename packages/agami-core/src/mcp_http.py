@@ -289,15 +289,24 @@ async def _auth_server(request: Request) -> JSONResponse:
     )
 
 
-def build_server(registry: dict | None = None):
+def build_server(registry: dict | None = None, extra_instructions: str | None = None):
     """A low-level MCP Server whose tool surface IS the given registry — list_tools / call_tool read
     from it, so HTTP advertises exactly what stdio does (no duplicate defs). Defaults to the shared
-    `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools)."""
+    `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools).
+
+    `extra_instructions` is APPENDED to `SERVER_INSTRUCTIONS` (never replaces it) and surfaced to the
+    model in the MCP `initialize` result — append-only so a consumer can add guidance but can't drop
+    the base protocol's safety directives (e.g. the sensitive-column output rule). None = no-op."""
     import mcp.types as mt
     from mcp.server.lowlevel import Server
 
     registry = TOOLS if registry is None else registry
-    server = Server(SERVER_NAME, version=server_version(), instructions=SERVER_INSTRUCTIONS)
+    # Appended, never replacing: SERVER_INSTRUCTIONS carries the PII output rule, so replace-semantics
+    # would let a consumer silently drop a safety directive.
+    instructions = SERVER_INSTRUCTIONS
+    if extra_instructions:
+        instructions = f"{instructions}\n{extra_instructions}"
+    server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
     @server.list_tools()
     async def _list_tools() -> list:
@@ -348,7 +357,11 @@ def build_server(registry: dict | None = None):
     return server
 
 
-def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None) -> Starlette:
+def create_app(
+    extra_tools: dict | None = None,
+    adapters: Adapters | None = None,
+    extra_instructions: str | None = None,
+) -> Starlette:
     """The ASGI app + the composition factory: the `.well-known` discovery routes + the
     streamable-HTTP MCP endpoint at /mcp, behind the auth middleware. Merges `extra_tools` over a
     COPY of the shared TOOLS (never mutating the global) and wires the `adapters` into the request
@@ -357,7 +370,10 @@ def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None
 
     Reusing an existing tool name in `extra_tools` overrides that tool in this app's registry copy —
     intentional at the composition root (the caller opts in explicitly). `tools.register` is the
-    guarded path that refuses a duplicate name."""
+    guarded path that refuses a duplicate name.
+
+    `extra_instructions` is APPENDED to the base MCP instructions and surfaced to the model via the
+    MCP `initialize` result (never replaces the base protocol — see `build_server`). None = no-op."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
@@ -390,7 +406,9 @@ def create_app(extra_tools: dict | None = None, adapters: Adapters | None = None
     # Merge the consumer's extra tools over a COPY of TOOLS — the module global is never mutated.
     registry = {**TOOLS, **(extra_tools or {})}
     session_manager = StreamableHTTPSessionManager(
-        app=build_server(registry), json_response=True, stateless=True
+        app=build_server(registry, extra_instructions=extra_instructions),
+        json_response=True,
+        stateless=True,
     )
 
     async def handle_mcp(scope, receive, send):
