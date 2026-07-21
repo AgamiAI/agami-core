@@ -478,6 +478,26 @@ class WriteReport:
     files_written: list[str] = field(default_factory=list)
 
 
+def ensure_org_id(out: Path, existing: Optional[str] = None) -> str:
+    """Idempotent, deployment-scoped mint of the org identity (F14 / ACE-056). Returns, in order:
+    ``existing`` (an id the caller already resolved); the org_id already persisted at ``out/org.yaml``
+    (preserved across re-introspect — the immutability guarantee); an id already minted for a SIBLING
+    profile in the same artifacts dir (``out.parent``) — so a company with several datasources stays
+    ONE tenant rather than fragmenting; else a freshly minted ``uuid4().hex``. Pure-local — a uuid4
+    plus (later) a file write, no network egress; a random uuid4 is globally unique with no
+    coordinator, the only option under no-egress."""
+    from uuid import uuid4  # local generation only — no egress (F14 invariant)
+
+    from . import loader
+
+    return (
+        existing
+        or loader.load_org_id(out)
+        or loader.deployment_org_id(out.parent)  # adopt the deployment's id (deployment-scoped)
+        or uuid4().hex
+    )
+
+
 def write_tree(
     org: Organization,
     out: Path,
@@ -498,7 +518,11 @@ def write_tree(
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
 
+    # F14: the deployment identity is the first key. `ensure_org_id` reads the *previous* org.yaml
+    # (about to be overwritten) so a re-introspect/curate/snapshot preserves the minted id rather
+    # than re-minting — the immutability guarantee, centralized on the one write chokepoint.
     write("org.yaml", _dump({
+        "org_id": ensure_org_id(out, org.org_id),
         "organization": org.organization,
         "version": org.version,
         "description": org.description,

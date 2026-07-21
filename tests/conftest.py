@@ -22,9 +22,11 @@ def _reset_org_cache():
         return
     tools._ORG_CACHE.clear()
     tools._current_org_ctx.set(None)
+    tools.resolved_org_id.cache_clear()  # F14: memoized org-id resolver; clear so env/profile changes take
     yield
     tools._ORG_CACHE.clear()
     tools._current_org_ctx.set(None)
+    tools.resolved_org_id.cache_clear()
 
 
 @pytest.fixture(autouse=True)

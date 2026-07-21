@@ -21,6 +21,7 @@ Design constraints (match the rest of agami):
 from __future__ import annotations
 
 import csv
+import functools
 import io
 import json
 import os
@@ -279,10 +280,32 @@ def _model_version(profile: str) -> str | None:
 _current_org_ctx: ContextVar[str | None] = ContextVar("agami_current_org_id", default=None)
 
 
+@functools.lru_cache(maxsize=None)
+def resolved_org_id() -> str:
+    """The single-tenant deployment org id, resolved once per process (F14 / ACE-056). Precedence:
+    ``AGAMI_ORG_ID`` env override -> the minted uuid in the active profile's ``org.yaml``
+    (``loader.load_org_id``) -> ``"local"``. The SAME function backs both the deploy-time stamp
+    (``model_deploy._default_org``) and the serve-time resolver, so a deployment writes and reads its
+    rows under one identical id. Memoized: at most one ``org.yaml`` read per process (this sits on the
+    per-request path via ``_current_org_id``). Tests that vary env/profile must call ``.cache_clear()``."""
+    env = os.environ.get("AGAMI_ORG_ID", "").strip()
+    if env:
+        return env
+    try:
+        from semantic_model import loader as L  # lazy: keeps tools import light + avoids a cycle
+
+        # Deployment-scoped: scan the whole artifacts dir (not one 'active' profile) so a deploy with
+        # AGAMI_PROFILE unset and the model under a named profile still finds the minted id.
+        oid = L.deployment_org_id(resolve_artifacts_dir())
+    except Exception:
+        oid = None  # missing/legacy org.yaml or absent model deps -> single-tenant default
+    return oid or "local"
+
+
 def _current_org_id() -> str:
     """The org id to scope this process's model cache by: the request's resolved org when the HTTP server
-    set it (per-request under a multi-tenant resolver), else AGAMI_ORG_ID / 'local' (single-tenant / stdio)."""
-    return _current_org_ctx.get() or os.environ.get("AGAMI_ORG_ID") or "local"
+    set it (per-request under a multi-tenant resolver), else the process-wide minted/`local` id."""
+    return _current_org_ctx.get() or resolved_org_id()
 
 
 # Public alias: a consumer's tool handler needs to know the org its call resolved to (to scope its own

@@ -114,6 +114,7 @@ def load_organization(root: str | Path, *, include_rejected: bool = False) -> Or
         subject_areas.append(_load_subject_area(sa_dir, include_rejected=include_rejected))
 
     org = Organization(
+        org_id=org_doc.get("org_id"),  # F14: minted uuid4 (None for pre-F14 files)
         organization=org_doc.get("organization", root.name),
         version=org_doc.get("version", 1),
         description=org_doc.get("description", ""),
@@ -126,6 +127,42 @@ def load_organization(root: str | Path, *, include_rejected: bool = False) -> Or
         key_terminology=org_doc.get("key_terminology", {}) or {},
     )
     return org
+
+
+def load_org_id(root: str | Path) -> str | None:
+    """Return the minted org_id recorded in ``<root>/org.yaml``, or ``None`` if the file is absent
+    or predates F14 (no ``org_id`` key). This is the serve-time identity read (F14 / ACE-056).
+
+    Deliberately read-only and lenient — unlike ``load_organization`` it never raises on a missing
+    file — so the single-tenant resolver can fall through to its ``"local"`` default. Reads only the
+    top-level key; it does NOT build the full pydantic model (identity resolution runs per process,
+    not per query, so it stays cheap)."""
+    org_path = Path(root) / "org.yaml"
+    if not org_path.exists():
+        return None
+    doc = _read_yaml(org_path) or {}
+    oid = doc.get("org_id")
+    return oid or None
+
+
+def deployment_org_id(artifacts_dir: str | Path) -> str | None:
+    """The deployment-wide org identity: the first ``org_id`` found across ``<artifacts_dir>/*/org.yaml``,
+    or ``None`` if no profile carries one (F14 / ACE-056, the *deployment-scoped* rule).
+
+    A deployment is ONE tenant even with several datasource profiles, so the minted id is shared across
+    every profile's ``org.yaml``. Resolving by scanning the artifacts dir (rather than one 'active'
+    profile) means the deploy stamp and the serve resolver agree even when ``AGAMI_PROFILE`` is unset and
+    the real model lives under a named profile (e.g. ``northpeak_salesforce``, not ``default``). Read-only;
+    never raises. Profiles are expected to agree; the first (sorted) is returned deterministically."""
+    root = Path(artifacts_dir)
+    if not root.is_dir():
+        return None
+    for prof in sorted(root.iterdir()):
+        if prof.is_dir():
+            oid = load_org_id(prof)
+            if oid:
+                return oid
+    return None
 
 
 def _rejected(obj) -> bool:
@@ -603,6 +640,8 @@ def list_prompt_examples(root: str | Path, area: str,
 
 __all__ = [
     "load_organization",
+    "load_org_id",
+    "deployment_org_id",
     "collect_default_filters",
     "get_table_index",
     "get_table_context",
