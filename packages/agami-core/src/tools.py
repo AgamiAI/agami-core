@@ -313,6 +313,25 @@ def _current_org_id() -> str:
 current_org_id = _current_org_id
 
 
+def _credential_org_id() -> str:
+    """The org that selects WAREHOUSE CREDENTIALS — deliberately NOT always the row-scoping org.
+
+    `execute_sql` is fail-closed: a NAMED tenant never falls back to the shared, org-less
+    `DATASOURCE_URL[__<PROFILE>]` vars, so one tenant can't silently borrow another's warehouse. That
+    rule keys on the single-tenant sentinel `"local"`. F14 makes a single-tenant deployment's org a
+    minted uuid — it is still ONE deployment using ITS OWN credentials — so the deployment's own id must
+    keep behaving like the sentinel here, or every existing `DATASOURCE_URL`-based deploy would lose its
+    credentials the moment an id is minted.
+
+    So: the deployment's own resolved id (no `AGAMI_ORG_ID` naming a tenant) maps to `"local"`; anything
+    else — an explicitly-named `AGAMI_ORG_ID`, or a tenant a multi-tenant resolver picked per request —
+    is passed through unchanged and stays fail-closed."""
+    org = _current_org_id()
+    if not os.environ.get("AGAMI_ORG_ID", "").strip() and org == resolved_org_id():
+        return "local"
+    return org
+
+
 # Per-process semantic-model cache (ACE-045). The long-lived server loads the whole model 2-3x per query
 # (_resolve_units + _resolve_receipt) and re-loads it every query; caching serves it warm across queries and
 # users. Keyed (org_id, datasource, model_version): org-scoped so a multi-tenant server never serves one org's
@@ -1002,7 +1021,7 @@ def _run_in_process(
     cap_token = execute_sql._max_rows_override.set(max_rows)
     try:
         result = execute_sql.execute_guarded(
-            sql, profile, area, executor=executor, org_id=_current_org_id()
+            sql, profile, area, executor=executor, org_id=_credential_org_id()
         )
     except execute_sql.GuardRefused as refusal:
         # A read-only refusal (envelope present) is already caught by tool_execute_sql's upstream

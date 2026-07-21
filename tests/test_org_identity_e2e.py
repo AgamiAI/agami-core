@@ -105,3 +105,53 @@ def test_legacy_profile_without_org_id_resolves_local(tmp_path, monkeypatch):
     monkeypatch.delenv("AGAMI_ORG_ID", raising=False)
     tools.resolved_org_id.cache_clear()
     assert tools.resolved_org_id() == "local"
+
+
+# --- F14 regression guard: minting an org must NOT break credential resolution -------------------
+# execute_sql is fail-closed — a NAMED tenant never falls back to the shared org-less
+# DATASOURCE_URL[__<PROFILE>] vars. That rule keyed on the literal "local", so minting a uuid for a
+# single-tenant deployment would have silently cut every DATASOURCE_URL-based deploy off from its
+# warehouse. `_credential_org_id` maps the deployment's OWN id back to the sentinel; a genuinely
+# named tenant still passes through fail-closed.
+
+def test_minted_org_still_resolves_the_orgless_datasource_url(tmp_path, monkeypatch):
+    build.write_tree(_minimal_org(), tmp_path / "np")
+    minted = loader.load_org_id(tmp_path / "np")
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.delenv("AGAMI_ORG_ID", raising=False)
+    tools.resolved_org_id.cache_clear()
+    tools._current_org_ctx.set(None)
+
+    assert tools._current_org_id() == minted          # rows are stamped with the minted uuid …
+    assert tools._credential_org_id() == "local"      # … but credentials use the single-tenant channel
+
+    import execute_sql
+    monkeypatch.setenv("DATASOURCE_URL__NP", "postgresql://u:p@h:5432/np")
+    assert execute_sql._env_datasource_dsn("np", tools._credential_org_id()) is not None
+
+
+def test_named_tenant_stays_fail_closed(tmp_path, monkeypatch):
+    # An explicitly-named AGAMI_ORG_ID is a real tenant: it must NOT borrow the org-less DSN.
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGAMI_ORG_ID", "acme")
+    tools.resolved_org_id.cache_clear()
+    tools._current_org_ctx.set(None)
+    assert tools._credential_org_id() == "acme"
+
+    import execute_sql
+    monkeypatch.setenv("DATASOURCE_URL__NP", "postgresql://u:p@h:5432/np")
+    assert execute_sql._env_datasource_dsn("np", tools._credential_org_id()) is None  # fail-closed
+
+
+def test_per_request_tenant_stays_fail_closed(tmp_path, monkeypatch):
+    # A tenant chosen per-request by a multi-tenant resolver (the contextvar) is also fail-closed,
+    # even though the deployment itself has a minted id.
+    build.write_tree(_minimal_org(), tmp_path / "np")
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.delenv("AGAMI_ORG_ID", raising=False)
+    tools.resolved_org_id.cache_clear()
+    tools._current_org_ctx.set("tenant-b")
+    try:
+        assert tools._credential_org_id() == "tenant-b"
+    finally:
+        tools._current_org_ctx.set(None)
