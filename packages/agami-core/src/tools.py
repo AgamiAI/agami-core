@@ -283,11 +283,20 @@ _current_org_ctx: ContextVar[str | None] = ContextVar("agami_current_org_id", de
 @functools.lru_cache(maxsize=None)
 def resolved_org_id() -> str:
     """The single-tenant deployment org id, resolved once per process (F14 / ACE-056). Precedence:
-    ``AGAMI_ORG_ID`` env override -> the minted uuid in the active profile's ``org.yaml``
-    (``loader.load_org_id``) -> ``"local"``. The SAME function backs both the deploy-time stamp
+    ``AGAMI_ORG_ID`` env override -> the minted uuid found by scanning the artifacts dir
+    (``loader.deployment_org_id``) -> ``"local"``. The SAME function backs both the deploy-time stamp
     (``model_deploy._default_org``) and the serve-time resolver, so a deployment writes and reads its
-    rows under one identical id. Memoized: at most one ``org.yaml`` read per process (this sits on the
-    per-request path via ``_current_org_id``). Tests that vary env/profile must call ``.cache_clear()``."""
+    rows under one identical id.
+
+    It scans the artifacts dir rather than reading one 'active' profile deliberately. The id is
+    DEPLOYMENT-scoped — every profile in the dir carries the same one — so any of them answers the
+    question, while ``resolve_profile()`` would fall back to the literal ``"default"`` whenever
+    ``AGAMI_PROFILE`` is unset and there is no ``.config`` (exactly a deploy container, whose model
+    lives under its datasource's name). That would find no ``org.yaml``, silently resolve ``"local"``,
+    and make the whole feature inert on the deployments it exists for.
+
+    Memoized: at most one artifacts-dir scan per process (this sits on the per-request path via
+    ``_current_org_id``). Tests that vary env/profile must call ``.cache_clear()``."""
     env = os.environ.get("AGAMI_ORG_ID", "").strip()
     if env:
         return env
