@@ -282,32 +282,34 @@ _current_org_ctx: ContextVar[str | None] = ContextVar("agami_current_org_id", de
 
 @functools.lru_cache(maxsize=None)
 def resolved_org_id() -> str:
-    """The single-tenant deployment org id, resolved once per process (F14 / ACE-056). Precedence:
-    ``AGAMI_ORG_ID`` env override -> the minted uuid found by scanning the artifacts dir
-    (``loader.deployment_org_id``) -> ``"local"``. The SAME function backs both the deploy-time stamp
-    (``model_deploy._default_org``) and the serve-time resolver, so a deployment writes and reads its
-    rows under one identical id.
+    """The single-tenant deployment org id, resolved once per process (F14 / ACE-056; relocated by
+    F15 / ACE-067). Precedence: ``AGAMI_ORG_ID`` env override -> the id in the deployment-level record
+    (``organization.yaml``, via ``org_record.load_org_record``) -> the LEGACY per-profile id found by
+    scanning the artifacts dir (``loader.deployment_org_id`` — a pre-record deployment) -> ``"local"``.
+    The SAME function backs both the deploy-time stamp (``model_deploy._default_org``) and the serve-time
+    resolver, so a deployment writes and reads its rows under one identical id.
 
-    It scans the artifacts dir rather than reading one 'active' profile deliberately. The id is
-    DEPLOYMENT-scoped — every profile in the dir carries the same one — so any of them answers the
-    question, while ``resolve_profile()`` would fall back to the literal ``"default"`` whenever
-    ``AGAMI_PROFILE`` is unset and there is no ``.config`` (exactly a deploy container, whose model
-    lives under its datasource's name). That would find no ``org.yaml``, silently resolve ``"local"``,
-    and make the whole feature inert on the deployments it exists for.
+    F15 relocates the id's home from each profile's ``org.yaml`` up into the one root record, so the
+    org owns its own identity; the per-profile scan is kept only as the legacy fallback for a deployment
+    that has a per-profile id but no record yet (the id is lifted into a record on the next onboard).
+    The artifacts-dir scope (not one 'active' profile) is preserved: a deploy with ``AGAMI_PROFILE``
+    unset and the model under a named profile still resolves the deployment id.
 
-    Memoized: at most one artifacts-dir scan per process (this sits on the per-request path via
-    ``_current_org_id``). Tests that vary env/profile must call ``.cache_clear()``."""
+    Memoized: at most one resolve per process (this sits on the per-request path via ``_current_org_id``).
+    Tests that vary env/profile must call ``.cache_clear()``."""
     env = os.environ.get("AGAMI_ORG_ID", "").strip()
     if env:
         return env
     try:
         from semantic_model import loader as L  # lazy: keeps tools import light + avoids a cycle
+        from semantic_model import org_record as OR
 
-        # Deployment-scoped: scan the whole artifacts dir (not one 'active' profile) so a deploy with
-        # AGAMI_PROFILE unset and the model under a named profile still finds the minted id.
-        oid = L.deployment_org_id(resolve_artifacts_dir())
+        art = resolve_artifacts_dir()
+        record = OR.load_org_record(art)  # F15: the record is the home of the id
+        # Legacy fallback: a pre-record deployment still keeps its id in each profile's org.yaml.
+        oid = record.org_id if record is not None else L.deployment_org_id(art)
     except Exception:
-        oid = None  # missing/legacy org.yaml or absent model deps -> single-tenant default
+        oid = None  # missing/legacy record or absent model deps -> single-tenant default
     return oid or "local"
 
 
@@ -398,6 +400,29 @@ def _domain_memory(profile: str) -> tuple[str, str | None]:
     return (_read_text(artifacts / profile / "ORGANIZATION.md") or ""), _read_text(
         artifacts / "USER_MEMORY.md"
     )
+
+
+def _company_context(org_id: str) -> "tuple[Any, str]":
+    """(deployment ``OrgRecord`` | None, company narrative) for the two-level org context (F15 / ACE-069)
+    — from the DB when AGAMI_DB_URL is set (no file read), else from disk. The company narrative is stored
+    like USER_MEMORY.md: a company-level ``memory`` row under the empty-datasource sentinel. Both absent ⇒
+    ``(None, "")`` so composition degrades to today's per-profile output."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is not None:
+        from model_store import load_memory, load_organization_record
+
+        try:
+            record = load_organization_record(store, org_id)
+            mem = load_memory(store, "", org_id=org_id)  # the company narrative rides datasource=''
+        finally:
+            store.close()
+        return record, (mem.get("organization") or "")
+    from semantic_model import org_record as OR
+
+    art = resolve_artifacts_dir()
+    return OR.load_org_record(art), (_read_text(OR.narrative_path(art)) or "")
 
 
 def _resolve_receipt(profile: str, sql: str) -> dict | None:
@@ -839,7 +864,13 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     from semantic_model import org_draft as _OD
 
     org_md_raw, user_md_raw = _domain_memory(profile)
-    domain_context = _OD.compose_context(org_md_raw, org)
+    # Two-level (F15 / ACE-069): the shared COMPANY block from the deployment record + this datasource's
+    # source-specific narrative + derived summary. No record ⇒ compose_org_context degrades to the exact
+    # pre-F15 single-level output, so a deployment without a record is unaffected.
+    record, company_md = _company_context(_current_org_id())
+    domain_context = _OD.compose_org_context(
+        record, [org], company_narrative=company_md, source_narratives=[org_md_raw]
+    )
     if domain_context:
         parts.append(f"\n## Domain context\n{domain_context}")
     user_mem = _distill_for_llm(user_md_raw)

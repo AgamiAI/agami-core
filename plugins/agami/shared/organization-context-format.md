@@ -2,6 +2,26 @@
 
 Free-form Markdown describing **what this database is about** in the human's own words: the company / product, what the data represents, who the users are. One file per profile at `<artifacts_dir>/<profile>/ORGANIZATION.md` — context is database-specific.
 
+## Two levels: the company record vs the per-datasource narrative (F15)
+
+A deployment can connect several databases under **one company**. Company-wide context is written **once** at the deployment level and shared by every datasource; each datasource keeps its **own** vocabulary. Two homes, joined at read time:
+
+| Level | Where | Holds | Written |
+|---|---|---|---|
+| **Company** (the deployment) | `<artifacts_dir>/organization.yaml` (the `OrgRecord`) + `<artifacts_dir>/ORGANIZATION.md` (company narrative) | company name/description, `fiscal_year_start_month`, `display_conventions` (currency/rounding/week_start), the company-wide `glossary` — and the company narrative prose | once, at first onboarding; edited via `/agami-model` |
+| **Datasource** (each profile) | `<artifacts_dir>/<profile>/org.yaml` + `<profile>/ORGANIZATION.md` | that source's ontology (`key_terminology`, subject areas, …) and a **source-specific** narrative only | per profile |
+
+`cli org-context` (local) and `get_datasource_schema` (served) both assemble these two levels with `org_draft.compose_org_context(record, [ontology], …)`: the **company block once**, then each datasource's source-specific narrative + derived summary. A federated question spanning several datasources renders the company block **once** and both vocabularies. **With no company record, output degrades to exactly the pre-F15 per-profile assembly** — no error, nothing to migrate.
+
+### Content-routing rule — where each kind of context goes
+
+- **Company-wide** (fiscal year, company glossary, a display convention true for the whole company, "who we are" prose) → the **company record** (`organization.yaml` + root `ORGANIZATION.md`).
+- **Source-specific** (what THIS database means, a term that resolves differently here) → the **per-profile** files (`<profile>/org.yaml` `key_terminology` / `<profile>/ORGANIZATION.md`).
+- **Per-column** units/encodings → the column's `field_metadata` in the structured model — **never** prose.
+- **Personal / stylistic** (how *I* like results displayed) → `USER_MEMORY.md`.
+
+The rest of this doc describes the per-datasource `ORGANIZATION.md`.
+
 **It holds the human narrative ONLY.** The factual summary — subject areas, conventions, and the decoded domain **glossary** — is NOT stored here. That's derived from the structured model at read time and combined with the narrative when a reader needs the full context. The two homes stay separate so:
 
 - a human editing their prose can never accidentally overwrite or delete the auto facts, and
