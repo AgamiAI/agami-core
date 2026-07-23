@@ -86,6 +86,27 @@ def cmd_snapshot(args) -> int:
     return 0 if h else 1
 
 
+def cmd_ensure_org_id(args) -> int:
+    """Mint + persist the deployment org_id into <root>/org.yaml if absent (F14 / ACE-056), then
+    print it. Idempotent — an already-minted id is returned unchanged. The introspect/curate paths
+    mint inline via write_tree; this command is for paths that write a model WITHOUT them — e.g.
+    agami-connect's sample copy (6A) drops a prebuilt model that carries no id. Deployment-scoped:
+    adopts a sibling profile's id if one exists, so multi-datasource stays one tenant."""
+    from pathlib import Path
+
+    from . import build
+    root = Path(args.root)
+    org_path = root / "org.yaml"
+    doc = L._read_yaml(org_path) or {}
+    existing = doc.get("org_id")
+    oid = build.ensure_org_id(root, existing or None)
+    if oid != existing:
+        doc["org_id"] = oid
+        org_path.write_text(build._dump(doc), encoding="utf-8")
+    print(oid)
+    return 0
+
+
 def cmd_context(args) -> int:
     org = L.load_organization(args.root)
     out = L.get_table_context(
@@ -1051,6 +1072,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("snapshot", help="stamp the model_version snapshot for a profile (e.g. after copying a model)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_snapshot)
+
+    sp = sub.add_parser("ensure-org-id", help="mint + persist the deployment org_id into org.yaml if absent (e.g. after copying a sample model)")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_ensure_org_id)
 
     sp = sub.add_parser("context", help="assemble get_table_context")
     sp.add_argument("root")

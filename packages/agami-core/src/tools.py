@@ -21,6 +21,7 @@ Design constraints (match the rest of agami):
 from __future__ import annotations
 
 import csv
+import functools
 import io
 import json
 import os
@@ -279,15 +280,65 @@ def _model_version(profile: str) -> str | None:
 _current_org_ctx: ContextVar[str | None] = ContextVar("agami_current_org_id", default=None)
 
 
+@functools.lru_cache(maxsize=None)
+def resolved_org_id() -> str:
+    """The single-tenant deployment org id, resolved once per process (F14 / ACE-056). Precedence:
+    ``AGAMI_ORG_ID`` env override -> the minted uuid found by scanning the artifacts dir
+    (``loader.deployment_org_id``) -> ``"local"``. The SAME function backs both the deploy-time stamp
+    (``model_deploy._default_org``) and the serve-time resolver, so a deployment writes and reads its
+    rows under one identical id.
+
+    It scans the artifacts dir rather than reading one 'active' profile deliberately. The id is
+    DEPLOYMENT-scoped — every profile in the dir carries the same one — so any of them answers the
+    question, while ``resolve_profile()`` would fall back to the literal ``"default"`` whenever
+    ``AGAMI_PROFILE`` is unset and there is no ``.config`` (exactly a deploy container, whose model
+    lives under its datasource's name). That would find no ``org.yaml``, silently resolve ``"local"``,
+    and make the whole feature inert on the deployments it exists for.
+
+    Memoized: at most one artifacts-dir scan per process (this sits on the per-request path via
+    ``_current_org_id``). Tests that vary env/profile must call ``.cache_clear()``."""
+    env = os.environ.get("AGAMI_ORG_ID", "").strip()
+    if env:
+        return env
+    try:
+        from semantic_model import loader as L  # lazy: keeps tools import light + avoids a cycle
+
+        # Deployment-scoped: scan the whole artifacts dir (not one 'active' profile) so a deploy with
+        # AGAMI_PROFILE unset and the model under a named profile still finds the minted id.
+        oid = L.deployment_org_id(resolve_artifacts_dir())
+    except Exception:
+        oid = None  # missing/legacy org.yaml or absent model deps -> single-tenant default
+    return oid or "local"
+
+
 def _current_org_id() -> str:
     """The org id to scope this process's model cache by: the request's resolved org when the HTTP server
-    set it (per-request under a multi-tenant resolver), else AGAMI_ORG_ID / 'local' (single-tenant / stdio)."""
-    return _current_org_ctx.get() or os.environ.get("AGAMI_ORG_ID") or "local"
+    set it (per-request under a multi-tenant resolver), else the process-wide minted/`local` id."""
+    return _current_org_ctx.get() or resolved_org_id()
 
 
 # Public alias: a consumer's tool handler needs to know the org its call resolved to (to scope its own
 # store), and the request never reaches the handler — only this contextvar does.
 current_org_id = _current_org_id
+
+
+def _credential_org_id() -> str:
+    """The org that selects WAREHOUSE CREDENTIALS — deliberately NOT always the row-scoping org.
+
+    `execute_sql` is fail-closed: a NAMED tenant never falls back to the shared, org-less
+    `DATASOURCE_URL[__<PROFILE>]` vars, so one tenant can't silently borrow another's warehouse. That
+    rule keys on the single-tenant sentinel `"local"`. F14 makes a single-tenant deployment's org a
+    minted uuid — it is still ONE deployment using ITS OWN credentials — so the deployment's own id must
+    keep behaving like the sentinel here, or every existing `DATASOURCE_URL`-based deploy would lose its
+    credentials the moment an id is minted.
+
+    So: the deployment's own resolved id (no `AGAMI_ORG_ID` naming a tenant) maps to `"local"`; anything
+    else — an explicitly-named `AGAMI_ORG_ID`, or a tenant a multi-tenant resolver picked per request —
+    is passed through unchanged and stays fail-closed."""
+    org = _current_org_id()
+    if not os.environ.get("AGAMI_ORG_ID", "").strip() and org == resolved_org_id():
+        return "local"
+    return org
 
 
 # Per-process semantic-model cache (ACE-045). The long-lived server loads the whole model 2-3x per query
@@ -979,7 +1030,7 @@ def _run_in_process(
     cap_token = execute_sql._max_rows_override.set(max_rows)
     try:
         result = execute_sql.execute_guarded(
-            sql, profile, area, executor=executor, org_id=_current_org_id()
+            sql, profile, area, executor=executor, org_id=_credential_org_id()
         )
     except execute_sql.GuardRefused as refusal:
         # A read-only refusal (envelope present) is already caught by tool_execute_sql's upstream

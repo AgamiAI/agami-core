@@ -207,3 +207,56 @@ def test_main_errors_naming_a_missing_datasource(tmp_path, monkeypatch):
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(arts))
     rc = model_deploy.main(["nope"])  # no nope/org.yaml
     assert rc == 1
+
+
+# --- F14 / ACE-056 + ACE-057: minted org_id stamping + backfill --------------------------------
+
+def test_deploy_stamps_minted_org_id(tmp_path, monkeypatch):
+    # A model whose org.yaml carries a minted org_id: deploy resolves it (via _default_org ->
+    # tools.resolved_org_id over the artifacts dir) and stamps serving rows with it, not 'local'.
+    import tools
+
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    p = arts / "demo" / "org.yaml"
+    p.write_text("org_id: mintedcafe\n" + p.read_text())
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(arts))
+    monkeypatch.delenv("AGAMI_ORG_ID", raising=False)
+    tools.resolved_org_id.cache_clear()
+
+    store = _store(tmp_path)
+    model_deploy.deploy_one(store, "demo", arts / "demo")  # org_id=None -> resolves the minted id
+    orgs = {r["org_id"] for r in store.query("SELECT DISTINCT org_id FROM datasource_model")}
+    store.close()
+    assert orgs == {"mintedcafe"}
+
+
+def test_backfill_moves_local_rows_idempotently(tmp_path):
+    store = _store(tmp_path)
+    store.execute("INSERT INTO users (id, username, password_hash, created) VALUES ('u1','a@x','h','t')")
+    store.execute("INSERT INTO datasource_model (org_id, datasource, doc) VALUES ('local','ds','{}')")
+    store.execute("INSERT INTO tool_calls (id, ts, org_id, tool_name) VALUES ('t1','t','local','execute_sql')")
+    store.commit()
+
+    model_deploy._backfill_org_id(store, "the-uuid")
+
+    def orgs(t):
+        return {r["org_id"] for r in store.query(f"SELECT org_id FROM {t}")}
+
+    assert orgs("users") == {"the-uuid"}
+    assert orgs("datasource_model") == {"the-uuid"}
+    assert orgs("tool_calls") == {"the-uuid"}
+    # idempotent: re-run matches zero 'local' rows, nothing changes
+    model_deploy._backfill_org_id(store, "the-uuid")
+    assert orgs("users") == {"the-uuid"}
+    store.close()
+
+
+def test_backfill_noop_when_target_is_local(tmp_path):
+    # A pre-F14 / un-minted deployment resolves 'local' -> the backfill must leave 'local' rows alone.
+    store = _store(tmp_path)
+    store.execute("INSERT INTO datasource_model (org_id, datasource, doc) VALUES ('local','ds','{}')")
+    store.commit()
+    model_deploy._backfill_org_id(store, "local")
+    assert {r["org_id"] for r in store.query("SELECT org_id FROM datasource_model")} == {"local"}
+    store.close()

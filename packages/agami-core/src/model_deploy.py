@@ -10,7 +10,6 @@ Run by the deploy entrypoint and re-run on restart to pick up an edited model.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -20,10 +19,41 @@ from store import Store
 
 
 def _default_org() -> str:
-    """The org to deploy under when the caller names none. A CLI has no request, so this is exactly
-    what the server's read path falls back to (AGAMI_ORG_ID / 'local') — the two MUST agree, or the
-    model is written under one org and read under another and the server sees no model."""
-    return os.environ.get("AGAMI_ORG_ID") or "local"
+    """The org to deploy under when the caller names none. A CLI has no request, so it calls the SAME
+    resolver the server's read path uses (`tools.resolved_org_id`: AGAMI_ORG_ID -> the minted uuid in
+    org.yaml -> 'local') — the two MUST agree, or the model is written under one org and read under
+    another and the server sees no model (F14 / ACE-056)."""
+    from tools import resolved_org_id  # lazy: keeps the deploy CLI's import surface small
+
+    return resolved_org_id()
+
+
+# Every tenant-scoped table carrying `org_id` — the serving model (9), the append-only runtime logs (2),
+# and the user roster (1, added by 012). The backfill moves legacy 'local' rows across all of them.
+_BACKFILL_TABLES = (
+    "datasource_model", "subject_area", "model_table", "metric", "entity",
+    "relationship", "prompt_example", "memory", "model_version",  # serving
+    "query_executions", "tool_calls",                             # runtime (append-only)
+    "users",                                                      # auth roster
+)
+
+
+def _backfill_org_id(store: Store, org_id: str) -> None:
+    """Move rows written under the legacy 'local' sentinel onto the resolved minted `org_id`
+    (F14 / ACE-057). Runs once at boot, right after migrations, so an EXISTING deployment that ran
+    under 'local' before this feature adopts its minted id instead of orphaning those rows.
+
+    Why an UPDATE-move and not a re-seed: `model_store.write_organization`'s redeploy DELETE is scoped
+    to (org_id, datasource), so re-deploying under a NEW org_id would leave the old 'local' serving
+    rows behind (doubled); the runtime tables are append-only and can only be corrected by an UPDATE.
+    Idempotent + safe: a no-op when the target is still 'local' (a pre-F14 / un-minted deployment), and
+    `WHERE org_id='local'` matches zero rows once moved, so re-runs do nothing. Never touches
+    `username`, so the users UNIQUE index can't trip."""
+    if org_id == "local":
+        return
+    for tbl in _BACKFILL_TABLES:
+        store.execute(f"UPDATE {tbl} SET org_id = ? WHERE org_id = 'local'", (org_id,))
+    store.commit()
 
 
 def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | None = None) -> None:
@@ -108,6 +138,10 @@ def main(argv: list[str] | None = None) -> int:
     # server (whose lifespan auto-migrates) is up, so the schema may not be applied yet.
     # run_migrations is idempotent, so the later lifespan pass is a harmless no-op.
     store.run_migrations()
+    # Move any legacy 'local' rows onto this deployment's minted org_id BEFORE deploying — so the
+    # redeploy's (org_id, datasource)-scoped overwrite lines up with the just-moved serving rows
+    # instead of orphaning them. No-op on a fresh or un-minted ('local') deployment.
+    _backfill_org_id(store, _default_org())
     artifacts_dir = agami_paths.artifacts_dir()
     if not artifacts_dir.is_dir():  # clean exit, not an uncaught FileNotFoundError from iterdir()
         store.close()

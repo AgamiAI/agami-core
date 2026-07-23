@@ -70,6 +70,24 @@ def test_users_table_is_flat_no_role_column():
     s.close()
 
 
+def test_users_has_org_id_column():
+    # F14 / ACE-057: the users roster is tenant-scoped like the serving/runtime tables (migration 012),
+    # so an authorized-user set rides along when a deployment is lifted into hosted. org_id is an indexed
+    # NON-PK column here (users PK is `id`, login is by UNIQUE username) — deliberately unlike the
+    # serving tables where org_id leads the PK.
+    s = Store.connect("sqlite://")
+    ran = s.run_migrations()
+    assert "012_users_org_id.sql" in ran
+    info = {r["name"]: r for r in s.query("PRAGMA table_info(users)")}
+    assert "org_id" in info
+    assert info["org_id"]["notnull"] == 1
+    assert info["org_id"]["dflt_value"] in ("'local'", "local")  # SQLite quotes the default literal
+    assert info["org_id"]["pk"] == 0  # NOT part of the primary key
+    indexes = {r["name"] for r in s.query("PRAGMA index_list(users)")}
+    assert "idx_users_org" in indexes
+    s.close()
+
+
 def test_users_password_hash_nullable_and_email_indexed():
     # OIDC users have no password, and we look them up by email — so password_hash is nullable and
     # email is indexed after the passwordless migration.

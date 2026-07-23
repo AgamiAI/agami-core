@@ -632,6 +632,11 @@ class SubjectArea(_Base):
 
 
 class Organization(_Base):
+    # Locally-minted, globally-unique deployment identity (F14 / ACE-056): a uuid4 hex minted ONCE at
+    # agami-connect and persisted in org.yaml, then immutable. Optional/None so pre-F14 org.yaml files
+    # (which have no org_id key) still load under the model's `extra="forbid"` policy. Never transmitted;
+    # it only travels the day the operator exports their own DB — see F14's no-egress invariant.
+    org_id: Optional[str] = None
     organization: str
     version: int = 1
     description: str = ""
