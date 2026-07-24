@@ -568,8 +568,11 @@ def write_tree(
                   _dump({"examples": examples_by_area[sa.name]}))
     if not dry_run:
         # Stamp the model_version pin for the freshly-written model (best-effort).
-        from . import snapshot
+        from . import org_record, snapshot
         snapshot.write_snapshot(out)
+        # Keep the deployment record's datasource list in sync with what's actually on disk — this
+        # profile was just written, so rebuild the list from the profile dirs (auto-maintained, no drift).
+        org_record.refresh_datasources(out.parent)
     return rep
 
 

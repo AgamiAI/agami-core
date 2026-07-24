@@ -166,6 +166,21 @@ def cmd_org_context(args) -> int:
     return 0
 
 
+def cmd_set_org(args) -> int:
+    # Write the human-authored company fields (name / short description) into the deployment-level
+    # organization record. Onboarding calls this after asking the company question, so the record
+    # carries more than just its org_id. Only the flags passed are updated; others are left as-is.
+    from . import org_record as OR
+
+    record = OR.set_org_fields(
+        args.artifacts_dir, name=args.name, description=args.description
+    )
+    _print_json(
+        {"org_id": record.org_id, "name": record.name, "description": record.description}
+    )
+    return 0
+
+
 def cmd_examples(args) -> int:
     examples = L.list_prompt_examples(args.root, args.area)
     matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k)
@@ -1117,6 +1132,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("org-context", help="print the full domain context (human narrative + model-derived summary + glossary) for the LLM")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_org_context)
+
+    sp = sub.add_parser("set-org", help="write the company name / description into the deployment organization record")
+    sp.add_argument("artifacts_dir")
+    sp.add_argument("--name", default=None)
+    sp.add_argument("--description", default=None)
+    sp.set_defaults(func=cmd_set_org)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
     sp.add_argument("root")

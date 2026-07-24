@@ -87,6 +87,45 @@ def write_org_record(artifacts_dir: str | Path, record: OrgRecord) -> Path:
     return path
 
 
+def set_org_fields(
+    artifacts_dir: str | Path,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+) -> OrgRecord:
+    """Set the human-authored company fields on the record, minting it first if absent. Only the fields
+    passed (non-``None``) are updated; the rest are left untouched. Persists and returns the record.
+    This is the write path onboarding uses to populate ``name``/``description`` (the record is otherwise
+    minted with just an ``org_id``)."""
+    record = ensure_org_record(artifacts_dir)
+    changes = {k: v for k, v in {"name": name, "description": description}.items() if v is not None}
+    if changes:
+        record = record.model_copy(update=changes)
+        write_org_record(artifacts_dir, record)
+    return record
+
+
+def refresh_datasources(artifacts_dir: str | Path) -> Optional[OrgRecord]:
+    """Rebuild the record's ``datasources`` list from the profile directories actually present on disk
+    (each immediate subdir holding an ``org.yaml``), so the list is auto-maintained and can never drift.
+    Returns ``None`` (and writes nothing) when there is neither a record nor any profile yet; otherwise
+    mints the record if needed, updates the list, persists, and returns it."""
+    art = Path(artifacts_dir)
+    names = (
+        sorted(p.name for p in art.iterdir() if p.is_dir() and (p / "org.yaml").exists())
+        if art.is_dir()
+        else []
+    )
+    existing = load_org_record(artifacts_dir)
+    if existing is None and not names:
+        return None
+    record = existing or ensure_org_record(artifacts_dir)
+    if record.datasources != names:
+        record = record.model_copy(update={"datasources": names})
+        write_org_record(artifacts_dir, record)
+    return record
+
+
 def _lifted_or_minted_org_id(artifacts_dir: str | Path) -> str:
     """The legacy lift: reuse a per-profile ``org_id`` if one exists (post-F14 deployment), else mint.
     Kept here (not in the resolver) so the id is written into the record exactly once."""

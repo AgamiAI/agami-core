@@ -710,6 +710,9 @@ class OrgRecord(_Base):
     # Company-wide glossary: term -> one-line definition. Same shape as Organization.key_terminology
     # (the established glossary type), but scoped to the COMPANY rather than a single datasource.
     glossary: dict[str, str] = Field(default_factory=dict)
+    # The datasources (profile names) attached under this org. Auto-maintained: rebuilt from the profile
+    # directories present on disk on every onboard/deploy, never hand-edited, so it cannot drift.
+    datasources: list[str] = Field(default_factory=list)
 
     @field_validator("fiscal_year_start_month")
     @classmethod

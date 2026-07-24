@@ -103,7 +103,7 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
 def _deploy_user_memory(store: Store, artifacts_dir: Path, org_id: str | None = None) -> None:
     """USER_MEMORY.md is **cross-datasource** (one row per org, keyed by the global sentinel inside
     write_memory) and lives at the artifacts ROOT — not per profile — matching how the server reads it
-    (`tools._domain_memory` → `artifacts/USER_MEMORY.md`). Written once per run; absent ⇒ nothing to do."""
+    (`tools._context_sources` → `artifacts/USER_MEMORY.md`). Written once per run; absent ⇒ nothing to do."""
     f = artifacts_dir / "USER_MEMORY.md"
     if f.exists():
         org_id = org_id if org_id is not None else _default_org()
@@ -121,6 +121,9 @@ def _deploy_org_record(store: Store, artifacts_dir: Path, org_id: str | None = N
 
     record = OR.load_org_record(artifacts_dir)
     if record is not None:
+        # Refresh the datasource list from disk so the derived row reflects what's actually deployed.
+        # Only when a record already exists — an absent record still degrades (no mint at deploy time).
+        record = OR.refresh_datasources(artifacts_dir) or record
         org_id = org_id if org_id is not None else _default_org()
         model_store.write_organization_record(store, record, org_id=org_id)
         # The company NARRATIVE is prose, not structured — it lives in a company-level `memory` row

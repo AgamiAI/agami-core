@@ -130,3 +130,50 @@ def test_bare_record_is_valid_and_fiscal_year_bounds_enforced():
     assert OrgRecord(org_id="x").fiscal_year_start_month is None  # id-only record validates
     with pytest.raises(ValueError):
         OrgRecord(org_id="x", fiscal_year_start_month=13)  # same 1..12 bound as Organization
+
+
+def test_set_org_fields_mints_then_updates_only_passed_fields(tmp_path):
+    rec = OR.set_org_fields(tmp_path, name="Acme", description="Subscription commerce.")
+    assert rec.name == "Acme" and rec.description == "Subscription commerce."
+    assert len(rec.org_id) == 32  # minted the record on first write
+    # A later call updating only `description` leaves `name` (and the id) intact.
+    rec2 = OR.set_org_fields(tmp_path, description="Updated.")
+    assert rec2.name == "Acme" and rec2.description == "Updated."
+    assert rec2.org_id == rec.org_id
+    assert OR.load_org_record(tmp_path) == rec2  # persisted
+
+
+def test_refresh_datasources_tracks_profiles_on_disk(tmp_path):
+    OR.set_org_fields(tmp_path, name="Acme")  # a record with authored company content
+    for prof in ("crm", "erp"):
+        (tmp_path / prof).mkdir()
+        (tmp_path / prof / "org.yaml").write_text(f"org_id: x\norganization: {prof}\n")
+
+    rec = OR.refresh_datasources(tmp_path)
+    assert rec.datasources == ["crm", "erp"]  # sorted, rebuilt from the profile dirs on disk
+    assert rec.name == "Acme"  # the refresh never disturbs the authored fields
+
+    import shutil
+
+    shutil.rmtree(tmp_path / "erp")  # removing a datasource dir drops it on the next refresh
+    assert OR.refresh_datasources(tmp_path).datasources == ["crm"]  # no drift
+
+
+def test_refresh_datasources_noop_when_nothing_exists(tmp_path):
+    assert OR.refresh_datasources(tmp_path) is None  # no record and no profiles -> nothing to do
+    assert OR.load_org_record(tmp_path) is None  # and it wrote nothing (never mints on an empty dir)
+
+
+def test_build_write_tree_auto_maintains_the_datasource_list(tmp_path):
+    build.write_tree(_minimal_org("sales"), tmp_path / "sales")
+    build.write_tree(_minimal_org("support"), tmp_path / "support")
+    rec = OR.load_org_record(tmp_path)
+    assert rec.datasources == ["sales", "support"]  # the build keeps the record's list in sync
+
+
+def test_set_org_cli_writes_name_and_description(tmp_path):
+    from semantic_model import cli
+
+    assert cli.main(["set-org", str(tmp_path), "--name", "Acme", "--description", "Demo co."]) == 0
+    rec = OR.load_org_record(tmp_path)
+    assert rec.name == "Acme" and rec.description == "Demo co."

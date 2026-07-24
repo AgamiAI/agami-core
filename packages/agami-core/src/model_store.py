@@ -264,6 +264,7 @@ def write_organization_record(store: Store, record: OrgRecord, org_id: str = DEF
             "fiscal_year_start_month": record.fiscal_year_start_month,
             "display_conventions": record.display_conventions.model_dump(mode="json"),
             "glossary": record.glossary,
+            "datasources": record.datasources,
         }
     )
     store.execute(
@@ -295,6 +296,7 @@ def load_organization_record(store: Store, org_id: str = DEFAULT_ORG) -> OrgReco
         fiscal_year_start_month=doc.get("fiscal_year_start_month"),
         display_conventions=doc.get("display_conventions") or {},
         glossary=doc.get("glossary") or {},
+        datasources=doc.get("datasources") or [],
     )
 
 

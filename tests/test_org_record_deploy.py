@@ -145,6 +145,7 @@ def test_deploy_writes_one_org_row_and_two_datasource_rows_on_one_org_id(tmp_pat
         "SELECT content FROM memory WHERE org_id = ? AND datasource = '' AND kind = 'organization'",
         ("deployorg",),
     )
+    deployed_record = MS.load_organization_record(s, "deployorg")
     s.close()
 
     assert [r["org_id"] for r in org_rows] == ["deployorg"]  # exactly ONE org row
@@ -153,3 +154,5 @@ def test_deploy_writes_one_org_row_and_two_datasource_rows_on_one_org_id(tmp_pat
         ("deployorg", "crm"),
         ("deployorg", "erp"),
     ]  # two datasource rows, same org_id
+    # The deploy refreshed the datasource list from disk and derived it into the org row's doc.
+    assert deployed_record.datasources == ["crm", "erp"]

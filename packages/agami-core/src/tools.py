@@ -382,31 +382,13 @@ def get_cached_org(profile: str):
         return org
 
 
-def _domain_memory(profile: str) -> tuple[str, str | None]:
-    """(ORGANIZATION.md text, USER_MEMORY.md text) for the domain-context block — from the DB when
-    AGAMI_DB_URL is set (no file read at runtime), else from disk."""
-    from store import Store
-
-    store = Store.from_env()
-    if store is not None:
-        from model_store import load_memory
-
-        try:
-            mem = load_memory(store, profile, org_id=_current_org_id())
-        finally:
-            store.close()
-        return mem.get("organization") or "", mem.get("user")
-    artifacts = resolve_artifacts_dir()
-    return (_read_text(artifacts / profile / "ORGANIZATION.md") or ""), _read_text(
-        artifacts / "USER_MEMORY.md"
-    )
-
-
-def _company_context(org_id: str) -> "tuple[Any, str]":
-    """(deployment ``OrgRecord`` | None, company narrative) for the two-level org context (F15 / ACE-069)
-    — from the DB when AGAMI_DB_URL is set (no file read), else from disk. The company narrative is stored
-    like USER_MEMORY.md: a company-level ``memory`` row under the empty-datasource sentinel. Both absent ⇒
-    ``(None, "")`` so composition degrades to today's per-profile output."""
+def _context_sources(profile: str, org_id: str) -> "tuple[str, str | None, Any, str]":
+    """Every piece of domain-context text the served schema needs, read in ONE place: the per-datasource
+    ORGANIZATION.md, USER_MEMORY.md, the deployment ``OrgRecord``, and the company narrative. Under the DB
+    backend all of it is read on a SINGLE connection — this is a hot tool path, so open ``Store`` once, not
+    per-source; with no DB configured it falls back to file reads (a DB deploy reads no files at runtime).
+    Returns ``(org_md, user_md, record | None, company_md)``; missing pieces come back empty/``None`` so the
+    two-level composition degrades cleanly."""
     from store import Store
 
     store = Store.from_env()
@@ -414,15 +396,22 @@ def _company_context(org_id: str) -> "tuple[Any, str]":
         from model_store import load_memory, load_organization_record
 
         try:
-            record = load_organization_record(store, org_id)
-            mem = load_memory(store, "", org_id=org_id)  # the company narrative rides datasource=''
+            mem = load_memory(store, profile, org_id=org_id)  # per-datasource ORGANIZATION.md + USER_MEMORY.md
+            record = load_organization_record(store, org_id)  # the deployment company record
+            company = load_memory(store, "", org_id=org_id)  # company narrative rides the datasource='' row
         finally:
             store.close()
-        return record, (mem.get("organization") or "")
+        return mem.get("organization") or "", mem.get("user"), record, (company.get("organization") or "")
+
     from semantic_model import org_record as OR
 
     art = resolve_artifacts_dir()
-    return OR.load_org_record(art), (_read_text(OR.narrative_path(art)) or "")
+    return (
+        _read_text(art / profile / "ORGANIZATION.md") or "",
+        _read_text(art / "USER_MEMORY.md"),
+        OR.load_org_record(art),
+        _read_text(OR.narrative_path(art)) or "",
+    )
 
 
 def _resolve_receipt(profile: str, sql: str) -> dict | None:
@@ -863,11 +852,11 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # otherwise — so a DB-only deploy reads no files at runtime.
     from semantic_model import org_draft as _OD
 
-    org_md_raw, user_md_raw = _domain_memory(profile)
-    # Two-level (F15 / ACE-069): the shared COMPANY block from the deployment record + this datasource's
-    # source-specific narrative + derived summary. No record ⇒ compose_org_context degrades to the exact
-    # pre-F15 single-level output, so a deployment without a record is unaffected.
-    record, company_md = _company_context(_current_org_id())
+    # Two-level context: the shared COMPANY block from the deployment record + this datasource's own
+    # narrative + derived summary. All the text is read on ONE DB connection (see _context_sources). No
+    # record ⇒ compose_org_context degrades to the single-level output, so a deployment without a record
+    # is unaffected.
+    org_md_raw, user_md_raw, record, company_md = _context_sources(profile, _current_org_id())
     domain_context = _OD.compose_org_context(
         record, [org], company_narrative=company_md, source_narratives=[org_md_raw]
     )
