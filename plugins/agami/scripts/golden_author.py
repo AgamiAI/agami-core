@@ -730,8 +730,11 @@ def _sm_json(*args: str, timeout_s: float) -> Any:
 
     try:
         done = subprocess.run(
-            ["bash", str(_SM), *args], capture_output=True, text=True, check=False,
-            timeout=max(timeout_s, 0.1),
+            ["bash", str(_SM), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
         # `subprocess.run` RAISES on a timeout rather than returning, so without this the one
@@ -771,8 +774,13 @@ def _existing_item(profile: str, stem: str, item_id: str) -> Optional[GoldenItem
     and a caller sent away with only half the questions comes back to the other half.
     """
     try:
-        datasets, _ = load_golden_datasets(profile)
+        datasets, res = load_golden_datasets(profile)
     except Exception:
+        return None
+    # An unreadable dataset has no `before` worth rendering, and `_write_items` refuses the whole
+    # write over it a moment later with a sentence that says so. Offering half a diff off a file
+    # the reader is about to be told is broken would be the worse of the two messages.
+    if _our_faults(res, stem):
         return None
     found = next((dataset for dataset in datasets if dataset.name == stem), None)
     if found is None:
@@ -886,23 +894,23 @@ def _save(
     if not confirm_convention:
         divergence = _convention_divergence(profile, payload["query"], payload["sql"])
         if divergence:
-            payload_out: dict[str, Any] = {
+            stop: dict[str, Any] = {
                 "dataset": stem,
                 "added": [],
                 "needs_confirmation_convention": divergence,
             }
             # Both questions in one payload when both apply, so they can be asked together and
-            # answered with both flags. Emitting only this one sent a caller round a loop: they
-            # answer the departure, `_write_items` then asks about the replacement, they answer
-            # THAT with `--confirm-replace` alone, and the departure is asked again. The skill's
-            # own exit-code table already promised a payload could carry more than one key; this
-            # is the code catching up with it.
-            existing = _existing_item(profile, stem, item.id)
-            if existing is not None:
-                payload_out["needs_confirmation"] = [
-                    {"id": item.id, "before": _item_doc(existing), "after": _item_doc(item)}
-                ]
-            print(json.dumps(payload_out, indent=2))
+            # answered with both flags. Emitting only the departure sent a caller round a loop:
+            # they answer it, `_write_items` then asks about the replacement, they answer THAT
+            # with `--confirm-replace` alone, and the departure is asked again. Skipped when
+            # `--confirm-replace` is already set, since that question has been answered.
+            if not confirm_replace:
+                existing = _existing_item(profile, stem, item.id)
+                if existing is not None:
+                    stop["needs_confirmation"] = [
+                        {"id": item.id, "before": _item_doc(existing), "after": _item_doc(item)}
+                    ]
+            print(json.dumps(stop, indent=2))
             return _NEEDS_CONFIRMATION
 
     return _write_items(

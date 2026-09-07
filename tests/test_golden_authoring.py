@@ -1220,6 +1220,18 @@ def test_the_check_never_costs_a_save_when_it_cannot_run(tmp_path, monkeypatch, 
     assert code == 0 and _items(tmp_path)[0].expected.sql == SQL
 
 
+def test_a_timed_out_ranker_call_returns_no_opinion(monkeypatch):
+    """The timeout contract is advisory silence, not an exception escaping the save door."""
+    import subprocess
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(kwargs.get("args") or args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    assert golden_author._sm_json("examples", "/root", "--query", QUERY, timeout_s=1.0) is None
+
+
 def test_the_question_reaches_the_ranker_as_one_argument_and_never_a_shell_string(monkeypatch):
     """The one place user text crosses into a subprocess in this file.
 
@@ -1275,6 +1287,32 @@ def test_an_unrelated_example_is_not_treated_as_the_convention(tmp_path, monkeyp
 
     assert code == 0, "an unrelated example is not a convention to be held to"
     assert _items(tmp_path)[0].expected.sql == SQL
+
+
+def test_a_replacement_that_also_departs_from_convention_requests_both_confirmations(
+    tmp_path, monkeypatch, capsys
+):
+    """One stop should let the caller ask once and re-run with both flags."""
+    _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path)))
+    monkeypatch.setattr(
+        golden_author,
+        "_nearest_example",
+        lambda profile, question: _example(
+            "SELECT COUNT(*) AS order_count FROM orders WHERE created_at >= '2024-01-01'"
+        ),
+    )
+    replacement = _item_file(
+        tmp_path,
+        sql="SELECT COUNT(*) AS order_count FROM orders WHERE placed_at >= '2024-01-01'",
+    )
+
+    code, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(replacement))
+
+    assert code == golden_author._NEEDS_CONFIRMATION
+    assert payload["needs_confirmation"][0]["id"] == "how-many-orders-have-been-placed"
+    assert payload["needs_confirmation"][0]["before"]["expected"]["sql"] == SQL
+    assert payload["needs_confirmation"][0]["after"]["expected"]["sql"].count("placed_at")
+    assert payload["needs_confirmation_convention"]["example_sql"].count("created_at")
 
 
 def test_only_the_claims_that_change_which_rows_are_counted_are_reported(
