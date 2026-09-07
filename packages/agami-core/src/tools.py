@@ -2274,6 +2274,7 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     from execute_sql import (
         _last_error_detail,
         _last_executing_identity,
+        _last_warehouse_query_id,
         _pin_model_pass_posture,
     )
 
@@ -2284,6 +2285,9 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # opened — a row naming somebody who did not run it, which is worse than the null the forked
     # surface is supposed to carry.
     _last_executing_identity.set(None)
+    # And the statement's id in the warehouse's own terms, for the same reason: a pointer left by an
+    # earlier in-process call would send a reader to a different statement entirely.
+    _last_warehouse_query_id.set(None)
     # And pin the ACE-101 posture here, for the same "one point both paths pass through" reason and
     # against a sharper failure. `execute_guarded` pins it too, but on the fork that call happens in
     # the CHILD: the child decides whether the gates run, exits, and only then does this process build
