@@ -287,7 +287,13 @@ def test_an_incomplete_run_with_failures_in_it_reports_the_broken_pipeline(
     mistake this ordering exists to prevent."""
 
     class _RaisesAfterTheFirst:
-        def __init__(self, schema: str, *, timeout_s: float) -> None:
+        """Answers the first item, then falls over.
+
+        The count is per instance and the probe gets its own, so this one is untouched by it — the
+        behaviour under test is the loop's: one scored failure, then a stop.
+        """
+
+        def __init__(self, schema, *, timeout_s: float) -> None:
             self.answered = 0
 
         def generate(self, question, org, datasource):
@@ -798,3 +804,83 @@ def test_an_unreachable_datasource_cannot_produce_a_verdict(
 
     assert code == 2
     assert payload["summary"]["errored"] == payload["summary"]["total"]
+
+
+# --- The generator preflight ---------------------------------------------------------------------
+
+
+def test_a_client_that_cannot_start_stops_the_run_before_it_costs_anything(
+    artifacts, monkeypatch, capsys
+):
+    """The failure this exists for, and it happened twice in two days.
+
+    A client the shell cannot find errors EVERY case with the same sentence, after N model spawns
+    and up to 2N warehouse queries — and a wall of identical errors reads as a catastrophic model
+    regression rather than as a PATH. One probe turns it into a two-second refusal that names the
+    cause.
+    """
+    spawned = []
+
+    class _NeverStarts:
+        def __init__(self, schema: str, *, timeout_s: float) -> None:
+            pass
+
+        def generate(self, question, org, datasource):
+            spawned.append(question)
+            return gr.GeneratedSql(sql="", error=gr._GENERATION_UNAVAILABLE)
+
+    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _NeverStarts)
+    _write(artifacts, "unreachable", ONE_FAILURE)
+
+    code, payload, err = _run(capsys, "--dataset", "unreachable")
+
+    assert code == 2, "no verdict could be produced, which is not the same as a failing case"
+    assert payload == {}, "a run that never started prints no result document"
+    assert len(spawned) == 1, "the probe, and not one spawn per case"
+    assert "would fail every case the same way" in err
+    assert "AGAMI_CLIENT" in err, "and it says what to do about it"
+
+
+def test_a_generator_that_declines_the_probe_does_not_cancel_the_run(artifacts, monkeypatch, capsys):
+    """Only an unstartable client stops a run. A generator that starts and has no answer for this
+    particular question is one answer short, which the loop already reports per item — and widening
+    the probe to any error would let one unlucky question cancel a run whose other cases were
+    fine."""
+
+    class _DeclinesTheProbe:
+        def __init__(self, schema: str, *, timeout_s: float) -> None:
+            pass
+
+        def generate(self, question, org, datasource):
+            if question == run_golden_eval._PREFLIGHT_QUESTION:
+                return gr.GeneratedSql(sql="", error="no statement for that one")
+            return gr.GeneratedSql(sql=GENERATED[Q_FAIL], error=None)
+
+    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _DeclinesTheProbe)
+    _write(artifacts, "fussy", ONE_FAILURE)
+
+    code, payload, _ = _run(capsys, "--dataset", "fussy")
+
+    assert payload["summary"]["total"] == len(ONE_FAILURE["test_cases"]), "every case ran"
+    assert code == 1, "the run happened; its confirmed case failed"
+
+
+def test_the_probe_can_be_skipped(artifacts, monkeypatch, capsys):
+    """One model call on every healthy run is a real cost, so it is refusable — for a caller who
+    already knows the client works and is paying per token."""
+    spawned = []
+
+    class _Counts:
+        def __init__(self, schema: str, *, timeout_s: float) -> None:
+            pass
+
+        def generate(self, question, org, datasource):
+            spawned.append(question)
+            return gr.GeneratedSql(sql=GENERATED[Q_FAIL], error=None)
+
+    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Counts)
+    _write(artifacts, "trusted", ONE_FAILURE)
+
+    _run(capsys, "--dataset", "trusted", "--skip-preflight")
+
+    assert len(spawned) == len(ONE_FAILURE["test_cases"]), "one spawn per case, and no probe"
