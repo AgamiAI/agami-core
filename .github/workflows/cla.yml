@@ -49,7 +49,13 @@ jobs:
           # First-party maintainers are not gated. Add specific bot logins
           # (e.g. dependabot[bot]) here explicitly if/when bots open PRs — a
           # leading-wildcard like *[bot] is not reliably matched by the action.
-          allowlist: ashwin-agami,sandeep-agami
+          #
+          # `copilot-swe-agent[bot]` is the GitHub Copilot coding agent. It does not open PRs of
+          # its own here: it pushes commits to a maintainer's existing branch when asked to act on
+          # its own review comments, and those commits already carry a maintainer as
+          # `Co-authored-by`. It cannot sign a CLA, so without this line every branch it touches is
+          # blocked with no way forward but rewriting its commits by hand.
+          allowlist: ashwin-agami,sandeep-agami,copilot-swe-agent[bot]
           custom-pr-sign-comment: I have read the CLA Document and I hereby sign the CLA
           custom-notsigned-prcomment: >-
             Thank you for your contribution. Before we can merge it, please read our
