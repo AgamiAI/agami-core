@@ -29,8 +29,8 @@ below corresponds to one such version.
   already covers, and asking a user that is asking them to guess at a library they have never
   opened. `sm examples --query` already answers it: its `high_confidence` flag is the product's own
   judgement of "we have a close example for this", so a row it does not cover teaches and a row it
-  does becomes a test. Below four agreeing rows nothing is split, and a profile with an empty
-  library teaches with at least half.
+  does becomes a test. Below four agreeing rows nothing is split, and never more than half the
+  batch is sent to the examples so onboarding runs still write tests.
 
   **The user still makes one decision, and it is not the split** — one yes for the batch, with the
   breakdown shown. Saying what went where is mandatory rather than decorative: adding examples
