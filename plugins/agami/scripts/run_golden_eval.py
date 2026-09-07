@@ -78,7 +78,13 @@ try:
     from semantic_model import loader
     from semantic_model.comparator import ItemScore
     from semantic_model.golden import GoldenDataset, load_golden_datasets
-    from semantic_model.golden_run import ClaudeCliGenerator, GoldenRunResult, run_golden_dataset
+    from semantic_model.golden_run import (
+        _GENERATION_UNAVAILABLE,
+        ClaudeCliGenerator,
+        GeneratedSql,
+        GoldenRunResult,
+        run_golden_dataset,
+    )
     from semantic_model.sql_dialect import DialectUnresolved, resolve_datasource_dialect
 except ImportError as exc:
     # A fresh plugin install genuinely lacks these, and the traceback a bare ImportError prints
@@ -106,6 +112,15 @@ _CANNOT_START = 2
 # about itself. The run's own summary line carries no prefix, because that one is the thing to
 # keep.
 _PREFIX = "agami-eval:"
+
+# What the preflight asks. Deliberately answerable without a schema, a table or an opinion: the
+# question is whether a statement comes back at all, not whether it is any good.
+_PREFLIGHT_QUESTION = "How many rows are there in a table called t?"
+
+# The whole context the probe is given. The question is whether a statement comes back at all, so
+# the model needs nothing real to write one against — and handing it the profile's actual schema
+# would mean building that schema before knowing the client can run.
+_PREFLIGHT_SCHEMA = "t(id integer)"
 
 
 def _section(outcome: Any) -> str:
@@ -880,6 +895,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--timeout-s", type=float, default=120.0, help="how long one generation may take"
     )
     parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="run without first checking that the generator can answer at all",
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=5,
@@ -939,6 +959,36 @@ def main(argv: Optional[list[str]] = None) -> int:
         _stop(f"cannot run this profile — {exc}")
         return _CANNOT_START
 
+    if not args.skip_preflight:
+        try:
+            # A generator of its own, with a fixed one-line schema, rather than the one the run
+            # uses. The run's schema is a CALLABLE that ranks the example library per question —
+            # one `sm` subprocess per subject area — and spending that on a throwaway probe would
+            # cost more than the loop it protects on a model with many areas.
+            probe = ClaudeCliGenerator(lambda _question: _PREFLIGHT_SCHEMA, timeout_s=args.timeout_s).generate(
+                _PREFLIGHT_QUESTION, tools.resolved_org_id(), args.profile
+            )
+        except Exception:
+            # An injected generator that RAISES is somebody else's code failing, and the loop
+            # already has a documented answer for it: stop there and report the run as
+            # unfinished. Deciding that here would move the behaviour and lose the item it
+            # stopped on.
+            probe = GeneratedSql(sql="", error=None)
+        # ONLY an unstartable client stops the run. A generator that starts and declines this
+        # particular question is not broken — it is one answer short, which the loop already
+        # reports per item. Widening this to any error would let one unlucky probe cancel a run
+        # whose forty other cases were fine.
+        if probe.error == _GENERATION_UNAVAILABLE:
+            _stop(
+                f"the generator could not answer a trivial question, so this run would fail every "
+                f"case the same way — {probe.error}"
+            )
+            _stop(
+                "the generator is the `claude` client. Check it is on this shell's PATH, or set "
+                "AGAMI_CLIENT to its full path."
+            )
+            return _CANNOT_START
+
     try:
         cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k)
     except SmFailed as exc:
@@ -947,6 +997,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         _stop(f"cannot build the model context for profile {args.profile!r} — {exc}")
         return _CANNOT_START
 
+    # One trivial generation before the loop, for the same reason the three refusals above happen
+    # before it: a run whose generator cannot start has no verdict to give, and forty cases each
+    # failing to spawn the same process reads as a catastrophic model regression rather than as a
+    # PATH. It also costs nothing to be wrong about — the loop re-checks per item, so a client that
+    # answers here and dies later is still reported item by item.
+    #
+    # The cost is one model call on a healthy run, against N model calls and up to 2N warehouse
+    # queries on a broken one.
     result = run_golden_dataset(
         dataset,
         profile=args.profile,

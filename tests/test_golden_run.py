@@ -573,7 +573,7 @@ def test_the_generator_is_invoked_with_every_tool_and_mcp_source_switched_off(sp
     generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
 
     args, kwargs = spawn.invocations[0]
-    assert args[:2] == ["claude", "-p"]
+    assert Path(args[0]).name == "claude" and args[1] == "-p"
     assert _flag_value(args, "--tools") == ""  # "" is this client's spelling of "no tools"
     assert "--strict-mcp-config" in args  # and no --mcp-config, so: no MCP servers
     assert _flag_value(args, "--setting-sources") == ""  # no user / project / local settings
@@ -674,7 +674,10 @@ def test_the_invocation_is_the_same_on_every_call(spawn):
     generator.generate("How many customers are there?", ORG, None)
 
     assert spawn.invocations[0][0] == spawn.invocations[1][0]
-    assert isinstance(gr._CLIENT_ARGV, tuple)
+    assert isinstance(gr.client_argv(), tuple)
+    # Resolution is cached, so a PATH that changes mid-run cannot change the argument list under
+    # the items still to come.
+    assert gr.client_argv() == gr.client_argv()
 
 
 def test_the_answer_key_is_in_nothing_the_generator_was_given(chokepoint, spawn):
@@ -828,3 +831,68 @@ def test_a_near_miss_is_a_fail_at_every_decimal_place(chokepoint):
     assert accuracy == pytest.approx(4002 / 4004)
     assert round(accuracy, 3) == 1.0  # which is why the pass mark reads the unrounded value
     assert result.outcomes[0].passed is False and result.gating_failures == 1
+
+
+# --- Finding the client -------------------------------------------------------------------------
+#
+# `scripts/sm` exists because "bare `python3` on PATH" is not a reliable way to find an interpreter
+# with the model extra. The same is true of the client, for the same reason: it installs to a
+# user-local directory that plenty of non-interactive shells do not inherit. A run that cannot find
+# it errors EVERY case with "the generator command could not be started", which reads as a
+# catastrophic model regression and is a PATH.
+
+
+def _no_client(monkeypatch, home):
+    """A machine where the client is on no PATH this process can see."""
+    monkeypatch.setattr(gr.shutil, "which", lambda name: None)
+    monkeypatch.delenv(gr._CLIENT_ENV, raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    gr._client.cache_clear()
+
+
+def test_the_client_is_found_where_it_installs_when_it_is_not_on_path(monkeypatch, tmp_path):
+    """The exact shape that cost a 43-case run: the client at `~/.local/bin/claude`, and a shell
+    whose PATH does not carry that directory."""
+    installed = tmp_path / ".local" / "bin" / "claude"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("#!/bin/sh\n")
+    installed.chmod(0o755)
+    _no_client(monkeypatch, tmp_path)
+
+    assert gr.client_argv()[0] == str(installed)
+
+
+def test_path_wins_over_the_fallbacks(monkeypatch, tmp_path):
+    """A client the shell can already find is the one to use — the fallbacks exist for when it
+    cannot, and must never override an operator's own PATH."""
+    monkeypatch.setattr(gr.shutil, "which", lambda name: "/somewhere/on/path/claude")
+    monkeypatch.delenv(gr._CLIENT_ENV, raising=False)
+    gr._client.cache_clear()
+
+    assert gr.client_argv()[0] == "/somewhere/on/path/claude"
+
+
+def test_an_explicit_client_overrides_everything(monkeypatch, tmp_path):
+    """`AGAMI_CLIENT` is the escape hatch for an install none of the fallbacks cover, and mirrors
+    `sm`'s own `AGAMI_PYTHON`."""
+    monkeypatch.setattr(gr.shutil, "which", lambda name: "/somewhere/on/path/claude")
+    monkeypatch.setenv(gr._CLIENT_ENV, "/opt/custom/claude")
+    gr._client.cache_clear()
+
+    assert gr.client_argv()[0] == "/opt/custom/claude"
+
+
+def test_a_client_that_cannot_be_found_still_fails_as_a_generation(monkeypatch, tmp_path, spawn):
+    """Resolution never raises. A machine with no client at all has to fail the way the loop already
+    handles — one item at a time, reported — rather than as an exception out of the run."""
+    _no_client(monkeypatch, tmp_path)
+
+    assert gr.client_argv()[0] == gr._CLIENT_NAME
+
+    def _missing(*args, **kwargs):
+        raise FileNotFoundError(gr._CLIENT_NAME)
+
+    monkeypatch.setattr(gr.subprocess, "run", _missing)
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    assert generated.sql == "" and generated.error == gr._GENERATION_UNAVAILABLE

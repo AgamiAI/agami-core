@@ -12,6 +12,23 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The eval finds the client where it installs, and says so early when it cannot.** A run whose
+  `claude` client was not on the shell's `PATH` spawned it once per case, failed identically every
+  time, and presented a wall of "the generator command could not be started" — which reads as a
+  catastrophic model regression and is a `PATH`. It cost a 43-case run in the field.
+
+  Two changes. The client is now **resolved** rather than assumed: `AGAMI_CLIENT` if set, then
+  `PATH`, then the handful of directories it actually installs to. That is `scripts/sm`'s idea
+  applied to the other executable this package spawns, and for the same reason — a user-local
+  install directory is not on every non-interactive shell's `PATH`.
+
+  And when it still cannot be found, **one probe before the loop** turns N failed spawns and up to
+  2N warehouse queries into a two-second refusal that names the cause and what to do about it. Only
+  an unstartable client stops a run: a generator that starts and declines the probe is one answer
+  short, which the loop already reports per item. `--skip-preflight` refuses the probe.
+
 ## [0.8.1] — 2026-09-07
 
 Everything below came out of running the golden-dataset feature against a live warehouse for the

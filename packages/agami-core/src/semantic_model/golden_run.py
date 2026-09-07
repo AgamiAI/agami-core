@@ -46,11 +46,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
 
 from execute_sql import ExecResult, execute_guarded
@@ -466,8 +469,7 @@ def _not_ok(envelope: Envelope, *, answer_key: bool) -> ItemScore:
 # what makes withholding the NAME of the path sufficient. `-p` is print mode — read a prompt from
 # stdin, write an answer, exit. What the model needs to write a statement — the tables and
 # columns — is inlined in the prompt instead, by whoever built this generator.
-_CLIENT_ARGV = (
-    "claude",
+_CLIENT_FLAGS = (
     "-p",
     "--tools",
     "",
@@ -475,6 +477,54 @@ _CLIENT_ARGV = (
     "--setting-sources",
     "",
 )
+
+# Where the client is looked for, in order, when it is not simply on `PATH`.
+#
+# This is `scripts/sm`'s idea applied to the other executable this package spawns. That wrapper
+# exists because "bare `python3` on PATH" is not a reliable way to find an interpreter with the
+# model extra, and the same is true here for the same reason: the client installs to a user-local
+# directory that plenty of non-interactive shells do not inherit. A run that cannot find it errors
+# EVERY case with "the generator command could not be started", which reads as a catastrophic model
+# regression and is a PATH.
+#
+# `AGAMI_CLIENT` is the escape hatch for an install none of these cover, and mirrors `sm`'s
+# `AGAMI_PYTHON`.
+_CLIENT_ENV = "AGAMI_CLIENT"
+_CLIENT_NAME = "claude"
+_CLIENT_FALLBACKS = (
+    "~/.local/bin/claude",
+    "~/.claude/local/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+)
+
+
+@lru_cache(maxsize=1)
+def _client() -> str:
+    """The client's executable, resolved once per process.
+
+    Cached because the argument list must not vary between items — a flag or a path that some runs
+    get and others do not is the one that will be missing on the run that mattered.
+    """
+    override = os.environ.get(_CLIENT_ENV)
+    if override:
+        return override
+    found = shutil.which(_CLIENT_NAME)
+    if found:
+        return found
+    for candidate in _CLIENT_FALLBACKS:
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    # Nothing found. The bare name is returned rather than raising, so the failure stays the one
+    # the caller already handles: a generation that could not start, reported per item and never an
+    # exception out of the loop.
+    return _CLIENT_NAME
+
+
+def client_argv() -> tuple[str, ...]:
+    """The child's argument list, in full: the resolved client, then the four decisions."""
+    return (_client(), *_CLIENT_FLAGS)
 
 # The child's whole environment, by name. An ALLOWLIST and not a filter, and that is the decision:
 # `subprocess.run` passes the parent's environment through by default, and the parent's carries the
@@ -617,7 +667,7 @@ class ClaudeCliGenerator:
                 # argument list is bounded, and a process list is readable by other users on most
                 # systems.
                 completed = subprocess.run(
-                    list(_CLIENT_ARGV),
+                    list(client_argv()),
                     input=prompt,
                     stdout=subprocess.PIPE,
                     # Discarded by the OS rather than captured and then not read. A client can
