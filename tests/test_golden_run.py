@@ -653,7 +653,10 @@ def test_the_child_environment_stays_an_allowlist(spawn, monkeypatch):
     ], "a credential-shaped name reached the child's environment allowlist"
 
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", "/artifacts/tenant")
-    monkeypatch.setenv("DATASOURCE_URL__ACME", "postgresql://user:pw@warehouse.example/db")
+    # A sentinel and deliberately not a DSN: the assertion below is about the NAME never reaching
+    # the child, so the value carries nothing — and a credential-shaped string in a test is noise
+    # for every secret scanner that reads this repo.
+    monkeypatch.setenv("DATASOURCE_URL__ACME", "warehouse-dsn-marker")
 
     _cli_generator().generate(QUESTION, ORG, DATASOURCE)
 
