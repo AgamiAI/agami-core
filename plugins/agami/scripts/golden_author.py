@@ -728,9 +728,17 @@ def _sm_json(*args: str, timeout_s: float) -> Any:
     """
     import subprocess
 
-    done = subprocess.run(
-        ["bash", str(_SM), *args], capture_output=True, text=True, check=False, timeout=timeout_s
-    )
+    try:
+        done = subprocess.run(
+            ["bash", str(_SM), *args], capture_output=True, text=True, check=False,
+            timeout=max(timeout_s, 0.1),
+        )
+    except subprocess.TimeoutExpired:
+        # `subprocess.run` RAISES on a timeout rather than returning, so without this the one
+        # outcome the budget exists to produce would leave through a different door than every
+        # other failure — skipping the partial-ranking path below and making this function's own
+        # contract false.
+        return None
     if done.returncode != 0:
         return None
     try:
@@ -754,6 +762,22 @@ def _dialect(profile: str) -> str:
         return resolve_datasource_dialect(loader.load_datasource(agami_paths.profile_dir(profile)))
     except Exception:
         return ""
+
+
+def _existing_item(profile: str, stem: str, item_id: str) -> Optional[GoldenItem]:
+    """The item this save would replace, or None if it would add one.
+
+    Read here as well as in `_write_items` because the convention stop happens BEFORE the write,
+    and a caller sent away with only half the questions comes back to the other half.
+    """
+    try:
+        datasets, _ = load_golden_datasets(profile)
+    except Exception:
+        return None
+    found = next((dataset for dataset in datasets if dataset.name == stem), None)
+    if found is None:
+        return None
+    return next((item for item in found.test_cases if item.id == item_id), None)
 
 
 def _convention_divergence(profile: str, question: str, sql: str) -> Optional[dict]:
@@ -858,25 +882,33 @@ def _save(
     # warning about a file the reader now has to decide whether to undo, and the append-only rule
     # makes undoing it a second confirmation. This is the only door it runs on: an import writes no
     # statement, and curation may not write one.
+    item = GoldenItem(**fields)
     if not confirm_convention:
         divergence = _convention_divergence(profile, payload["query"], payload["sql"])
         if divergence:
-            print(
-                json.dumps(
-                    {
-                        "dataset": stem,
-                        "added": [],
-                        "needs_confirmation_convention": divergence,
-                    },
-                    indent=2,
-                )
-            )
+            payload_out: dict[str, Any] = {
+                "dataset": stem,
+                "added": [],
+                "needs_confirmation_convention": divergence,
+            }
+            # Both questions in one payload when both apply, so they can be asked together and
+            # answered with both flags. Emitting only this one sent a caller round a loop: they
+            # answer the departure, `_write_items` then asks about the replacement, they answer
+            # THAT with `--confirm-replace` alone, and the departure is asked again. The skill's
+            # own exit-code table already promised a payload could carry more than one key; this
+            # is the code catching up with it.
+            existing = _existing_item(profile, stem, item.id)
+            if existing is not None:
+                payload_out["needs_confirmation"] = [
+                    {"id": item.id, "before": _item_doc(existing), "after": _item_doc(item)}
+                ]
+            print(json.dumps(payload_out, indent=2))
             return _NEEDS_CONFIRMATION
 
     return _write_items(
         profile,
         stem,
-        [GoldenItem(**fields)],
+        [item],
         confirm_replace=confirm_replace,
         description=description,
     )

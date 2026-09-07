@@ -1296,3 +1296,69 @@ def test_only_the_claims_that_change_which_rows_are_counted_are_reported(
     code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(item))
 
     assert code == 0, "ordering and limit alone are not a departure worth stopping for"
+
+
+def test_a_departure_that_is_also_a_replacement_asks_both_questions_at_once(
+    tmp_path, monkeypatch, capsys
+):
+    """Or the caller goes round a loop.
+
+    Answering the departure lets the write proceed, `_write_items` then asks about the replacement,
+    and answering THAT with `--confirm-replace` alone runs the convention check again. Two prompts
+    that each re-arm the other. The exit-code table already promised a payload could carry more than
+    one key; this is the code keeping that promise.
+    """
+    monkeypatch.setattr(
+        golden_author, "_nearest_example", lambda profile, question: _example(SQL)
+    )
+    # An item on disk first, so the second save is a replacement.
+    code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path)))
+    assert code == 0
+
+    monkeypatch.setattr(
+        golden_author,
+        "_nearest_example",
+        lambda profile, question: _example(
+            "SELECT COUNT(*) AS order_count FROM orders WHERE created_at >= '2024-01-01'"
+        ),
+    )
+    item = _item_file(
+        tmp_path, sql="SELECT COUNT(*) AS order_count FROM orders WHERE placed_at >= '2024-01-01'"
+    )
+
+    code, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(item))
+
+    assert code == golden_author._NEEDS_CONFIRMATION
+    assert "needs_confirmation_convention" in payload
+    # …and the replacement, in the same breath, with both sides to render.
+    assert [entry["id"] for entry in payload["needs_confirmation"]] == [
+        "how-many-orders-have-been-placed"
+    ]
+    assert payload["needs_confirmation"][0]["before"]["expected"]["sql"] == SQL
+    assert "placed_at" in payload["needs_confirmation"][0]["after"]["expected"]["sql"]
+
+    # Both flags together, and it writes.
+    code, _, _ = _run(
+        tmp_path, monkeypatch, capsys,
+        _save_argv(item, "orders", "--confirm-convention", "--confirm-replace"),
+    )
+    assert code == 0 and "placed_at" in _items(tmp_path)[0].expected.sql
+
+
+def test_a_departure_on_a_new_item_asks_only_about_the_departure(tmp_path, monkeypatch, capsys):
+    """There is no replacement to ask about, so the payload does not invent one."""
+    monkeypatch.setattr(
+        golden_author,
+        "_nearest_example",
+        lambda profile, question: _example(
+            "SELECT COUNT(*) AS order_count FROM orders WHERE created_at >= '2024-01-01'"
+        ),
+    )
+    item = _item_file(
+        tmp_path, sql="SELECT COUNT(*) AS order_count FROM orders WHERE placed_at >= '2024-01-01'"
+    )
+
+    _, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(item))
+
+    assert "needs_confirmation_convention" in payload
+    assert "needs_confirmation" not in payload
