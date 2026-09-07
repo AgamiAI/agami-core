@@ -17,6 +17,7 @@ test double's behaviour.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,7 @@ def _fresh_db(tmp_path) -> str:
     return url
 
 
-def _record(url: str, **overrides) -> None:
+def _record(**overrides) -> None:
     rec = {
         "id": "7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f",
         "ts": "2026-09-07T00:00:00Z",
@@ -76,7 +77,7 @@ def test_the_builtin_executor_reports_no_identity(tmp_path, monkeypatch):
     url = _fresh_db(tmp_path)
     monkeypatch.setenv("AGAMI_DB_URL", url)
 
-    _record(url)
+    _record()
 
     assert _identities(url) == [None]
 
@@ -85,7 +86,7 @@ def test_an_identity_reported_by_an_executor_reaches_the_row(tmp_path, monkeypat
     url = _fresh_db(tmp_path)
     monkeypatch.setenv("AGAMI_DB_URL", url)
 
-    _record(url, executing_identity="IAM:you@example.com")
+    _record(executing_identity="IAM:you@example.com")
 
     assert _identities(url) == ["IAM:you@example.com"]
 
@@ -99,7 +100,7 @@ def test_the_recorded_identity_follows_the_connection_not_the_intent(tmp_path, m
     monkeypatch.setenv("AGAMI_DB_URL", url)
 
     # The question is asked by one person; the warehouse authenticated a different account.
-    _record(url, question="asked by the analyst", executing_identity="warehouse_service_account")
+    _record(question="asked by the analyst", executing_identity="warehouse_service_account")
 
     assert _identities(url) == ["warehouse_service_account"], (
         "the row recorded the intent rather than what the connection reported"
@@ -126,7 +127,7 @@ def test_a_statement_that_did_not_succeed_still_records_the_identity(tmp_path, m
     url = _fresh_db(tmp_path)
     monkeypatch.setenv("AGAMI_DB_URL", url)
 
-    _record(url, executing_identity="IAM:you@example.com", **outcome)
+    _record(executing_identity="IAM:you@example.com", **outcome)
 
     assert _identities(url) == ["IAM:you@example.com"]
 
@@ -138,7 +139,7 @@ def test_an_executor_that_reports_nothing_changes_nothing(tmp_path, monkeypatch)
     url = _fresh_db(tmp_path)
     monkeypatch.setenv("AGAMI_DB_URL", url)
 
-    _record(url, executing_identity=None)
+    _record(executing_identity=None)
 
     s = Store.connect(url)
     (row,) = s.query(
@@ -174,6 +175,35 @@ def test_an_executor_reports_before_the_statement_can_fail():
 
     report_executing_identity(None)
     assert _last_executing_identity.get() is None, "reporting nothing must clear, not keep"
+
+
+def test_every_out_of_band_carrier_is_cleared_where_both_paths_meet():
+    """**The fork-path leak, which the in-process clear does not cover.**
+
+    An executor only reports in-process, so on the forked path the parent never runs
+    `execute_guarded` and its copy of the carrier is whatever an EARLIER in-process call left there.
+    A forked call would then record the identity of a connection it never opened — a row naming
+    somebody who did not run it, which is worse than the null that surface is meant to carry.
+    `_last_error_detail` already carries a second clear in `_tool_execute_sql` for exactly this, with
+    the reasoning written beside it.
+
+    Asserted at the source rather than behaviourally, and deliberately generalised: it holds for
+    EVERY out-of-band carrier `_record_execution` reads, so the next one added without a clear fails
+    here rather than silently attributing one call's value to another.
+    """
+    tools_src = (_SRC / "tools.py").read_text(encoding="utf-8")
+    body = tools_src.split("def _tool_execute_sql(")[1].split("\ndef ")[0]
+
+    read_by_the_recorder = set(
+        re.findall(r"(_last_[a-z_]+)\.get\(\)", tools_src.split("def _record_execution(")[1])
+    )
+    assert read_by_the_recorder, "no out-of-band carriers found — the regex stopped matching"
+
+    for carrier in sorted(read_by_the_recorder):
+        assert f"{carrier}.set(None)" in body, (
+            f"{carrier} is read when the row is written but never cleared where both paths meet, "
+            "so a forked call can record what an earlier in-process call left behind"
+        )
 
 
 def test_the_column_is_written_by_the_insert_and_never_updated():
