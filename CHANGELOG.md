@@ -12,6 +12,13 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-07
+
+Everything below came out of running the golden-dataset feature against a live warehouse for the
+first time. One fix is the difference between the feature working and not working at all; the rest
+is what a first real run and its review turned up.
+
+
 ### Added
 
 - **Saving a golden item checks it against the profile's own examples first.** The curated example
