@@ -728,9 +728,16 @@ def _sm_json(*args: str, timeout_s: float) -> Any:
     """
     import subprocess
 
-    done = subprocess.run(
-        ["bash", str(_SM), *args], capture_output=True, text=True, check=False, timeout=timeout_s
-    )
+    try:
+        done = subprocess.run(
+            ["bash", str(_SM), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     if done.returncode != 0:
         return None
     try:
@@ -861,15 +868,40 @@ def _save(
     if not confirm_convention:
         divergence = _convention_divergence(profile, payload["query"], payload["sql"])
         if divergence:
+            stop = {
+                "dataset": stem,
+                "added": [],
+                "needs_confirmation_convention": divergence,
+            }
+            if not confirm_replace:
+                path = _datasets_dir(profile) / f"{stem}.yaml"
+                if path.exists():
+                    datasets, res = load_golden_datasets(profile)
+                    if not _our_faults(res, stem):
+                        found = next((dataset for dataset in datasets if dataset.name == stem), None)
+                        existing = (
+                            next(
+                                (
+                                    item
+                                    for item in found.test_cases
+                                    if item.id == fields["id"]
+                                ),
+                                None,
+                            )
+                            if found is not None
+                            else None
+                        )
+                        if existing is not None:
+                            stop["path"] = str(path)
+                            stop["needs_confirmation"] = [
+                                {
+                                    "id": fields["id"],
+                                    "before": _item_doc(existing),
+                                    "after": _item_doc(GoldenItem(**fields)),
+                                }
+                            ]
             print(
-                json.dumps(
-                    {
-                        "dataset": stem,
-                        "added": [],
-                        "needs_confirmation_convention": divergence,
-                    },
-                    indent=2,
-                )
+                json.dumps(stop, indent=2)
             )
             return _NEEDS_CONFIRMATION
 
