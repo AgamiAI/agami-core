@@ -206,6 +206,20 @@ class ExecResult:
     # after connecting has no result to carry this, and that is the case the column is most worth
     # having for.
     executing_identity: str | None = None
+    # The warehouse's own id for this statement, where the engine has one. Some engines mint a
+    # per-execution id a person can look up in the cluster's own logs; most do not, and one that
+    # cannot answer is never asked rather than asked and found wanting.
+    #
+    # **A pointer into somebody else's system, opaque on this side.** Nothing here joins on it,
+    # validates it or fails without it — its whole worth is that a person holding it can find the
+    # statement in the cluster's own logs and see the plan, the runtime and the queue it waited in.
+    # Naming the concept rather than the engine is deliberate: a `redshift_query_id` column becomes a
+    # schema change the first time a second engine has one.
+    #
+    # None where the engine has no such id, where the lookup says not to ask, or where the ask
+    # failed — three cases that share one honest rendering, because inventing an id that points at
+    # nothing is worse than admitting there is none.
+    warehouse_query_id: str | None = None
 
 
 class ExecutorError(Exception):
@@ -1352,6 +1366,33 @@ def report_executing_identity(identity: str | None) -> None:
     this is not doing anything wrong — the built-in one never does.
     """
     _last_executing_identity.set(identity)
+
+
+# The warehouse's own id for the statement THIS call ran, for the audit row only. Same kind as the
+# two above and clear-cut for the same reason: an id left behind by an earlier call would point a
+# reader at a statement this row is not about, which is worse than pointing them nowhere.
+_last_warehouse_query_id: ContextVar[str | None] = ContextVar(
+    "_last_warehouse_query_id", default=None
+)
+
+
+def report_warehouse_query_id(query_id: str | None) -> None:
+    """Called by an executor that can name the statement it just ran, in the warehouse's own terms.
+
+    **Whether an engine can is a property of the engine, not of this module.** Nothing here asks,
+    branches on a database type, or knows which engines have such an id — an executor that can
+    answer reports, and one that cannot never calls this. That is what keeps adding an engine a
+    matter for whoever owns the connection rather than a change here.
+
+    Reported as late as the statement allows and as early as the answer is stable, which is the
+    executor's judgement to make: on some engines the id readable after a result has been consumed
+    belongs to the fetch rather than to the statement, and only the executor is in a position to
+    know when it is reading the right one.
+
+    Tolerates None so an engine with nothing to say costs nothing: the column stays null, and null
+    is a claim rather than a gap.
+    """
+    _last_warehouse_query_id.set(query_id)
 
 # The classified outcome of THIS call, for the tool-call recorder (ACE-098). `tools.record_tool_call`
 # derived `success` / `error_kind` by `json.loads`-ing the serialized body and reading
@@ -2646,6 +2687,9 @@ def execute_guarded(
     # unconditional read safe — without it a statement that reported nothing would inherit whoever
     # ran the statement before it, which is worse than the null it should have written.
     _last_executing_identity.set(None)
+    # And the same for the statement's id in the warehouse's own terms: a pointer left behind by an
+    # earlier call would send a reader to the wrong statement, with nothing on the row to say so.
+    _last_warehouse_query_id.set(None)
     # Same reason again: a verdict left behind by an earlier call in this context must never label
     # this one. The recorder falls back to parsing the body when this is None, so a stale value is
     # strictly worse than no value — it would be believed.
@@ -2766,6 +2810,8 @@ def execute_guarded(
         # no-op, which is why it only overwrites when the result actually carries one.
         if result.executing_identity is not None:
             _last_executing_identity.set(result.executing_identity)
+        if result.warehouse_query_id is not None:
+            _last_warehouse_query_id.set(result.warehouse_query_id)
         if result.truncated:
             return _envelope("refused", refusal=_resource_limit_refusal(None),
                              receipt=_receipt_for(received_sql, profile, bounded=True))

@@ -243,6 +243,12 @@ def test_the_budget_has_exactly_one_configuration_surface():
     # surface the child holds the connection and the parent writes the row, so the column is NULL
     # there by the same construction that leaves `error_detail` NULL — and null is already a claim on
     # that column rather than a gap.
+    #
+    # `_last_warehouse_query_id` is the seventh, and it is the same kind again: an OUTPUT carrier
+    # holding the warehouse's own id for the statement this call ran, for the audit row alone.
+    # Written when an executor can name its statement, never read to compute a bound, and cleared at
+    # the entry to every call beside the two above. Like them it cannot cross the fork, and like them
+    # it does not need to — the column is null on that surface by the same construction.
     context_vars -= {
         "_last_error_detail",
         "_guard_model",
@@ -250,6 +256,7 @@ def test_the_budget_has_exactly_one_configuration_surface():
         "_guard_shape",
         "_pass_posture",
         "_last_executing_identity",
+        "_last_warehouse_query_id",
     }
     assert context_vars == set(), (
         "a second, higher-precedence configuration surface for the budget cannot cross the fork; "

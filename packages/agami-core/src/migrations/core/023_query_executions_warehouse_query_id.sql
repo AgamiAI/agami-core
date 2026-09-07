@@ -1,0 +1,44 @@
+-- The warehouse's own id for a statement, where the engine mints one.
+--
+-- Some engines give every statement they run an internal id, and that id is the key to their own
+-- logs: the plan it chose, how long it queued, how much it scanned, why it was slow. An operator
+-- holding one can answer questions this database cannot, because the answers live in a system we do
+-- not own and do not replicate.
+--
+-- A POINTER INTO SOMEBODY ELSE'S SYSTEM, AND OPAQUE ON THIS SIDE. Nothing here joins on it, parses
+-- it, validates its shape or fails without it. It is written down and handed over. That is a
+-- deliberate limit rather than an unfinished thought: the moment this column means something to us
+-- it becomes a thing that can disagree with the warehouse, and a pointer that argues with what it
+-- points at is worse than one that says nothing.
+--
+-- NAMED FOR THE CONCEPT, NOT FOR AN ENGINE. A column named after whichever warehouse happened to be
+-- first becomes a schema change the day a second engine has one — and this table would then carry
+-- two columns meaning the same thing for different vendors, which is how a record stops being
+-- readable. There is also an unrelated `query_id` in the chart path; the qualified name keeps the
+-- two apart in every conversation about either.
+--
+-- NULLABLE, AND NULL IS A CLAIM RATHER THAN A GAP. Four honest nulls share this column:
+--
+--   * a row written before this migration ran;
+--   * an engine that has no such id at all, which is most of them;
+--   * an executor that did not ask, because asking costs a round trip nobody should pay blind;
+--   * an ask that failed, where the alternative was to invent a pointer to nothing.
+--
+-- WHICH ENGINES CAN ANSWER IS NOT DECIDED HERE. Nothing in this schema, and nothing in the recorder,
+-- knows which warehouses mint an id. An executor that can name its statement reports one; one that
+-- cannot never does. Adding an engine is therefore a matter for whoever owns the connection, and
+-- costs no migration and no change to the record — which is the whole reason the column is one
+-- nullable TEXT field rather than anything cleverer.
+--
+-- WRITTEN BY THE INSERT THAT WRITES THE ROW, never by a later update — the same append-only stance
+-- the rest of this table keeps, and the reason the value travels out through the executor rather
+-- than being written afterwards by whoever went looking for it.
+--
+-- Recorded on EVERY outcome, not only success. A statement that failed or was refused is the one an
+-- operator most wants to look up in the warehouse's logs, because that is where the reason lives.
+--
+-- Forward-only and portable (SQLite + Postgres unchanged). No `IF NOT EXISTS` — SQLite's ALTER does
+-- not accept it, and re-run safety comes from the runner's applied-filename ledger.
+--
+-- No index. Nothing filters on it; it is read by a person who already has the row in front of them.
+ALTER TABLE query_executions ADD COLUMN warehouse_query_id TEXT;

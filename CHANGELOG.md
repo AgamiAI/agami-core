@@ -14,6 +14,30 @@ below corresponds to one such version.
 
 ### Added
 
+- **An execution record can name the warehouse's own id for the statement.** Some engines mint a
+  per-execution id, and it is the key to their own logs — the plan the statement got, how long it
+  queued, how much it scanned. Recording it lets somebody follow a row from here into a system this
+  database does not own and cannot replicate.
+
+  The column is `warehouse_query_id`, and this side treats it as **opaque**: nothing joins on it,
+  parses it or fails without it. That is a limit on purpose rather than an unfinished thought — the
+  moment the value means something here it becomes a thing that can disagree with the warehouse, and
+  a pointer that argues with what it points at is worse than one that says nothing.
+
+  **Which engines can answer is not decided in this library.** No database type or engine list
+  appears in the recorder or the seam: an executor that can name its statement reports one through
+  `ExecResult.warehouse_query_id` or `report_warehouse_query_id()`, and one that cannot never does.
+  Adding an engine is therefore a change where the connection lives, with no migration and no change
+  to the record — and there is a test asserting the field carries no engine name near it.
+
+  Named for the concept rather than for whichever warehouse was first, because a vendor-named column
+  becomes a schema change the day a second engine has one. Null where the engine has none, where the
+  executor did not ask, or where the ask failed — all four nulls, the pre-migration row included,
+  are claims rather than gaps.
+
+  Migration `023_query_executions_warehouse_query_id.sql`, one nullable TEXT column, portable across
+  SQLite and Postgres. Nothing reads it yet; nothing updates it.
+
 - **An execution record can name the database identity that ran it.** `query_executions` said what
   ran, when, for whom, against which model and with what verdict, and never said who the warehouse
   authenticated. Where every statement runs as one shared account that is worth little; where a

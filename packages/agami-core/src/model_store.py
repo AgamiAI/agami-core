@@ -514,8 +514,8 @@ class DbActivitySink:
         self._store.execute(
             "INSERT INTO query_executions (id, ts, org_id, datasource, question, sql, row_count, "
             "source, status, reason, rule, sql_truncated, error_detail, detail, receipt, "
-            "model_version, executing_identity) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "model_version, executing_identity, warehouse_query_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.ts,
@@ -546,6 +546,9 @@ class DbActivitySink:
                 # nothing else** — the row is append-only, and a column filled by a later update is
                 # exactly what that stance exists to prevent.
                 getattr(record, "executing_identity", None),
+                # The statement's id in the warehouse's own terms, on the same terms as the one
+                # above: written by this insert, tolerated as absent, and never filled later.
+                getattr(record, "warehouse_query_id", None),
             ),
         )
         self._store.commit()
