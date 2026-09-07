@@ -288,8 +288,11 @@ class QueryExecutionRecord(_Contract):
 
 class ToolCallRecord(_Contract):
     """One MCP tool call. Audit-grade fields (server-observed) are required-ish; the self-report fields
-    (user_question / agent_query / thread_id / client_model) are Claude-supplied and nullable
-    (best-effort)."""
+    (user_question / agent_query / thread_id / client_model) are CLIENT-supplied and nullable
+    (best-effort).
+
+    Client-supplied rather than Claude-supplied, which is what this said: any MCP client can call
+    these tools, and a contract that names one vendor reads as though the others were unsupported."""
 
     ts: str
     tool_name: str
