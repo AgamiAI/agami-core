@@ -285,12 +285,12 @@
         line.appendChild(el("span", { text: "Nothing could be compared — the scoring status was unknown" }));
         return line;
       }
-      // Built from what the comparison decided and what the gates decided, never from `passed`
-      // alone. An item can reproduce its answer key exactly and still fail a gate, and the page
-      // used to call that "Did not reproduce the answer key", which was simply untrue.
-      // What the comparison did to the DATA, in those words. The pill beside the question already
-      // says passed or failed, so this line has one job: whether the rows matched. "Reproduced the
-      // answer key" said that in two pieces of vocabulary a reader has to learn first.
+      // What the comparison did to the DATA, in those words, and built from what the comparison and
+      // the gates decided rather than from `passed` alone. An item can reproduce its answer key
+      // exactly and still fail a gate; the page used to call that "Did not reproduce the answer
+      // key", which was untrue and sat beside a perfect score that said so. The pill next to the
+      // question already reports passed or failed, so this line has one job: whether the rows
+      // matched.
       const verdict = item.reproduced
         ? (item.gated ? "Same rows as the answer key, but not the same question"
                       : "Same rows as the answer key")
