@@ -163,6 +163,16 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
   > /tmp/agami-golden-save-<ts>.json
 ```
 
+**A statement that departs from this profile's own examples stops here too**, with exit `1` and a `needs_confirmation_convention` payload. The library of curated examples is where a team's conventions live — which of two equally correct date columns they answer with, how they phrase a join — and it is what agami reads when it answers the question for real. An answer key that contradicts it will fail every future run and blame the model.
+
+The payload carries the nearest example's question and statement, and the claims that differ. **Show both statements and ask**, in one line:
+
+> Your examples for this kind of question filter on `created`; this one uses `opened`. Save it anyway?
+
+**It is a question and never a refusal.** A golden item may legitimately depart from convention — that is sometimes exactly why one is written. On an explicit yes, re-run the same command with `--confirm-convention` appended. On a no, nothing was written, and the fix is usually to the statement rather than to the dataset.
+
+Only three claims can stop a save this way — the tables read, the filters written, and the resolved date window — because those are the ones that change *which rows are counted*. Two statements answering one question differ in ordering and limit all the time, and stopping for those would make this a prompt people learn to click through.
+
 **A relative question over a frozen answer key is refused here**, with exit `2`: *"how many orders in the last 7 days?"* names a window that slides forward and SQL pinned to a fixed date does not. Either anchor the statement to the current date (`CURRENT_DATE - INTERVAL '7 days'`, the dialect's spelling) or rewrite the question to name the window it means (`…in Q1 2024?`), then re-invoke. Do not save it and plan to fix it later — the whole point of refusing at save time is that the one person who can still fix it is here.
 
 ---
@@ -211,10 +221,20 @@ Exit codes are Phase 4's, unchanged. On `1` the payload carries `needs_confirmat
 **Read the exit code before the payload.** Both write doors share it:
 
 - **`0`** — written. Report `added` / `replaced` and the path.
-- **`1`** — **needs confirmation.** Nothing was written. Not a failure and not a success; a pipeline that treated it as either would be wrong in both directions. **This is the only thing that produces `1`** — every other outcome, expected or not, is `2` with a sentence on stderr — so a `1` always carries a `needs_confirmation` payload and is never a crash. If you ever see `1` with no such payload, stop and report it rather than re-running with `--confirm-replace`.
+- **`1`** — **needs confirmation.** Nothing was written. Not a failure and not a success; a pipeline that treated it as either would be wrong in both directions. **This is the only thing that produces `1`** — every other outcome, expected or not, is `2` with a sentence on stderr — so a `1` is never a crash.
+
+  **Read which key the payload carries before you answer it. There are three, and they take different flags:**
+
+  | Key | What it means | Clears with |
+  |---|---|---|
+  | `needs_confirmation` | A write would replace an item that already exists. Carries `{id, before, after}`. | `--confirm-replace` |
+  | `needs_confirmation_removals` | A queued action would delete an item. Carries `{id, before}` and no `after`. | `--confirm-replace` |
+  | `needs_confirmation_convention` | The statement departs from the profile's own examples. Carries the nearest example and the claims that differ. | `--confirm-convention` |
+
+  A payload may carry more than one — a replacement whose statement also departs needs both flags. If you ever see `1` with none of the three, stop and report it rather than re-running with a flag.
 - **`2`** — cannot start. The stderr line (prefix `agami-save-golden:`) says why. Nothing was written, or a failed write was rolled back to the bytes that were there before.
 
-On `1`, the payload carries `needs_confirmation`: a list of `{id, before, after}`. **Render both sides** — a markdown table or two fenced blocks per id, the existing item and the one that would take its place. "This id already exists" is not enough for anyone to decide with: the thing being overwritten is an answer key, and they have to see what they would lose.
+On a `needs_confirmation` payload — a list of `{id, before, after}` — **render both sides** — a markdown table or two fenced blocks per id, the existing item and the one that would take its place. "This id already exists" is not enough for anyone to decide with: the thing being overwritten is an answer key, and they have to see what they would lose.
 
 **A replacement is wholesale** — the item that is written is the item you sent, so anything the existing one carries and yours does not (its `tags`, a `must_filter`, a `match`) is gone. Read the `before` and carry forward what still applies before you ask; that is also what the user is agreeing to when they look at the two sides.
 
@@ -248,6 +268,8 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
 |---|---|
 | Exit `0` | Written. Report `added` / `replaced` and the path. After an import, say plainly that nothing can gate yet. |
 | Exit `1` with `needs_confirmation` | Nothing was written. Render the before and the after for every id, ask, and re-run with `--confirm-replace` only on an explicit yes. On a no, say the file is untouched and stop. |
+| Exit `1` with `needs_confirmation_removals` | Nothing was written. Render each removal's question and answer key — not its id — ask, and re-run with `--confirm-replace` on an explicit yes. |
+| Exit `1` with `needs_confirmation_convention` | Nothing was written. Show the nearest example's statement beside the one being saved, say which claims differ, and ask. On a yes re-run with `--confirm-convention`. On a no the fix is usually to the statement, not to the dataset. |
 | Exit `2` | Cannot start. Read the `agami-save-golden:` line on stderr — it names the cause. Nothing was written; a rolled-back write left the previous bytes exactly as they were. |
 | `agami-save-golden: this file is empty` / `no column here holds the question` / `this file has no header row` | The sheet's question column can't be identified. The refusal lists every header it read — quote it back, ask which column holds the question, and have them rename it (or add a header row) and re-invoke. Never guess at column 0: a bank of ids imported as questions fails every future run in a way that looks exactly like a model regression. |
 | `agami-save-golden: N row(s) were skipped` on a successful parse | A warning, not a stop. List every entry in `skipped` with its row number and reason before asking for the import — a question silently missing from a dataset is the failure this line exists to prevent. |

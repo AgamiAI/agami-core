@@ -12,7 +12,69 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Saving a golden item checks it against the profile's own examples first.** The curated example
+  library is where a team's conventions live — which of two equally correct date columns they answer
+  with, how they phrase a join — and it is what agami reads when it answers a question for real.
+  Nothing in the write path had ever looked at it, so an answer key could contradict the convention
+  and then fail every future run while blaming the model.
+
+  That is measured rather than imagined. On the first real dataset authored against a live
+  warehouse, nine of fifteen items failed and six were one mistake: the keys filtered on one
+  timestamp column where that profile's examples used another, 24 times out of 36.
+
+  The save door now ranks the nearest example for the question, reads both statements, and stops
+  with exit `1` and a `needs_confirmation_convention` payload when they disagree — before writing,
+  because a warning that arrives after the key is on disk is a warning about a file somebody now has
+  to decide whether to undo. `--confirm-convention` writes it anyway: a golden item may legitimately
+  depart from convention, and that is sometimes exactly why one is written.
+
+  Only three claims can stop a save — the tables read, the filters written, the resolved date window
+  — because those are the ones that change which rows are counted. A save only stops when the CLI
+  itself reports `high_confidence`, so a library that does not cover the question has no opinion to
+  hold anyone to. And the check is total: no model, no CLI, a profile mid-rebuild, all return no
+  opinion rather than blocking a correct answer from being written down, and the whole check is
+  bounded by one wall-clock budget rather than a timeout per subject area.
+
+  `agami-reconcile` is taught the second meaning of exit `1` in the same change, since a promotion
+  that met it and answered with `--confirm-replace` would loop on a payload with no before and
+  after to render.
+
+- **`/agami-eval` says what a pass rate is not.** A run scores a generator with every tool switched
+  off and one attempt, because that isolation is what keeps it from reading the answer key. The
+  agent that answers the same question in production has four tools and can iterate. A dataset is
+  also deliberately not a random sample. So a run measures regression, and quoting its pass rate as
+  agami's accuracy is wrong in both directions.
+
 ### Changed
+
+- **A reconcile run now teaches as well as tests.** Its only write was promoting agreeing rows to a
+  golden dataset. Nothing went to the curated example library — the one path there was the referral
+  to `agami-save-correction` when a number *disagreed*. So a run that proved twelve statements
+  correct against the customer's own dashboard taught agami nothing from any of them, while an
+  argument taught it something.
+
+  Agreeing rows are now split between the two. They cannot go to both: an item that is also an
+  example ranks first for its own question, the model reproduces it, and the test can only ever
+  pass. They came from one dashboard, so they are the same family of question, which is exactly what
+  makes holding some back meaningful.
+
+  **The product does the splitting.** Which rows should teach depends on what the example library
+  already covers, and asking a user that is asking them to guess at a library they have never
+  opened. `sm examples --query` already answers it: its `high_confidence` flag is the product's own
+  judgement of "we have a close example for this", so a row it does not cover teaches and a row it
+  does becomes a test. Below four agreeing rows nothing is split, and never more than half the
+  batch is sent to the examples so onboarding runs still write tests.
+
+  **The user still makes one decision, and it is not the split** — one yes for the batch, with the
+  breakdown shown. Saying what went where is mandatory rather than decorative: adding examples
+  changes how agami answers future questions, and that must not happen silently behind a button
+  that says "keep these numbers".
+
+  A promoted row passes `--confirm-convention` to the save door. The statement being saved is the
+  one agami generated *from* those examples minutes earlier, so the convention check would ask the
+  person to confirm a departure they never made.
 
 - **The golden run report shows the difference it already worked out.** Reading a failure meant
   diffing two SQL statements by eye, from a page that had computed the answer and kept it in a file
