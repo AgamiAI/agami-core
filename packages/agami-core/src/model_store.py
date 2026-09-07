@@ -559,8 +559,8 @@ class DbActivitySink:
             "INSERT INTO tool_calls (id, ts, org_id, actor, tool_name, datasource, sql, row_count, "
             "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
             "correlation_id, refusal_detail, refusal_remediation, audit_id, basis, "
-            "conversation_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "conversation_id, client_model) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -597,6 +597,9 @@ class DbActivitySink:
                 # than raising — and NULL is a real value here: the local single-user path has no
                 # store to read a previous call from, so it derives nothing.
                 getattr(record, "conversation_id", None),
+                # The model the client says it is running (ACE-113). `getattr`-guarded like the five
+                # above, so an embedder on an older record shape writes NULL rather than raising.
+                getattr(record, "client_model", None),
             ),
         )
         self._store.commit()
@@ -612,7 +615,11 @@ _TOOL_CALL_COLS = (
     # The conversation the SERVER decided this call belongs to (021), which is what `list_sessions`
     # groups by now. `thread_id` stays selected beside it: it is still recorded, a consumer may still
     # read it, and on a row written before 021 it is the only grouping there is.
-    "refusal_detail, refusal_remediation, basis, conversation_id"
+    "refusal_detail, refusal_remediation, basis, conversation_id, "
+    # Selected as well as inserted, which is the half that is easy to miss: this list is narrower
+    # than the INSERT (`org_id` and `audit_id` are written and never read), so a column added to one
+    # and not the other is recorded faithfully and reaches no reader at all.
+    "client_model"
 )
 
 

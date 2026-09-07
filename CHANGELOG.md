@@ -67,6 +67,32 @@ below corresponds to one such version.
   SQLite and Postgres. Nothing reads it yet; nothing updates it — the row stays append-only and the
   value is written by the insert that already writes it.
 
+- **A tool call can record the AI model the client says it is running.** The activity log recorded
+  who called, which tool, the statement and the outcome — everything the server observed — and never
+  what was driving. Over MCP the model belongs to the client and the server never sees it, so an
+  operator reading a run of unusually poor statements could not tell whether the client had moved to
+  a different model that week. That is the first question somebody asks, and the log had no answer.
+
+  `client_model` is an optional property on all four tools and a nullable column beside the other
+  self-reported ones. It is **evidence of a claim and never a fact**: models self-identify
+  unreliably, nothing checks the value, and nothing branches on it — it is never a basis for an
+  access decision, a bound, a bill or an audit conclusion. A client-controlled value that could
+  change what the server does would be far worse than an empty column, so a test asserts against the
+  source that no reader of it exists outside the record, the writer, the read list and the render.
+
+  There is deliberately **no list of known models** to check it against. A closed set would refuse a
+  model that shipped after the set was written, which is a certainty rather than a risk; storing what
+  was said, unvalidated and marked as unvalidated, is the only account that stays true. The admin
+  activity view shows it marked `· self-reported`, beside the agent's own framing.
+
+  Bounded by the writer at 200 characters — many times the longest honest model id — and with no
+  truncation flag, on the same reasoning the refusal detail already carries: nobody re-runs a model
+  id, so a flag would be a column false on every row ever written. Null is the ordinary case; a
+  client that reports nothing is behaving correctly, and so is one built before this existed.
+
+  Migration `024_tool_calls_client_model.sql`, one nullable TEXT column, portable across SQLite and
+  Postgres.
+
 ## [0.8.2] — 2026-09-07
 
 Two reliability fixes to the eval, both found by running it for real: the client couldn't be found

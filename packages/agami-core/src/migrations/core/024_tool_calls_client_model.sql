@@ -1,0 +1,45 @@
+-- The AI model the client says it is running (ACE-113).
+--
+-- The log records who called, which tool, the statement and the outcome — everything the server
+-- observed. It has never recorded WHAT WAS DRIVING. Over MCP the model belongs to the client, and
+-- the server never sees it, so an operator reading a run of unusually poor statements cannot tell
+-- whether the client was on a different model that week. That is the first question somebody asks,
+-- and the log had no answer to it.
+--
+-- SELF-REPORTED, LIKE ITS NEIGHBOURS. This is the fourth best-effort column on this table, joining
+-- `user_question`, `agent_query` and `basis` in the tier 008 describes: the audit-grade columns are
+-- what the server observed and are always trustworthy; these are what the client said about itself.
+-- It is evidence of a claim and never a fact. A client can report anything, report nothing, or be
+-- wrong about itself — models self-identify unreliably — and this column is honest about that by
+-- being read as a claim rather than believed as a measurement.
+--
+-- NOTHING BRANCHES ON IT, and that is a rule rather than an accident of this slice being small. It
+-- is never a basis for an access decision, a bound, a bill or an audit conclusion. It is written,
+-- read back, and shown to a person who is told where it came from. A value a client controls must
+-- not be able to change what the server does, and the way to guarantee that is for nothing to
+-- consult it.
+--
+-- NOT CHECKED AGAINST ANYTHING. There is no list of known models here and there will not be one: a
+-- closed set would refuse a model that shipped after the set was written, which is a certainty
+-- rather than a risk. Storing what was said, unvalidated and marked as unvalidated, is the only
+-- account that stays true.
+--
+-- BOUNDED BY THE WRITER, at a cap many times the longest honest model id, and with no companion
+-- truncation flag. The flag on `query_executions.sql` earns its place because a cut statement reads
+-- as the whole one and a reviewer would re-run something that does not reproduce the decision.
+-- Nobody re-runs a model id, and at this cap a cut value means a caller already did something
+-- pathological — so the flag would be a column that is false on every row ever written. That is the
+-- same argument `_bounded_audit_detail` makes for its own single bounded string.
+--
+-- NULLABLE, AND NULL IS THE ORDINARY CASE rather than a defect. A client that reports nothing is
+-- behaving correctly; so is one built before this existed. Nothing degrades when the column is
+-- empty, which is what "best-effort" has to mean if the log is to stay usable for clients that
+-- report none of it.
+--
+-- Forward-only and portable (SQLite + Postgres unchanged). `ALTER TABLE ... ADD COLUMN` is the one
+-- schema change both engines take as written, and existing rows keep their history with a NULL
+-- here. No `IF NOT EXISTS` — SQLite's ALTER does not accept it, and re-run safety comes from the
+-- runner's applied-filename ledger.
+--
+-- No index. Nothing filters on it; it is read by a person who already has the row in front of them.
+ALTER TABLE tool_calls ADD COLUMN client_model TEXT;
