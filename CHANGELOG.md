@@ -29,6 +29,18 @@ below corresponds to one such version.
   an unstartable client stops a run: a generator that starts and declines the probe is one answer
   short, which the loop already reports per item. `--skip-preflight` refuses the probe.
 
+- **The eval names its generator once, so the test suite cannot be talked out of substituting it.**
+  `run_golden_eval` constructed its generator in two places, and every test replaced the class by
+  the name those places used. Swapping the default meant editing the two construction sites — which
+  left the substitutions pointing at a class the command no longer named. Nothing failed: the suite
+  went on passing while spawning a real client, once per case, against the operator's own account.
+
+  The generator is now chosen at a single module-level name, `GENERATOR`, that both construction
+  sites and every test go through, so a changed default carries the substitutions with it. Two
+  tests hold that shut — one parses the command's own source and fails on any generator built
+  outside that name, the other pins what the name is currently set to, so moving it is a decision
+  someone makes rather than a diff that passes.
+
 ## [0.8.1] — 2026-09-07
 
 Everything below came out of running the golden-dataset feature against a live warehouse for the

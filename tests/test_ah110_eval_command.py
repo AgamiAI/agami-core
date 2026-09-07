@@ -15,6 +15,7 @@ statement the model happened to write.
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import sys
@@ -175,7 +176,7 @@ def artifacts(tmp_path, monkeypatch, warehouse) -> Path:
 @pytest.fixture()
 def scripted(monkeypatch) -> None:
     """Answer every question from a table instead of spawning the operator's client."""
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Scripted)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Scripted)
 
 
 def _write(art: Path, name: str, dataset: dict[str, Any]) -> None:
@@ -241,7 +242,7 @@ def test_a_run_that_stopped_partway_cannot_produce_a_verdict(artifacts, monkeypa
                 raise RuntimeError("the client fell over")
             return gr.GeneratedSql(sql=GENERATED[Q_PASS], error=None)
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _RaisesOnTheSecond)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _RaisesOnTheSecond)
     _write(artifacts, "stopped", {"test_cases": [PASSING_ITEM, FAILING_ITEM]})
 
     code, payload, _ = _run(capsys, "--dataset", "stopped")
@@ -265,7 +266,7 @@ def test_a_run_where_every_generation_errored_cannot_produce_a_verdict(
         def generate(self, question, org, datasource):
             return gr.GeneratedSql(sql="", error="no statement was scripted for this question")
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _AnswersNothing)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _AnswersNothing)
     _write(artifacts, "regressed", ONE_FAILURE)
 
     code, payload, _ = _run(capsys, "--dataset", "regressed")
@@ -302,7 +303,7 @@ def test_an_incomplete_run_with_failures_in_it_reports_the_broken_pipeline(
                 raise RuntimeError("the client fell over")
             return gr.GeneratedSql(sql=GENERATED[Q_FAIL], error=None)
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _RaisesAfterTheFirst)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _RaisesAfterTheFirst)
     _write(artifacts, "half", ONE_FAILURE)
 
     code, payload, _ = _run(capsys, "--dataset", "half")
@@ -379,7 +380,7 @@ def test_the_summary_line_says_when_the_run_did_not_complete(artifacts, monkeypa
         def generate(self, question, org, datasource):
             raise RuntimeError("the client fell over")
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _RaisesImmediately)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _RaisesImmediately)
     _write(artifacts, "stopped", ONE_FAILURE)
 
     _, _, err = _run(capsys, "--dataset", "stopped")
@@ -740,10 +741,10 @@ def test_a_run_that_produced_no_verdict_is_not_read_as_a_clean_one(artifacts, ca
         def generate(self, question, org, datasource):
             return gr.GeneratedSql(sql="", error="the generator did not answer")
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Silent)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Silent)
     assert _run(capsys, "--dataset", "mixed")[0] == 2
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Scripted)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Scripted)
     code, payload, err = _run(capsys, "--dataset", "mixed", "--rerun-failures")
 
     # No usable record exists, so it refuses rather than reporting a clean re-run.
@@ -768,10 +769,10 @@ def test_an_incomplete_run_is_not_read_as_a_failure_record(artifacts, capsys, mo
                 raise RuntimeError("the client fell over")
             return super().generate(question, org, datasource)
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Raises)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Raises)
     assert _run(capsys, "--dataset", "mixed")[0] == 2
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Scripted)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Scripted)
     code, _, err = _run(capsys, "--dataset", "mixed", "--rerun-failures")
 
     assert code == 2
@@ -829,7 +830,7 @@ def test_a_client_that_cannot_start_stops_the_run_before_it_costs_anything(
             spawned.append(question)
             return gr.GeneratedSql(sql="", error=gr._GENERATION_UNAVAILABLE)
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _NeverStarts)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _NeverStarts)
     _write(artifacts, "unreachable", ONE_FAILURE)
 
     code, payload, err = _run(capsys, "--dataset", "unreachable")
@@ -856,7 +857,7 @@ def test_a_generator_that_declines_the_probe_does_not_cancel_the_run(artifacts, 
                 return gr.GeneratedSql(sql="", error="no statement for that one")
             return gr.GeneratedSql(sql=GENERATED[Q_FAIL], error=None)
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _DeclinesTheProbe)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _DeclinesTheProbe)
     _write(artifacts, "fussy", ONE_FAILURE)
 
     code, payload, _ = _run(capsys, "--dataset", "fussy")
@@ -878,9 +879,44 @@ def test_the_probe_can_be_skipped(artifacts, monkeypatch, capsys):
             spawned.append(question)
             return gr.GeneratedSql(sql=GENERATED[Q_FAIL], error=None)
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Counts)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Counts)
     _write(artifacts, "trusted", ONE_FAILURE)
 
     _run(capsys, "--dataset", "trusted", "--skip-preflight")
 
     assert len(spawned) == len(ONE_FAILURE["test_cases"]), "one spawn per case, and no probe"
+
+
+def test_no_generator_is_built_except_through_the_one_name():
+    """Every test above substitutes `GENERATOR`, so a construction that bypasses that name is a
+    real client, spawned once per case, against whoever is running the suite.
+
+    That is not hypothetical: swapping the default once meant editing the construction sites and
+    leaving the substitutions pointing at a class nobody named any more. Nothing failed. The suite
+    stayed green for ten minutes of live generation. This reads the source rather than the
+    behaviour because the behaviour under a correct patch is indistinguishable from the bug.
+    """
+    tree = ast.parse(Path(run_golden_eval.__file__).read_text(encoding="utf-8"))
+    # Both callee shapes, because they are the same mistake written two ways: the class imported by
+    # name (`ClaudeCliGenerator(...)`) and the class reached through its module
+    # (`golden_run.ClaudeCliGenerator(...)`). A guard that only knew the first would pass the day
+    # somebody dropped the import and qualified the call instead.
+    built = {
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
+    }
+    built = {name for name in built if name.lower().endswith("generator")}
+
+    assert built <= {"GENERATOR"}, (
+        f"{sorted(built - {'GENERATOR'})} is constructed directly — route it through GENERATOR, "
+        "or every scripted substitution in this file silently becomes a live client"
+    )
+
+
+def test_the_default_generator_is_the_client_one():
+    """The seam's current setting, pinned so that changing it is a decision and not a diff.
+
+    Whoever moves this line is the person who most needs to read the one above it.
+    """
+    assert run_golden_eval.GENERATOR is gr.ClaudeCliGenerator

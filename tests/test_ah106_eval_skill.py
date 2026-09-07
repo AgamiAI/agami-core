@@ -257,7 +257,7 @@ def scripted(monkeypatch, sm) -> None:
     Takes `sm` too: a run that scripts the generator still builds a context first, and letting that
     reach the real CLI would spend a second per call to receive a fixture back.
     """
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Scripted)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Scripted)
 
 
 class _RecordedSm:
@@ -790,7 +790,7 @@ def test_a_generator_that_raises_stops_the_run_and_the_payload_says_so(
                 raise RuntimeError("the client fell over")
             return gr.GeneratedSql(sql=GENERATED[Q_PASS], error=None)
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _RaisesOnTheSecond)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _RaisesOnTheSecond)
     _write(artifacts, "mixed", MIXED_DATASET)
 
     code, payload, _ = _run(capsys, "--dataset", "mixed")
@@ -813,7 +813,7 @@ def test_a_run_where_every_item_errors_is_not_green(artifacts, monkeypatch, caps
         def generate(self, question, org, datasource):
             return gr.GeneratedSql(sql="", error="no statement was scripted for this question")
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _AnswersNothing)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _AnswersNothing)
     _write(artifacts, "mixed", MIXED_DATASET)
 
     code, payload, _ = _run(capsys, "--dataset", "mixed")
@@ -914,7 +914,7 @@ def test_the_generator_is_handed_every_section_and_the_timeout(artifacts, monkey
             seen["schema"] = schema
             seen["timeout_s"] = timeout_s
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Records)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Records)
     _write(artifacts, "green", PASSING_DATASET)
 
     _run(capsys, "--dataset", "green", "--timeout-s", "7")

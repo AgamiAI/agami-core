@@ -122,6 +122,14 @@ _PREFLIGHT_QUESTION = "How many rows are there in a table called t?"
 # would mean building that schema before knowing the client can run.
 _PREFLIGHT_SCHEMA = "t(id integer)"
 
+# Which generator this command runs, named once. Both construction sites below go through this
+# name, and so does every test that substitutes a scripted one — which is the whole point of it
+# being a name rather than the class itself. An attempt to swap the default edited the construction
+# sites and left the tests patching the class they no longer named: the suite went on passing while
+# spawning a real client per case against the operator's own account. A single name cannot drift
+# that way — change it here and the substitutions follow it, or they fail loudly.
+GENERATOR = ClaudeCliGenerator
+
 
 def _section(outcome: Any) -> str:
     """Which section an item is printed under.
@@ -965,7 +973,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             # uses. The run's schema is a CALLABLE that ranks the example library per question —
             # one `sm` subprocess per subject area — and spending that on a throwaway probe would
             # cost more than the loop it protects on a model with many areas.
-            probe = ClaudeCliGenerator(lambda _question: _PREFLIGHT_SCHEMA, timeout_s=args.timeout_s).generate(
+            probe = GENERATOR(lambda _question: _PREFLIGHT_SCHEMA, timeout_s=args.timeout_s).generate(
                 _PREFLIGHT_QUESTION, tools.resolved_org_id(), args.profile
             )
         except Exception:
@@ -1008,7 +1016,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     result = run_golden_dataset(
         dataset,
         profile=args.profile,
-        generator=ClaudeCliGenerator(
+        generator=GENERATOR(
             lambda question: _model_context(cached, question),
             timeout_s=args.timeout_s,
         ),
