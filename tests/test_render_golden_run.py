@@ -932,6 +932,20 @@ def test_the_run_stamp_reads_as_a_date_somebody_would_say():
     assert "T11:47" not in stamp
 
 
+def test_the_run_stamp_is_converted_to_utc_before_labeling():
+    """A non-UTC aware datetime must be converted before it is labeled as UTC."""
+    import datetime
+
+    from render_golden_run import _run_stamp
+
+    eastern = datetime.datetime(
+        2026, 9, 6, 7, 47, 38, tzinfo=datetime.timezone(datetime.timedelta(hours=-4))
+    )
+    stamp = _run_stamp(eastern)
+
+    assert stamp == "6 September 2026 at 11:47 UTC"
+
+
 def test_a_bucket_with_nothing_in_it_is_not_given_a_tile():
     """Five tiles on every run put three zeroes beside the two numbers that matter.
 
@@ -1035,6 +1049,12 @@ def test_a_non_dict_score_reads_as_unscored_rather_than_throwing():
     payload = _payload(render(title="x", profile="demo", run=_run(items)))
     assert payload["items"][0]["reproduced"] is False
     assert payload["items"][0]["status"] == ""
+
+
+def test_an_unknown_status_is_not_rendered_as_a_row_difference():
+    """Only a scored item may claim row agreement or disagreement."""
+    assert 'if (item.status !== "scored") {' in TEMPLATE
+    assert "the scoring status was unknown" in TEMPLATE
 
 
 def test_a_run_that_omits_completed_is_not_banner_ed_as_stopped_partway():

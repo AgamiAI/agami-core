@@ -281,6 +281,10 @@
         line.appendChild(el("span", { text: "Nothing could be compared — " + item.reason }));
         return line;
       }
+      if (item.status !== "scored") {
+        line.appendChild(el("span", { text: "Nothing could be compared — the scoring status was unknown" }));
+        return line;
+      }
       // Built from what the comparison decided and what the gates decided, never from `passed`
       // alone. An item can reproduce its answer key exactly and still fail a gate, and the page
       // used to call that "Did not reproduce the answer key", which was simply untrue.

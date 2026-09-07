@@ -101,6 +101,12 @@ def _run_stamp(now: Optional[datetime.datetime] = None) -> str:
     not necessarily in it, and the day is not zero-padded because nobody says "06 September".
     """
     stamp = now or datetime.datetime.now(datetime.timezone.utc)
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        # A naive timestamp has no zone to convert from; treat it as already UTC so the label stays
+        # truthful instead of pretending to have converted something unknown.
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    else:
+        stamp = stamp.astimezone(datetime.timezone.utc)
     return f"{stamp.day} {_MONTHS[stamp.month - 1]} {stamp.year} at {stamp:%H:%M} UTC"
 
 
