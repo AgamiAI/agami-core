@@ -514,8 +514,8 @@ class DbActivitySink:
         self._store.execute(
             "INSERT INTO query_executions (id, ts, org_id, datasource, question, sql, row_count, "
             "source, status, reason, rule, sql_truncated, error_detail, detail, receipt, "
-            "model_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "model_version, executing_identity) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.ts,
@@ -540,6 +540,12 @@ class DbActivitySink:
                 getattr(record, "detail", None),
                 getattr(record, "receipt", None),
                 getattr(record, "model_version", None),
+                # Who the warehouse authenticated for this statement. Same `getattr`
+                # tolerance as the four above, and for the same reason: a caller still on the older
+                # record shape writes a NULL rather than raising. **Written by this insert and by
+                # nothing else** — the row is append-only, and a column filled by a later update is
+                # exactly what that stance exists to prevent.
+                getattr(record, "executing_identity", None),
             ),
         )
         self._store.commit()

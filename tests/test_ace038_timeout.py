@@ -233,12 +233,23 @@ def test_the_budget_has_exactly_one_configuration_surface():
     # fork carries it EXPLICITLY rather than losing it. It exists for the inverse of this test's
     # concern: parent and child reading the environment at two different moments is the defect, and
     # pinning is the fix. It is never read to compute a bound.
+    #
+    # `_last_executing_identity` is the sixth, and it is the same kind as the first and the
+    # third: an OUTPUT carrier. It holds the identity the executor's connection reported, for the
+    # audit row alone — written when a connection is opened, long after the budget has been resolved,
+    # never read to compute a bound, and cleared at the entry to every call beside `_last_error_detail`.
+    #
+    # It cannot cross the fork either, and like `error_detail` it does not need to: on the forked
+    # surface the child holds the connection and the parent writes the row, so the column is NULL
+    # there by the same construction that leaves `error_detail` NULL — and null is already a claim on
+    # that column rather than a gap.
     context_vars -= {
         "_last_error_detail",
         "_guard_model",
         "_last_outcome",
         "_guard_shape",
         "_pass_posture",
+        "_last_executing_identity",
     }
     assert context_vars == set(), (
         "a second, higher-precedence configuration surface for the budget cannot cross the fork; "

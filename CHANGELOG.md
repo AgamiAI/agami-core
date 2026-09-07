@@ -12,6 +12,37 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **An execution record can name the database identity that ran it.** `query_executions` said what
+  ran, when, for whom, against which model and with what verdict, and never said who the warehouse
+  authenticated. Where every statement runs as one shared account that is worth little; where a
+  deployment runs each statement as the person who asked, it is a different identity per row and
+  the record could not say so.
+
+  The column is `executing_identity`, and it holds **what the connection says it is** — not the
+  signed-in principal, not the subject of the token that opened it, not a namespace configured on
+  the profile. Those are statements of intent, and a row built from intent would report the account
+  we meant to run as even on the day a misconfiguration ran everything as somebody else, which is
+  the day anybody reads this column.
+
+  An executor reports through one of two seams: `ExecResult.executing_identity` for the ordinary
+  path, or `report_executing_identity()` at connect time, which is what lets a statement that
+  **fails after its connection was opened** still be attributed — the case the column is most worth
+  having for. Both are optional; an executor that reports nothing is not doing anything wrong.
+
+  **The built-in executor reports nothing, deliberately.** Obtaining an identity would cost a round
+  trip on every query in every self-hosted deployment, to record the same shared account each time —
+  a price paid by the people who get the least from it. Those rows stay null, and null here is a
+  claim (no executor reported one) rather than a gap, alongside the two other honest nulls: a row
+  written before the column existed, and a driver that could not answer. On the forked stdio surface
+  the column is null too, by the same construction that already leaves `error_detail` null there —
+  the child holds the connection and the parent writes the row.
+
+  Migration `022_query_executions_executing_identity.sql`, one nullable TEXT column, portable across
+  SQLite and Postgres. Nothing reads it yet; nothing updates it — the row stays append-only and the
+  value is written by the insert that already writes it.
+
 ## [0.8.2] — 2026-09-07
 
 Two reliability fixes to the eval, both found by running it for real: the client couldn't be found

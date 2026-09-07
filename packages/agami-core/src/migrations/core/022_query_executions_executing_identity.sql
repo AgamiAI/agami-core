@@ -1,0 +1,45 @@
+-- Which database identity actually ran a statement.
+--
+-- `query_executions` records what ran, when, for whom, against which model and with what verdict. It
+-- has never recorded WHO THE WAREHOUSE SAW. On a deployment where every statement runs as the same
+-- shared account that is a fact worth nothing; where an executor runs each statement as the person
+-- who asked, it is a different identity per row, and the row could not say so.
+--
+-- WHAT THE CONNECTION SAYS IT IS, and this is the whole content of the column. Not the signed-in
+-- principal, not the subject of the token that opened the connection, not a namespace configured on
+-- the profile. Those are statements of intent, and an audit row built from intent agrees with itself
+-- and with nothing else — it would report the person we MEANT to run as even on the day a
+-- misconfiguration ran everything as somebody else, which is precisely the day somebody reads this
+-- column.
+--
+-- NULLABLE, AND NULL IS A CLAIM RATHER THAN A GAP — the stance the receipt and error-detail columns
+-- on this table already take. Three different rows carry null here and all three are honest:
+--
+--   * a row written before this migration ran;
+--   * a row from the built-in executor, which never reports an identity (see below);
+--   * a row whose driver could not answer, where the alternative was a guess.
+--
+-- None of them is worth telling apart in the schema. What matters is that a null is never invented.
+--
+-- THE BUILT-IN EXECUTOR STAYS SILENT, deliberately, and that is why this column is mostly null on a
+-- self-hosted deployment. Teaching it to report would work and would cost a round trip on every
+-- query in every such deployment, to record the same shared account every single time — a price paid
+-- by the people who get the least from it. An injected executor, where the identity actually
+-- varies, is the one that fills it.
+--
+-- WRITTEN BY THE INSERT THAT WRITES THE ROW, never by a later update. The row is append-only, and a
+-- column filled by a second write is exactly what that stance exists to prevent; it is also why the
+-- value travels out through the executor rather than being written afterwards by whoever knows it.
+--
+-- Recorded on EVERY outcome, not only success. A statement that failed or was refused after its
+-- connection was opened is the case this column is most worth having for: "it ran as somebody, and
+-- then it broke" is the question an operator is chasing, and a row that goes null the moment a
+-- statement fails answers it for exactly the wrong half of the traffic.
+--
+-- Forward-only and portable (SQLite + Postgres unchanged). `ALTER TABLE ... ADD COLUMN` is the one
+-- schema change both engines take as written; no `IF NOT EXISTS`, because SQLite's ALTER does not
+-- accept it and re-run safety comes from the runner's applied-filename ledger.
+--
+-- No index. Nothing filters on this column yet, and an index for a query nobody has written is a
+-- guess about the shape it will take. The first read that needs one can add it knowing the query.
+ALTER TABLE query_executions ADD COLUMN executing_identity TEXT;
