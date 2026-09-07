@@ -897,13 +897,16 @@ def test_no_generator_is_built_except_through_the_one_name():
     behaviour because the behaviour under a correct patch is indistinguishable from the bug.
     """
     tree = ast.parse(Path(run_golden_eval.__file__).read_text(encoding="utf-8"))
+    # Both callee shapes, because they are the same mistake written two ways: the class imported by
+    # name (`ClaudeCliGenerator(...)`) and the class reached through its module
+    # (`golden_run.ClaudeCliGenerator(...)`). A guard that only knew the first would pass the day
+    # somebody dropped the import and qualified the call instead.
     built = {
-        node.func.id
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id.lower().endswith("generator")
+        if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
     }
+    built = {name for name in built if name.lower().endswith("generator")}
 
     assert built <= {"GENERATOR"}, (
         f"{sorted(built - {'GENERATOR'})} is constructed directly — route it through GENERATOR, "
