@@ -12,6 +12,12 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-09-07
+
+Two reliability fixes to the eval, both found by running it for real: the client couldn't be found
+on a non-interactive shell's `PATH`, and the test suite could be talked out of substituting a
+scripted generator for the real one — silently, the way it already happened once.
+
 ### Fixed
 
 - **The eval finds the client where it installs, and says so early when it cannot.** A run whose
