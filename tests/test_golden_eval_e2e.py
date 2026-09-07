@@ -277,7 +277,7 @@ def test_a_real_run_writes_a_report_with_both_statements_and_no_rows(
         def __init__(self, schema: str, *, timeout_s: float) -> None:
             super().__init__()
 
-    monkeypatch.setattr(run_golden_eval, "ClaudeCliGenerator", _Helper)
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Helper)
     # The helper resolves the single-operator org, so it reads the org-less form of the DSN.
     monkeypatch.setenv("DATASOURCE_URL__AGAMI_EXAMPLE", f"sqlite:///{warehouse}")
 
