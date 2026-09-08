@@ -183,9 +183,9 @@ def test_a_question_bank_imports_unconfirmed_and_one_verified_answer_confirms_it
     assert confirmed.expected.sql == PAID_BY_CHANNEL_SQL
     assert confirmed.match == "values"
     assert confirmed.tags == ["orders"]
-    # The receipt: what the answer looked like on the day, and how it was vouched for.
-    assert confirmed.recorded.columns == ["channel", "order_count"]
-    assert confirmed.recorded.rows == [["web", 812], ["mobile", 517]]
+    # The receipt: when the answer was accepted, and how it was vouched for. Not the payload's
+    # rows — #281, the save door never carries them onto disk.
+    assert confirmed.recorded.columns == [] and confirmed.recorded.rows == []
     assert confirmed.confirmed_by.method == METHOD
     assert confirmed.recorded.at and confirmed.confirmed_by.at
 
@@ -273,17 +273,18 @@ def test_an_agreeing_row_promotes_and_scores_on_its_own_next_run(tmp_path, monke
     # A reconciled number legitimately moves, so it is banded rather than pinned.
     assert promoted.match == "bounded"
     assert promoted.bounds.min_value < Q3_ACTUAL < promoted.bounds.max_value
-    # The receipt is the run's own recorded result, forwarded rather than rebuilt from a number.
-    assert promoted.recorded.columns == ["total_revenue"]
-    assert promoted.recorded.rows == [[Q3_ACTUAL]]
+    # The receipt is a timestamp, not the run's own result — #281, the save door never carries a
+    # payload's rows onto disk.
+    assert promoted.recorded.columns == [] and promoted.recorded.rows == []
     assert promoted.tags == ["reconciled"]
     # Provenance names the source, the day and the tolerance — the whole of what makes the claim
     # auditable later.
     for part in ("the finance dashboard", "2026-08-31", "±1%"):
         assert part in promoted.confirmed_by.method
 
-    # …and it passes its own next run.
-    result = ExecResult(columns=list(promoted.recorded.columns), rows=[(Q3_ACTUAL,)])
+    # …and it passes its own next run. Not against `promoted.recorded` — that never carried the
+    # column — but against the column the promoted statement itself names.
+    result = ExecResult(columns=["total_revenue"], rows=[(Q3_ACTUAL,)])
     score = compare_result_sets(
         result,
         result,
@@ -439,8 +440,9 @@ def test_the_item_the_skill_documents_is_the_item_the_save_door_reads(
     """
     item = _documented_promotion_item()
     assert set(item) <= _KEYS_THE_DOOR_READS, set(item) - _KEYS_THE_DOOR_READS
-    # The band in the block is the helper's own output, not arithmetic somebody wrote in prose.
-    assert item["bounds"] == reconcile.band(item["recorded"]["rows"][0][0], tolerance=TOLERANCE)
+    # The band in the block is the helper's own output, not arithmetic somebody wrote in prose —
+    # for the same worked value (`Q3_ACTUAL`) the block's own `band` command names.
+    assert item["bounds"] == reconcile.band(Q3_ACTUAL, tolerance=TOLERANCE)
 
     code, saved = _run(
         tmp_path,
@@ -471,8 +473,10 @@ def test_the_item_the_skill_documents_is_the_item_the_save_door_reads(
     assert promoted.expected.sql_confirmed is True
     assert promoted.match == item["match"]
     assert promoted.bounds.model_dump(exclude_none=True) == item["bounds"]
-    assert promoted.recorded.columns == item["recorded"]["columns"]
-    assert promoted.recorded.rows == [list(row) for row in item["recorded"]["rows"]]
+    # The block no longer documents a `recorded` key — #281, the save door never carried a
+    # payload's rows onto disk, so there is nothing left for the skill to tell a model to send.
+    assert "recorded" not in item
+    assert promoted.recorded.columns == [] and promoted.recorded.rows == []
     assert promoted.tags == item["tags"]
     assert promoted.confirmed_by.method == item["confirmed_by"]["method"]
 

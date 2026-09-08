@@ -33,10 +33,15 @@ MatchLevel = Literal["exact", "values", "shape", "bounded", "nonempty"]
 
 
 class GoldenRecorded(_Base):
-    """What the author saw when they wrote the case down.
+    """When the case was written down — never the comparison target, a run is judged against
+    `expected` alone.
 
-    This is a receipt, never the comparison target: a run is judged against `expected`, and
-    these numbers exist so a reviewer can see what the answer looked like on the day.
+    `columns`/`rows` stay on this model for one reason only: reading a file that already has them,
+    from before the save door stopped writing them. Nothing constructs a `GoldenRecorded` with
+    either populated any more — the golden-datasets directory has no gitignore exclusion, so a
+    populated `rows` here was a query's actual result rows committed to version control, and
+    nothing downstream needed them: scoring re-executes both statements live, and the explorer
+    already refused to render them for the same reason this stopped writing them.
     """
 
     columns: list[str] = Field(default_factory=list)

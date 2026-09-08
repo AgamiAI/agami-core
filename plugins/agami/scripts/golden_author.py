@@ -842,7 +842,7 @@ def _save(
     """Write one answer somebody looked at and accepted.
 
     The only door that can produce an item able to gate a run, and everything that makes it one is
-    written here: the statement, `sql_confirmed`, the receipt of what the answer looked like, and
+    written here: the statement, `sql_confirmed`, the receipt of when the answer was accepted, and
     how it was confirmed. AH-111 is a caller of this door, not a second write path.
 
     `confirmed_by.method` is free text by AH-100's deliberate choice — a `Literal` would refuse
@@ -868,11 +868,15 @@ def _save(
         "query": payload["query"],
         "expected": GoldenExpected(sql=payload["sql"], sql_confirmed=True),
         "tags": payload.get("tags") or [],
-        "recorded": GoldenRecorded(
-            columns=recorded.get("columns") or [],
-            rows=recorded.get("rows") or [],
-            at=recorded.get("at") or now,
-        ),
+        # `columns`/`rows` never reach this door's output: the golden-datasets directory has no
+        # gitignore exclusion, scoring never reads them (`golden_run.py` re-executes both
+        # statements live), and the explorer already refuses to render them for the same reason
+        # (`render_golden_datasets.py`'s `_item` — "their own data" — shows only whether a receipt
+        # exists, not what it says). Carrying the caller's rows through here was the one place that
+        # promise was not kept: every confirmed item committed its query's actual result rows to
+        # version control. `at` is kept — a timestamp is not a data-handling problem, and it is
+        # still what "has a receipt" means to the explorer and to `_our_faults` below.
+        "recorded": GoldenRecorded(at=recorded.get("at") or now),
         "confirmed_by": GoldenConfirmedBy(
             method=method, at=(payload.get("confirmed_by") or {}).get("at") or now
         ),

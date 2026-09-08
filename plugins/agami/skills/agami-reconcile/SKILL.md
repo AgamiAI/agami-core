@@ -269,14 +269,13 @@ Write the item with the **Write tool** — never a heredoc, never `python3 -c`, 
   "sql": "<the row's `sql`, verbatim>",
   "match": "bounded",
   "bounds": {"min_rows": 1, "max_rows": 1, "min_value": 3851100.0, "max_value": 3928900.0},
-  "recorded": {"columns": ["total_revenue"], "rows": [[3890000]]},
   "tags": ["reconciled"],
   "confirmed_by": {"method": "reconciled against the finance dashboard on 2026-08-31; agreed within ±<the run's tolerance>"}
 }
 ```
 
 - **`id` is omitted on purpose.** The save door derives it from the question, exactly as the import door does, so a promotion lands **on** an already-imported question of the same wording rather than beside it as a second copy.
-- `sql` and `recorded` come from the row record (Phase 2d) as they stand. Neither is rebuilt here — the record kept them so that nobody would have to.
+- `sql` comes from the row record (Phase 2d) as it stands, verbatim. `recorded` is omitted — the save door stamps it itself and never takes it from this payload, because the golden-datasets directory has no gitignore exclusion and this row's `recorded` is the finance dashboard's own numbers.
 - `match: "bounded"` because a reconciled number is one that legitimately moves. `bounded` with no band is refused (exit `2`), which is why the band below is not optional.
 - **`bounds` comes from the helper, never from arithmetic written in prose:**
 
