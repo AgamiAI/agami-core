@@ -292,9 +292,20 @@ def _call_card(c: dict[str, Any]) -> str:
     ds = ui.esc(c.get("datasource") or "—")
     lat = (str(c["execution_ms"]) + " ms") if c.get("execution_ms") is not None else ""
     rows_bit = f" · {c['row_count']} rows" if c.get("row_count") is not None else ""
+    # What the client said it was running (ACE-113), marked so nobody reads it as something the
+    # server observed. Absent on every call that reported none, which is the ordinary case, and
+    # through `_text` because a non-string column value would otherwise take the whole page down —
+    # `_session_drawer` joins every card into one string.
+    model = _text(c.get("client_model"))
+    model_bit = (
+        f'<div class="muted" style="font-size:13px;margin-top:6px">{ui.esc(model)} '
+        f'<span class="muted">· self-reported</span></div>'
+        if model
+        else ""
+    )
     return (
         '<div style="border-top:1px solid var(--line);padding:9px 0 11px">'
-        f"{head}{body}{_basis_block(c.get('basis'))}"
+        f"{head}{body}{_basis_block(c.get('basis'))}{model_bit}"
         f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(c["ts"])} · {ds} · '
         f"{lat} {_ok_pill(c['success'])}{rows_bit}</div></div>"
     )

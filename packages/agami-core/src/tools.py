@@ -2075,6 +2075,35 @@ def _bounded_basis(raw: Any) -> str | None:
     return json.dumps({"entries": entries, "truncated": truncated})
 
 
+#: How much of a self-reported model id is stored (ACE-113). Many times the longest honest value —
+#: model ids run to a few tens of characters — for the reason the caps above are set that way: a
+#: bound well clear of any real value means a cut is a signal that something already went wrong,
+#: rather than a routine trim of legitimate content.
+CLIENT_MODEL_MAX_CHARS = 200
+
+
+def _bounded_client_model(raw: Any) -> str | None:
+    """The model the client says it is running, as it will be stored (ACE-113).
+
+    **The isinstance guard is not defensive padding.** This value arrives from JSON, where a client
+    may hand back a number, a list or an object as easily as a string; without the check a
+    `{"client_model": 7}` would be stored as the Python `repr` of an int and read later as though a
+    client had reported a model called "7". `_bounded_basis` guards its own fields for the same
+    reason.
+
+    None rather than an empty string when there is nothing to store, so a call that omits the
+    argument stays byte-identical to one made before the field existed.
+
+    No companion truncation flag, on the same argument `_bounded_audit_detail` makes below: the flag
+    on `sql` earns its place because a cut statement reads as the whole one and somebody would re-run
+    it. Nobody re-runs a model id, and at this cap a cut value is already a caller doing something
+    pathological — so the flag would be a column that is false on every row ever written.
+    """
+    if not isinstance(raw, str):
+        return None
+    return raw[:CLIENT_MODEL_MAX_CHARS] or None
+
+
 def _bounded_audit_detail(detail: str) -> str:
     """The refusal's detail as it will be stored (ACE-098).
 
@@ -2804,6 +2833,10 @@ def record_tool_call(
         # applies is not a bound. Joins the two self-reported columns above: same provenance, same
         # trust.
         "basis": _bounded_basis(args.get("basis")),
+        # The model the client says it is running. Read straight off the arguments like the two
+        # above rather than exposed as a caller override: an embedder knows its own thread and its
+        # own actor, but it is no better placed than we are to know what model the client is on.
+        "client_model": _bounded_client_model(args.get("client_model")),
         "thread_id": thread_id if thread_id is not None else args.get("thread_id"),
         "correlation_id": (  # the turn (one user question)
             correlation_id if correlation_id is not None else args.get("correlation_id")
@@ -2979,6 +3012,11 @@ _CORRELATION_ID_PROP = {
     "you make answering THAT question — lets the admin see 'user asked X → agent made N calls'. "
     "Start a fresh one when the user asks something new.",
 }
+_CLIENT_MODEL_PROP = {
+    "type": "string",
+    "description": "The AI model YOU are running, as you know it — recorded so an admin reading a "
+    "run of calls can see what was driving them. Your own best account of it; nothing checks it.",
+}
 _USER_QUESTION_PROP = {
     "type": "string",
     "description": "The user's question, VERBATIM, that this call helps answer — recorded so an admin "
@@ -3070,6 +3108,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "user_question": _USER_QUESTION_PROP,
+                "client_model": _CLIENT_MODEL_PROP,
                 "thread_id": _THREAD_ID_PROP,
                 "correlation_id": _CORRELATION_ID_PROP,
             },
@@ -3144,6 +3183,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,
+                "client_model": _CLIENT_MODEL_PROP,
                 "thread_id": _THREAD_ID_PROP,
                 "correlation_id": _CORRELATION_ID_PROP,
             },
@@ -3192,6 +3232,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,
+                "client_model": _CLIENT_MODEL_PROP,
                 "thread_id": _THREAD_ID_PROP,
                 "correlation_id": _CORRELATION_ID_PROP,
             },
@@ -3314,6 +3355,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "query you run to answer one question — do not replace it with your refinement (that "
                     "goes in raw_query). Recorded so an admin sees what was actually asked.",
                 },
+                "client_model": _CLIENT_MODEL_PROP,
                 "thread_id": _THREAD_ID_PROP,
                 "correlation_id": _CORRELATION_ID_PROP,
                 # Deliberately a bare array: no `items` schema, no `maxItems`. The MCP SDK validates

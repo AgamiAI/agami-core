@@ -288,7 +288,11 @@ class QueryExecutionRecord(_Contract):
 
 class ToolCallRecord(_Contract):
     """One MCP tool call. Audit-grade fields (server-observed) are required-ish; the self-report fields
-    (user_question / agent_query / thread_id) are Claude-supplied and nullable (best-effort)."""
+    (user_question / agent_query / thread_id / client_model) are CLIENT-supplied and nullable
+    (best-effort).
+
+    Client-supplied rather than Claude-supplied, which is what this said: any MCP client can call
+    these tools, and a contract that names one vendor reads as though the others were unsupported."""
 
     ts: str
     tool_name: str
@@ -329,4 +333,17 @@ class ToolCallRecord(_Contract):
     # claim and never a fact; nothing here checks `ref` against `sql`. NULL on every call that did
     # not send one, which is the ordinary case.
     basis: str | None = None
+    # The AI model the CLIENT says it is running (ACE-113). Over MCP the model belongs to the client
+    # and the server never sees it, so this is the only account of what was driving a call — which is
+    # the first thing somebody asks when a run of statements is worse than usual.
+    #
+    # Bounded by the writer (`tools.CLIENT_MODEL_MAX_CHARS`) and carrying no truncation flag, unlike
+    # `basis` above: the cap is many times the longest honest model id, so a cut means a caller
+    # already did something pathological rather than that a real value was too long.
+    #
+    # Self-reported like `user_question`/`agent_query`/`basis`, so it is evidence of a claim and
+    # never a fact. Nothing checks it against anything — there is no list of models to check it
+    # against, and one written down here would refuse a model that shipped after it. NULL on every
+    # call that did not send one, which is the ordinary case.
+    client_model: str | None = None
     org_id: str = "local"  # the tenant this call ran for; defaults to the single-tenant org
