@@ -12,6 +12,13 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-09-08
+
+Three additive fields on the activity record, each answering a different half of "what produced this
+answer?" — the database identity a statement ran as, the warehouse's own id for it, and the AI model
+a client says it is running. All three are nullable, written by the insert that already writes the
+row, and read by nothing that makes a decision.
+
 ### Added
 
 - **An execution record can name the warehouse's own id for the statement.** Some engines mint a
