@@ -547,7 +547,15 @@ def client_argv() -> tuple[str, ...]:
 # subscription operator's child starts, reports that it is not logged in, and exits — every item in
 # the run erroring with the one sentence that would explain it discarded by design. It names the
 # account rather than a path, so it opens nothing the flags above have not already closed.
-_CHILD_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "USER", "ANTHROPIC_API_KEY")
+#
+# `SystemRoot` is here for the same reason and was missed for the same reason: it is invisible on
+# every platform this list was written and tested on. The client's Windows runtime (Bun) needs it
+# set to initialize WinSock before it can make its first network call — without it the child exits
+# immediately on a message this same `stderr=subprocess.DEVNULL` discards, so every item in a
+# Windows run errors identically with the one sentence that would explain it. It names a directory
+# every Windows process already has on its own environment, not a path the child gains a tool to
+# open, and it is simply absent from `os.environ` on every other platform, so it costs nothing there.
+_CHILD_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "USER", "ANTHROPIC_API_KEY", "SystemRoot")
 
 # Why a generation produced no statement. Fixed sentences, and the fixedness is the point: a client
 # can echo the whole prompt on stderr, and this text is rendered beside the item and persisted with
