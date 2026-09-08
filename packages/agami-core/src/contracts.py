@@ -275,6 +275,15 @@ class QueryExecutionRecord(_Contract):
     # and a driver that could not answer. None of them is worth telling apart here — what matters is
     # that a null is never a guess.
     executing_identity: str | None = None
+    # The warehouse's own id for this statement, where the engine mints one and the executor could
+    # read it. A pointer into somebody else's system: nothing here joins on it, validates it or
+    # fails without it, and its whole worth is that a person holding it can find the statement in
+    # the cluster's logs and see what it actually did.
+    #
+    # Named for the concept rather than for any one engine, so the first time a second engine has
+    # such an id it is an executor that learns to report rather than a column that has to be added.
+    # NULL where the engine has none, where the executor did not ask, or where the ask failed.
+    warehouse_query_id: str | None = None
 
 
 class ToolCallRecord(_Contract):

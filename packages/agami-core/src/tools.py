@@ -2126,7 +2126,11 @@ def _record_execution(
     # across the fork the child sanitizes and the parent records, so the raw text never crosses and
     # this is None. `execute_guarded` clears the var on entry, so a stale detail cannot attach to a
     # later call.
-    from execute_sql import _last_error_detail, _last_executing_identity
+    from execute_sql import (
+        _last_error_detail,
+        _last_executing_identity,
+        _last_warehouse_query_id,
+    )
 
     raw_detail = _last_error_detail.get()
     # Read unconditionally, exactly as the detail above is, and safe for the same reason:
@@ -2134,6 +2138,7 @@ def _record_execution(
     # than that an earlier one did. Read on every outcome, not only `ok` — a statement that failed
     # after connecting is the one an operator most wants attributed.
     executing_identity = _last_executing_identity.get()
+    warehouse_query_id = _last_warehouse_query_id.get()
     _record_query(
         {
             "id": env.audit_id,
@@ -2171,6 +2176,10 @@ def _record_execution(
             # the Envelope on purpose — the Envelope is the caller's, and this is an operator field
             # that should never be serialized back to whoever asked the question.
             "executing_identity": executing_identity,
+            # The statement's id in the warehouse's own terms, where the executor could name it.
+            # Off the ContextVar for the same reason as the identity beside it: an operator field,
+            # and the Envelope belongs to the caller.
+            "warehouse_query_id": warehouse_query_id,
         }
     )
 
@@ -2265,6 +2274,7 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     from execute_sql import (
         _last_error_detail,
         _last_executing_identity,
+        _last_warehouse_query_id,
         _pin_model_pass_posture,
     )
 
@@ -2275,6 +2285,9 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # opened — a row naming somebody who did not run it, which is worse than the null the forked
     # surface is supposed to carry.
     _last_executing_identity.set(None)
+    # And the statement's id in the warehouse's own terms, for the same reason: a pointer left by an
+    # earlier in-process call would send a reader to a different statement entirely.
+    _last_warehouse_query_id.set(None)
     # And pin the ACE-101 posture here, for the same "one point both paths pass through" reason and
     # against a sharper failure. `execute_guarded` pins it too, but on the fork that call happens in
     # the CHILD: the child decides whether the gates run, exits, and only then does this process build
