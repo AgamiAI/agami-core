@@ -190,6 +190,22 @@ class ExecResult:
     columns: list[str]
     rows: list[tuple]
     truncated: bool = False
+    # The identity the executor's own CONNECTION reported, or None where it reported none.
+    #
+    # **What the connection says it is** — not the signed-in principal, not the subject of the token
+    # that opened it, and not a namespace configured on the profile. Those are statements of intent;
+    # this is what the warehouse actually saw, and the two can differ. An audit row that recorded the
+    # intent would agree with itself and with nothing else.
+    #
+    # The built-in executor leaves it None deliberately: obtaining it would put a round trip on every
+    # query in every self-hosted deployment to record the same shared account every time. **None is a
+    # claim** — no executor reported one — rather than a gap.
+    #
+    # Optional so every existing construction of this class, injected executors included, keeps
+    # working unchanged. `report_executing_identity` below is the other half: a statement that fails
+    # after connecting has no result to carry this, and that is the case the column is most worth
+    # having for.
+    executing_identity: str | None = None
 
 
 class ExecutorError(Exception):
@@ -1303,6 +1319,39 @@ _DEFAULT_MAX_ROWS = 1000  # rows a result may hold before the transfer bound ref
 # message}` and stays that way, because a raw field on the contract is a raw field somebody
 # eventually serializes.
 _last_error_detail: ContextVar[str | None] = ContextVar("_last_error_detail", default=None)
+
+# The identity the executor's connection reported for THIS call, for the audit row only. A
+# ContextVar for every reason the one above is, including the clear-on-entry — an identity left
+# behind by an earlier call in this context would put the wrong person on a row they never ran.
+#
+# **Out-of-band rather than on the Envelope, for the same reason `error_detail` is**: the Envelope is
+# what a caller receives, and this is an operator field. A field on the contract is a field somebody
+# eventually serializes, and the identity of the account a customer's warehouse authenticated is not
+# something an end user asked for or should receive back.
+#
+# It exists BESIDE `ExecResult.executing_identity` rather than instead of it because the two cover
+# different halves. The result carries it on the path where there is a result; this carries it on the
+# path where the statement failed after the connection was opened — which is where the record earns
+# its keep, since a failure nobody can attribute is the thing an operator is trying to chase down.
+_last_executing_identity: ContextVar[str | None] = ContextVar(
+    "_last_executing_identity", default=None
+)
+
+
+def report_executing_identity(identity: str | None) -> None:
+    """Called by an executor as soon as its connection reports an identity — before the statement
+    runs, not after it succeeds.
+
+    **Before, and that is the whole point.** An executor that reports only on success cannot satisfy
+    the criterion this exists for: a statement that fails or is refused after connecting still has to
+    say who was connected. Calling this at connect time and letting the statement fail afterwards is
+    what makes that true, and it is why the value does not simply ride out on `ExecResult`.
+
+    Tolerates None so a driver that cannot answer costs nothing: the column stays null, the statement
+    is unaffected, and nothing about how long it takes to fail changes. An executor that never calls
+    this is not doing anything wrong — the built-in one never does.
+    """
+    _last_executing_identity.set(identity)
 
 # The classified outcome of THIS call, for the tool-call recorder (ACE-098). `tools.record_tool_call`
 # derived `success` / `error_kind` by `json.loads`-ing the serialized body and reading
@@ -2592,6 +2641,11 @@ def execute_guarded(
     # be attributed to this one. The recorder reads it unconditionally; a stale value would put the
     # wrong error text on a row that succeeded.
     _last_error_detail.set(None)
+    # Same reason, and the same load-bearing half: an identity reported by an earlier call in this
+    # context must never be attributed to this one. This is the clear that makes the recorder's
+    # unconditional read safe — without it a statement that reported nothing would inherit whoever
+    # ran the statement before it, which is worse than the null it should have written.
+    _last_executing_identity.set(None)
     # Same reason again: a verdict left behind by an earlier call in this context must never label
     # this one. The recorder falls back to parsing the body when this is None, so a stale value is
     # strictly worse than no value — it would be believed.
@@ -2704,6 +2758,14 @@ def execute_guarded(
         # The rows are dropped rather than returned. `_envelope("refused", …)` carries no data by
         # construction, which is the whole point: what the executor holds is whichever rows the
         # engine emitted first, and with no ORDER BY that is an arbitrary sample of the real result.
+        # **Folded in HERE, above the truncation refusal**. An executor that reports only
+        # through its result would otherwise lose the identity on exactly the statement that got
+        # refused for returning too much — a real execution, against a real connection, that an
+        # operator has every reason to want attributed. `report_executing_identity` is the other
+        # entry; an executor that calls it at connect time has already set this and the fold is a
+        # no-op, which is why it only overwrites when the result actually carries one.
+        if result.executing_identity is not None:
+            _last_executing_identity.set(result.executing_identity)
         if result.truncated:
             return _envelope("refused", refusal=_resource_limit_refusal(None),
                              receipt=_receipt_for(received_sql, profile, bounded=True))

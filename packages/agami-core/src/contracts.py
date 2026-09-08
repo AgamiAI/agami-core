@@ -266,6 +266,15 @@ class QueryExecutionRecord(_Contract):
     # value inside a JSON blob is not portably filterable across SQLite and Postgres. NULL means
     # either a pre-migration row or a call whose receipt could not pin a version at all.
     model_version: str | None = None
+    # The identity the executor's connection reported — what the warehouse authenticated,
+    # not who the caller believed was asking. Where an executor runs each statement as the person
+    # who asked, this varies per row, and it is the only field that says who the database saw.
+    #
+    # NULL is a claim rather than a gap, and it covers three honest cases: a row written before the
+    # column existed, an executor that reports no identity (the built-in one never does, by design),
+    # and a driver that could not answer. None of them is worth telling apart here — what matters is
+    # that a null is never a guess.
+    executing_identity: str | None = None
 
 
 class ToolCallRecord(_Contract):

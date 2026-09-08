@@ -2126,9 +2126,14 @@ def _record_execution(
     # across the fork the child sanitizes and the parent records, so the raw text never crosses and
     # this is None. `execute_guarded` clears the var on entry, so a stale detail cannot attach to a
     # later call.
-    from execute_sql import _last_error_detail
+    from execute_sql import _last_error_detail, _last_executing_identity
 
     raw_detail = _last_error_detail.get()
+    # Read unconditionally, exactly as the detail above is, and safe for the same reason:
+    # `execute_guarded` clears it on entry, so a None here means THIS call reported nothing rather
+    # than that an earlier one did. Read on every outcome, not only `ok` — a statement that failed
+    # after connecting is the one an operator most wants attributed.
+    executing_identity = _last_executing_identity.get()
     _record_query(
         {
             "id": env.audit_id,
@@ -2162,6 +2167,10 @@ def _record_execution(
             # Lifted OUT of the receipt into its own column so a replay can SELECT on it. Inside the
             # JSON as well, deliberately: see migration 017.
             "model_version": env.receipt.model_version,
+            # Who the executor's connection said it was. Off the ContextVar rather than off
+            # the Envelope on purpose — the Envelope is the caller's, and this is an operator field
+            # that should never be serialized back to whoever asked the question.
+            "executing_identity": executing_identity,
         }
     )
 
@@ -2253,9 +2262,19 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # fork the parent never calls it, so without this a forked call would record the driver text
     # left behind by an earlier IN-PROCESS failure in the same server process. Two paths, one
     # ContextVar, so the reset belongs where the call begins rather than where one of them does.
-    from execute_sql import _last_error_detail, _pin_model_pass_posture
+    from execute_sql import (
+        _last_error_detail,
+        _last_executing_identity,
+        _pin_model_pass_posture,
+    )
 
     _last_error_detail.set(None)
+    # The identity carrier gets the same treatment, and needs it for the same reason: an executor
+    # only reports in-process, so on the fork the parent's copy is whatever an EARLIER in-process
+    # call left there. Without this a forked call would record the identity of a connection it never
+    # opened — a row naming somebody who did not run it, which is worse than the null the forked
+    # surface is supposed to carry.
+    _last_executing_identity.set(None)
     # And pin the ACE-101 posture here, for the same "one point both paths pass through" reason and
     # against a sharper failure. `execute_guarded` pins it too, but on the fork that call happens in
     # the CHILD: the child decides whether the gates run, exits, and only then does this process build
