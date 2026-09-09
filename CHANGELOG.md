@@ -28,6 +28,17 @@ below corresponds to one such version.
   re-executes `expected.sql` live and never reads `recorded`, and the explorer already refused to
   render row content for the same privacy reason. The save door now stamps only `recorded.at`. (#281)
 
+- **The eval sources its context from the product's own `get_datasource_schema` tool, not a
+  hand-rendered copy of it.** The script's own rendering of the whole semantic model measured ~60k
+  tokens per question on a live 22-area profile — a 43-case run cost ~2.6M tokens, enough to
+  exhaust a subscription twice. Worse than the cost: it scored a generator against a context no
+  real session ever sees, since the shipped product always narrows through this same tool. Calling
+  it in-process, with no `mode` forced so `auto` picks verbosity the way a real session does, cuts
+  token cost by roughly half and — verified live against a real warehouse, twice — reproduces the
+  correct join every time. Known gap: called this way, with no `dataset_names` narrowing, the tool
+  does not return join cardinality or entity aliases; a session that narrows to specific tables
+  sees more than this single unnarrowed call does. (#277)
+
 ### Changed
 
 - **Importing a question bank confirms the rows that already carry an answer.** A row with no `sql`
