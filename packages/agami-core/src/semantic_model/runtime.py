@@ -602,13 +602,18 @@ def _is_self_referential(question: str) -> bool:
     return bool(_SELF_REFERENCE_MARKERS.search(question or ""))
 
 
-def is_high_confidence(matches: list[ExampleMatch], question: str) -> bool:
+def is_high_confidence(matches: list[ExampleMatch], question: str = "") -> bool:
     """Whether the top match is confident enough to short-circuit cold-start resolution.
 
     Self-reference is excluded from the shortcut regardless of match score: a self-referential
     question ("how many are assigned to me") must always re-resolve its identity portion rather than
     inherit whichever example scored highest — that example's own SQL names WHOEVER asked it, not
-    this caller (ACE-114)."""
+    this caller (ACE-114).
+
+    `question` defaults to `""` (never self-referential) rather than being required, so the
+    pre-ACE-114 one-argument call still type-checks and behaves exactly as before — `is_high_confidence`
+    is exported public API (`__all__`) with a stability promise, and a required second positional
+    argument would have broken every existing caller."""
     if not matches or matches[0].score < HIGH_CONFIDENCE_EXAMPLE:
         return False
     return not _is_self_referential(question)

@@ -238,6 +238,16 @@ def test_self_reference_marker_match_is_case_insensitive():
     assert not rt.is_high_confidence(matches, "how many tickets are assigned to ME")
 
 
+def test_is_high_confidence_still_works_with_the_old_one_arg_call():
+    """`question` gained a default (ACE-114 review) so the pre-existing one-argument call — public
+    API, exported via `__all__` — keeps working unchanged rather than raising a TypeError. An empty
+    default question is never self-referential, so behavior for this caller is byte-identical to
+    before the second parameter existed."""
+    exs = [{"question": "average price by region"}]
+    matches = rt.get_prompt_examples("average PRICE by region", exs)
+    assert rt.is_high_confidence(matches)
+
+
 # --- identify_entity ---
 
 

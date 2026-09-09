@@ -14,6 +14,12 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`is_high_confidence`'s new `question` argument is optional.** It gained a second positional
+  parameter so the examples confidence shortcut could exclude self-referential questions (ACE-114),
+  which made it a breaking change for the function's existing callers — public API, exported via
+  `__all__` with a stability promise. `question` now defaults to `""`, which never matches the
+  self-reference check, so an existing one-argument call keeps its old behavior unchanged.
+
 - **The eval's generator can start on Windows.** The client's Windows runtime (Bun) needs
   `SystemRoot` set to initialize WinSock before its first network call; without it the child exited
   immediately on a message `stderr=subprocess.DEVNULL` discarded, so every item in a Windows run
