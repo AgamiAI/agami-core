@@ -424,27 +424,26 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
 # letting the product decide.
 
 
-
 def _schema_from_the_product(profile: str, question: str) -> str:
     """The model as the shipped product describes it, rather than as this script renders it.
 
     Two things fall out of asking `get_datasource_schema` instead of assembling the answer here.
     The obvious one is size: this script's own rendering of a 22-area profile measured ~60k tokens
-    per question, and the tool's `summary` of the same model is ~10k. The one that matters more is
+    per question, and the tool's own `auto` verbosity of the same model measured ~56% smaller,
+    consistent across an aggregate, a join and a multi-table group-by. The one that matters more is
     that a golden run now scores a generator against the SAME description of the model the product
     hands its own generator — so a failure is a failure about SQL rather than about being given a
     context no real session ever sees.
 
-    Called in-process. The tool is a plain function over the model; going through MCP would add a
-    subprocess and a protocol to reach the same bytes.
+    Called in-process, through the tool's own typed entry point rather than the registry it is
+    filed under — a plain function over the model, so nothing here goes through MCP or a subprocess
+    to reach the same bytes.
     """
     # `query` is what makes the metrics come back with their `calculation` and `binding` rather
     # than as bare names — the tool does not narrow on it, it picks which metrics get full detail.
     # Without it a generator cannot reuse a binding verbatim, which is the thing F22 requires and
     # the reason a metric exists at all. It costs a few hundred characters.
-    return tools.TOOLS["get_datasource_schema"]["handler"](
-        {"datasource": profile, "query": question}
-    )
+    return tools.tool_get_datasource_schema({"datasource": profile, "query": question})
 
 
 # The second reason built from an answer-key column name, and the one that carries no structured
