@@ -21,6 +21,13 @@ below corresponds to one such version.
   client or model problem. `SystemRoot` joins the child's environment allowlist, inert everywhere
   the key doesn't exist. (#280)
 
+- **The save door stops committing a query's result rows to git.** Confirming a golden-dataset item
+  wrote the confirmed query's actual result rows into a `recorded` block, into a path with no
+  gitignore exclusion — any real data a golden question's query returned ended up in version
+  control as a side effect of confirming an answer key. Nothing needed those rows: scoring
+  re-executes `expected.sql` live and never reads `recorded`, and the explorer already refused to
+  render row content for the same privacy reason. The save door now stamps only `recorded.at`. (#281)
+
 ## [0.8.3] — 2026-09-08
 
 Three additive fields on the activity record, each answering a different half of "what produced this
