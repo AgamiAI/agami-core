@@ -923,26 +923,31 @@ def test_the_generator_is_handed_every_section_and_the_timeout(artifacts, monkey
     context = seen["schema"]("How many orders?")
     # The vocabulary is now the product's own description of the model — `get_datasource_schema`,
     # the tool a real session calls — rather than a rendering assembled here. That is both why a run
-    # costs a third of what it did and why a failure is now a failure about SQL rather than about
+    # costs a fraction of what it did and why a failure is now a failure about SQL rather than about
     # being handed a context no session ever sees.
-    vocabulary = json.loads(context.split("\n\n")[0].split("\n{")[0] if False else
-                            context[: context.index("\n\n")] if "\n\n" in context else context)
+    vocabulary = json.loads(context[: context.index("\n\n")] if "\n\n" in context else context)
     assert vocabulary["datasource"] == PROFILE
-    assert vocabulary["mode"] == "summary", "the verbosity that made the saving"
+    # No `mode` is passed to the tool, on purpose: `auto` is what a real session sends, and it picks
+    # the verbosity itself from how much is in scope — `full` on a model this small, `summary` or
+    # `index` on a larger one. Asserting a specific mode here would be asserting a property of the
+    # sample model's size, not of this call; the call itself never names one.
+    assert vocabulary["mode"] in ("full", "summary", "index")
     assert "CustInvc -- a customer invoice" in context  # org-context, verbatim
-    # The metrics, entities and joins are no longer rendered here — they arrive inside the tool's
-    # own payload, in its shape. What has to survive the move is the SUBSTANCE, so that is what is
-    # asserted: a metric that cannot be reused verbatim is the failure F22 records, and a join
-    # without its cardinality is how a fan-out gets written.
+    # Metrics are no longer rendered here — they arrive inside the tool's own payload, in its shape.
+    # What has to survive the move is the SUBSTANCE, so that is what is asserted: a metric that
+    # cannot be reused verbatim is the failure F22 records.
     assert '"binding"' in context or '"calculation"' in context, "a metric must arrive reusable"
-    assert '"entities"' in context, "the words a reader uses for a thing"
-    # NOT asserted, because `summary` does not carry them: the entity aliases — the words a reader
-    # uses for a thing — are absent at this verbosity. That is a deliberate reduction and it is
-    # recorded in the CHANGELOG rather than discovered later.
+    # NOT asserted, and the absence is the finding: `get_datasource_schema` does not put entity
+    # aliases in its payload at all — only a count, in prose ("8 entities are defined in the
+    # model") — so a real session asking this same question never sees them here either. This
+    # script used to render the alias list from the bundles unconditionally, which meant a golden
+    # run judged a generator that knew more about the model's vocabulary than any real session does.
     # NOT asserted, and the absence is the finding: `get_datasource_schema` does not return join
-    # cardinality, so the product's own agent never sees it either. This script used to render it
-    # from the bundles, which meant a golden run judged a generator that knew more about fan-out
-    # than any real session does. Matching the product is the point; the gap is filed separately.
+    # cardinality when called this way — with no `dataset_names` narrowing — so a run that never
+    # narrows never sees it either, matching an agent that hasn't yet asked about specific tables.
+    # This script used to render cardinality from the bundles unconditionally, which meant a golden
+    # run judged a generator that knew more about fan-out than any real session does at this point
+    # in its own turn. Matching the product is the point; the two-call case is filed separately.
 
 
 def test_the_examples_are_ranked_for_the_question_being_asked(artifacts, scripted, sm, capsys):
