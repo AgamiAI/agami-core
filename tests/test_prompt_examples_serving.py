@@ -45,6 +45,61 @@ def test_large_library_is_ranked_and_capped(tmp_path, monkeypatch):
     assert all("revenue" in e["question"] for e in out["examples"][:5])
 
 
+def test_self_referential_question_never_returns_a_real_identity_literal(tmp_path, monkeypatch):
+    """ACE-114 review: the confidence shortcut this spec closes lives only in the local `sm
+    examples` CLI path (`semantic_model.runtime.is_high_confidence`) — this hosted tool has no
+    confidence-scored shortcut at all, it just ranks and returns matches, so a self-referential
+    question can still surface another person's identity literal from a matched example's SQL. The
+    fix has to redact at the tool boundary, unconditionally, not rely on the model reading the
+    instructions sentence."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assigned_to = 'someone-else@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    # `write_examples` seeds under `model_store.DEFAULT_ORG` ("local"); pin the resolved org to
+    # match rather than let it fall through to whatever `~/.config/agami/path` points a
+    # contributor's machine at (a real hazard `_isolate_active_profile` in conftest.py documents
+    # for `.config` — this is the same class of leak one step further down the resolution chain).
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    assert out["examples"], "expected the near-identical example to match"
+    for ex in out["examples"]:
+        assert "someone-else@example.com" not in ex["sql"]
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
+def test_a_non_self_referential_question_keeps_the_examples_sql_verbatim(tmp_path, monkeypatch):
+    """The additive guarantee: redaction is gated on self-reference, not applied blindly to every
+    example — a question with no 'my'/'me'/'I'/'mine' must see the real SQL unchanged."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to alex",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assigned_to = 'alex@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to alex"}
+        )
+    )
+    assert out["examples"][0]["sql"] == examples[0]["sql"]
+
+
 def test_char_budget_bounds_the_result(tmp_path, monkeypatch):
     # one giant example + many small: the budget stops accumulation (but always returns >=1).
     big = {"area": "s", "question": "x " * 50, "sql": "Q" * 30_000}
