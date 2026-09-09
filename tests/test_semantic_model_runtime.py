@@ -211,13 +211,31 @@ def test_examples_high_confidence_short_circuit():
     exs = [{"question": "top 5 sellers this month"}, {"question": "average price by region"}]
     matches = rt.get_prompt_examples("average PRICE by region", exs)
     assert matches[0].example["question"] == "average price by region"
-    assert rt.is_high_confidence(matches)
+    assert rt.is_high_confidence(matches, "average PRICE by region")
 
 
 def test_examples_low_confidence():
     exs = [{"question": "something totally unrelated about widgets"}]
     matches = rt.get_prompt_examples("how many orders were placed", exs)
-    assert not rt.is_high_confidence(matches)
+    assert not rt.is_high_confidence(matches, "how many orders were placed")
+
+
+def test_self_referential_question_never_short_circuits_even_at_high_confidence():
+    """ACE-114: a self-referential question must always re-derive its identity, never inherit a
+    matched example's — even when the match is lexically near-identical and would otherwise clear
+    the confidence bar."""
+    exs = [{"question": "how many tickets are assigned to me",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assignee = 'someone-else@example.com'"}]
+    matches = rt.get_prompt_examples("how many tickets are assigned to me", exs)
+    assert matches[0].score >= rt.HIGH_CONFIDENCE_EXAMPLE  # would short-circuit if not excluded
+    assert not rt.is_high_confidence(matches, "how many tickets are assigned to me")
+
+
+def test_self_reference_marker_match_is_case_insensitive():
+    exs = [{"question": "how many tickets are assigned to ME"}]
+    matches = rt.get_prompt_examples("how many tickets are assigned to ME", exs)
+    assert matches[0].score >= rt.HIGH_CONFIDENCE_EXAMPLE
+    assert not rt.is_high_confidence(matches, "how many tickets are assigned to ME")
 
 
 # --- identify_entity ---

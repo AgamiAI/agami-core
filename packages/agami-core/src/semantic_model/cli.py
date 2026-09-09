@@ -194,7 +194,7 @@ def cmd_examples(args) -> int:
     matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k)
     _print_json(
         {
-            "high_confidence": RT.is_high_confidence(matches),
+            "high_confidence": RT.is_high_confidence(matches, args.query),
             "matches": [{"score": round(m.score, 3), "example": m.example} for m in matches],
         }
     )

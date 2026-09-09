@@ -592,9 +592,26 @@ def get_prompt_examples(
 
 HIGH_CONFIDENCE_EXAMPLE = 0.82
 
+# A self-referential question ("my", "me", "I", "mine") must never be answered by copying a matched
+# example's SQL verbatim — the example's own identity literal belongs to whoever asked IT, not to
+# this caller (ACE-114). Word-boundary + case-insensitive so "minecraft" or "IMPORTANT" don't match.
+_SELF_REFERENCE_MARKERS = re.compile(r"\b(my|me|i|mine)\b", re.IGNORECASE)
 
-def is_high_confidence(matches: list[ExampleMatch]) -> bool:
-    return bool(matches) and matches[0].score >= HIGH_CONFIDENCE_EXAMPLE
+
+def _is_self_referential(question: str) -> bool:
+    return bool(_SELF_REFERENCE_MARKERS.search(question or ""))
+
+
+def is_high_confidence(matches: list[ExampleMatch], question: str) -> bool:
+    """Whether the top match is confident enough to short-circuit cold-start resolution.
+
+    Self-reference is excluded from the shortcut regardless of match score: a self-referential
+    question ("how many are assigned to me") must always re-resolve its identity portion rather than
+    inherit whichever example scored highest — that example's own SQL names WHOEVER asked it, not
+    this caller (ACE-114)."""
+    if not matches or matches[0].score < HIGH_CONFIDENCE_EXAMPLE:
+        return False
+    return not _is_self_referential(question)
 
 
 # ---------------------------------------------------------------------------

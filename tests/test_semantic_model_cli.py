@@ -260,6 +260,23 @@ def test_add_examples_appends_dedups_and_skips_invalid(tmp_path):
     assert next(e for e in ex if e["question"] == "revenue")["sql"] == "SELECT SUM(amount) FROM orders"
 
 
+def test_examples_self_referential_query_reports_low_confidence_even_on_a_matching_example(tmp_path):
+    """ACE-114: `sm examples` must never report `high_confidence: true` for a self-referential
+    query, even against an example whose wording is close enough to otherwise clear the bar — the
+    matched example's SQL names WHOEVER asked it, not this caller."""
+    from semantic_model import curate
+    curate.add_examples(tmp_path, "sales", [
+        {"question": "how many tickets are assigned to me",
+         "sql": "SELECT COUNT(*) FROM tickets WHERE assignee = 'someone-else@example.com'",
+         "source": "seed"}])
+    rc, out = _run(["examples", str(tmp_path), "--area", "sales",
+                     "--query", "how many tickets are assigned to me"])
+    d = json.loads(out)
+    assert rc == 0
+    assert d["matches"][0]["score"] >= 0.82  # would short-circuit if self-reference weren't excluded
+    assert d["high_confidence"] is False
+
+
 def test_curate_edit_op_sets_enrichment_fields(tmp_path):
     # enrichment edits (descriptions / caveats / default_filters / value_transform) go
     # through `sm curate` edit ops — not a hand-edited or scripted table YAML
