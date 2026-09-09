@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import json
 import logging
 import os
 import time
@@ -356,6 +357,28 @@ async def _auth_server(request: Request) -> JSONResponse:
     )
 
 
+def _with_caller_identity(result_text: str, actor: str | None) -> str:
+    """Stamp the authenticated caller's identity onto a JSON tool result, so the model resolving
+    "my"/"me" in the next turn has somewhere to read who is asking (ACE-114) — the audit log was the
+    only consumer of `_actor_ctx` before this.
+
+    Best-effort and additive ONLY: some existing test tools (and any third-party consumer's tool)
+    return a bare string, not JSON, and this must never corrupt that. Any parse failure, a body that
+    isn't a JSON object, no actor, or a body that already names `caller_identity` (never overwrite an
+    existing value — a tool's own answer takes precedence) returns `result_text` unchanged.
+    """
+    if actor is None:
+        return result_text
+    try:
+        body = json.loads(result_text)
+    except (TypeError, ValueError):
+        return result_text
+    if not isinstance(body, dict) or "caller_identity" in body:
+        return result_text
+    body["caller_identity"] = actor
+    return json.dumps(body, indent=2)
+
+
 def build_server(
     registry: dict | None = None,
     extra_instructions: str | None = None,
@@ -461,6 +484,7 @@ def build_server(
             # verdict readable at the audit write below, instead of it having to `json.loads` the
             # body this call is about to return.
             result_text = await run_blocking(handler_ctx.run, meta["handler"], arguments or {})
+            result_text = _with_caller_identity(result_text, _actor_ctx.get())
             return [mt.TextContent(type="text", text=result_text)]
         except Exception:
             raised = True

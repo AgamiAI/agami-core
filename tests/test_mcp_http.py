@@ -298,6 +298,85 @@ def test_the_session_id_reaches_a_tool_handler(base_url, monkeypatch):
     assert mcp_http.current_session_id() is None
 
 
+# --- caller identity on tool results (ACE-114) ---------------------------------
+
+
+def _identity_app(handler):
+    """An app with one extra tool `probe` running `handler`, and an auth provider whose subject is
+    the bearer token itself — so one test can drive two different callers by varying the token."""
+    from dataclasses import replace
+
+    tool = {
+        "handler": handler,
+        "description": "probe",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    }
+
+    class _Principal:
+        def __init__(self, subject: str) -> None:
+            self.subject = subject
+            self.session_id = None
+
+    class _Auth:
+        def validate_token(self, token):
+            token = (token or "").strip()
+            return _Principal(token) if token else None
+
+    adapters = replace(mcp_http.default_adapters(), auth_provider=_Auth())
+    return mcp_http.create_app(extra_tools={"probe": tool}, adapters=adapters)
+
+
+def _headers(bearer: str) -> dict:
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+
+
+def _call_probe(c, headers, rid=2) -> str:
+    r = c.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "tools/call",
+            "params": {"name": "probe", "arguments": {}},
+        },
+    )
+    payload = json.loads(re.search(r"\{.*\}", r.text, re.DOTALL).group(0))
+    return payload["result"]["content"][0]["text"]
+
+
+def test_a_json_tool_result_is_stamped_with_the_caller_identity(base_url):
+    app = _identity_app(lambda a: json.dumps({"ok": True}))
+    with TestClient(app) as c:
+        _handshake(c)
+        text = _call_probe(c, _headers("jordan@example.com"))
+    assert json.loads(text) == {"ok": True, "caller_identity": "jordan@example.com"}
+
+
+def test_a_bare_string_tool_result_is_left_byte_identical(base_url):
+    """The additive/non-corrupting guarantee: a tool that answers plain text (not JSON) — the shape
+    some existing test tools return — must come back completely unchanged, never wrapped or altered."""
+    app = _identity_app(lambda a: "ran")
+    with TestClient(app) as c:
+        _handshake(c)
+        text = _call_probe(c, _headers("jordan@example.com"))
+    assert text == "ran"
+
+
+def test_two_callers_each_get_their_own_identity_not_the_others(base_url):
+    app = _identity_app(lambda a: json.dumps({"ok": True}))
+    with TestClient(app) as c:
+        _handshake(c)
+        text_a = _call_probe(c, _headers("alex@example.com"), rid=2)
+        text_b = _call_probe(c, _headers("sam@example.com"), rid=3)
+    assert json.loads(text_a)["caller_identity"] == "alex@example.com"
+    assert json.loads(text_b)["caller_identity"] == "sam@example.com"
+
+
 # --- the tool-visibility seam --------------------------------------------------
 
 
