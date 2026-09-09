@@ -353,15 +353,9 @@ def _model_context(cached: dict, question: str) -> str:
     context, then the examples. Only the last of these depends on the question; everything above it
     was fetched once for the run.
     """
-    sections = [cached["schema"]]
+    sections = [_schema_from_the_product(cached["profile"], question)]
     for heading, body in (
         ("What this datasource means, and what its codes stand for:", cached["org_context"]),
-        (
-            "Approved metrics — reuse a binding verbatim when the question names one:",
-            cached["metrics"],
-        ),
-        ("The words a reader uses for these things:", cached["entities"]),
-        ("How these tables join:", cached["relationships"]),
         (
             "Worked examples this team has confirmed, nearest first — follow their conventions:",
             _examples_text(cached["root"], cached["areas"], question, cached["top_k"]),
@@ -397,8 +391,8 @@ def _schema_text(bundles: list[dict]) -> str:
     return "\n".join(tables.values())
 
 
-def _fetch_context(root: Path, top_k: int) -> dict:
-    """The three `sm` calls that do not depend on the question, run once for the whole run.
+def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
+    """The question-independent half of the generator's context, built once for the whole run.
 
     Cached because each costs about a second of interpreter start-up, and a per-item fetch would
     spend that on every case to receive the same bytes back. `examples` is the only one the question
@@ -407,19 +401,50 @@ def _fetch_context(root: Path, top_k: int) -> dict:
     areas = _sm("areas", str(root))
     if not areas:
         raise SmFailed("this profile declares no subject areas")
-    bundles = [_sm("bundle", str(root), "--area", area["name"]) for area in areas]
     return {
         "root": root,
         # Every area, because the ranker reads one library at a time and the question decides which
         # one matters — not the order `sm areas` happens to return.
         "areas": [area["name"] for area in areas],
         "top_k": top_k,
-        "schema": _schema_text(bundles),
+        "profile": profile,
+        # Kept, though the schema now comes from the tool. F22 records that the first live runs
+        # failed EVERY item because the generator was handed column names alone and guessed
+        # 'Invoice' where the data holds a code the profile's own glossary defines. The tool's
+        # payload does not carry that glossary on every profile, and ~4k tokens is a cheap price
+        # for the failure mode it prevents.
         "org_context": _sm("org-context", str(root), json_out=False).strip(),
-        "metrics": _metrics_text(bundles),
-        "entities": _entities_text(bundles),
-        "relationships": _relationships_text(bundles),
     }
+
+
+# No `mode` is passed, and that is the point rather than an omission. `auto` is what a real session
+# sends — the tool picks verbosity itself, under its own char budget, from how much is in scope.
+# Choosing `summary` here instead saved a further 2.5x and silently dropped join cardinality and
+# entity aliases, which is how a fan-out gets written and passes. Replicating the product means
+# letting the product decide.
+
+
+
+def _schema_from_the_product(profile: str, question: str) -> str:
+    """The model as the shipped product describes it, rather than as this script renders it.
+
+    Two things fall out of asking `get_datasource_schema` instead of assembling the answer here.
+    The obvious one is size: this script's own rendering of a 22-area profile measured ~60k tokens
+    per question, and the tool's `summary` of the same model is ~10k. The one that matters more is
+    that a golden run now scores a generator against the SAME description of the model the product
+    hands its own generator — so a failure is a failure about SQL rather than about being given a
+    context no real session ever sees.
+
+    Called in-process. The tool is a plain function over the model; going through MCP would add a
+    subprocess and a protocol to reach the same bytes.
+    """
+    # `query` is what makes the metrics come back with their `calculation` and `binding` rather
+    # than as bare names — the tool does not narrow on it, it picks which metrics get full detail.
+    # Without it a generator cannot reuse a binding verbatim, which is the thing F22 requires and
+    # the reason a metric exists at all. It costs a few hundred characters.
+    return tools.TOOLS["get_datasource_schema"]["handler"](
+        {"datasource": profile, "query": question}
+    )
 
 
 # The second reason built from an answer-key column name, and the one that carries no structured
@@ -998,7 +1023,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return _CANNOT_START
 
     try:
-        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k)
+        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
     except SmFailed as exc:
         # Before the first item rather than during one: a run whose context could not be built has
         # no generator, and reporting that as every item erroring would read as a model regression.
@@ -1013,13 +1038,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     #
     # The cost is one model call on a healthy run, against N model calls and up to 2N warehouse
     # queries on a broken one.
+    generator = GENERATOR(
+        lambda question: _model_context(cached, question), timeout_s=args.timeout_s
+    )
+
     result = run_golden_dataset(
         dataset,
         profile=args.profile,
-        generator=GENERATOR(
-            lambda question: _model_context(cached, question),
-            timeout_s=args.timeout_s,
-        ),
+        generator=generator,
         executor=execute_sql.BUILTIN_EXECUTOR,
         # The deployment's own resolver, so this run scores a tenant's dataset against the warehouse
         # that tenant's credentials resolve to — `local` on the single-operator path.

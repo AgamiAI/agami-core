@@ -48,6 +48,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Sequence
@@ -672,47 +673,58 @@ class ClaudeCliGenerator:
         """One question in, one statement out — or a fixed sentence saying why there is not one."""
         schema = self.schema(question) if callable(self.schema) else self.schema
         prompt = _generation_prompt(question, org, datasource, schema)
-        try:
-            # A directory of its own, empty, thrown away afterwards. The child would otherwise start
-            # in whatever directory the eval was launched from, and a `CLAUDE.md`,
-            # `.claude/settings.json` or `.mcp.json` sitting there is project configuration the
-            # client reads. `--setting-sources ""` already refuses to load those; starting somewhere
-            # that has none of them means the two would have to fail together.
-            with tempfile.TemporaryDirectory(prefix="agami-generation-") as workdir:
-                # The prompt goes on STDIN rather than in the argument list: a schema is long, an
-                # argument list is bounded, and a process list is readable by other users on most
-                # systems.
-                completed = subprocess.run(
-                    list(client_argv()),
-                    input=prompt,
-                    stdout=subprocess.PIPE,
-                    # Discarded by the OS rather than captured and then not read. A client can
-                    # echo the whole prompt on stderr, and the prompt carries the model's
-                    # vocabulary; the fixed sentences this module relays are written here, never
-                    # taken from the child. Holding it in memory to ignore it is a copy of
-                    # something with no reader and one way to leak.
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    timeout=self.timeout_s,
-                    env=_child_env(),
-                    cwd=workdir,
-                    check=False,
-                )
-        except subprocess.TimeoutExpired:
-            # `TimeoutExpired` carries the command and whatever output was captured before the kill.
-            # None of it is read.
-            return GeneratedSql(sql="", error=_GENERATION_TIMED_OUT)
-        except OSError:
-            # No client installed, or nothing executable at that name. `OSError.__str__`
-            # interpolates the path it tried, which is why the exception is not relayed.
-            return GeneratedSql(sql="", error=_GENERATION_UNAVAILABLE)
-        if completed.returncode != 0:
-            return GeneratedSql(sql="", error=_GENERATION_EXITED)
-        answer = _first_json_object(completed.stdout)
-        sql = answer.get("sql") if answer else None
-        if not isinstance(sql, str) or not sql.strip():
-            return GeneratedSql(sql="", error=_GENERATION_UNREADABLE)
-        return GeneratedSql(sql=sql.strip(), error=None)
+        return _spawn(prompt, list(client_argv()), self.timeout_s)
+
+
+
+def _spawn(prompt: str, argv: list[str], timeout_s: float) -> GeneratedSql:
+    """Run one client invocation and read one statement out of it.
+
+    Shared by both generators so the decisions below cannot drift apart: the empty working
+    directory, the prompt on stdin, the discarded stderr, and the four fixed sentences that are the
+    only thing a caller ever learns about a failure.
+    """
+    try:
+        # A directory of its own, empty, thrown away afterwards. The child would otherwise start
+        # in whatever directory the eval was launched from, and a `CLAUDE.md`,
+        # `.claude/settings.json` or `.mcp.json` sitting there is project configuration the
+        # client reads. `--setting-sources ""` already refuses to load those; starting somewhere
+        # that has none of them means the two would have to fail together.
+        with tempfile.TemporaryDirectory(prefix="agami-generation-") as workdir:
+            # The prompt goes on STDIN rather than in the argument list: a schema is long, an
+            # argument list is bounded, and a process list is readable by other users on most
+            # systems.
+            completed = subprocess.run(
+                argv,
+                input=prompt,
+                stdout=subprocess.PIPE,
+                # Discarded by the OS rather than captured and then not read. A client can
+                # echo the whole prompt on stderr, and the prompt carries the model's
+                # vocabulary; the fixed sentences this module relays are written here, never
+                # taken from the child. Holding it in memory to ignore it is a copy of
+                # something with no reader and one way to leak.
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=timeout_s,
+                env=_child_env(),
+                cwd=workdir,
+                check=False,
+            )
+    except subprocess.TimeoutExpired:
+        # `TimeoutExpired` carries the command and whatever output was captured before the kill.
+        # None of it is read.
+        return GeneratedSql(sql="", error=_GENERATION_TIMED_OUT)
+    except OSError:
+        # No client installed, or nothing executable at that name. `OSError.__str__`
+        # interpolates the path it tried, which is why the exception is not relayed.
+        return GeneratedSql(sql="", error=_GENERATION_UNAVAILABLE)
+    if completed.returncode != 0:
+        return GeneratedSql(sql="", error=_GENERATION_EXITED)
+    answer = _first_json_object(completed.stdout)
+    sql = answer.get("sql") if answer else None
+    if not isinstance(sql, str) or not sql.strip():
+        return GeneratedSql(sql="", error=_GENERATION_UNREADABLE)
+    return GeneratedSql(sql=sql.strip(), error=None)
 
 
 __all__ = [

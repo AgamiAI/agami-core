@@ -921,3 +921,4 @@ def test_a_client_that_cannot_be_found_still_fails_as_a_generation(monkeypatch, 
     generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
 
     assert generated.sql == "" and generated.error == gr._GENERATION_UNAVAILABLE
+
