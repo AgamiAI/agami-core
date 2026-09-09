@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The eval's generator can start on Windows.** The client's Windows runtime (Bun) needs
+  `SystemRoot` set to initialize WinSock before its first network call; without it the child exited
+  immediately on a message `stderr=subprocess.DEVNULL` discarded, so every item in a Windows run
+  errored identically with "the generator exited without answering" — indistinguishable from a real
+  client or model problem. `SystemRoot` joins the child's environment allowlist, inert everywhere
+  the key doesn't exist. (#280)
+
 ## [0.8.3] — 2026-09-08
 
 Three additive fields on the activity record, each answering a different half of "what produced this

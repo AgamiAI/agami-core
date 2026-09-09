@@ -634,6 +634,23 @@ def test_the_child_can_authenticate_as_the_operator_who_started_the_run(spawn, m
     assert kwargs["env"]["USER"] == "operator"
 
 
+def test_the_child_can_make_a_network_request_on_windows(spawn, monkeypatch):
+    """`SystemRoot` reaches the child, because the client's Windows runtime (Bun) needs it set to
+    initialize WinSock before its first network call.
+
+    Without it the child exits immediately on `error: The %SystemRoot% environment variable is not
+    set`, a message `stderr=subprocess.DEVNULL` discards — so every item in a Windows run errors
+    with the one sentence that would explain it, indistinguishable from a real client or model
+    problem. Reported after every case on a Windows machine failed with `_GENERATION_EXITED`.
+    """
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+
+    _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    _, kwargs = spawn.invocations[0]
+    assert kwargs["env"]["SystemRoot"] == r"C:\Windows"
+
+
 def test_the_child_environment_stays_an_allowlist(spawn, monkeypatch):
     """Whatever is added for the client's benefit, nothing that names the key or the warehouse may
     ride along. `USER` widened this tuple once; this is the guard that keeps the widening honest.
@@ -643,7 +660,15 @@ def test_the_child_environment_stays_an_allowlist(spawn, monkeypatch):
     widening could ever fail such a check. Naming the members is what makes adding one a deliberate
     edit to a test rather than a line nobody reads.
     """
-    assert gr._CHILD_ENV_KEYS == ("PATH", "HOME", "LANG", "LC_ALL", "USER", "ANTHROPIC_API_KEY")
+    assert gr._CHILD_ENV_KEYS == (
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "USER",
+        "ANTHROPIC_API_KEY",
+        "SystemRoot",
+    )
     # And the shape of what may ever join them. The module's own docstring claims no datasource
     # credential has a name that could reach this tuple; this is that claim as a test, so a future
     # `PGPASSWORD` or `SNOWFLAKE_PASSWORD` fails here rather than shipping.
