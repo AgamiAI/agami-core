@@ -499,10 +499,12 @@ def test_a_saved_answer_does_not_carry_its_result_rows_onto_disk(tmp_path, monke
     assert item.recorded.columns == [] and item.recorded.rows == []
     # And not merely absent from the parsed model — the keys themselves never reach the file, so a
     # person reading the YAML by eye sees no row data either (`_drop_empty` strips an empty
-    # `columns`/`rows` from the serialized doc, since `_save` never populates them).
-    raw = _dataset_file(tmp_path).read_text(encoding="utf-8")
-    assert "rows:" not in raw
-    assert "columns:" not in raw
+    # `columns`/`rows` from the serialized doc, since `_save` never populates them). Parsed rather
+    # than string-matched: a `bounds` block's own `min_rows`/`max_rows` keys would make a substring
+    # check on "rows:" fail even when `recorded` truly carries none.
+    raw = yaml.safe_load(_dataset_file(tmp_path).read_text(encoding="utf-8"))
+    (recorded,) = [case["recorded"] for case in raw["test_cases"] if case["id"] == item.id]
+    assert "rows" not in recorded and "columns" not in recorded
 
 
 def test_a_duplicate_save_declined_leaves_the_file_byte_identical(tmp_path, monkeypatch, capsys):
