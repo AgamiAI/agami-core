@@ -1,22 +1,22 @@
 ---
 name: agami-save-golden
-description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, or a table pasted into chat — into items written unconfirmed, after the parsed rows have been shown and agreed to. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item with its receipt. The curation door applies the changes queued on the golden-dataset explorer page, which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
+description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, or a table pasted into chat — into items after the parsed rows have been shown and agreed to: a row that already carries a statement is written confirmed, a bare question is written unconfirmed. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item. The curation door applies the changes queued on the golden-dataset explorer page, which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
 when_to_use: "Use when the user says 'save this as a golden question', 'add this to the golden dataset', 'import my question bank', 'turn this spreadsheet into a golden dataset', 'this answer is correct — remember it as ground truth', 'show me the golden datasets', 'what does this dataset not test', 'apply my queued changes', or '/agami-save-golden <dataset>' — any ask to record a question, or a bank of questions, that the model should be scored against later. Also use when the user replies with a back-channel block from a previously-rendered golden-dataset explorer page (first line `profile: <name>`, then `golden-ops:` and a JSON array, ending `done`) — paste it and nothing else is needed. Requires agami-connect to have been run first (needs a profile with a semantic model). To RUN a dataset and see the verdicts, use `/agami-eval` instead: that skill reads and scores, this one writes and never runs or scores."
 argument-hint: "[dataset-name]"
 ---
 
 # agami save-golden
 
-You are writing to the answer key. Goal: get a question — or a bank of them — into the profile's golden dataset in the state it has actually earned, and never in a better one. A dataset is what `/agami-eval` gates on, so an item that claims to be confirmed when nobody looked at a result turns the whole suite green on nothing.
+You are writing to the answer key. Goal: get a question — or a bank of them — into the profile's golden dataset in the state it has actually earned, and never in a better one. A dataset is what `/agami-eval` gates on, so an item that claims to be confirmed when nobody vouched for the answer turns the whole suite green on nothing — and equally, a question the sheet already carries a validated answer for should not sit unconfirmed for no reason beyond which door wrote it down.
 
 **This skill has three doors and they write different things.** Everything below is organized around them, because confusing them is the one failure that matters:
 
 | Door | Input | What it writes | Can it gate a run? |
 |---|---|---|---|
-| **Import** | A CSV of questions, or a table pasted into chat | Items with `sql_confirmed: false` | No |
-| **Save** | One question, the statement that answered it, the result the person accepted | One item with `sql_confirmed: true`, its statement and its receipt | Yes |
+| **Import** | A CSV of questions, or a table pasted into chat | `sql_confirmed: true` for a row that already carries a statement, `false` for a bare question | Yes, for the rows that carried an answer |
+| **Save** | One question, the statement that answered it, the result the person accepted | One item with `sql_confirmed: true` and its `confirmed_by` | Yes |
 
-An imported item **has no statement until somebody runs it and saves the answer through the save door.** That is the intended shape, not a gap to close: an import is a list of the questions this team cares about, and a question with no verified answer is an honest in-progress case that reports and cannot gate.
+An imported row with no statement **has none until somebody runs it and saves the answer through the save door.** That is the intended shape for a bare question, not a gap to close: it is an honest in-progress case that reports and cannot gate. A row that arrived already carrying a statement is different — it is somebody's own pre-validated answer, brought into the dataset already vouched for, and the import door confirms it on the spot rather than asking for a second confirmation of something it was just told to trust.
 
 **This skill never generates SQL for an imported question.** Not to be helpful, not "as a starting point", not even marked as a draft. Filling one in would fabricate ground truth, which is the one thing an answer key may not contain — the answer key is what everything else is measured against, so a statement nobody verified corrupts every future verdict rather than just one item. If the user wants an imported question answered, run it (`/agami-query`), let them look at the result, and come back through the save door with what they accepted.
 
@@ -98,7 +98,7 @@ The payload carries `columns` (the header as found), `rows`, `skipped` (each wit
 | id | Question | Expected | SQL in the sheet? | Tags |
 |---|---|---|---|---|
 | how-many-orders-have-been-placed | How many orders have been placed? | 1,329 | — | orders, smoke |
-| revenue-by-channel-2024 | What was revenue by channel in 2024? | — | yes (unverified) | revenue |
+| revenue-by-channel-2024 | What was revenue by channel in 2024? | — | yes (confirmed on import) | revenue |
 ```
 
 Ids are derived from the question when the sheet has none, so they are stable across re-imports — say that, because it is why re-running the same sheet lands on the duplicate path instead of doubling the dataset.
@@ -107,7 +107,7 @@ If `skipped` is non-empty, list every skipped row with its number and reason **b
 
 Derived ids are unique by construction, but a sheet with its **own `id` column** can repeat one. The import refuses the whole batch and names the id, because an id is the key a result is stored under and the second row would otherwise overwrite the first inside one write. The table you just rendered is where to spot it — ask the user which row keeps the id.
 
-Then ask, plainly: *"Import these `<N>` questions into `<dataset>`? They'll be written unconfirmed — none of them can gate a run until someone verifies an answer."* **Wait for an explicit yes.** Never skip this and never infer it from the user having handed you the file.
+Then ask, plainly, naming both counts when they differ: *"Import these `<N>` questions into `<dataset>`? `<K>` of them already carry an answer in the sheet and will be written confirmed, able to gate a run immediately; the rest have no answer yet and stay unconfirmed until someone saves one."* **Wait for an explicit yes.** Never skip this and never infer it from the user having handed you the file.
 
 ### 2d — Import
 
@@ -120,7 +120,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" import \
   > /tmp/agami-golden-import-<ts>.json
 ```
 
-`--description "<prose>"` sets the dataset's description, and is worth passing on a new dataset. Every row is written `sql_confirmed: false` — including the rows whose sheet carried a statement, which is carried through as `expected.sql` but claims nothing. Nobody ran it.
+`--description "<prose>"` sets the dataset's description, and is worth passing on a new dataset. A row whose sheet carried a statement is written `sql_confirmed: true`, with `confirmed_by.method` naming the sheet as the source; a row with no statement is written `sql_confirmed: false`, since there is no answer yet for anyone to have confirmed.
 
 Read the exit code before the payload (Phase 4). On `0`, report `summary.added` and where the file is, then say what is still missing: *"`<N>` questions are in `<dataset>`. None can gate a run yet — ask one of them, and say 'save this as a golden question' when the answer is right."*
 
@@ -253,7 +253,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
 ## Hard rules
 
 1. **Never generate SQL for an imported question.** No drafts, no "here's a starting point", no filling in a blank `expected.sql` to make a dataset look finished. Ground truth that nobody verified is worse than a gap, because a gap reports itself and a fabrication does not. Run the question and come back through the save door.
-2. **Never write `sql_confirmed: true` for an answer nobody looked at.** The save door is the only route to it, and the only thing behind that door is a person who read a result and accepted it. A statement that "looks right" is not one.
+2. **Never write `sql_confirmed: true` for an answer nobody vouched for.** Two doors can produce one: the save door, where a person read a result and accepted it, and the import door, for a row whose sheet already carried a statement — that statement is passed through **verbatim**, never generated or edited here (rule 1 is what keeps that true). A statement that "looks right" to you is not one; a statement the sheet already carried is.
 3. **Never skip the confirmation step.** The parse is shown as a table and agreed to before the import runs; a replacement is shown as a before and an after and agreed to before `--confirm-replace` is passed. Both are the point of the two-step, not a formality in front of it.
 4. **Never read another profile.** Not to learn the file shape, not to copy a case, not to see "how other people tag these". [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md) is the authority and it has every field; a glob across profiles returns another tenant's questions together with the SQL that answers them.
 5. **Never run or score a dataset from here.** No `/agami-eval`, no executing the statement to "check it first". This skill writes. If the user wants a verdict, hand them off: *"Say 'run the evals' to score `<dataset>`."*

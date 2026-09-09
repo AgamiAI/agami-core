@@ -642,23 +642,36 @@ def _import(
     confirm_replace: bool,
     description: Optional[str],
 ) -> int:
-    """Turn a confirmed `parse` payload into items, every one of them unverified.
+    """Turn a confirmed `parse` payload into items — confirmed wherever the sheet already carried
+    an answer, unconfirmed only where it did not.
 
-    `expected.sql_confirmed` is False for every row without exception, including the rows whose
-    sheet carried a statement: nobody ran it, and an import that marked its own rows verified would
-    forge the gate the confirmed-only rule exists to be.
+    A row with no `sql` is a question with nothing to check yet, and stays unconfirmed: there is no
+    answer to have confirmed. A row that already carries a statement is a person's own pre-validated
+    answer, brought in from wherever they vouched for it — a business-question sign-off, a sheet
+    someone's team already ran — and importing it a second time through the save door would ask them
+    to reconfirm what they just told this door they were confirming by including the statement at
+    all. `confirmed_by.method` names the sheet as the source, so the provenance the confirmed-only
+    rule exists to preserve is never blank.
 
     `expected_value` is dropped. AH-100's shape has no home for it, and parking it in
     `validation_notes` would put a number nothing compares against into a field a reader would
     reasonably read as an answer key.
     """
     payload = json.loads(Path(rows_path).expanduser().read_text(encoding="utf-8"))
+    now = datetime.now(timezone.utc).isoformat()
     items = [
         GoldenItem(
             id=row["id"],
             query=row["query"],
-            expected=GoldenExpected(sql=row.get("sql"), sql_confirmed=False),
+            expected=GoldenExpected(sql=row.get("sql"), sql_confirmed=bool(row.get("sql"))),
             tags=row.get("tags") or [],
+            confirmed_by=(
+                GoldenConfirmedBy(
+                    method="provided as a pre-validated answer in the imported sheet", at=now
+                )
+                if row.get("sql")
+                else None
+            ),
         )
         for row in payload["rows"]
     ]

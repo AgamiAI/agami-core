@@ -166,13 +166,17 @@ wrong thing.
 Two supported ways in, and both land the same shape.
 
 **`/agami-save-golden` is the skill that writes these.** It has two doors: a
-question bank (a CSV, or a table pasted into chat) imports as items written
-`sql_confirmed: false`, after the parsed rows have been shown and agreed to; and
-one question with the statement that answered it and the result somebody
-accepted saves as a confirmed item with its `recorded` receipt and its
-`confirmed_by`. It is append-only — a write that would change an item that
-already exists stops and shows the before and the after — and every write is
-re-read through the reader below before it is kept.
+question bank (a CSV, or a table pasted into chat) imports as items, after the
+parsed rows have been shown and agreed to — a row with no statement lands
+`sql_confirmed: false` (a question with nothing yet to check), and a row that
+already carries a statement lands `sql_confirmed: true` with `confirmed_by`
+naming the sheet as the source, because a statement someone put in the sheet is
+an answer they are vouching for, not a draft this door invents. The other door
+takes one question with the statement that answered it and the result somebody
+just looked at, and saves it as a confirmed item with its `confirmed_by`. It is
+append-only — a write that would change an item that already exists stops and
+shows the before and the after — and every write is re-read through the reader
+below before it is kept.
 
 **Or write the file by hand**, one dataset per question area, and read it back
 before relying on it — the reader reports per-file and per-case, so one bad case
