@@ -555,7 +555,15 @@ def client_argv() -> tuple[str, ...]:
 # Windows run errors identically with the one sentence that would explain it. It names a directory
 # every Windows process already has on its own environment, not a path the child gains a tool to
 # open, and it is simply absent from `os.environ` on every other platform, so it costs nothing there.
-_CHILD_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "USER", "ANTHROPIC_API_KEY", "SystemRoot")
+_CHILD_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "USER",
+    "ANTHROPIC_API_KEY",
+    "SystemRoot",
+)
 
 # Why a generation produced no statement. Fixed sentences, and the fixedness is the point: a client
 # can echo the whole prompt on stderr, and this text is rendered beside the item and persisted with
