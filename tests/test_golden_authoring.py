@@ -464,11 +464,11 @@ def _save_argv(item_path: str, stem: str = "orders", *extra: str) -> list[str]:
 def test_a_saved_answer_carries_its_statement_and_receipt(tmp_path, monkeypatch, capsys):
     """SC-6. The one door that can produce an item able to gate a run.
 
-    All four parts have to survive the round trip together: without the statement there is nothing
-    to compare, without `sql_confirmed` the runner will not let the case gate, and without the
-    receipt a reviewer months later cannot see what the answer looked like on the day somebody
-    accepted it. `confirmed_by.method` is carried verbatim — AH-100 types it as free text on
-    purpose, so nothing here narrows it to a vocabulary.
+    The parts that have to survive the round trip: without the statement there is nothing to
+    compare, without `sql_confirmed` the runner will not let the case gate, and without the receipt
+    stamp a reviewer months later cannot see when somebody accepted this answer.
+    `confirmed_by.method` is carried verbatim — AH-100 types it as free text on purpose, so nothing
+    here narrows it to a vocabulary.
     """
     code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path)))
     assert code == 0
@@ -476,12 +476,35 @@ def test_a_saved_answer_carries_its_statement_and_receipt(tmp_path, monkeypatch,
     assert item.id == "how-many-orders-have-been-placed"
     assert item.expected.sql_confirmed is True
     assert item.expected.sql == SQL
-    assert item.recorded.columns == ["order_count"] and item.recorded.rows == [[42]]
     assert item.confirmed_by.method == METHOD
     # Both stamps are set here rather than left None: a receipt that cannot say when it was taken
     # is not much of a receipt.
     assert item.recorded.at and item.confirmed_by.at
     assert item.match == "exact"
+
+
+def test_a_saved_answer_does_not_carry_its_result_rows_onto_disk(tmp_path, monkeypatch, capsys):
+    """#281. The golden-datasets directory has no gitignore exclusion, so a `recorded` carrying
+    the payload's rows was a query's actual result committed to version control on every save.
+
+    Scoring never reads `recorded` — a run re-executes `expected.sql` live and compares that
+    result, never anything recorded here — and the explorer already refuses to render row content
+    for the same reason (`render_golden_datasets.py`'s `_item`). This is that same refusal, at the
+    one place it actually mattered: the door does not carry the caller's `columns`/`rows` through,
+    regardless of what the payload sends.
+    """
+    code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path)))
+    assert code == 0
+    item = _items(tmp_path)[0]
+    assert item.recorded.columns == [] and item.recorded.rows == []
+    # And not merely absent from the parsed model — the keys themselves never reach the file, so a
+    # person reading the YAML by eye sees no row data either (`_drop_empty` strips an empty
+    # `columns`/`rows` from the serialized doc, since `_save` never populates them). Parsed rather
+    # than string-matched: a `bounds` block's own `min_rows`/`max_rows` keys would make a substring
+    # check on "rows:" fail even when `recorded` truly carries none.
+    raw = yaml.safe_load(_dataset_file(tmp_path).read_text(encoding="utf-8"))
+    (recorded,) = [case["recorded"] for case in raw["test_cases"] if case["id"] == item.id]
+    assert "rows" not in recorded and "columns" not in recorded
 
 
 def test_a_duplicate_save_declined_leaves_the_file_byte_identical(tmp_path, monkeypatch, capsys):

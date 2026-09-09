@@ -72,10 +72,6 @@ test_cases:
     match: exact
     must_filter: [status]
     recorded:
-      columns: [channel, order_count]
-      rows:
-        - [web, 812]
-        - [mobile, 517]
       at: '2026-01-14T09:00:00Z'
     tags: [orders, smoke]
     confirmed_by:
@@ -135,10 +131,12 @@ Alongside `expected`, an item takes six optional fields:
   (`must_filter: [status]` — not the predicate, just the column). A statement
   that does not filter on every column listed fails. This is how a case gates
   *how* the answer was reached, not just what it came to.
-- `recorded` — `columns` (a list of names), `rows` (a list of rows, each row
-  itself a list of values in `columns` order) and `at`: what the author saw on
-  the day. A receipt for a reviewer, **never the comparison target** — a run is
-  judged against `expected`.
+- `recorded` — `at`: when the answer was accepted. **Never the comparison
+  target** — a run is judged against `expected`, which is re-executed live at
+  score time, not against anything recorded here. It does not carry the
+  query's result rows: the golden-datasets directory has no gitignore
+  exclusion, so a row-carrying receipt would commit a query's actual result to
+  version control on every save.
 - `tags` — free text. `smoke` is a **convention** for the fast subset, not a
   keyword the reader knows or treats specially.
 - `confirmed_by` — `method` (required within the block, free text) and `at`:
