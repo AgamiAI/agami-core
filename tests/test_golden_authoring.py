@@ -300,20 +300,25 @@ def test_imported_items_read_back_through_the_reader(tmp_path, monkeypatch, caps
     assert [item.query for item in _items(tmp_path)] == [QUERY, REVENUE]
 
 
-def test_an_import_never_marks_its_own_rows_confirmed(tmp_path, monkeypatch, capsys):
-    """SC-2. Not one imported row is confirmed — least of all the row that came with SQL.
+def test_an_import_confirms_exactly_the_rows_that_carried_an_answer(tmp_path, monkeypatch, capsys):
+    """SC-2 (revised). A row with no `sql` has nothing to confirm and stays unconfirmed; a row that
+    already carried a statement is a person's own pre-validated answer and lands confirmed,
+    with its provenance named rather than left blank.
 
-    A sheet's statement column is carried, because throwing it away would lose work; but nobody
-    ran it, and an import that marked its own rows verified would forge the gate the confirmed-only
-    rule exists to be. The row with a statement is in this fixture precisely because it is the one
-    a writer would be tempted to promote.
+    A sheet's statement column was always carried, because throwing it away would lose work — the
+    thing that changed is what carrying it now means. Marking that row unconfirmed anyway would
+    ask whoever validated it once to do so again through the save door for no reason the import
+    door could state.
     """
     rows = [_row(), _row(REVENUE, sql=REVENUE_SQL)]
     code, _, _ = _run(tmp_path, monkeypatch, capsys, _import_argv(_rows_file(tmp_path, rows)))
     assert code == 0
     items = _items(tmp_path)
-    assert [item.expected.sql_confirmed for item in items] == [False, False]
+    assert [item.expected.sql_confirmed for item in items] == [False, True]
     assert items[1].expected.sql == REVENUE_SQL
+    assert items[0].confirmed_by is None
+    assert items[1].confirmed_by.method == "provided as a pre-validated answer in the imported sheet"
+    assert items[1].confirmed_by.at
 
 
 def test_the_written_file_never_declares_its_own_name(tmp_path, monkeypatch, capsys):
