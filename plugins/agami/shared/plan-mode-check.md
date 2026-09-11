@@ -75,7 +75,7 @@ Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Per-row queries require Bash; chart receipts require Write. Surface ONLY this:
 
-> I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the CSV path.
+> I can't reconcile in plan mode — each row runs a live query and writes a receipt. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the same input.
 
 ### `agami-eval`
 
