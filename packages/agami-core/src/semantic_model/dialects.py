@@ -128,6 +128,20 @@ class Dialect:
         # Universal zero-row describe — returns the header on every dialect.
         return f"SELECT * FROM {self.qualified(schema, table)} WHERE 1=0"
 
+    def limited(self, select: str, n: int) -> str:
+        """`select` bounded to `n` rows in this dialect's own row-limit syntax.
+
+        The one place the TOP / FETCH FIRST / LIMIT switch is spelled for a statement built
+        elsewhere. `TOP` goes after `DISTINCT` when there is one: T-SQL reads `SELECT DISTINCT TOP n`
+        and rejects `SELECT TOP n DISTINCT`.
+        """
+        if self.limit_style == "top":
+            head = "SELECT DISTINCT " if select.startswith("SELECT DISTINCT ") else "SELECT "
+            return select.replace(head, f"{head}TOP {n} ", 1)
+        if self.limit_style == "fetch":
+            return f"{select} FETCH FIRST {n} ROWS ONLY"
+        return f"{select} LIMIT {n}"
+
     def count_distinct_sql(self, schema: Optional[str], table: str, column: str) -> str:
         q = self.qualified(schema, table)
         c = self.quote_ident(column)

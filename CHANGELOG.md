@@ -26,10 +26,16 @@ below corresponds to one such version.
   model's list of values holds it, and the probes that would settle it; `sm filter-values judge` reads
   the probe results back and grades each value `confirmed`, `model_gap`, `query_defect` or
   `unresolved`. None of the four runs SQL: the skill runs every probe through the same execution tier
-  a question takes. A near miss is a case and whitespace fold only, an empty list of values reads as
-  not yet decoded rather than as no legal values, and a column marked sensitive is never probed for a
-  value. The overlap probe is the one introspection already trusts, now shared as
-  `introspect.overlap_sql`. (ACE-114)
+  a question takes. Joins are classified with the receipt's own flags, so a CTE that shadows a
+  declared table, a `USING`, a comma join, or a declared `on:` this layer cannot read all come back
+  as open states and never as a settled claim about a key nobody read. A probe that came back empty
+  is graded as a probe that failed, never as a column that holds nothing. A near miss is a case and
+  whitespace fold only, an empty list of values reads as not yet decoded rather than as no legal
+  values, a column marked sensitive is never probed for a value, and a value carrying a backslash or
+  a control character is never sent to the warehouse, because engines quote it differently. The
+  overlap probe is the one introspection already trusts, now shared as `introspect.overlap_sql` and
+  bounded to its 50-row sample on every engine through the new `Dialect.limited`, where it used to
+  be bounded only where the row-limit keyword was `LIMIT`. (ACE-114)
 
 ### Fixed
 
