@@ -287,6 +287,109 @@ def cmd_receipt(args) -> int:
     return 0
 
 
+# --- the four verbs that grade a statement a PERSON supplied ----------------------------------
+#
+# `agami-reconcile` takes a trusted query as evidence, never as the answer. These verbs are the
+# deterministic half of grading it: none of them runs a probe, and none writes anything. The skill
+# runs every emitted probe through the execution tier a question takes, then hands the CSVs back.
+
+
+def _grammar(org) -> str:
+    """The sqlglot grammar to read statements in, or the generic one when the model cannot say —
+    the same fallback `golden_author._dialect` takes, and for the same reason: both statements are
+    parsed the same way either way, which is what a comparison needs."""
+    return RT._dialect_of(org)[0] or ""
+
+
+def cmd_claims(args) -> int:
+    """Where two statements differ, in the seven claims the golden runner already compares.
+    `golden_claims.compare_statements` has been reachable from the runner and the save door and
+    from no command; this is that command."""
+    from .golden_claims import compare_statements
+    org = L.load_datasource(args.root)
+    grammar = _grammar(org)
+    diff = compare_statements(
+        Path(args.sql_file).read_text(), Path(args.against_sql_file).read_text(), dialect=grammar)
+    out = diff.as_dict()
+    out["dialect"] = grammar
+    _print_json(out)
+    return 0
+
+
+_NUMERIC_TEXT = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _result_from_csv(path: str):
+    """A result CSV as the comparator's `ExecResult`. The CSV wire lost every type, so numeric text
+    is put back as Decimal before the comparator sees a cell — otherwise `4.20` and `4.2` are two
+    different strings — and an empty cell is read as NULL, which is what the wire writes for None."""
+    import csv
+    from decimal import Decimal, InvalidOperation
+
+    from execute_sql import ExecResult
+
+    def cell(text: str):
+        if text == "":
+            return None
+        if _NUMERIC_TEXT.match(text):
+            try:
+                return Decimal(text)
+            except InvalidOperation:
+                return text
+        return text
+
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    if not rows:
+        return ExecResult(columns=[], rows=[])
+    return ExecResult(columns=rows[0], rows=[tuple(cell(v) for v in row) for row in rows[1:]])
+
+
+def cmd_compare_results(args) -> int:
+    """Whether two result sets say the same thing, through the one comparator the golden runner
+    uses — so a table-shaped answer is judged the way an answer key is, not by a second rule."""
+    import dataclasses
+
+    from .comparator import compare_result_sets
+    from .golden import GoldenBounds
+    org = L.load_datasource(args.root)
+    bounds = GoldenBounds(**json.loads(args.bounds)) if args.bounds else None
+    golden_sql = Path(args.golden_sql_file).read_text() if args.golden_sql_file else None
+    score = compare_result_sets(
+        _result_from_csv(args.golden_csv), _result_from_csv(args.generated_csv),
+        match=args.match, golden_sql=golden_sql, bounds=bounds, dialect=_grammar(org) or None)
+    _print_json(dataclasses.asdict(score))
+    return 0
+
+
+def cmd_join_probes(args) -> int:
+    """Every join a statement wrote: declared or not, on the declared key or not, and the probe SQL
+    that would test whether the keys resolve. Emitted, never run."""
+    from . import probes
+    org = L.load_datasource(args.root)
+    _print_json(probes.join_probes(org, Path(args.sql_file).read_text()))
+    return 0
+
+
+def cmd_filter_values(args) -> int:
+    """Every value typed into a filter. `plan` says what the semantic model already knows and what
+    to probe; `judge` reads the probe results back and grades each value."""
+    from . import probes
+    if args.mode == "plan":
+        if not args.sql_file:
+            _print_json({"error": "usage", "detail": "filter-values plan needs --sql-file"})
+            return 2
+        org = L.load_datasource(args.root)
+        _print_json(probes.filter_values_plan(org, Path(args.sql_file).read_text()))
+        return 0
+    if not (args.plan and args.results):
+        _print_json({"error": "usage", "detail": "filter-values judge needs --plan and --results"})
+        return 2
+    plan = json.loads(Path(args.plan).read_text())
+    _print_json(probes.filter_values_judge(plan, Path(args.results)))
+    return 0
+
+
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_datasource(args.root)
@@ -1201,6 +1304,34 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--freshness", default=None,
                     help="optional freshness timestamp for the receipt's tables section")
     sp.set_defaults(func=cmd_receipt)
+
+    sp = sub.add_parser("claims", help="where two statements differ: the seven claims the golden runner compares, as a diff")
+    sp.add_argument("root")
+    sp.add_argument("--sql-file", required=True, dest="sql_file")
+    sp.add_argument("--against-sql-file", required=True, dest="against_sql_file")
+    sp.set_defaults(func=cmd_claims)
+
+    sp = sub.add_parser("compare-results", help="whether two result CSVs say the same thing, through the golden comparator")
+    sp.add_argument("root")
+    sp.add_argument("--golden-csv", required=True, dest="golden_csv")
+    sp.add_argument("--generated-csv", required=True, dest="generated_csv")
+    sp.add_argument("--match", default="values", choices=["exact", "values", "shape", "bounded", "nonempty"])
+    sp.add_argument("--golden-sql-file", default=None, dest="golden_sql_file")
+    sp.add_argument("--bounds", default=None, help="JSON with min_rows/max_rows/min_value/max_value, for --match bounded")
+    sp.set_defaults(func=cmd_compare_results)
+
+    sp = sub.add_parser("join-probes", help="every join a statement wrote: declared or not, on the declared key or not, and the probe SQL that would test it (emitted, never run)")
+    sp.add_argument("root")
+    sp.add_argument("--sql-file", required=True, dest="sql_file")
+    sp.set_defaults(func=cmd_join_probes)
+
+    sp = sub.add_parser("filter-values", help="every value typed into a filter: `plan` emits what to probe, `judge` grades what came back")
+    sp.add_argument("mode", choices=["plan", "judge"])
+    sp.add_argument("root")
+    sp.add_argument("--sql-file", default=None, dest="sql_file")
+    sp.add_argument("--plan", default=None, help="the plan JSON `filter-values plan` printed")
+    sp.add_argument("--results", default=None, help="directory of <literal id>.<probe>.csv files the tier returned")
+    sp.set_defaults(func=cmd_filter_values)
 
     sp = sub.add_parser("review-queue", help="trust-review items needing sign-off (Rule 1/2)")
     sp.add_argument("root")
