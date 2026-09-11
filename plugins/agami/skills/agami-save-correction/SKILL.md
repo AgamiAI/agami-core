@@ -71,6 +71,8 @@ Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
 - Refuse DDL/DML (DROP, DELETE, INSERT, UPDATE, ALTER, etc.).
 - Refuse system-table queries unless the user explicitly asked about schema metadata.
 
+When the SQL was pasted rather than regenerated, EXPLAIN says only that it plans. Grade its parts with the ledger per [`shared/part-ledger.md`](../../shared/part-ledger.md) before saving: a pasted statement is evidence, and a `query_defect` in it (a miscased value, a join on the wrong key) is a correction that would teach the AI a mistake.
+
 ---
 
 ## Phase 2: Always append to the examples library
