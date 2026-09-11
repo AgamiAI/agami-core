@@ -37,6 +37,21 @@ below corresponds to one such version.
   bounded to its 50-row sample on every engine through the new `Dialect.limited`, where it used to
   be bounded only where the row-limit keyword was `LIMIT`. (ACE-114)
 
+- **`reconcile.py` reads any input a person brings, and grades a supplied statement part by part.**
+  Three new verbs beside `parse`, `diff` and `band`, which are unchanged. `intake` reads the four
+  shapes the reconcile skill will accept, a list of questions, questions with the SQL the person
+  trusts, labels with numbers, and labels with numbers and the SQL behind each tile, into one row
+  shape with the question, the statement and the expected value, any of which may be missing. A CSV
+  whose third column is SQL now yields a statement instead of a label with SQL glued onto it; a
+  statement whose label matches a tile joins that tile's row. `ledger` grades every part of a
+  supplied statement from the files the skill wrote beside it: what happened when it ran, what
+  `sm prepare` and `sm receipt` said, what `sm join-probes` and `sm filter-values judge` reported, and
+  the probe CSVs the execution tier returned. Four grades, and only measurement earns `model_gap`; a
+  join that could not be graded leaves the fan-out check on its aggregate `unresolved`, said out
+  loud. `findings` writes a run's findings, the person's own defects listed apart, and every row's
+  ledger. Three shared references describe the row, the ledger and how a supplied statement is run
+  the way the AI's own SQL runs. Nothing here runs SQL or writes to the semantic model. (ACE-115)
+
 ### Fixed
 
 - **The eval's generator can start on Windows.** The client's Windows runtime (Bun) needs

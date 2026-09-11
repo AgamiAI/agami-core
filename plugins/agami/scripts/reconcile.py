@@ -23,6 +23,11 @@ Usage:
 
     # Band an observed number, ready to paste as a golden item's `bounds`:
     python3 reconcile.py band --value 47238221 --tolerance 0.01
+
+    # Read any of the four input shapes a person brings into evidence rows:
+    #   (a) questions, (b) questions with the SQL they trust, (c) labels with numbers,
+    #   (d) labels with numbers and the SQL behind each. Several files merge by label.
+    python3 reconcile.py intake --file tiles.csv --file behind-the-tiles.sql --source "the finance dashboard"
 """
 
 from __future__ import annotations
@@ -270,6 +275,696 @@ def band(value: float, *, tolerance: float = 0.01) -> dict:
     }
 
 
+# --- Intake ---------------------------------------------------------------
+#
+# Any input a person brings reduces to rows of three optional fields: the question, the
+# statement, the expected number. The four shapes the skill names are subsets of that row:
+#   (a) questions only            (b) questions with the SQL the person trusts
+#   (c) labels with numbers       (d) labels with numbers and the SQL behind each tile
+# `intake` reads all four and says which it saw. The number path is untouched: a two-column
+# CSV still goes through `parse_csv`, and a third column that is not SQL is still glued onto
+# the label as context, exactly as `parse` always did.
+
+_STATEMENT_RE = re.compile(r"^\s*(with|select)\b", re.IGNORECASE)
+
+# Header names a person is likely to type, folded to the field each stands for. A header is
+# recognised by NAME rather than by position so a `question,sql` file and a `label,value,sql` file
+# both read the way they were written.
+_HEADER_FIELDS: dict[str, str] = {
+    "label": "label", "metric": "label", "tile": "label", "name": "label", "kpi": "label",
+    "value": "value", "expected": "value", "expected_value": "value", "number": "value",
+    "amount": "value", "actual": "value",
+    "sql": "statement", "statement": "statement", "query": "statement",
+    "question": "question", "prompt": "question",
+}
+
+_SHAPE_ORDER = ("a", "b", "c", "d")
+
+
+def _fold(text: str) -> str:
+    """Case and whitespace fold, the only normalization a label match is allowed."""
+    return re.sub(r"\s+", " ", text.strip()).lower()
+
+
+def _is_statement(cell: str | None) -> bool:
+    return bool(cell) and _STATEMENT_RE.match(cell) is not None
+
+
+def _row_shape(row: dict) -> str:
+    has_statement = row["statement"] is not None
+    has_expected = row["expected"] is not None
+    if has_statement and has_expected:
+        return "d"
+    if has_statement:
+        return "b"
+    if has_expected:
+        return "c"
+    return "a"
+
+
+def _new_row(*, file: str, line: int, source: str | None, label: str | None = None,
+             question: str | None = None, statement: str | None = None,
+             raw_value: str | None = None) -> dict:
+    row = {
+        "label": label or None,
+        "question": question or None,
+        "statement": statement.strip().rstrip(";").strip() if statement else None,
+        "expected": parse_value(raw_value) if raw_value is not None else None,
+        "raw_value": raw_value if raw_value not in (None, "") else None,
+        "provenance": {"shape": None, "source": source, "file": file, "line": line, "graded": None},
+    }
+    row["provenance"]["shape"] = _row_shape(row)
+    return row
+
+
+def _header_map(first: list[str], rest: list[list[str]]) -> dict[int, str] | None:
+    """Which field each column holds, when the first row is a header; None when it is data.
+
+    Two ways a row is a header. Every cell names a field this module knows, which is how a
+    `question,sql` or `label,value,sql` file declares itself. Or, the legacy two-column case
+    `parse_csv` has always handled: a second cell that is neither a number nor a statement, over a
+    file whose later rows do carry numbers there.
+    """
+    cells = [c.strip() for c in first]
+    if cells and all(_fold(c) in _HEADER_FIELDS for c in cells if c):
+        return {i: _HEADER_FIELDS[_fold(c)] for i, c in enumerate(cells) if c}
+    if (len(cells) >= 2 and parse_value(cells[1]) is None and not _is_statement(cells[1])
+            and any(len(r) >= 2 and parse_value(r[1]) is not None for r in rest)):
+        fields = {0: "label", 1: "value"}
+        for i in range(2, len(cells)):
+            fields[i] = "statement" if _fold(cells[i]) in ("sql", "statement", "query") else "extra"
+        return fields
+    return None
+
+
+def _row_from_named(cells: list[str], fields: dict[int, str], *, file: str, line: int,
+                    source: str | None) -> tuple[dict | None, str | None]:
+    got: dict[str, str] = {}
+    extras: list[str] = []
+    for i, cell in enumerate(cells):
+        cell = cell.strip()
+        if not cell:
+            continue
+        field = fields.get(i, "extra")
+        if field == "extra":
+            extras.append(cell)
+        elif field == "statement" and not _is_statement(cell):
+            # A `sql` column holding something that is not a statement is context, not SQL.
+            extras.append(cell)
+        else:
+            got[field] = cell
+    label = got.get("label")
+    if label and extras:
+        label = f"{label} ({', '.join(extras)})"
+    raw = got.get("value")
+    if raw is not None and parse_value(raw) is None:
+        return None, f"the value {raw!r} could not be read as a number"
+    if not any(k in got for k in ("label", "question", "statement", "value")):
+        return None, "no question, statement or number in the row"
+    return _new_row(file=file, line=line, source=source, label=label,
+                    question=got.get("question"), statement=got.get("statement"),
+                    raw_value=raw), None
+
+
+def _row_from_positional(cells: list[str], *, file: str, line: int,
+                         source: str | None) -> tuple[dict | None, str | None]:
+    """A data row with no header to name its columns, read by shape."""
+    cells = [c.strip() for c in cells]
+    if len(cells) == 1:
+        text = cells[0]
+        if _is_statement(text):
+            return _new_row(file=file, line=line, source=source, statement=text), None
+        return _new_row(file=file, line=line, source=source, question=text), None
+    first, second, rest = cells[0], cells[1], cells[2:]
+    if _is_statement(second):
+        return _new_row(file=file, line=line, source=source, question=first, statement=second), None
+    if parse_value(second) is None:
+        return None, f"the second column {second!r} is neither a number nor a statement"
+    statement = None
+    extras = []
+    for cell in rest:
+        if _is_statement(cell) and statement is None:
+            statement = cell
+        elif cell:
+            extras.append(cell)
+    label = f"{first} ({', '.join(extras)})" if extras else first
+    return _new_row(file=file, line=line, source=source, label=label, statement=statement,
+                    raw_value=second), None
+
+
+def _rows_from_json(items: Any, *, file: str, source: str | None) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    skipped: list[dict] = []
+    if not isinstance(items, list):
+        return rows, [{"file": file, "line": 1, "reason": "a JSON input must be a list"}]
+    for n, item in enumerate(items, 1):
+        if isinstance(item, str):
+            row, why = _row_from_positional([item], file=file, line=n, source=source)
+        elif isinstance(item, dict):
+            cells: list[str] = []
+            fields: dict[int, str] = {}
+            for key, value in item.items():
+                field = _HEADER_FIELDS.get(_fold(str(key)))
+                if field is None or value is None:
+                    continue
+                fields[len(cells)] = field
+                cells.append(str(value))
+            row, why = _row_from_named(cells, fields, file=file, line=n, source=source)
+        else:
+            row, why = None, "an item must be a string or an object"
+        if row is None:
+            skipped.append({"file": file, "line": n, "reason": why})
+        else:
+            rows.append(row)
+    return rows, skipped
+
+
+def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[dict]]:
+    """One file's rows and the lines it could not use. The extension decides how lines are cut:
+    `.json` is a list, `.sql` is statements split on `;`, `.txt` and `.md` are one question per
+    line, and everything else is CSV."""
+    file = path.name
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return _rows_from_json(json.loads(text), file=file, source=source)
+    if suffix == ".sql":
+        rows = []
+        for n, stmt in enumerate((s for s in text.split(";") if s.strip()), 1):
+            rows.append(_new_row(file=file, line=n, source=source, statement=stmt))
+        return rows, []
+    if suffix in (".txt", ".md") or ("," not in text and "\t" not in text):
+        rows = []
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.strip():
+                rows.append(_row_from_positional([line], file=file, line=n, source=source)[0])
+        return rows, []
+    with path.open(newline="", encoding="utf-8") as fh:
+        numbered = [(n, r) for n, r in enumerate(csv.reader(fh), 1) if r and any(c.strip() for c in r)]
+    if not numbered:
+        return [], []
+    fields = _header_map(numbered[0][1], [r for _n, r in numbered[1:]])
+    data = numbered[1:] if fields is not None else numbered
+    rows, skipped = [], []
+    for n, cells in data:
+        if fields is not None:
+            row, why = _row_from_named(cells, fields, file=file, line=n, source=source)
+        else:
+            row, why = _row_from_positional(cells, file=file, line=n, source=source)
+        if row is None:
+            skipped.append({"file": file, "line": n, "reason": why})
+        else:
+            rows.append(row)
+    return rows, skipped
+
+
+def _merge_by_label(rows: list[dict]) -> list[dict]:
+    """A statement whose label matches a tile's label joins that tile's row; anything unmatched
+    keeps its own row. Matching is the fold only, so `q3 revenue` meets `Q3 Revenue` and nothing
+    looser does."""
+    tiles: dict[str, dict] = {}
+    for row in rows:
+        if row["expected"] is not None and row["statement"] is None and row["label"]:
+            tiles.setdefault(_fold(row["label"]), row)
+    merged: list[dict] = []
+    for row in rows:
+        key = _fold(row["label"] or row["question"] or "")
+        if (row["statement"] is not None and row["expected"] is None and key in tiles
+                and tiles[key]["statement"] is None):
+            tile = tiles[key]
+            tile["statement"] = row["statement"]
+            tile["provenance"]["shape"] = _row_shape(tile)
+            tile["provenance"]["merged_from"] = {"file": row["provenance"]["file"],
+                                                 "line": row["provenance"]["line"]}
+            continue
+        merged.append(row)
+    return merged
+
+
+def intake(paths: list[Path], *, source: str | None = None) -> dict:
+    """Every file's rows, merged by label across files, with the shape that was seen.
+
+    `shape` is one letter when every row has the same shape and `mixed` otherwise; each row also
+    carries its own under `provenance.shape`, which is what the skill reads row by row.
+    """
+    rows: list[dict] = []
+    skipped: list[dict] = []
+    for path in paths:
+        got, missed = _rows_from_file(Path(path).expanduser(), source)
+        rows.extend(got)
+        skipped.extend(missed)
+    rows = _merge_by_label(rows)
+    shapes = {row["provenance"]["shape"] for row in rows}
+    shape = next(iter(shapes)) if len(shapes) == 1 else ("mixed" if shapes else None)
+    return {"shape": shape, "rows": rows, "skipped": skipped}
+
+
+# --- Ledger ---------------------------------------------------------------
+#
+# One grade per part of a statement the person supplied, read from fixed filenames in the row's
+# directory: what happened when it ran (`run.json`), what `sm prepare` and `sm receipt` said about
+# it, what `sm join-probes` and `sm filter-values judge` reported, and the probe CSVs the execution
+# tier returned. Four grades, and only measurement can earn `model_gap`:
+#   confirmed     the statement and the semantic model agree, and the data backs it
+#   model_gap     the data proves the statement right where the semantic model is missing or wrong
+#   query_defect  the data proves the statement wrong
+#   unresolved    the part could not be checked, and the note says why
+# The rules have a dependency in them, and it is applied rather than assumed: a join that could not
+# be graded leaves the fan-out check on its aggregate `unresolved`, said out loud, never clean.
+
+CONFIRMED = "confirmed"
+MODEL_GAP = "model_gap"
+QUERY_DEFECT = "query_defect"
+UNRESOLVED = "unresolved"
+_VERDICT_RANK = {QUERY_DEFECT: 3, UNRESOLVED: 2, MODEL_GAP: 1, CONFIRMED: 0}
+
+# Error-classifier kinds that mean the statement itself is wrong, as opposed to the connection.
+_STATEMENT_DEFECT_KINDS = {"column_not_found", "table_not_found", "syntax"}
+# Guard rules that mean the statement wanted something the semantic model does not expose.
+_SCOPE_RULES = {"table_scope", "column_scope"}
+# Pre-flight risks that describe how the aggregate itself was written, not how a join fanned it.
+_AGGREGATION_RISKS = {"bad_aggregation", "semi_additive"}
+
+
+def _part(part: str, verdict: str, *, kind: str | None = None, depends_on=(),
+          evidence: dict | None = None, note: str = "") -> dict:
+    return {"part": part, "verdict": verdict, "kind": kind, "depends_on": list(depends_on),
+            "evidence": evidence or {}, "note": note}
+
+
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def _probe_csv(path: Path) -> "list[dict] | str | None":
+    """A probe's CSV as rows; None when the file is absent; the string `failed` when it is empty.
+
+    The execution tier writes CSV to stdout only on success. A probe that was refused or failed
+    leaves a zero-byte file behind, and reading that as "the column holds no values" would turn a
+    failed probe into a definite grade. A header-only file is the legitimately empty result.
+    """
+    if not path.exists():
+        return None
+    if path.stat().st_size == 0:
+        return "failed"
+    with path.open(newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+def _first_number(rows, key: str) -> float | None:
+    if not isinstance(rows, list) or not rows:
+        return None
+    raw = rows[0].get(key)
+    if raw is None and rows[0]:
+        raw = next(iter(rows[0].values()))
+    try:
+        return float(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _grade_run(run: dict | None) -> list[dict]:
+    if run is None:
+        return [_part("runs", UNRESOLVED, note="no run record was found for the statement")]
+    status, rule, kind = run.get("status"), run.get("rule"), run.get("kind")
+    if status == "ok":
+        return [_part("runs", CONFIRMED, note="the statement ran"),
+                _part("scope", CONFIRMED, note="every table and column it named is in the semantic model")]
+    if status == "refused":
+        if rule in _SCOPE_RULES:
+            return [
+                _part("runs", UNRESOLVED,
+                      note=f"the statement was refused before it ran ({rule}); see the scope part"),
+                _part("scope", MODEL_GAP, kind="scope",
+                      evidence={"rule": rule, "detail": run.get("detail")},
+                      note="the statement names a table or column the semantic model does not expose"),
+            ]
+        if rule == "select_star":
+            return [_part("runs", QUERY_DEFECT, evidence={"rule": rule},
+                          note="SELECT * is refused; name the columns")]
+        return [_part("runs", UNRESOLVED, evidence={"rule": rule},
+                      note=f"the statement was refused before it ran ({rule})")]
+    if status == "failed":
+        if kind in _STATEMENT_DEFECT_KINDS:
+            return [_part("runs", QUERY_DEFECT, evidence={"kind": kind, "detail": run.get("detail")},
+                          note=f"the database rejected the statement ({kind})")]
+        return [_part("runs", UNRESOLVED, evidence={"kind": kind},
+                      note=f"the run failed with {kind}; the statement could not be checked")]
+    return [_part("runs", UNRESOLVED, note="the statement was not run")]
+
+
+def _join_tables(join: dict) -> tuple[str, str]:
+    """The two tables a join is between, sorted: from its one written pair when it has one, and
+    from its endpoint labels otherwise."""
+    pairs = join.get("pairs") or []
+    if len(pairs) == 1 and len(pairs[0]) == 2:
+        a, b = pairs[0][0][0], pairs[0][1][0]
+    else:
+        a, b = (join.get("endpoints") or ["", ""])[:2]
+        a, b = _fold(a), _fold(b)
+    first, second = sorted((a, b))
+    return first, second
+
+
+def _join_status(join: dict) -> str:
+    """The status `sm join-probes` gave the join, derived from its flags for a file written before
+    the verb carried one."""
+    status = join.get("status")
+    if status:
+        return status
+    if join.get("written_matches_declared"):
+        return "declared"
+    return "wrong_key" if join.get("declared_between_tables") else "undeclared"
+
+
+def _cardinality_result(probes: dict | None, key: str, row_dir: Path) -> dict | None:
+    """One endpoint's uniqueness: from the semantic model when it declares the column a key, else
+    from the column's cardinality CSV, which is shared by every join that reads that column."""
+    if ((probes or {}).get("unique_by_model") or {}).get(key):
+        return {"unique": True, "source": "the semantic model declares the column a key"}
+    got = _probe_csv(row_dir / f"cardinality.{key}.csv")
+    if not isinstance(got, list) or not got:
+        return None
+    total = _first_number(got, "total")
+    distinct = _first_number(got, "distinct_count")
+    nulls = _first_number(got, "null_count") or 0.0
+    if total is None or distinct is None:
+        return None
+    return {"total": total, "distinct": distinct, "nulls": nulls,
+            "unique": distinct == total - nulls, "source": "probe"}
+
+
+def _grade_joins(probes: dict | None, row_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    for join in (probes or {}).get("joins", []):
+        a, b = _join_tables(join)
+        label = f"{a}-{b}"
+        jid = join.get("id", "join")
+        status = _join_status(join)
+        planned = join.get("probes") or {}
+        declared_pairs = join.get("declared_pairs", [])
+        written = {"pairs": join.get("pairs"), "predicate": join.get("predicate")}
+
+        overlaps: list[float | None] = []
+        overlap_failed = False
+        for i, _probe in enumerate(planned.get("overlap", [])):
+            got = _probe_csv(row_dir / f"{jid}.overlap.{i}.csv")
+            if got == "failed":
+                overlap_failed = True
+            elif got is not None:
+                overlaps.append(_first_number(got, "matched"))
+        card = {key: result for key in planned.get("cardinality", [])
+                if (result := _cardinality_result(probes, key, row_dir)) is not None}
+        hits = [m for m in overlaps if m is not None]
+        any_overlap = any(m > 0 for m in hits)
+
+        if status in ("undeclarable", "undetermined"):
+            rows.append(_part(f"join:{label}", UNRESOLVED, evidence=written,
+                              note=join.get("not_probed_because")
+                              or "the join could not be resolved to two declared tables"))
+            continue
+        if status == "declared":
+            rows.append(_part(f"join:{label}", CONFIRMED, evidence={"declared_pairs": declared_pairs},
+                              note="the join is on the key the semantic model declares"))
+        elif status == "wrong_key":
+            rows.append(_part(f"join:{label}", QUERY_DEFECT,
+                              evidence={"declared_pairs": declared_pairs, **written},
+                              note="the join is on a different key than the one the semantic model declares"))
+        elif join.get("too_big_to_probe") or not planned.get("overlap"):
+            rows.append(_part(f"join:{label}", UNRESOLVED, evidence=written,
+                              note="the join is not declared and no probe could be run: "
+                                   + (join.get("not_probed_because") or "no probe was planned")))
+        elif any_overlap:
+            rows.append(_part(f"join:{label}", MODEL_GAP, kind="relationship",
+                              evidence={"overlap": hits, **written},
+                              note="the join is not declared, and its keys resolve in the data"))
+        elif hits:
+            rows.append(_part(f"join:{label}", QUERY_DEFECT, evidence={"overlap": hits, **written},
+                              note="the join is not declared, and its keys never meet in the data"))
+        else:
+            rows.append(_part(f"join:{label}", UNRESOLVED, evidence=written,
+                              note="the join is not declared and no probe result was supplied"
+                                   + ("; the probe file is empty, so the probe likely failed"
+                                      if overlap_failed else "")))
+
+        # The probe rows: whenever probes were planned or answered. A declared join plans none.
+        if hits or planned.get("overlap"):
+            if any_overlap:
+                rows.append(_part(f"join_key:{label}", CONFIRMED, evidence={"overlap": hits},
+                                  note="sampled keys from one side exist on the other"))
+            elif hits:
+                rows.append(_part(f"join_key:{label}", QUERY_DEFECT, evidence={"overlap": hits},
+                                  note="no sampled key from either side exists on the other"))
+            else:
+                rows.append(_part(f"join_key:{label}", UNRESOLVED, note="no overlap probe result"))
+        if card or planned.get("cardinality"):
+            uniques = sorted(k for k, v in card.items() if v["unique"])
+            if len(card) >= 2 and uniques:
+                rows.append(_part(f"cardinality:{label}", CONFIRMED,
+                                  evidence={"one_side": uniques[0], "sides": card},
+                                  note=f"{uniques[0]} is unique, so the join does not multiply rows"))
+            elif len(card) >= 2:
+                rows.append(_part(f"cardinality:{label}", QUERY_DEFECT, evidence={"sides": card},
+                                  note="both sides repeat, so the join multiplies rows"))
+            else:
+                rows.append(_part(f"cardinality:{label}", UNRESOLVED, evidence={"sides": card},
+                                  note="no cardinality result for both sides"))
+    return rows
+
+
+def _joins_named(label: str, join_rows: list[dict]) -> list[str]:
+    """The `join:` parts whose two tables both appear in a pre-flight join label."""
+    words = set(re.findall(r"[a-z0-9_]+", _fold(label)))
+    out = []
+    for row in join_rows:
+        if not row["part"].startswith("join:"):
+            continue
+        a, b = row["part"][len("join:"):].split("-", 1)
+        if a in words and b in words:
+            out.append(row["part"])
+    return out
+
+
+def _grade_aggregates(prepare: dict | None, join_rows: list[dict]) -> list[dict]:
+    if prepare is None:
+        return []
+    if prepare.get("unchecked"):
+        return [_part("fan_out:*", UNRESOLVED, evidence={"unchecked": prepare["unchecked"]},
+                      note=f"the pre-flight did not run: {prepare['unchecked']}")]
+    rows: list[dict] = []
+    by_part = {row["part"]: row for row in join_rows}
+    for agg in prepare.get("aggregates", []):
+        text = agg.get("aggregate", "?")
+        risks = {f.get("risk") for f in agg.get("findings", [])}
+        deps = sorted({p for label in agg.get("joins", []) for p in _joins_named(label, join_rows)})
+        weak = [p for p in deps if by_part[p]["verdict"] != CONFIRMED]
+        if weak:
+            rows.append(_part(f"fan_out:{text}", UNRESOLVED, depends_on=deps,
+                              note=f"the join {weak[0][len('join:'):]} this total depends on is "
+                                   f"{by_part[weak[0]]['verdict']}, so the fan-out check has no "
+                                   "cardinality to reason from"))
+        elif agg.get("status") == "multiplied":
+            if risks and risks <= {"fan_out_invariant"}:
+                rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
+                                  note="a join multiplies the rows, but this aggregate cannot move"))
+            else:
+                named = sorted(risks - {"fan_out_invariant"}) or ["multiplied"]
+                rows.append(_part(f"fan_out:{text}", QUERY_DEFECT, depends_on=deps,
+                                  evidence={"risks": named, "joins": agg.get("joins", [])},
+                                  note=f"a join multiplies the rows this total is computed from "
+                                       f"({', '.join(named)})"))
+        elif agg.get("status") == "not_multiplied":
+            rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
+                              note="no join multiplies the rows behind this aggregate"))
+        else:
+            rows.append(_part(f"fan_out:{text}", UNRESOLVED, depends_on=deps,
+                              note="the pre-flight could not decide whether a join multiplies this aggregate"))
+        bad = sorted(risks & _AGGREGATION_RISKS)
+        if bad:
+            rows.append(_part(f"aggregation:{text}", QUERY_DEFECT, evidence={"risks": bad},
+                              note=f"the aggregate is not legal over this column ({', '.join(bad)})"))
+        else:
+            rows.append(_part(f"aggregation:{text}", CONFIRMED, note="the aggregate is legal over its column"))
+    return rows
+
+
+def _grade_filters(receipt: dict | None) -> list[dict]:
+    rows: list[dict] = []
+    for item in ((receipt or {}).get("tables") or {}).get("items", []):
+        table = item.get("ref") or item.get("qname") or "?"
+        for flt in item.get("filters", []) or []:
+            part = f"default_filter:{table}:{flt.get('expr')}"
+            status = flt.get("status")
+            if status == "applied":
+                rows.append(_part(part, CONFIRMED, note="the declared filter is applied"))
+            elif status == "omitted":
+                rows.append(_part(part, MODEL_GAP, kind="filter", evidence={"table": table, "expr": flt.get("expr")},
+                                  note="the semantic model declares this filter and the statement does not apply it"))
+            else:
+                rows.append(_part(part, UNRESOLVED, note="whether the declared filter is applied could not be read"))
+    return rows
+
+
+def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
+    rows: list[dict] = []
+    aggregates = [_fold(a.get("aggregate", "")) for a in (prepare or {}).get("aggregates", [])]
+    only_bare_counts = bool(aggregates) and all(a == "count(*)" for a in aggregates)
+    for item in ((receipt or {}).get("columns") or {}).get("items", []):
+        if item.get("kind") != "output":
+            continue
+        column = item.get("column", "?")
+        if item.get("status") == "matched":
+            rows.append(_part(f"metric:{column}", CONFIRMED, evidence={"metric": item.get("metric")},
+                              note="the output matches a defined metric"))
+        elif only_bare_counts:
+            rows.append(_part(f"metric:{column}", CONFIRMED,
+                              note="a bare count matches no metric by design"))
+        else:
+            rows.append(_part(f"metric:{column}", MODEL_GAP, kind="metric", evidence={"column": column},
+                              note="the output matches no metric the semantic model defines"))
+    return rows
+
+
+def _grade_literals(judge: dict | None) -> list[dict]:
+    rows: list[dict] = []
+    for lit in (judge or {}).get("literals", []):
+        part = f"literal:{lit.get('table')}.{lit.get('column')}={lit.get('literal')}"
+        verdict = lit.get("verdict", UNRESOLVED)
+        rows.append(_part(part, verdict, kind="description" if verdict == MODEL_GAP else None,
+                          evidence={"tier": lit.get("tier"), "op": lit.get("op"),
+                                    "near_miss": lit.get("near_miss"), "observed": lit.get("observed"),
+                                    "rows_with_value": lit.get("rows_with_value")},
+                          note=lit.get("note", "")))
+    return rows
+
+
+def _grade_claims(claims: dict | None) -> list[dict]:
+    rows: list[dict] = []
+    wanted = {"filter_predicates": "predicates", "date_window": "date_window"}
+    for claim in (claims or {}).get("claims", []):
+        part = wanted.get(claim.get("name"))
+        if part is None:
+            continue
+        evidence = {"status": claim.get("status"), "generated": claim.get("generated"),
+                    "golden": claim.get("golden")}
+        if claim.get("status") == "agrees":
+            rows.append(_part(part, CONFIRMED, evidence=evidence, note="both statements agree"))
+        elif claim.get("status") == "differs":
+            rows.append(_part(part, UNRESOLVED, evidence=evidence,
+                              note="the two statements differ here; which is right is not decided by this comparison"))
+        else:
+            rows.append(_part(part, UNRESOLVED, evidence=evidence,
+                              note="this claim could not be read on one side"))
+    return rows
+
+
+def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
+    """Every part of the statement in `row_dir`, graded, and the verdict the weakest part decides."""
+    row_dir = Path(row_dir)
+    run = _load_json(row_dir / "run.json")
+    prepare = _load_json(row_dir / "statement-prepare.json")
+    receipt = _load_json(row_dir / "statement-receipt.json")
+    probes = _load_json(row_dir / "join-probes.json")
+    judge = _load_json(row_dir / "filter-values.judge.json")
+    claims = _load_json(row_dir / "claims.json") if with_claims else None
+
+    rows = _grade_run(run)
+    join_rows = _grade_joins(probes, row_dir)
+    rows.extend(join_rows)
+    rows.extend(_grade_aggregates(prepare, join_rows))
+    rows.extend(_grade_filters(receipt))
+    rows.extend(_grade_metrics(receipt, prepare))
+    rows.extend(_grade_literals(judge))
+    rows.extend(_grade_claims(claims))
+
+    counts = {v: 0 for v in _VERDICT_RANK}
+    for row in rows:
+        counts[row["verdict"]] = counts.get(row["verdict"], 0) + 1
+    verdict = max((row["verdict"] for row in rows), key=lambda v: _VERDICT_RANK.get(v, 2))
+    return {"rows": rows, "verdict": verdict, "counts": counts}
+
+
+# --- Findings -------------------------------------------------------------
+
+
+def _finding_key(row: dict) -> str | None:
+    """One key per problem, so the same gap seen from two statements counts once."""
+    part, kind = row["part"], row.get("kind")
+    if kind == "relationship" and part.startswith("join:"):
+        return f"relationship:{part[len('join:'):]}"
+    if kind == "filter" and part.startswith("default_filter:"):
+        table, _sep, expr = part[len("default_filter:"):].partition(":")
+        return f"filter:{table}:{_fold(expr)}"
+    if kind == "metric" and part.startswith("metric:"):
+        return f"metric:{_fold(part[len('metric:'):])}"
+    if kind == "scope":
+        return f"scope:{row.get('evidence', {}).get('rule') or 'scope'}"
+    if kind == "description" and part.startswith("literal:"):
+        return f"description:{_fold(part[len('literal:'):].split('=', 1)[0])}"
+    return f"{kind or 'other'}:{_fold(part)}"
+
+
+def findings(run_dir: Path) -> dict:
+    """The run's findings, its defects, and every row's ledger, written beside `rows.jsonl`.
+
+    A finding is one place the semantic model was shown to be missing or wrong, with every row that
+    showed it. A defect is one part of a person's statement the data proved wrong, listed apart so
+    nothing about the semantic model is proposed from it. A statement the AI got wrong while every
+    part of the person's statement held is a finding of kind `example`: the fix is a worked example,
+    not a change to a definition.
+    """
+    run_dir = Path(run_dir)
+    records: list[dict] = []
+    rows_path = run_dir / "rows.jsonl"
+    if rows_path.exists():
+        for n, line in enumerate(rows_path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.strip():
+                record = json.loads(line)
+                record.setdefault("row", n)
+                records.append(record)
+    ledgers: dict[str, dict] = {}
+    grouped: dict[str, dict] = {}
+    defects: list[dict] = []
+    for record in records:
+        n = record["row"]
+        row_dir = run_dir / "rows" / str(n)
+        graded = ledger(row_dir, with_claims=True) if row_dir.exists() else None
+        if graded is not None:
+            ledgers[str(n)] = graded
+        parts = graded["rows"] if graded else []
+        evidence_base = {"row": n, "question": record.get("question"),
+                         "statement": record.get("statement"), "expected": record.get("expected"),
+                         "claims": record.get("claims")}
+        for part in parts:
+            if part["verdict"] == QUERY_DEFECT:
+                defects.append({"row": n, "part": part["part"], "note": part["note"]})
+            elif part["verdict"] == MODEL_GAP:
+                key = _finding_key(part)
+                entry = grouped.setdefault(key, {"key": key, "kind": part.get("kind"), "evidence": []})
+                entry["evidence"].append({**evidence_base, "part": part["part"],
+                                          "note": part["note"], "ledger": part["evidence"]})
+                if record.get("words"):
+                    entry["words"] = record["words"]
+        clean = not any(p["verdict"] in (QUERY_DEFECT, MODEL_GAP) for p in parts)
+        if record.get("status") == "mismatch" and clean and record.get("question"):
+            key = f"example:{_fold(record['question'])}"
+            entry = grouped.setdefault(key, {"key": key, "kind": "example", "evidence": []})
+            entry["evidence"].append({**evidence_base, "part": None,
+                                      "note": "the statement held on every part and the AI's answer differed",
+                                      "ledger": {}})
+    result = {
+        "findings": sorted(grouped.values(), key=lambda f: f["key"]),
+        "query_defects": sorted(defects, key=lambda d: (d["row"], d["part"])),
+        "ledger": ledgers,
+    }
+    for entry in result["findings"]:
+        entry["evidence"].sort(key=lambda e: e["row"])
+    (run_dir / "findings.json").write_text(json.dumps({"findings": result["findings"]}, indent=2), encoding="utf-8")
+    (run_dir / "query_defects.json").write_text(json.dumps(result["query_defects"], indent=2), encoding="utf-8")
+    (run_dir / "ledger.json").write_text(json.dumps(ledgers, indent=2), encoding="utf-8")
+    return result
+
+
 # --- CLI ------------------------------------------------------------------
 
 
@@ -294,7 +989,60 @@ def main(argv: list[str] | None = None) -> int:
     p_band.add_argument("--value", required=True)
     p_band.add_argument("--tolerance", default="0.01")
 
+    p_intake = sub.add_parser("intake", help="Read any input shape a person brings into evidence rows.")
+    p_intake.add_argument("--file", action="append", required=True, dest="files")
+    p_intake.add_argument("--source", default=None, help="the person's own words for where this came from")
+
+    p_ledger = sub.add_parser("ledger", help="Grade every part of a supplied statement from the files in its row directory.")
+    p_ledger.add_argument("--row-dir", required=True, dest="row_dir")
+    p_ledger.add_argument("--with-claims", action="store_true", dest="with_claims",
+                          help="also read claims.json, the diff against the AI's own statement")
+
+    p_findings = sub.add_parser("findings", help="Write a run's findings, defects and ledgers beside its rows.jsonl.")
+    p_findings.add_argument("--run-dir", required=True, dest="run_dir")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "ledger":
+        row_dir = Path(args.row_dir).expanduser()
+        if not row_dir.is_dir():
+            print(f"reconcile ledger: row directory not found: {row_dir}", file=sys.stderr)
+            return 2
+        result = ledger(row_dir, with_claims=args.with_claims)
+        (row_dir / "ledger.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.cmd == "findings":
+        run_dir = Path(args.run_dir).expanduser()
+        if not run_dir.is_dir():
+            print(f"reconcile findings: run directory not found: {run_dir}", file=sys.stderr)
+            return 2
+        if not (run_dir / "rows.jsonl").exists():
+            print("reconcile findings: no rows to read; the run wrote no rows.jsonl", file=sys.stderr)
+            return 4
+        print(json.dumps(findings(run_dir), indent=2))
+        return 0
+
+    if args.cmd == "intake":
+        paths = [Path(f).expanduser() for f in args.files]
+        missing = [str(p) for p in paths if not p.exists()]
+        if missing:
+            print(f"reconcile intake: file not found: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        try:
+            result = intake(paths, source=args.source)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            print(f"reconcile intake: could not read the input: {exc}", file=sys.stderr)
+            return 2
+        if not result["rows"]:
+            # Exit 4, "nothing to do", kept apart from 2 so the skill can say which happened:
+            # a file it could not open, or a file with no question, statement or number in it.
+            print("reconcile intake: nothing usable in the input; no question, statement or number "
+                  "was found", file=sys.stderr)
+            return 4
+        print(json.dumps(result, indent=2))
+        return 0
 
     if args.cmd == "parse":
         rows = parse_csv(args.csv)

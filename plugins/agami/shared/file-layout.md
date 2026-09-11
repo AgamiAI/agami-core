@@ -18,6 +18,7 @@ Everything in here is either a secret, an auth file derived from a secret, or pe
 | `charts/<profile>/<ts>.html` | Per-query HTML reports |
 | `exports/<profile>/<ts>.csv` | Per-query CSV exports |
 | `{review,model,examples-validation,eval}/<profile>/<ts>.html` | Per-profile dashboards. The `eval` kind also holds a JSON run artifact per run — the answer key and the generated statement, side by side |
+| `reconcile/<ts>/` | One reconcile run: `rows.jsonl`, `ledger.json`, `findings.json`, `query_defects.json`, and `rows/<n>/` holding each supplied statement, its run record, receipts, probe plans and probe CSVs. Question text and SQL, never result rows beyond one recorded cell. See [`part-ledger.md`](part-ledger.md) |
 | `serve/`, `tunnels/` | The copied MCP server; SSH tunnel scripts |
 | `.duckdb_init_*.sql` | Ephemeral, chmod-600 — federation init files, deleted after the query |
 
