@@ -39,6 +39,8 @@ that produced it.
 
 from __future__ import annotations
 
+import csv
+import io
 import math
 import re
 from collections import Counter
@@ -46,6 +48,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Context, Decimal
+from pathlib import Path
 from typing import Any, Literal, NamedTuple, Optional
 
 import sqlglot
@@ -666,8 +669,44 @@ def compare_result_sets(
     )
 
 
+# A number as the execute_sql CSV wire spells it. Deliberately narrow: a digit string with a leading
+# zero (`007`, `02134`) stays text, because a padded id or a postal code that reads as a number would
+# compare equal to its unpadded twin, and a text column that happens to hold digits is text.
+_NUMERIC_TEXT = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?$")
+
+
+def result_from_csv(path: str | Path) -> ExecResult:
+    """The execute_sql CSV wire read back into an ``ExecResult``, for a comparison of two files.
+
+    The wire lost every type, so this puts back the two it can without guessing: numeric text
+    becomes ``Decimal`` (the shape ``_canonical_number`` normalises), and an empty cell becomes
+    ``None``, which is what the wire writes for a NULL. Everything else stays text and is keyed by
+    ``_canonical_text`` like any other string. A digit string with a leading zero stays text on
+    purpose; see ``_NUMERIC_TEXT``.
+
+    A zero-byte file raises rather than reading as an empty result: the execution tier writes CSV
+    only on success, so an empty file is a statement that was refused or failed, and scoring it as
+    "zero rows" would turn a failed run into a wrong answer.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"{path} is empty; the statement that should have written it did not succeed")
+
+    def cell(value: str):
+        if value == "":
+            return None
+        if _NUMERIC_TEXT.match(value):
+            return Decimal(value)
+        return value
+
+    rows = list(csv.reader(io.StringIO(text)))
+    return ExecResult(columns=rows[0], rows=[tuple(cell(v) for v in row) for row in rows[1:]])
+
+
 # The scoring call and the value it hands back, and nothing else. The rest of this module is how
 # the two are built rather than what a caller is invited to reach for; `MatchLevel` and
 # `GoldenBounds` stay out because they belong to `golden`, which is where a caller should take them
-# from rather than through here.
+# from rather than through here. `result_from_csv` is reached by name by the one CLI verb that
+# compares two files, and stays off this list on purpose: it is a reader for one wire, not part of
+# what the comparator promises.
 __all__ = ["ItemScore", "compare_result_sets"]

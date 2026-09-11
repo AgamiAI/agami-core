@@ -927,16 +927,19 @@ def _too_big_to_probe(t: Table) -> bool:
 
 def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str) -> str:
     """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
-    `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself — the reconcile skill's
-    join check, which hands every probe to the execution tier — emits exactly the probe introspection
-    already trusts, rather than a second spelling of it."""
+    `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself, the reconcile skill's
+    join check, which hands every probe to the execution tier, emits exactly the probe introspection
+    already trusts rather than a second spelling of it.
+
+    The sample is bounded through `Dialect.limited`, so the 50-row cap now holds on TOP and FETCH
+    engines too; it used to apply only where the row-limit keyword was `LIMIT`."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
     col_f = dialect.quote_ident(fc)
     col_t = dialect.quote_ident(tc)
+    sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
     return (
-        f"SELECT COUNT(*) AS matched FROM (SELECT DISTINCT {col_f} AS v FROM {fq_from} "
-        f"WHERE {col_f} IS NOT NULL {('LIMIT 50' if dialect.limit_style=='limit' else '')}) src "
+        f"SELECT COUNT(*) AS matched FROM ({sample}) src "
         f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
     )
 
