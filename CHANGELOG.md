@@ -67,6 +67,17 @@ below corresponds to one such version.
   pasted statement with the same ledger. The plan-mode refusal no longer assumes a CSV path.
   (ACE-116)
 
+- **A grading page for a list of questions.** When a person brings questions and no answers, agami
+  answers each one and there is nothing to compare against, so the person grades. One page lists
+  every question with the AI's answer as one cell or a shape, the receipt's signals, and right,
+  wrong or unsure, with a box for the right SQL or for words; one block comes back. A right answer
+  becomes the expected value. A wrong answer with SQL is graded like any statement the person
+  supplies. A wrong answer with words becomes a finding carrying them. Unsure changes nothing.
+  `render_reconcile_grades.py` and `parse_reconcile_grades.py` follow the model explorer's
+  paste-back pattern; the page never renders a result row, and a grade decides nothing on its own.
+  An end-to-end test walks the flawed-inputs chain over the sample store: the wrong join key, the
+  miscased value, the omitted required filter, the clean count. (ACE-117)
+
 ### Fixed
 
 - **The eval's generator can start on Windows.** The client's Windows runtime (Bun) needs

@@ -835,7 +835,12 @@ def _joins_named(label: str, join_rows: list[dict]) -> list[str]:
     return out
 
 
-def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict | None = None) -> list[dict]:
+def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict | None = None,
+                      no_joins_written: bool = False) -> list[dict]:
+    """`no_joins_written` is settled by `sm join-probes` having listed no join at all: a statement
+    that writes no join has nothing that can multiply its aggregates, however the pre-flight labelled
+    them, so an `undetermined` there is confirmed rather than left open. `probes` is the same file,
+    read for the sibling rule: every join written brings in one row at most."""
     if prepare is None:
         return []
     if prepare.get("unchecked"):
@@ -877,6 +882,9 @@ def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict 
         elif agg.get("status") == "not_multiplied":
             rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
                               note="no join multiplies the rows behind this aggregate"))
+        elif no_joins_written:
+            rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
+                              note="the statement writes no join, so nothing multiplies this aggregate"))
         elif one_row_joins:
             rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=[row["part"] for row in join_parts],
                               evidence={"joins": [row["part"] for row in join_parts]},
@@ -1007,6 +1015,8 @@ def _grade_literals(judge: dict | None) -> list[dict]:
 def _grade_claims(claims: dict | None) -> list[dict]:
     rows: list[dict] = []
     wanted = {"filter_predicates": "predicates", "date_window": "date_window"}
+    unreadable = (claims or {}).get("unreadable")
+    both_readable = isinstance(unreadable, dict) and not any(unreadable.values())
     for claim in (claims or {}).get("claims", []):
         part = wanted.get(claim.get("name"))
         if part is None:
@@ -1018,6 +1028,12 @@ def _grade_claims(claims: dict | None) -> list[dict]:
         elif claim.get("status") == "differs":
             rows.append(_part(part, UNRESOLVED, evidence=evidence,
                               note="the two statements differ here; which is right is not decided by this comparison"))
+        elif (part == "date_window" and both_readable
+              and claim.get("generated") is None and claim.get("golden") is None):
+            # `sm claims` reads a window as `unknown` unless both sides wrote one. Two readable
+            # statements with no window on either side have nothing to disagree about.
+            rows.append(_part(part, CONFIRMED, evidence=evidence,
+                              note="neither statement writes a date window"))
         else:
             rows.append(_part(part, UNRESOLVED, evidence=evidence,
                               note="this claim could not be read on one side"))
@@ -1056,7 +1072,8 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
         claims, _why = _usable(claims, "claims")
     join_rows = _grade_joins(probes, row_dir)
     rows.extend(join_rows)
-    rows.extend(_grade_aggregates(prepare, join_rows, probes))
+    rows.extend(_grade_aggregates(prepare, join_rows, probes,
+                                  no_joins_written=probes is not None and not probes.get("joins")))
     rows.extend(_grade_filters(receipt))
     rows.extend(_grade_metrics(receipt, prepare))
     rows.extend(_grade_literals(judge))
@@ -1148,6 +1165,16 @@ def findings(run_dir: Path) -> dict:
             entry["evidence"].append({**evidence_base, "part": None,
                                       "note": "the statement held on every part and the AI's answer differed",
                                       "ledger": {}})
+        # A person graded the answer wrong and said why, with no statement to grade. The receipt
+        # could not say what was wrong, so the finding carries their words and nothing else.
+        graded = (record.get("provenance") or {}).get("graded")
+        if graded == "wrong" and record.get("words") and not record.get("statement") and record.get("question"):
+            key = f"description:{_fold(record['question'])}"
+            entry = grouped.setdefault(key, {"key": key, "kind": "description", "evidence": []})
+            entry["evidence"].append({**evidence_base, "part": None,
+                                      "note": "the person graded the answer wrong; their words say why",
+                                      "ledger": {}})
+            entry["words"] = record["words"]
     result = {
         "findings": sorted(grouped.values(), key=lambda f: f["key"]),
         "query_defects": sorted(defects, key=lambda d: (d["row"], d["part"])),
