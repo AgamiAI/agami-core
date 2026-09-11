@@ -925,18 +925,25 @@ def _too_big_to_probe(t: Table) -> bool:
     return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
-def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
-    """Sample from-column values and check they exist in the target key."""
+def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str) -> str:
+    """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
+    `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself — the reconcile skill's
+    join check, which hands every probe to the execution tier — emits exactly the probe introspection
+    already trusts, rather than a second spelling of it."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
     col_f = dialect.quote_ident(fc)
     col_t = dialect.quote_ident(tc)
-    sql = (
+    return (
         f"SELECT COUNT(*) AS matched FROM (SELECT DISTINCT {col_f} AS v FROM {fq_from} "
         f"WHERE {col_f} IS NOT NULL {('LIMIT 50' if dialect.limit_style=='limit' else '')}) src "
         f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
     )
-    res = _try(runner, sql)
+
+
+def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
+    """Sample from-column values and check they exist in the target key."""
+    res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))
     if not res:
         return False
     try:
