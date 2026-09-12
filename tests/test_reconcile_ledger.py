@@ -60,8 +60,27 @@ def _table(ref: str, filters: list[dict] = ()) -> dict:
 
 
 def _output(column: str, status: str) -> dict:
+    # The receipt carries the matched metric flattened as `name`, `area` and `expression`.
     return {"kind": "output", "column": column, "scope": "main", "status": status,
-            "metric": None if status == "unmatched" else {"name": "revenue"}}
+            "name": "revenue" if status == "matched" else None}
+
+
+def _no_joins() -> dict:
+    return {"joins": [], "joins_written": 0, "dropped": 0, "cardinality": {}, "unique_by_model": {},
+            "unreadable": None}
+
+
+def _no_literals() -> dict:
+    return {"literals": [], "unreadable": None}
+
+
+def _complete(row_dir: Path) -> None:
+    """Every file a successful run leaves behind, each saying there was nothing to grade."""
+    _ran_ok(row_dir)
+    _write(row_dir, "statement-prepare.json", _prepare())
+    _write(row_dir, "statement-receipt.json", _receipt())
+    _write(row_dir, "join-probes.json", _no_joins())
+    _write(row_dir, "filter-values.judge.json", _no_literals())
 
 
 def _join_probe(a: str, ac: str, b: str, bc: str, *, declared_between: bool, matches: bool,
@@ -97,12 +116,13 @@ def _parts(result: dict) -> dict[str, dict]:
 
 
 def test_a_statement_that_ran_clean_is_confirmed_on_every_part(tmp_path):
-    _ran_ok(tmp_path)
+    _complete(tmp_path)
     _write(tmp_path, "statement-prepare.json", _prepare(_agg("SUM(total)", "not_multiplied")))
     _write(tmp_path, "statement-receipt.json", _receipt(
         tables=[_table("orders", [{"expr": "orders.deleted_at IS NULL", "status": "applied"}])],
         columns=[_output("total", "matched")]))
     result = ledger(tmp_path)
+    assert _parts(result)["metric:total"]["evidence"] == {"metric": "revenue"}
     assert result["verdict"] == "confirmed"
     assert {row["verdict"] for row in result["rows"]} == {"confirmed"}
     assert set(_parts(result)) == {"runs", "scope", "fan_out:SUM(total)", "aggregation:SUM(total)",
@@ -412,7 +432,7 @@ def test_a_clean_statement_the_ai_got_wrong_is_a_finding_of_kind_example(tmp_pat
                                "claims": {"claims": [{"name": "filter_predicates", "status": "differs",
                                                       "generated": [], "golden": ["status <> 'cancelled'"]}]}}])
     d = run / "rows" / "1"
-    _ran_ok(d)
+    _complete(d)
     (f,) = findings(run)["findings"]
     assert f["kind"] == "example" and f["key"] == "example:what is total revenue?"
     assert f["evidence"][0]["claims"]["claims"][0]["name"] == "filter_predicates"
@@ -437,3 +457,116 @@ def test_the_findings_verb_exits_four_when_there_is_nothing_to_read(tmp_path, ca
     run.mkdir()
     assert reconcile.main(["findings", "--run-dir", str(run)]) == 4
     assert "no rows" in capsys.readouterr().err
+
+
+# --- review fixes: nothing confident from nothing -----------------------------------
+
+
+def test_an_input_missing_after_a_successful_run_leaves_that_part_open(tmp_path):
+    """A verb that crashed leaves no file, or a zero-byte one, or one JSON error line. Each is a part
+    of the statement that was NOT checked, and the ledger says so instead of grading the rest clean."""
+    _ran_ok(tmp_path)
+    result = ledger(tmp_path)
+    assert result["verdict"] == "unresolved"
+    opened = {p: row for p, row in _parts(result).items() if p.endswith(":*")}
+    assert set(opened) == {"fan_out:*", "receipt:*", "join:*", "literal:*"}
+    assert all(row["evidence"]["problem"] == "was not written" for row in opened.values())
+    _write(tmp_path, "join-probes.json", "")
+    _write(tmp_path, "statement-prepare.json", {"error": "no_model"})
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:*"]["evidence"]["problem"] == "carries an error (empty_file)"
+    assert parts["fan_out:*"]["evidence"]["problem"] == "carries an error (no_model)"
+
+
+def test_a_run_that_failed_expects_no_later_files(tmp_path):
+    _write(tmp_path, "run.json", {"status": "failed", "rule": None, "kind": "timeout", "detail": None})
+    assert set(_parts(ledger(tmp_path))) == {"runs"}
+
+
+def test_a_complete_clean_row_has_no_open_part(tmp_path):
+    _complete(tmp_path)
+    result = ledger(tmp_path)
+    assert result["verdict"] == "confirmed" and set(_parts(result)) == {"runs", "scope"}
+
+
+def test_an_output_column_the_receipt_could_not_settle_is_open_not_a_gap(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "statement-receipt.json", _receipt(columns=[_output("x", "undetermined")]))
+    row = _parts(ledger(tmp_path))["metric:x"]
+    assert row["verdict"] == "unresolved" and row["kind"] is None
+
+
+def test_cardinality_headers_are_read_whatever_their_case(tmp_path):
+    """One tier upper-cases CSV headers. Read case-sensitively, `TOTAL` fell back to the first column
+    for every field and a unique key read as a repeating one."""
+    _ran_ok(tmp_path)
+    _write(tmp_path, "join-probes.json", {"joins": [
+        _join_probe("orders", "customer_id", "customers", "id", declared_between=False, matches=False)],
+        "unreadable": None})
+    _write(tmp_path, "join-1.overlap.0.csv", "MATCHED\n50\n")
+    _write(tmp_path, "cardinality.customers.id.csv", "TOTAL,DISTINCT_COUNT,NULL_COUNT\n1000,1000,0\n")
+    _write(tmp_path, "cardinality.orders.customer_id.csv", "TOTAL,DISTINCT_COUNT,NULL_COUNT\n4000,900,10\n")
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:customers-orders"]["verdict"] == "model_gap"
+    card = parts["cardinality:customers-orders"]
+    assert card["verdict"] == "confirmed" and card["evidence"]["one_side"] == "customers.id"
+
+
+def test_a_failed_overlap_probe_beside_a_zero_is_not_a_defect(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "join-probes.json", {"joins": [
+        _join_probe("orders", "customer_id", "customers", "id", declared_between=False, matches=False)],
+        "unreadable": None})
+    _write(tmp_path, "join-1.overlap.0.csv", "")
+    _write(tmp_path, "join-1.overlap.1.csv", "matched\n0\n")
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:customers-orders"]["verdict"] == "unresolved"
+    assert "empty" in parts["join:customers-orders"]["note"]
+    assert parts["join_key:customers-orders"]["verdict"] == "unresolved"
+
+
+def test_two_joins_between_the_same_tables_are_two_parts(tmp_path):
+    _ran_ok(tmp_path)
+    first = _join_probe("orders", "id", "order_items", "id", declared_between=True, matches=False)
+    second = _join_probe("orders", "id", "order_items", "order_id", declared_between=True, matches=True)
+    second["id"] = "join-2"
+    _write(tmp_path, "join-probes.json", {"joins": [first, second], "unreadable": None})
+    _write(tmp_path, "statement-prepare.json", _prepare(
+        _agg("SUM(total)", "not_multiplied", joins=["orders - order_items"])))
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:order_items-orders"]["verdict"] == "query_defect"
+    assert parts["join:order_items-orders#2"]["verdict"] == "confirmed"
+    fan = parts["fan_out:SUM(total)"]
+    assert fan["verdict"] == "unresolved" and "join:order_items-orders" in fan["depends_on"]
+
+
+def test_a_statement_the_verbs_could_not_read_opens_every_join_and_literal(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "join-probes.json", {**_no_joins(), "unreadable": "the statement could not be read"})
+    _write(tmp_path, "filter-values.judge.json", {"literals": [], "unreadable": "the statement could not be read"})
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:*"]["verdict"] == "unresolved" and parts["literal:*"]["verdict"] == "unresolved"
+
+
+def test_a_row_with_an_open_part_or_no_ledger_is_never_an_example(tmp_path):
+    run = _run_dir(tmp_path, [
+        {"row": 1, "question": "q1", "statement": "s1", "expected": 1, "status": "mismatch"},
+        {"row": 2, "question": "q2", "statement": "s2", "expected": 2, "status": "mismatch"},
+        {"row": 3, "question": "q3", "statement": None, "expected": 3, "status": "mismatch"}])
+    _write(run / "rows" / "1", "run.json", {"status": "failed", "rule": None, "kind": "timeout", "detail": None})
+    _ran_ok(run / "rows" / "2")  # ran, but nothing after it was written: four parts stay open
+    keys = {f["key"] for f in findings(run)["findings"]}
+    assert not any(k.startswith("example:") for k in keys), keys
+
+
+def test_one_declared_filter_seen_through_two_aliases_is_one_finding(tmp_path):
+    run = _run_dir(tmp_path, [
+        {"row": 1, "question": "q1", "statement": "s1", "expected": 1, "status": "mismatch"},
+        {"row": 2, "question": "q2", "statement": "s2", "expected": 2, "status": "mismatch"}])
+    for n, expr in ((1, "o.status != 'cancelled'"), (2, "orders.status != 'cancelled'")):
+        d = run / "rows" / str(n)
+        _ran_ok(d)
+        _write(d, "statement-receipt.json", _receipt(
+            tables=[_table("orders", [{"expr": expr, "status": "omitted"}])]))
+    keys = [f["key"] for f in findings(run)["findings"]]
+    assert keys == ["filter:orders:status != 'cancelled'"]
