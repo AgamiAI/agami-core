@@ -84,6 +84,9 @@ below corresponds to one such version.
 - Reconcile Phase 1.5g reads a person's question beside their statement and writes
   `question_fit.json`; the ledger's `question_fit` part withholds a doubtful row from the keep-offer,
   and a fit that was never checked is an open part rather than a silent pass. (ACE-120)
+- `shared/plain-language.md` says how reconcile talks to the person in Phase 3: four actors and no
+  fifth, the thing and never the mechanism, one idea per sentence, the semantic model quoted when it
+  decided something. Phase 3 points at it. (ACE-121)
 
 ### Fixed
 

@@ -26,7 +26,7 @@ CONVENTIONS = (SHARED / "invocation-conventions.md").read_text(encoding="utf-8")
 PLAN_MODE = (SHARED / "plan-mode-check.md").read_text(encoding="utf-8")
 SAVE_CORRECTION = (SKILLS / "agami-save-correction" / "SKILL.md").read_text(encoding="utf-8")
 REFERENCES = {name: (SHARED / name).read_text(encoding="utf-8")
-              for name in ("evidence-row.md", "part-ledger.md", "statement-check.md")}
+              for name in ("evidence-row.md", "part-ledger.md", "statement-check.md", "plain-language.md")}
 
 
 def _between(text: str, start: str, end: str) -> str:
@@ -180,6 +180,32 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
     assert "question_fit:" in statements and "re-run the row" in statements
     assert "| `question_fit` |" in REFERENCES["part-ledger.md"]
     assert "question_fit.json" in REFERENCES["statement-check.md"] and "question_fit" in REFERENCES["evidence-row.md"]
+
+
+def test_phase_three_speaks_plainly_and_names_four_actors():
+    """Every sentence about a difference names who did what, and the AI is never one of them; the word
+    "model" alone is never written; the ledger's mechanism words stay in tables and files. The pointer
+    sits before 3a, and 3a is untouched."""
+    opening = SKILL.split("## Phase 3: Present", 1)[1].split("### 3a — Summary line first", 1)[0]
+    assert "shared/plain-language.md" in opening and "never the mechanism" in opening
+    assert "steering, front-running or deciding" in opening
+    plain = REFERENCES["plain-language.md"]
+    for actor in ("**you**", "**agami**", "**the semantic model**", "**the prompt examples**", "**the data**"):
+        assert actor in plain, actor
+    # The bare word is never written; the reference says which of four things each name stands for.
+    assert '## The word "model" on its own is never written' in plain
+    for meaning in ("the semantic model", "the large language model", "the prompt examples", "the data model"):
+        assert any(line.startswith("| " + meaning) for line in plain.splitlines()), meaning
+    assert 'never write the word "model" on its own' in opening
+    for machinery, said in (("fan-out", "the join repeats rows"), ("anti-join", "also holds"),
+                            ("predicate", "filter"), ("query_defect", "a mistake in your query"),
+                            ("model_gap", "missing"), ("noted", "not a problem"),
+                            ("unresolved", "could not be checked")):
+        row = next(line for line in plain.splitlines() if line.startswith("| ") and machinery in line.split("|")[1])
+        assert said in row, (machinery, row)
+    assert "## A worked example" in plain and "front-running" in plain
+    statements = _between(SKILL, "### 3b.5 — Your statements", "### 3c")
+    assert "shared/plain-language.md" in statements and 'never "fan-out"' in statements
 
 
 def test_hard_rule_3_gains_the_findings_file_and_keeps_every_pin():
