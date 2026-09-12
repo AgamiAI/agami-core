@@ -36,7 +36,8 @@ def _between(text: str, start: str, end: str) -> str:
 PHASE_1_5 = _between(SKILL, "## Phase 1.5:", "## Phase 2:")
 RECORD = _between(SKILL, "### 2d — Build the row record", "## Phase 3: Present")
 HARD_RULE = _between(SKILL, "## Hard rule for a statement the person supplies", "## Roadmap")
-NEW_PROSE = PHASE_1_5 + RECORD + _between(SKILL, "### 3b.5", "### 3c") + HARD_RULE
+HARD_RULE_3 = _between(SKILL, "3. **Don't write to the semantic model from this skill.**", "\n4. ")
+NEW_PROSE = PHASE_1_5 + RECORD + _between(SKILL, "### 3b.5", "### 3c") + HARD_RULE + HARD_RULE_3
 
 BARE_MODEL = re.compile(r"(?<!semantic )(?<!Semantic )\bthe model\b", re.IGNORECASE)
 
