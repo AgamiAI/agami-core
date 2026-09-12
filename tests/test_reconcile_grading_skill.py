@@ -41,7 +41,8 @@ def test_each_grade_has_one_consequence_and_it_is_named():
 
 
 def test_a_block_that_does_not_parse_applies_nothing():
-    assert "A `needs_judgment` means the block did not parse: ask for it again, apply nothing." in PHASE
+    assert ("A `needs_judgment` means the block did not parse, or a grade in it could not be applied as written "
+            "(a misspelt grade, a row graded twice, SQL beside a `right`): ask for it again, apply nothing.") in PHASE
 
 
 def test_no_bare_the_model_in_the_phase():

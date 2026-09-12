@@ -158,10 +158,10 @@ Only for rows that carry a question and neither a statement nor an expected valu
    ```bash
    python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_grades.py" --block-file /tmp/agami-reconcile-grades-<ts>.txt
    ```
-   A `needs_judgment` means the block did not parse: ask for it again, apply nothing. Read the `anomalies`: a `sql_ignored_on_right` or a `sql_not_a_statement` is worth one sentence back.
+   A `needs_judgment` means the block did not parse, or a grade in it could not be applied as written (a misspelt grade, a row graded twice, SQL beside a `right`): ask for it again, apply nothing. Read the `anomalies`: a `sql_ignored_on_right` or a `sql_not_a_statement` is worth one sentence back.
 4. **Apply each grade, and say which happened:**
    - **`right`** → the answer becomes the row's `expected`; set `provenance.graded` to `right`, run Phase 2c's diff (it matches by construction), and the row can reach Phase 3e like any other agreeing row.
-   - **`wrong` with `sql`** → the SQL is a statement the person supplies, graded like any other: write it to a new row directory and take that row through Phase 1.5, then 2e. A correction typed in frustration is no more ground truth than a query pasted at the start.
+   - **`wrong` with `sql`** → the SQL is a statement the person supplies, graded like any other: write it to a new row directory and take that row through Phase 1.5, then 2e. A correction typed in frustration is no more ground truth than a query pasted at the start. When words came with the SQL, the SQL is what gets graded: the words ride on the new row as `words` for context, and the original row keeps only `provenance.graded: wrong`, so no finding of kind `description` is written for a row that also has a statement.
    - **`wrong` with `words`** → set `provenance.graded` to `wrong` and keep the words on the row record as `words`; Phase 2f writes a finding of kind `description` carrying them, because the receipt could not say what was wrong and only the person's words can.
    - **`unsure`** → set `provenance.graded` to `unsure`. Nothing else happens.
    A row the person did not grade stays as it was and is reported as ungraded in Phase 3.
@@ -201,11 +201,12 @@ Per row:
   "statement_recorded":     {"columns": ["..."], "rows": [[<one cell>]]} | {"columns": ["..."], "row_count": 12} | null,
   "statement_receipt_path": "<rows/<n>/statement-receipt.json, or null>",
   "receipt_path": "<the receipt of agami's own statement>",
-  "ledger":       [<the graded parts, from reconcile.py ledger>] | null,
+  "ledger":       <the ledger.json object from reconcile.py ledger: its rows, verdict and counts> | null,
   "ledger_verdict": "confirmed" | "model_gap" | "query_defect" | "unresolved" | null,
   "comparison":   {"scalar": <the diff>} | {"result_set": <the compare-results score>} | null,
   "claims":       <the sm claims diff between the two statements, or null>,
-  "finding_keys": ["<keys of the findings this row contributed to>"]
+  "finding_keys": ["<keys of the findings this row contributed to>"],
+  "words":        "<what the person wrote beside a wrong grade in Phase 2.5, or null>"
 }
 ```
 

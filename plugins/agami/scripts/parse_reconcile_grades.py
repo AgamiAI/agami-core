@@ -39,6 +39,8 @@ _KEYS = {"profile", "reconcile-run", "grades"}
 _GRADES = frozenset({"right", "wrong", "unsure"})
 _FIELDS = ("row", "grade", "sql", "words")
 _STATEMENT_RE = re.compile(r"^\s*(with|select)\b", re.IGNORECASE)
+_DROPPED_KINDS = frozenset({"unknown_grade", "grade_missing_row", "row_graded_twice",
+                            "grade_not_an_object", "sql_ignored_on_right"})
 
 
 def _key_of(line: str):
@@ -133,6 +135,16 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
             if value.strip():
                 out[field] = value.strip()
         grades.append({key: out[key] for key in _FIELDS if key in out})
+    # A grade that was dropped is a person's decision that would go missing in silence: a misspelt
+    # grade, a row number that is not one, a row graded twice, or SQL beside a `right` (the hand
+    # edit this parser exists to catch). Any of them sends the whole block back rather than
+    # applying the rest, the way the sibling parsers escalate a malformed entry.
+    dropped = sorted({a.get("row") for a in anomalies
+                      if a["kind"] in _DROPPED_KINDS and a.get("row") is not None})
+    if any(a["kind"] in _DROPPED_KINDS for a in anomalies):
+        needs = {"kind": "grades_dropped", "section": "grades", "rows": dropped,
+                 "ask": "some grades could not be applied as written (see anomalies); fix them on the "
+                        "page and paste the block again"}
     return data, anomalies, needs
 
 
@@ -142,7 +154,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     text = Path(args.block_file).read_text(encoding="utf-8") if args.block_file else sys.stdin.read()
     data, anomalies, needs = parse(text)
-    print(json.dumps({"ok": True, "data": data, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
+    print(json.dumps({"ok": needs is None, "data": data, "anomalies": anomalies, "needs_judgment": needs},
+                     indent=2))
     return 0
 
 

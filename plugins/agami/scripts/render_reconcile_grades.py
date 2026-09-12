@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import html
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -69,20 +71,28 @@ def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
         item.setdefault("signals", [])
         item.setdefault("report_path", None)
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    # `</` inside a JSON string would end the script block early; the standard escape keeps it text.
-    items_json = json.dumps(projected).replace("</", "<\\/")
-    return (
-        template
-        .replace("{{REPORT_TITLE}}", title)
-        .replace("{{GENERATED_AT}}",
-                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
-        .replace("{{ITEMS_JSON}}", items_json)
-        .replace("{{PROFILE}}", profile or "")
-        .replace("{{RUN}}", run or "")
-        .replace("{{AGAMI_LOGO_DARK_TEXT}}", _read(LOGO_DARK_PATH))
-        .replace("{{AGAMI_LOGO_LIGHT_TEXT}}", _read(LOGO_LIGHT_PATH))
-        .replace("{{THEME_CSS}}", _read(THEME_PATH))
-    )
+    values = {
+        "REPORT_TITLE": html.escape(title),
+        "GENERATED_AT": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "PROFILE": html.escape(profile or ""),
+        "RUN": html.escape(run or ""),
+        "PROFILE_JSON": _script_json(profile or ""),
+        "RUN_JSON": _script_json(run or ""),
+        "ITEMS_JSON": _script_json(projected),
+        "AGAMI_LOGO_DARK_TEXT": _read(LOGO_DARK_PATH),
+        "AGAMI_LOGO_LIGHT_TEXT": _read(LOGO_LIGHT_PATH),
+        "THEME_CSS": _read(THEME_PATH),
+    }
+    # One pass over the template, so a placeholder token inside a person's question (or the
+    # profile name) is copied as text and never expanded by a later substitution.
+    return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
+
+
+def _script_json(payload) -> str:
+    """JSON safe inside a `<script>` block: every `<` is written as `\\u003c`, so no `</script>`,
+    `<!--` or `<script` in a person's text can end the block or put the parser in a comment state.
+    JSON.parse and a JS literal both read the escape back as the character."""
+    return json.dumps(payload).replace("<", "\\u003c")
 
 
 def main(argv=None) -> int:

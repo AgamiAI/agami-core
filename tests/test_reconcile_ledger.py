@@ -317,10 +317,21 @@ def test_an_undecided_aggregate_over_a_statement_with_no_join_is_confirmed(tmp_p
     """`COUNT(*)` has no column for the pre-flight to trace, so it comes back `undetermined`. When
     `sm join-probes` has listed no join at all, nothing can multiply it, and the grade says so."""
     _ran_ok(tmp_path)
-    _write(tmp_path, "join-probes.json", {"joins": [], "cardinality": {}, "unreadable": None})
+    _write(tmp_path, "join-probes.json", _no_joins())
     _write(tmp_path, "statement-prepare.json", _prepare(_agg("COUNT(*)", "undetermined")))
     row = _parts(ledger(tmp_path))["fan_out:COUNT(*)"]
     assert row["verdict"] == "confirmed" and "no join" in row["note"]
+
+
+def test_an_undecided_aggregate_beside_a_written_join_stays_open(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "join-probes.json", {**_no_joins(), "joins_written": 1, "joins": [
+        _join_probe("orders", "id", "order_items", "order_id", declared_between=True, matches=True)]})
+    _write(tmp_path, "statement-prepare.json", _prepare(_agg("COUNT(*)", "undetermined")))
+    assert _parts(ledger(tmp_path))["fan_out:COUNT(*)"]["verdict"] == "unresolved"
+    # A verb that could not read the statement settles nothing either.
+    _write(tmp_path, "join-probes.json", {**_no_joins(), "unreadable": "the statement could not be read"})
+    assert _parts(ledger(tmp_path))["fan_out:COUNT(*)"]["verdict"] == "unresolved"
 
 
 def test_an_undecided_aggregate_stays_open_when_the_joins_were_never_listed(tmp_path):
@@ -399,13 +410,28 @@ def test_no_date_window_on_either_readable_side_is_not_a_disagreement(tmp_path):
     part is confirmed; the same `unknown` with one side unreadable stays open."""
     _ran_ok(tmp_path)
     window = {"name": "date_window", "status": "unknown", "generated": None, "golden": None}
-    _write(tmp_path, "claims.json", {"claims": [window], "gates": [], "gated": False,
-                                     "unreadable": {"sql_file": None, "against_sql_file": None}})
+    readable = {"sql_file": None, "against_sql_file": None}
+    _write(tmp_path, "claims.json", {"claims": [window], "gates": [], "gated": False, "unreadable": readable,
+                                     "temporal_predicates": {"sql_file": 0, "against_sql_file": 0}})
     row = _parts(ledger(tmp_path, with_claims=True))["date_window"]
     assert row["verdict"] == "confirmed" and "neither statement" in row["note"]
     _write(tmp_path, "claims.json", {"claims": [window], "gates": [], "gated": False,
-                                     "unreadable": {"sql_file": None, "against_sql_file": "syntax"}})
+                                     "unreadable": {"sql_file": None, "against_sql_file": "syntax"},
+                                     "temporal_predicates": {"sql_file": 0, "against_sql_file": None}})
     assert _parts(ledger(tmp_path, with_claims=True))["date_window"]["verdict"] == "unresolved"
+
+
+def test_a_date_filter_the_reader_could_not_fold_keeps_the_window_open(tmp_path):
+    """`CURRENT_DATE - INTERVAL '30 days'` is a window the resolver does not fold, so the claim reads
+    `unknown` with both sides null; the temporal count says a date filter was written, and the part
+    stays open rather than reading as agreement."""
+    _ran_ok(tmp_path)
+    window = {"name": "date_window", "status": "unknown", "generated": None, "golden": None}
+    _write(tmp_path, "claims.json", {"claims": [window], "gates": [], "gated": False,
+                                     "unreadable": {"sql_file": None, "against_sql_file": None},
+                                     "temporal_predicates": {"sql_file": 1, "against_sql_file": 0}})
+    row = _parts(ledger(tmp_path, with_claims=True))["date_window"]
+    assert row["verdict"] == "unresolved" and "does not fold" in row["note"]
 
 
 def test_a_window_read_on_one_side_only_stays_open(tmp_path):
