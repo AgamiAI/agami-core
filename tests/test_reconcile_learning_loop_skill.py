@@ -156,6 +156,15 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
     for grade in ("query_defect", "model_gap", "unresolved"):
         assert grade in statements, grade
     assert "/agami-save-correction" in statements
+    # The three kinds of part live in three blocks, so an open part is never counted as a defect and
+    # a noticed fact is never counted as a grade. The table's example rows carry no `unresolved` row.
+    table = statements.split("**What couldn't be checked**")[0]
+    assert "| unresolved" not in table and "| noted" not in table
+    assert "**What couldn't be checked**" in statements and "**What this run noticed**" in statements
+    assert "`noted` part is not a grade at all" in statements
+    assert "one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`" in PHASE_1_5
+    assert "`noted`, a fact the run states and never judges" in PHASE_1_5
+    assert "| `noted` |" in REFERENCES["part-ledger.md"]
 
 
 def test_hard_rule_3_gains_the_findings_file_and_keeps_every_pin():

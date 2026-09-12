@@ -107,7 +107,7 @@ For every row that carries a `statement`. Skip this phase for a row that does no
 - **1.5b — Run it the way agami runs its own.** `sm prepare` first, then the profile's tier exactly as `agami-query` Phase 1e tabulates it (psql, mysql, snowsql, sqlite3, DuckDB, or `execute_sql`), never `--no-safety`, and always with the statement passed **by file**, never inline in a shell string. Write stdout to `statement.csv`, and into `run.json` the `status`, `exit`, classifier `kind`, guard `rule` and `remediation`, never the raw stderr. **A refusal is a finding, not a crash**: a `table_scope` or `column_scope` refusal grades `scope: model_gap`, because the person wanted a table or column the semantic model does not expose; `select_star` grades `runs: query_defect`. Never rewrite the statement and never retry. Other failures go through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md); `auth`, `dsn`, `network` and `permission` stop the run as `agami-query` Phase 3b stops it. Nothing in this phase writes `query_log.jsonl`: `agami-save-correction` reads that log's last successful line as the question to correct, and a probe there would be corrected instead of the answer. The phase keeps its own record instead: `run.json` for the statement and a `.run.json` beside every probe's CSV, so every execution and every refusal here is written down.
 - **1.5c — Its receipt.** `sm receipt "$ROOT" --sql-file statement.sql > statement-receipt.json` whenever the statement parsed.
 - **1.5d — Probes.** `sm join-probes` and `sm filter-values plan` emit SQL; write each emitted probe to its own `.sql` file and run it through the same tier by path, each to the CSV `part-ledger.md` names with a `.run.json` beside it, then `sm filter-values judge`. A probe the tier refuses or fails leaves an empty CSV; leave it there, the ledger reads it as a probe that failed. A file the ledger expects and does not find, or finds empty, is a part it grades `unresolved`, never clean.
-- **1.5e — The ledger.** `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n>` writes `ledger.json`: one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`, and the weakest grade as the row's `ledger_verdict`. A part reaches `model_gap` only by measurement; the statement asserting something is never the evidence for it.
+- **1.5e — The ledger.** `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n>` writes `ledger.json`: one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`, and the weakest grade as the row's `ledger_verdict`; a part may also be `noted`, a fact the run states and never judges, which never decides the verdict. A part reaches `model_gap` only by measurement; the statement asserting something is never the evidence for it.
 - **1.5f — Its result is the expected value.** For a row that came with no number, `expected` is the single cell `statement.csv` returned (its text folded to a number by `reconcile.py diff`, which reads `$4.2M` and `47,238,221.00` alike), or the table's shape when it returned several rows. For a row that came with a tile number too, run `reconcile.py diff` between the tile and the statement's own result: a disagreement means the statement is not the tile's statement, or the data moved; flag the row in Phase 3b.5 and keep the tile's number as `expected`.
 
 ---
@@ -278,7 +278,7 @@ This is where the trust win lands. The DE doesn't have to chase the disagreement
 
 ### 3b.5 — Your statements (where the evidence itself fell short)
 
-Only when a row carried a statement, and only for the parts that did not grade `confirmed`. One table, no SQL in chat: the part's name and its note are enough, and `findings.json` holds the rest.
+Only when a row carried a statement, and only for the parts that did not grade `confirmed`. One rule throughout: no SQL in chat; the part's name and its note are enough, and `findings.json` holds the rest. Three blocks, because the three kinds of part answer three different questions, and a reader scanning one table counts every row as a problem with the query. The table holds the grades that judge; the two blocks under it hold what was not judged.
 
 ```markdown
 ### Your statements
@@ -288,10 +288,16 @@ Only when a row carried a statement, and only for the parts that did not grade `
 | Delivered orders | literal: orders.status = 'Delivered' | query_defect | not one of the values the semantic model lists, and no row holds it; did you mean 'delivered' |
 | Paid revenue     | join: orders-payments              | query_defect | the join is on a different key than the one the semantic model declares |
 | Q3 Revenue       | default_filter: orders             | model_gap    | the semantic model declares this filter and the statement does not apply it |
-| Q3 Revenue       | fan_out: SUM(total)                | unresolved   | the join this total depends on is unresolved, so the fan-out check has no cardinality to reason from |
+| Open items       | values_declared: items.state       | model_gap    | the column holds 6 distinct values and the semantic model lists none of them |
+
+**What couldn't be checked**
+- Q3 Revenue, fan_out: SUM(total): the pre-flight could not bind this aggregate to one table: a column inside the aggregate could not be attributed to one table
+
+**What this run noticed**
+- Open items, dropped_rows: items-users: 3 of 8,345 items rows have no users partner and are dropped by this inner join; counted over the whole table, before the statement's own filters
 ```
 
-Say the two kinds apart in one sentence each: a `query_defect` is the person's to fix, and nothing about agami changes because of it; a `model_gap` is a place the data proved their statement right where the semantic model is missing or wrong, and a single fix still goes through `/agami-save-correction`. An `unresolved` part is neither: it says what could not be checked and why.
+Say the kinds apart in one sentence each: a `query_defect` is the person's to fix, and nothing about agami changes because of it; a `model_gap` is a place the data proved their statement right where the semantic model is missing or wrong, and a single fix still goes through `/agami-save-correction` (an undeclared value list is a field's `choice_field`, the `field_metadata` route). An `unresolved` part is neither: it says what could not be checked and why, and it sits in its own block so nobody counts it as a defect. A `noted` part is not a grade at all: a fact the run states and never judges, in the last block.
 
 ### 3c — Errors block (if any)
 
