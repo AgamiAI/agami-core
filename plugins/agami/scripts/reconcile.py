@@ -27,7 +27,9 @@ Usage:
     # Read any of the four input shapes a person brings into evidence rows:
     #   (a) questions, (b) questions with the SQL they trust, (c) labels with numbers,
     #   (d) labels with numbers and the SQL behind each. Several files merge by label.
-    python3 reconcile.py intake --file tiles.csv --file behind-the-tiles.sql --source "the finance dashboard"
+    #   A second file merges by label, so it needs a label column: `label,sql` reads as the SQL
+    #   behind each tile; a bare .sql file has no labels and stands as its own rows.
+    python3 reconcile.py intake --file tiles.csv --file sql.csv --source "the finance dashboard"
 """
 
 from __future__ import annotations
@@ -298,9 +300,6 @@ _HEADER_FIELDS: dict[str, str] = {
     "question": "question", "prompt": "question",
 }
 
-_SHAPE_ORDER = ("a", "b", "c", "d")
-
-
 def _fold(text: str) -> str:
     """Case and whitespace fold, the only normalization a label match is allowed."""
     return re.sub(r"\s+", " ", text.strip()).lower()
@@ -449,10 +448,16 @@ def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[di
     if suffix == ".json":
         return _rows_from_json(json.loads(text), file=file, source=source)
     if suffix == ".sql":
-        rows = []
+        rows, skipped = [], []
         for n, stmt in enumerate((s for s in text.split(";") if s.strip()), 1):
-            rows.append(_new_row(file=file, line=n, source=source, statement=stmt))
-        return rows, []
+            # The same test a CSV cell gets: anything that is not a SELECT or a WITH is context or
+            # a mistake, and never reaches the tier as a statement the person supplied.
+            if _is_statement(stmt):
+                rows.append(_new_row(file=file, line=n, source=source, statement=stmt.strip()))
+            else:
+                skipped.append({"file": file, "line": n, "text": stmt.strip()[:80],
+                                "reason": "not a SELECT or WITH statement"})
+        return rows, skipped
     if suffix in (".txt", ".md") or ("," not in text and "\t" not in text):
         rows = []
         for n, line in enumerate(text.splitlines(), 1):
@@ -553,7 +558,32 @@ def _part(part: str, verdict: str, *, kind: str | None = None, depends_on=(),
 
 
 def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    """The JSON in `path`; None when the file is absent; `{"error": ...}` when it is empty or is not
+    JSON. A verb that crashed leaves a zero-byte redirect behind, and that must read as "this input
+    is unusable", never as "checked and clean"."""
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return {"error": "empty_file"}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        return {"error": "unreadable_json", "detail": str(exc).splitlines()[0]}
+
+
+def _usable(payload: Any, key: str) -> "tuple[dict | None, str | None]":
+    """The payload when it carries `key`, else None and why: absent, empty, an error object from a verb
+    that exited non-zero, or JSON of another shape."""
+    if payload is None:
+        return None, "was not written"
+    if not isinstance(payload, dict):
+        return None, "is not a JSON object"
+    if payload.get("error"):
+        return None, f"carries an error ({payload['error']})"
+    if key not in payload:
+        return None, f"has no `{key}` key"
+    return payload, None
 
 
 def _probe_csv(path: Path) -> "list[dict] | str | None":
@@ -572,11 +602,15 @@ def _probe_csv(path: Path) -> "list[dict] | str | None":
 
 
 def _first_number(rows, key: str) -> float | None:
+    """The first row's `key` column as a number. Headers are matched without regard to case, because
+    one tier upper-cases them; the fall-back to the only column is for a one-column result and never
+    for a wider one, where it would read the wrong column."""
     if not isinstance(rows, list) or not rows:
         return None
-    raw = rows[0].get(key)
-    if raw is None and rows[0]:
-        raw = next(iter(rows[0].values()))
+    row = rows[0]
+    raw = next((v for k, v in row.items() if k and k.strip().lower() == key.lower()), None)
+    if raw is None and len(row) == 1:
+        raw = next(iter(row.values()))
     try:
         return float(raw) if raw not in (None, "") else None
     except (TypeError, ValueError):
@@ -606,7 +640,7 @@ def _grade_run(run: dict | None) -> list[dict]:
                       note=f"the statement was refused before it ran ({rule})")]
     if status == "failed":
         if kind in _STATEMENT_DEFECT_KINDS:
-            return [_part("runs", QUERY_DEFECT, evidence={"kind": kind, "detail": run.get("detail")},
+            return [_part("runs", QUERY_DEFECT, evidence={"kind": kind, "remediation": run.get("remediation")},
                           note=f"the database rejected the statement ({kind})")]
         return [_part("runs", UNRESOLVED, evidence={"kind": kind},
                       note=f"the run failed with {kind}; the statement could not be checked")]
@@ -627,14 +661,8 @@ def _join_tables(join: dict) -> tuple[str, str]:
 
 
 def _join_status(join: dict) -> str:
-    """The status `sm join-probes` gave the join, derived from its flags for a file written before
-    the verb carried one."""
-    status = join.get("status")
-    if status:
-        return status
-    if join.get("written_matches_declared"):
-        return "declared"
-    return "wrong_key" if join.get("declared_between_tables") else "undeclared"
+    """The status `sm join-probes` gave the join; one it did not label stays open."""
+    return join.get("status") or "undetermined"
 
 
 def _cardinality_result(probes: dict | None, key: str, row_dir: Path) -> dict | None:
@@ -656,9 +684,18 @@ def _cardinality_result(probes: dict | None, key: str, row_dir: Path) -> dict | 
 
 def _grade_joins(probes: dict | None, row_dir: Path) -> list[dict]:
     rows: list[dict] = []
+    if probes is not None and probes.get("unreadable"):
+        return [_part("join:*", UNRESOLVED, evidence={"unreadable": probes["unreadable"]},
+                      note="the join verb could not read the statement, so no join was checked")]
+    seen: dict[str, int] = {}
     for join in (probes or {}).get("joins", []):
         a, b = _join_tables(join)
         label = f"{a}-{b}"
+        # Two joins between the same two tables in one statement are two parts, not one: keyed by
+        # the same label, the second would silently overwrite the first's grade.
+        seen[label] = seen.get(label, 0) + 1
+        if seen[label] > 1:
+            label = f"{label}#{seen[label]}"
         jid = join.get("id", "join")
         status = _join_status(join)
         planned = join.get("probes") or {}
@@ -698,25 +735,27 @@ def _grade_joins(probes: dict | None, row_dir: Path) -> list[dict]:
             rows.append(_part(f"join:{label}", MODEL_GAP, kind="relationship",
                               evidence={"overlap": hits, **written},
                               note="the join is not declared, and its keys resolve in the data"))
-        elif hits:
+        elif hits and not overlap_failed:
             rows.append(_part(f"join:{label}", QUERY_DEFECT, evidence={"overlap": hits, **written},
                               note="the join is not declared, and its keys never meet in the data"))
         else:
-            rows.append(_part(f"join:{label}", UNRESOLVED, evidence=written,
-                              note="the join is not declared and no probe result was supplied"
-                                   + ("; the probe file is empty, so the probe likely failed"
-                                      if overlap_failed else "")))
+            # No hit, or a hit beside a probe that failed: half the evidence is not evidence.
+            rows.append(_part(f"join:{label}", UNRESOLVED, evidence={"overlap": hits, **written},
+                              note="the join is not declared and "
+                                   + ("a probe file is empty, so that probe likely failed; the rest is not enough to decide"
+                                      if overlap_failed else "no probe result was supplied")))
 
         # The probe rows: whenever probes were planned or answered. A declared join plans none.
         if hits or planned.get("overlap"):
             if any_overlap:
                 rows.append(_part(f"join_key:{label}", CONFIRMED, evidence={"overlap": hits},
                                   note="sampled keys from one side exist on the other"))
-            elif hits:
+            elif hits and not overlap_failed:
                 rows.append(_part(f"join_key:{label}", QUERY_DEFECT, evidence={"overlap": hits},
                                   note="no sampled key from either side exists on the other"))
             else:
-                rows.append(_part(f"join_key:{label}", UNRESOLVED, note="no overlap probe result"))
+                rows.append(_part(f"join_key:{label}", UNRESOLVED, evidence={"overlap": hits},
+                                  note="an overlap probe result is missing or its file is empty"))
         if card or planned.get("cardinality"):
             uniques = sorted(k for k, v in card.items() if v["unique"])
             if len(card) >= 2 and uniques:
@@ -739,7 +778,7 @@ def _joins_named(label: str, join_rows: list[dict]) -> list[str]:
     for row in join_rows:
         if not row["part"].startswith("join:"):
             continue
-        a, b = row["part"][len("join:"):].split("-", 1)
+        a, b = row["part"][len("join:"):].split("#", 1)[0].split("-", 1)
         if a in words and b in words:
             out.append(row["part"])
     return out
@@ -813,20 +852,29 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
         if item.get("kind") != "output":
             continue
         column = item.get("column", "?")
-        if item.get("status") == "matched":
-            rows.append(_part(f"metric:{column}", CONFIRMED, evidence={"metric": item.get("metric")},
+        status = item.get("status")
+        if status == "matched":
+            rows.append(_part(f"metric:{column}", CONFIRMED, evidence={"metric": item.get("name")},
                               note="the output matches a defined metric"))
         elif only_bare_counts:
             rows.append(_part(f"metric:{column}", CONFIRMED,
                               note="a bare count matches no metric by design"))
-        else:
+        elif status == "unmatched":
             rows.append(_part(f"metric:{column}", MODEL_GAP, kind="metric", evidence={"column": column},
                               note="the output matches no metric the semantic model defines"))
+        else:
+            # `undetermined` is the receipt saying it could not tell (an ambiguous binding, a column
+            # behind a CTE, a declaration it could not read). A failure to read is never a gap.
+            rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "status": status},
+                              note="whether the output matches a metric could not be read"))
     return rows
 
 
 def _grade_literals(judge: dict | None) -> list[dict]:
     rows: list[dict] = []
+    if judge is not None and judge.get("unreadable"):
+        return [_part("literal:*", UNRESOLVED, evidence={"unreadable": judge["unreadable"]},
+                      note="the filter-values verb could not read the statement, so no value was checked")]
     for lit in (judge or {}).get("literals", []):
         part = f"literal:{lit.get('table')}.{lit.get('column')}={lit.get('literal')}"
         verdict = lit.get("verdict", UNRESOLVED)
@@ -869,6 +917,25 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     claims = _load_json(row_dir / "claims.json") if with_claims else None
 
     rows = _grade_run(run)
+    # After a run that succeeded, every input the later steps write is expected. One that is absent,
+    # empty, or an error object is a part of the statement that was NOT checked, said as such: the
+    # alternative, grading only what is there, makes a crashed verb read as a clean statement.
+    ran = isinstance(run, dict) and run.get("status") == "ok"
+    expected = (("statement-prepare.json", prepare, "aggregates", "fan_out:*"),
+                ("statement-receipt.json", receipt, "tables", "receipt:*"),
+                ("join-probes.json", probes, "joins", "join:*"),
+                ("filter-values.judge.json", judge, "literals", "literal:*"))
+    checked: dict[str, dict | None] = {}
+    for name, payload, key, part in expected:
+        got, why = _usable(payload, key)
+        checked[name] = got
+        if ran and got is None:
+            rows.append(_part(part, UNRESOLVED, evidence={"file": name, "problem": why},
+                              note=f"{name} {why}, so this part of the statement was not checked"))
+    prepare, receipt = checked["statement-prepare.json"], checked["statement-receipt.json"]
+    probes, judge = checked["join-probes.json"], checked["filter-values.judge.json"]
+    if with_claims:
+        claims, _why = _usable(claims, "claims")
     join_rows = _grade_joins(probes, row_dir)
     rows.extend(join_rows)
     rows.extend(_grade_aggregates(prepare, join_rows))
@@ -887,6 +954,10 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
 # --- Findings -------------------------------------------------------------
 
 
+# A table or alias qualifier in front of a column name, for folding `o.status` and `orders.status`.
+_QUALIFIER_RE = re.compile(r"\b[a-z_][a-z0-9_]*\.(?=[a-z_])")
+
+
 def _finding_key(row: dict) -> str | None:
     """One key per problem, so the same gap seen from two statements counts once."""
     part, kind = row["part"], row.get("kind")
@@ -894,7 +965,9 @@ def _finding_key(row: dict) -> str | None:
         return f"relationship:{part[len('join:'):]}"
     if kind == "filter" and part.startswith("default_filter:"):
         table, _sep, expr = part[len("default_filter:"):].partition(":")
-        return f"filter:{table}:{_fold(expr)}"
+        # The receipt spells the filter with the statement's own alias (`o.status`), so the same
+        # declared filter seen through two aliases would be two findings. The qualifier is dropped.
+        return f"filter:{table}:{_QUALIFIER_RE.sub('', _fold(expr))}"
     if kind == "metric" and part.startswith("metric:"):
         return f"metric:{_fold(part[len('metric:'):])}"
     if kind == "scope":
@@ -945,7 +1018,9 @@ def findings(run_dir: Path) -> dict:
                                           "note": part["note"], "ledger": part["evidence"]})
                 if record.get("words"):
                     entry["words"] = record["words"]
-        clean = not any(p["verdict"] in (QUERY_DEFECT, MODEL_GAP) for p in parts)
+        # An example is offered only when the person's statement held on EVERY part. A part left
+        # open, or a row that was never graded at all, is not a statement that held.
+        clean = bool(parts) and all(p["verdict"] == CONFIRMED for p in parts)
         if record.get("status") == "mismatch" and clean and record.get("question"):
             key = f"example:{_fold(record['question'])}"
             entry = grouped.setdefault(key, {"key": key, "kind": "example", "evidence": []})
@@ -1038,6 +1113,8 @@ def main(argv: list[str] | None = None) -> int:
         if not result["rows"]:
             # Exit 4, "nothing to do", kept apart from 2 so the skill can say which happened:
             # a file it could not open, or a file with no question, statement or number in it.
+            # The skipped lines and their reasons still go to stdout, so the person hears why.
+            print(json.dumps(result, indent=2))
             print("reconcile intake: nothing usable in the input; no question, statement or number "
                   "was found", file=sys.stderr)
             return 4

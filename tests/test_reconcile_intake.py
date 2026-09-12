@@ -166,3 +166,22 @@ def test_the_verb_prints_the_same_json_the_function_returns(tmp_path, capsys):
     assert reconcile.main(["intake", "--file", str(p), "--source", "analyst"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed == intake([p], source="analyst")
+
+
+def test_a_sql_file_keeps_only_statements_and_names_the_rest(tmp_path):
+    """A `.sql` file gets the same test a CSV cell gets: a chunk that is not a SELECT or a WITH never
+    becomes a statement row, so nothing but a read-only statement ever reaches the tier from here."""
+    f = tmp_path / "q.sql"
+    f.write_text("DROP TABLE orders;\nSELECT COUNT(*) FROM orders;\n-- a note\n")
+    result = intake([f], source=None)
+    assert [r["statement"] for r in result["rows"]] == ["SELECT COUNT(*) FROM orders"]
+    assert [s["reason"] for s in result["skipped"]] == ["not a SELECT or WITH statement"] * 2
+
+
+def test_exit_four_still_prints_what_was_skipped_and_why(tmp_path, capsys):
+    f = tmp_path / "q.sql"
+    f.write_text("DROP TABLE orders;")
+    assert reconcile.main(["intake", "--file", str(f)]) == 4
+    out, err = capsys.readouterr()
+    assert json.loads(out)["skipped"][0]["reason"] == "not a SELECT or WITH statement"
+    assert "nothing usable" in err

@@ -21,8 +21,12 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    It describes and never refuses.
 4. **The tier's own tool**, exactly as `agami-query` Phase 1e tabulates it for this profile: psql,
    mysql, snowsql, sqlite3, DuckDB, or `"$PY" -m execute_sql --profile <profile> --area <area>
-   --sql-file statement.sql`. **Never `--no-safety`.** stdout goes to `statement.csv`; the exit code
-   and stderr go into `run.json`.
+   --sql-file statement.sql`. **Never `--no-safety`.** Always pass the statement **by file** (the
+   tool's `-f` or `--sql-file` form), never inline in a shell string: a literal such as `'$(id)'` is
+   legal SQL and the shell would expand it. stdout goes to `statement.csv`. `run.json` records
+   `status` (`ok`, `failed`, `refused`, `not_run`), `exit`, the classifier's `kind`, the guard's
+   `rule`, and its `remediation`; **never the raw stderr**, which can carry the statement and the
+   engine's error text.
 5. **A refusal is a finding, not a crash.** `execute_sql` exits `1` with one JSON line on stderr,
    `{"refusal": {"reason", "rule", "detail", "remediation"}}`. Write `run.json` with
    `status: "refused"` and that `rule`. `table_scope` and `column_scope` become a `scope: model_gap`
@@ -30,23 +34,31 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    `select_star` becomes `runs: query_defect`. Never rewrite the statement and never retry: a
    regenerated statement is one the person never wrote.
 6. **Other failures** go through [`db_error_classifier.md`](db_error_classifier.md). `auth`, `dsn`,
-   `network` and `permission` stop the whole run, as Phase 3b stops it; write the `kind` and move on.
+   `network` and `permission` stop the whole run, as Phase 3b stops it; write the `kind` and its
+   `remediation` and move on.
 7. **`sm receipt`** whenever the statement parsed: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" receipt
    "$ROOT" --sql-file statement.sql > statement-receipt.json`.
-8. **Probes** go through step 4 only, each to its own CSV named as `part-ledger.md` lists:
-   `sm join-probes --sql-file statement.sql > join-probes.json`, then each join's
-   `probes.overlap[i].sql` to `<join id>.overlap.<i>.csv` and each entry of the top-level
-   `cardinality` map to `cardinality.<table>.<column>.csv` (skip a null entry: the semantic model
-   already says that column is unique); `sm filter-values plan --sql-file statement.sql >
-   filter-values.plan.json`, then each `columns[<key>].distinct` to `<key>.distinct.csv`, each
-   literal's `probes.exists` to `<literal id>.exists.csv`, and `probes.exists_folded` to
-   `<literal id>.exists_folded.csv` only when `exists` returned 0; then `sm filter-values judge
-   --plan filter-values.plan.json --results . > filter-values.judge.json`.
-   A probe the tier refuses or fails leaves an empty file; leave it, the ledger reads it as a probe
-   that failed.
-9. **Nothing in these steps writes `query_log.jsonl`.** `agami-save-correction` reads that log's last
-   successful line as the question to correct, and a probe there would be corrected instead of the
-   answer. The AI's own run logs as `agami-query` Phase 5 always has.
+8. **Probes** go through step 4 only, each written to its own `.sql` file first and passed by path,
+   each result to its own CSV named as `part-ledger.md` lists:
+   `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" join-probes "$ROOT" --sql-file statement.sql >
+   join-probes.json`, then each join's `probes.overlap[i].sql` to `<join id>.overlap.<i>.csv` and
+   each entry of the top-level `cardinality` map to `cardinality.<table>.<column>.csv` (skip a null
+   entry: the semantic model already says that column is unique); `bash "$AGAMI_PLUGIN_ROOT/scripts/sm"
+   filter-values plan "$ROOT" --sql-file statement.sql > filter-values.plan.json`, then each
+   `columns[<key>].distinct` to `<key>.distinct.csv`, each literal's `probes.exists` to
+   `<literal id>.exists.csv`, and `probes.exists_folded` to `<literal id>.exists_folded.csv` only when
+   `exists` returned 0; then `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" filter-values judge "$ROOT" --plan
+   filter-values.plan.json --results . > filter-values.judge.json`.
+   A probe the tier refuses or fails leaves an empty CSV; leave it, the ledger reads it as a probe
+   that failed. Beside every probe's CSV write `<same name>.run.json` with the same fields as step
+   4's `run.json`, refusal `rule` included: that file is the record of the probe having run or having
+   been refused.
+9. **Nothing in these steps writes `query_log.jsonl`, and nothing here runs unrecorded.**
+   `agami-save-correction` reads that log's last successful line as the question to correct, and a
+   probe there would be corrected instead of the answer. The record of this phase is the row
+   directory itself: `run.json` for the statement and `<probe>.run.json` for every probe, each with
+   its exit, rule and kind, so every execution and every refusal in this phase is written down. The
+   AI's own run logs as `agami-query` Phase 5 always has.
 
 Then `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir .` grades what was found,
 and again with `--with-claims` once `sm claims` has compared the two statements.

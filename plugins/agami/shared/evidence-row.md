@@ -40,10 +40,13 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" intake --file <path> [--file <
 Detection is by content, never by asking:
 
 - **A cell that starts with `SELECT` or `WITH`** is a statement. A `.sql` file is statements split on
-  `;`.
-- **A `.txt` or `.md` file, or a file with no commas or tabs,** is one question per line.
+  `;`, and every chunk gets the same test: one that is not a `SELECT` or a `WITH` is skipped with a
+  reason, never a statement row.
+- **A `.txt` or `.md` file, or a file with no commas or tabs,** is one question per line; a line that
+  starts with `SELECT` or `WITH` is a statement.
 - **A `.json` file** is a list of strings (questions) or objects with any of the keys `label`,
-  `question`, `value`, `sql`.
+  `question`, `value`, `sql`, or their common spellings (`metric`, `tile`, `expected`, `statement`,
+  `query`, `prompt`, and the like).
 - **Anything else is CSV.** A header row is recognised by name (`label`, `metric`, `value`,
   `expected`, `sql`, `statement`, `question`, and their common spellings), or by the shape
   `parse_csv` always recognised: a non-numeric second cell over rows whose second cells are numbers.
@@ -70,7 +73,7 @@ always had stays, with the same meaning: `label`, `question`, `expected`, `actua
 
 | Key | Holds |
 |---|---|
-| `provenance` | the block above: `shape`, `source`, `file`, `line`, `graded` (`null`, `right`, `wrong` or `unsure` once the person has graded a shape-a row) |
+| `provenance` | the block above: `shape`, `source`, `file`, `line`, `graded` (`null`, `right`, `wrong` or `unsure` once the person has graded a shape-a row), and `merged_from` (the file and line of a statement that joined a tile's row by label) |
 | `statement` | the person's SQL, verbatim; `null` when they gave none |
 | `statement_recorded` | what the person's SQL returned: one cell as `{"columns": [...], "rows": [[v]]}`, or `{"columns": [...], "row_count": n}` for a table. Never the rows of a table |
 | `statement_receipt_path` | the receipt of the person's SQL, in the row directory |
@@ -79,6 +82,7 @@ always had stays, with the same meaning: `label`, `question`, `expected`, `actua
 | `comparison` | `{"scalar": <diff>}` or `{"result_set": <compare-results>}` |
 | `claims` | the `sm claims` diff between the two statements, when both exist |
 | `finding_keys` | the keys of the findings this row contributed to |
+| `words` | what the person wrote beside a `wrong` grade when they gave no SQL; `null` otherwise |
 
 ## The status a row gets
 
