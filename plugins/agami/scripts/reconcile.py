@@ -621,6 +621,32 @@ def _first_number(rows, key: str) -> float | None:
         return None
 
 
+def _grade_question_fit(fit: Any, ran: bool) -> list[dict]:
+    """The one part graded by reading rather than measuring: the skill's Phase 1.5g judgment of
+    whether the statement answers the question it came with, written to `question_fit.json`. It can
+    withhold a row from the keep-offer and never proves anything about the semantic model. Expected
+    for every statement row after a run that succeeded, so a check that was never made is an open
+    part and not a silent pass."""
+    got, why = _usable(fit, "fit")
+    if got is None:
+        if not ran:
+            return []
+        return [_part("question_fit", UNRESOLVED, evidence={"file": "question_fit.json", "problem": why},
+                      note=f"question_fit.json {why}, so the fit of the statement to its question was not checked")]
+    word, reason = got.get("fit"), got.get("reason")
+    if word == "no_question":
+        return []
+    if word == "plausible":
+        return [_part("question_fit", CONFIRMED, evidence={"fit": word, "reason": reason},
+                      note="the statement plausibly answers the question, by reading; a judgment, not a measurement")]
+    if word == "doubtful":
+        return [_part("question_fit", UNRESOLVED, evidence={"fit": word, "reason": reason},
+                      note=f"the statement may not answer the question: {reason or 'no reason was given'}; "
+                           "reword the question or the statement and re-run this row")]
+    return [_part("question_fit", UNRESOLVED, evidence={"fit": word},
+                  note=f"question_fit.json carries an unknown fit {word!r}, so the fit was not checked")]
+
+
 def _grade_run(run: dict | None) -> list[dict]:
     if run is None:
         return [_part("runs", UNRESOLVED, note="no run record was found for the statement")]
@@ -1109,8 +1135,10 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     # Optional: the semantic model's own words about what the statement reads. Absent, the ledger
     # grades exactly as it would have; present, they ride on the parts that fell short.
     mentions = _load_json(row_dir / "mentions.json")
+    fit = _load_json(row_dir / "question_fit.json")
 
     rows = _grade_run(run)
+    rows.extend(_grade_question_fit(fit, isinstance(run, dict) and run.get("status") == "ok"))
     # After a run that succeeded, every input the later steps write is expected. One that is absent,
     # empty, or an error object is a part of the statement that was NOT checked, said as such: the
     # alternative, grading only what is there, makes a crashed verb read as a clean statement.
