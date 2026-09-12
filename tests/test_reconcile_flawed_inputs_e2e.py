@@ -20,6 +20,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 import shutil
 import sqlite3
 import sys
@@ -145,6 +146,11 @@ def grade_statement(store: dict, n: int, sql: str) -> dict:
         if probe_sql:
             text, _err = _run_sql(db, probe_sql)
             (row_dir / f"cardinality.{key}.csv").write_text(text)
+    for join in joins["joins"]:
+        probe = join.get("dropped_rows_probe")
+        if probe:
+            text, _err = _run_sql(db, probe["sql"])
+            (row_dir / f"{join['id']}.dropped_rows.csv").write_text(text)
     plan = _sm("filter-values", "plan", str(root), "--sql-file", str(row_dir / "statement.sql"))
     (row_dir / "filter-values.plan.json").write_text(json.dumps(plan))
     for key, column in plan["columns"].items():
@@ -366,6 +372,72 @@ def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(store):
     assert not any("payments" in k for k in keys)
     for name in ("findings.json", "query_defects.json", "ledger.json"):
         assert (store["run"] / name).exists()
+
+
+def test_10_a_count_through_declared_many_to_one_joins_is_confirmed_and_the_drops_are_noted(store):
+    """`COUNT(*)` names no column, so the pre-flight cannot bind it. Both joins bring the one side in
+    (order_items -> orders, order_items -> products), so nothing multiplies the count; the ledger
+    confirms it, states what each inner join dropped, and the row can reach the keep-offer."""
+    sql = ("SELECT COUNT(*) AS n FROM order_items oi JOIN orders o ON o.id = oi.order_id "
+           "JOIN products p ON p.id = oi.product_id WHERE o.status != 'cancelled'")
+    ledger = grade_statement(store, 10, sql)
+    parts = _parts(ledger)
+    fan = parts["fan_out:COUNT(*)"]
+    assert fan["verdict"] == "confirmed" and "one row at most" in fan["note"], fan
+    noted = {p: row for p, row in parts.items() if p.startswith("dropped_rows:")}
+    assert set(noted) == {"dropped_rows:order_items-orders", "dropped_rows:order_items-products"}, noted
+    for row in noted.values():
+        assert row["verdict"] == "noted" and row["evidence"]["total"] > 0 and row["evidence"]["dropped"] >= 0
+    assert ledger["verdict"] == "confirmed", [r for r in ledger["rows"] if r["verdict"] not in ("confirmed", "noted")]
+    expected = scalar((store["run"] / "rows" / "10" / "statement.csv").read_text())
+    actual = ask_agami(store, 10, sql)
+    diff, ledger = compare(store, 10, expected, actual)
+    rec = record(store, 10, "How many items were ordered?", sql, expected, diff, ledger)
+    assert rec["status"] == "match"
+
+
+def test_11_a_join_that_brings_the_many_side_in_leaves_the_count_open_and_says_why(store):
+    sql = ("SELECT COUNT(*) AS n FROM orders o JOIN order_items oi ON oi.order_id = o.id "
+           "WHERE o.status != 'cancelled'")
+    parts = _parts(grade_statement(store, 11, sql))
+    assert parts["join:order_items-orders"]["evidence"]["one_row_on_right"] is False
+    fan = parts["fan_out:COUNT(*)"]
+    assert fan["verdict"] == "unresolved"
+    assert "could not bind this aggregate to one table: the aggregate names no column" in fan["note"], fan
+
+
+def test_12_a_filter_on_a_column_with_no_declared_values_is_a_gap_said_once(store):
+    """`categories.slug` holds three values and the semantic model lists none of them. The value
+    itself checks out against the warehouse and says so; the column's missing list is the finding."""
+    sql = ("SELECT COUNT(*) AS n FROM products p JOIN categories c ON c.id = p.category_id "
+           "WHERE c.slug = 'apparel'")
+    ledger = grade_statement(store, 12, sql)
+    parts = _parts(ledger)
+    gap = parts["values_declared:categories.slug"]
+    assert gap["verdict"] == "model_gap" and gap["kind"] == "description", gap
+    assert re.search(r"holds \d+ distinct values and the semantic model lists none", gap["note"]), gap["note"]
+    (lit,) = [row for p, row in parts.items() if p.startswith("literal:categories.slug")]
+    assert lit["verdict"] == "confirmed" and "graded against the warehouse" in lit["note"]
+    expected = scalar((store["run"] / "rows" / "12" / "statement.csv").read_text())
+    actual = ask_agami(store, 12, sql)
+    diff, ledger = compare(store, 12, expected, actual)
+    rec = record(store, 12, "How many apparel products are there?", sql, expected, diff, ledger)
+    # The gap is the semantic model's, not the statement's, and a gap is not a confirmed part.
+    assert rec["status"] == "match_unverified"
+    # It reaches the findings file under the key a stale list would use: one column, one gap.
+    keys = {f["key"] for f in reconcile.findings(store["run"])["findings"]}
+    assert "description:categories.slug" in keys, keys
+
+
+def test_13_a_metric_matched_by_shape_on_another_table_is_open(store):
+    """`SUM(pay.amount)` over payments equals the `total refunds` metric's `SUM(refunds.amount)` once
+    the qualifiers are stripped for the match. The statement never reads refunds, so the match is
+    by shape alone and the part stays open rather than confirming a metric it did not compute."""
+    sql = "SELECT SUM(pay.amount) AS total_refunds FROM payments pay"
+    parts = _parts(grade_statement(store, 13, sql))
+    metric = parts["metric:total_refunds"]
+    assert metric["verdict"] == "unresolved", metric
+    assert "defined on refunds, which this statement does not read" in metric["note"]
 
 
 def test_8_the_profile_was_never_written_to(store):
