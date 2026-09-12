@@ -379,9 +379,12 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     authenticated value, even when the tool's own JSON body already carries that key — deferring to
     an existing value would let any tool whose own domain data happens to use this field name spoof
     the asker to the model, which is instructed to trust it unconditionally (ACE-118 review).
+
+    **The overwrite guarantee holds even with no actor.** An unresolved principal means there is
+    nothing to SET the field to, but a tool-supplied `caller_identity` still has to be REMOVED —
+    returning the body unchanged would let that same spoofed key through precisely when there is no
+    real identity to contradict it, which is the worst case for it to survive (Copilot review).
     """
-    if actor is None:
-        return result_text
     try:
         body = json.loads(result_text)
         suffix = ""
@@ -393,7 +396,12 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
             return result_text
     if not isinstance(body, dict):
         return result_text
-    body["caller_identity"] = actor
+    if actor is None:
+        if "caller_identity" not in body:
+            return result_text
+        body = {k: v for k, v in body.items() if k != "caller_identity"}
+    else:
+        body["caller_identity"] = actor
     return json.dumps(body, indent=2) + suffix
 
 

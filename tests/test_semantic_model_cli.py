@@ -275,6 +275,10 @@ def test_examples_self_referential_query_reports_low_confidence_even_on_a_matchi
     assert rc == 0
     assert d["matches"][0]["score"] >= 0.82  # would short-circuit if self-reference weren't excluded
     assert d["high_confidence"] is False
+    # Copilot review: the flag alone is not enough — a caller reading `matches[0].example.sql`
+    # directly, or a model that doesn't honor `high_confidence`, would still see the real literal.
+    assert "someone-else@example.com" not in d["matches"][0]["example"]["sql"]
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in d["matches"][0]["example"]["sql"]
 
 
 def test_curate_edit_op_sets_enrichment_fields(tmp_path):

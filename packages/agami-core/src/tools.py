@@ -1591,39 +1591,6 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-# A quoted string literal in an equality test against an identity-shaped column, either operand
-# order (`email = 'x'` or `'x' = email`) — the shape a stored example's SQL uses to name WHOEVER
-# asked it. Conservative and regex-based rather than a real parse, matching the heuristic style
-# sql_guard.py already leans on for read-only/deny-list checks elsewhere in this codebase: it only
-# needs to catch this one shape, not understand the statement (ACE-118 review).
-_IDENTITY_COLUMN_NAMES = (
-    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|sys_id|caller_id|requested_for"
-)
-# The literal body allows THREE escape conventions, not one: a backslash escape (`\\.`, MySQL-style),
-# and a doubled single quote (`''`) — the standard SQL escaping `semantic_model/dialects.py` itself
-# emits for an apostrophe in a value (e.g. `o''reilly`). Missing the doubled-quote form (ACE-118
-# review) matched only up to the first `'`, leaving the remainder of the identity unredacted and the
-# resulting SQL malformed.
-_IDENTITY_LITERAL_RE = re.compile(
-    rf"(?P<pre>\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b\s*=\s*)(?P<lit>'(?:[^'\\]|\\.|'')*')"
-    rf"|(?P<lit2>'(?:[^'\\]|\\.|'')*')(?P<post>\s*=\s*\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b)",
-    re.IGNORECASE,
-)
-_IDENTITY_REDACTION_PLACEHOLDER = "'<RESOLVE_FROM_CALLER_IDENTITY>'"
-
-
-def _redact_identity_literals(sql: str) -> str:
-    """Replace every identity-shaped equality literal in `sql` with a placeholder the model cannot
-    mistake for a real value — see `_IDENTITY_LITERAL_RE` for the shape matched."""
-
-    def _sub(m: "re.Match[str]") -> str:
-        if m.group("pre") is not None:
-            return f"{m.group('pre')}{_IDENTITY_REDACTION_PLACEHOLDER}"
-        return f"{_IDENTITY_REDACTION_PLACEHOLDER}{m.group('post')}"
-
-    return _IDENTITY_LITERAL_RE.sub(_sub, sql or "")
-
-
 def _redact_self_referential_identity(
     examples: list[dict[str, Any]], question: str
 ) -> list[dict[str, Any]]:
@@ -1638,8 +1605,15 @@ def _redact_self_referential_identity(
     the model verbatim, with only the instructions text asking it not to mirror it. Redaction
     therefore happens unconditionally on every self-referential question, regardless of match score
     — the same trigger `is_high_confidence` uses, reused rather than reimplemented.
+
+    The actual matcher (`_redact_identity_literals`) lives in `semantic_model.runtime`, alongside
+    `_is_self_referential` — both are needed by `semantic_model.cli`'s `cmd_examples` too, which
+    cannot import this module (`tools` sits above `semantic_model`, not below it).
     """
-    from semantic_model.runtime import _is_self_referential  # sibling package; no import cycle
+    from semantic_model.runtime import (  # sibling package; no import cycle
+        _is_self_referential,
+        _redact_identity_literals,
+    )
 
     if not _is_self_referential(question):
         return examples
@@ -1719,7 +1693,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # way `_resolve_units` above degrades rather than crashes when it's absent (ACE-118 review):
     # redaction is skipped, not the whole call.
     try:
-        from semantic_model.runtime import _is_self_referential
+        from semantic_model.runtime import _is_self_referential, _redact_identity_literals
 
         self_referential = _is_self_referential(args.get("query") or "")
     except ImportError:

@@ -602,6 +602,60 @@ def _is_self_referential(question: str) -> bool:
     return bool(_SELF_REFERENCE_MARKERS.search(question or ""))
 
 
+# A quoted string literal in an equality test against an identity-shaped column, either operand
+# order (`email = 'x'` or `'x' = email`) — the shape a stored example's SQL uses to name WHOEVER
+# asked it. Conservative and regex-based rather than a real parse, matching the heuristic style
+# sql_guard.py already leans on for read-only/deny-list checks elsewhere in this codebase: it only
+# needs to catch this one shape, not understand the statement (ACE-118 review).
+#
+# The list is grounded in `metadata_sources.py`'s own ServiceNow reference-graph fields
+# (`opened_by`, `closed_by`, `resolved_by`, `opened_for`, `requested_by`, `watch_list`), not
+# invented — those are fields this codebase already documents as naming a person (ACE-118 review;
+# `assignment_group`/`group` are excluded, since they name a team, not a person).
+#
+# Lives here (not in `tools.py`, where it was first written) because `semantic_model.cli`'s
+# `cmd_examples` needs it too, and `cli.py` cannot import `tools.py` — `tools` sits above this
+# package, not below it. `_is_self_referential` already lived here for the same reason.
+_IDENTITY_COLUMN_NAMES = (
+    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|sys_id|caller_id|"
+    r"requested_(?:by|for)|opened_(?:by|for)|closed_by|resolved_by|watch_list"
+)
+# A column reference, optionally table-qualified and optionally quoted in any of the three styles
+# this codebase's supported dialects use — double quotes (Postgres/Redshift/Snowflake), backticks
+# (MySQL), square brackets (SQL Server); see `dialects.py`. The bare-`\w` version missed every
+# quoted form, e.g. `"assigned_to" = '...'`, and a dialect-specific stored example could still
+# return its identity literal verbatim (ACE-118 review).
+_IDENTITY_COLUMN_REF = (
+    rf'(?:"(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})"'
+    rf"|`(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})`"
+    rf"|\[(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\]"
+    rf"|\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b)"
+)
+# The literal body allows THREE escape conventions, not one: a backslash escape (`\\.`, MySQL-style),
+# and a doubled single quote (`''`) — the standard SQL escaping `dialects.py` itself emits for an
+# apostrophe in a value (e.g. `o''reilly`). Missing the doubled-quote form (ACE-118 review) matched
+# only up to the first `'`, leaving the remainder of the identity unredacted and the resulting SQL
+# malformed.
+_IDENTITY_LITERAL_RE = re.compile(
+    rf"(?P<pre>{_IDENTITY_COLUMN_REF}\s*=\s*)(?P<lit>'(?:[^'\\]|\\.|'')*')"
+    rf"|(?P<lit2>'(?:[^'\\]|\\.|'')*')(?P<post>\s*=\s*{_IDENTITY_COLUMN_REF})",
+    re.IGNORECASE,
+)
+_IDENTITY_REDACTION_PLACEHOLDER = "'<RESOLVE_FROM_CALLER_IDENTITY>'"
+
+
+def _redact_identity_literals(sql: str) -> str:
+    """Replace every identity-shaped equality literal in `sql` with a placeholder the model cannot
+    mistake for a real value — see `_IDENTITY_LITERAL_RE` for the shape matched."""
+
+    def _sub(m: "re.Match[str]") -> str:
+        if m.group("pre") is not None:
+            return f"{m.group('pre')}{_IDENTITY_REDACTION_PLACEHOLDER}"
+        return f"{_IDENTITY_REDACTION_PLACEHOLDER}{m.group('post')}"
+
+    return _IDENTITY_LITERAL_RE.sub(_sub, sql or "")
+
+
 def is_high_confidence(matches: list[ExampleMatch], question: str = "") -> bool:
     """Whether the top match is confident enough to short-circuit cold-start resolution.
 

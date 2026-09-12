@@ -426,6 +426,23 @@ def test_a_tool_results_own_caller_identity_key_is_overwritten_not_trusted(base_
     assert json.loads(text)["caller_identity"] == "jordan@example.com"
 
 
+def test_a_spoofed_caller_identity_is_stripped_even_with_no_actor():
+    """Copilot review: with `actor is None`, the function used to return the body unchanged —
+    exactly the case where a tool-supplied `caller_identity` is most dangerous to leave in place,
+    since there is no real value to contradict it. A missing principal must still sanitize the
+    reserved key, just not set it to anything."""
+    body = json.dumps({"caller_identity": "attacker@evil.example", "ok": True})
+    result = json.loads(mcp_http._with_caller_identity(body, None))
+    assert "caller_identity" not in result
+    assert result["ok"] is True
+
+
+def test_a_body_with_no_caller_identity_and_no_actor_is_untouched():
+    """The common case — nothing to strip, nothing to set — must not even be reserialized."""
+    body = json.dumps({"ok": True})
+    assert mcp_http._with_caller_identity(body, None) == body
+
+
 def test_stamping_runs_off_the_event_loop_thread(base_url):
     """ACE-048 moved the handler off the loop so one slow/large call can't freeze every other
     in-flight request; ACE-118's identity stamp does its own json.loads/json.dumps round-trip over

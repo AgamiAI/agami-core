@@ -104,6 +104,61 @@ def test_redaction_catches_an_assignee_column_too(tmp_path, monkeypatch):
     assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
 
 
+@pytest.mark.parametrize("column", ["opened_by", "closed_by", "resolved_by", "opened_for", "requested_by", "watch_list"])
+def test_redaction_catches_every_documented_reference_field(tmp_path, monkeypatch, column):
+    """Copilot review: these are fields `semantic_model/metadata_sources.py` already documents as
+    naming a person (ServiceNow's own reference-graph); the matcher has to cover all of them, not
+    just `assigned_to`/`assignee`."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": f"SELECT COUNT(*) FROM tickets WHERE {column} = 'someone-else@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    assert "someone-else@example.com" not in out["examples"][0]["sql"]
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
+@pytest.mark.parametrize(
+    "quoted_column",
+    ['"assigned_to"', "`assigned_to`", "[assigned_to]"],
+    ids=["double-quoted", "backtick", "bracket"],
+)
+def test_redaction_handles_a_quoted_identity_column(tmp_path, monkeypatch, quoted_column):
+    """Copilot review: the bare-`\\w` matcher missed every quoted identifier form this codebase's
+    supported dialects use — Postgres/Redshift/Snowflake double quotes, MySQL backticks, SQL
+    Server brackets — so a dialect-specific stored example could return its identity literal
+    verbatim."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": f"SELECT COUNT(*) FROM tickets WHERE {quoted_column} = 'someone-else@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    assert "someone-else@example.com" not in out["examples"][0]["sql"]
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
 def test_redaction_handles_a_doubled_single_quote_inside_the_literal(tmp_path, monkeypatch):
     """Copilot review on ACE-118: standard SQL escapes an apostrophe as `''`, not `\\'` — the
     dialect helper (`semantic_model/dialects.py`) emits exactly this shape for a value like
