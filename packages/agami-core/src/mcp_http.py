@@ -369,11 +369,22 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     Handles a JSON object followed by trailing non-JSON text — `tool_get_datasource_schema` builds
     its response this way, a JSON payload with a "## Domain context" / "## USER_MEMORY.md" markdown
     suffix appended after it — by parsing only the leading JSON object and re-appending whatever
-    followed it, untouched. `tool_get_prompt_examples`'s local file-serving branch (no DB configured)
-    is NOT handled: it returns a whole area's curated library as one YAML/Markdown document with no
-    leading JSON object at all, so there is no prefix to parse here — stamping that shape would mean
-    restructuring what that branch returns, which is out of scope for this fix (ACE-118 review); it
-    is left unstamped, a known limitation.
+    followed it, untouched.
+
+    **`tool_get_prompt_examples`'s local file-serving branch (no DB configured) is NOT handled, and
+    this is not merely deferred scope — it is a mode where the gap cannot matter.** That branch
+    returns a whole area's curated library as one YAML/Markdown document with no leading JSON
+    object at all, so there is no prefix here to stamp. But "no `AGAMI_DB_URL`" is exactly the
+    condition for the local single-player transport (`mcp_harness.py`), which has no authentication
+    at all, by design — its own docs state the trust boundary is the OS user account, because there
+    is nothing to authenticate to. `_actor_ctx` is only ever set inside this module's own
+    `handle_mcp`, which that transport never reaches. So the one branch this can't stamp is also
+    the one branch where `actor` is always `None` regardless — there is no real identity being
+    withheld from the model here, on either surface a self-hosted or hosted deployment actually
+    uses (both require a database, which is exactly what routes `get_prompt_examples` away from
+    this branch and onto the one that already carries identity correctly). Restructuring this
+    branch's response shape to carry a field that would always be empty is not a fix (ACE-118
+    review).
 
     `caller_identity` is a reserved, server-injected field: it is ALWAYS overwritten with the true
     authenticated value, even when the tool's own JSON body already carries that key — deferring to
@@ -558,7 +569,6 @@ def build_server(
             )
 
     return server
-
 
 
 def _is_loopback(base: str) -> bool:
