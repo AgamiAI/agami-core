@@ -190,26 +190,12 @@ def cmd_set_org(args) -> int:
 
 
 def cmd_examples(args) -> int:
-    """`high_confidence: false` on a self-referential question is not enough on its own (Copilot
-    review, ACE-118): it tells `agami-query`'s SKILL.md to re-resolve rather than mirror, but the
-    `matches` this command prints still carried the ORIGINAL, unredacted SQL either way — so a
-    caller reading `matches[0].example.sql` directly (or a model that doesn't honor the flag) could
-    still see a different asker's identity literal verbatim. Redact the same way the hosted tool
-    does, unconditionally on a self-referential question — not only the flag, the data too.
-    """
     examples = L.list_prompt_examples(args.root, args.area)
     matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k)
-    self_referential = RT._is_self_referential(args.query or "")
-    printed = []
-    for m in matches:
-        example = m.example
-        if self_referential and isinstance(example.get("sql"), str):
-            example = {**example, "sql": RT._redact_identity_literals(example["sql"])}
-        printed.append({"score": round(m.score, 3), "example": example})
     _print_json(
         {
-            "high_confidence": RT.is_high_confidence(matches, args.query),
-            "matches": printed,
+            "high_confidence": RT.is_high_confidence(matches),
+            "matches": [{"score": round(m.score, 3), "example": m.example} for m in matches],
         }
     )
     return 0

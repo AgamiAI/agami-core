@@ -1591,42 +1591,6 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _redact_self_referential_identity(
-    examples: list[dict[str, Any]], question: str
-) -> list[dict[str, Any]]:
-    """Strip identity-shaped literals from every example's SQL when `question` is self-referential
-    (ACE-118).
-
-    `semantic_model.runtime.is_high_confidence` excludes self-reference from the LOCAL confidence
-    shortcut (`sm examples` / the local skill path), but this hosted tool has no confidence
-    shortcut at all — it simply ranks and returns matches — so that exclusion never runs here. A
-    self-referential question ("how many are assigned to me") can still match a stored example
-    carrying a DIFFERENT person's identity literal, and without this, that literal would go back to
-    the model verbatim, with only the instructions text asking it not to mirror it. Redaction
-    therefore happens unconditionally on every self-referential question, regardless of match score
-    — the same trigger `is_high_confidence` uses, reused rather than reimplemented.
-
-    The actual matcher (`_redact_identity_literals`) lives in `semantic_model.identity_redaction`,
-    a stdlib-only module — `semantic_model.cli`'s `cmd_examples` needs it too (and cannot import
-    this module: `tools` sits above `semantic_model`, not below it), and the local file-serving
-    branch of this same tool needs it on a bare install with no `[model]` extra.
-    """
-    from semantic_model.identity_redaction import (  # sibling package; no import cycle
-        _is_self_referential,
-        _redact_identity_literals,
-    )
-
-    if not _is_self_referential(question):
-        return examples
-    redacted = []
-    for ex in examples:
-        sql = ex.get("sql")
-        if isinstance(sql, str) and sql:
-            ex = {**ex, "sql": _redact_identity_literals(sql)}
-        redacted.append(ex)
-    return redacted
-
-
 def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     """Ask Agami `get_prompt_examples`: the few-shot library.
 
@@ -1634,14 +1598,6 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     `query`, and cap to `top_k` within a char budget — so a large library (e.g. accumulated
     corrections) never floods the context. Local serving (files): returns the curated examples.yaml
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
-
-    A self-referential `query` ("how many are assigned to me") gets each returned example's SQL
-    scrubbed of identity-shaped literals first (ACE-118) — see `_redact_self_referential_identity`
-    for the DB-served path. The local file-serving branch below returns a whole area's curated
-    library as one YAML/Markdown document rather than a list of example dicts, but the redaction
-    itself (`_redact_identity_literals`) is a plain string transform keyed on the SQL shape, not on
-    that structure — so it applies just as well to the raw YAML text before it's ever parsed, one
-    area at a time, whenever the question is self-referential.
     """
     profile = resolve_profile(args.get("datasource"))
 
@@ -1665,7 +1621,6 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
             )
         finally:
             store.close()
-        examples = _redact_self_referential_identity(examples, args.get("query") or "")
         return json.dumps(
             {"datasource": profile, "examples": examples, "count": len(examples)},
             indent=2,
@@ -1688,19 +1643,6 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # is what the caller got before, rather than being refused: this path returns the curated
     # library and has no vocabulary for an input error.
     wanted = _area.strip() if isinstance(_area, str) else ""
-    # This branch historically needed no model deps at all — it just reads YAML text (a bare
-    # `agami-core` install, no `[model]` extra, can still serve it). An earlier version imported
-    # self-reference detection from `semantic_model.runtime`, which pulls in `semantic_model.models`
-    # (pydantic), and guarded it with try/except ImportError, skipping redaction on failure — which
-    # is backwards for a security check: an absent dependency silently turned the guarantee OFF
-    # (Copilot review). `identity_redaction` imports nothing but `re`, so there is nothing to guard.
-    from semantic_model.identity_redaction import _is_self_referential, _redact_identity_literals
-
-    # Same `isinstance` guard as `_area` above, for the same reason: this handler is reachable
-    # outside a schema-validating transport, and `_is_self_referential` runs a regex `.search()`
-    # that raises `TypeError` on a truthy non-string (Copilot review).
-    _query = args.get("query")
-    self_referential = _is_self_referential(_query if isinstance(_query, str) else "")
     blocks: list[str] = []
     if ex_dir.is_dir():
         for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
@@ -1709,8 +1651,6 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 continue
             text = _read_text(ex_file)
             if text and text.strip():
-                if self_referential:
-                    text = _redact_identity_literals(text)
                 blocks.append(f"## subject area: {area}\n```yaml\n{text}\n```")
     if not blocks:
         return json.dumps(

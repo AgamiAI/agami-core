@@ -14,11 +14,13 @@ below corresponds to one such version.
 
 ### Fixed
 
-- **`is_high_confidence`'s new `question` argument is optional.** It gained a second positional
-  parameter so the examples confidence shortcut could exclude self-referential questions (ACE-118),
-  which made it a breaking change for the function's existing callers — public API, exported via
-  `__all__` with a stability promise. `question` now defaults to `""`, which never matches the
-  self-reference check, so an existing one-argument call keeps its old behavior unchanged.
+- **A tool result now carries the verified caller's identity.** The hosted HTTP transport
+  (`mcp_http.py`) stamps a `caller_identity` field onto every JSON tool result, and the shared
+  instructions tell the model to resolve a self-referential term ("my", "me", "I", "mine") against
+  it rather than against a stored example's SQL — so a self-referential question has a real
+  identity to anchor on instead of inheriting whichever past example happens to match closely
+  (ACE-118). `caller_identity` is reserved and server-injected: it always overwrites a same-named
+  key a tool's own JSON body might already carry.
 
 - **The eval's generator can start on Windows.** The client's Windows runtime (Bun) needs
   `SystemRoot` set to initialize WinSock before its first network call; without it the child exited

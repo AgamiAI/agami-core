@@ -592,30 +592,9 @@ def get_prompt_examples(
 
 HIGH_CONFIDENCE_EXAMPLE = 0.82
 
-# Self-reference detection and identity redaction live in `identity_redaction.py`, a stdlib-only
-# module — `tools.py`'s local file-serving branch needs them on a bare install with no `[model]`
-# extra, so they cannot depend on anything that pulls in Pydantic the way the rest of this file
-# does (ACE-118 review). Re-exported here (both private, neither in `__all__`, matching how they
-# were used before this move) under their original names: both were first written in this module,
-# and `cli.py` already imports them as `RT._is_self_referential` / `RT._redact_identity_literals`.
-from .identity_redaction import _is_self_referential, _redact_identity_literals  # noqa: F401
 
-
-def is_high_confidence(matches: list[ExampleMatch], question: str = "") -> bool:
-    """Whether the top match is confident enough to short-circuit cold-start resolution.
-
-    Self-reference is excluded from the shortcut regardless of match score: a self-referential
-    question ("how many are assigned to me") must always re-resolve its identity portion rather than
-    inherit whichever example scored highest — that example's own SQL names WHOEVER asked it, not
-    this caller (ACE-118).
-
-    `question` defaults to `""` (never self-referential) rather than being required, so the
-    pre-ACE-118 one-argument call still type-checks and behaves exactly as before — `is_high_confidence`
-    is exported public API (`__all__`) with a stability promise, and a required second positional
-    argument would have broken every existing caller."""
-    if not matches or matches[0].score < HIGH_CONFIDENCE_EXAMPLE:
-        return False
-    return not _is_self_referential(question)
+def is_high_confidence(matches: list[ExampleMatch]) -> bool:
+    return bool(matches) and matches[0].score >= HIGH_CONFIDENCE_EXAMPLE
 
 
 # ---------------------------------------------------------------------------
