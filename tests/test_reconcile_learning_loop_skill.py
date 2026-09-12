@@ -165,6 +165,12 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
     assert "one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`" in PHASE_1_5
     assert "`noted`, a fact the run states and never judges" in PHASE_1_5
     assert "| `noted` |" in REFERENCES["part-ledger.md"]
+    # The semantic model's own words ride on the parts that fell short, quoted and never graded.
+    assert "sm mentions" in PHASE_1_5 and "> mentions.json" in PHASE_1_5
+    assert "**What the semantic model says in words**" in statements
+    assert "which is right is the person's call, never the ledger's" in statements
+    assert "| `mentions.json` |" in REFERENCES["part-ledger.md"]
+    assert "mentions" in REFERENCES["statement-check.md"]
 
 
 def test_hard_rule_3_gains_the_findings_file_and_keeps_every_pin():

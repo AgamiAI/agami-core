@@ -388,6 +388,20 @@ def cmd_join_probes(args) -> int:
     return 0
 
 
+def cmd_mentions(args) -> int:
+    """Every prose line in the semantic model (descriptions, caveats, glossary, narrative, prompt
+    examples) that mentions a table or column the statement reads. Quoted for a reader, never graded:
+    the ledger puts these beside a part that fell short, so the words that shaped the SQL sit next to
+    the number that went wrong."""
+    from . import mentions
+    org = L.load_datasource(args.root)
+    sql = _read_sql_file(args.sql_file)
+    if sql is None:
+        return 2
+    _print_json(mentions.prose_mentions(org, Path(args.root), sql, _grammar(org)))
+    return 0
+
+
 def cmd_filter_values_plan(args) -> int:
     """Every value typed into a filter: what the semantic model already knows about its column, and
     the probe SQL that would settle the rest."""
@@ -1355,6 +1369,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--sql-file", required=True, dest="sql_file")
     sp.set_defaults(func=cmd_join_probes)
+    sp = sub.add_parser("mentions", help="every prose line in the semantic model that mentions a table or column a statement reads (quoted for a reader, never graded)")
+    sp.add_argument("root")
+    sp.add_argument("--sql-file", required=True, dest="sql_file")
+    sp.set_defaults(func=cmd_mentions)
 
     sp = sub.add_parser("filter-values", help="every value typed into a filter: `plan` emits what to probe, `judge` grades what came back")
     modes = sp.add_subparsers(dest="mode", required=True)
