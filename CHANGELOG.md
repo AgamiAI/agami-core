@@ -14,6 +14,14 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A tool result now carries the verified caller's identity.** The hosted HTTP transport
+  (`mcp_http.py`) stamps a `caller_identity` field onto every tool result that is a JSON object, and the shared
+  instructions tell the model to resolve a self-referential term ("my", "me", "I", "mine") against
+  it rather than against a stored example's SQL — so a self-referential question has a real
+  identity to anchor on instead of inheriting whichever past example happens to match closely
+  (ACE-118). `caller_identity` is reserved and server-injected: it always overwrites a same-named
+  key a tool's own JSON body might already carry.
+
 - **The eval's generator can start on Windows.** The client's Windows runtime (Bun) needs
   `SystemRoot` set to initialize WinSock before its first network call; without it the child exited
   immediately on a message `stderr=subprocess.DEVNULL` discarded, so every item in a Windows run

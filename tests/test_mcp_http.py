@@ -298,6 +298,187 @@ def test_the_session_id_reaches_a_tool_handler(base_url, monkeypatch):
     assert mcp_http.current_session_id() is None
 
 
+# --- caller identity on tool results (ACE-118) ---------------------------------
+
+
+def _identity_app(handler):
+    """An app with one extra tool `probe` running `handler`, and an auth provider whose subject is
+    the bearer token itself — so one test can drive two different callers by varying the token."""
+    from dataclasses import replace
+
+    tool = {
+        "handler": handler,
+        "description": "probe",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    }
+
+    class _Principal:
+        def __init__(self, subject: str) -> None:
+            self.subject = subject
+            self.session_id = None
+
+    class _Auth:
+        def validate_token(self, token):
+            token = (token or "").strip()
+            return _Principal(token) if token else None
+
+    adapters = replace(mcp_http.default_adapters(), auth_provider=_Auth())
+    return mcp_http.create_app(extra_tools={"probe": tool}, adapters=adapters)
+
+
+def _headers(bearer: str) -> dict:
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+
+
+def _call_probe(c, headers, rid=2) -> str:
+    r = c.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "tools/call",
+            "params": {"name": "probe", "arguments": {}},
+        },
+    )
+    payload = json.loads(re.search(r"\{.*\}", r.text, re.DOTALL).group(0))
+    return payload["result"]["content"][0]["text"]
+
+
+def test_a_json_tool_result_is_stamped_with_the_caller_identity(base_url):
+    app = _identity_app(lambda a: json.dumps({"ok": True}))
+    with TestClient(app) as c:
+        _handshake(c)
+        text = _call_probe(c, _headers("jordan@example.com"))
+    assert json.loads(text) == {"ok": True, "caller_identity": "jordan@example.com"}
+
+
+def test_a_bare_string_tool_result_is_left_byte_identical(base_url):
+    """The additive/non-corrupting guarantee: a tool that answers plain text (not JSON) — the shape
+    some existing test tools return — must come back completely unchanged, never wrapped or altered."""
+    app = _identity_app(lambda a: "ran")
+    with TestClient(app) as c:
+        _handshake(c)
+        text = _call_probe(c, _headers("jordan@example.com"))
+    assert text == "ran"
+
+
+def test_two_callers_each_get_their_own_identity_not_the_others(base_url):
+    app = _identity_app(lambda a: json.dumps({"ok": True}))
+    with TestClient(app) as c:
+        _handshake(c)
+        text_a = _call_probe(c, _headers("alex@example.com"), rid=2)
+        text_b = _call_probe(c, _headers("sam@example.com"), rid=3)
+    assert json.loads(text_a)["caller_identity"] == "alex@example.com"
+    assert json.loads(text_b)["caller_identity"] == "sam@example.com"
+
+
+def test_a_json_result_with_a_trailing_text_suffix_is_still_stamped(base_url):
+    """`_with_caller_identity` must handle a JSON object followed by non-JSON prose — the shape
+    `tool_get_datasource_schema` returns (JSON head + a '## Domain context' markdown tail) — not
+    just pure JSON or a pure bare string. The suffix must survive untouched (ACE-118 review)."""
+    body = json.dumps({"ok": True}) + "\n## Domain context\nsome narrative prose, not JSON"
+    text = mcp_http._with_caller_identity(body, "jordan@example.com")
+    prefix, end = json.JSONDecoder().raw_decode(text)
+    assert prefix["caller_identity"] == "jordan@example.com"
+    assert text[end:] == "\n## Domain context\nsome narrative prose, not JSON"
+
+
+def test_get_datasource_schemas_markdown_suffix_still_gets_stamped(base_url, tmp_path, monkeypatch):
+    """The real shape, not a synthetic stand-in: `tool_get_datasource_schema` always appends a
+    '## Domain context' section after its JSON body (org narrative + model-derived summary), so its
+    result is exactly the "JSON prefix + trailing text" case the fix above exists for."""
+    pytest.importorskip("pydantic")
+    pytest.importorskip("yaml")
+    from semantic_model import build
+    from semantic_model.models import Datasource, SubjectArea
+
+    org = Datasource(datasource="crm", subject_areas=[SubjectArea(name="Sales", description="Sales area")])
+    build.write_tree(org, tmp_path / "crm")
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.delenv("AGAMI_DB_URL", raising=False)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+    tools.resolved_org_id.cache_clear()
+
+    raw = tools.tool_get_datasource_schema({"datasource": "crm"})
+    head, end = json.JSONDecoder().raw_decode(raw)
+    assert raw[end:], "expected this profile to produce a non-empty domain-context suffix"
+
+    stamped = mcp_http._with_caller_identity(raw, "jordan@example.com")
+    body, stamped_end = json.JSONDecoder().raw_decode(stamped)
+    assert body["caller_identity"] == "jordan@example.com"
+    assert body["datasource"] == "crm"  # the real payload, not just any dict
+    assert stamped[stamped_end:] == raw[end:]  # the markdown tail is untouched
+
+
+def test_a_tool_results_own_caller_identity_key_is_overwritten_not_trusted(base_url):
+    """ACE-118 review: `caller_identity` is reserved and server-injected. An untrusted tool whose own
+    domain data happens to use that exact field name must not be able to spoof the asker — the
+    instructions unconditionally tell the model to trust whatever value arrives under that key."""
+    app = _identity_app(lambda a: json.dumps({"caller_identity": "attacker@evil.example"}))
+    with TestClient(app) as c:
+        _handshake(c)
+        text = _call_probe(c, _headers("jordan@example.com"))
+    assert json.loads(text)["caller_identity"] == "jordan@example.com"
+
+
+def test_a_spoofed_caller_identity_is_stripped_even_with_no_actor():
+    """Copilot review: with `actor is None`, the function used to return the body unchanged —
+    exactly the case where a tool-supplied `caller_identity` is most dangerous to leave in place,
+    since there is no real value to contradict it. A missing principal must still sanitize the
+    reserved key, just not set it to anything."""
+    body = json.dumps({"caller_identity": "attacker@evil.example", "ok": True})
+    result = json.loads(mcp_http._with_caller_identity(body, None))
+    assert "caller_identity" not in result
+    assert result["ok"] is True
+
+
+def test_a_body_with_no_caller_identity_and_no_actor_is_untouched():
+    """The common case — nothing to strip, nothing to set — must not even be reserialized."""
+    body = json.dumps({"ok": True})
+    assert mcp_http._with_caller_identity(body, None) == body
+
+
+def test_stamping_runs_off_the_event_loop_thread(base_url):
+    """ACE-048 moved the handler off the loop so one slow/large call can't freeze every other
+    in-flight request; ACE-118's identity stamp does its own json.loads/json.dumps round-trip over
+    the WHOLE result body, which is exactly the kind of blocking work that guarantee exists to keep
+    off the loop. Prove the stamp runs in the same offloaded worker thread as the handler, the same
+    way test_async_offload.py proves run_blocking itself does — not just that the final text is
+    stamped, which would pass even if the stamp ran back on the loop after run_blocking returned."""
+    import threading
+
+    seen: dict[str, int] = {}
+
+    def _probe(args: dict) -> str:
+        seen["handler_thread"] = threading.get_ident()
+        return json.dumps({"ok": True})
+
+    app = _identity_app(_probe)
+    main_thread = threading.get_ident()
+    stamp_thread = {}
+    orig = mcp_http._with_caller_identity
+
+    def _spy(result_text, actor):
+        stamp_thread["thread"] = threading.get_ident()
+        return orig(result_text, actor)
+
+    with TestClient(app) as c:
+        mcp_http._with_caller_identity = _spy
+        try:
+            _handshake(c)
+            text = _call_probe(c, _headers("jordan@example.com"))
+        finally:
+            mcp_http._with_caller_identity = orig
+    assert json.loads(text)["caller_identity"] == "jordan@example.com"
+    assert stamp_thread["thread"] == seen["handler_thread"]  # same offloaded worker thread
+    assert stamp_thread["thread"] != main_thread  # not the event-loop thread
+
+
 # --- the tool-visibility seam --------------------------------------------------
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import json
 import logging
 import os
 import time
@@ -356,6 +357,68 @@ async def _auth_server(request: Request) -> JSONResponse:
     )
 
 
+def _with_caller_identity(result_text: str, actor: str | None) -> str:
+    """Stamp the authenticated caller's identity onto a tool result that is a JSON object, so the
+    model resolving "my"/"me" in the next turn has somewhere to read who is asking (ACE-118) — the
+    audit log was the only consumer of `_actor_ctx` before this.
+
+    Best-effort and additive ONLY: some existing test tools (and any third-party consumer's tool)
+    return a bare string, not JSON, and this must never corrupt that. A body whose top level is not
+    a JSON object — a bare string, or a JSON array — always returns `result_text` unchanged; an
+    array has no field to add without changing the shape its consumer reads. With no actor, a body that also carries
+    no `caller_identity` key returns unchanged too — but one that DOES carry that key is still
+    reserialized with it stripped; see the overwrite-guarantee paragraph below.
+
+    Handles a JSON object followed by trailing non-JSON text — `tool_get_datasource_schema` builds
+    its response this way, a JSON payload with a "## Domain context" / "## USER_MEMORY.md" markdown
+    suffix appended after it — by parsing only the leading JSON object and re-appending whatever
+    followed it, untouched.
+
+    **`tool_get_prompt_examples`'s local file-serving branch (no DB configured) is NOT handled, and
+    this is not merely deferred scope — it is a mode where the gap cannot matter.** That branch
+    returns a whole area's curated library as one YAML/Markdown document with no leading JSON
+    object at all, so there is no prefix here to stamp. But "no `AGAMI_DB_URL`" is exactly the
+    condition for the local single-player transport (`mcp_harness.py`), which has no authentication
+    at all, by design — its own docs state the trust boundary is the OS user account, because there
+    is nothing to authenticate to. `_actor_ctx` is only ever set inside this module's own
+    `handle_mcp`, which that transport never reaches. So the one branch this can't stamp is also
+    the one branch where `actor` is always `None` regardless — there is no real identity being
+    withheld from the model here, on either surface a self-hosted or hosted deployment actually
+    uses (both require a database, which is exactly what routes `get_prompt_examples` away from
+    this branch and onto the one that already carries identity correctly). Restructuring this
+    branch's response shape to carry a field that would always be empty is not a fix (ACE-118
+    review).
+
+    `caller_identity` is a reserved, server-injected field: it is ALWAYS overwritten with the true
+    authenticated value, even when the tool's own JSON body already carries that key — deferring to
+    an existing value would let any tool whose own domain data happens to use this field name spoof
+    the asker to the model, which is instructed to trust it unconditionally (ACE-118 review).
+
+    **The overwrite guarantee holds even with no actor.** An unresolved principal means there is
+    nothing to SET the field to, but a tool-supplied `caller_identity` still has to be REMOVED —
+    returning the body unchanged would let that same spoofed key through precisely when there is no
+    real identity to contradict it, which is the worst case for it to survive (Copilot review).
+    """
+    try:
+        body = json.loads(result_text)
+        suffix = ""
+    except (TypeError, ValueError):
+        try:
+            body, end = json.JSONDecoder().raw_decode(result_text)
+            suffix = result_text[end:]
+        except (TypeError, ValueError):
+            return result_text
+    if not isinstance(body, dict):
+        return result_text
+    if actor is None:
+        if "caller_identity" not in body:
+            return result_text
+        body = {k: v for k, v in body.items() if k != "caller_identity"}
+    else:
+        body["caller_identity"] = actor
+    return json.dumps(body, indent=2) + suffix
+
+
 def build_server(
     registry: dict | None = None,
     extra_instructions: str | None = None,
@@ -460,7 +523,20 @@ def build_server(
             # verified, not assumed. Giving the handler a `Context` object we hold is what makes the
             # verdict readable at the audit write below, instead of it having to `json.loads` the
             # body this call is about to return.
-            result_text = await run_blocking(handler_ctx.run, meta["handler"], arguments or {})
+            #
+            # The caller-identity stamp (ACE-118) is folded into THIS SAME offloaded call rather than
+            # applied as a separate synchronous step after `run_blocking` returns. `_with_caller_identity`
+            # does its own `json.loads`/`json.dumps` round-trip over the full result body, which is exactly
+            # the kind of blocking work ACE-048 moved the handler off the loop to avoid — doing it
+            # synchronously here would silently reintroduce that regression for every call. `actor` is read
+            # on the loop (same as the audit write below) and closed over, so the worker thread does no
+            # contextvar reads of its own.
+            actor = _actor_ctx.get()
+
+            def _run_and_stamp() -> str:
+                return _with_caller_identity(meta["handler"](arguments or {}), actor)
+
+            result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
             return [mt.TextContent(type="text", text=result_text)]
         except Exception:
             raised = True
@@ -496,7 +572,6 @@ def build_server(
             )
 
     return server
-
 
 
 def _is_loopback(base: str) -> bool:
