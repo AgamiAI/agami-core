@@ -1654,12 +1654,12 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
 
     A self-referential `query` ("how many are assigned to me") gets each returned example's SQL
-    scrubbed of identity-shaped literals first (ACE-114) — see `_redact_self_referential_identity`.
-    Not applied on the local file-serving branch below: that path returns a whole area's curated
-    library as one YAML/Markdown document rather than a list of example dicts, a different enough
-    shape that the same redaction would mean scanning prose instead of a discrete SQL string; left
-    as a known limitation of that branch (see `_with_caller_identity` in mcp_http.py, which
-    documents the same branch's other limitation).
+    scrubbed of identity-shaped literals first (ACE-114) — see `_redact_self_referential_identity`
+    for the DB-served path. The local file-serving branch below returns a whole area's curated
+    library as one YAML/Markdown document rather than a list of example dicts, but the redaction
+    itself (`_redact_identity_literals`) is a plain string transform keyed on the SQL shape, not on
+    that structure — so it applies just as well to the raw YAML text before it's ever parsed, one
+    area at a time, whenever the question is self-referential.
     """
     profile = resolve_profile(args.get("datasource"))
 
@@ -1706,6 +1706,9 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # is what the caller got before, rather than being refused: this path returns the curated
     # library and has no vocabulary for an input error.
     wanted = _area.strip() if isinstance(_area, str) else ""
+    from semantic_model.runtime import _is_self_referential  # sibling package; no import cycle
+
+    self_referential = _is_self_referential(args.get("query") or "")
     blocks: list[str] = []
     if ex_dir.is_dir():
         for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
@@ -1714,6 +1717,8 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 continue
             text = _read_text(ex_file)
             if text and text.strip():
+                if self_referential:
+                    text = _redact_identity_literals(text)
                 blocks.append(f"## subject area: {area}\n```yaml\n{text}\n```")
     if not blocks:
         return json.dumps(

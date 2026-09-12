@@ -195,6 +195,56 @@ def test_the_local_path_returns_every_area_when_none_is_named(local_library):
     assert "subject area: sales" in out and "subject area: assets" in out
 
 
+def test_the_local_path_also_redacts_a_self_referential_identity_literal(tmp_path, monkeypatch):
+    """ACE-118: the DB path's redaction (`_redact_self_referential_identity`) never ran here — this
+    branch returns a whole area's YAML as one text block, not a list of example dicts. But
+    `_redact_identity_literals` is a plain string transform keyed on the SQL shape, not on that
+    structure, so it applies just as well to the raw text before it's parsed.
+
+    Real-world relevance: this is the plain local file mode (Claude Code / Claude Desktop, no
+    database, no login) — normally single-user by design, so there is no "someone else" to leak
+    to. It still matters when the model files are shared, which this project's own onboarding
+    explicitly supports (pointing `<artifacts_dir>` at a git repo so a team shares one tuned
+    model) — a colleague's old example can carry a real identity literal into a shared library.
+    """
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", "AGAMI_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    ex = tmp_path / "main" / "prompt_examples" / "sales"
+    ex.mkdir(parents=True)
+    ex.joinpath("examples.yaml").write_text(
+        "- question: how many tickets are assigned to me\n"
+        "  sql: SELECT COUNT(*) FROM tickets WHERE assigned_to = 'someone-else@example.com'\n"
+    )
+    tools.bootstrap_paths()
+
+    out = tools.tool_get_prompt_examples(
+        {"datasource": "main", "query": "how many tickets are assigned to me"}
+    )
+    assert "someone-else@example.com" not in out
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out
+
+
+def test_the_local_path_leaves_a_non_self_referential_examples_yaml_verbatim(tmp_path, monkeypatch):
+    """The additive guarantee, same as the DB path's sibling test: a question with no self-
+    reference marker must see the real SQL unchanged, byte for byte."""
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", "AGAMI_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    ex = tmp_path / "main" / "prompt_examples" / "sales"
+    ex.mkdir(parents=True)
+    sql_line = "  sql: SELECT COUNT(*) FROM tickets WHERE assigned_to = 'alex@example.com'\n"
+    ex.joinpath("examples.yaml").write_text(
+        "- question: how many tickets are assigned to alex\n" + sql_line
+    )
+    tools.bootstrap_paths()
+
+    out = tools.tool_get_prompt_examples(
+        {"datasource": "main", "query": "how many tickets are assigned to alex"}
+    )
+    assert sql_line in out
+
+
 def test_the_local_path_honours_area_too(local_library):
     """One schema, one behaviour. Advertising `area` while only the served path honoured it would
     have been the same defect this batch is about, one layer down: a parameter a client can send
