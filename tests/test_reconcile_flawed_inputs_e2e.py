@@ -184,9 +184,10 @@ def ask_agami(store: dict, n: int, sql: str) -> float | None:
     return scalar(text)
 
 
-def compare(store: dict, n: int, expected: float | None, actual: float | None) -> tuple[dict, dict]:
+def compare(store: dict, n: int, expected: float | None, actual: float | None,
+            tolerance: float = 0.01) -> tuple[dict, dict]:
     row_dir = store["run"] / "rows" / str(n)
-    diff = reconcile.diff(expected, actual)
+    diff = reconcile.diff(expected, actual, tolerance=tolerance)
     claims = _sm("claims", str(store["root"]), "--sql-file", str(row_dir / "agami.sql"),
                  "--against-sql-file", str(row_dir / "statement.sql"))
     (row_dir / "claims.json").write_text(json.dumps(claims))
@@ -225,12 +226,25 @@ def test_1_a_join_on_the_wrong_key_is_the_persons_defect_and_the_expected_value_
                                  "JOIN orders o ON o.id = pay.order_id WHERE o.status != 'cancelled'")
     diff, ledger = compare(store, 1, expected, actual)
     rec = record(store, 1, "What is paid revenue?", sql, expected, diff, ledger)
-    # On this data the wrong key happens to give the same total as the right one, which is exactly
-    # the case the two new statuses exist for: a lucky match is `match_unverified` and never reaches
-    # the keep-offer; had the totals differed, the person's own defect would make the expected value
-    # `expected_doubtful` rather than a mismatch charged to agami. Either way, never `match`.
-    assert rec["status"] in ("match_unverified", "expected_doubtful"), rec["status"]
-    assert rec["status"] != "match"
+    # On this data the wrong key gives a total 0.28% away from the right one, inside the default 1%
+    # band, so the numbers "agree" while the join is the person's defect: that is the lucky match
+    # `match_unverified` exists for, and it never reaches the keep-offer.
+    assert rec["status"] == "match_unverified", rec["status"]
+
+
+def test_1b_the_same_wrong_key_makes_the_expected_value_doubtful_when_the_numbers_differ(store):
+    """The brief's case 1 outcome: the totals differ (a 0.1% band sees the 0.28% gap) and the
+    person's own defect makes the expected value doubtful rather than a mismatch charged to agami."""
+    sql = "SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay JOIN orders o ON o.id = pay.id"
+    ledger = grade_statement(store, 9, sql)
+    assert _parts(ledger)["join:orders-payments"]["verdict"] == "query_defect"
+    expected = scalar((store["run"] / "rows" / "9" / "statement.csv").read_text())
+    actual = ask_agami(store, 9, "SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay "
+                                 "JOIN orders o ON o.id = pay.order_id WHERE o.status != 'cancelled'")
+    diff, ledger = compare(store, 9, expected, actual, tolerance=0.001)
+    assert diff["match"] is False
+    rec = record(store, 9, "What is paid revenue, tightly?", sql, expected, diff, ledger)
+    assert rec["status"] == "expected_doubtful"
 
 
 def test_2_a_miscased_value_is_the_persons_defect_with_the_near_miss_named(store):
@@ -266,15 +280,16 @@ def test_3_a_required_filter_left_out_is_a_gap_of_kind_filter(store):
 
 
 def test_4_a_correct_statement_the_ai_gets_wrong_names_the_filter_that_differs(store):
-    sql = "SELECT ROUND(SUM(o.total_amount), 2) AS revenue FROM orders o WHERE o.status != 'cancelled'"
+    sql = "SELECT SUM(o.total_amount) AS revenue FROM orders o WHERE o.status != 'cancelled'"
     ledger = grade_statement(store, 4, sql)
     parts = _parts(ledger)
     (flt,) = [row for part, row in parts.items() if part.startswith("default_filter:orders:")]
     assert flt["verdict"] == "confirmed", flt
-    assert not any(row["verdict"] == "query_defect" for row in ledger["rows"]), ledger["rows"]
+    # Every part holds: the brief's "correct statement", and the only way to an `example` finding.
+    assert ledger["verdict"] == "confirmed", [r for r in ledger["rows"] if r["verdict"] != "confirmed"]
     expected = scalar((store["run"] / "rows" / "4" / "statement.csv").read_text())
     # The seed example for this question omits the filter: that is exactly what agami would write.
-    actual = ask_agami(store, 4, "SELECT ROUND(SUM(total_amount), 2) AS revenue FROM orders")
+    actual = ask_agami(store, 4, "SELECT SUM(total_amount) AS revenue FROM orders")
     diff, ledger = compare(store, 4, expected, actual)
     claims = json.loads((store["run"] / "rows" / "4" / "claims.json").read_text())
     by_name = {c["name"]: c["status"] for c in claims["claims"]}
@@ -337,7 +352,10 @@ def test_6_three_bare_questions_are_graded_on_one_page_and_the_grades_re_enter(s
 def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(store):
     out = reconcile.findings(store["run"])
     keys = {f["key"] for f in out["findings"]}
-    assert any(k.startswith("filter:orders:") for k in keys), keys
+    # One declared filter, omitted by row 3's statement, is one finding whatever alias spelt it.
+    assert len([k for k in keys if k.startswith("filter:orders:")]) == 1, keys
+    # Row 4's statement held on every part and agami answered differently: a worked example.
+    assert "example:what is our total revenue?" in keys, keys
     assert "description:what is the refund rate?" in keys
     words = next(f for f in out["findings"] if f["kind"] == "description")
     assert words["words"] == "the refund rate should divide refunds by payments"

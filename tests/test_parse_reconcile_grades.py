@@ -75,3 +75,25 @@ def test_the_cli_prints_the_standard_contract(tmp_path, capsys):
     assert pg.main(["--block-file", str(block)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is True and out["needs_judgment"] is None and len(out["data"]["grades"]) == 4
+
+
+def test_a_grade_that_could_not_be_applied_sends_the_block_back(tmp_path, capsys):
+    """A misspelt grade is a person's decision that would otherwise vanish while the rest applied. Any
+    dropped grade, and SQL beside a `right`, becomes `needs_judgment` naming the rows."""
+    block = "profile: demo\nreconcile-run: r\ngrades:\n" + json.dumps([
+        {"row": 1, "grade": "wrng"}, {"row": 2, "grade": "right"}, {"row": 3, "grade": "right", "sql": "SELECT 1"}]) + "\ndone\n"
+    data, anomalies, needs = pg.parse(block)
+    assert needs["kind"] == "grades_dropped" and needs["rows"] == [1, 3]
+    assert {a["kind"] for a in anomalies} == {"unknown_grade", "sql_ignored_on_right"}
+    # The CLI says `ok: false` for a block that must go back.
+    block_file = Path(tmp_path) / "block.txt"
+    block_file.write_text(block)
+    assert pg.main(["--block-file", str(block_file)]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_a_clean_block_is_ok_and_needs_nothing():
+    block = "profile: demo\nreconcile-run: r\ngrades:\n" + json.dumps([
+        {"row": 1, "grade": "right"}, {"row": 2, "grade": "wrong", "words": "too low"}]) + "\ndone\n"
+    _data, anomalies, needs = pg.parse(block)
+    assert anomalies == [] and needs is None

@@ -79,3 +79,26 @@ def test_the_cli_refuses_bad_items_with_a_sentence_not_a_traceback(tmp_path, cap
     assert rg.main(["--title", "t", "--profile", "demo", "--run", "r", "--items-file", str(items),
                     "--out", str(tmp_path / "grade.html")]) == 1
     assert "'row'" in capsys.readouterr().err
+
+
+def test_a_placeholder_token_inside_a_question_stays_text():
+    """The template is substituted in one pass, so `{{THEME_CSS}}` typed into a question is copied as
+    those characters and never expanded into the theme. Substituted in sequence, it was."""
+    html = rg.render(title="t", profile="p", run="r",
+                     items=[{"row": 1, "question": "how many {{THEME_CSS}} orders?"}])
+    assert "how many {{THEME_CSS}} orders?" in html
+    assert html.count("{{") == 1
+
+
+def test_every_angle_bracket_in_the_payload_is_escaped_for_the_script_block():
+    html = rg.render(title="t", profile="p", run="r",
+                     items=[{"row": 1, "question": "why <!-- did it drop?", "signals": ["a <script> tag"]}])
+    assert "<!--" not in html.split("const DATA")[1].split("</script>")[0]
+    assert "\\u003c!-- did it drop?" in html and "a \\u003cscript> tag" in html
+
+
+def test_the_profile_and_title_cannot_break_the_page():
+    html = rg.render(title='t <b>"q"</b>', profile='p";alert(1);//', run="r", items=[{"row": 1, "question": "q"}])
+    assert 'profile: "p\\";alert(1);//"' in html
+    assert "<title>t &lt;b&gt;&quot;q&quot;&lt;/b&gt;" in html
+    assert 'profile p&quot;;alert(1);//' in html
