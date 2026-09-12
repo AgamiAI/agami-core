@@ -1696,7 +1696,11 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # (Copilot review). `identity_redaction` imports nothing but `re`, so there is nothing to guard.
     from semantic_model.identity_redaction import _is_self_referential, _redact_identity_literals
 
-    self_referential = _is_self_referential(args.get("query") or "")
+    # Same `isinstance` guard as `_area` above, for the same reason: this handler is reachable
+    # outside a schema-validating transport, and `_is_self_referential` runs a regex `.search()`
+    # that raises `TypeError` on a truthy non-string (Copilot review).
+    _query = args.get("query")
+    self_referential = _is_self_referential(_query if isinstance(_query, str) else "")
     blocks: list[str] = []
     if ex_dir.is_dir():
         for ex_file in sorted(ex_dir.glob("*/examples.yaml")):

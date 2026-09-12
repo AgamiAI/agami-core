@@ -37,9 +37,14 @@ def _is_self_referential(question: str) -> bool:
 # (`opened_by`, `closed_by`, `resolved_by`, `opened_for`, `requested_by`, `watch_list`) and the
 # generic person-reference columns this codebase's own tests use as worked examples (`created_by`,
 # `approved_by`) — not invented (ACE-118 review; `assignment_group`/`group` are excluded, since
-# they name a team, not a person).
+# they name a team, not a person). `sys_id` was removed after review: it is a generic record
+# primary key, not a person-reference column — `test_metadata_sources.py` models it as the grain
+# of BOTH `incident` and `sys_user` tables, so a filter on a ticket's own `sys_id` alongside a real
+# identity column (e.g. `caller_id`) would have its ticket reference corrupted too, changing the
+# query's meaning rather than protecting an identity (Copilot review). `caller_id` alone already
+# covers the person-identity case this column exists for.
 _IDENTITY_COLUMN_NAMES = (
-    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|sys_id|caller_id|"
+    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|caller_id|"
     r"requested_(?:by|for)|opened_(?:by|for)|closed_by|resolved_by|watch_list|"
     r"created_by|approved_by"
 )

@@ -106,8 +106,16 @@ def test_redaction_catches_an_assignee_column_too(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "column",
-    ["opened_by", "closed_by", "resolved_by", "opened_for", "requested_by", "watch_list",
-     "created_by", "approved_by"],
+    [
+        "opened_by",
+        "closed_by",
+        "resolved_by",
+        "opened_for",
+        "requested_by",
+        "watch_list",
+        "created_by",
+        "approved_by",
+    ],
 )
 def test_redaction_catches_every_documented_reference_field(tmp_path, monkeypatch, column):
     """Copilot review: these are fields `semantic_model/metadata_sources.py` already documents as
@@ -190,7 +198,9 @@ def test_redaction_handles_an_in_clause(tmp_path, monkeypatch):
     sql = out["examples"][0]["sql"]
     assert "someone-else@example.com" not in sql
     assert "another@example.com" not in sql
-    assert sql == "SELECT COUNT(*) FROM tickets WHERE assignee IN ('<RESOLVE_FROM_CALLER_IDENTITY>')"
+    assert (
+        sql == "SELECT COUNT(*) FROM tickets WHERE assignee IN ('<RESOLVE_FROM_CALLER_IDENTITY>')"
+    )
 
 
 def test_redaction_handles_a_doubled_single_quote_inside_the_literal(tmp_path, monkeypatch):
@@ -216,7 +226,9 @@ def test_redaction_handles_a_doubled_single_quote_inside_the_literal(tmp_path, m
     )
     sql = out["examples"][0]["sql"]
     assert "reilly@example.com" not in sql
-    assert sql == "SELECT COUNT(*) FROM tickets WHERE assigned_to = '<RESOLVE_FROM_CALLER_IDENTITY>'"
+    assert (
+        sql == "SELECT COUNT(*) FROM tickets WHERE assigned_to = '<RESOLVE_FROM_CALLER_IDENTITY>'"
+    )
 
 
 def test_a_non_self_referential_question_keeps_the_examples_sql_verbatim(tmp_path, monkeypatch):
@@ -278,9 +290,9 @@ def test_area_narrows_to_that_area_plus_the_cross_area_bucket(tmp_path, monkeypa
 
     out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "area": "sales"}))
     got = {e["question"] for e in out["examples"]}
-    assert "how many orders by region" in got          # the named area
-    assert "how many rows overall" in got              # the cross-area bucket, not lost
-    assert "how many assets by install status" not in got   # another area, dropped
+    assert "how many orders by region" in got  # the named area
+    assert "how many rows overall" in got  # the cross-area bucket, not lost
+    assert "how many assets by install status" not in got  # another area, dropped
 
 
 def test_the_area_parameter_is_advertised_so_a_client_can_send_it(tmp_path):
@@ -336,6 +348,16 @@ def test_the_local_path_returns_every_area_when_none_is_named(local_library):
     assert "subject area: sales" in out and "subject area: assets" in out
 
 
+def test_the_local_path_does_not_crash_on_a_truthy_non_string_query(local_library):
+    """Copilot review: this handler is reachable outside a schema-validating transport (a direct
+    embedder can pass anything), and the local path historically ignored `query` entirely, so it
+    could never crash on it. Adding self-reference detection must not change that — a truthy
+    non-string `query` (`1`, `{}`) must not raise `TypeError` out of `_is_self_referential`'s regex
+    `.search()`, the same guarantee the adjacent `area` handling already keeps."""
+    out = tools.tool_get_prompt_examples({"datasource": local_library, "query": 1})
+    assert "subject area:" in out
+
+
 def test_the_local_path_also_redacts_a_self_referential_identity_literal(tmp_path, monkeypatch):
     """ACE-118: the DB path's redaction (`_redact_self_referential_identity`) never ran here — this
     branch returns a whole area's YAML as one text block, not a list of example dicts. But
@@ -386,7 +408,9 @@ def test_the_local_path_leaves_a_non_self_referential_examples_yaml_verbatim(tmp
     assert sql_line in out
 
 
-def test_the_local_path_serves_examples_without_the_model_deps_installed(local_library, monkeypatch):
+def test_the_local_path_serves_examples_without_the_model_deps_installed(
+    local_library, monkeypatch
+):
     """This branch historically needed no model deps at all — a bare `agami-core` install (no
     `[model]` extra) can still serve raw YAML.
 
@@ -439,8 +463,9 @@ def test_the_local_path_honours_area_too(local_library):
 
 
 def test_an_area_with_no_examples_on_disk_gives_the_empty_note(local_library):
-    out = json.loads(tools.tool_get_prompt_examples(
-        {"datasource": local_library, "area": "nonexistent"}))
+    out = json.loads(
+        tools.tool_get_prompt_examples({"datasource": local_library, "area": "nonexistent"})
+    )
     assert out["examples"] == []
     assert "prompt_examples" in out["note"]
 
