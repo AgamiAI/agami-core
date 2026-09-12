@@ -302,31 +302,6 @@ def test_myself_is_recognized_as_self_referential(tmp_path, monkeypatch):
     assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
 
 
-@pytest.mark.parametrize(
-    "question,expected",
-    [
-        ("Give me all issues assigned to spanda", False),
-        ("give ashwin the full incident details of spanda", False),
-        ("email me the assignee list", False),
-        ("give me a count of open tickets", False),
-        ("how many tickets are assigned to me", True),
-        ("how many tickets are assigned to myself", True),
-        ("show me my reports", True),
-        ("tell me about my incidents", True),
-    ],
-)
-def test_is_self_referential_ignores_request_verb_me(question, expected):
-    """A bare 'me' as the object of a request verb ('give me', 'show me', 'email me', ...) names
-    the ASKER as the recipient of the answer, not the person the answer should be scoped to —
-    flagging 'Give me all issues assigned to spanda' as self-referential purely because of 'give
-    me' would have let the redaction/caller-identity-resolution instructions run on a question
-    that already names a different, real person as the actual filter target (identified during
-    human review before this shipped, not caught by Copilot)."""
-    from semantic_model.identity_redaction import _is_self_referential
-
-    assert _is_self_referential(question) is expected
-
-
 def test_redaction_handles_a_doubled_single_quote_inside_the_literal(tmp_path, monkeypatch):
     """Copilot review on ACE-118: standard SQL escapes an apostrophe as `''`, not `\\'` — the
     dialect helper (`semantic_model/dialects.py`) emits exactly this shape for a value like

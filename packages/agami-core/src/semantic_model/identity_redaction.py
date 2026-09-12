@@ -24,24 +24,10 @@ import re
 # and without it such a question would be scored high-confidence and its SQL left unredacted
 # (Copilot review).
 _SELF_REFERENCE_MARKERS = re.compile(r"\b(my|myself|me|i|mine)\b", re.IGNORECASE)
-# A bare "me" preceded by a request verb ("give me", "show me", "tell me", "email me", ...) names
-# the ASKER as the recipient of the answer, not the person the answer should be scoped to — "Give
-# me all issues assigned to spanda" must not be flagged self-referential on "me" alone when the
-# actual filter target ("spanda") is named explicitly and is not the caller. "my"/"mine"/"myself"
-# carry no such ambiguity (there is no idiom where they name the recipient rather than the
-# subject) and are never excluded; only a bare "me" needs this check.
-_REQUEST_VERB_BEFORE_ME = re.compile(
-    r"\b(?:give|show|tell|send|email|get|find|fetch|pull)\s+me\b$", re.IGNORECASE
-)
 
 
 def _is_self_referential(question: str) -> bool:
-    question = question or ""
-    for m in _SELF_REFERENCE_MARKERS.finditer(question):
-        if m.group(1).lower() == "me" and _REQUEST_VERB_BEFORE_ME.search(question[: m.end()]):
-            continue
-        return True
-    return False
+    return bool(_SELF_REFERENCE_MARKERS.search(question or ""))
 
 
 # A quoted string literal in an equality or IN test against an identity-shaped column, either
