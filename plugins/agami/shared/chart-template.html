@@ -94,7 +94,7 @@
       // "multiplied" (and `joins` names the join that did it), "not_multiplied", or
       // "undetermined". `findings` is the other axis — aggregation class and semi-additivity,
       // which are about what the number MEANS rather than how many rows went into it.
-      "aggregates": {"items": [{"aggregate":"SUM(o.total)","scope":"main","status":"multiplied",
+      "aggregates": {"items": [{"aggregate":"SUM(o.total)","scope":"main","status":"multiplied","reason":null,
                                 "joins":["orders (1) <- order_items (N)"],
                                 "findings":[{"risk":"fan_trap","reason":"...",
                                              "triggering_joins":["..."],

@@ -944,6 +944,25 @@ def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str) -> s
     )
 
 
+def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc: str) -> str:
+    """How many rows of `left` an inner join to `right` on `left.lc = right.rc` leaves behind: the rows
+    with no partner, a null key among them, counted over the whole table before any filter the
+    statement wrote. Emitted for the reconcile skill's join check and never run here.
+
+    Shaped as a correlated `NOT EXISTS` in WHERE beside an uncorrelated scalar subquery, the one
+    form every supported engine runs: a correlated subquery inside `SUM(CASE WHEN EXISTS ...)` is
+    refused by Snowflake and restricted on Oracle and BigQuery. Not sampled, because a sample gives
+    a rate where a reader wants a count; the size guard bounds the cost instead."""
+    fq_left = dialect.qualified(left.schema_name, left.name)
+    fq_right = dialect.qualified(right.schema_name, right.name)
+    col_l = dialect.quote_ident(lc)
+    col_r = dialect.quote_ident(rc)
+    return (
+        f"SELECT (SELECT COUNT(*) FROM {fq_left}) AS total, COUNT(*) AS dropped FROM {fq_left} l "
+        f"WHERE NOT EXISTS (SELECT 1 FROM {fq_right} r WHERE r.{col_r} = l.{col_l})"
+    )
+
+
 def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
     """Sample from-column values and check they exist in the target key."""
     res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))

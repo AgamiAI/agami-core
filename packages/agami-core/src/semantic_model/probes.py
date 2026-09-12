@@ -228,16 +228,100 @@ def join_probes(org: Datasource, sql: str) -> dict[str, Any]:
             "probes": {"overlap": [], "cardinality": []},
             "not_probed_because": why_open,
         }
+        # What the semantic model already says about this pair of tables, so a declared join is the
+        # best-described entry in the file rather than the emptiest: the relationship's direction
+        # and which side is the one side, and whether each written column is a declared key.
+        entry["declared_cardinality"] = _declared_cardinality(rels, site)
         if status == UNDECLARED:
             _emit_join_probes(entry, site, tidx, writer, cardinality, unique_by_model)
         elif status != UNDECLARED and why_open is None:
             entry["not_probed_because"] = (
                 "the join is on the declared key; nothing to probe" if status == DECLARED
                 else "the join is on a different key than the declared one; the declaration decides")
+        if status in (DECLARED, WRONG_KEY):
+            _note_declared_keys(site, tidx, unique_by_model)
+        entry["dropped_rows_probe"], entry["dropped_rows_not_emitted_because"] = _dropped_rows_probe(
+            site, status, tidx, writer)
         joins.append(entry)
     return {"joins": joins, "joins_written": written_total, "dropped": written_total - len(sites),
             "cardinality": cardinality, "unique_by_model": unique_by_model,
             "unreadable": None, "dialect": grammar}
+
+
+def _one_side(rel) -> list[str]:
+    """The table(s) a declared relationship says hold one row per key: the `to` side of a
+    many_to_one, the `from` side of a one_to_many, both of a one_to_one."""
+    kind = getattr(rel, "relationship", None)
+    sides = {"many_to_one": [rel.to_table], "one_to_many": [rel.from_table],
+             "one_to_one": [rel.from_table, rel.to_table]}.get(kind, [])
+    return sorted(RT._tkey(RT._bare(t)) for t in sides)
+
+
+def _declared_cardinality(rels: list, site) -> list[dict[str, Any]]:
+    """Every relationship the semantic model declares between the two joined tables, with its
+    direction and one side. A list, because two edges can join one pair of tables (two foreign keys
+    into the same dimension). `matched` says whether this edge's columns are the ones the statement
+    wrote, which is the only edge a reader may lean on for the join at hand."""
+    out = []
+    for rel, pairs in rels:
+        out.append({
+            "relationship": getattr(rel, "relationship", None),
+            "from": RT._tkey(RT._bare(rel.from_table)),
+            "to": RT._tkey(RT._bare(rel.to_table)),
+            "one_side": _one_side(rel),
+            "matched": pairs is not None and bool(site.pairs) and pairs <= site.pairs,
+        })
+    return out
+
+
+def _note_declared_keys(site, tidx: dict[str, Table], unique_by_model: dict[str, bool]) -> None:
+    """Record, for a join the semantic model already declares, whether each written column is unique
+    by the model: a declared key, or the whole of the table's grain. No probe is planned for it; the
+    model has answered, and that answer is what lets a ledger tell a many-to-one join from a
+    one-to-many without a scan."""
+    for pair in site.pairs:
+        for table_name, column_name in pair:
+            table = tidx.get(table_name)
+            column = _declared_column(table, column_name)
+            if table is None or column is None:
+                continue
+            grain = [g.lower() for g in (getattr(table, "grain", None) or [])]
+            unique = bool(column.primary_key) or (bool(grain) and grain == [column.name.lower()])
+            unique_by_model.setdefault(f"{table_name}.{column.name}", unique)
+
+
+def _dropped_rows_probe(site, status: str, tidx: dict[str, Table],
+                        writer: Optional[D.Dialect]) -> "tuple[dict[str, Any] | None, str | None]":
+    """The probe that counts the left table's rows an inner join leaves behind, or why none is
+    written. A fact the run states and never grades: dropping unmatched rows is often exactly what
+    the author meant."""
+    if status in (UNDECLARABLE, UNDETERMINED):
+        return None, "the join is not between two declared tables on a readable column pair"
+    side = str(site.node.args.get("side") or "").upper()
+    if side in ("LEFT", "FULL"):
+        return None, f"a {side} join keeps every left row, so nothing is dropped"
+    if len(site.pairs) != 1:
+        return None, "the join is not on exactly one pair of columns"
+    (pair,) = site.pairs
+    if len(pair) != 2:
+        return None, "the join compares a column with itself"
+    left_key, right_key = (RT._tkey(RT._bare(name)) for name in site.endpoints)
+    if left_key == right_key:
+        return None, "a self-join has no left and right table to compare"
+    by_table = {table_name: column_name for table_name, column_name in pair}
+    if set(by_table) != {left_key, right_key}:
+        return None, "the column pair does not name the two joined tables"
+    left, right = tidx.get(left_key), tidx.get(right_key)
+    lc, rc = _declared_column(left, by_table[left_key]), _declared_column(right, by_table[right_key])
+    if left is None or right is None or lc is None or rc is None:
+        return None, "a joined column is not in the semantic model"
+    if writer is None:
+        return None, "the datasource declares no single storage engine, so no probe can be written"
+    if I._too_big_to_probe(left) or I._too_big_to_probe(right):
+        return None, "a table is over the size guard for probes"
+    return {"sql": I.dropped_rows_sql(writer, left, lc.name, right, rc.name),
+            "left": left_key, "right": right_key,
+            "on": f"{left_key}.{lc.name} = {right_key}.{rc.name}"}, None
 
 
 def _emit_join_probes(entry: dict[str, Any], site, tidx: dict[str, Table],
@@ -530,7 +614,28 @@ def filter_values_judge(plan: dict[str, Any], results_dir: Path) -> dict[str, An
     columns = plan.get("columns", {})
     verdicts = [_judge_one(lit, columns.get(lit.get("column_key") or "", {}), results_dir)
                 for lit in plan["literals"]]
-    return {"literals": verdicts, "unreadable": None, "dialect": plan.get("dialect")}
+    # One entry per filtered column, whatever the literals on it said: what the semantic model
+    # declares for it and what the distinct probe showed. A column nobody declared a list for is a
+    # fact about the model, and it is a fact about the COLUMN, said once and not once per value.
+    facts = {key: _column_fact(key, column, results_dir) for key, column in columns.items()}
+    return {"literals": verdicts, "columns": facts, "unreadable": None, "dialect": plan.get("dialect")}
+
+
+def _column_fact(key: str, column: dict[str, Any], results_dir: Path) -> dict[str, Any]:
+    rows = _probe_csv(results_dir / f"{key}.distinct.csv")
+    limit = column.get("distinct_limit", _DISTINCT_PROBE_LIMIT)
+    count: Optional[int] = None
+    if column.get("distinct") is None or rows is None:
+        distinct = "not_run"
+    elif rows == "failed":
+        distinct = "failed"
+    else:
+        values = _values(rows)
+        count = len(values) if isinstance(values, list) else None
+        distinct = "empty" if not count else ("overflow" if count >= limit else "listed")
+    return {"table": column.get("table"), "column": column.get("column"),
+            "declared": column.get("choice_field") or "absent", "sensitive": bool(column.get("sensitive")),
+            "distinct": distinct, "observed_count": count}
 
 
 def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -> dict[str, Any]:
@@ -545,6 +650,7 @@ def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -
         "id": lit_id, "table": lit.get("table"), "column": lit.get("column"), "literal": literal,
         "op": lit.get("op"), "tier": "none", "verdict": UNRESOLVED, "observed": None,
         "near_miss": None, "rows_with_value": exists_n, "note": "",
+        "declared": lit.get("choice_field") or "absent",
     }
     probe_failed = ("; the probe file is empty, so the probe likely failed"
                     if "failed" in (exists, distinct, folded) else "")
@@ -598,7 +704,7 @@ def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -
             out["verdict"] = QUERY_DEFECT
             out["near_miss"] = _near_miss(distinct, literal)
             out["note"] = "not a value the column holds"
-        return _with_suggestion(out)
+        return _with_suggestion(_graded_against_warehouse(out))
 
     if exists_n is not None:
         out["tier"] = "exists"
@@ -612,12 +718,20 @@ def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -
             out["verdict"] = QUERY_DEFECT
             out["near_miss"] = _near_miss(folded, literal) if isinstance(folded, list) else None
             out["note"] = "no row holds this value" + probe_failed
-        return _with_suggestion(out)
+        return _with_suggestion(_graded_against_warehouse(out))
 
     out["note"] = ("no probe result was supplied, so the value could not be checked" + probe_failed
                    + ("; the distinct probe returned no values at all" if empty_distinct else "")
                    + ("; the semantic model's list for this column is empty"
                       if lit.get("choice_field") == "empty" else ""))
+    return out
+
+
+def _graded_against_warehouse(out: dict[str, Any]) -> dict[str, Any]:
+    """A grade the warehouse decided over a column the semantic model lists no values for says so.
+    "This value exists" is not "this value belongs", and without the sentence the two read alike."""
+    if out.get("declared") != "populated" and out.get("verdict") in (CONFIRMED, QUERY_DEFECT):
+        out["note"] += "; the semantic model declares no values for this column; graded against the warehouse"
     return out
 
 

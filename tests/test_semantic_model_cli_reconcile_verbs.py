@@ -710,3 +710,111 @@ def test_the_verbs_refuse_a_missing_sql_file_with_one_json_line(tmp_path):
                   "--against-sql-file", str(tmp_path / "nope.sql")]):
         rc, out = _run(args)
         assert rc == 2 and json.loads(out)["error"] == "unreadable_sql_file", (args, out)
+
+
+# --- round 3: what the semantic model already knows travels with a declared join ------------
+
+
+def test_a_declared_join_carries_the_relationship_and_the_keys_the_model_declares(tmp_path):
+    """The one join the model already understands used to be the emptiest entry in the file. Now it
+    says which side is the one side, which written columns are declared keys, and it still plans no
+    overlap probe: the declaration has answered."""
+    _model(tmp_path)
+    d = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")
+    (j,) = d["joins"]
+    (edge,) = j["declared_cardinality"]
+    assert edge == {"relationship": "many_to_one", "from": "order_items", "to": "orders",
+                    "one_side": ["orders"], "matched": True}
+    assert d["unique_by_model"] == {"orders.id": True, "order_items.order_id": False}
+    assert "orders.id" not in d["cardinality"]
+    assert j["probes"] == {"overlap": [], "cardinality": []}
+
+
+def test_a_join_on_the_wrong_key_still_reports_the_declared_edge_as_unmatched(tmp_path):
+    _model(tmp_path)
+    d = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.id = o.id")
+    (j,) = d["joins"]
+    assert j["declared_cardinality"][0]["matched"] is False
+    assert d["unique_by_model"] == {"orders.id": True, "order_items.id": True}
+
+
+def test_every_inner_join_on_one_pair_plans_a_dropped_rows_probe(tmp_path):
+    """A count of the left table's rows with no partner on the right, whole table, `NOT EXISTS` in
+    the WHERE clause because that is the one spelling every engine runs. Stated, never graded."""
+    _model(tmp_path)
+    d = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")
+    (j,) = d["joins"]
+    probe = j["dropped_rows_probe"]
+    assert probe["left"] == "order_items" and probe["right"] == "orders"
+    assert probe["on"] == "order_items.order_id = orders.id"
+    assert "NOT EXISTS" in probe["sql"] and "AS dropped" in probe["sql"] and "AS total" in probe["sql"]
+    assert "LIMIT" not in probe["sql"] and "SUM(CASE" not in probe["sql"]
+    assert j["dropped_rows_not_emitted_because"] is None
+    # An undeclared join gets one too: the fact is about the data, not the declaration.
+    d = _joins(tmp_path, "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id")
+    assert d["joins"][0]["dropped_rows_probe"]["left"] == "orders"
+
+
+def test_the_dropped_rows_probe_is_withheld_where_nothing_is_dropped_or_nothing_can_be_said(tmp_path):
+    _model(tmp_path)
+    cases = {
+        "SELECT COUNT(*) FROM order_items oi LEFT JOIN orders o ON oi.order_id = o.id": "LEFT join keeps",
+        "SELECT COUNT(*) FROM orders a JOIN orders b ON a.id = b.id": "itself",
+        "SELECT COUNT(*) FROM orders o CROSS JOIN customers c": "not on exactly one pair",
+    }
+    for sql, reason in cases.items():
+        (j,) = _joins(tmp_path, sql)["joins"]
+        assert j["dropped_rows_probe"] is None, sql
+        assert reason in j["dropped_rows_not_emitted_because"], (sql, j["dropped_rows_not_emitted_because"])
+    _model(tmp_path / "big", orders_rows=5_000_000)
+    (j,) = _joins(tmp_path / "big", "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")["joins"]
+    assert j["dropped_rows_probe"] is None and "size guard" in j["dropped_rows_not_emitted_because"]
+    _model(tmp_path / "noengine", engines=("PostgreSQL", "Snowflake"))
+    (j,) = _joins(tmp_path / "noengine", "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")["joins"]
+    assert j["dropped_rows_probe"] is None and "engine" in j["dropped_rows_not_emitted_because"]
+
+
+# --- round 3: a column nobody declared values for is said, once per column -----------------
+
+
+def test_the_judge_says_what_the_model_declared_for_each_column_once(tmp_path):
+    """`columns` is one entry per filtered column, whatever the literals on it said: what the semantic
+    model declares and what the distinct probe showed. Two literals on one column are one entry."""
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region IN ('eu', 'us') AND status = 'paid'")
+    out = _judge(tmp_path, plan, {"orders.region.distinct.csv": "v\nEU\nUS\nAPAC\n",
+                                  "lit-1.exists.csv": "n\n0\n", "lit-2.exists.csv": "n\n0\n"})
+    assert set(out["columns"]) == {"orders.region", "orders.status"}
+    assert out["columns"]["orders.region"] == {
+        "table": "orders", "column": "region", "declared": "empty", "sensitive": False,
+        "distinct": "listed", "observed_count": 3}
+    assert out["columns"]["orders.status"]["declared"] == "populated"
+    assert out["columns"]["orders.status"]["distinct"] == "not_run"
+    assert all(v["declared"] == "empty" for v in out["literals"] if v["column"] == "region")
+
+
+def test_a_column_with_a_wide_value_set_reads_overflow_and_an_empty_probe_file_reads_failed(tmp_path):
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = 'eu'")
+    wide = "v\n" + "\n".join(f"r{i}" for i in range(26)) + "\n"
+    assert _judge(tmp_path, plan, {"orders.region.distinct.csv": wide})["columns"]["orders.region"]["distinct"] == "overflow"
+    assert _judge(tmp_path, plan, {"orders.region.distinct.csv": ""})["columns"]["orders.region"]["distinct"] == "failed"
+
+
+def test_a_warehouse_grade_over_an_undeclared_column_says_so(tmp_path):
+    """`confirmed` by the warehouse is "this value exists", not "this value belongs". When the model
+    lists nothing for the column the note says which of the two the reader is looking at."""
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = 'EU'")
+    (v,) = _judge(tmp_path, plan, {"orders.region.distinct.csv": "v\nEU\nUS\n"})["literals"]
+    assert v["verdict"] == "confirmed" and v["declared"] == "empty"
+    assert "declares no values for this column; graded against the warehouse" in v["note"]
+    # A fresh results directory: the distinct file above would otherwise still be read first.
+    _model(tmp_path / "exists_only")
+    plan = _plan(tmp_path / "exists_only", "SELECT COUNT(*) FROM orders WHERE region = 'EU'")
+    (v,) = _judge(tmp_path / "exists_only", plan, {"lit-1.exists.csv": "n\n7\n"})["literals"]
+    assert v["tier"] == "exists" and "graded against the warehouse" in v["note"]
+    # A populated list never carries the sentence: the model answered.
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'paid'")
+    (v,) = _judge(tmp_path, plan, {})["literals"]
+    assert v["declared"] == "populated" and "graded against the warehouse" not in v["note"]
