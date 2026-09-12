@@ -37,7 +37,10 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    `network` and `permission` stop the whole run, as Phase 3b stops it; write the `kind` and its
    `remediation` and move on.
 7. **`sm receipt`** whenever the statement parsed: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" receipt
-   "$ROOT" --sql-file statement.sql > statement-receipt.json`.
+   "$ROOT" --sql-file statement.sql > statement-receipt.json`. Beside it, `bash
+   "$AGAMI_PLUGIN_ROOT/scripts/sm" mentions "$ROOT" --sql-file statement.sql > mentions.json`: the
+   semantic model's own words (descriptions, caveats, glossary, narrative, prompt examples) about every
+   table and column the statement reads, for the ledger to put beside a part that falls short.
 8. **Probes** go through step 4 only, each written to its own `.sql` file first and passed by path,
    each result to its own CSV named as `part-ledger.md` lists:
    `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" join-probes "$ROOT" --sql-file statement.sql >

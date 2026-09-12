@@ -77,6 +77,10 @@ below corresponds to one such version.
   paste-back pattern; the page never renders a result row, and a grade decides nothing on its own.
   An end-to-end test walks the flawed-inputs chain over the sample store: the wrong join key, the
   miscased value, the omitted required filter, the clean count. (ACE-117)
+- `sm mentions` quotes every description, caveat, glossary line, narrative paragraph and prompt
+  example that mentions a table or column a statement reads, and the reconcile ledger puts those
+  words beside every part that fell short, with a flag when two of them name different values for
+  one column. Quoted, never graded. (ACE-119)
 
 ### Fixed
 

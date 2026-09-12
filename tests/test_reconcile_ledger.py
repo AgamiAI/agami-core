@@ -820,3 +820,56 @@ def test_a_bare_aggregate_matched_to_a_metric_on_another_table_is_open(tmp_path)
     _write(tmp_path, "statement-receipt.json", _receipt(
         tables=[_table("payments")], columns=[_output("revenue", "matched")]))
     assert _parts(ledger(tmp_path))["metric:revenue"]["verdict"] == "confirmed"
+
+
+# --- prose evidence: the semantic model's words ride on the parts that fell short -------------
+
+
+def _mentions_file() -> dict:
+    return {"subjects": ["orders", "orders.status"], "dropped": 0, "unreadable": None, "dialect": "sqlite",
+            "mentions": [
+                {"about": "orders", "source": "table.caveat", "where": "orders",
+                 "text": "open orders are status NOT LIKE 'closed%'"},
+                {"about": "orders.status", "source": "column.caveat", "where": "orders.status",
+                 "text": "pending fulfillment is status IN ('pending', 'paid')"},
+                {"about": "customers", "source": "table.description", "where": "customers", "text": "cu"}],
+            "flags": [{"about": "orders.status", "kind": "values_named_differ",
+                       "sources": ["orders", "orders.status"], "values": [["closed%"], ["paid", "pending"]]}]}
+
+
+def test_the_models_words_ride_on_a_part_that_fell_short_and_not_on_a_confirmed_one(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "filter-values.judge.json", _judged("query_defect"))
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("orders", [{"expr": "orders.deleted_at IS NULL", "status": "applied"}])]))
+    _write(tmp_path, "mentions.json", _mentions_file())
+    parts = _parts(ledger(tmp_path))
+    lit = parts["literal:orders.status=Paid"]
+    assert [m["source"] for m in lit["evidence"]["prose"]] == ["column.caveat", "table.caveat"]
+    assert lit["evidence"]["prose_flags"][0]["kind"] == "values_named_differ"
+    assert "two descriptions in the semantic model name different values" in lit["note"]
+    assert "prose" not in parts["default_filter:orders:orders.deleted_at IS NULL"]["evidence"]
+    assert "prose" not in parts["runs"]["evidence"]
+
+
+def test_a_row_without_mentions_grades_exactly_as_before(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "filter-values.judge.json", _judged("query_defect"))
+    before = ledger(tmp_path)
+    _write(tmp_path, "mentions.json", "")
+    assert ledger(tmp_path) == before
+    _write(tmp_path, "mentions.json", {"mentions": [], "flags": [], "subjects": [], "dropped": 0, "unreadable": None})
+    assert ledger(tmp_path) == before
+
+
+def test_prose_reaches_the_findings_file(tmp_path):
+    run = _run_dir(tmp_path, [{"row": 1, "question": "q", "statement": "s", "expected": 1, "status": "mismatch"}])
+    d = run / "rows" / "1"
+    _ran_ok(d)
+    _write(d, "filter-values.judge.json", {"literals": [], "unreadable": None, "columns": {
+        "orders.status": {"table": "orders", "column": "status", "declared": "absent", "sensitive": False,
+                          "distinct": "listed", "observed_count": 4}}})
+    _write(d, "mentions.json", _mentions_file())
+    (finding,) = findings(run)["findings"]
+    assert finding["key"] == "description:orders.status"
+    assert [m["about"] for m in finding["evidence"][0]["ledger"]["prose"]] == ["orders.status", "orders"]

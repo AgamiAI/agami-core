@@ -818,3 +818,81 @@ def test_a_warehouse_grade_over_an_undeclared_column_says_so(tmp_path):
     plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'paid'")
     (v,) = _judge(tmp_path, plan, {})["literals"]
     assert v["declared"] == "populated" and "graded against the warehouse" not in v["note"]
+
+
+# --- mentions: the semantic model's own words about what a statement reads ------------------
+
+
+def _prose_model(root: Path) -> None:
+    """The verbs' fixture plus prose on every layer: a table caveat and a column caveat that name
+    DIFFERENT values for `orders.status`, a glossary line, a narrative paragraph, and an example."""
+    _model(root)
+    orders_yaml = root / "subject_areas" / "s" / "tables" / "orders.yaml"
+    orders = yaml.safe_load(orders_yaml.read_text())
+    orders["caveats"] = ["open orders are status NOT LIKE 'closed%'"]
+    for col in orders["columns"]:
+        if col["name"] == "status":
+            col["description"] = "The order's lifecycle state."
+            col["caveats"] = ["pending fulfillment is status IN ('pending', 'paid')"]
+    orders_yaml.write_text(yaml.safe_dump(orders))
+    ds_yaml = root / "datasource.yaml"
+    ds = yaml.safe_load(ds_yaml.read_text())
+    ds["key_terminology"] = {"pending": "an orders row whose status has not reached shipped"}
+    ds_yaml.write_text(yaml.safe_dump(ds))
+    (root / "datasource.md").write_text("Orders are the unit of sale.\n\nCustomers are people, never companies.\n")
+    (root / "prompt_examples" / "s").mkdir(parents=True)
+    (root / "prompt_examples" / "s" / "examples.yaml").write_text(yaml.safe_dump({"examples": [
+        {"question": "How many pending orders?", "sql": "SELECT COUNT(*) FROM orders WHERE status = 'pending'",
+         "notes": ["pending excludes paid"]},
+        {"question": "How many customers?", "sql": "SELECT COUNT(*) FROM customers"}]}))
+
+
+def _mentions(tmp_path: Path, sql: str) -> dict:
+    s = _write(tmp_path, "m.sql", sql)
+    rc, out = _run(["mentions", str(tmp_path), "--sql-file", s])
+    assert rc == 0, out
+    return json.loads(out)
+
+
+def test_mentions_quotes_every_prose_layer_about_what_the_statement_reads(tmp_path):
+    _prose_model(tmp_path)
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders o WHERE o.status = 'pending'")
+    assert d["subjects"] == ["orders", "orders.status"] and d["unreadable"] is None
+    by = {(m["about"], m["source"]) for m in d["mentions"]}
+    assert ("orders", "table.description") in by and ("orders", "table.caveat") in by
+    assert ("orders.status", "column.description") in by and ("orders.status", "column.caveat") in by
+    assert ("orders.status", "glossary") in by  # "an orders row whose status ..." names both words
+    assert ("orders", "datasource.md") in by
+    assert ("orders.status", "example") in by
+    example = next(m for m in d["mentions"] if m["source"] == "example" and m["about"] == "orders.status")
+    assert example["where"] == "How many pending orders?" and "pending excludes paid" in example["text"]
+    # The customers example and the customers paragraph are about a table the statement never reads.
+    assert not any("customers" in m["about"] for m in d["mentions"])
+    for m in d["mentions"]:
+        assert set(m) == {"about", "source", "where", "text"} and len(m["text"]) <= 300
+
+
+def test_two_caveats_naming_different_values_for_one_column_are_flagged(tmp_path):
+    _prose_model(tmp_path)
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'pending'")
+    (flag,) = [f for f in d["flags"] if f["kind"] == "values_named_differ"]
+    assert flag["about"] == "orders.status"
+    # The table caveat names the column, so it is about the column too and takes part in the flag.
+    assert set(flag["sources"]) >= {"orders", "orders.status", "How many pending orders?"}
+    # The same set everywhere is not a disagreement, and a line naming no value takes no part in it.
+    orders_yaml = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    orders = yaml.safe_load(orders_yaml.read_text())
+    orders["caveats"] = ["open orders are status IN ('pending', 'paid')"]
+    orders_yaml.write_text(yaml.safe_dump(orders))
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text(yaml.safe_dump({"examples": [
+        {"question": "How many open orders?", "sql": "SELECT COUNT(*) FROM orders WHERE status IN ('paid', 'pending')"}]}))
+    assert _mentions(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'pending'")["flags"] == []
+
+
+def test_mentions_are_empty_for_a_statement_that_reads_nothing_described_and_say_when_unreadable(tmp_path):
+    _model(tmp_path)
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM order_items")
+    assert d["subjects"] == ["order_items"]
+    assert [m["source"] for m in d["mentions"]] == ["table.description"]  # "oi", the fixture's one line
+    d = _mentions(tmp_path, "SELECT FROM WHERE")
+    assert d["mentions"] == [] and d["unreadable"]
