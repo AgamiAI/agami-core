@@ -1052,6 +1052,51 @@ def _grade_claims(claims: dict | None) -> list[dict]:
     return rows
 
 
+def _part_subjects(part: str) -> list[str]:
+    """The table or `table.column` a part is about, as the mentions verb keys them; empty for a part
+    that names neither (a run, an aggregate, a claim)."""
+    for prefix in ("literal:", "values_declared:"):
+        if part.startswith(prefix):
+            return [part[len(prefix):].split("=", 1)[0].lower()]
+    if part.startswith("default_filter:"):
+        return [part[len("default_filter:"):].split(":", 1)[0].lower()]
+    for prefix in ("join:", "join_key:", "cardinality:", "dropped_rows:"):
+        if part.startswith(prefix):
+            label = part[len(prefix):].split("#", 1)[0]
+            return [name for name in label.split("-", 1) if name and name != "*"]
+    return []
+
+
+def _attach_prose(rows: list[dict], mentions: dict | None) -> None:
+    """Put the semantic model's own words beside every part that fell short: the descriptions,
+    caveats, glossary lines and examples that mention its table or column, from `sm mentions`.
+    Never a grade; a person reads them. A part that is confirmed or noted gets none, so a clean
+    row's ledger does not grow a copy of the model's prose."""
+    if not isinstance(mentions, dict) or not mentions.get("mentions"):
+        return
+    by_about: dict[str, list[dict]] = {}
+    for mention in mentions["mentions"]:
+        by_about.setdefault(mention.get("about", ""), []).append(mention)
+    flags = {flag.get("about"): flag for flag in mentions.get("flags") or []}
+    for row in rows:
+        if row["verdict"] in (CONFIRMED, NOTED):
+            continue
+        subjects = _part_subjects(row["part"])
+        if not subjects:
+            continue
+        prose: list[dict] = []
+        for subject in subjects:
+            prose.extend(by_about.get(subject, []))
+            if "." in subject:
+                prose.extend(by_about.get(subject.split(".", 1)[0], []))
+        if prose:
+            row["evidence"]["prose"] = prose[:20]
+        flagged = [flags[subject] for subject in subjects if subject in flags]
+        if flagged:
+            row["evidence"]["prose_flags"] = flagged
+            row["note"] += "; two descriptions in the semantic model name different values for this column, read both"
+
+
 def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     """Every part of the statement in `row_dir`, graded, and the verdict the weakest part decides."""
     row_dir = Path(row_dir)
@@ -1061,6 +1106,9 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     probes = _load_json(row_dir / "join-probes.json")
     judge = _load_json(row_dir / "filter-values.judge.json")
     claims = _load_json(row_dir / "claims.json") if with_claims else None
+    # Optional: the semantic model's own words about what the statement reads. Absent, the ledger
+    # grades exactly as it would have; present, they ride on the parts that fell short.
+    mentions = _load_json(row_dir / "mentions.json")
 
     rows = _grade_run(run)
     # After a run that succeeded, every input the later steps write is expected. One that is absent,
@@ -1091,6 +1139,8 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     rows.extend(_grade_metrics(receipt, prepare))
     rows.extend(_grade_literals(judge))
     rows.extend(_grade_claims(claims))
+
+    _attach_prose(rows, mentions if isinstance(mentions, dict) and not mentions.get("error") else None)
 
     counts = {v: 0 for v in _VERDICT_RANK}
     for row in rows:
