@@ -34,14 +34,15 @@ downstream: a join that could not be graded leaves the fan-out check on its aggr
 | `literal:<t>.<c>=<v>` | `filter-values.judge.json` | the judge's grade, as it stands; a `model_gap` is of kind `description`, the column's list of values being stale. Every grade carries `declared` (`populated`, `empty`, `absent`), and a grade the warehouse decided over an undeclared column says so in its note |
 | `values_declared:<t>.<c>` | `filter-values.judge.json` `columns` | one per filtered column. `populated` → confirmed; `absent` or `empty` with the distinct probe `listed` (under 26 values) → model_gap of kind `description`, the same finding family as a stale list; `overflow` → noted, no list is expected of a wide column; `empty` → noted; `failed` or `not_run` → unresolved; a sensitive column → noted |
 | `dropped_rows:<a>-<b>` | `<join id>.dropped_rows.csv` | noted, never a grade: `<dropped> of <total> <left> rows have no <right> partner`, counted over the whole table before the statement's own filters; a probe planned but not run → noted, nothing claimed; no probe planned → no part |
+| `question_fit` | `question_fit.json`, the skill's Phase 1.5g reading of whether the statement answers its question | `plausible` → confirmed, by reading, and the note says so; `doubtful` → unresolved with the reason, so the row grades `match_unverified` at best and never reaches the keep-offer; `no_question` → no part; absent after a run that succeeded → unresolved, the fit was not checked. The one part graded by judgment: it can withhold a row and never proves anything about the semantic model |
 | `predicates`, `date_window` | `claims.json`, only with `--with-claims` | `agrees` → confirmed; `differs` → unresolved, with both sides named; `unknown` → unresolved, except a `date_window` that is `null` on both sides when `unreadable` says both statements parsed and `temporal_predicates` is zero on both sides, which is confirmed (neither writes a date filter, so there is nothing to disagree about); a count above zero is a window written in a shape the reader does not fold, and stays open. A difference is reported, never judged here |
 
 **The verdict is the weakest part:** `query_defect` outranks `unresolved`, which outranks
 `model_gap`, which outranks `confirmed`. The counts travel with it so a reader sees what else was there.
 
 **An input that is not there is a part that was not checked.** After a run whose `run.json` says
-`ok`, the ledger expects `statement-prepare.json`, `statement-receipt.json`, `join-probes.json` and
-`filter-values.judge.json`. One that is absent, zero bytes, one JSON error line from a verb that
+`ok`, the ledger expects `statement-prepare.json`, `statement-receipt.json`, `join-probes.json`,
+`filter-values.judge.json` and `question_fit.json`. One that is absent, zero bytes, one JSON error line from a verb that
 exited non-zero, or JSON of another shape becomes one open part, `fan_out:*`, `receipt:*`, `join:*` or
 `literal:*`, whose evidence names the file and the problem. A verb that could not read the statement
 (`unreadable` set) opens `join:*` or `literal:*` the same way. Grading only what happened to be there
@@ -69,6 +70,7 @@ and writes `ledger.json` beside the inputs.
 | `<literal id>.exists.csv`, `<literal id>.exists_folded.csv` | the tier | one value's row count, and the folded near miss, run only when `exists` returned 0 |
 | `filter-values.judge.json` | `sm filter-values judge` | one grade per typed value |
 | `claims.json` | `sm claims` | the diff against the AI's own statement, once both exist |
+| `question_fit.json` | the skill, Phase 1.5g | `{"fit": "plausible" \| "doubtful" \| "no_question", "reason": "<one sentence, or null>"}`: whether the statement plausibly answers the question it came with, decided by reading |
 | `mentions.json` | `sm mentions --sql-file` | every description, caveat, glossary line, narrative paragraph and prompt example that mentions a table or column the statement reads, with a `values_named_differ` flag when two mentions about one column name different quoted values. Optional: absent, the ledger grades as before |
 | `receipt.json` | `sm receipt` | the receipt of the AI's statement |
 | `ledger.json` | `reconcile.py ledger` | the graded parts |

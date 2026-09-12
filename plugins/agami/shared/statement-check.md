@@ -64,6 +64,13 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    its exit, rule and kind, so every execution and every refusal in this phase is written down. The
    AI's own run logs as `agami-query` Phase 5 always has.
 
+10. **Does the statement answer the question?** For a row that carries a question too, read the two
+   side by side and write `question_fit.json`: `{"fit": "plausible" | "doubtful" | "no_question",
+   "reason": "<one sentence, or null>"}`. Doubtful when the grain differs, the measure differs, a
+   filter is present the question never asked for or absent when it did, or the time window differs.
+   `no_question` for a statement that came alone. This is the one step here that judges by reading;
+   the ledger turns a doubtful fit into an open part, and a missing file into one too.
+
 Then `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir .` grades what was found,
 and again with `--with-claims` once `sm claims` has compared the two statements.
 

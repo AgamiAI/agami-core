@@ -171,6 +171,15 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
     assert "which is right is the person's call, never the ledger's" in statements
     assert "| `mentions.json` |" in REFERENCES["part-ledger.md"]
     assert "mentions" in REFERENCES["statement-check.md"]
+    # 1.5g: the one judgment in the ledger, named as such, with its four doubt signals and its file.
+    fit = PHASE_1_5.split("**1.5g")[1]
+    for signal in ("grain differs", "measure differs", "a filter is present the question never asked for", "time window differs"):
+        assert signal in fit, signal
+    assert "`question_fit.json`" in fit and "a judgment made by reading" in fit
+    assert "never proves anything about the semantic model" in fit
+    assert "question_fit:" in statements and "re-run the row" in statements
+    assert "| `question_fit` |" in REFERENCES["part-ledger.md"]
+    assert "question_fit.json" in REFERENCES["statement-check.md"] and "question_fit" in REFERENCES["evidence-row.md"]
 
 
 def test_hard_rule_3_gains_the_findings_file_and_keeps_every_pin():

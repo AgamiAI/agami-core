@@ -113,8 +113,10 @@ def store(tmp_path_factory):
 # --- the chain, as the skill's Phase 1.5 walks it ----------------------------------------
 
 
-def grade_statement(store: dict, n: int, sql: str) -> dict:
-    """Phase 1.5 in code: run, receipt, probes, judge, ledger. Returns the ledger."""
+def grade_statement(store: dict, n: int, sql: str, *, fit: str = "plausible",
+                    fit_reason: str | None = None) -> dict:
+    """Phase 1.5 in code: run, receipt, probes, judge, the fit judgment, ledger. Returns the ledger.
+    `fit` stands in for the AI's Phase 1.5g reading of the question beside the statement."""
     db, root = store["db"], store["root"]
     row_dir = store["run"] / "rows" / str(n)
     row_dir.mkdir(parents=True, exist_ok=True)
@@ -170,6 +172,8 @@ def grade_statement(store: dict, n: int, sql: str) -> dict:
     (row_dir / "filter-values.judge.json").write_text(json.dumps(_sm(
         "filter-values", "judge", str(root), "--plan", str(row_dir / "filter-values.plan.json"),
         "--results", str(row_dir))))
+    # 1.5g: whether the statement answers its question, a judgment the skill writes down.
+    (row_dir / "question_fit.json").write_text(json.dumps({"fit": fit, "reason": fit_reason}))
     return reconcile.ledger(row_dir)
 
 
@@ -438,6 +442,24 @@ def test_13_a_metric_matched_by_shape_on_another_table_is_open(store):
     metric = parts["metric:total_refunds"]
     assert metric["verdict"] == "unresolved", metric
     assert "defined on refunds, which this statement does not read" in metric["note"]
+
+
+def test_14_a_sound_statement_paired_with_the_wrong_question_is_never_kept(store):
+    """The statement is right and every measured part holds, but it counts order items while the
+    question asks about orders. The skill's reading writes a doubtful fit; the ledger holds the row
+    open; a matching number becomes `match_unverified` and never reaches the keep-offer."""
+    sql = ("SELECT COUNT(*) AS n FROM order_items oi JOIN orders o ON o.id = oi.order_id "
+           "WHERE o.status != 'cancelled'")
+    ledger = grade_statement(store, 14, sql, fit="doubtful",
+                             fit_reason="the question asks how many orders were placed; the statement counts order items")
+    parts = _parts(ledger)
+    assert parts["fan_out:COUNT(*)"]["verdict"] == "confirmed"
+    assert parts["question_fit"]["verdict"] == "unresolved" and "counts order items" in parts["question_fit"]["note"]
+    expected = scalar((store["run"] / "rows" / "14" / "statement.csv").read_text())
+    actual = ask_agami(store, 14, sql)
+    diff, ledger = compare(store, 14, expected, actual)
+    rec = record(store, 14, "How many orders were placed?", sql, expected, diff, ledger)
+    assert diff["match"] is True and rec["status"] == "match_unverified"
 
 
 def test_8_the_profile_was_never_written_to(store):
