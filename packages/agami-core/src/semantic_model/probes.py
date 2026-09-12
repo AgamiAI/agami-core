@@ -76,12 +76,13 @@ UNDETERMINED = "undetermined"
 # a receipt's rendering budget, so the cap here only guards against a pathological input, and the
 # payload says how many joins were dropped by it.
 _MAX_JOINS = 200
+# Literals are capped the same way: an `IN` list of a thousand values would plan a thousand scans.
+_MAX_LITERALS = 200
 # One past the enum ceiling, so an overflow shows as one extra row rather than as a full list that
 # happens to be exactly the ceiling long. Recorded on the plan, so the judge reads the number the
 # plan used rather than whatever this constant is when it runs.
 _DISTINCT_PROBE_LIMIT = I.ENUM_MAX_DISTINCT + 1
 # The sample size the overlap probe has always used.
-_OVERLAP_SAMPLE = 50
 
 _UNREADABLE = "the statement could not be read"
 _UNQUOTABLE = re.compile(r"[\\\x00-\x1f\x7f]")
@@ -227,7 +228,7 @@ def join_probes(org: Datasource, sql: str) -> dict[str, Any]:
             "probes": {"overlap": [], "cardinality": []},
             "not_probed_because": why_open,
         }
-        if status == UNDECLARED and site.pairs:
+        if status == UNDECLARED:
             _emit_join_probes(entry, site, tidx, writer, cardinality, unique_by_model)
         elif status != UNDECLARED and why_open is None:
             entry["not_probed_because"] = (
@@ -243,6 +244,9 @@ def _emit_join_probes(entry: dict[str, Any], site, tidx: dict[str, Table],
                       writer: Optional[D.Dialect], cardinality: dict[str, Optional[str]],
                       unique_by_model: dict[str, bool]) -> None:
     """Fill `entry["probes"]` for an undeclared join, or say why nothing could be emitted."""
+    if not site.pairs:
+        entry["not_probed_because"] = "the join wrote no column pair to probe (a cross join)"
+        return
     if len(site.pairs) != 1:
         entry["not_probed_because"] = "the join is on more than one pair of columns"
         return
@@ -275,6 +279,9 @@ def _emit_join_probes(entry: dict[str, Any], site, tidx: dict[str, Table],
             "from": f"{t1}.{col1.name}", "into": f"{t2}.{col2.name}",
             "sql": I.overlap_sql(writer, table1, col1.name, table2, col2.name),
         })
+    if not entry["probes"]["overlap"]:
+        entry["not_probed_because"] = ("both join columns are declared keys, and no overlap probe is "
+                                       "written from a key")
     for name, table, column in ends:
         key = f"{name}.{column.name}"
         entry["probes"]["cardinality"].append(key)
@@ -298,7 +305,10 @@ def _literal_sites(conj: "exp.Expression") -> Iterator[tuple]:
     if isinstance(conj, (exp.EQ, exp.NEQ)):
         op = "=" if isinstance(conj, exp.EQ) else "<>"
         for col, lit in ((conj.this, conj.expression), (conj.expression, conj.this)):
-            if isinstance(col, exp.Column) and isinstance(lit, exp.Literal):
+            if isinstance(col, exp.Column) and isinstance(lit, exp.Neg) and isinstance(lit.this, exp.Literal):
+                # `-3` parses as a negation over the literal `3`; the value the person typed is `-3`.
+                yield "literal", col, f"-{lit.this.this}", False, op, False
+            elif isinstance(col, exp.Column) and isinstance(lit, exp.Literal):
                 yield "literal", col, str(lit.this), bool(lit.is_string), op, False
         return
     negated = False
@@ -380,17 +390,29 @@ def filter_values_plan(org: Datasource, sql: str) -> dict[str, Any]:
         scope = RT._own_alias_map(sel)
         hidden = set(cte_names) | set(RT._computed_relations(sel))
         for conj in RT._filtering_conjuncts(sel):
-            for hit in _literal_sites(conj):
+            hits = list(_literal_sites(conj))
+            if not hits:
+                # A shape this walker does not read (two conditions joined by OR, a function over
+                # the column, a cast, a comparison against another column). Said, not dropped: an
+                # empty `literals` list must never read as "no value was typed".
+                first = conj.find(exp.Column)
+                skipped.append({"column": first.name if first is not None else None,
+                                "op": type(conj).__name__.lower(),
+                                "reason": "a filter shape the plan does not read"})
+                continue
+            for hit in hits:
                 if hit[0] == "skipped":
                     _kind, col, op, reason = hit
                     skipped.append({"column": col.name, "op": op, "reason": reason})
                     continue
                 _kind, col, text, quoted, op, pattern = hit
                 n += 1
+                if n > _MAX_LITERALS:
+                    continue
                 literals.append(_plan_entry(f"lit-{n}", col, text, quoted, op, pattern, scope, tidx,
                                             hidden, writer, columns))
-    return {"literals": literals, "columns": columns, "skipped": skipped, "unreadable": None,
-            "dialect": grammar}
+    return {"literals": literals, "columns": columns, "skipped": skipped,
+            "dropped": max(0, n - _MAX_LITERALS), "unreadable": None, "dialect": grammar}
 
 
 def _plan_entry(lit_id: str, col: "exp.Column", literal: str, quoted: bool, op: str, pattern: bool,
@@ -524,7 +546,11 @@ def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -
         "op": lit.get("op"), "tier": "none", "verdict": UNRESOLVED, "observed": None,
         "near_miss": None, "rows_with_value": exists_n, "note": "",
     }
-    probe_failed = "; the probe file is empty, so the probe likely failed" if "failed" in (exists, distinct) else ""
+    probe_failed = ("; the probe file is empty, so the probe likely failed"
+                    if "failed" in (exists, distinct, folded) else "")
+    # A header-only distinct file is a column that returned no values at all: an empty table, an
+    # all-null column, or a truncated write. None of those is evidence about the value typed.
+    empty_distinct = isinstance(distinct, list) and not distinct
 
     if lit.get("pattern"):
         out["note"] = "a LIKE pattern is not one value and was not checked"
@@ -558,11 +584,11 @@ def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -
     if lit.get("sensitive"):
         out["note"] = "sensitive column: its values are never probed and no list exists to answer from"
         return out
-    if lit["probes"].get("exists") is None:
+    if (lit.get("probes") or {}).get("exists") is None:
         out["note"] = lit.get("note") or "no probe was emitted for this value"
         return out
 
-    if isinstance(distinct, list) and len(distinct) < limit:
+    if isinstance(distinct, list) and 0 < len(distinct) < limit:
         out["tier"] = "distinct"
         out["observed"] = sorted(distinct)
         if literal in distinct:
@@ -579,13 +605,17 @@ def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -
         if exists_n > 0:
             out["verdict"] = CONFIRMED
             out["note"] = f"the warehouse holds {exists_n} row(s) with this value"
+        elif empty_distinct:
+            out["note"] = ("the column returned no values at all, so no value can be checked against it; "
+                           "the table may be empty or the column all null")
         else:
             out["verdict"] = QUERY_DEFECT
             out["near_miss"] = _near_miss(folded, literal) if isinstance(folded, list) else None
-            out["note"] = "no row holds this value"
+            out["note"] = "no row holds this value" + probe_failed
         return _with_suggestion(out)
 
     out["note"] = ("no probe result was supplied, so the value could not be checked" + probe_failed
+                   + ("; the distinct probe returned no values at all" if empty_distinct else "")
                    + ("; the semantic model's list for this column is empty"
                       if lit.get("choice_field") == "empty" else ""))
     return out

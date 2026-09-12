@@ -301,20 +301,42 @@ def _grammar(org) -> Optional[str]:
     return RT._dialect_of(org)[0]
 
 
+def _read_sql_file(path: str) -> Optional[str]:
+    """The statement in `path`, or None after printing `{"error": "unreadable_sql_file"}`: a file that
+    is not there must not become a traceback with an empty stdout, because the skill redirects stdout
+    to a file and a zero-byte file downstream reads as a probe that failed."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        _print_json({"error": "unreadable_sql_file", "detail": str(exc).splitlines()[0]})
+        return None
+
+
 def cmd_claims(args) -> int:
     """Where two statements differ, in the seven claims the golden runner already compares.
     `golden_claims.compare_statements` has been reachable from the runner and the save door and
     from no command; this is that command. A side that could not be read says so, rather than
     leaving seven `unknown` claims to explain themselves."""
-    from .golden_claims import compare_statements, read_claims
+    from .golden_claims import compare_statements, count_temporal_predicates, read_claims
     org = L.load_datasource(args.root)
     grammar = _grammar(org)
-    left, right = Path(args.sql_file).read_text(), Path(args.against_sql_file).read_text()
+    left = _read_sql_file(args.sql_file)
+    if left is None:
+        return 2
+    right = _read_sql_file(args.against_sql_file)
+    if right is None:
+        return 2
     diff = compare_statements(left, right, dialect=grammar or "")
     out = diff.as_dict()
     out["unreadable"] = {
         "sql_file": read_claims(left, dialect=grammar or "").unreadable,
         "against_sql_file": read_claims(right, dialect=grammar or "").unreadable,
+    }
+    # How many conjuncts on each side speak of time. Two zeros beside a `date_window` that reads
+    # `unknown` mean neither statement filtered on a date; anything else leaves the window open.
+    out["temporal_predicates"] = {
+        "sql_file": count_temporal_predicates(left, dialect=grammar or ""),
+        "against_sql_file": count_temporal_predicates(right, dialect=grammar or ""),
     }
     out["dialect"] = grammar
     _print_json(out)
@@ -343,7 +365,11 @@ def cmd_compare_results(args) -> int:
     except (OSError, ValueError) as exc:
         _print_json({"error": "unreadable_csv", "detail": str(exc)})
         return 2
-    golden_sql = Path(args.golden_sql_file).read_text() if args.golden_sql_file else None
+    golden_sql = None
+    if args.golden_sql_file:
+        golden_sql = _read_sql_file(args.golden_sql_file)
+        if golden_sql is None:
+            return 2
     score = compare_result_sets(golden, generated, match=args.match, golden_sql=golden_sql,
                                 bounds=bounds, dialect=_grammar(org))
     _print_json(dataclasses.asdict(score))
@@ -355,7 +381,10 @@ def cmd_join_probes(args) -> int:
     that would test whether the keys resolve. Emitted, never run."""
     from . import probes
     org = L.load_datasource(args.root)
-    _print_json(probes.join_probes(org, Path(args.sql_file).read_text()))
+    sql = _read_sql_file(args.sql_file)
+    if sql is None:
+        return 2
+    _print_json(probes.join_probes(org, sql))
     return 0
 
 
@@ -364,7 +393,10 @@ def cmd_filter_values_plan(args) -> int:
     the probe SQL that would settle the rest."""
     from . import probes
     org = L.load_datasource(args.root)
-    _print_json(probes.filter_values_plan(org, Path(args.sql_file).read_text()))
+    sql = _read_sql_file(args.sql_file)
+    if sql is None:
+        return 2
+    _print_json(probes.filter_values_plan(org, sql))
     return 0
 
 

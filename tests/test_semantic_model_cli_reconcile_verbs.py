@@ -626,3 +626,87 @@ def test_judge_refuses_a_results_directory_that_does_not_exist(tmp_path):
     rc, out = _run(["filter-values", "judge", str(tmp_path), "--plan", str(plan_path),
                     "--results", str(tmp_path / "missing")])
     assert rc == 2 and json.loads(out)["error"] == "no_results_dir"
+
+
+# --- review fixes: no confident grade from no evidence -------------------------------
+
+
+def test_judge_leaves_a_distinct_probe_that_returned_no_values_open(tmp_path):
+    """A header-only distinct file is an empty table, an all-null column, or a truncated write. None
+    of those says anything about the value typed, so the grade stays open instead of `query_defect`."""
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = 'eu'")
+    (v,) = _judge(tmp_path, plan, {"orders.region.distinct.csv": "v\n", "lit-1.exists.csv": "n\n0\n"})["literals"]
+    assert v["verdict"] == "unresolved" and "no values at all" in v["note"]
+    # With rows that do hold the value, the existence tier still confirms it.
+    (v,) = _judge(tmp_path, plan, {"orders.region.distinct.csv": "v\n", "lit-1.exists.csv": "n\n3\n"})["literals"]
+    assert v["tier"] == "exists" and v["verdict"] == "confirmed"
+
+
+def test_judge_says_when_the_folded_probe_file_is_empty(tmp_path):
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = 'eu'")
+    (v,) = _judge(tmp_path, plan, {"lit-1.exists.csv": "n\n0\n", "lit-1.exists_folded.csv": ""})["literals"]
+    assert v["verdict"] == "query_defect" and v["near_miss"] is None
+    assert "probe file is empty" in v["note"]
+
+
+def test_plan_reports_a_filter_shape_it_does_not_read_instead_of_an_empty_list(tmp_path):
+    _model(tmp_path)
+    d = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'paid' OR status = 'PAID'")
+    assert d["literals"] == []
+    assert [(s["column"], s["op"]) for s in d["skipped"]] == [("status", "or")]
+    d = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE UPPER(status) = 'PAID'")
+    assert d["literals"] == [] and d["skipped"][0]["reason"] == "a filter shape the plan does not read"
+
+
+def test_plan_reads_a_negative_number_as_the_value_typed(tmp_path):
+    _model(tmp_path)
+    d = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE total = -3")
+    (lit,) = d["literals"]
+    assert lit["literal"] == "-3" and lit["quoted"] is False and d["skipped"] == []
+
+
+def test_plan_caps_the_literals_and_counts_the_dropped(tmp_path):
+    _model(tmp_path)
+    values = ", ".join(f"'v{i}'" for i in range(250))
+    d = _plan(tmp_path, f"SELECT COUNT(*) FROM orders WHERE status IN ({values})")
+    assert len(d["literals"]) == 200 and d["dropped"] == 50
+
+
+def test_join_probes_says_why_a_cross_join_has_no_probe(tmp_path):
+    _model(tmp_path)
+    d = _joins(tmp_path, "SELECT COUNT(*) FROM orders CROSS JOIN customers")
+    (join,) = d["joins"]
+    assert join["status"] == "undeclared" and join["probes"]["overlap"] == []
+    assert "cross join" in join["not_probed_because"]
+
+
+def test_claims_counts_the_conjuncts_that_speak_of_time_on_each_side(tmp_path):
+    """Two zeros are the one reading a ledger may lean on: neither statement filtered on a date, so a
+    `date_window` that reads `unknown` has nothing to disagree about. A window written in a shape the
+    resolver does not fold still counts, and keeps the claim open."""
+    _model(tmp_path)
+    a = _write(tmp_path, "a.sql", "SELECT COUNT(*) FROM orders WHERE status = 'paid'")
+    b = _write(tmp_path, "b.sql", "SELECT COUNT(*) FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL '30 days'")
+    c = _write(tmp_path, "c.sql",
+               "SELECT COUNT(*) FROM orders WHERE order_date >= '2025-01-01' AND order_date < '2026-01-01' AND status = 'paid'")
+    rc, out = _run(["claims", str(tmp_path), "--sql-file", a, "--against-sql-file", a])
+    assert rc == 0 and json.loads(out)["temporal_predicates"] == {"sql_file": 0, "against_sql_file": 0}
+    rc, out = _run(["claims", str(tmp_path), "--sql-file", b, "--against-sql-file", c])
+    d = json.loads(out)
+    assert d["temporal_predicates"] == {"sql_file": 1, "against_sql_file": 2}
+    assert {x["name"]: x["status"] for x in d["claims"]}["date_window"] == "unknown"
+    u = _write(tmp_path, "u.sql", "SELECT FROM WHERE")
+    rc, out = _run(["claims", str(tmp_path), "--sql-file", a, "--against-sql-file", u])
+    assert json.loads(out)["temporal_predicates"] == {"sql_file": 0, "against_sql_file": None}
+
+
+def test_the_verbs_refuse_a_missing_sql_file_with_one_json_line(tmp_path):
+    _model(tmp_path)
+    for args in (["join-probes", str(tmp_path), "--sql-file", str(tmp_path / "nope.sql")],
+                 ["filter-values", "plan", str(tmp_path), "--sql-file", str(tmp_path / "nope.sql")],
+                 ["claims", str(tmp_path), "--sql-file", str(tmp_path / "nope.sql"),
+                  "--against-sql-file", str(tmp_path / "nope.sql")]):
+        rc, out = _run(args)
+        assert rc == 2 and json.loads(out)["error"] == "unreadable_sql_file", (args, out)
