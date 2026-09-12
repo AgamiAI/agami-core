@@ -363,8 +363,10 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     only consumer of `_actor_ctx` before this.
 
     Best-effort and additive ONLY: some existing test tools (and any third-party consumer's tool)
-    return a bare string, not JSON, and this must never corrupt that. No actor, or a body with no
-    JSON object anywhere in it, returns `result_text` unchanged.
+    return a bare string, not JSON, and this must never corrupt that. A body with no JSON object
+    anywhere in it always returns `result_text` unchanged. With no actor, a body that also carries
+    no `caller_identity` key returns unchanged too — but one that DOES carry that key is still
+    reserialized with it stripped; see the overwrite-guarantee paragraph below.
 
     Handles a JSON object followed by trailing non-JSON text — `tool_get_datasource_schema` builds
     its response this way, a JSON payload with a "## Domain context" / "## USER_MEMORY.md" markdown
