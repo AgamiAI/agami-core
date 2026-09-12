@@ -879,6 +879,10 @@ class AggregateReport:
     status: str
     joins: list[str] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+    # Why the status is "undetermined", in the words of the one blindness the analysis hit, and None
+    # on the other two statuses. One word for four different causes sent a reader to the join when
+    # the aggregate simply named no column.
+    reason: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -887,6 +891,7 @@ class AggregateReport:
             "status": self.status,
             "joins": self.joins,
             "findings": [f.as_dict() for f in self.findings],
+            "reason": self.reason,
         }
 
 
@@ -1865,20 +1870,22 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     for i, finding in _check_aggregation_semantics(tree, sites, org, tables_in_scope, ctx=ctx):
         attached[i].append(finding)
 
-    return [
-        AggregateReport(
+    reports: list[AggregateReport] = []
+    for site, findings in zip(sites, attached):
+        status = _multiplication_status(site, findings)
+        reports.append(AggregateReport(
             aggregate=site.aggregate,
             scope=site.scope,
-            status=_multiplication_status(site, findings),
+            status=status,
             # De-duplicated, order preserved: a fan and a chasm on one aggregate can name the same
             # edge, and a receipt listing it twice reads as two joins.
             joins=list(dict.fromkeys(
                 j for f in findings if f.risk in _MULTIPLYING_RISKS for j in f.triggering_joins
             )),
             findings=findings,
-        )
-        for site, findings in zip(sites, attached)
-    ]
+            reason=site.unresolved_because if status == UNDETERMINED else None,
+        ))
+    return reports
 
 
 def _multiplication_status(site: "_AggSite", findings: list[Finding]) -> str:
@@ -2961,10 +2968,14 @@ def assemble_receipt(
         # Composed as one dict so every branch carries the identical key set.
         trust: dict[str, Any] = {key: None for key in (
             "name", "area", "definition_prose", "expression", "confidence", "origin",
-            "review_state", "signed_off_by", "signed_off_role", "signed_off_at")}
+            "review_state", "signed_off_by", "signed_off_role", "signed_off_at", "source_tables")}
         if match is not None:
             trust = {
                 "name": match.metric.name, "area": match.area,
+                # The tables the metric is defined over, bare and folded, so a reader can tell a match
+                # by shape (`SUM(amount)` on two different tables) from a match on the table the
+                # statement reads. The comparison stripped qualifiers to make the match at all.
+                "source_tables": sorted({_tkey(_bare(t)) for t in (match.metric.source_tables or [])}),
                 "definition_prose": match.metric.calculation,
                 # The binding as the MODEL AUTHOR wrote it, not the normalized form the comparison
                 # was made on: the reader is being told which declaration this is, and a
@@ -4203,6 +4214,9 @@ class _AggSite(NamedTuple):
     # not be attributed to a table, and false when there is no column at all — see `_aggregate_sites`
     # for why the second case is the one that matters.
     resolved: bool
+    # Which of the four blindnesses made `resolved` false, in words a report can carry; None when it
+    # is true. The decision reads the boolean; the report reads this.
+    unresolved_because: Optional[str] = None
 
 
 def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
@@ -4265,17 +4279,37 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
         cols = list(agg.find_all(exp.Column))
         resolved = [_resolve_col_table(col, scope_map) for col in cols]
+        why = _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
             node=agg,
             aggregate=_echo_expr(agg.sql()),
             scope=scope,
             sources=frozenset(t for t in resolved if t),
             value_sources=_value_sources(agg, scope_map),
-            resolved=bool(cols) and all(resolved) and all(scope_map.values()) and (
-                visible is None or all(_tkey(t) in visible for t in resolved)
-            ),
+            resolved=why is None,
+            unresolved_because=why,
         ))
     return sites
+
+
+def _why_unresolved(cols: list, resolved: list, scope_map: dict[str, str],
+                    visible: Optional[set[str]]) -> Optional[str]:
+    """The first reason an aggregate's reads are not the whole story, tested in the order the single
+    boolean used to test them, or None when they are. Kept apart so the report can say which
+    blindness it hit instead of one word for four."""
+    if not cols:
+        return ("the aggregate names no column (COUNT(*) counts rows of every joined table), so the "
+                "pre-flight cannot tell which table it counts")
+    if not all(resolved):
+        return ("a column inside the aggregate could not be attributed to one table: it is unqualified "
+                "with more than one table in scope, or its qualifier is a name this SELECT does not bind")
+    if not all(scope_map.values()):
+        return ("a name in this SELECT is bound to a derived table, a VALUES list or a CTE the analysis "
+                "could not read, not to a declared table")
+    if visible is not None and not all(_tkey(t) in visible for t in resolved):
+        return ("the aggregate reads a relation the statement computed or a table the semantic model "
+                "does not declare")
+    return None
 
 
 # The node types `_value_operands` understands, in the three readings it has, plus a fail-closed

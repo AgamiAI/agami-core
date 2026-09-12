@@ -287,6 +287,138 @@ def cmd_receipt(args) -> int:
     return 0
 
 
+# --- the four verbs that grade a statement a PERSON supplied ----------------------------------
+#
+# `agami-reconcile` takes a trusted query as evidence, never as the answer. These verbs are the
+# deterministic half of grading it: none of them runs a probe, and none writes anything. The skill
+# runs every emitted probe through the execution tier a question takes, then hands the CSVs back.
+
+
+def _grammar(org) -> Optional[str]:
+    """The sqlglot grammar to read statements in, or None when the semantic model cannot say which
+    engine its SQL runs on. Every verb below reports the same value under `dialect`, so a caller
+    reads one spelling of "engine unknown" across all four."""
+    return RT._dialect_of(org)[0]
+
+
+def _read_sql_file(path: str) -> Optional[str]:
+    """The statement in `path`, or None after printing `{"error": "unreadable_sql_file"}`: a file that
+    is not there must not become a traceback with an empty stdout, because the skill redirects stdout
+    to a file and a zero-byte file downstream reads as a probe that failed."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        _print_json({"error": "unreadable_sql_file", "detail": str(exc).splitlines()[0]})
+        return None
+
+
+def cmd_claims(args) -> int:
+    """Where two statements differ, in the seven claims the golden runner already compares.
+    `golden_claims.compare_statements` has been reachable from the runner and the save door and
+    from no command; this is that command. A side that could not be read says so, rather than
+    leaving seven `unknown` claims to explain themselves."""
+    from .golden_claims import compare_statements, count_temporal_predicates, read_claims
+    org = L.load_datasource(args.root)
+    grammar = _grammar(org)
+    left = _read_sql_file(args.sql_file)
+    if left is None:
+        return 2
+    right = _read_sql_file(args.against_sql_file)
+    if right is None:
+        return 2
+    diff = compare_statements(left, right, dialect=grammar or "")
+    out = diff.as_dict()
+    out["unreadable"] = {
+        "sql_file": read_claims(left, dialect=grammar or "").unreadable,
+        "against_sql_file": read_claims(right, dialect=grammar or "").unreadable,
+    }
+    # How many conjuncts on each side speak of time. Two zeros beside a `date_window` that reads
+    # `unknown` mean neither statement filtered on a date; anything else leaves the window open.
+    out["temporal_predicates"] = {
+        "sql_file": count_temporal_predicates(left, dialect=grammar or ""),
+        "against_sql_file": count_temporal_predicates(right, dialect=grammar or ""),
+    }
+    out["dialect"] = grammar
+    _print_json(out)
+    return 0
+
+
+def cmd_compare_results(args) -> int:
+    """Whether two result sets say the same thing, through the one comparator the golden runner
+    uses, so a table-shaped answer is judged the way an answer key is and not by a second rule. The
+    match level defaults to the comparator's own (`exact`) for the same reason."""
+    import dataclasses
+
+    from .comparator import compare_result_sets, result_from_csv
+    from .golden import GoldenBounds
+    org = L.load_datasource(args.root)
+    bounds = None
+    if args.bounds:
+        try:
+            bounds = GoldenBounds(**json.loads(args.bounds))
+        except (ValueError, TypeError) as exc:  # pydantic's ValidationError is a ValueError
+            _print_json({"error": "bad_bounds", "detail": str(exc).splitlines()[0]})
+            return 2
+    try:
+        golden = result_from_csv(args.golden_csv)
+        generated = result_from_csv(args.generated_csv)
+    except (OSError, ValueError) as exc:
+        _print_json({"error": "unreadable_csv", "detail": str(exc)})
+        return 2
+    golden_sql = None
+    if args.golden_sql_file:
+        golden_sql = _read_sql_file(args.golden_sql_file)
+        if golden_sql is None:
+            return 2
+    score = compare_result_sets(golden, generated, match=args.match, golden_sql=golden_sql,
+                                bounds=bounds, dialect=_grammar(org))
+    _print_json(dataclasses.asdict(score))
+    return 0
+
+
+def cmd_join_probes(args) -> int:
+    """Every join a statement wrote: declared or not, on the declared key or not, and the probe SQL
+    that would test whether the keys resolve. Emitted, never run."""
+    from . import probes
+    org = L.load_datasource(args.root)
+    sql = _read_sql_file(args.sql_file)
+    if sql is None:
+        return 2
+    _print_json(probes.join_probes(org, sql))
+    return 0
+
+
+def cmd_filter_values_plan(args) -> int:
+    """Every value typed into a filter: what the semantic model already knows about its column, and
+    the probe SQL that would settle the rest."""
+    from . import probes
+    org = L.load_datasource(args.root)
+    sql = _read_sql_file(args.sql_file)
+    if sql is None:
+        return 2
+    _print_json(probes.filter_values_plan(org, sql))
+    return 0
+
+
+def cmd_filter_values_judge(args) -> int:
+    """The probe results read back onto the plan: one grade per value. Takes the profile root like
+    every other verb, and reads no model from it; the plan already carries what the semantic model
+    knew."""
+    from . import probes
+    results = Path(args.results)
+    if not results.is_dir():
+        _print_json({"error": "no_results_dir", "detail": f"{results} is not a directory"})
+        return 2
+    try:
+        plan = json.loads(Path(args.plan).read_text())
+        out = probes.filter_values_judge(plan, results)
+    except (OSError, ValueError) as exc:
+        _print_json({"error": "bad_plan", "detail": str(exc)})
+        return 2
+    _print_json(out)
+    return 0
+
+
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_datasource(args.root)
@@ -1201,6 +1333,40 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--freshness", default=None,
                     help="optional freshness timestamp for the receipt's tables section")
     sp.set_defaults(func=cmd_receipt)
+
+    sp = sub.add_parser("claims", help="where two statements differ: the seven claims the golden runner compares, as a diff")
+    sp.add_argument("root")
+    sp.add_argument("--sql-file", required=True, dest="sql_file")
+    sp.add_argument("--against-sql-file", required=True, dest="against_sql_file")
+    sp.set_defaults(func=cmd_claims)
+
+    sp = sub.add_parser("compare-results", help="whether two result CSVs say the same thing, through the golden comparator")
+    sp.add_argument("root")
+    sp.add_argument("--golden-csv", required=True, dest="golden_csv")
+    sp.add_argument("--generated-csv", required=True, dest="generated_csv")
+    sp.add_argument("--match", default="exact", choices=["exact", "values", "shape", "bounded", "nonempty"],
+                    help="the comparator's own default is exact; reconcile passes values for a number that may carry a float tail")
+    sp.add_argument("--golden-sql-file", default=None, dest="golden_sql_file",
+                    help="the answer key's statement, read only for whether it ordered its rows")
+    sp.add_argument("--bounds", default=None, help="JSON with min_rows/max_rows/min_value/max_value, for --match bounded")
+    sp.set_defaults(func=cmd_compare_results)
+
+    sp = sub.add_parser("join-probes", help="every join a statement wrote: declared or not, on the declared key or not, and the probe SQL that would test it (emitted, never run)")
+    sp.add_argument("root")
+    sp.add_argument("--sql-file", required=True, dest="sql_file")
+    sp.set_defaults(func=cmd_join_probes)
+
+    sp = sub.add_parser("filter-values", help="every value typed into a filter: `plan` emits what to probe, `judge` grades what came back")
+    modes = sp.add_subparsers(dest="mode", required=True)
+    mp = modes.add_parser("plan", help="what the semantic model knows about each typed value, and the probes to run")
+    mp.add_argument("root")
+    mp.add_argument("--sql-file", required=True, dest="sql_file")
+    mp.set_defaults(func=cmd_filter_values_plan)
+    mj = modes.add_parser("judge", help="grade each typed value from the probe CSVs the tier returned")
+    mj.add_argument("root")
+    mj.add_argument("--plan", required=True, help="the plan JSON `filter-values plan` printed")
+    mj.add_argument("--results", required=True, help="directory of <id>.<probe>.csv files the tier returned")
+    mj.set_defaults(func=cmd_filter_values_judge)
 
     sp = sub.add_parser("review-queue", help="trust-review items needing sign-off (Rule 1/2)")
     sp.add_argument("root")

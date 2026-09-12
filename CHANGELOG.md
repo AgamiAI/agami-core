@@ -12,6 +12,31 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Four `sm` verbs that grade a statement a person supplied, part by part.** `agami-reconcile` is
+  learning to take a trusted query as evidence rather than as the answer, and these are the
+  deterministic checks it will lean on. `sm claims` reports where two statements differ, in the seven
+  claims the golden runner already compares. `sm compare-results` says whether two result CSVs say the
+  same thing, through the golden comparator, so a table-shaped answer is judged the way an answer key
+  is. `sm join-probes` names, for every join a statement wrote, whether the semantic model declares a
+  relationship between those tables and whether the written key matches the declared one, and emits
+  the overlap and cardinality probes that would show whether the keys really resolve. `sm filter-values
+  plan` names, for every value typed into a filter, the column it binds to, whether the semantic
+  model's list of values holds it, and the probes that would settle it; `sm filter-values judge` reads
+  the probe results back and grades each value `confirmed`, `model_gap`, `query_defect` or
+  `unresolved`. None of the four runs SQL: the skill runs every probe through the same execution tier
+  a question takes. Joins are classified with the receipt's own flags, so a CTE that shadows a
+  declared table, a `USING`, a comma join, or a declared `on:` this layer cannot read all come back
+  as open states and never as a settled claim about a key nobody read. A probe that came back empty
+  is graded as a probe that failed, never as a column that holds nothing. A near miss is a case and
+  whitespace fold only, an empty list of values reads as not yet decoded rather than as no legal
+  values, a column marked sensitive is never probed for a value, and a value carrying a backslash or
+  a control character is never sent to the warehouse, because engines quote it differently. The
+  overlap probe is the one introspection already trusts, now shared as `introspect.overlap_sql` and
+  bounded to its 50-row sample on every engine through the new `Dialect.limited`, where it used to
+  be bounded only where the row-limit keyword was `LIMIT`. (ACE-114)
+
 ### Fixed
 
 - **The eval's generator can start on Windows.** The client's Windows runtime (Bun) needs
