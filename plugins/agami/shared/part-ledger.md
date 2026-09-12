@@ -5,7 +5,7 @@ How a statement a person supplied is graded, one part at a time. Shared by `agam
 evidence, never the answer: a part is graded against the semantic model and the warehouse, and the
 query saying something is never proof of it.
 
-## Four grades, and only measurement earns a `model_gap`
+## Four grades and a note, and only measurement earns a `model_gap`
 
 | Grade | Means | What follows |
 |---|---|---|
@@ -13,6 +13,7 @@ query saying something is never proof of it.
 | `model_gap` | the data proves the statement right where the semantic model is missing it or has it wrong | a finding, for a person to act on |
 | `query_defect` | the data proves the statement wrong on this part | reported to the person; nothing about the semantic model changes |
 | `unresolved` | the part could not be checked, and the note says why | nothing is written; a row with one, or a row never graded at all, is never kept as an example |
+| `noted` | not a grade: a fact the run states and never judges (rows an inner join dropped, a wide column nobody would list) | shown in its own block; never decides the row's verdict and never blocks an example |
 
 **A check that could not run is never a pass.** And a failed measurement upstream never lends a grade
 downstream: a join that could not be graded leaves the fan-out check on its aggregate `unresolved`.
@@ -26,11 +27,13 @@ downstream: a join that could not be graded leaves the fan-out check on its aggr
 | `join:<a>-<b>` | `join-probes.json` + overlap CSVs | the verb's `status` decides: `declared` → confirmed; `wrong_key` (a different key between two tables with a declared relationship) → query_defect, whatever the probe says; `undeclarable` or `undetermined` (a CTE or derived table, a `USING`, a comma join, a declared `on:` nobody could read) → unresolved, with the verb's reason. `undeclared`: keys overlap → model_gap of kind `relationship`; keys never meet → query_defect; not probed, or one overlap probe's file empty → unresolved. A second join between the same two tables is its own part, `join:<a>-<b>#2` |
 | `join_key:<a>-<b>` | overlap CSVs | sampled keys from one side exist on the other → confirmed; none do, every probe having answered → query_defect; a result missing or a probe file empty → unresolved. Emitted whenever overlap probes were planned or answered, which a declared join never plans |
 | `cardinality:<a>-<b>` | `cardinality.<table>.<column>.csv`, or the semantic model | one side unique (a declared key, or distinct = total − nulls) → confirmed, naming the side; both sides repeat → query_defect, the join multiplies rows; a side missing → unresolved |
-| `fan_out:<aggregate>` | `statement-prepare.json` | a `join:` part it depends on is not confirmed → unresolved. `multiplied` with only `fan_out_invariant` → confirmed. `multiplied` otherwise → query_defect, naming the risk. `not_multiplied` → confirmed. `undetermined` → unresolved. Pre-flight `unchecked` → one `fan_out:*` row, unresolved |
+| `fan_out:<aggregate>` | `statement-prepare.json` | a `join:` part it depends on is not confirmed → unresolved. `multiplied` with only `fan_out_invariant` → confirmed. `multiplied` otherwise → query_defect, naming the risk. `not_multiplied` → confirmed. `undetermined` with every written join listed, confirmed, and bringing in one row at most (its right endpoint the one side of the declared relationship the statement wrote, or its written column unique by the semantic model) → confirmed, "every join the statement writes brings in one row at most"; `undetermined` otherwise → unresolved, the note repeating the pre-flight's `reason` (the aggregate names no column; a column attributed to no single table; a name bound to a computed relation; a table the semantic model does not declare). Pre-flight `unchecked` → one `fan_out:*` row, unresolved |
 | `aggregation:<aggregate>` | `statement-prepare.json` | a `bad_aggregation` or `semi_additive` risk → query_defect; else confirmed |
 | `default_filter:<table>:<expr>` | `statement-receipt.json` `tables.items[].filters` | `applied` → confirmed; `omitted` → model_gap of kind `filter`; `undetermined` → unresolved |
-| `metric:<output column>` | `statement-receipt.json` `columns.items[]` | `matched` → confirmed; `unmatched` → model_gap of kind `metric`, except when every aggregate in the statement is a bare `count(*)`, which matches no metric by design; `undetermined` (the receipt could not tell) → unresolved, because a failure to read is never a gap |
-| `literal:<t>.<c>=<v>` | `filter-values.judge.json` | the judge's grade, as it stands; a `model_gap` is of kind `description`, the column's list of values being stale |
+| `metric:<output column>` | `statement-receipt.json` `columns.items[]` | `matched` → confirmed; `unmatched` → model_gap of kind `metric`, except when every aggregate in the statement is a bare `count(*)`, which matches no metric by design; `undetermined` (the receipt could not tell) → unresolved, because a failure to read is never a gap; `matched` to a metric whose `source_tables` the statement never reads → unresolved, the match being by shape alone |
+| `literal:<t>.<c>=<v>` | `filter-values.judge.json` | the judge's grade, as it stands; a `model_gap` is of kind `description`, the column's list of values being stale. Every grade carries `declared` (`populated`, `empty`, `absent`), and a grade the warehouse decided over an undeclared column says so in its note |
+| `values_declared:<t>.<c>` | `filter-values.judge.json` `columns` | one per filtered column. `populated` → confirmed; `absent` or `empty` with the distinct probe `listed` (under 26 values) → model_gap of kind `description`, the same finding family as a stale list; `overflow` → noted, no list is expected of a wide column; `empty` → noted; `failed` or `not_run` → unresolved; a sensitive column → noted |
+| `dropped_rows:<a>-<b>` | `<join id>.dropped_rows.csv` | noted, never a grade: `<dropped> of <total> <left> rows have no <right> partner`, counted over the whole table before the statement's own filters; a probe planned but not run → noted, nothing claimed; no probe planned → no part |
 | `predicates`, `date_window` | `claims.json`, only with `--with-claims` | `agrees` → confirmed; `differs` or `unknown` → unresolved, with both sides named. A difference is reported, never judged here |
 
 **The verdict is the weakest part:** `query_defect` outranks `unresolved`, which outranks
@@ -57,8 +60,9 @@ and writes `ledger.json` beside the inputs.
 | `statement.csv` | the tier | the statement's result; only its shape and one cell are ever copied onward |
 | `statement-prepare.json` | `sm prepare --sql-file` | aggregates, findings, `unchecked` |
 | `statement-receipt.json` | `sm receipt --sql-file` | the receipt of the person's statement |
-| `join-probes.json` | `sm join-probes --sql-file` | every join written with its status, the probes to run, and a top-level `cardinality` map of one probe per column |
+| `join-probes.json` | `sm join-probes --sql-file` | every join written with its status, what the semantic model declares about it (`declared_cardinality`, `unique_by_model`), the probes to run, and a top-level `cardinality` map of one probe per column |
 | `<join id>.overlap.<i>.csv` | the tier | the `i`-th overlap probe's `matched` count |
+| `<join id>.dropped_rows.csv` | the tier | `total, dropped` for the join's left table: its rows with no partner on the right |
 | `cardinality.<table>.<column>.csv` | the tier | `total, distinct_count, null_count` for one column, shared by every join that reads it; not written for a column the semantic model declares a key |
 | `filter-values.plan.json` | `sm filter-values plan --sql-file` | every typed value and its probes, and a `columns` map of one distinct-values probe per column |
 | `<column key>.distinct.csv` | the tier | one column's distinct values, bounded one past the enum ceiling |

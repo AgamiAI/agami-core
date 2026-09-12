@@ -43,7 +43,8 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" join-probes "$ROOT" --sql-file statement.sql >
    join-probes.json`, then each join's `probes.overlap[i].sql` to `<join id>.overlap.<i>.csv` and
    each entry of the top-level `cardinality` map to `cardinality.<table>.<column>.csv` (skip a null
-   entry: the semantic model already says that column is unique); `bash "$AGAMI_PLUGIN_ROOT/scripts/sm"
+   entry: the semantic model already says that column is unique), and each join's `dropped_rows_probe.sql` to
+   `<join id>.dropped_rows.csv` (skip a null probe); `bash "$AGAMI_PLUGIN_ROOT/scripts/sm"
    filter-values plan "$ROOT" --sql-file statement.sql > filter-values.plan.json`, then each
    `columns[<key>].distinct` to `<key>.distinct.csv`, each literal's `probes.exists` to
    `<literal id>.exists.csv`, and `probes.exists_folded` to `<literal id>.exists_folded.csv` only when
