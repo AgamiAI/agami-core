@@ -1161,6 +1161,31 @@ def findings(run_dir: Path) -> dict:
     return result
 
 
+# --- Row status -----------------------------------------------------------
+
+MATCH = "match"
+MATCH_UNVERIFIED = "match_unverified"
+MISMATCH = "mismatch"
+EXPECTED_DOUBTFUL = "expected_doubtful"
+ERROR = "error"
+
+
+def row_status(match: bool | None, ledger_verdict: str | None) -> str:
+    """The status a row gets, from the number comparison and the weakest grade on the person's
+    statement. Applied by code so the skill never decides it by feel.
+
+    A match with a part not confirmed is `match_unverified`: two wrong statements agree easily, and
+    Phase 3e must never see it. A difference beside a defect in the person's statement is
+    `expected_doubtful`: the expected value itself is in doubt, so the row is kept out of the
+    mismatch tally rather than counted against the AI.
+    """
+    if match is None:
+        return ERROR
+    if match:
+        return MATCH if ledger_verdict in (None, CONFIRMED) else MATCH_UNVERIFIED
+    return EXPECTED_DOUBTFUL if ledger_verdict == QUERY_DEFECT else MISMATCH
+
+
 # --- CLI ------------------------------------------------------------------
 
 
@@ -1197,7 +1222,20 @@ def main(argv: list[str] | None = None) -> int:
     p_findings = sub.add_parser("findings", help="Write a run's findings, defects and ledgers beside its rows.jsonl.")
     p_findings.add_argument("--run-dir", required=True, dest="run_dir")
 
+    p_status = sub.add_parser("status", help="The status a row gets, from the number comparison and the ledger's verdict.")
+    p_status.add_argument("--match", required=True, choices=["true", "false", "none"],
+                          help="reconcile.py diff's match, or none when the row could not run")
+    p_status.add_argument("--ledger-verdict", default="none", dest="ledger_verdict",
+                          choices=[CONFIRMED, MODEL_GAP, QUERY_DEFECT, UNRESOLVED, "none"],
+                          help="the ledger's verdict, or none for a row with no statement")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "status":
+        match = None if args.match == "none" else args.match == "true"
+        verdict = None if args.ledger_verdict == "none" else args.ledger_verdict
+        print(json.dumps({"status": row_status(match, verdict)}))
+        return 0
 
     if args.cmd == "ledger":
         row_dir = Path(args.row_dir).expanduser()
