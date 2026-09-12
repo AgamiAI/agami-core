@@ -541,7 +541,11 @@ CONFIRMED = "confirmed"
 MODEL_GAP = "model_gap"
 QUERY_DEFECT = "query_defect"
 UNRESOLVED = "unresolved"
-_VERDICT_RANK = {QUERY_DEFECT: 3, UNRESOLVED: 2, MODEL_GAP: 1, CONFIRMED: 0}
+# A fifth word that is not a grade: a fact the run states and never judges (rows an inner join
+# dropped, a wide column nobody would list). Ranked below `confirmed` so it never decides a row's
+# verdict, never blocks an example, and is rendered in its own block.
+NOTED = "noted"
+_VERDICT_RANK = {QUERY_DEFECT: 3, UNRESOLVED: 2, MODEL_GAP: 1, CONFIRMED: 0, NOTED: -1}
 
 # Error-classifier kinds that mean the statement itself is wrong, as opposed to the connection.
 _STATEMENT_DEFECT_KINDS = {"column_not_found", "table_not_found", "syntax"}
@@ -714,6 +718,7 @@ def _grade_joins(probes: dict | None, row_dir: Path) -> list[dict]:
                 if (result := _cardinality_result(probes, key, row_dir)) is not None}
         hits = [m for m in overlaps if m is not None]
         any_overlap = any(m > 0 for m in hits)
+        one_row_on_right = _one_row_on_right(join, probes)
 
         if status in ("undeclarable", "undetermined"):
             rows.append(_part(f"join:{label}", UNRESOLVED, evidence=written,
@@ -744,6 +749,9 @@ def _grade_joins(probes: dict | None, row_dir: Path) -> list[dict]:
                               note="the join is not declared and "
                                    + ("a probe file is empty, so that probe likely failed; the rest is not enough to decide"
                                       if overlap_failed else "no probe result was supplied")))
+        # Whether this join brings in one row at most per row of the table it joins to, by the
+        # semantic model's own word. The aggregate grader reads it; nothing is re-derived there.
+        rows[-1]["evidence"]["one_row_on_right"] = one_row_on_right
 
         # The probe rows: whenever probes were planned or answered. A declared join plans none.
         if hits or planned.get("overlap"):
@@ -768,7 +776,50 @@ def _grade_joins(probes: dict | None, row_dir: Path) -> list[dict]:
             else:
                 rows.append(_part(f"cardinality:{label}", UNRESOLVED, evidence={"sides": card},
                                   note="no cardinality result for both sides"))
+        rows.extend(_dropped_rows(join, label, jid, row_dir))
     return rows
+
+
+def _one_row_on_right(join: dict, probes: dict | None) -> bool:
+    """True when the table this join introduces (its right endpoint) contributes one row at most per
+    row already there: it is the one side of the declared relationship the statement actually wrote,
+    or its written column is unique by the semantic model. False for a self-join and for anything
+    the model did not say. Sound for a chain, because each such join leaves the row count alone."""
+    endpoints = join.get("endpoints") or ["", ""]
+    left_key, right_key = _fold(str(endpoints[0])), _fold(str(endpoints[-1]))
+    if not right_key or left_key == right_key:
+        return False
+    matched_one_sides = {_fold(str(side)) for edge in (join.get("declared_cardinality") or [])
+                         if edge.get("matched") for side in (edge.get("one_side") or [])}
+    if right_key in matched_one_sides:
+        return True
+    pairs = join.get("pairs") or []
+    if len(pairs) == 1 and len(pairs[0]) == 2:
+        unique = (probes or {}).get("unique_by_model") or {}
+        for table, column in pairs[0]:
+            if _fold(str(table)) == right_key and unique.get(f"{table}.{column}"):
+                return True
+    return False
+
+
+def _dropped_rows(join: dict, label: str, jid: str, row_dir: Path) -> list[dict]:
+    """The rows an inner join left behind, said and never judged. No probe planned → nothing to say."""
+    probe = join.get("dropped_rows_probe")
+    if not probe:
+        return []
+    left_t, right_t = probe.get("left"), probe.get("right")
+    got = _probe_csv(row_dir / f"{jid}.dropped_rows.csv")
+    total = _first_number(got, "total") if isinstance(got, list) and got else None
+    dropped = _first_number(got, "dropped") if isinstance(got, list) and got else None
+    if total is None or dropped is None:
+        return [_part(f"dropped_rows:{label}", NOTED, evidence={"left": left_t, "right": right_t},
+                      note="the dropped-rows probe was not run or failed; nothing is claimed")]
+    t, d = int(total), int(dropped)
+    said = (f"no {left_t} row is dropped by this join" if d == 0
+            else f"{d} of {t} {left_t} rows have no {right_t} partner and are dropped by this inner join")
+    return [_part(f"dropped_rows:{label}", NOTED,
+                  evidence={"total": t, "dropped": d, "left": left_t, "right": right_t},
+                  note=said + "; counted over the whole table, before the statement's own filters")]
 
 
 def _joins_named(label: str, join_rows: list[dict]) -> list[str]:
@@ -784,7 +835,7 @@ def _joins_named(label: str, join_rows: list[dict]) -> list[str]:
     return out
 
 
-def _grade_aggregates(prepare: dict | None, join_rows: list[dict]) -> list[dict]:
+def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict | None = None) -> list[dict]:
     if prepare is None:
         return []
     if prepare.get("unchecked"):
@@ -792,6 +843,17 @@ def _grade_aggregates(prepare: dict | None, join_rows: list[dict]) -> list[dict]
                       note=f"the pre-flight did not run: {prepare['unchecked']}")]
     rows: list[dict] = []
     by_part = {row["part"]: row for row in join_rows}
+    # Every join the statement wrote, not the aggregate's own `joins` list: the pre-flight fills
+    # that list from multiplying findings only, so it is empty for exactly the aggregate this rule
+    # is for. The rule needs every written join listed (none dropped at the cap, the verb having
+    # read the statement), every one confirmed, and every one bringing in one row at most.
+    join_parts = [row for row in join_rows if row["part"].startswith("join:") and row["part"] != "join:*"]
+    one_row_joins = (
+        isinstance(probes, dict) and probes.get("unreadable") is None
+        and probes.get("dropped") == 0 and probes.get("joins_written") == len(probes.get("joins") or [])
+        and bool(join_parts)
+        and all(row["verdict"] == CONFIRMED and row["evidence"].get("one_row_on_right") for row in join_parts)
+    )
     for agg in prepare.get("aggregates", []):
         text = agg.get("aggregate", "?")
         risks = {f.get("risk") for f in agg.get("findings", [])}
@@ -815,9 +877,16 @@ def _grade_aggregates(prepare: dict | None, join_rows: list[dict]) -> list[dict]
         elif agg.get("status") == "not_multiplied":
             rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
                               note="no join multiplies the rows behind this aggregate"))
+        elif one_row_joins:
+            rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=[row["part"] for row in join_parts],
+                              evidence={"joins": [row["part"] for row in join_parts]},
+                              note="every join the statement writes brings in one row at most, so no join "
+                                   "multiplies this aggregate"))
         else:
-            rows.append(_part(f"fan_out:{text}", UNRESOLVED, depends_on=deps,
-                              note="the pre-flight could not decide whether a join multiplies this aggregate"))
+            # The pre-flight names the blindness it hit; the note repeats it rather than blaming a join.
+            reason = agg.get("reason") or "no reason was given"
+            rows.append(_part(f"fan_out:{text}", UNRESOLVED, depends_on=deps, evidence={"reason": agg.get("reason")},
+                              note=f"the pre-flight could not bind this aggregate to one table: {reason}"))
         bad = sorted(risks & _AGGREGATION_RISKS)
         if bad:
             rows.append(_part(f"aggregation:{text}", QUERY_DEFECT, evidence={"risks": bad},
@@ -854,8 +923,20 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
         column = item.get("column", "?")
         status = item.get("status")
         if status == "matched":
-            rows.append(_part(f"metric:{column}", CONFIRMED, evidence={"metric": item.get("name")},
-                              note="the output matches a defined metric"))
+            sources = [str(t) for t in (item.get("source_tables") or [])]
+            read = _tables_read(receipt)
+            if sources and not (set(sources) & read):
+                # The receipt matched by shape: the qualifiers were stripped to compare, so a
+                # `SUM(amount)` on one table equals a metric's `SUM(amount)` on another.
+                rows.append(_part(f"metric:{column}", UNRESOLVED,
+                                  evidence={"metric": item.get("name"), "source_tables": sources,
+                                            "tables_read": sorted(read)},
+                                  note=f"matched the metric {item.get('name')!r}, defined on "
+                                       f"{', '.join(sources)}, which this statement does not read; "
+                                       "the expression matches by shape only"))
+            else:
+                rows.append(_part(f"metric:{column}", CONFIRMED, evidence={"metric": item.get("name")},
+                                  note="the output matches a defined metric"))
         elif only_bare_counts:
             rows.append(_part(f"metric:{column}", CONFIRMED,
                               note="a bare count matches no metric by design"))
@@ -868,6 +949,16 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
             rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "status": status},
                               note="whether the output matches a metric could not be read"))
     return rows
+
+
+def _tables_read(receipt: dict | None) -> set[str]:
+    """The bare, folded names of every table the statement read, from the receipt's `tables` items."""
+    out: set[str] = set()
+    for item in ((receipt or {}).get("tables") or {}).get("items", []):
+        for name in (item.get("qname"), item.get("ref")):
+            if name:
+                out.add(_fold(str(name)).split(".")[-1])
+    return out
 
 
 def _grade_literals(judge: dict | None) -> list[dict]:
@@ -883,6 +974,33 @@ def _grade_literals(judge: dict | None) -> list[dict]:
                                     "near_miss": lit.get("near_miss"), "observed": lit.get("observed"),
                                     "rows_with_value": lit.get("rows_with_value")},
                           note=lit.get("note", "")))
+    # One part per filtered COLUMN: did the semantic model declare its values at all? Said once,
+    # not once per literal, and only a column that holds a short list of values is a gap; a wide
+    # column is noted, because nobody would list it.
+    for _key, fact in sorted(((judge or {}).get("columns") or {}).items()):
+        part = f"values_declared:{fact.get('table')}.{fact.get('column')}"
+        declared, distinct, n = fact.get("declared"), fact.get("distinct"), fact.get("observed_count")
+        evidence = {"declared": declared, "distinct": distinct, "observed_count": n}
+        if declared == "populated":
+            rows.append(_part(part, CONFIRMED, evidence=evidence, note="the semantic model lists this column's values"))
+        elif fact.get("sensitive"):
+            rows.append(_part(part, NOTED, evidence=evidence,
+                              note="sensitive column: its values are never listed, so no list is expected"))
+        elif distinct == "listed":
+            note = ("introspection found a low-cardinality column and nobody decoded its values"
+                    if declared == "empty" else
+                    f"the column holds {n} distinct values and the semantic model lists none of them")
+            rows.append(_part(part, MODEL_GAP, kind="description", evidence=evidence, note=note))
+        elif distinct == "overflow":
+            rows.append(_part(part, NOTED, evidence=evidence,
+                              note="the column holds more than 25 distinct values, so no value list is expected"))
+        elif distinct == "empty":
+            rows.append(_part(part, NOTED, evidence=evidence,
+                              note="the column returned no values at all, so nothing says whether a list is expected"))
+        else:
+            rows.append(_part(part, UNRESOLVED, evidence=evidence,
+                              note="whether the semantic model should list this column's values could not be "
+                                   f"checked: the distinct probe was {distinct or 'not run'}"))
     return rows
 
 
@@ -938,7 +1056,7 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
         claims, _why = _usable(claims, "claims")
     join_rows = _grade_joins(probes, row_dir)
     rows.extend(join_rows)
-    rows.extend(_grade_aggregates(prepare, join_rows))
+    rows.extend(_grade_aggregates(prepare, join_rows, probes))
     rows.extend(_grade_filters(receipt))
     rows.extend(_grade_metrics(receipt, prepare))
     rows.extend(_grade_literals(judge))
@@ -974,6 +1092,9 @@ def _finding_key(row: dict) -> str | None:
         return f"scope:{row.get('evidence', {}).get('rule') or 'scope'}"
     if kind == "description" and part.startswith("literal:"):
         return f"description:{_fold(part[len('literal:'):].split('=', 1)[0])}"
+    if kind == "description" and part.startswith("values_declared:"):
+        # The same family as a stale list: one column whose declared values are missing or wrong.
+        return f"description:{_fold(part[len('values_declared:'):])}"
     return f"{kind or 'other'}:{_fold(part)}"
 
 
@@ -1020,7 +1141,7 @@ def findings(run_dir: Path) -> dict:
                     entry["words"] = record["words"]
         # An example is offered only when the person's statement held on EVERY part. A part left
         # open, or a row that was never graded at all, is not a statement that held.
-        clean = bool(parts) and all(p["verdict"] == CONFIRMED for p in parts)
+        clean = bool(parts) and all(p["verdict"] in (CONFIRMED, NOTED) for p in parts)
         if record.get("status") == "mismatch" and clean and record.get("question"):
             key = f"example:{_fold(record['question'])}"
             entry = grouped.setdefault(key, {"key": key, "kind": "example", "evidence": []})

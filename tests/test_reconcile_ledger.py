@@ -42,8 +42,9 @@ def _prepare(*aggregates: dict, unchecked: str | None = None) -> dict:
             "unchecked": unchecked}
 
 
-def _agg(text: str, status: str, joins: list[str] = (), risks: list[str] = ()) -> dict:
-    return {"aggregate": text, "scope": "main", "status": status, "joins": list(joins),
+def _agg(text: str, status: str, joins: list[str] = (), risks: list[str] = (),
+         reason: str | None = None) -> dict:
+    return {"aggregate": text, "scope": "main", "status": status, "joins": list(joins), "reason": reason,
             "findings": [{"risk": r, "reason": "x", "triggering_joins": list(joins), "aggregate": text}
                          for r in risks]}
 
@@ -59,10 +60,12 @@ def _table(ref: str, filters: list[dict] = ()) -> dict:
             "filters": list(filters)}
 
 
-def _output(column: str, status: str) -> dict:
-    # The receipt carries the matched metric flattened as `name`, `area` and `expression`.
+def _output(column: str, status: str, source_tables: list[str] | None = None) -> dict:
+    # The receipt carries the matched metric flattened as `name`, `area`, `expression` and, since
+    # round 3, the metric's `source_tables`.
     return {"kind": "output", "column": column, "scope": "main", "status": status,
-            "name": "revenue" if status == "matched" else None}
+            "name": "revenue" if status == "matched" else None,
+            "source_tables": source_tables if status == "matched" else None}
 
 
 def _no_joins() -> dict:
@@ -93,12 +96,29 @@ def _join_probe(a: str, ac: str, b: str, bc: str, *, declared_between: bool, mat
         probes = {"overlap": [{"from": keys[0], "into": keys[1], "sql": "..."},
                               {"from": keys[1], "into": keys[0], "sql": "..."}],
                   "cardinality": keys}
-    return {"id": "join-1", "endpoints": [a, b], "predicate": f"{a}.{ac} = {b}.{bc}",
-            "scope": "main", "status": status, "pairs": [[[ta, ca], [tb, cb]]],
-            "declared_between_tables": declared_between, "written_matches_declared": matches,
-            "declared_pairs": [[["order_items", "order_id"], ["orders", "id"]]] if declared_between else [],
-            "too_big_to_probe": too_big, "probes": probes,
-            "not_probed_because": "a table is over the size guard for probes" if too_big else None}
+    entry = {"id": "join-1", "endpoints": [a, b], "predicate": f"{a}.{ac} = {b}.{bc}",
+             "scope": "main", "status": status, "pairs": [[[ta, ca], [tb, cb]]],
+             "declared_between_tables": declared_between, "written_matches_declared": matches,
+             "declared_pairs": [[["order_items", "order_id"], ["orders", "id"]]] if declared_between else [],
+             "too_big_to_probe": too_big, "probes": probes,
+             "not_probed_because": "a table is over the size guard for probes" if too_big else None,
+             "declared_cardinality": [], "dropped_rows_probe": None, "dropped_rows_not_emitted_because": None}
+    if declared_between:
+        # The sample edge: order_items.order_id -> orders.id, many_to_one, orders the one side.
+        entry["declared_cardinality"] = [{"relationship": "many_to_one", "from": "order_items",
+                                         "to": "orders", "one_side": ["orders"], "matched": matches}]
+    return entry
+
+
+def _with_dropped_probe(join: dict) -> dict:
+    left, right = join["endpoints"]
+    join["dropped_rows_probe"] = {"sql": "...", "left": left, "right": right, "on": join["predicate"]}
+    return join
+
+
+def _probes(*joins: dict, unique: dict | None = None) -> dict:
+    return {**_no_joins(), "joins": list(joins), "joins_written": len(joins),
+            "unique_by_model": unique or {}}
 
 
 def _judged(verdict: str, literal: str = "Paid", column: str = "status") -> dict:
@@ -570,3 +590,167 @@ def test_one_declared_filter_seen_through_two_aliases_is_one_finding(tmp_path):
             tables=[_table("orders", [{"expr": expr, "status": "omitted"}])]))
     keys = [f["key"] for f in findings(run)["findings"]]
     assert keys == ["filter:orders:status != 'cancelled'"]
+
+
+# --- round 3: what the semantic model knows about a declared join reaches the aggregate -------
+
+
+def test_a_count_through_declared_many_to_one_joins_is_confirmed(tmp_path):
+    """`COUNT(*)` names no column, so the pre-flight cannot bind it and says `undetermined`. When every
+    join the statement writes is the declared one and brings in one row at most (its right side is the
+    one side of the relationship), nothing can multiply the count, and the ledger says so."""
+    _ran_ok(tmp_path)
+    join = _join_probe("order_items", "order_id", "orders", "id", declared_between=True, matches=True)
+    _write(tmp_path, "join-probes.json", _probes(join, unique={"orders.id": True, "order_items.order_id": False}))
+    _write(tmp_path, "statement-prepare.json", _prepare(
+        _agg("COUNT(*)", "undetermined", reason="the aggregate names no column")))
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:order_items-orders"]["evidence"]["one_row_on_right"] is True
+    fan = parts["fan_out:COUNT(*)"]
+    assert fan["verdict"] == "confirmed" and "one row at most" in fan["note"]
+    assert fan["depends_on"] == ["join:order_items-orders"]
+
+
+def test_the_one_row_stamp_also_comes_from_a_unique_written_column(tmp_path):
+    """An undeclared join onto a declared key: no relationship to match, but the model says the right
+    column is unique, which is the same fact."""
+    _ran_ok(tmp_path)
+    join = _join_probe("orders", "customer_id", "customers", "id", declared_between=False, matches=False)
+    join["probes"] = {"overlap": [], "cardinality": []}
+    join["status"] = "declared"
+    _write(tmp_path, "join-probes.json", _probes(join, unique={"customers.id": True, "orders.customer_id": False}))
+    _write(tmp_path, "statement-prepare.json", _prepare(_agg("COUNT(*)", "undetermined")))
+    assert _parts(ledger(tmp_path))["fan_out:COUNT(*)"]["verdict"] == "confirmed"
+
+
+def test_a_join_that_brings_the_many_side_in_leaves_the_count_open_and_names_the_cause(tmp_path):
+    """`FROM orders JOIN order_items`: the right side is the many side, so each order row can become
+    several. The count stays open, and the note repeats the pre-flight's reason instead of blaming the join."""
+    _ran_ok(tmp_path)
+    join = _join_probe("orders", "id", "order_items", "order_id", declared_between=True, matches=True)
+    _write(tmp_path, "join-probes.json", _probes(join, unique={"orders.id": True, "order_items.order_id": False}))
+    _write(tmp_path, "statement-prepare.json", _prepare(
+        _agg("COUNT(*)", "undetermined", reason="the aggregate names no column (COUNT(*) counts rows of every joined table)")))
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:order_items-orders"]["evidence"]["one_row_on_right"] is False
+    fan = parts["fan_out:COUNT(*)"]
+    assert fan["verdict"] == "unresolved"
+    assert "could not bind this aggregate to one table: the aggregate names no column" in fan["note"]
+    assert fan["evidence"]["reason"].startswith("the aggregate names no column")
+
+
+def test_the_many_to_one_rule_needs_every_join_listed_and_confirmed(tmp_path):
+    _ran_ok(tmp_path)
+    good = _join_probe("order_items", "order_id", "orders", "id", declared_between=True, matches=True)
+    unique = {"orders.id": True, "order_items.order_id": False}
+    # A join dropped at the cap: one written join is unlisted, so nothing is known about it.
+    _write(tmp_path, "join-probes.json", {**_probes(good, unique=unique), "joins_written": 2, "dropped": 1})
+    _write(tmp_path, "statement-prepare.json", _prepare(_agg("COUNT(*)", "undetermined")))
+    assert _parts(ledger(tmp_path))["fan_out:COUNT(*)"]["verdict"] == "unresolved"
+    # A join on the wrong key beside the good one: the defect blocks the rule.
+    bad = _join_probe("order_items", "id", "orders", "id", declared_between=True, matches=False)
+    bad["id"] = "join-2"
+    _write(tmp_path, "join-probes.json", _probes(good, bad, unique=unique))
+    assert _parts(ledger(tmp_path))["fan_out:COUNT(*)"]["verdict"] == "unresolved"
+    # A self-join has no right side to speak of.
+    selfjoin = _join_probe("orders", "id", "orders", "id", declared_between=False, matches=False)
+    selfjoin["status"] = "declared"
+    selfjoin["probes"] = {"overlap": [], "cardinality": []}
+    _write(tmp_path, "join-probes.json", _probes(selfjoin, unique={"orders.id": True}))
+    assert _parts(ledger(tmp_path))["fan_out:COUNT(*)"]["verdict"] == "unresolved"
+
+
+def test_dropped_rows_are_noted_and_never_graded(tmp_path):
+    """The left table's rows with no partner: a fact the run states. It never decides the verdict,
+    never blocks an example, and a probe that did not run is noted as such rather than held open."""
+    _complete(tmp_path)
+    join = _with_dropped_probe(
+        _join_probe("order_items", "order_id", "orders", "id", declared_between=True, matches=True))
+    _write(tmp_path, "join-probes.json", _probes(join, unique={"orders.id": True}))
+    _write(tmp_path, "join-1.dropped_rows.csv", "total,dropped\n4000,12\n")
+    result = ledger(tmp_path)
+    noted = _parts(result)["dropped_rows:order_items-orders"]
+    assert noted["verdict"] == "noted"
+    assert noted["evidence"] == {"total": 4000, "dropped": 12, "left": "order_items", "right": "orders"}
+    assert "12 of 4000 order_items rows have no orders partner" in noted["note"]
+    assert result["verdict"] == "confirmed" and result["counts"]["noted"] == 1
+    _write(tmp_path, "join-1.dropped_rows.csv", "")
+    noted = _parts(ledger(tmp_path))["dropped_rows:order_items-orders"]
+    assert noted["verdict"] == "noted" and "nothing is claimed" in noted["note"]
+    _write(tmp_path, "join-1.dropped_rows.csv", "total,dropped\n4000,0\n")
+    assert "no order_items row is dropped" in _parts(ledger(tmp_path))["dropped_rows:order_items-orders"]["note"]
+
+
+def test_a_noted_part_does_not_stop_an_example_finding(tmp_path):
+    run = _run_dir(tmp_path, [{"row": 1, "question": "How many items?", "statement": "s",
+                               "expected": 100, "status": "mismatch"}])
+    d = run / "rows" / "1"
+    _complete(d)
+    join = _with_dropped_probe(
+        _join_probe("order_items", "order_id", "orders", "id", declared_between=True, matches=True))
+    _write(d, "join-probes.json", _probes(join, unique={"orders.id": True}))
+    _write(d, "join-1.dropped_rows.csv", "total,dropped\n4000,12\n")
+    assert [f["kind"] for f in findings(run)["findings"]] == ["example"]
+
+
+# --- round 3: a column nobody declared values for is one gap, said once -----------------------
+
+
+def _judge_columns(**columns: dict) -> dict:
+    return {"literals": [], "unreadable": None,
+            "columns": {key: {"table": key.split(".")[0], "column": key.split(".")[1], "sensitive": False,
+                              "observed_count": None, **fact} for key, fact in columns.items()}}
+
+
+def test_an_undeclared_low_cardinality_column_is_a_gap_in_the_semantic_model(tmp_path):
+    _ran_ok(tmp_path)
+    judge = _judge_columns(**{"categories.slug": {"declared": "absent", "distinct": "listed", "observed_count": 8}})
+    # Two literals on the column, one part about the column.
+    judge["literals"] = [{"id": f"lit-{i}", "table": "categories", "column": "slug", "literal": v, "tier": "distinct",
+                          "verdict": "confirmed", "observed": None, "near_miss": None, "op": "=",
+                          "rows_with_value": 3, "note": "n", "declared": "absent"} for i, v in enumerate(("a", "b"), 1)]
+    _write(tmp_path, "filter-values.judge.json", judge)
+    parts = _parts(ledger(tmp_path))
+    gap = parts["values_declared:categories.slug"]
+    assert gap["verdict"] == "model_gap" and gap["kind"] == "description"
+    assert "8 distinct values and the semantic model lists none" in gap["note"]
+    assert sum(1 for p in parts if p.startswith("values_declared:")) == 1
+    assert reconcile._finding_key(gap) == "description:categories.slug"
+
+
+def test_the_values_declared_part_reads_each_state_of_the_column(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "filter-values.judge.json", _judge_columns(**{
+        "orders.status": {"declared": "populated", "distinct": "not_run"},
+        "orders.region": {"declared": "empty", "distinct": "listed", "observed_count": 3},
+        "customers.full_name": {"declared": "absent", "distinct": "overflow", "observed_count": 26},
+        "orders.notes": {"declared": "absent", "distinct": "not_run"},
+        "customers.email": {"declared": "absent", "distinct": "not_run", "sensitive": True},
+    }))
+    parts = _parts(ledger(tmp_path))
+    assert parts["values_declared:orders.status"]["verdict"] == "confirmed"
+    region = parts["values_declared:orders.region"]
+    assert region["verdict"] == "model_gap" and "nobody decoded" in region["note"]
+    assert parts["values_declared:customers.full_name"]["verdict"] == "noted"
+    assert parts["values_declared:orders.notes"]["verdict"] == "unresolved"
+    assert parts["values_declared:customers.email"]["verdict"] == "noted"
+
+
+# --- round 3: a metric matched by shape on a table the statement never reads -----------------
+
+
+def test_a_bare_aggregate_matched_to_a_metric_on_another_table_is_open(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("payments")], columns=[_output("total_refunds", "matched", source_tables=["refunds"])]))
+    row = _parts(ledger(tmp_path))["metric:total_refunds"]
+    assert row["verdict"] == "unresolved"
+    assert "defined on refunds, which this statement does not read" in row["note"]
+    assert row["evidence"]["tables_read"] == ["payments"]
+    # On the table the metric is defined over, or with no tables named, the match stands.
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("orders")], columns=[_output("revenue", "matched", source_tables=["orders"])]))
+    assert _parts(ledger(tmp_path))["metric:revenue"]["verdict"] == "confirmed"
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("payments")], columns=[_output("revenue", "matched")]))
+    assert _parts(ledger(tmp_path))["metric:revenue"]["verdict"] == "confirmed"
