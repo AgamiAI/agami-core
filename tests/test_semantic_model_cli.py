@@ -261,7 +261,7 @@ def test_add_examples_appends_dedups_and_skips_invalid(tmp_path):
 
 
 def test_examples_self_referential_query_reports_low_confidence_even_on_a_matching_example(tmp_path):
-    """ACE-114: `sm examples` must never report `high_confidence: true` for a self-referential
+    """ACE-118: `sm examples` must never report `high_confidence: true` for a self-referential
     query, even against an example whose wording is close enough to otherwise clear the bar — the
     matched example's SQL names WHOEVER asked it, not this caller."""
     from semantic_model import curate

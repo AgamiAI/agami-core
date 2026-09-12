@@ -1595,11 +1595,18 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
 # order (`email = 'x'` or `'x' = email`) — the shape a stored example's SQL uses to name WHOEVER
 # asked it. Conservative and regex-based rather than a real parse, matching the heuristic style
 # sql_guard.py already leans on for read-only/deny-list checks elsewhere in this codebase: it only
-# needs to catch this one shape, not understand the statement (ACE-114 review).
-_IDENTITY_COLUMN_NAMES = r"email|user(?:name)?|owner|assigned_to|sys_id|caller_id|requested_for"
+# needs to catch this one shape, not understand the statement (ACE-118 review).
+_IDENTITY_COLUMN_NAMES = (
+    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|sys_id|caller_id|requested_for"
+)
+# The literal body allows THREE escape conventions, not one: a backslash escape (`\\.`, MySQL-style),
+# and a doubled single quote (`''`) — the standard SQL escaping `semantic_model/dialects.py` itself
+# emits for an apostrophe in a value (e.g. `o''reilly`). Missing the doubled-quote form (ACE-118
+# review) matched only up to the first `'`, leaving the remainder of the identity unredacted and the
+# resulting SQL malformed.
 _IDENTITY_LITERAL_RE = re.compile(
-    rf"(?P<pre>\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b\s*=\s*)(?P<lit>'(?:[^'\\]|\\.)*')"
-    rf"|(?P<lit2>'(?:[^'\\]|\\.)*')(?P<post>\s*=\s*\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b)",
+    rf"(?P<pre>\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b\s*=\s*)(?P<lit>'(?:[^'\\]|\\.|'')*')"
+    rf"|(?P<lit2>'(?:[^'\\]|\\.|'')*')(?P<post>\s*=\s*\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b)",
     re.IGNORECASE,
 )
 _IDENTITY_REDACTION_PLACEHOLDER = "'<RESOLVE_FROM_CALLER_IDENTITY>'"
@@ -1621,7 +1628,7 @@ def _redact_self_referential_identity(
     examples: list[dict[str, Any]], question: str
 ) -> list[dict[str, Any]]:
     """Strip identity-shaped literals from every example's SQL when `question` is self-referential
-    (ACE-114).
+    (ACE-118).
 
     `semantic_model.runtime.is_high_confidence` excludes self-reference from the LOCAL confidence
     shortcut (`sm examples` / the local skill path), but this hosted tool has no confidence
@@ -1654,7 +1661,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
 
     A self-referential `query` ("how many are assigned to me") gets each returned example's SQL
-    scrubbed of identity-shaped literals first (ACE-114) — see `_redact_self_referential_identity`
+    scrubbed of identity-shaped literals first (ACE-118) — see `_redact_self_referential_identity`
     for the DB-served path. The local file-serving branch below returns a whole area's curated
     library as one YAML/Markdown document rather than a list of example dicts, but the redaction
     itself (`_redact_identity_literals`) is a plain string transform keyed on the SQL shape, not on
@@ -1706,9 +1713,17 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # is what the caller got before, rather than being refused: this path returns the curated
     # library and has no vocabulary for an input error.
     wanted = _area.strip() if isinstance(_area, str) else ""
-    from semantic_model.runtime import _is_self_referential  # sibling package; no import cycle
+    # This branch historically needed no model deps at all — it just reads YAML text (a bare
+    # `agami-core` install, no `[model]` extra, can still serve it). `semantic_model.runtime`
+    # pulls in `semantic_model.models`, which needs pydantic, so the import is guarded the same
+    # way `_resolve_units` above degrades rather than crashes when it's absent (ACE-118 review):
+    # redaction is skipped, not the whole call.
+    try:
+        from semantic_model.runtime import _is_self_referential
 
-    self_referential = _is_self_referential(args.get("query") or "")
+        self_referential = _is_self_referential(args.get("query") or "")
+    except ImportError:
+        self_referential = False
     blocks: list[str] = []
     if ex_dir.is_dir():
         for ex_file in sorted(ex_dir.glob("*/examples.yaml")):

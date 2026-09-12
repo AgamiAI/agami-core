@@ -15,7 +15,7 @@ below corresponds to one such version.
 ### Fixed
 
 - **`is_high_confidence`'s new `question` argument is optional.** It gained a second positional
-  parameter so the examples confidence shortcut could exclude self-referential questions (ACE-114),
+  parameter so the examples confidence shortcut could exclude self-referential questions (ACE-118),
   which made it a breaking change for the function's existing callers — public API, exported via
   `__all__` with a stability promise. `question` now defaults to `""`, which never matches the
   self-reference check, so an existing one-argument call keeps its old behavior unchanged.

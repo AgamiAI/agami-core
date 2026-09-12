@@ -359,7 +359,7 @@ async def _auth_server(request: Request) -> JSONResponse:
 
 def _with_caller_identity(result_text: str, actor: str | None) -> str:
     """Stamp the authenticated caller's identity onto a JSON tool result, so the model resolving
-    "my"/"me" in the next turn has somewhere to read who is asking (ACE-114) — the audit log was the
+    "my"/"me" in the next turn has somewhere to read who is asking (ACE-118) — the audit log was the
     only consumer of `_actor_ctx` before this.
 
     Best-effort and additive ONLY: some existing test tools (and any third-party consumer's tool)
@@ -372,13 +372,13 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     followed it, untouched. `tool_get_prompt_examples`'s local file-serving branch (no DB configured)
     is NOT handled: it returns a whole area's curated library as one YAML/Markdown document with no
     leading JSON object at all, so there is no prefix to parse here — stamping that shape would mean
-    restructuring what that branch returns, which is out of scope for this fix (ACE-114 review); it
+    restructuring what that branch returns, which is out of scope for this fix (ACE-118 review); it
     is left unstamped, a known limitation.
 
     `caller_identity` is a reserved, server-injected field: it is ALWAYS overwritten with the true
     authenticated value, even when the tool's own JSON body already carries that key — deferring to
     an existing value would let any tool whose own domain data happens to use this field name spoof
-    the asker to the model, which is instructed to trust it unconditionally (ACE-114 review).
+    the asker to the model, which is instructed to trust it unconditionally (ACE-118 review).
     """
     if actor is None:
         return result_text
@@ -502,7 +502,7 @@ def build_server(
             # verdict readable at the audit write below, instead of it having to `json.loads` the
             # body this call is about to return.
             #
-            # The caller-identity stamp (ACE-114) is folded into THIS SAME offloaded call rather than
+            # The caller-identity stamp (ACE-118) is folded into THIS SAME offloaded call rather than
             # applied as a separate synchronous step after `run_blocking` returns. `_with_caller_identity`
             # does its own `json.loads`/`json.dumps` round-trip over the full result body, which is exactly
             # the kind of blocking work ACE-048 moved the handler off the loop to avoid — doing it

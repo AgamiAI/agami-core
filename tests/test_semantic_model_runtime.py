@@ -221,7 +221,7 @@ def test_examples_low_confidence():
 
 
 def test_self_referential_question_never_short_circuits_even_at_high_confidence():
-    """ACE-114: a self-referential question must always re-derive its identity, never inherit a
+    """ACE-118: a self-referential question must always re-derive its identity, never inherit a
     matched example's — even when the match is lexically near-identical and would otherwise clear
     the confidence bar."""
     exs = [{"question": "how many tickets are assigned to me",
@@ -239,7 +239,7 @@ def test_self_reference_marker_match_is_case_insensitive():
 
 
 def test_is_high_confidence_still_works_with_the_old_one_arg_call():
-    """`question` gained a default (ACE-114 review) so the pre-existing one-argument call — public
+    """`question` gained a default (ACE-118 review) so the pre-existing one-argument call — public
     API, exported via `__all__` — keeps working unchanged rather than raising a TypeError. An empty
     default question is never self-referential, so behavior for this caller is byte-identical to
     before the second parameter existed."""

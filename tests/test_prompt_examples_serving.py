@@ -7,6 +7,7 @@ set. Default ranking is word-overlap (zero deps, zero egress); the embeddings ti
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -46,7 +47,7 @@ def test_large_library_is_ranked_and_capped(tmp_path, monkeypatch):
 
 
 def test_self_referential_question_never_returns_a_real_identity_literal(tmp_path, monkeypatch):
-    """ACE-114 review: the confidence shortcut this spec closes lives only in the local `sm
+    """ACE-118 review: the confidence shortcut this spec closes lives only in the local `sm
     examples` CLI path (`semantic_model.runtime.is_high_confidence`) — this hosted tool has no
     confidence-scored shortcut at all, it just ranks and returns matches, so a self-referential
     question can still surface another person's identity literal from a matched example's SQL. The
@@ -76,6 +77,57 @@ def test_self_referential_question_never_returns_a_real_identity_literal(tmp_pat
     for ex in out["examples"]:
         assert "someone-else@example.com" not in ex["sql"]
     assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
+def test_redaction_catches_an_assignee_column_too(tmp_path, monkeypatch):
+    """Copilot review on ACE-118: `assignee` is a real identity-bearing column name (this file's
+    own self-reference fixtures use it) and was missing from the matcher — a hosted example
+    naming it would have been returned verbatim for a self-referential question, defeating the
+    redaction guarantee."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assignee = 'someone-else@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    assert "someone-else@example.com" not in out["examples"][0]["sql"]
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
+def test_redaction_handles_a_doubled_single_quote_inside_the_literal(tmp_path, monkeypatch):
+    """Copilot review on ACE-118: standard SQL escapes an apostrophe as `''`, not `\\'` — the
+    dialect helper (`semantic_model/dialects.py`) emits exactly this shape for a value like
+    O'Reilly. The old pattern stopped at the first `'`, leaving the remainder of the identity
+    literal (and the SQL) unredacted and malformed."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assigned_to = 'o''reilly@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    sql = out["examples"][0]["sql"]
+    assert "reilly@example.com" not in sql
+    assert sql == "SELECT COUNT(*) FROM tickets WHERE assigned_to = '<RESOLVE_FROM_CALLER_IDENTITY>'"
 
 
 def test_a_non_self_referential_question_keeps_the_examples_sql_verbatim(tmp_path, monkeypatch):
@@ -243,6 +295,18 @@ def test_the_local_path_leaves_a_non_self_referential_examples_yaml_verbatim(tmp
         {"datasource": "main", "query": "how many tickets are assigned to alex"}
     )
     assert sql_line in out
+
+
+def test_the_local_path_serves_examples_without_the_model_deps_installed(local_library, monkeypatch):
+    """Copilot review on ACE-118: this branch historically needed no model deps at all — a bare
+    `agami-core` install (no `[model]` extra) can still serve raw YAML. `semantic_model.runtime`
+    pulls in `semantic_model.models`, which needs pydantic; importing it unconditionally would turn
+    a working call into an unhandled `ModuleNotFoundError`. The guard must degrade (skip
+    redaction), never crash the whole call — same convention `_resolve_units` already uses."""
+    monkeypatch.setitem(sys.modules, "semantic_model", None)
+
+    out = tools.tool_get_prompt_examples({"datasource": local_library, "query": "how many orders"})
+    assert "subject area: sales" in out
 
 
 def test_the_local_path_honours_area_too(local_library):

@@ -594,7 +594,7 @@ HIGH_CONFIDENCE_EXAMPLE = 0.82
 
 # A self-referential question ("my", "me", "I", "mine") must never be answered by copying a matched
 # example's SQL verbatim — the example's own identity literal belongs to whoever asked IT, not to
-# this caller (ACE-114). Word-boundary + case-insensitive so "minecraft" or "IMPORTANT" don't match.
+# this caller (ACE-118). Word-boundary + case-insensitive so "minecraft" or "IMPORTANT" don't match.
 _SELF_REFERENCE_MARKERS = re.compile(r"\b(my|me|i|mine)\b", re.IGNORECASE)
 
 
@@ -608,10 +608,10 @@ def is_high_confidence(matches: list[ExampleMatch], question: str = "") -> bool:
     Self-reference is excluded from the shortcut regardless of match score: a self-referential
     question ("how many are assigned to me") must always re-resolve its identity portion rather than
     inherit whichever example scored highest — that example's own SQL names WHOEVER asked it, not
-    this caller (ACE-114).
+    this caller (ACE-118).
 
     `question` defaults to `""` (never self-referential) rather than being required, so the
-    pre-ACE-114 one-argument call still type-checks and behaves exactly as before — `is_high_confidence`
+    pre-ACE-118 one-argument call still type-checks and behaves exactly as before — `is_high_confidence`
     is exported public API (`__all__`) with a stability promise, and a required second positional
     argument would have broken every existing caller."""
     if not matches or matches[0].score < HIGH_CONFIDENCE_EXAMPLE:
