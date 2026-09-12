@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import re
 
-# Word-boundary + case-insensitive so "minecraft" or "IMPORTANT" don't match.
-_SELF_REFERENCE_MARKERS = re.compile(r"\b(my|me|i|mine)\b", re.IGNORECASE)
+# Word-boundary + case-insensitive so "minecraft" or "IMPORTANT" don't match. `myself` added after
+# review: "tickets assigned to myself" is exactly the self-referential shape this exists to catch,
+# and without it such a question would be scored high-confidence and its SQL left unredacted
+# (Copilot review).
+_SELF_REFERENCE_MARKERS = re.compile(r"\b(my|myself|me|i|mine)\b", re.IGNORECASE)
 
 
 def _is_self_referential(question: str) -> bool:
@@ -42,9 +45,12 @@ def _is_self_referential(question: str) -> bool:
 # of BOTH `incident` and `sys_user` tables, so a filter on a ticket's own `sys_id` alongside a real
 # identity column (e.g. `caller_id`) would have its ticket reference corrupted too, changing the
 # query's meaning rather than protecting an identity (Copilot review). `caller_id` alone already
-# covers the person-identity case this column exists for.
+# covers the person-identity case this column exists for. `manager_id`/`mentor_id` added after
+# review: they're the repository's own worked example of an employee self-join key
+# (`model_store.py`'s `_relationship_key` docstring, `test_model_store_roundtrip.py:131-150`) —
+# exactly the shape of a person-reference column this list exists to cover.
 _IDENTITY_COLUMN_NAMES = (
-    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|caller_id|"
+    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|caller_id|manager_id|mentor_id|"
     r"requested_(?:by|for)|opened_(?:by|for)|closed_by|resolved_by|watch_list|"
     r"created_by|approved_by"
 )
@@ -65,17 +71,23 @@ _IDENTITY_COLUMN_REF = (
 # review) matched only up to the first `'`, leaving the remainder of the identity unredacted and
 # the resulting SQL malformed.
 _QUOTED_LITERAL = r"'(?:[^'\\]|\\.|'')*'"
+# `!=`/`<>` matched alongside `=` after review: `assignee != 'previous@example.com'` still names
+# the previous caller's identity — a self-referential example rejecting everyone but a name is
+# just as much a leak of that name as one selecting it (Copilot review).
+_EQ_OP = r"(?:=|!=|<>)"
 _IDENTITY_LITERAL_RE = re.compile(
-    rf"(?P<pre>{_IDENTITY_COLUMN_REF}\s*=\s*)(?P<lit>{_QUOTED_LITERAL})"
-    rf"|(?P<lit2>{_QUOTED_LITERAL})(?P<post>\s*=\s*{_IDENTITY_COLUMN_REF})",
+    rf"(?P<pre>{_IDENTITY_COLUMN_REF}\s*{_EQ_OP}\s*)(?P<lit>{_QUOTED_LITERAL})"
+    rf"|(?P<lit2>{_QUOTED_LITERAL})(?P<post>\s*{_EQ_OP}\s*{_IDENTITY_COLUMN_REF})",
     re.IGNORECASE,
 )
-# `IN (...)` is a second, equally common shape an identity predicate takes and the equality
-# pattern above never matches (ACE-118 review) — the whole parenthesized list is replaced with one
-# placeholder rather than redacting each member individually, since once any member names an
-# identity, the model has no business seeing which values were in the list at all.
+# `IN (...)` / `NOT IN (...)` are a second, equally common shape an identity predicate takes and
+# the equality pattern above never matches (ACE-118 review) — the whole parenthesized list is
+# replaced with one placeholder rather than redacting each member individually, since once any
+# member names an identity, the model has no business seeing which values were in the list at all.
+# `NOT IN` added alongside `IN` for the same reason `!=` joined `=` above: excluding a caller's
+# past identity from a result set still names it in the query text (Copilot review).
 _IDENTITY_IN_RE = re.compile(
-    rf"(?P<col>{_IDENTITY_COLUMN_REF})\s+IN\s*\(\s*{_QUOTED_LITERAL}"
+    rf"(?P<col>{_IDENTITY_COLUMN_REF})\s+(?P<neg>NOT\s+)?IN\s*\(\s*{_QUOTED_LITERAL}"
     rf"(?:\s*,\s*{_QUOTED_LITERAL})*\s*\)",
     re.IGNORECASE,
 )
@@ -83,14 +95,14 @@ _IDENTITY_REDACTION_PLACEHOLDER = "'<RESOLVE_FROM_CALLER_IDENTITY>'"
 
 
 def _redact_identity_literals(sql: str) -> str:
-    """Replace every identity-shaped equality or `IN (...)` literal in `sql` with a placeholder
-    the model cannot mistake for a real value — see `_IDENTITY_LITERAL_RE`/`_IDENTITY_IN_RE` for
-    the shapes matched.
+    """Replace every identity-shaped equality/inequality or `[NOT] IN (...)` literal in `sql` with
+    a placeholder the model cannot mistake for a real value — see `_IDENTITY_LITERAL_RE`/
+    `_IDENTITY_IN_RE` for the shapes matched.
 
-    Not an exhaustive SQL grammar — `!=`, `LIKE`, and a value reached through a function call are
-    still unredacted. Equality and `IN` are the two shapes actually seen in review so far; if
-    another shape surfaces, that is the signal to reconsider a real parse (`sqlglot`, already a
-    dependency elsewhere in this codebase) rather than extend this pattern a third time.
+    Not an exhaustive SQL grammar — `LIKE` and a value reached through a function call are still
+    unredacted. Equality/inequality and `[NOT] IN` are the shapes actually seen in review so far;
+    if another shape surfaces, that is the signal to reconsider a real parse (`sqlglot`, already a
+    dependency elsewhere in this codebase) rather than extend this pattern again.
     """
 
     def _sub_eq(m: "re.Match[str]") -> str:
@@ -98,7 +110,9 @@ def _redact_identity_literals(sql: str) -> str:
             return f"{m.group('pre')}{_IDENTITY_REDACTION_PLACEHOLDER}"
         return f"{_IDENTITY_REDACTION_PLACEHOLDER}{m.group('post')}"
 
+    def _sub_in(m: "re.Match[str]") -> str:
+        neg = m.group("neg") or ""
+        return f"{m.group('col')} {neg}IN ({_IDENTITY_REDACTION_PLACEHOLDER})"
+
     sql = _IDENTITY_LITERAL_RE.sub(_sub_eq, sql or "")
-    return _IDENTITY_IN_RE.sub(
-        lambda m: f"{m.group('col')} IN ({_IDENTITY_REDACTION_PLACEHOLDER})", sql
-    )
+    return _IDENTITY_IN_RE.sub(_sub_in, sql)

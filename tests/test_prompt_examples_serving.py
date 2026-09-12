@@ -203,6 +203,105 @@ def test_redaction_handles_an_in_clause(tmp_path, monkeypatch):
     )
 
 
+def test_redaction_handles_a_not_in_clause(tmp_path, monkeypatch):
+    """Copilot review: `NOT IN` still names the excluded identity in the query text — a
+    self-referential example excluding everyone but the previous caller is as much a leak of that
+    identity as one selecting it."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assignee NOT IN ('someone-else@example.com')",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    sql = out["examples"][0]["sql"]
+    assert "someone-else@example.com" not in sql
+    assert sql == (
+        "SELECT COUNT(*) FROM tickets WHERE assignee NOT IN ('<RESOLVE_FROM_CALLER_IDENTITY>')"
+    )
+
+
+def test_redaction_handles_a_not_equal_predicate(tmp_path, monkeypatch):
+    """Copilot review: `assignee != 'previous@example.com'` still names the previous caller's
+    identity — the equality-only pattern missed this inequality shape."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assignee != 'someone-else@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    sql = out["examples"][0]["sql"]
+    assert "someone-else@example.com" not in sql
+    assert sql == "SELECT COUNT(*) FROM tickets WHERE assignee != '<RESOLVE_FROM_CALLER_IDENTITY>'"
+
+
+@pytest.mark.parametrize("column", ["manager_id", "mentor_id"])
+def test_redaction_catches_an_employee_self_join_column(tmp_path, monkeypatch, column):
+    """Copilot review: `manager_id`/`mentor_id` are the repository's own worked example of an
+    employee self-join person-reference column (`model_store.py`'s `_relationship_key` docstring)
+    and were missing from the matcher."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many reports do I have",
+            "sql": f"SELECT COUNT(*) FROM employees WHERE {column} = 'someone-else@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many reports do I have"}
+        )
+    )
+    assert "someone-else@example.com" not in out["examples"][0]["sql"]
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
+def test_myself_is_recognized_as_self_referential(tmp_path, monkeypatch):
+    """Copilot review: 'tickets assigned to myself' is exactly the self-referential shape this
+    module exists to catch, but the marker regex only had 'my', 'me', 'i', 'mine'."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to myself",
+            "sql": "SELECT COUNT(*) FROM tickets WHERE assignee = 'someone-else@example.com'",
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to myself"}
+        )
+    )
+    assert "someone-else@example.com" not in out["examples"][0]["sql"]
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
 def test_redaction_handles_a_doubled_single_quote_inside_the_literal(tmp_path, monkeypatch):
     """Copilot review on ACE-118: standard SQL escapes an apostrophe as `''`, not `\\'` — the
     dialect helper (`semantic_model/dialects.py`) emits exactly this shape for a value like
