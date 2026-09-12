@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<!--
+  agami · reconcile grading page — used by the agami-reconcile skill via
+  scripts/render_reconcile_grades.py.
+  A list of questions has no answer to compare against, so a person grades what the AI answered.
+  One page, one block back: every question with the AI's answer and the receipt's signals, a grade
+  per row, and a single block the person pastes into chat. Self-contained: opens from file:// in
+  any browser, no server, no relative-path dependencies.
+  Two rules this page keeps, both asserted by tests/test_render_reconcile_grades.py:
+    * NO result rows. A row shows one recorded cell, or the shape of a table (columns and a row
+      count), never the rows themselves.
+    * A grade decides nothing on its own. "right" makes the answer the expected value; "wrong" with
+      SQL becomes a statement graded like any other; "wrong" with words becomes a finding carrying
+      them; "unsure" does nothing. The skill applies each, never this page.
+  NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose;
+  the renderer does a blanket string replace, and a real token inside this comment would catch it.
+  Renderer fills:
+    REPORT_TITLE          — "Grade agami's answers · <profile>"
+    GENERATED_AT          — ISO8601 UTC timestamp
+    PROFILE               — the active profile name
+    RUN                   — the reconcile run's timestamp folder name
+    ITEMS_JSON            — [{row, question, answer, signals:[...], report_path}]
+    AGAMI_LOGO_DARK_TEXT  — full SVG content of agami-logo-dark.svg
+    AGAMI_LOGO_LIGHT_TEXT — full SVG content of agami-logo-light.svg
+    THEME_CSS             — shared/theme.css, the one palette
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} — agami</title>
+  <style>
+{{THEME_CSS}}
+    body { margin: 0; font-family: var(--font-body, system-ui, sans-serif); background: var(--bg, #f7f7f8); color: var(--fg, #17212b); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 96px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border, #d9dde3); }
+    .logo svg { display: block; height: 26px; width: auto; }
+    .logo-light-mode { display: inline-block; } .logo-dark-mode { display: none; }
+    @media (prefers-color-scheme: dark) { .logo-light-mode { display: none; } .logo-dark-mode { display: inline-block; } }
+    h1 { font-size: 22px; margin: 0; }
+    .meta { font-size: 12px; color: var(--fg-muted, #5b6875); }
+    .lede { max-width: 70ch; font-size: 15px; color: var(--fg-muted, #5b6875); margin: 18px 0 8px; }
+    .card { background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 16px 18px; margin: 14px 0; }
+    .card .q { font-weight: 600; font-size: 16px; }
+    .card .n { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted, #5b6875); margin-right: 8px; }
+    .answer { margin: 10px 0; font-size: 15px; }
+    .answer code { background: var(--code-bg, #eef1f4); padding: 2px 6px; border-radius: 4px; }
+    .signals { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--fg-muted, #5b6875); }
+    .grade { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 14px; }
+    .grade label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .more { margin-top: 10px; display: grid; gap: 8px; }
+    .more[hidden] { display: none; }
+    .more label { font-size: 13px; color: var(--fg-muted, #5b6875); display: block; }
+    .more textarea { width: 100%; min-height: 64px; font-family: ui-monospace, monospace; font-size: 13px; border: 1px solid var(--border, #d9dde3); border-radius: 6px; padding: 8px; background: var(--bg, #fff); color: inherit; }
+    .receipt { font-size: 12px; margin-top: 8px; }
+    .footer { position: sticky; bottom: 0; background: var(--bg, #f7f7f8); border-top: 1px solid var(--border, #d9dde3); padding: 12px 0; display: flex; align-items: center; gap: 14px; }
+    button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border, #d9dde3); background: var(--card, #fff); color: inherit; cursor: pointer; }
+    button.primary { background: var(--accent, #1d5fb4); color: #fff; border-color: transparent; }
+    button[disabled] { opacity: 0.5; cursor: default; }
+    .summary { font-size: 13px; color: var(--fg-muted, #5b6875); }
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
+    .modal[hidden] { display: none; }
+    .modal-card { background: var(--card, #fff); border-radius: 10px; padding: 20px; width: min(720px, 92vw); }
+    .modal-card textarea { width: 100%; min-height: 200px; font-family: ui-monospace, monospace; font-size: 13px; }
+    .modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+    .modal-status { font-size: 13px; color: var(--fg-muted, #5b6875); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">
+        <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+        <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+      </div>
+      <div>
+        <h1>{{REPORT_TITLE}}</h1>
+        <div class="meta">profile {{PROFILE}} · run {{RUN}} · generated {{GENERATED_AT}}</div>
+      </div>
+    </header>
+
+    <p class="lede">These questions came with no answers to compare against, so agami answered each one and you grade the answers. Mark each right, wrong or unsure. If it is wrong and you know the right SQL, paste it; if you can only say what is wrong, say it in words. Then generate the block and paste it back into Claude. Nothing changes until you do.</p>
+
+    <div id="items"></div>
+
+    <div class="footer">
+      <button type="button" id="btn-generate" class="primary" disabled>Generate feedback</button>
+      <span class="summary" id="summary"></span>
+    </div>
+  </div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Send to Claude</h2>
+      <p class="meta">Copy this block and paste it back into Claude. A "right" makes the answer the expected value. A "wrong" with SQL is graded like any other statement you supply. A "wrong" with words becomes a finding carrying them. "Unsure" changes nothing.</p>
+      <textarea id="modal-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" id="modal-copy" class="primary">Copy to clipboard</button>
+        <button type="button" id="modal-close">Close</button>
+        <span class="modal-status" id="modal-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, items: {{ITEMS_JSON}} };
+    const grades = {};   // row -> {grade, sql, words}
+
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function renderItems() {
+      const root = document.getElementById('items');
+      root.innerHTML = DATA.items.map(item => {
+        const g = grades[item.row] || {};
+        const signals = (item.signals || []).map(s => '<li>' + esc(s) + '</li>').join('');
+        return '<div class="card" data-row="' + item.row + '">'
+          + '<div class="q"><span class="n">#' + item.row + '</span>' + esc(item.question) + '</div>'
+          + '<div class="answer">agami answered: <code>' + esc(item.answer) + '</code></div>'
+          + (signals ? '<ul class="signals">' + signals + '</ul>' : '')
+          + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+          + '<div class="grade">'
+          + ['right', 'wrong', 'unsure'].map(v =>
+              '<label><input type="radio" name="g' + item.row + '" value="' + v + '"'
+              + (g.grade === v ? ' checked' : '') + '> ' + v + '</label>').join('')
+          + '</div>'
+          + '<div class="more"' + (g.grade === 'wrong' ? '' : ' hidden') + '>'
+          + '<label>The right SQL, if you know it<textarea data-field="sql" placeholder="SELECT ...">' + esc(g.sql || '') + '</textarea></label>'
+          + '<label>Or say what is wrong, in words<textarea data-field="words" placeholder="e.g. revenue should exclude refunds">' + esc(g.words || '') + '</textarea></label>'
+          + '</div>'
+          + '</div>';
+      }).join('');
+      root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onGrade));
+      root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
+      renderSummary();
+    }
+
+    function onGrade(e) {
+      const card = e.target.closest('.card');
+      const row = Number(card.dataset.row);
+      grades[row] = Object.assign(grades[row] || {}, { grade: e.target.value });
+      card.querySelector('.more').hidden = e.target.value !== 'wrong';
+      renderSummary();
+    }
+
+    function onText(e) {
+      const row = Number(e.target.closest('.card').dataset.row);
+      grades[row] = Object.assign(grades[row] || {}, { [e.target.dataset.field]: e.target.value });
+    }
+
+    function graded() {
+      return Object.keys(grades).filter(r => grades[r].grade).map(r => {
+        const g = grades[r];
+        const out = { row: Number(r), grade: g.grade };
+        if (g.grade === 'wrong' && g.sql && g.sql.trim()) out.sql = g.sql.trim();
+        if (g.grade === 'wrong' && g.words && g.words.trim()) out.words = g.words.trim();
+        return out;
+      }).sort((a, b) => a.row - b.row);
+    }
+
+    function renderSummary() {
+      const n = graded().length;
+      document.getElementById('btn-generate').disabled = n === 0;
+      document.getElementById('summary').textContent = n
+        ? n + ' of ' + DATA.items.length + ' graded. Nothing is applied until you paste the block into Claude.'
+        : 'Nothing graded yet.';
+    }
+
+    // The block Claude reads back. `profile:` first so the apply step never falls back to whichever
+    // profile happens to be active, then the run, then the grades under a bare header with the array
+    // on its own line, and `done` last: the model explorer's format, unchanged.
+    function generateFeedback() {
+      const lines = ['profile: ' + (DATA.profile || ''), 'reconcile-run: ' + (DATA.run || ''),
+                     'grades:', JSON.stringify(graded()), 'done'];
+      document.getElementById('modal-text').value = lines.join('\n') + '\n';
+      document.getElementById('modal').hidden = false;
+      document.getElementById('modal-status').textContent = '';
+    }
+
+    document.getElementById('btn-generate').addEventListener('click', generateFeedback);
+    document.getElementById('modal-close').addEventListener('click', () => {
+      document.getElementById('modal').hidden = true;
+    });
+    document.getElementById('modal-copy').addEventListener('click', async () => {
+      const status = document.getElementById('modal-status');
+      try {
+        await navigator.clipboard.writeText(document.getElementById('modal-text').value);
+        status.textContent = '✓ Copied. Paste it back in Claude.';
+      } catch (e) {
+        document.getElementById('modal-text').select();
+        status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.';
+      }
+    });
+
+    renderItems();
+  </script>
+</body>
+</html>
