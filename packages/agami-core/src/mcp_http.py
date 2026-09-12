@@ -358,13 +358,14 @@ async def _auth_server(request: Request) -> JSONResponse:
 
 
 def _with_caller_identity(result_text: str, actor: str | None) -> str:
-    """Stamp the authenticated caller's identity onto a JSON tool result, so the model resolving
-    "my"/"me" in the next turn has somewhere to read who is asking (ACE-118) — the audit log was the
-    only consumer of `_actor_ctx` before this.
+    """Stamp the authenticated caller's identity onto a tool result that is a JSON object, so the
+    model resolving "my"/"me" in the next turn has somewhere to read who is asking (ACE-118) — the
+    audit log was the only consumer of `_actor_ctx` before this.
 
     Best-effort and additive ONLY: some existing test tools (and any third-party consumer's tool)
-    return a bare string, not JSON, and this must never corrupt that. A body with no JSON object
-    anywhere in it always returns `result_text` unchanged. With no actor, a body that also carries
+    return a bare string, not JSON, and this must never corrupt that. A body whose top level is not
+    a JSON object — a bare string, or a JSON array — always returns `result_text` unchanged; an
+    array has no field to add without changing the shape its consumer reads. With no actor, a body that also carries
     no `caller_identity` key returns unchanged too — but one that DOES carry that key is still
     reserialized with it stripped; see the overwrite-guarantee paragraph below.
 

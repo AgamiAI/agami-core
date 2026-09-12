@@ -15,7 +15,7 @@ below corresponds to one such version.
 ### Fixed
 
 - **A tool result now carries the verified caller's identity.** The hosted HTTP transport
-  (`mcp_http.py`) stamps a `caller_identity` field onto every JSON tool result, and the shared
+  (`mcp_http.py`) stamps a `caller_identity` field onto every tool result that is a JSON object, and the shared
   instructions tell the model to resolve a self-referential term ("my", "me", "I", "mine") against
   it rather than against a stored example's SQL — so a self-referential question has a real
   identity to anchor on instead of inheriting whichever past example happens to match closely
