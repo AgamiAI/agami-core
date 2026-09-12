@@ -104,7 +104,11 @@ def test_redaction_catches_an_assignee_column_too(tmp_path, monkeypatch):
     assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
 
 
-@pytest.mark.parametrize("column", ["opened_by", "closed_by", "resolved_by", "opened_for", "requested_by", "watch_list"])
+@pytest.mark.parametrize(
+    "column",
+    ["opened_by", "closed_by", "resolved_by", "opened_for", "requested_by", "watch_list",
+     "created_by", "approved_by"],
+)
 def test_redaction_catches_every_documented_reference_field(tmp_path, monkeypatch, column):
     """Copilot review: these are fields `semantic_model/metadata_sources.py` already documents as
     naming a person (ServiceNow's own reference-graph); the matcher has to cover all of them, not
@@ -157,6 +161,36 @@ def test_redaction_handles_a_quoted_identity_column(tmp_path, monkeypatch, quote
     )
     assert "someone-else@example.com" not in out["examples"][0]["sql"]
     assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out["examples"][0]["sql"]
+
+
+def test_redaction_handles_an_in_clause(tmp_path, monkeypatch):
+    """Copilot review: the equality-only pattern never matched `assignee IN ('x@example.com')` —
+    an equally common shape an identity predicate takes. The whole parenthesized list is redacted
+    to one placeholder, not member-by-member, since once any member names an identity the model
+    has no business seeing which values were in the list at all."""
+    examples = [
+        {
+            "area": "sales",
+            "question": "how many tickets are assigned to me",
+            "sql": (
+                "SELECT COUNT(*) FROM tickets WHERE assignee IN "
+                "('someone-else@example.com', 'another@example.com')"
+            ),
+        }
+    ]
+    url = _seed(tmp_path, examples)
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setenv("AGAMI_ORG_ID", "local")
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": "main", "query": "how many tickets are assigned to me"}
+        )
+    )
+    sql = out["examples"][0]["sql"]
+    assert "someone-else@example.com" not in sql
+    assert "another@example.com" not in sql
+    assert sql == "SELECT COUNT(*) FROM tickets WHERE assignee IN ('<RESOLVE_FROM_CALLER_IDENTITY>')"
 
 
 def test_redaction_handles_a_doubled_single_quote_inside_the_literal(tmp_path, monkeypatch):
@@ -353,15 +387,45 @@ def test_the_local_path_leaves_a_non_self_referential_examples_yaml_verbatim(tmp
 
 
 def test_the_local_path_serves_examples_without_the_model_deps_installed(local_library, monkeypatch):
-    """Copilot review on ACE-118: this branch historically needed no model deps at all — a bare
-    `agami-core` install (no `[model]` extra) can still serve raw YAML. `semantic_model.runtime`
-    pulls in `semantic_model.models`, which needs pydantic; importing it unconditionally would turn
-    a working call into an unhandled `ModuleNotFoundError`. The guard must degrade (skip
-    redaction), never crash the whole call — same convention `_resolve_units` already uses."""
-    monkeypatch.setitem(sys.modules, "semantic_model", None)
+    """This branch historically needed no model deps at all — a bare `agami-core` install (no
+    `[model]` extra) can still serve raw YAML.
 
-    out = tools.tool_get_prompt_examples({"datasource": local_library, "query": "how many orders"})
+    An earlier version imported self-reference detection from `semantic_model.runtime` (which
+    needs Pydantic) and skipped redaction when that import failed — backwards for a security
+    check: an absent dependency silently turned the guarantee OFF instead of leaving it on
+    (Copilot review). The fix moved the check into `identity_redaction.py`, a stdlib-only module,
+    so there is nothing left to guard against — simulated here by blocking `pydantic` itself
+    (what a real bare install lacks), not the whole `semantic_model` package, which the fixed code
+    no longer needs for this."""
+    monkeypatch.setitem(sys.modules, "pydantic", None)
+
+    out = tools.tool_get_prompt_examples(
+        {"datasource": local_library, "query": "how many tickets are assigned to me"}
+    )
     assert "subject area: sales" in out
+
+
+def test_redaction_still_runs_when_pydantic_is_unavailable(tmp_path, monkeypatch):
+    """The actual guarantee finding #114 was about: NOT degrading to "no redaction" when the
+    optional model dependency is missing. Blocking `pydantic` must not stop a self-referential
+    question's matched example from having its identity literal stripped."""
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", "AGAMI_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    ex = tmp_path / "main" / "prompt_examples" / "sales"
+    ex.mkdir(parents=True)
+    ex.joinpath("examples.yaml").write_text(
+        "- question: how many tickets are assigned to me\n"
+        "  sql: SELECT COUNT(*) FROM tickets WHERE assigned_to = 'someone-else@example.com'\n"
+    )
+    tools.bootstrap_paths()
+    monkeypatch.setitem(sys.modules, "pydantic", None)
+
+    out = tools.tool_get_prompt_examples(
+        {"datasource": "main", "query": "how many tickets are assigned to me"}
+    )
+    assert "someone-else@example.com" not in out
+    assert "<RESOLVE_FROM_CALLER_IDENTITY>" in out
 
 
 def test_the_local_path_honours_area_too(local_library):

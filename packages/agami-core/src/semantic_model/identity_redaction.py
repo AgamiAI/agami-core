@@ -1,0 +1,99 @@
+"""Self-reference detection and identity-literal redaction — stdlib-only, on purpose (ACE-118).
+
+A self-referential question ("my", "me", "I", "mine") must never be answered by copying a matched
+example's SQL verbatim — the example's own identity literal belongs to whoever asked IT, not to
+this caller. Two callers need this: `semantic_model.runtime.is_high_confidence` (the local `sm
+examples` path) and `tools.py`'s hosted + local-file `get_prompt_examples` serving.
+
+**This module imports nothing but `re`, deliberately.** It used to live inside `runtime.py`, which
+needs Pydantic (`semantic_model.models`) for other things — so `tools.py`'s local file-serving
+branch (no database, meant to work on a bare `agami-core` install with no `[model]` extra) had to
+import it inside a `try/except ImportError`, and on failure it treated the question as NOT
+self-referential and skipped redaction entirely. That is backwards for a security check: an
+unavailable dependency silently turned OFF the guarantee instead of leaving it on (ACE-118 review).
+Moving this logic somewhere it can never fail to import removes the need for that fallback, and
+the guarantee, rather than degrading.
+"""
+
+from __future__ import annotations
+
+import re
+
+# Word-boundary + case-insensitive so "minecraft" or "IMPORTANT" don't match.
+_SELF_REFERENCE_MARKERS = re.compile(r"\b(my|me|i|mine)\b", re.IGNORECASE)
+
+
+def _is_self_referential(question: str) -> bool:
+    return bool(_SELF_REFERENCE_MARKERS.search(question or ""))
+
+
+# A quoted string literal in an equality or IN test against an identity-shaped column, either
+# operand order for equality (`email = 'x'` or `'x' = email`) — the shape a stored example's SQL
+# uses to name WHOEVER asked it. Conservative and regex-based rather than a real parse, matching
+# the heuristic style sql_guard.py already leans on for read-only/deny-list checks elsewhere in
+# this codebase: it only needs to catch these shapes, not understand the statement (ACE-118 review).
+#
+# The list is grounded in `metadata_sources.py`'s own ServiceNow reference-graph fields
+# (`opened_by`, `closed_by`, `resolved_by`, `opened_for`, `requested_by`, `watch_list`) and the
+# generic person-reference columns this codebase's own tests use as worked examples (`created_by`,
+# `approved_by`) — not invented (ACE-118 review; `assignment_group`/`group` are excluded, since
+# they name a team, not a person).
+_IDENTITY_COLUMN_NAMES = (
+    r"email|user(?:name)?|owner|assign(?:ed_to|ee)|sys_id|caller_id|"
+    r"requested_(?:by|for)|opened_(?:by|for)|closed_by|resolved_by|watch_list|"
+    r"created_by|approved_by"
+)
+# A column reference, optionally table-qualified and optionally quoted in any of the three styles
+# this codebase's supported dialects use — double quotes (Postgres/Redshift/Snowflake), backticks
+# (MySQL), square brackets (SQL Server); see `dialects.py`. The bare-`\w` version missed every
+# quoted form, e.g. `"assigned_to" = '...'`, and a dialect-specific stored example could still
+# return its identity literal verbatim (ACE-118 review).
+_IDENTITY_COLUMN_REF = (
+    rf'(?:"(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})"'
+    rf"|`(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})`"
+    rf"|\[(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\]"
+    rf"|\b(?:\w+\.)?(?:{_IDENTITY_COLUMN_NAMES})\b)"
+)
+# A single quoted literal, allowing THREE escape conventions: a backslash escape (`\\.`,
+# MySQL-style) and a doubled single quote (`''`) — the standard SQL escaping `dialects.py` itself
+# emits for an apostrophe in a value (e.g. `o''reilly`). Missing the doubled-quote form (ACE-118
+# review) matched only up to the first `'`, leaving the remainder of the identity unredacted and
+# the resulting SQL malformed.
+_QUOTED_LITERAL = r"'(?:[^'\\]|\\.|'')*'"
+_IDENTITY_LITERAL_RE = re.compile(
+    rf"(?P<pre>{_IDENTITY_COLUMN_REF}\s*=\s*)(?P<lit>{_QUOTED_LITERAL})"
+    rf"|(?P<lit2>{_QUOTED_LITERAL})(?P<post>\s*=\s*{_IDENTITY_COLUMN_REF})",
+    re.IGNORECASE,
+)
+# `IN (...)` is a second, equally common shape an identity predicate takes and the equality
+# pattern above never matches (ACE-118 review) — the whole parenthesized list is replaced with one
+# placeholder rather than redacting each member individually, since once any member names an
+# identity, the model has no business seeing which values were in the list at all.
+_IDENTITY_IN_RE = re.compile(
+    rf"(?P<col>{_IDENTITY_COLUMN_REF})\s+IN\s*\(\s*{_QUOTED_LITERAL}"
+    rf"(?:\s*,\s*{_QUOTED_LITERAL})*\s*\)",
+    re.IGNORECASE,
+)
+_IDENTITY_REDACTION_PLACEHOLDER = "'<RESOLVE_FROM_CALLER_IDENTITY>'"
+
+
+def _redact_identity_literals(sql: str) -> str:
+    """Replace every identity-shaped equality or `IN (...)` literal in `sql` with a placeholder
+    the model cannot mistake for a real value — see `_IDENTITY_LITERAL_RE`/`_IDENTITY_IN_RE` for
+    the shapes matched.
+
+    Not an exhaustive SQL grammar — `!=`, `LIKE`, and a value reached through a function call are
+    still unredacted. Equality and `IN` are the two shapes actually seen in review so far; if
+    another shape surfaces, that is the signal to reconsider a real parse (`sqlglot`, already a
+    dependency elsewhere in this codebase) rather than extend this pattern a third time.
+    """
+
+    def _sub_eq(m: "re.Match[str]") -> str:
+        if m.group("pre") is not None:
+            return f"{m.group('pre')}{_IDENTITY_REDACTION_PLACEHOLDER}"
+        return f"{_IDENTITY_REDACTION_PLACEHOLDER}{m.group('post')}"
+
+    sql = _IDENTITY_LITERAL_RE.sub(_sub_eq, sql or "")
+    return _IDENTITY_IN_RE.sub(
+        lambda m: f"{m.group('col')} IN ({_IDENTITY_REDACTION_PLACEHOLDER})", sql
+    )

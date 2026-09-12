@@ -1606,11 +1606,12 @@ def _redact_self_referential_identity(
     therefore happens unconditionally on every self-referential question, regardless of match score
     — the same trigger `is_high_confidence` uses, reused rather than reimplemented.
 
-    The actual matcher (`_redact_identity_literals`) lives in `semantic_model.runtime`, alongside
-    `_is_self_referential` — both are needed by `semantic_model.cli`'s `cmd_examples` too, which
-    cannot import this module (`tools` sits above `semantic_model`, not below it).
+    The actual matcher (`_redact_identity_literals`) lives in `semantic_model.identity_redaction`,
+    a stdlib-only module — `semantic_model.cli`'s `cmd_examples` needs it too (and cannot import
+    this module: `tools` sits above `semantic_model`, not below it), and the local file-serving
+    branch of this same tool needs it on a bare install with no `[model]` extra.
     """
-    from semantic_model.runtime import (  # sibling package; no import cycle
+    from semantic_model.identity_redaction import (  # sibling package; no import cycle
         _is_self_referential,
         _redact_identity_literals,
     )
@@ -1688,16 +1689,14 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # library and has no vocabulary for an input error.
     wanted = _area.strip() if isinstance(_area, str) else ""
     # This branch historically needed no model deps at all — it just reads YAML text (a bare
-    # `agami-core` install, no `[model]` extra, can still serve it). `semantic_model.runtime`
-    # pulls in `semantic_model.models`, which needs pydantic, so the import is guarded the same
-    # way `_resolve_units` above degrades rather than crashes when it's absent (ACE-118 review):
-    # redaction is skipped, not the whole call.
-    try:
-        from semantic_model.runtime import _is_self_referential, _redact_identity_literals
+    # `agami-core` install, no `[model]` extra, can still serve it). An earlier version imported
+    # self-reference detection from `semantic_model.runtime`, which pulls in `semantic_model.models`
+    # (pydantic), and guarded it with try/except ImportError, skipping redaction on failure — which
+    # is backwards for a security check: an absent dependency silently turned the guarantee OFF
+    # (Copilot review). `identity_redaction` imports nothing but `re`, so there is nothing to guard.
+    from semantic_model.identity_redaction import _is_self_referential, _redact_identity_literals
 
-        self_referential = _is_self_referential(args.get("query") or "")
-    except ImportError:
-        self_referential = False
+    self_referential = _is_self_referential(args.get("query") or "")
     blocks: list[str] = []
     if ex_dir.is_dir():
         for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
