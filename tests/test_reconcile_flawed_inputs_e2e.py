@@ -386,8 +386,10 @@ def test_10_a_count_through_declared_many_to_one_joins_is_confirmed_and_the_drop
     assert fan["verdict"] == "confirmed" and "one row at most" in fan["note"], fan
     noted = {p: row for p, row in parts.items() if p.startswith("dropped_rows:")}
     assert set(noted) == {"dropped_rows:order_items-orders", "dropped_rows:order_items-products"}, noted
+    # Every item has an order and a product in the sample store, so both inner joins drop nothing.
     for row in noted.values():
-        assert row["verdict"] == "noted" and row["evidence"]["total"] > 0 and row["evidence"]["dropped"] >= 0
+        assert row["verdict"] == "noted" and row["evidence"]["total"] > 0 and row["evidence"]["dropped"] == 0, row
+        assert "no order_items row is dropped" in row["note"]
     assert ledger["verdict"] == "confirmed", [r for r in ledger["rows"] if r["verdict"] not in ("confirmed", "noted")]
     expected = scalar((store["run"] / "rows" / "10" / "statement.csv").read_text())
     actual = ask_agami(store, 10, sql)
@@ -407,8 +409,9 @@ def test_11_a_join_that_brings_the_many_side_in_leaves_the_count_open_and_says_w
 
 
 def test_12_a_filter_on_a_column_with_no_declared_values_is_a_gap_said_once(store):
-    """`categories.slug` holds three values and the semantic model lists none of them. The value
-    itself checks out against the warehouse and says so; the column's missing list is the finding."""
+    """`categories.slug` holds a handful of values (eight in the sample store, under the 26 that make a
+    column wide) and the semantic model lists none of them. The value itself checks out against the
+    warehouse and says so; the column's missing list is the finding."""
     sql = ("SELECT COUNT(*) AS n FROM products p JOIN categories c ON c.id = p.category_id "
            "WHERE c.slug = 'apparel'")
     ledger = grade_statement(store, 12, sql)
@@ -438,6 +441,19 @@ def test_13_a_metric_matched_by_shape_on_another_table_is_open(store):
     metric = parts["metric:total_refunds"]
     assert metric["verdict"] == "unresolved", metric
     assert "defined on refunds, which this statement does not read" in metric["note"]
+
+
+def test_15_a_join_that_really_drops_rows_says_how_many_and_which_side_it_did_not_count(store):
+    """Not every order has a payment in the sample store. The probe counts the orders with no
+    payment, over the whole table, and says that payments with no order were not counted."""
+    sql = "SELECT COUNT(*) AS n FROM orders o JOIN payments pay ON pay.order_id = o.id WHERE o.status != 'cancelled'"
+    parts = _parts(grade_statement(store, 15, sql))
+    (noted,) = [row for part, row in parts.items() if part.startswith("dropped_rows:")]
+    assert noted["verdict"] == "noted"
+    assert noted["evidence"]["left"] == "orders" and noted["evidence"]["right"] == "payments"
+    assert noted["evidence"]["total"] > noted["evidence"]["dropped"] > 0, noted["evidence"]
+    assert f"{noted['evidence']['dropped']} of {noted['evidence']['total']} orders rows have no payments partner" in noted["note"]
+    assert "rows of payments with no orders partner were not counted" in noted["note"]
 
 
 def test_8_the_profile_was_never_written_to(store):
