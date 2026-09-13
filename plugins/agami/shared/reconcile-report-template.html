@@ -165,7 +165,8 @@
       results.innerHTML = Object.entries(labels).map(([label, n]) =>
         '<button type="button" class="chip ' + (RESULT_CLASS[label] || 'noted') + (view.result.has(label) ? ' on' : '') + '" data-result="' + esc(label) + '" aria-pressed="' + view.result.has(label) + '"><b>' + n + '</b><span>' + esc(label) + '</span></button>').join('');
       results.querySelectorAll('[data-result]').forEach(el => el.addEventListener('click', () => { toggle(view.result, el.dataset.result); renderItems(); }));
-      root.hidden = Object.keys(labels).length > 0;
+      // `root` (the status chips) is declared further down in this function; reach it by id here.
+      document.getElementById('chips').hidden = Object.keys(labels).length > 0;
       document.getElementById('result-row').hidden = Object.keys(labels).length === 0;
       const root = document.getElementById('chips');
       root.classList.toggle('filtering', view.status.size > 0);
