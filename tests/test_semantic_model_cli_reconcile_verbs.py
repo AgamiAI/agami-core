@@ -42,7 +42,8 @@ from semantic_model import cli, dialects  # noqa: E402
 
 
 def _model(root: Path, *, orders_rows: int | None = None, storage: str = "PostgreSQL",
-           unreadable_on: bool = False, engines: tuple[str, ...] | None = None) -> None:
+           unreadable_on: bool = False, engines: tuple[str, ...] | None = None,
+           rows_all: int | None = None) -> None:
     """A three-table shop. `orders.status` carries a populated list of values, `orders.region` an
     EMPTY one (the not-yet-decoded state), `customers.email` is sensitive, `customers.id` is a
     declared key, and only the order_items -> orders join is declared. `unreadable_on` declares that
@@ -77,17 +78,18 @@ def _model(root: Path, *, orders_rows: int | None = None, storage: str = "Postgr
                     {"name": "deleted_at", "type": "timestamp"},
                     {"name": "order_date", "type": "date"},
                     {"name": "total", "type": "decimal"}]}
-    if orders_rows is not None:
-        orders["performance_hints"] = {"estimated_row_count": orders_rows}
+    if orders_rows is not None or rows_all is not None:
+        orders["performance_hints"] = {"estimated_row_count": orders_rows if orders_rows is not None else rows_all}
+    sized = {"performance_hints": {"estimated_row_count": rows_all}} if rows_all is not None else {}
     (root / "subject_areas" / "s" / "tables" / "orders.yaml").write_text(yaml.safe_dump(orders))
     (root / "subject_areas" / "s" / "tables" / "order_items.yaml").write_text(yaml.safe_dump({
         "name": "order_items", "schema": "public", "storage_connection": "c0", "grain": ["id"],
-        "description": "oi",
+        "description": "oi", **sized,
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "order_id", "type": "integer"}, {"name": "qty", "type": "integer"}]}))
     (root / "subject_areas" / "s" / "tables" / "customers.yaml").write_text(yaml.safe_dump({
         "name": "customers", "schema": "public", "storage_connection": "c0", "grain": ["id"],
-        "description": "cu",
+        "description": "cu", **sized,
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "name", "type": "string"},
                     {"name": "email", "type": "string", "sensitive": True}]}))
@@ -740,8 +742,9 @@ def test_a_join_on_the_wrong_key_still_reports_the_declared_edge_as_unmatched(tm
 
 def test_every_inner_join_on_one_pair_plans_a_dropped_rows_probe(tmp_path):
     """A count of the left table's rows with no partner on the right, whole table, `NOT EXISTS` in
-    the WHERE clause because that is the one spelling every engine runs. Stated, never graded."""
-    _model(tmp_path)
+    the WHERE clause because that is the one spelling every engine runs. Stated, never graded, and
+    naming the side it did not count."""
+    _model(tmp_path, rows_all=10_000)
     d = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")
     (j,) = d["joins"]
     probe = j["dropped_rows_probe"]
@@ -749,6 +752,7 @@ def test_every_inner_join_on_one_pair_plans_a_dropped_rows_probe(tmp_path):
     assert probe["on"] == "order_items.order_id = orders.id"
     assert "NOT EXISTS" in probe["sql"] and "AS dropped" in probe["sql"] and "AS total" in probe["sql"]
     assert "LIMIT" not in probe["sql"] and "SUM(CASE" not in probe["sql"]
+    assert probe["unexamined"] == "orders"
     assert j["dropped_rows_not_emitted_because"] is None
     # An undeclared join gets one too: the fact is about the data, not the declaration.
     d = _joins(tmp_path, "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id")
@@ -756,7 +760,7 @@ def test_every_inner_join_on_one_pair_plans_a_dropped_rows_probe(tmp_path):
 
 
 def test_the_dropped_rows_probe_is_withheld_where_nothing_is_dropped_or_nothing_can_be_said(tmp_path):
-    _model(tmp_path)
+    _model(tmp_path, rows_all=10_000)
     cases = {
         "SELECT COUNT(*) FROM order_items oi LEFT JOIN orders o ON oi.order_id = o.id": "LEFT join keeps",
         "SELECT COUNT(*) FROM orders a JOIN orders b ON a.id = b.id": "itself",
@@ -766,9 +770,13 @@ def test_the_dropped_rows_probe_is_withheld_where_nothing_is_dropped_or_nothing_
         (j,) = _joins(tmp_path, sql)["joins"]
         assert j["dropped_rows_probe"] is None, sql
         assert reason in j["dropped_rows_not_emitted_because"], (sql, j["dropped_rows_not_emitted_because"])
-    _model(tmp_path / "big", orders_rows=5_000_000)
+    _model(tmp_path / "big", orders_rows=5_000_000, rows_all=10_000)
     (j,) = _joins(tmp_path / "big", "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")["joins"]
     assert j["dropped_rows_probe"] is None and "size guard" in j["dropped_rows_not_emitted_because"]
+    # No size at all is not "small": a whole-table probe over a table of unknown size is withheld.
+    _model(tmp_path / "unknown")
+    (j,) = _joins(tmp_path / "unknown", "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")["joins"]
+    assert j["dropped_rows_probe"] is None and "size is not known" in j["dropped_rows_not_emitted_because"]
     _model(tmp_path / "noengine", engines=("PostgreSQL", "Snowflake"))
     (j,) = _joins(tmp_path / "noengine", "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id")["joins"]
     assert j["dropped_rows_probe"] is None and "engine" in j["dropped_rows_not_emitted_because"]
@@ -818,3 +826,47 @@ def test_a_warehouse_grade_over_an_undeclared_column_says_so(tmp_path):
     plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'paid'")
     (v,) = _judge(tmp_path, plan, {})["literals"]
     assert v["declared"] == "populated" and "graded against the warehouse" not in v["note"]
+
+
+def test_semi_and_anti_joins_are_read_by_their_kind_not_their_side(tmp_path):
+    """Both parse as a LEFT join with a kind. A semi join drops exactly the rows the probe counts; an
+    anti join keeps only those, so its count is the result and not a loss."""
+    _model(tmp_path, storage="Databricks", rows_all=10_000)
+    (semi,) = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi LEFT SEMI JOIN orders o ON oi.order_id = o.id")["joins"]
+    assert semi["dropped_rows_probe"] is not None and semi["dropped_rows_probe"]["left"] == "order_items"
+    (anti,) = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi LEFT ANTI JOIN orders o ON oi.order_id = o.id")["joins"]
+    assert anti["dropped_rows_probe"] is None and "ANTI" in anti["dropped_rows_not_emitted_because"]
+    (left,) = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi LEFT JOIN orders o ON oi.order_id = o.id")["joins"]
+    assert left["dropped_rows_probe"] is None and "LEFT join keeps" in left["dropped_rows_not_emitted_because"]
+
+
+def test_whole_table_probes_are_capped_per_statement(tmp_path, monkeypatch):
+    from semantic_model import probes as P
+    monkeypatch.setattr(P, "_MAX_DROPPED_PROBES", 1)
+    _model(tmp_path, rows_all=10_000)
+    d = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id "
+                         "JOIN customers c ON c.id = o.customer_id")
+    probes = [j["dropped_rows_probe"] for j in d["joins"]]
+    assert probes[0] is not None and probes[1] is None
+    assert "over the cap of 1" in d["joins"][1]["dropped_rows_not_emitted_because"]
+
+
+def test_uniqueness_by_the_semantic_model_is_one_rule_for_both_emitters(tmp_path):
+    """A table whose grain is declared without a primary_key flag is unique by the semantic model
+    whichever path reads it: the declared-join path and the undeclared-probe path agree."""
+    _model(tmp_path)
+    oi = tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml"
+    doc = yaml.safe_load(oi.read_text())
+    for col in doc["columns"]:
+        col.pop("primary_key", None)
+    oi.write_text(yaml.safe_dump(doc))
+    d = _joins(tmp_path, "SELECT COUNT(*) FROM order_items oi JOIN orders o ON oi.order_id = o.id "
+                         "JOIN customers c ON oi.id = c.id")
+    assert d["unique_by_model"]["order_items.id"] is True and d["cardinality"]["order_items.id"] is None
+
+
+def test_an_unreadable_plan_judges_to_the_same_shape_as_a_readable_one(tmp_path):
+    _model(tmp_path)
+    out = _judge(tmp_path, {"literals": [], "columns": {}, "skipped": [], "unreadable": "the statement could not be read",
+                            "dialect": None}, {})
+    assert set(out) == {"literals", "columns", "unreadable", "dialect"} and out["columns"] == {}

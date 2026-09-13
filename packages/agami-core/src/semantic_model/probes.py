@@ -78,6 +78,9 @@ UNDETERMINED = "undetermined"
 _MAX_JOINS = 200
 # Literals are capped the same way: an `IN` list of a thousand values would plan a thousand scans.
 _MAX_LITERALS = 200
+# Whole-table dropped-rows probes are capped harder still: each is a correlated NOT EXISTS over a
+# whole table, so a statement with many joins would otherwise plan many full scans.
+_MAX_DROPPED_PROBES = 20
 # One past the enum ceiling, so an overflow shows as one extra row rather than as a full list that
 # happens to be exactly the ceiling long. Recorded on the plan, so the judge reads the number the
 # plan used rather than whatever this constant is when it runs.
@@ -205,6 +208,7 @@ def join_probes(org: Datasource, sql: str) -> dict[str, Any]:
     cardinality: dict[str, Optional[str]] = {}
     unique_by_model: dict[str, bool] = {}
     joins: list[dict[str, Any]] = []
+    dropped_probes = 0
     for n, site in enumerate(sites, 1):
         left, right = site.endpoints
         between = {RT._tkey(RT._bare(left)), RT._tkey(RT._bare(right))}
@@ -240,8 +244,12 @@ def join_probes(org: Datasource, sql: str) -> dict[str, Any]:
                 else "the join is on a different key than the declared one; the declaration decides")
         if status in (DECLARED, WRONG_KEY):
             _note_declared_keys(site, tidx, unique_by_model)
-        entry["dropped_rows_probe"], entry["dropped_rows_not_emitted_because"] = _dropped_rows_probe(
-            site, status, tidx, writer)
+        probe, why_not = _dropped_rows_probe(site, status, tidx, writer)
+        if probe is not None and dropped_probes >= _MAX_DROPPED_PROBES:
+            probe, why_not = None, f"over the cap of {_MAX_DROPPED_PROBES} whole-table probes for one statement"
+        if probe is not None:
+            dropped_probes += 1
+        entry["dropped_rows_probe"], entry["dropped_rows_not_emitted_because"] = probe, why_not
         joins.append(entry)
     return {"joins": joins, "joins_written": written_total, "dropped": written_total - len(sites),
             "cardinality": cardinality, "unique_by_model": unique_by_model,
@@ -257,7 +265,7 @@ def _one_side(rel) -> list[str]:
     return sorted(RT._tkey(RT._bare(t)) for t in sides)
 
 
-def _declared_cardinality(rels: list, site) -> list[dict[str, Any]]:
+def _declared_cardinality(rels: list, site: "RT._JoinSite") -> list[dict[str, Any]]:
     """Every relationship the semantic model declares between the two joined tables, with its
     direction and one side. A list, because two edges can join one pair of tables (two foreign keys
     into the same dimension). `matched` says whether this edge's columns are the ones the statement
@@ -274,31 +282,48 @@ def _declared_cardinality(rels: list, site) -> list[dict[str, Any]]:
     return out
 
 
-def _note_declared_keys(site, tidx: dict[str, Table], unique_by_model: dict[str, bool]) -> None:
+def _unique_by_model(table: Table, column: Column) -> bool:
+    """Whether the semantic model says one row per value of this column: a declared key, or the
+    whole of the table's grain. One rule, read by both emitters, so a column reached through a
+    declared join and an undeclared one gets the same answer."""
+    grain = [g.lower() for g in (getattr(table, "grain", None) or [])]
+    return bool(column.primary_key) or (bool(grain) and grain == [column.name.lower()])
+
+
+def _size_known(table: Table) -> bool:
+    perf = getattr(table, "performance_hints", None)
+    return getattr(perf, "estimated_row_count", None) is not None if perf else False
+
+
+def _note_declared_keys(site: "RT._JoinSite", tidx: dict[str, Table], unique_by_model: dict[str, bool]) -> None:
     """Record, for a join the semantic model already declares, whether each written column is unique
-    by the model: a declared key, or the whole of the table's grain. No probe is planned for it; the
-    model has answered, and that answer is what lets a ledger tell a many-to-one join from a
-    one-to-many without a scan."""
+    by the semantic model. No probe is planned for it; the semantic model has answered, and that
+    answer is what lets a ledger tell a many-to-one join from a one-to-many without a scan."""
     for pair in site.pairs:
         for table_name, column_name in pair:
             table = tidx.get(table_name)
             column = _declared_column(table, column_name)
             if table is None or column is None:
                 continue
-            grain = [g.lower() for g in (getattr(table, "grain", None) or [])]
-            unique = bool(column.primary_key) or (bool(grain) and grain == [column.name.lower()])
-            unique_by_model.setdefault(f"{table_name}.{column.name}", unique)
+            unique_by_model.setdefault(f"{table_name}.{column.name}", _unique_by_model(table, column))
 
 
-def _dropped_rows_probe(site, status: str, tidx: dict[str, Table],
+def _dropped_rows_probe(site: "RT._JoinSite", status: str, tidx: dict[str, Table],
                         writer: Optional[D.Dialect]) -> "tuple[dict[str, Any] | None, str | None]":
     """The probe that counts the left table's rows an inner join leaves behind, or why none is
     written. A fact the run states and never grades: dropping unmatched rows is often exactly what
-    the author meant."""
+    the author meant. The probe counts ONE side, the left, and names the other as `unexamined`: an
+    inner join drops from both, and a reader must not take one count for the whole story."""
     if status in (UNDECLARABLE, UNDETERMINED):
         return None, "the join is not between two declared tables on a readable column pair"
     side = str(site.node.args.get("side") or "").upper()
-    if side in ("LEFT", "FULL"):
+    kind = str(site.node.args.get("kind") or "").upper()
+    # A semi join keeps only the left rows WITH a partner, so it drops exactly what this probe
+    # counts; an anti join keeps only the rows without one, so the count IS its result and is not
+    # a loss. Reading `side` alone called both "LEFT" and said nothing was dropped.
+    if kind == "ANTI":
+        return None, "an ANTI join keeps only the rows with no partner; the dropped-rows count is the join's own result"
+    if side in ("LEFT", "FULL") and kind != "SEMI":
         return None, f"a {side} join keeps every left row, so nothing is dropped"
     if len(site.pairs) != 1:
         return None, "the join is not on exactly one pair of columns"
@@ -317,10 +342,14 @@ def _dropped_rows_probe(site, status: str, tidx: dict[str, Table],
         return None, "a joined column is not in the semantic model"
     if writer is None:
         return None, "the datasource declares no single storage engine, so no probe can be written"
+    # A whole-table probe needs the size guard to have something to read. The overlap probe samples
+    # fifty rows and can run blind; this one cannot, so an unknown size withholds it (fail closed).
+    if not (_size_known(left) and _size_known(right)):
+        return None, "a table's size is not known, so the whole-table probe is not written"
     if I._too_big_to_probe(left) or I._too_big_to_probe(right):
         return None, "a table is over the size guard for probes"
     return {"sql": I.dropped_rows_sql(writer, left, lc.name, right, rc.name),
-            "left": left_key, "right": right_key,
+            "left": left_key, "right": right_key, "unexamined": right_key,
             "on": f"{left_key}.{lc.name} = {right_key}.{rc.name}"}, None
 
 
@@ -370,8 +399,9 @@ def _emit_join_probes(entry: dict[str, Any], site, tidx: dict[str, Table],
         key = f"{name}.{column.name}"
         entry["probes"]["cardinality"].append(key)
         if key not in cardinality:
-            unique_by_model[key] = bool(column.primary_key)
-            cardinality[key] = (None if column.primary_key
+            unique = _unique_by_model(table, column)
+            unique_by_model[key] = unique
+            cardinality[key] = (None if unique
                                 else writer.count_distinct_sql(table.schema_name, table.name, column.name))
 
 
@@ -610,13 +640,13 @@ def filter_values_judge(plan: dict[str, Any], results_dir: Path) -> dict[str, An
     if "literals" not in plan:
         raise ValueError("the plan carries no literals; it is not the output of filter-values plan")
     if plan.get("unreadable"):
-        return {"literals": [], "unreadable": plan["unreadable"], "dialect": plan.get("dialect")}
+        return {"literals": [], "columns": {}, "unreadable": plan["unreadable"], "dialect": plan.get("dialect")}
     columns = plan.get("columns", {})
     verdicts = [_judge_one(lit, columns.get(lit.get("column_key") or "", {}), results_dir)
                 for lit in plan["literals"]]
     # One entry per filtered column, whatever the literals on it said: what the semantic model
     # declares for it and what the distinct probe showed. A column nobody declared a list for is a
-    # fact about the model, and it is a fact about the COLUMN, said once and not once per value.
+    # fact about the semantic model, and it is a fact about the COLUMN, said once and not once per value.
     facts = {key: _column_fact(key, column, results_dir) for key, column in columns.items()}
     return {"literals": verdicts, "columns": facts, "unreadable": None, "dialect": plan.get("dialect")}
 
@@ -630,9 +660,8 @@ def _column_fact(key: str, column: dict[str, Any], results_dir: Path) -> dict[st
     elif rows == "failed":
         distinct = "failed"
     else:
-        values = _values(rows)
-        count = len(values) if isinstance(values, list) else None
-        distinct = "empty" if not count else ("overflow" if count >= limit else "listed")
+        count = len(_values(rows))
+        distinct = "empty" if count == 0 else ("overflow" if count >= limit else "listed")
     return {"table": column.get("table"), "column": column.get("column"),
             "declared": column.get("choice_field") or "absent", "sensitive": bool(column.get("sensitive")),
             "distinct": distinct, "observed_count": count}
