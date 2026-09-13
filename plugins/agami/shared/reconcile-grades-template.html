@@ -119,7 +119,7 @@
           + '<div class="beats">'
           + '<div class="beat b1"><b>1 · What you asked</b>' + esc(item.question) + '</div>'
           + '<div class="beat b2"><b>2 · What agami did</b>Answered <code>' + esc(item.answer) + '</code></div>'
-          + '<div class="beat b3"><b>3 · How it got there</b>' + (signals ? '<ul>' + signals + '</ul>' : 'Nothing in the receipt needs your attention.')
+          + '<div class="beat b3"><b>3 · How it got there</b>' + (signals ? '<div class="dg one">' + (item.signals || []).map(s => '<div class="m noted">·</div><div class="v noted">' + esc(s) + '</div>').join('') + '</div>' : 'Nothing in the receipt needs your attention.')
           + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '') + '</div>'
           + '<div class="beat b4"><b>4 · Your grade</b>'
           + '<div class="grade">'
@@ -139,11 +139,17 @@
     }
 
     function onGrade(e) {
+      // Updated in place: re-rendering here would drop the card out of a "not graded yet" filter the
+      // moment it is graded, taking the SQL and words boxes with it.
       const card = e.target.closest('.card');
       const row = Number(card.dataset.row);
       grades[row] = Object.assign(grades[row] || {}, { grade: e.target.value });
       card.querySelector('.more').hidden = e.target.value !== 'wrong';
-      renderItems();
+      const pill = card.querySelector('.head .pill');
+      pill.textContent = e.target.value;
+      pill.className = 'pill ' + (e.target.value === 'right' ? 'held' : e.target.value === 'wrong' ? 'defect' : 'open');
+      chips();
+      renderSummary();
     }
 
     function onText(e) {
