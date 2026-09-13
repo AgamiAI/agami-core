@@ -86,7 +86,7 @@ def test_a_table_that_differs_in_columns_names_the_extra_columns_and_blames_the_
     # The same rows come back; only the columns the person's query returns differ: the query is what to change.
     assert item["owner"] == "you" and item["single_cell"] is False and item["expected"] == "21 rows"
     assert item["change"] == ["Your query returns columns the question did not ask for: planned_ship_date, delivered_at, channel. Remove them, or name them in the question."]
-    assert rows["values"]["yours"] == "100% of the values match" or rows["values"]["state"] == "held"
+    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical, row for row"
     assert item["sentence"].startswith("The two answers do not match. What differs: columns")
 
 

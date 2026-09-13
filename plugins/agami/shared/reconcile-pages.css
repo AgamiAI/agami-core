@@ -107,7 +107,7 @@
     .dg .v { font-family: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Roboto Mono", "Liberation Mono", monospace; font-size: 12.5px; overflow-wrap: anywhere; }
     .dg .v .tok + .tok::before { content: ", "; color: var(--muted, #5b6875); }
     .dg .v .hi { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 2px; font-weight: 600; }
-    .dg .held.m { color: var(--held); } .dg .defect.m { color: var(--defect); } .dg .open.m { color: var(--open); } .dg .gap.m { color: var(--gap); } .dg .noted.m { color: var(--noted); }
+    .dg .held.m { color: var(--held); } .dg .defect.m { color: var(--defect); } .dg .differs.m { color: var(--open); } .dg .open.m { color: var(--open); } .dg .gap.m { color: var(--gap); } .dg .noted.m { color: var(--noted); }
     .dg .defect.v .hi, .dg .defect.v.whole { color: var(--defect); text-decoration-color: var(--defect); }
     .dg .open.v { color: var(--open); } .dg .gap.k, .dg .gap.v { color: var(--gap); } .dg .noted.v { color: var(--muted, #5b6875); }
     .dg .n { grid-column: 2 / -1; border-top: 0; padding-top: 0; font-size: 12.5px; color: var(--muted, #5b6875); }
@@ -163,3 +163,6 @@
     .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: var(--noted); }
     .legend .held::before { background: var(--held); } .legend .defect::before { background: var(--defect); } .legend .gap::before { background: var(--gap); }
     .legend .open::before { background: var(--open); } .legend .agami::before { background: var(--agami); } .legend .noted::before { background: var(--noted); }
+    /* a claim that differs between the two queries: amber, its own mark, the differing tokens marked without blame */
+    .dg .differs.v .tok.diff { background: var(--open-bg); color: var(--open); font-weight: 600; padding: 0 4px; border-radius: 4px; }
+    .dg .differs.k { color: var(--open); }

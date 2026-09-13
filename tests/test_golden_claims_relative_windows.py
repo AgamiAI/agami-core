@@ -80,3 +80,13 @@ def test_between_reads_relative_bounds_and_a_two_digit_year_stays_a_date():
     w = gc.read_claims("SELECT COUNT(*) FROM orders WHERE EXTRACT(YEAR FROM order_date) = 25", dialect="postgres").date_window
     assert w is not None and w.start == "0025-01-01" and not gc._symbolic(w.start)
 
+
+def test_a_pathological_relative_bound_reads_none_and_never_raises():
+    deep = "SELECT x FROM t WHERE d >= CURRENT_DATE" + " + INTERVAL '1' DAY" * 3000
+    assert gc.read_claims(deep, dialect="postgres").date_window is None
+    nested = "SELECT x FROM t WHERE d >= " + "CAST(" * 3000 + "CURRENT_DATE" + " AS DATE)" * 3000
+    claims = gc.read_claims(nested, dialect="postgres")
+    assert claims.date_window is None
+    # a window a handful of steps deep still folds
+    assert _window("o.order_date >= (CURRENT_DATE - INTERVAL '1' DAY) - INTERVAL '2' DAY").start == "today - 1 day - 2 day"
+

@@ -4,6 +4,7 @@ blank page. Skipped where Node is not installed."""
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -20,6 +21,8 @@ import render_reconcile_intake as ri  # noqa: E402
 import render_reconcile_report as rr  # noqa: E402
 
 NODE = shutil.which("node")
+if NODE is None and os.environ.get("CI"):
+    raise RuntimeError("node is required on CI for the page load tests; add a setup-node step")
 
 # A document that answers every call the pages make at load time with an inert element. Structure is
 # not modelled: the point is that the script's own code runs, not that the DOM is right.

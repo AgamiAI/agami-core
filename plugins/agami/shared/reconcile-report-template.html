@@ -23,7 +23,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>{{REPORT_TITLE}} — agami</title>
+  <title>{{REPORT_TITLE}} · agami</title>
   <style>
 {{THEME_CSS}}
 {{PAGE_CSS}}
@@ -99,7 +99,9 @@
       return '<span class="pill ' + cls + '">' + esc(item.result.label) + '</span>'
         + (n ? '<span class="tag unchecked">' + n + (n === 1 ? ' check' : ' checks') + ' not run</span>' : '');
     }
-    const FIX_WORDS = { query: 'fix your query', semantic_model: 'fix the semantic model', examples: 'add an example', question: 'reword the question', ask_again: 'ask agami again', none: 'nothing to fix' };
+    // The fix words come from the items themselves (report-items writes fix_words); one home for six strings.
+    const FIX_WORDS = {};
+    DATA.items.forEach(i => { if (i.fix && i.fix_words) FIX_WORDS[i.fix] = i.fix_words; });
     const FIX_CLASS = { query: 'you', semantic_model: 'model', examples: 'agami', question: 'question', ask_again: 'agami', none: 'keep' };
     function fixOf(item) { return item.fix || ({ you: 'query', model: 'semantic_model', question: 'question', agami: 'ask_again', keep: 'none', nothing: 'none' }[item.owner || 'nothing']); }
     function nums(item) {
@@ -194,8 +196,8 @@
     }
     // The diff grid: one grid row per check, mark | what was checked | yours | agami, so a tall cell on
     // one side never pushes the other out of line. Differing tokens are highlighted in place.
-    const MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·' };
-    const MARK_WORDS = { held: 'passed', defect: 'does not match', open: 'could not check', gap: 'gap in the semantic model', noted: 'noted' };
+    const MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·', differs: '≠' };
+    const MARK_WORDS = { held: 'passed', defect: 'does not match', open: 'could not check', gap: 'gap in the semantic model', noted: 'noted', differs: 'the two queries differ' };
     // A list cell reads like a diff: a token only on this side is removed (yours, red, a minus) or
     // added (agami, green, a plus); a token whose partner on the other side has another name is
     // marked in place, with the partner's name on hover. No sentence repeats what the marks show.
@@ -206,7 +208,7 @@
         const partner = {};
         (renamed || []).forEach(([a, b]) => { if (side === 'yours') partner[a] = b; else partner[b] = a; });
         return '<div class="' + cls + '">' + v.map(tok => {
-          if ((hi || []).includes(tok)) return '<span class="tok ' + (side === 'yours' ? 'del' : 'add') + '">' + (side === 'yours' ? '−' : '+') + esc(tok) + '</span>';
+          if ((hi || []).includes(tok)) return '<span class="tok ' + (state === 'differs' ? 'diff' : (side === 'yours' ? 'del' : 'add')) + '">' + (state === 'differs' ? '' : (side === 'yours' ? '−' : '+')) + esc(tok) + '</span>';
           if (partner[tok]) return '<span class="tok renamed" title="same values as ' + esc(partner[tok]) + '">' + esc(tok) + '</span>';
           return '<span class="tok">' + esc(tok) + '</span>';
         }).join('') + '</div>';

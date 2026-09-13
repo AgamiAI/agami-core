@@ -33,7 +33,7 @@ def test_the_grid_has_one_row_per_check_with_the_category_first_and_the_extra_to
     css = html[html.index("<style>"):html.index("</style>")]
     assert re.search(r"\.dg \{[^}]*grid-template-columns: 22px minmax\(120px, 170px\) minmax\(0, 1fr\) minmax\(0, 1fr\)", css)
     assert "(side === 'yours' ? 'del' : 'add')" in html and "class=\"tok renamed\"" in html
-    assert "MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·' }" in html
+    assert "MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·', differs: '≠' }" in html
     assert "diffCard(item)" in html and "diffAudit(item)" in html and 'layout: "cards"' in html
     # The sentence and the semantic model's words ride along; the note shows only off a held row.
     assert "r.note && (r.state !== 'held' || r.key === 'columns')" in html and '<details class="words"><summary>The semantic model says</summary>' in html
@@ -112,7 +112,7 @@ def test_the_result_pill_and_the_fix_pill_come_from_the_verbs_two_fields():
     item = dict(ITEM, result={"data": "matches", "query": "different", "label": "same answer, different query", "unchecked": 2, "differs_in": ["filters"]},
                 fix="examples", fix_words="add an example", keep_allowed=True)
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
-    for token in ("function resultPill(item)", "'same answer, different query'".replace("'", '"')[1:-1], "check' : ' checks') + ' not run", "FIX_WORDS = { query: 'fix your query'",
+    for token in ("function resultPill(item)", "'same answer, different query'".replace("'", '"')[1:-1], "check' : ' checks') + ' not run", "const FIX_WORDS = {};",
                   "examples: item.keep_allowed ? 'keep' : 'example'", 'id="result-chips"', "<b>fix</b>", '"fix": "examples"', '"label": "same answer, different query"'):
         assert token in html, token
     with pytest.raises(ValueError, match="'result' needs data in"):
@@ -149,7 +149,7 @@ def test_the_card_after_the_second_read_question_first_folding_checks_example_an
 def test_list_cells_read_like_a_diff():
     item = dict(ITEM, diff=[{"key": "columns", "state": "defect", "yours": ["number", "channel"], "agami": ["o.number", "region"], "yours_hi": ["channel"], "agami_hi": ["region"], "renamed": [["number", "o.number"]]}])
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
-    for token in ("'<span class=\"tok ' + (side === 'yours' ? 'del' : 'add') + '\">' + (side === 'yours' ? '−' : '+')", "class=\"tok renamed\" title=\"same values as '", '"renamed": [["number", "o.number"]]'):
+    for token in ("(state === 'differs' ? 'diff' : (side === 'yours' ? 'del' : 'add'))", "class=\"tok renamed\" title=\"same values as '", '"renamed": [["number", "o.number"]]'):
         assert token.replace("\\", "") in html, token
     with pytest.raises(ValueError, match="name pairs"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, diff=[{"key": "columns", "state": "held", "renamed": ["number"]}])])

@@ -48,7 +48,7 @@ _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "erro
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
 _OWNERS = {"you", "model", "question", "agami", "keep", "nothing"}
-_CHECK_STATES = {"held", "defect", "open", "gap", "noted"}
+_CHECK_STATES = {"held", "defect", "open", "gap", "noted", "differs"}
 _LAYOUTS = ("auto", "cards", "audit")
 _DATA_RESULTS = {"matches", "partly", "differs", "could_not_compare"}
 _QUERY_RESULTS = {"same", "different", "not_comparable"}

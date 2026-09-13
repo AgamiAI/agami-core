@@ -653,6 +653,8 @@ def _column_pairs(
             ordered=ordered, quantize=match == "values",
         )
     except Exception:
+        # The score itself has already reported a ragged or malformed result as an error with a
+        # value-free reason; the pairing is a courtesy on top and must never turn that into a raise.
         return (), ()
     pairs = tuple((golden.columns[g], generated.columns[i]) for g, i in sorted(pairing.items()))
     extra = tuple(name for i, name in enumerate(generated.columns) if i not in set(pairing.values()))

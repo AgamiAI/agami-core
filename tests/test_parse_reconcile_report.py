@@ -132,3 +132,13 @@ def test_the_example_decision_is_accepted_with_or_without_words():
     assert needs is None and anomalies == []
     assert data["decisions"] == [{"row": 1, "decision": "example"}, {"row": 2, "decision": "example", "words": "for the refund question"}]
 
+
+def test_an_example_is_never_offered_on_a_row_whose_ledger_holds_a_mistake(tmp_path):
+    run = tmp_path / "20260913-101500"; (run / "rows" / "1").mkdir(parents=True); (run / "rows" / "2").mkdir(parents=True)
+    (run / "rows" / "1" / "ledger.json").write_text(json.dumps({"rows": [{"part": "literal:orders.status='Delivered'", "verdict": "query_defect"}]}))
+    (run / "rows" / "2" / "ledger.json").write_text(json.dumps({"rows": [{"part": "runs", "verdict": "confirmed"}]}))
+    assert pr.example_blocked_rows(run) == {1}
+    text = "profile: demo\nreconcile-run: 20260913-101500\ndecisions:\n" + json.dumps([{"row": 1, "decision": "example"}, {"row": 2, "decision": "example"}]) + "\ndone\n"
+    data, anomalies, needs = pr.parse(text, set(), "20260913-101500", example_blocked=pr.example_blocked_rows(run))
+    assert data["decisions"] == [{"row": 2, "decision": "example"}] and {a["kind"] for a in anomalies} == {"example_not_offered"} and needs is not None
+
