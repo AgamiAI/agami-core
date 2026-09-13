@@ -163,8 +163,9 @@ def test_keep_is_the_owner_only_where_the_offer_can_be_made(tmp_path):
     items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [SCALAR_MATCH, table, doubtful]))}
     assert items[1]["owner"] == "keep"
     assert items[6]["owner"] == "nothing" and items[6]["change"] == ["The two answers match. A table is not kept as an example; nothing to change."]
-    assert items[7]["owner"] == "nothing" and items[7]["change"][0].startswith("The numbers match, but the statement may not answer its question")
-    assert items[7]["change"][1] == "Also: the grain differs"
+    # a doubtful fit on a matching number is the question's fix, and never kept
+    assert items[7]["owner"] == "question" and items[7]["fix"] == "question" and items[7]["keep_allowed"] is False
+    assert items[7]["change"][0].startswith("Reword the question, or change your query, so they ask the same thing. the grain differs")
 
 
 def test_agamis_side_is_read_from_its_receipt_where_one_exists(tmp_path):

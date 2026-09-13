@@ -1892,12 +1892,13 @@ def _fix(rec: dict, diff: list[dict], result: dict) -> str:
     if any(p.get("verdict") == MODEL_GAP for p in parts):
         return "semantic_model"
     definitional = bool(set(result["differs_in"]) & _DEFINITIONAL)
+    if fit and fit.get("verdict") != CONFIRMED:
+        # A query that may not answer its question is never the example to teach, however the data fell.
+        return "question"
     if result["data"] == "matches":
         return "examples" if result["query"] == "different" and definitional else "none"
     if result["data"] == "partly":
         return "none" if not definitional else "question"
-    if fit and fit.get("verdict") != CONFIRMED:
-        return "question"
     if result["data"] == "differs" and result["query"] == "same":
         return "ask_again"
     if result["data"] == "differs" and result["query"] == "different":

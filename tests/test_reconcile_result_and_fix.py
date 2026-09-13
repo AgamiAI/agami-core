@@ -18,6 +18,7 @@ from test_reconcile_report_items import (  # noqa: E402
     GAPS_AND_GRAIN,
     SCALAR_MATCH,
     TABLE_DIFF,
+    _part,
     _run,
 )
 
@@ -80,3 +81,13 @@ def test_a_different_query_is_a_noted_fact_and_the_row_still_matches(tmp_path):
     # noted never raises the row's verdict: with every measured part confirmed, a matching number is a match
     assert reconcile._VERDICT_RANK[reconcile.NOTED] < reconcile._VERDICT_RANK[reconcile.CONFIRMED]
     assert reconcile.row_status(True, reconcile.CONFIRMED) == "match"
+
+
+def test_a_doubtful_fit_is_the_questions_fix_even_when_the_answer_matches(tmp_path):
+    doubtful = json.loads(json.dumps(SCALAR_MATCH)); doubtful["row"] = 1; doubtful["status"] = "match_unverified"
+    doubtful["ledger"]["rows"] = [_part("runs", "confirmed"), _part("question_fit", "unresolved", {"fit": "doubtful"}, note="the grain differs")]
+    doubtful["claims"] = _claims(("tables", "differs", ["orders", "payments"], ["orders"]))
+    item = reconcile.report_items(_run(tmp_path, [doubtful]))[0]
+    assert item["result"]["label"] == "same answer, different query" and item["fix"] == "question" and item["keep_allowed"] is False
+    assert item["change"][0].startswith("Reword the question, or change your query, so they ask the same thing.")
+
