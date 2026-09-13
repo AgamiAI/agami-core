@@ -1024,6 +1024,39 @@ def test_a_question_that_tips_the_detail_level_sends_its_whole_description(monke
     assert '"mode": "summary"' in sent and "names only" in sent and '"truncated": true' in sent
 
 
+def test_the_effort_level_reaches_the_generator_and_is_recorded_with_the_run(
+    artifacts, monkeypatch, sm, capsys
+):
+    """A score measured at one reasoning level says nothing about another, so the level travels to
+    the generator AND into what the run records — two runs compared without it may never have been
+    measuring the same thing."""
+    seen: list[str | None] = []
+
+    class _Records(_Scripted):
+        def __init__(self, schema, *, timeout_s: float, effort: str | None = None) -> None:
+            super().__init__(schema, timeout_s=timeout_s)
+            seen.append(effort)
+
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Records)
+    _write(artifacts, "green", PASSING_DATASET)
+
+    _, payload, _ = _run(capsys, "--dataset", "green", "--effort", "low")
+
+    assert seen and set(seen) == {"low"}  # the preflight probe and the run alike
+    assert payload["effort"] == "low"
+    assert json.loads(Path(payload["artifact"]).read_text(encoding="utf-8"))["effort"] == "low"
+
+
+def test_an_unset_effort_is_recorded_as_the_client_default(artifacts, scripted, sm, capsys):
+    """Unset is a level too — the client's own — and a run has to say so, or it cannot be told apart
+    from one whose level was simply not written down."""
+    _write(artifacts, "green", PASSING_DATASET)
+
+    _, payload, _ = _run(capsys, "--dataset", "green")
+
+    assert payload["effort"] == "default"
+
+
 def test_the_examples_are_ranked_for_the_question_being_asked(artifacts, scripted, sm, capsys):
     """The reason for shelling out at all: `sm examples --query` is the product's own ranker, so the
     eval sends the handful nearest THIS question rather than the whole library to every item."""

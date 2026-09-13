@@ -28,6 +28,13 @@ below corresponds to one such version.
   sends are no longer sent twice. What the generator is told, and how the answer is scored, are
   unchanged.
 
+- **A golden run can set how hard the generator reasons.** `--effort low|medium|high|xhigh|max`
+  passes the client's own reasoning level to every generation; unset keeps the client's default,
+  as before. Once the model's description is cached, reasoning the answer never shows is most of
+  what a question costs — measured at 90-97% of its output tokens, against a statement of 50-80 —
+  so a lower level is the next large saving. The level is recorded in the run's JSON and artifact,
+  because a score measured at one level says nothing about another.
+
 ## [0.8.4] — 2026-09-12
 
 ### Fixed

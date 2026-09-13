@@ -70,6 +70,8 @@ A run costs one model call plus one query per case, so tell the user what they a
 
 `--timeout-s` bounds a single generation (default 120). Raise it only if items are coming back with *"the generator did not answer within the time this run allows"*.
 
+`--effort low|medium|high|xhigh|max` sets how hard the generator reasons before answering; unset uses the client's own default. Most of what a question costs is reasoning the answer never shows, so a lower level is much cheaper — pass it when the user is short on tokens or asks for a quick run, and say which level ran when you report. The level is recorded in the run's JSON (`effort`), and two runs at different levels are not a comparison of the model: never present them side by side as one getting better or worse.
+
 Two flags narrow the run, and naming both is refused because they are two ways of selecting from the same dataset. `--tag <name>` is repeatable and runs the cases carrying **any** of the tags given, matched exactly — `Smoke` and `smoke` are different tags. `--rerun-failures` runs only what this dataset's last run recorded under failures. Both are for the non-interactive path; reach for them here only if the user asks for a slice or a re-run by name.
 
 **The exit code is the contract, and you should read it before the payload.** `0` every confirmed case passed · `1` a confirmed case failed · `2` no verdict could be produced. A `2` is never a model regression — report it as a broken harness and do not open the failures table.

@@ -737,14 +737,27 @@ class ClaudeCliGenerator:
     generator that hangs hangs the run, with nothing above it to cut the call off.
     """
 
+    # The reasoning levels the client accepts for `--effort`. Checked here rather than left to the
+    # client, because a misspelled level would otherwise fail every item identically — one fixed
+    # sentence, once per case, reading as a model regression.
+    EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
     def __init__(
         self,
         schema: "str | GenerationContext | Callable[[str], str | GenerationContext]",
         *,
         timeout_s: float,
+        effort: Optional[str] = None,
     ) -> None:
+        if effort is not None and effort not in self.EFFORT_LEVELS:
+            raise ValueError(f"effort must be one of: {', '.join(self.EFFORT_LEVELS)}")
         self.schema = schema
         self.timeout_s = timeout_s
+        # How hard the child reasons before it answers. Unset leaves the client's own default,
+        # which is what every run did before this existed. It is the largest cost a question has
+        # left once the model's description is cached: measured, 90-97% of a question's output
+        # tokens were reasoning the reply never shows, against a statement of 50-80 tokens.
+        self.effort = effort
 
     def generate(self, question: str, org: str, datasource: Optional[str]) -> GeneratedSql:
         """One question in, one statement out — or a fixed sentence saying why there is not one."""
@@ -756,7 +769,7 @@ class ClaudeCliGenerator:
         )
         return _spawn(
             _question_prompt(question, context),
-            list(client_argv()),
+            [*client_argv(), *(("--effort", self.effort) if self.effort else ())],
             self.timeout_s,
             system_prompt=_system_prompt(org, datasource, context.fixed),
         )

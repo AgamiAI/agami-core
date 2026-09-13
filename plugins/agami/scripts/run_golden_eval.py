@@ -132,6 +132,16 @@ _PREFLIGHT_SCHEMA = "t(id integer)"
 GENERATOR = ClaudeCliGenerator
 
 
+def _effort(args: argparse.Namespace) -> dict[str, str]:
+    """The reasoning level as a keyword for `GENERATOR`, or nothing at all when none was asked for.
+
+    Nothing rather than `effort=None`, so a generator that predates the option — every scripted one
+    a test substitutes, and any injected by a caller — is constructed exactly as it always was until
+    somebody actually asks for a level.
+    """
+    return {"effort": args.effort} if args.effort else {}
+
+
 def _section(outcome: Any) -> str:
     """Which section an item is printed under.
 
@@ -1020,6 +1030,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=5,
         help="how many ranked prompt examples to give the generator per question",
     )
+    parser.add_argument(
+        "--effort",
+        choices=ClaudeCliGenerator.EFFORT_LEVELS,
+        help="how hard the generator reasons before answering; unset uses the client's default. "
+        "Most of a question's output is reasoning the answer never shows, so a lower level is "
+        "much cheaper. The level is recorded with the run, because a score measured at one level "
+        "says nothing about another",
+    )
     args = parser.parse_args(argv)
 
     if args.list:
@@ -1080,7 +1098,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             # uses. The run's schema is a CALLABLE that ranks the example library per question —
             # one `sm` subprocess per subject area — and spending that on a throwaway probe would
             # cost more than the loop it protects on a model with many areas.
-            probe = GENERATOR(lambda _question: _PREFLIGHT_SCHEMA, timeout_s=args.timeout_s).generate(
+            probe = GENERATOR(
+                lambda _question: _PREFLIGHT_SCHEMA, timeout_s=args.timeout_s, **_effort(args)
+            ).generate(
                 _PREFLIGHT_QUESTION, tools.resolved_org_id(), args.profile
             )
         except Exception:
@@ -1121,7 +1141,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # The cost is one model call on a healthy run, against N model calls and up to 2N warehouse
     # queries on a broken one.
     generator = GENERATOR(
-        lambda question: _model_context(cached, question), timeout_s=args.timeout_s
+        lambda question: _model_context(cached, question),
+        timeout_s=args.timeout_s,
+        **_effort(args),
     )
 
     result = run_golden_dataset(
@@ -1141,6 +1163,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     keys = {item.item_key: item.expected.sql or "" for item in dataset.test_cases}
     payload = _run_payload(result, questions)
     joined = _joined(result, questions, keys, payload["summary"], selection)
+    # On both, before either is written: a score measured at one reasoning level says nothing about
+    # another, so a run that did not name its level could be compared against one it never matched.
+    payload["effort"] = joined["effort"] = args.effort or "default"
     # Microseconds because a person sorts these by name and two runs a second apart must not land
     # on the same one — an overwritten run is a report that silently describes something else. One
     # stamp for the pair, so the JSON and the page beside it are visibly the same run.

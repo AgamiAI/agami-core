@@ -784,6 +784,26 @@ def test_the_model_description_is_fenced_as_reference_data_and_the_rules_come_af
     assert closed < system.index("Reply with a single JSON object")
 
 
+def test_an_effort_level_reaches_the_child_and_an_unset_one_adds_nothing(spawn):
+    """Reasoning is most of a question's output, so the level is a real lever — and an unset level
+    must leave the argument list exactly as it was, because every run before this option existed
+    was scored at the client's own default."""
+    gr.ClaudeCliGenerator(SCHEMA, timeout_s=30.0, effort="low").generate(QUESTION, ORG, DATASOURCE)
+    _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    low, default = spawn.invocations[0][0], spawn.invocations[1][0]
+    assert _flag_value(low, "--effort") == "low"
+    assert "--effort" not in default
+
+
+def test_a_misspelled_effort_level_is_refused_before_anything_runs(spawn):
+    """Left to the client, a bad level would fail every item identically, which reads as a model
+    regression. Refused at construction, before a single question is asked."""
+    with pytest.raises(ValueError, match="effort must be one of"):
+        gr.ClaudeCliGenerator(SCHEMA, timeout_s=30.0, effort="lowest")
+    assert spawn.invocations == []
+
+
 def test_the_answer_key_is_in_nothing_the_generator_was_given(chokepoint, spawn):
     """Criterion 1. A model that can see `expected.sql` is grading itself, and no assertion over
     the scores would reveal it — so the assertion is over what the child was handed."""
