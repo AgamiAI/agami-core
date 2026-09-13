@@ -36,6 +36,7 @@ TEMPLATE_PATH = SHARED_DIR / "reconcile-grades-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
 LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
 THEME_PATH = SHARED_DIR / "theme.css"
+PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 
 # What one item may carry. `answer` is DISPLAY text the skill already reduced to one cell or a
 # shape; a `rows` key is refused rather than rendered, because the page's rule is no result rows.
@@ -82,6 +83,7 @@ def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
         "AGAMI_LOGO_DARK_TEXT": _read(LOGO_DARK_PATH),
         "AGAMI_LOGO_LIGHT_TEXT": _read(LOGO_LIGHT_PATH),
         "THEME_CSS": _read(THEME_PATH),
+        "PAGE_CSS": _read(PAGE_CSS_PATH),
     }
     # One pass over the template, so a placeholder token inside a person's question (or the
     # profile name) is copied as text and never expanded by a later substitution.

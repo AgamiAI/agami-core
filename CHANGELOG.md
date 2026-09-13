@@ -116,6 +116,10 @@ below corresponds to one such version.
 - One reconcile report page per run, on the plugin's theme, tells every row in the four beats and
   takes the person's decisions back as one pasted block; a keep is offered only where the run said
   match, and every decision goes through a door that already exists. (ACE-123)
+- Reconcile takes input the way connect does: an options prompt for the four shapes, a template CSV
+  the person fills with a hand-off, and an intake page that shows what was read before anything
+  runs, with one block back applied by a parser. The grading, intake and report pages share one
+  stylesheet and the same four beats. (ACE-124)
 
 ### Fixed
 

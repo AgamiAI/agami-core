@@ -465,7 +465,10 @@ def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[di
                 rows.append(_row_from_positional([line], file=file, line=n, source=source)[0])
         return rows, []
     with path.open(newline="", encoding="utf-8") as fh:
-        numbered = [(n, r) for n, r in enumerate(csv.reader(fh), 1) if r and any(c.strip() for c in r)]
+        # A line whose first cell starts with `#` is guidance, the way the template the skill
+        # writes for the person carries it; it is never a row.
+        numbered = [(n, r) for n, r in enumerate(csv.reader(fh), 1)
+                    if r and any(c.strip() for c in r) and not r[0].lstrip().startswith("#")]
     if not numbered:
         return [], []
     fields = _header_map(numbered[0][1], [r for _n, r in numbered[1:]])
