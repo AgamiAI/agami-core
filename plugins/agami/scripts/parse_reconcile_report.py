@@ -38,8 +38,8 @@ import sys
 from pathlib import Path
 
 _KEYS = {"profile", "reconcile-run", "decisions"}
-_DECISIONS = frozenset({"keep", "change", "fix", "reword", "nothing"})
-_WITH_WORDS = frozenset({"change", "fix", "reword"})
+_DECISIONS = frozenset({"keep", "change", "fix", "reword", "example", "nothing"})
+_WITH_WORDS = frozenset({"change", "fix", "reword", "example"})
 _FIELDS = ("row", "decision", "words")
 _DROPPED_KINDS = frozenset({"unknown_decision", "decision_missing_row", "row_decided_twice",
                             "decision_not_an_object", "keep_not_offered", "words_ignored_on_keep",

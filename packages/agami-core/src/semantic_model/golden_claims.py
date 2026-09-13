@@ -235,6 +235,12 @@ def _rendered(node: "exp.Expression", aliases: dict[str, str], depth: int) -> st
     if isinstance(node, exp.Column):
         qualifier = node.table
         if not qualifier:
+            # An unqualified column in a SELECT that reads exactly one table belongs to that table,
+            # so `opened` and `r.opened` are one key; with two tables in scope it stays bare, since
+            # guessing an owner would make two different columns one key.
+            tables = {rt._tkey(rt._bare(t)) for t in aliases.values()}
+            if len(tables) == 1:
+                return f"{next(iter(tables))}.{node.name.lower()}"
             return node.name.lower()
         # The schema and catalog parts are dropped with the alias: `sales.orders.region` and
         # `orders.region` name one column, and `_bare` has already stripped the schema off the

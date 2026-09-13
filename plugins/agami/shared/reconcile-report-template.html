@@ -64,7 +64,7 @@
   <div class="modal" id="modal" hidden>
     <div class="modal-card">
       <h2>Send to Claude</h2>
-      <p class="meta">Copy this block and paste it back into Claude. "keep" is your yes to the offer for that row. "change" sends a definition to save-correction, with your words. "fix" and "reword" come back to you. "nothing" changes nothing.</p>
+      <p class="meta">Copy this block and paste it back into Claude. "keep" is your yes to the offer for that row. "change" sends a definition to save-correction, with your words. "fix" and "reword" come back to you. "example" sends your query to save-correction as a prompt example. "nothing" changes nothing.</p>
       <textarea id="modal-text" readonly></textarea>
       <div class="modal-actions">
         <button type="button" id="modal-copy" class="primary">Copy to clipboard</button>
@@ -118,19 +118,23 @@
              prompt: 'What you will fix, in a few words (optional)', ph: 'e.g. the status value is lower-case delivered' },
       reword: { word: 'reword the question', what: 'The question was read differently from what you meant. Ask it in other words.',
                 prompt: 'The question, in the words you mean', ph: 'e.g. How many orders were placed in Q3 2025, cancelled ones included?' },
+      example: { word: 'add an example', what: 'Your query goes to /agami-save-correction as a prompt example for this question, so agami writes it your way next time.',
+                 prompt: 'Anything to add for the example (optional)', ph: 'e.g. use this whenever the question says "open"' },
       nothing: { word: 'nothing', what: 'Leave this row as it is.' },
     };
+    // What each box starts with, from the run's own words for this row; the person edits or clears it.
+    function prefillFor(item, decision) { return ((item.prefill || {})[decision]) || ''; }
     const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
     function controls(item, d) {
-      const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
-      const byFix = { query: 'fix', semantic_model: 'change', examples: item.keep_allowed ? 'keep' : 'change', question: 'reword', ask_again: 'nothing', none: item.keep_allowed ? 'keep' : 'nothing' };
+      const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'example', 'nothing']);
+      const byFix = { query: 'fix', semantic_model: 'change', examples: item.keep_allowed ? 'keep' : 'example', question: 'reword', ask_again: 'nothing', none: item.keep_allowed ? 'keep' : 'nothing' };
       const suggested = item.fix ? byFix[item.fix] : ((SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null));
       const spec = DECISIONS[d.decision] || {};
       return '<div class="grade opts">' + choices.map(v =>
           '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
           + '<b>' + esc(DECISIONS[v].word) + (v === suggested ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
           + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</div>'
-        + '<div class="more"' + (['change', 'fix', 'reword'].includes(d.decision) ? '' : ' hidden') + '>'
+        + '<div class="more"' + (['change', 'fix', 'reword', 'example'].includes(d.decision) ? '' : ' hidden') + '>'
         + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
     }
     // What is shown. A filter narrows the cards, never the block: decided() reads every row.
@@ -199,13 +203,16 @@
     }
     function diffGrid(item) {
       const rows = item.diff || [];
-      return '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
+      const passed = rows.filter(r => r.state === 'held').length;
+      const open = rows.length - passed;
+      return '<details class="checks"' + (open ? ' open' : '') + '><summary>Checks: ' + passed + ' passed' + (open ? ', ' + open + ' did not' : '') + '</summary>'
+        + '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
         + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
         + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'
             + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
             + cell(r.yours, r.yours_hi, 'yours', r.state) + cell(r.agami, r.agami_hi, 'agami', r.state)
-            + (r.note && r.state !== 'held' ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
-        + '</div>';
+            + (r.note && (r.state !== 'held' || r.key === 'columns') ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
+        + '</div></details>';
     }
     // The two statements, collapsed: the person's own SQL shown to its author, and agami's, which
     // the receipt already shows. Never a result row.
@@ -228,9 +235,8 @@
     function diffCard(item) {
       const d = decisions[item.row] || {};
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + resultPill(item)
-        + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
-        + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title q">' + esc(item.question) + '</span><span class="state">' + resultPill(item) + '</span></div>'
+        + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
         + diffGrid(item)
         + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '')
         + sqlBlock(item) + words(item) + action(item, d)
@@ -240,9 +246,8 @@
     function diffAudit(item) {
       const d = decisions[item.row] || {};
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + resultPill(item)
-        + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
-        + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title q">' + esc(item.question) + '</span><span class="state">' + resultPill(item) + '</span></div>'
+        + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
         + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + sqlBlock(item) + words(item) + '</div>'
         + '<div class="rail"><b>What to do</b>' + lines(item.todo && item.todo.length ? item.todo : item.change) + action(item, d) + '</div></div>'
         + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
@@ -298,11 +303,16 @@
     }
     function onDecide(e) {
       const card = e.target.closest('.card'); const row = Number(card.dataset.row);
-      decisions[row] = Object.assign(decisions[row] || {}, { decision: e.target.value });
+      const item = DATA.items.find(i => i.row === row) || {};
+      const prior = decisions[row] || {};
+      // A box the person has not typed in starts with the run's words for the new decision.
+      const untouched = !prior.words || prior.words === prefillFor(item, prior.decision);
+      decisions[row] = Object.assign(prior, { decision: e.target.value, words: untouched ? prefillFor(item, e.target.value) : prior.words });
       const more = card.querySelector('.more'); const spec = DECISIONS[e.target.value] || {};
-      more.hidden = !['change', 'fix', 'reword'].includes(e.target.value);
+      more.hidden = !['change', 'fix', 'reword', 'example'].includes(e.target.value);
       more.querySelector('.p').textContent = spec.prompt || 'Say it in words';
       more.querySelector('textarea').placeholder = spec.ph || '';
+      if (untouched) more.querySelector('textarea').value = decisions[row].words || '';
       card.querySelectorAll('.opt').forEach(el => el.classList.toggle('on', el.querySelector('input').value === e.target.value));
       renderSummary();
     }

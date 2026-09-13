@@ -36,7 +36,7 @@ def test_the_grid_has_one_row_per_check_with_the_category_first_and_the_extra_to
     assert "MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·' }" in html
     assert "diffCard(item)" in html and "diffAudit(item)" in html and 'layout: "cards"' in html
     # The sentence and the semantic model's words ride along; the note shows only off a held row.
-    assert "r.note && r.state !== 'held'" in html and '<details class="words"><summary>The semantic model says</summary>' in html
+    assert "r.note && (r.state !== 'held' || r.key === 'columns')" in html and '<details class="words"><summary>The semantic model says</summary>' in html
 
 
 def test_one_item_with_a_diff_takes_the_audit_layout_and_keeps_the_rail():
@@ -68,7 +68,7 @@ def test_each_decision_says_what_it_is_and_what_happens_and_the_box_asks_for_the
                   "SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword'", 'class="tag suggested"', 'class="opt'):
         assert token in html, token
     # The block's contract is untouched: the same five radio values, the same words field.
-    for token in ("value=\"' + v + '\"", 'data-field="words"', "['change', 'fix', 'reword'].includes(d.decision)"):
+    for token in ("value=\"' + v + '\"", 'data-field="words"', "['change', 'fix', 'reword', 'example'].includes(d.decision)"):
         assert token in html, token
 
 
@@ -113,7 +113,7 @@ def test_the_result_pill_and_the_fix_pill_come_from_the_verbs_two_fields():
                 fix="examples", fix_words="add an example", keep_allowed=True)
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
     for token in ("function resultPill(item)", "'same answer, different query'".replace("'", '"')[1:-1], "check' : ' checks') + ' not run", "FIX_WORDS = { query: 'fix your query'",
-                  "examples: item.keep_allowed ? 'keep' : 'change'", 'id="result-chips"', "<b>fix</b>", '"fix": "examples"', '"label": "same answer, different query"'):
+                  "examples: item.keep_allowed ? 'keep' : 'example'", 'id="result-chips"', "<b>fix</b>", '"fix": "examples"', '"label": "same answer, different query"'):
         assert token in html, token
     with pytest.raises(ValueError, match="'result' needs data in"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, result={"data": "maybe", "query": "same", "label": "x"})])
@@ -129,5 +129,19 @@ def test_the_result_chips_filter_and_replace_the_status_chips_when_labels_exist(
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
     for token in ("view.result.has((item.result || {}).label || '')", 'data-result="\' + esc(label) + \'"'.replace("\\", ""), "toggle(view.result, el.dataset.result)",
                   "document.getElementById('result-row').hidden = Object.keys(labels).length === 0;", "view.result.clear();"):
+        assert token in html, token
+
+
+def test_the_card_after_the_second_read_question_first_folding_checks_example_and_prefill():
+    item = dict(ITEM, prefill={"change": "add values declared on x", "fix": "remove channel", "reword": "List all orders placed from June this year.", "example": ""},
+                result={"data": "partly", "query": "different", "label": "same rows, different columns", "unchecked": 0, "differs_in": ["columns"]}, fix="query", fix_words="fix your query")
+    html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
+    for token in ('<span class="title q">\' + esc(item.question) + \'</span>'.replace("\\", ""), "<span class=\"state\">' + resultPill(item)".replace("\\", ""),
+                  "[item.label, item.source].filter(Boolean).join(' · ')", "<details class=\"checks\"".replace("\\", ""), "'</summary>'", "Checks: ' + passed + ' passed",
+                  "example: { word: 'add an example'", "function prefillFor(item, decision)", "['change', 'fix', 'reword', 'example'].includes(d.decision)",
+                  "examples: item.keep_allowed ? 'keep' : 'example'", '"prefill": {"change": "add values declared on x"'):
+        assert token in html, token
+    # the pinned contract stays
+    for token in ("['change', 'fix', 'reword', 'example'].includes(e.target.value)", 'data-field="words"'):
         assert token in html, token
 

@@ -162,7 +162,7 @@ class TestReadingAStatement:
         other = gc.read_claims("SELECT region FROM orders ORDER BY status, region", dialect=dialect)
 
         assert one.ordering != other.ordering
-        assert one.ordering == (("region", "asc"), ("status", "asc"))
+        assert one.ordering == (("orders.region", "asc"), ("orders.status", "asc"))
 
     def test_an_unparseable_statement_is_read_as_unreadable_rather_than_as_empty(self, engine):
         """The reason `unreadable` exists: an empty claim set must never be asked to mean both

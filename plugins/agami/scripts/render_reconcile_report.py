@@ -41,7 +41,7 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "keep_allowed", "result", "fix", "fix_words")
+           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "keep_allowed", "result", "fix", "fix_words", "prefill")
 _LISTS = ("read", "how", "words", "change", "todo")
 _DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
@@ -110,6 +110,9 @@ def _validate_item(item: dict, idx: int) -> None:
         raise ValueError(f"item {idx}: 'fix' must be one of {sorted(_FIXES)}")
     if item.get("fix_words") is not None and not isinstance(item["fix_words"], str):
         raise ValueError(f"item {idx}: 'fix_words' must be text")
+    prefill = item.get("prefill")
+    if prefill is not None and (not isinstance(prefill, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in prefill.items())):
+        raise ValueError(f"item {idx}: 'prefill' must map a decision to the words its box starts with")
     if item.get("sentence") is not None and not isinstance(item["sentence"], str):
         raise ValueError(f"item {idx}: 'sentence' must be text")
     for key in ("sql_yours", "sql_agami"):

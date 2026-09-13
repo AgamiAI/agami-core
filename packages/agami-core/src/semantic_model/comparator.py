@@ -410,6 +410,11 @@ class ItemScore:
     accuracy: Optional[float]
     reason: str
     unmatched_golden_columns: tuple[str, ...] = ()
+    # Which golden column paired with which generated column, by VALUES, and which generated columns
+    # paired with none. A renamed column is the same column here; a reader that compared names would
+    # call it missing. Additive; empty where no column-level comparison ran.
+    column_pairs: tuple[tuple[str, str], ...] = ()
+    unmatched_generated_columns: tuple[str, ...] = ()
     golden_row_count: Optional[int] = None
     generated_row_count: Optional[int] = None
     order_sensitive: Optional[bool] = None
@@ -629,6 +634,25 @@ def _judge(
     return _Verdict("error", None, f"{match!r} is not a match level this comparison knows")
 
 
+def _column_pairs(
+    golden: ExecResult, generated: ExecResult, match: MatchLevel, ordered: bool
+) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+    """(golden column, generated column) pairs matched by values, and the generated columns left
+    over, for the two levels that pair columns at all. Never raises; a shape the pairing cannot read
+    reports nothing rather than failing a score that already ran."""
+    if match not in ("exact", "values") or not golden.rows or not generated.rows:
+        return (), ()
+    try:
+        pairing, _unmatched = match_columns(
+            golden.columns, golden.rows, generated.columns, generated.rows,
+            ordered=ordered, quantize=match == "values",
+        )
+    except Exception:
+        return (), ()
+    pairs = tuple((golden.columns[g], generated.columns[i]) for g, i in sorted(pairing.items()))
+    extra = tuple(name for i, name in enumerate(generated.columns) if i not in set(pairing.values()))
+    return pairs, extra
+
 def compare_result_sets(
     golden: ExecResult,
     generated: ExecResult,
@@ -657,11 +681,14 @@ def compare_result_sets(
         verdict = _Verdict(
             "error", None, f"the comparison failed with an unexpected {type(exc).__name__}"
         )
+    pairs, extra = _column_pairs(golden, generated, match, ordered)
     return ItemScore(
         status=verdict.status,
         accuracy=verdict.accuracy,
         reason=verdict.reason,
         unmatched_golden_columns=verdict.unmatched,
+        column_pairs=pairs,
+        unmatched_generated_columns=extra,
         golden_row_count=len(golden.rows),
         generated_row_count=len(generated.rows),
         order_sensitive=ordered,

@@ -1711,22 +1711,40 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         add("rows", "held" if same_rows else "defect", yours_text, agami_text)
         yc = list(((rec.get("statement_recorded") or {}).get("columns")) or [])
         ac = list(((rec.get("recorded") or {}).get("columns")) or [])
+        pairs = [tuple(p) for p in (result_set.get("column_pairs") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
         if yc or ac:
-            only_yours, only_agami = _only(yc, ac), _only(ac, yc)
+            if pairs or "unmatched_generated_columns" in result_set:
+                # Columns are compared by the values they carry, never by name: the comparator says
+                # which of yours paired with which of agami's, and a renamed column is the same column.
+                only_yours = [c for c in (result_set.get("unmatched_golden_columns") or []) if c in yc] or [c for c in yc if c not in {p[0] for p in pairs}]
+                only_agami = list(result_set.get("unmatched_generated_columns") or [])
+                renamed = [f"{a} → {b}" for a, b in pairs if a != b]
+            else:  # an older score file: names are all there is
+                only_yours, only_agami, renamed = _only(yc, ac), _only(ac, yc), []
             if not only_yours and not only_agami:
                 col_state = "held"
             elif only_yours:
                 col_state = "defect"
             else:
                 col_state = "noted"  # agami returned more than asked; nothing of yours is missing
-            add("columns", col_state, yc, ac, yours_hi=only_yours, agami_hi=only_agami,
-                note=(f"the comparison scores on columns; {len(result_set.get('unmatched_golden_columns') or [])} unmatched scored 0"
-                      if result_set.get("unmatched_golden_columns") else (f"agami returned columns your query did not: {', '.join(only_agami)}" if col_state == "noted" else None)))
+            note = None
+            if only_yours:
+                note = f"no column of agami's carries the values of: {', '.join(only_yours)}"
+            elif only_agami:
+                note = f"agami returned columns your query did not: {', '.join(only_agami)}"
+            if renamed:
+                note = (note + "; " if note else "") + "same values under other names: " + ", ".join(renamed)
+            add("columns", col_state, yc, ac, yours_hi=only_yours, agami_hi=only_agami, note=note)
         acc = result_set.get("accuracy")
         if acc is not None:
             same = float(acc) >= 1.0
-            add("values", "held" if same else "defect", "identical, row for row" if same else f"{float(acc):.0%} of the values match",
-                None, note=None if same else result_set.get("reason"))
+            if same:
+                add("values", "held", "identical, row for row", None)
+            elif pairs and result_set.get("unmatched_golden_columns"):
+                add("values", "held", f"identical on the {len(pairs)} paired column{'s' if len(pairs) != 1 else ''}", None,
+                    note="the score is 0 only because a column of yours has no partner; the paired columns agree")
+            else:
+                add("values", "defect", f"{float(acc):.0%} of the values match", None, note=result_set.get("reason"))
     else:
         match = rec.get("match") if rec.get("match") is not None else (scalar or {}).get("match")
         if rec.get("status") == "error":
@@ -1860,18 +1878,24 @@ def _result(rec: dict, diff: list[dict]) -> dict:
 
 
 def _values_agree_on_shared_columns(rec: dict) -> bool:
-    """A table compare whose only difference is the column set: every golden column the generated side
-    carries matched by value, so the score is exactly the matched share."""
+    """A table compare whose only difference is the column set. The comparator pairs columns by their
+    values, so every pair it reports agrees by construction; the answer is partly the same when at
+    least one pair exists beside a column of yours with no partner or a column of agami's with none.
+    The score itself is 0.0 whenever any column of yours is unpaired, so it cannot be the test."""
     score = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
     if not score:
         return False
+    acc = score.get("accuracy")
+    if acc is not None and float(acc) >= 1.0:
+        return True  # agami returned everything you did, and more
+    pairs = score.get("column_pairs") or []
+    if pairs:
+        return bool(score.get("unmatched_golden_columns") or score.get("unmatched_generated_columns"))
+    # an older score file without pairs: fall back to the matched share of the columns
     cols = list(((rec.get("statement_recorded") or {}).get("columns")) or [])
     unmatched = list(score.get("unmatched_golden_columns") or [])
-    acc = score.get("accuracy")
     if acc is None or not cols:
         return False
-    if float(acc) >= 1.0:
-        return True  # agami returned everything you did, and more
     matched = len(cols) - len(unmatched)
     return matched > 0 and abs(float(acc) - matched / len(cols)) < 1e-6
 
@@ -1911,6 +1935,50 @@ _FIX_CHANGE = {
                  ["The examples: add your query for this question."]),
     "ask_again": (["Ask the question again; the same query gave a different answer, so the data moved or a run failed."], ["agami: ask again."]),
 }
+
+
+def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], list[str], dict]:
+    """The card's change text, its to-do and the words each decision box starts with, all from the one
+    fix. The three used to come from three places and could disagree on one card."""
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    fit = next((p for p in parts if p.get("part") == "question_fit"), None)
+    gaps = [r["key"] for r in diff if r["state"] == "gap"]
+    cols = next((r for r in diff if r["key"] == "columns"), None)
+    extra = list((cols or {}).get("yours_hi") or [])
+    mistakes = _measured_mistakes(rec)
+    prefill = {"change": "", "fix": "", "reword": rec.get("question") or "", "example": ""}
+    if fix == "query":
+        if mistakes:
+            change = [f"Fix your query: {', '.join(mistakes)}. Then run this row again."]
+            prefill["fix"] = "; ".join(mistakes)
+        elif extra:
+            change = [f"Your query returns columns the question did not ask for: {', '.join(extra)}. Remove them, or name them in the question."]
+            prefill["fix"] = "remove " + ", ".join(extra)
+            prefill["reword"] = (rec.get("question") or "").rstrip(".?") + f", with {', '.join(extra)}?"
+        else:
+            change = ["Fix your query where the marks are red, then run this row again."]
+        todo = ["Your query: fix the red rows, then re-run."]
+    elif fix == "semantic_model":
+        change = [f"The semantic model is missing: {', '.join(gaps)}. Add them through /agami-save-correction." if gaps
+                  else "Decide which definition your team means. A change to the semantic model goes through /agami-save-correction."]
+        todo = [f"The semantic model: {', '.join(gaps)}." if gaps else "The semantic model: decide the definition."]
+        prefill["change"] = ("add " + ", ".join(gaps)) if gaps else ""
+    elif fix == "examples":
+        change, todo = list(_FIX_CHANGE["examples"][0]), list(_FIX_CHANGE["examples"][1])
+    elif fix == "question":
+        reason = (fit or {}).get("note") or ""
+        change = [("Reword the question, or change your query, so they ask the same thing. " + reason).strip()]
+        todo = ["The question: reword it and re-run."]
+    elif fix == "ask_again":
+        if rec.get("status") == "error":
+            change, todo = list(_OWNER_CHANGE["agami"][0]), list(_OWNER_CHANGE["agami"][1])
+        else:
+            change, todo = list(_FIX_CHANGE["ask_again"][0]), list(_FIX_CHANGE["ask_again"][1])
+    else:
+        change, todo = list(_OWNER_CHANGE["keep"][0]), list(_OWNER_CHANGE["keep"][1])
+    if fit and fit.get("verdict") != CONFIRMED and fit.get("note") and fix != "question":
+        change.append(f"Also: {fit['note']}")
+    return change, todo, prefill
 
 
 def _owner(rec: dict, diff: list[dict]) -> str:
@@ -2050,12 +2118,9 @@ def report_items(run_dir: Path) -> list[dict]:
         # keep is the fix "nothing" on a row the keep gate accepts; the page's keep offer is that
         keep_ok = legacy_owner == "keep"
         owner = "keep" if (fix == "none" and keep_ok) else _FIX_OWNER[fix]
-        change, todo = _change(owner if owner != "agami" else legacy_owner, rec, diff)
-        if fix in _FIX_CHANGE:
-            change, todo = list(_FIX_CHANGE[fix][0]), list(_FIX_CHANGE[fix][1])
-            if fix == "ask_again" and rec.get("status") == "error":
-                change, todo = list(_OWNER_CHANGE["agami"][0]), list(_OWNER_CHANGE["agami"][1])
-        if fix == "none" and not keep_ok and rec.get("status") == "match":
+        change, todo, prefill = _change_for_fix(fix, rec, diff)
+        if fix == "none" and not keep_ok:
+            # nothing to fix, and not kept either: say why in the words the status gives
             change, todo = _change("nothing", rec, diff)
         if result["data"] == "matches" and result["query"] == "different":
             clause = ("The two queries differ in: " + ", ".join(result["differs_in"]) + ("; the match may not hold on other data." if set(result["differs_in"]) & _DEFINITIONAL else "; a cosmetic difference."))
@@ -2079,7 +2144,7 @@ def report_items(run_dir: Path) -> list[dict]:
             "expected": expected, "answer": answer,
             "delta_pct": (round(delta * 100, 1) if isinstance(delta, (int, float)) and not isinstance(delta, bool) else None),
             "single_cell": bool(single), "owner": owner, "keep_allowed": owner == "keep", "diff": diff,
-            "result": result, "fix": fix, "fix_words": _FIX_WORDS[fix],
+            "result": result, "fix": fix, "fix_words": _FIX_WORDS[fix], "prefill": prefill,
             "sentence": _sentence(rec, diff) + (" " + clause if clause else ""),
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,

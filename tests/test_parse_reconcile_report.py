@@ -125,3 +125,10 @@ def test_words_that_are_not_text_drop_the_decision():
     data, anomalies, needs = pr.parse(text, set(), "r")
     assert data["decisions"] == [] and {a["kind"] for a in anomalies} == {"words_not_text"} and needs is not None
 
+
+def test_the_example_decision_is_accepted_with_or_without_words():
+    text = "profile: demo\nreconcile-run: r\ndecisions:\n" + json.dumps([{"row": 1, "decision": "example"}, {"row": 2, "decision": "example", "words": "for the refund question"}]) + "\ndone\n"
+    data, anomalies, needs = pr.parse(text, set(), "r")
+    assert needs is None and anomalies == []
+    assert data["decisions"] == [{"row": 1, "decision": "example"}, {"row": 2, "decision": "example", "words": "for the refund question"}]
+

@@ -91,3 +91,37 @@ def test_a_doubtful_fit_is_the_questions_fix_even_when_the_answer_matches(tmp_pa
     assert item["result"]["label"] == "same answer, different query" and item["fix"] == "question" and item["keep_allowed"] is False
     assert item["change"][0].startswith("Reword the question, or change your query, so they ask the same thing.")
 
+
+def test_columns_are_compared_by_data_and_a_renamed_column_is_the_same_column(tmp_path):
+    """The comparator pairs columns by values. Yours with three extra columns, all others paired under
+    other names, is "same rows, different columns", and the pairs are named; a table whose every
+    column paired is a match even when every name differs."""
+    partly = dict(TABLE_DIFF, row=1, recorded={"columns": ["o.number", "o.status", "o.region", "o.region_code", "o.placed_at"], "rows": []},
+                  comparison={"result_set": {"accuracy": 0.0, "reason": "no generated column carries the values of: planned_ship_date, delivered_at, channel",
+                                             "unmatched_golden_columns": ["planned_ship_date", "delivered_at", "channel"],
+                                             "column_pairs": [["number", "o.number"], ["status", "o.status"], ["placed_at", "o.placed_at"], ["region", "o.region"], ["region_code", "o.region_code"]],
+                                             "unmatched_generated_columns": [], "golden_row_count": 21, "generated_row_count": 21}})
+    renamed = dict(TABLE_DIFF, row=2, status="match", statement_recorded={"columns": ["number", "status"], "row_count": 21}, recorded={"columns": ["o.number", "o.status"], "rows": []},
+                   comparison={"result_set": {"accuracy": 1.0, "reason": "", "unmatched_golden_columns": [], "column_pairs": [["number", "o.number"], ["status", "o.status"]],
+                                              "unmatched_generated_columns": [], "golden_row_count": 21, "generated_row_count": 21}},
+                   ledger={"rows": [_part("runs", "confirmed"), _part("question_fit", "confirmed", {"fit": "plausible"})], "verdict": "confirmed", "counts": {}}, claims=None)
+    items = _items(tmp_path, [partly, renamed])
+    rows1 = {r["key"]: r for r in items[1]["diff"]}
+    assert items[1]["result"]["label"] == "same rows, different columns" and items[1]["fix"] == "query"
+    assert rows1["columns"]["state"] == "defect" and rows1["columns"]["yours_hi"] == ["planned_ship_date", "delivered_at", "channel"] and rows1["columns"].get("agami_hi") in (None, [])
+    assert "same values under other names: number → o.number" in rows1["columns"]["note"]
+    assert rows1["values"]["state"] == "held" and rows1["values"]["yours"] == "identical on the 5 paired columns"
+    assert items[1]["prefill"]["fix"] == "remove planned_ship_date, delivered_at, channel"
+    rows2 = {r["key"]: r for r in items[2]["diff"]}
+    assert items[2]["result"]["label"] == "match" and rows2["columns"]["state"] == "held" and rows2["columns"]["note"].startswith("same values under other names")
+
+
+def test_the_change_text_the_prefill_and_the_fix_come_from_one_source(tmp_path):
+    items = _items(tmp_path, [dict(GAPS_AND_GRAIN, row=1), dict(DEFECT, row=2)])
+    gaps = items[1]
+    assert gaps["fix"] == "semantic_model" and gaps["change"][0].startswith("The semantic model is missing: values declared on")
+    assert gaps["prefill"]["change"].startswith("add values declared on") and gaps["prefill"]["reword"] == GAPS_AND_GRAIN["question"]
+    assert gaps["change"][1].startswith("Also:")  # the doubtful fit rides along as a second line
+    defect = items[2]
+    assert defect["fix"] == "query" and defect["prefill"]["fix"] == "value orders.status='Delivered'"
+
