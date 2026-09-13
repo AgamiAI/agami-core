@@ -2,19 +2,21 @@
 <!--
   agami · reconcile report page — used by the agami-reconcile skill via
   scripts/render_reconcile_report.py.
-  One card per row, told in four beats: what you gave us and how we checked it; what agami did with
-  the question and what it answered; how it got there; what to change or keep. Same theme, logos and
-  paste-back grammar as the grading page and the model explorer.
+  Two layouts, chosen by the renderer from the items: CARDS for a batch of rows (one card per row,
+  the four beats as four columns, the fourth colored by who acts), and AUDIT for a single statement
+  row (the checks in the order they ran, pass / fail / open marks, and a rail of what to do). Same
+  theme, logos and paste-back grammar as the grading page and the model explorer.
   Two rules this page keeps, both asserted by tests/test_render_reconcile_report.py:
     * NO result rows. One recorded cell, or the shape of a table, never the rows themselves.
     * A control decides nothing on its own. "keep" is the person's yes to Phase 3e's offer for that
-      row and is offered only where the run scored the row match; change, fix, reword and nothing go
-      back through the doors that exist. The skill applies each, never this page.
+      row and is offered only where the run scored the row match with one cell; change, fix, reword
+      and nothing go back through the doors that exist. The skill applies each, never this page.
   NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose.
   Renderer fills:
-    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON,
-    ITEMS_JSON — [{row, label, question, source, status, expected, answer, read:[..], how:[..],
-                  words:[..], disagreement, change:[..], report_path, keep_allowed}]
+    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON, LAYOUT_JSON,
+    ITEMS_JSON — [{row, label, question, source, status, expected, answer, delta_pct, single_cell,
+                  owner, read:[..], how:[..], words:[..], disagreement, change:[..],
+                  checks:[{step, state, detail}], todo:[..], report_path, keep_allowed}]
     AGAMI_LOGO_DARK_TEXT, AGAMI_LOGO_LIGHT_TEXT, THEME_CSS
 -->
 <html lang="en">
@@ -24,34 +26,63 @@
   <title>{{REPORT_TITLE}} — agami</title>
   <style>
 {{THEME_CSS}}
+    :root { --held: #1f7a4d; --held-bg: #e3f3ea; --open: #b7791f; --open-bg: #fbf1dc; --defect: #b3261e; --defect-bg: #f9e3e1;
+            --gap: #6b4fbb; --gap-bg: #ece7fa; --noted: #6b7684; --noted-bg: #eceff3; }
+    @media (prefers-color-scheme: dark) { :root { --held: #5cc48f; --held-bg: #173325; --open: #e0a94a; --open-bg: #3a2e14; --defect: #f08a82; --defect-bg: #3d1c19;
+            --gap: #b39cf2; --gap-bg: #2b2342; --noted: #a2adb9; --noted-bg: #252c35; } }
     body { margin: 0; font-family: var(--font-body, system-ui, sans-serif); background: var(--bg, #f7f7f8); color: var(--fg, #17212b); }
-    .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 96px; }
+    .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 96px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border, #d9dde3); }
     .logo svg { display: block; height: 26px; width: auto; }
     .logo-light-mode { display: inline-block; } .logo-dark-mode { display: none; }
     @media (prefers-color-scheme: dark) { .logo-light-mode { display: none; } .logo-dark-mode { display: inline-block; } }
     h1 { font-size: 22px; margin: 0; }
     .meta { font-size: 12px; color: var(--fg-muted, #5b6875); }
-    .lede { max-width: 70ch; font-size: 15px; color: var(--fg-muted, #5b6875); margin: 18px 0 8px; }
-    .card { background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 16px 18px; margin: 14px 0; }
-    .card .q { font-weight: 600; font-size: 16px; }
-    .card .n { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted, #5b6875); margin-right: 8px; }
-    .answer { margin: 10px 0; font-size: 15px; }
-    .answer code { background: var(--code-bg, #eef1f4); padding: 2px 6px; border-radius: 4px; }
-    .signals { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--fg-muted, #5b6875); }
-    .beat { margin: 10px 0; font-size: 14px; }
-    .beat b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted, #5b6875); margin-bottom: 4px; }
-    .beat ul { margin: 4px 0 0; padding-left: 18px; }
-    .status { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border, #d9dde3); margin-left: 8px; }
-    .status.match { border-color: #2e8b57; color: #2e8b57; } .status.mismatch, .status.expected_doubtful { border-color: #b3261e; color: #b3261e; } .status.match_unverified { border-color: #b8860b; color: #b8860b; } .status.error { border-color: var(--fg-muted, #5b6875); color: var(--fg-muted, #5b6875); }
-    .quote { color: var(--fg-muted, #5b6875); font-style: italic; }
+    .lede { max-width: 72ch; font-size: 15px; color: var(--fg-muted, #5b6875); margin: 18px 0 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--code-bg, #eef1f4); padding: 1px 5px; border-radius: 4px; }
+    .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+    .pill.held { color: var(--held); background: var(--held-bg); } .pill.open { color: var(--open); background: var(--open-bg); }
+    .pill.defect { color: var(--defect); background: var(--defect-bg); } .pill.gap { color: var(--gap); background: var(--gap-bg); }
+    .pill.noted { color: var(--noted); background: var(--noted-bg); }
+    .chips { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0 6px; }
+    .chip { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); }
+    .chip b { font-size: 20px; font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+    .chip span { color: var(--fg-muted, #5b6875); font-size: 13px; }
+    .chip.held b { color: var(--held); } .chip.open b { color: var(--open); } .chip.defect b { color: var(--defect); } .chip.gap b { color: var(--gap); } .chip.noted b { color: var(--noted); }
+    /* cards */
+    .card { background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 14px 16px; margin: 12px 0; }
+    .card .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .card .head .title { font-weight: 700; font-size: 16px; }
+    .card .head .n { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted, #5b6875); }
+    .card .head .nums { margin-left: auto; font-family: ui-monospace, monospace; font-size: 13px; color: var(--fg-muted, #5b6875); font-variant-numeric: tabular-nums; }
+    .card .src { font-size: 13px; color: var(--fg-muted, #5b6875); margin-top: 2px; }
+    .beats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+    .beat { border-left: 3px solid var(--border, #d9dde3); padding: 2px 0 2px 10px; font-size: 14px; }
+    .beat b { display: block; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-muted, #5b6875); margin-bottom: 4px; }
+    .beat ul { margin: 4px 0 0; padding-left: 16px; } .beat li { margin: 2px 0; }
+    .beat.b1 { border-color: var(--noted); } .beat.b2 { border-color: var(--accent, #1d5fb4); } .beat.b3 { border-color: var(--open); }
+    .beat.b4 { border-color: var(--held); } .beat.b4.you, .beat.b4.question { border-color: var(--defect); } .beat.b4.model { border-color: var(--gap); } .beat.b4.agami { border-color: var(--open); }
+    .quote { color: var(--fg-muted, #5b6875); font-style: italic; margin-top: 4px; }
+    .receipt { font-size: 12px; margin-top: 8px; }
     .grade { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 14px; }
     .grade label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
     .more { margin-top: 10px; display: grid; gap: 8px; }
     .more[hidden] { display: none; }
     .more label { font-size: 13px; color: var(--fg-muted, #5b6875); display: block; }
     .more textarea { width: 100%; min-height: 64px; font-family: ui-monospace, monospace; font-size: 13px; border: 1px solid var(--border, #d9dde3); border-radius: 6px; padding: 8px; background: var(--bg, #fff); color: inherit; }
-    .receipt { font-size: 12px; margin-top: 8px; }
+    /* audit */
+    .audit { display: grid; grid-template-columns: 1fr 320px; gap: 16px; margin-top: 14px; }
+    .audit .q { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
+    .steps { background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 6px 14px; }
+    .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border, #d9dde3); font-size: 14px; }
+    .step:last-child { border-bottom: 0; }
+    .dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff; margin-top: 1px; }
+    .dot.held { background: var(--held); } .dot.defect { background: var(--defect); } .dot.open { background: var(--open); } .dot.gap { background: var(--gap); } .dot.noted { background: var(--noted); }
+    .step .s { font-weight: 600; } .step .d { color: var(--fg-muted, #5b6875); }
+    .rail { background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 12px 14px; align-self: start; }
+    .rail h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-muted, #5b6875); }
+    .rail ol { margin: 0; padding-left: 20px; } .rail li { margin: 6px 0; font-size: 14px; }
     .footer { position: sticky; bottom: 0; background: var(--bg, #f7f7f8); border-top: 1px solid var(--border, #d9dde3); padding: 12px 0; display: flex; align-items: center; gap: 14px; }
     button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border, #d9dde3); background: var(--card, #fff); color: inherit; cursor: pointer; }
     button.primary { background: var(--accent, #1d5fb4); color: #fff; border-color: transparent; }
@@ -63,6 +94,7 @@
     .modal-card textarea { width: 100%; min-height: 200px; font-family: ui-monospace, monospace; font-size: 13px; }
     .modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
     .modal-status { font-size: 13px; color: var(--fg-muted, #5b6875); }
+    @media (max-width: 820px) { .beats, .audit { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -78,8 +110,8 @@
       </div>
     </header>
 
-    <p class="lede">Every row you gave us, in four beats: what we read and checked, what agami did with the question and answered, how it got there, and what to change or keep. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do, and a "keep" is only offered where the numbers agreed and every part held.</p>
-
+    <p class="lede" id="lede"></p>
+    <div class="chips" id="chips"></div>
     <div id="items"></div>
 
     <div class="footer">
@@ -102,102 +134,118 @@
   </div>
 
   <script>
-    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, items: {{ITEMS_JSON}} };
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, layout: {{LAYOUT_JSON}}, items: {{ITEMS_JSON}} };
     const decisions = {};   // row -> {decision, words}
+    // Plain words for a status, and the color family each belongs to. Never the ledger's word alone.
+    const STATUS = {
+      match: ['held', 'match'], match_unverified: ['defect', 'match by luck: one part could not be confirmed'],
+      mismatch: ['gap', 'differs'], expected_doubtful: ['defect', 'your number is in doubt'], error: ['noted', 'did not run'],
+    };
+    const OWNER = { you: 'What to change: your query', model: 'What to change: the semantic model', question: 'What to change: the question',
+                    agami: "What to change: agami's answer", keep: 'Keep it', nothing: 'Nothing to change' };
 
-    function esc(s) {
-      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
+    function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function lines(list) { return (list || []).length ? '<ul>' + list.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''; }
-
+    function pill(status) { const [cls, words] = STATUS[status] || ['noted', status]; return '<span class="pill ' + cls + '">' + esc(words) + '</span>'; }
+    function nums(item) {
+      const parts = [];
+      if (item.expected) parts.push('yours ' + item.expected);
+      if (item.answer) parts.push('agami ' + item.answer);
+      if (item.delta_pct !== null && item.delta_pct !== undefined) parts.push((item.delta_pct > 0 ? '+' : '') + item.delta_pct + '%');
+      return esc(parts.join(' · '));
+    }
+    function controls(item, d) {
+      const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
+      return '<div class="grade">' + choices.map(v =>
+          '<label><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '> ' + v + '</label>').join('') + '</div>'
+        + '<div class="more"' + (['change', 'fix', 'reword'].includes(d.decision) ? '' : ' hidden') + '>'
+        + '<label>Say what should change, in words<textarea data-field="words" placeholder="e.g. revenue should net refunds">' + esc(d.words || '') + '</textarea></label></div>';
+    }
+    function chips() {
+      const counts = {};
+      DATA.items.forEach(i => { const cls = (STATUS[i.status] || ['noted'])[0]; counts[cls] = (counts[cls] || 0) + 1; });
+      const words = { held: 'match', defect: 'a mistake on your side', gap: 'differs', open: 'could not check', noted: 'did not run' };
+      document.getElementById('chips').innerHTML = Object.entries(counts).map(([cls, n]) =>
+        '<div class="chip ' + cls + '"><b>' + n + '</b><span>' + esc(words[cls] || cls) + '</span></div>').join('');
+    }
+    function card(item) {
+      const d = decisions[item.row] || {};
+      const owner = item.owner || (item.status === 'match' ? 'keep' : 'nothing');
+      return '<div class="card" data-row="' + item.row + '">'
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + '<span class="nums">' + nums(item) + '</span></div>'
+        + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
+        + '<div class="beats">'
+        + '<div class="beat b1"><b>1 · What you gave us</b>' + esc(item.question) + lines(item.read) + '</div>'
+        + '<div class="beat b2"><b>2 · What agami did</b>' + (item.answer ? 'Answered <code>' + esc(item.answer) + '</code>' : 'Could not answer this row')
+        + (item.expected ? '; you expected <code>' + esc(item.expected) + '</code>' : '') + '</div>'
+        + '<div class="beat b3"><b>3 · How it got there</b>' + lines(item.how)
+        + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
+        + (item.disagreement ? '<div>' + esc(item.disagreement) + '</div>' : '') + '</div>'
+        + '<div class="beat b4 ' + esc(owner) + '"><b>4 · ' + esc(OWNER[owner] || 'What to change') + '</b>' + lines(item.change) + '</div>'
+        + '</div>'
+        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+        + controls(item, d) + '</div>';
+    }
+    function audit(item) {
+      const d = decisions[item.row] || {};
+      const marks = { held: '✓', defect: '✗', open: '?', gap: '!', noted: 'i' };
+      return '<div class="card" data-row="' + item.row + '">'
+        + '<div class="head"><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status) + '<span class="nums">' + nums(item) + '</span></div>'
+        + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
+        + '<div class="audit"><div><div class="q">' + esc(item.question) + '</div><div class="steps">'
+        + (item.checks || []).map(c => '<div class="step"><span class="dot ' + esc(c.state) + '">' + (marks[c.state] || '·') + '</span><div><div class="s">' + esc(c.step) + '</div><div class="d">' + esc(c.detail || '') + '</div></div></div>').join('')
+        + '</div>'
+        + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
+        + (item.disagreement ? '<div class="quote">' + esc(item.disagreement) + '</div>' : '')
+        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '') + '</div>'
+        + '<aside class="rail"><h4>What to do</h4><ol>' + (item.todo || []).map(t => '<li>' + esc(t) + '</li>').join('') + '</ol></aside></div>'
+        + controls(item, d) + '</div>';
+    }
     function renderItems() {
+      document.getElementById('lede').textContent = DATA.layout === 'audit'
+        ? 'One query, checked part by part in the order the checks ran. The rail on the right is what to do about it. Decide below, generate the block, and paste it back into Claude; nothing changes until you do.'
+        : 'Every row you gave us, in four beats: what we read and checked, what agami did with the question and answered, how it got there, and what to change or keep. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do, and "keep" is only offered where the numbers agreed and every part held.';
+      chips();
       const root = document.getElementById('items');
-      root.innerHTML = DATA.items.map(item => {
-        const d = decisions[item.row] || {};
-        const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
-        return '<div class="card" data-row="' + item.row + '">'
-          + '<div class="q"><span class="n">#' + item.row + '</span>' + esc(item.label || item.question)
-          + '<span class="status ' + esc(item.status) + '">' + esc(item.status) + '</span></div>'
-          + (item.source ? '<div class="meta">' + esc(item.source) + '</div>' : '')
-          + '<div class="beat"><b>1. What you gave us</b>' + esc(item.question) + lines(item.read) + '</div>'
-          + '<div class="beat"><b>2. What agami did</b>'
-          + (item.answer ? 'agami answered <code>' + esc(item.answer) + '</code>' : 'agami could not answer this row')
-          + (item.expected ? '; you expected <code>' + esc(item.expected) + '</code>' : '') + '</div>'
-          + '<div class="beat"><b>3. How it got there</b>' + lines(item.how)
-          + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
-          + (item.disagreement ? '<div>' + esc(item.disagreement) + '</div>' : '') + '</div>'
-          + '<div class="beat"><b>4. What to change or keep</b>' + lines(item.change) + '</div>'
-          + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
-          + '<div class="grade">'
-          + choices.map(v =>
-              '<label><input type="radio" name="d' + item.row + '" value="' + v + '"'
-              + (d.decision === v ? ' checked' : '') + '> ' + v + '</label>').join('')
-          + '</div>'
-          + '<div class="more"' + (d.decision === 'change' || d.decision === 'fix' || d.decision === 'reword' ? '' : ' hidden') + '>'
-          + '<label>Say what should change, in words<textarea data-field="words" placeholder="e.g. revenue should net refunds">' + esc(d.words || '') + '</textarea></label>'
-          + '</div>'
-          + '</div>';
-      }).join('');
+      root.innerHTML = DATA.items.map(item => DATA.layout === 'audit' ? audit(item) : card(item)).join('');
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
       renderSummary();
     }
-
     function onDecide(e) {
-      const card = e.target.closest('.card');
-      const row = Number(card.dataset.row);
+      const card = e.target.closest('.card'); const row = Number(card.dataset.row);
       decisions[row] = Object.assign(decisions[row] || {}, { decision: e.target.value });
       card.querySelector('.more').hidden = !['change', 'fix', 'reword'].includes(e.target.value);
       renderSummary();
     }
-
-    function onText(e) {
-      const row = Number(e.target.closest('.card').dataset.row);
-      decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value });
-    }
-
+    function onText(e) { const row = Number(e.target.closest('.card').dataset.row); decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value }); }
     function decided() {
       return Object.keys(decisions).filter(r => decisions[r].decision).map(r => {
-        const d = decisions[r];
-        const out = { row: Number(r), decision: d.decision };
+        const d = decisions[r]; const out = { row: Number(r), decision: d.decision };
         if (d.words && d.words.trim() && d.decision !== 'keep' && d.decision !== 'nothing') out.words = d.words.trim();
         return out;
       }).sort((a, b) => a.row - b.row);
     }
-
     function renderSummary() {
       const n = decided().length;
       document.getElementById('btn-generate').disabled = n === 0;
-      document.getElementById('summary').textContent = n
-        ? n + ' of ' + DATA.items.length + ' decided. Nothing is applied until you paste the block into Claude.'
-        : 'Nothing decided yet.';
+      document.getElementById('summary').textContent = n ? n + ' of ' + DATA.items.length + ' decided. Nothing is applied until you paste the block into Claude.' : 'Nothing decided yet.';
     }
-
     // The block Claude reads back: profile first, then the run, then the decisions under a bare
     // header with the array on its own line, and done last: the grading page's format, unchanged.
     function generateDecisions() {
-      const out = ['profile: ' + (DATA.profile || ''), 'reconcile-run: ' + (DATA.run || ''),
-                   'decisions:', JSON.stringify(decided()), 'done'];
+      const out = ['profile: ' + (DATA.profile || ''), 'reconcile-run: ' + (DATA.run || ''), 'decisions:', JSON.stringify(decided()), 'done'];
       document.getElementById('modal-text').value = out.join('\n') + '\n';
-      document.getElementById('modal').hidden = false;
-      document.getElementById('modal-status').textContent = '';
+      document.getElementById('modal').hidden = false; document.getElementById('modal-status').textContent = '';
     }
-
     document.getElementById('btn-generate').addEventListener('click', generateDecisions);
-    document.getElementById('modal-close').addEventListener('click', () => {
-      document.getElementById('modal').hidden = true;
-    });
+    document.getElementById('modal-close').addEventListener('click', () => { document.getElementById('modal').hidden = true; });
     document.getElementById('modal-copy').addEventListener('click', async () => {
       const status = document.getElementById('modal-status');
-      try {
-        await navigator.clipboard.writeText(document.getElementById('modal-text').value);
-        status.textContent = '✓ Copied. Paste it back in Claude.';
-      } catch (e) {
-        document.getElementById('modal-text').select();
-        status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.';
-      }
+      try { await navigator.clipboard.writeText(document.getElementById('modal-text').value); status.textContent = '✓ Copied. Paste it back in Claude.'; }
+      catch (e) { document.getElementById('modal-text').select(); status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.'; }
     });
-
     renderItems();
   </script>
 </body>

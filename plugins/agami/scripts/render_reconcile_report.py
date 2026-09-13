@@ -39,10 +39,15 @@ THEME_PATH = SHARED_DIR / "theme.css"
 
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
-_FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "single_cell",
-           "read", "how", "words", "disagreement", "change", "report_path")
-_LISTS = ("read", "how", "words", "change")
+_FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
+           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path")
+_LISTS = ("read", "how", "words", "change", "todo")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
+# Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
+# question, agami's answer (a worked example), keep, or nothing.
+_OWNERS = {"you", "model", "question", "agami", "keep", "nothing"}
+_CHECK_STATES = {"held", "defect", "open", "gap", "noted"}
+_LAYOUTS = ("auto", "cards", "audit")
 
 
 def _validate_item(item: dict, idx: int) -> None:
@@ -63,20 +68,39 @@ def _validate_item(item: dict, idx: int) -> None:
         value = item.get(key, [])
         if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
             raise ValueError(f"item {idx}: '{key}' must be a list of sentences")
+    if item.get("owner") is not None and item["owner"] not in _OWNERS:
+        raise ValueError(f"item {idx}: 'owner' must be one of {sorted(_OWNERS)}")
+    if item.get("delta_pct") is not None and not isinstance(item["delta_pct"], (int, float)):
+        raise ValueError(f"item {idx}: 'delta_pct' must be a number")
+    for check in item.get("checks", []) or []:
+        if (not isinstance(check, dict) or not isinstance(check.get("step"), str)
+                or check.get("state") not in _CHECK_STATES):
+            raise ValueError(f"item {idx}: each check needs a 'step' and a 'state' in {sorted(_CHECK_STATES)}")
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
+def choose_layout(items: list[dict], layout: str = "auto") -> str:
+    """`audit` for one row that carries checks (a single trusted query, read part by part), `cards`
+    for anything else. A person can force either."""
+    if layout != "auto":
+        return layout
+    return "audit" if len(items) == 1 and items[0].get("checks") else "cards"
+
+
+def render(*, title: str, profile: str, run: str, items: list[dict], layout: str = "auto") -> str:
+    if layout not in _LAYOUTS:
+        raise ValueError(f"layout must be one of {_LAYOUTS}")
     for i, item in enumerate(items):
         _validate_item(item, i)
     projected = [{k: item.get(k) for k in _FIELDS if k in item} for item in items]
     for item in projected:
         for key in _LISTS:
             item.setdefault(key, [])
-        for key in ("label", "source", "expected", "answer", "disagreement", "report_path"):
+        item.setdefault("checks", [])
+        for key in ("label", "source", "expected", "answer", "disagreement", "report_path", "owner", "delta_pct"):
             item.setdefault(key, None)
         # The one rule the page enforces about decisions: keep is offered where the run said match
         # AND the answer is one cell, which is Phase 3e's own predicate; a table row can match and
@@ -91,6 +115,7 @@ def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
         "PROFILE_JSON": _script_json(profile or ""),
         "RUN_JSON": _script_json(run or ""),
         "ITEMS_JSON": _script_json(projected),
+        "LAYOUT_JSON": _script_json(choose_layout(projected, layout)),
         "AGAMI_LOGO_DARK_TEXT": _read(LOGO_DARK_PATH),
         "AGAMI_LOGO_LIGHT_TEXT": _read(LOGO_LIGHT_PATH),
         "THEME_CSS": _read(THEME_PATH),
@@ -111,6 +136,8 @@ def main(argv=None) -> int:
     p.add_argument("--run", required=True, help="The reconcile run's folder name (its timestamp)")
     p.add_argument("--items-file", required=True,
                    help="JSON array of {row, label, question, source, status, expected, answer, read, how, words, disagreement, change, report_path}")
+    p.add_argument("--layout", choices=list(_LAYOUTS), default="auto",
+                   help="cards for a batch, audit for one statement read part by part; auto picks from the items")
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
 
@@ -120,7 +147,7 @@ def main(argv=None) -> int:
         sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
         return 1
     try:
-        page = render(title=args.title, profile=args.profile, run=args.run, items=items)
+        page = render(title=args.title, profile=args.profile, run=args.run, items=items, layout=args.layout)
     except ValueError as exc:
         sys.stderr.write(f"render_reconcile_report: {exc}\n")
         return 1

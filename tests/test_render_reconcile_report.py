@@ -38,14 +38,16 @@ def test_renders_one_card_per_row_in_four_beats_and_the_block_grammar():
     for text in ("What was total revenue in Q3 2025?", "leaves out the declared filter", "matched the metric revenue",
                  "cancelled orders are excluded from revenue", "add the filter and the numbers meet", "How many orders"):
         assert text in html, text
-    for beat in ("1. What you gave us", "2. What agami did", "3. How it got there", "4. What to change or keep"):
+    for beat in ("1 · What you gave us", "2 · What agami did", "3 · How it got there", "4 · "):
         assert beat in html, beat
+    # A batch renders as cards; the fourth column is colored by who acts.
+    assert 'layout: "cards"' in html and "beat b4 ' + esc(owner)" in html
     for token in ("'profile: '", "'reconcile-run: '", "'decisions:'", "'done'"):
         assert token in html, token
     assert 'profile: "demo"' in html and 'run: "20260912-101500"' in html
     # An error row has no answer and says so instead of quoting an empty cell.
     error = rr.render(title="t", profile="p", run="r", items=[{"row": 7, "question": "q", "status": "error"}])
-    assert "agami could not answer this row" in error
+    assert "Could not answer this row" in error
 
 
 def _payload(html: str) -> dict:
@@ -93,3 +95,39 @@ def test_the_cli_writes_the_file_and_reports_the_count(tmp_path, capsys):
     items.write_text(json.dumps([{"row": 1, "question": "q", "status": "maybe"}]))
     assert rr.main(["--title", "t", "--profile", "demo", "--run", "r", "--items-file", str(items), "--out", str(out)]) == 1
     assert "'status'" in capsys.readouterr().err
+
+
+AUDIT = [{"row": 1, "label": "Paid revenue", "question": "What is paid revenue?", "status": "match_unverified",
+          "expected": "5,967,671", "answer": "5,950,667", "delta_pct": -0.28, "single_cell": True, "owner": "you",
+          "checks": [
+              {"step": "It runs, read-only, on the same road agami uses", "state": "held", "detail": "one SELECT; the zero-row check passed"},
+              {"step": "Joins are on the declared keys", "state": "defect", "detail": "orders to payments is on o.id = pay.id; the declared key is pay.order_id"},
+              {"step": "No join repeats the rows behind the total", "state": "open", "detail": "depends on the join above"},
+              {"step": "The output matches a declared metric", "state": "gap", "detail": "no metric sums payments"},
+              {"step": "Noticed", "state": "noted", "detail": "200 of 4000 orders have no payment and are dropped"}],
+          "todo": ["Your query: join on pay.order_id = o.id, then re-run this row.", "Nothing to keep yet."],
+          "words": ["orders, table caveat: cancelled orders are excluded from revenue"]}]
+
+
+def test_one_statement_row_with_checks_renders_as_an_audit_with_a_rail():
+    html = rr.render(title="t", profile="p", run="r", items=AUDIT)
+    assert 'layout: "audit"' in html
+    payload = _payload(html)[1]
+    assert [c["state"] for c in payload["checks"]] == ["held", "defect", "open", "gap", "noted"]
+    assert payload["todo"][0].startswith("Your query:") and payload["owner"] == "you"
+    assert payload["keep_allowed"] is False  # match_unverified is never offered
+    # The same items forced into cards, and a batch forced into an audit, both obey the switch.
+    assert 'layout: "cards"' in rr.render(title="t", profile="p", run="r", items=AUDIT, layout="cards")
+    assert 'layout: "audit"' in rr.render(title="t", profile="p", run="r", items=ITEMS, layout="audit")
+    assert rr.choose_layout(ITEMS) == "cards" and rr.choose_layout(AUDIT) == "audit"
+
+
+def test_owner_delta_and_check_states_come_from_closed_sets():
+    with pytest.raises(ValueError, match="'owner'"):
+        rr.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "status": "match", "owner": "them"}])
+    with pytest.raises(ValueError, match="'delta_pct'"):
+        rr.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "status": "match", "delta_pct": "7%"}])
+    with pytest.raises(ValueError, match="each check needs"):
+        rr.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "status": "match", "checks": [{"step": "x", "state": "maybe"}]}])
+    with pytest.raises(ValueError, match="layout must be"):
+        rr.render(title="t", profile="p", run="r", items=ITEMS, layout="table")

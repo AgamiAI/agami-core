@@ -286,7 +286,9 @@ When any row carried a statement, add one more line, counting the two statuses t
 
 ### 3a.5 — Every row in four beats
 
-One block per row, four short paragraphs, in the words of `shared/plain-language.md`. A row with no statement skips beat 1's parts and says so; a row that matched with every part held has a one-line beat 4: keep it. Beat 4 never asks anything per row; the keep question is 3e's, once.
+The four beats are told on the **report page**, one card per row for a batch and a checklist with a rail for a single audited query, and the chat carries only three lines: the summary of 3a with the counts as colored words, the report's path, and one line of next steps naming what to fix, what to decide and how many rows are ready to keep. A person reading the transcript later keeps the counts and the actions; the page holds the story. When the page cannot be written, the four beats below are said in chat instead, one block per row, in the words of `shared/plain-language.md`. A row with no statement skips beat 1's parts and says so; a row that matched with every part held has a one-line beat 4: keep it. Beat 4 never asks anything per row; the keep question is 3e's, once.
+
+What each card says, whether on the page or, without one, in chat:
 
 ```markdown
 **Q3 Revenue** (from your CSV, tile 3, with the SQL behind it)
@@ -304,16 +306,16 @@ One block per row, four short paragraphs, in the words of `shared/plain-language
 
 Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap, "the question" for a doubtful fit, and "agami's answer" for a mismatch where your statement held on every part (a worked example is the fix). It never says "the model".
 
-**Render the same four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. The chat keeps 3a, 3a.5 and the tables below, so a person reading the transcript later loses nothing.
+**Render the four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. The page picks its layout from the items: **cards** for a batch of rows, the four beats as four columns with the fourth colored by who acts; **audit** for a single statement row that carries `checks`, the checks in the order they ran with pass, fail, open, gap and noticed marks, and a rail of what to do. Force one with `--layout cards|audit` when the person asks. The chat keeps 3a, the link and one line of next steps; 3b to 3d below still render when the page could not be written.
 
-1. **Build the report items file** with the Write tool, one entry per row: `{"row": <n>, "label": "...", "question": "...", "source": "<from your CSV, tile 3, with the SQL behind it>", "status": "<the row's status>", "expected": "<display text or null>", "answer": "<the one recorded cell, or 'a table of N rows, columns a, b'>", "single_cell": <true when recorded is one cell>, "read": ["<beat 1, one sentence per line>"], "how": ["<beat 3>"], "words": ["<one line per prose source from evidence.prose>"], "disagreement": "<the one sentence when two lines name different values, or null>", "change": ["<beat 4>"], "report_path": "<the receipt>"}`. Never a result row. Every sentence in the words of `shared/plain-language.md`.
+1. **Build the report items file** with the Write tool, one entry per row: `{"row": <n>, "label": "...", "question": "...", "source": "<from your CSV, tile 3, with the SQL behind it>", "status": "<the row's status>", "expected": "<display text or null>", "answer": "<the one recorded cell, or 'a table of N rows, columns a, b'>", "delta_pct": <signed percent or null>, "single_cell": <true when recorded is one cell>, "owner": "<who acts in beat 4: you | model | question | agami | keep | nothing>", "checks": [{"step": "<a check, in plain words>", "state": "held | defect | open | gap | noted", "detail": "<one sentence>"}] (for a single statement row: every ledger part in the order it ran, each as one step), "todo": ["<the rail: one action per line, naming the side>"], "read": ["<beat 1, one sentence per line>"], "how": ["<beat 3>"], "words": ["<one line per prose source from evidence.prose>"], "disagreement": "<the one sentence when two lines name different values, or null>", "change": ["<beat 4>"], "report_path": "<the receipt>"}`. Never a result row. Every sentence in the words of `shared/plain-language.md`.
 2. **Render and point at it:**
    ```bash
    python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_report.py" --title "Reconcile · <profile>" \
      --profile <profile> --run <ts> --items-file /tmp/agami-reconcile-report-items-<ts>.json \
      --out "<artifacts_dir>/local/reconcile/<ts>/report.html"
    ```
-   The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from what you wrote, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's.
+   Then say the three lines: the 3a summary with its counts as colored words (match, differs, a mistake on your side, could not check), the report's path, and one line of next steps. The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from what you wrote, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's.
 3. **Read the decisions back** when the block arrives (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`), handing the parser the run directory the page was rendered from. It reads which rows may be kept from `rows.jsonl` and each row's `ledger.json`, never from anything typed, and refuses a block whose `reconcile-run` is not this run:
    ```bash
    python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_report.py" --block-file /tmp/agami-reconcile-decisions-<ts>.txt --run-dir "<artifacts_dir>/local/reconcile/<ts>"
