@@ -195,7 +195,7 @@ def test_reconcile_takes_input_the_way_connect_does():
     assert "render_reconcile_intake.py" in intake and "--intake-file" in intake
     assert "parse_reconcile_intake.py" in intake and "--rows-file" in intake
     assert "**end the turn**" in intake and "never hand-edit the rows" in intake
-    assert 'a per-row "is this the question?" in chat is never asked' in intake
+    assert 'A per-row "is this the question?" in chat is never asked' in intake
     assert "only for a statement that came alone" in PHASE_1_5
     assert "| `question_fit` |" in REFERENCES["part-ledger.md"]
     assert "question_fit.json" in REFERENCES["statement-check.md"] and "question_fit" in REFERENCES["evidence-row.md"]
@@ -300,3 +300,21 @@ def test_the_four_beats_are_also_a_page_and_a_keep_is_never_the_pages_to_grant()
     assert "one card per row for a batch and a checklist with a rail for a single audited query" in story
     assert "--layout cards|audit" in story and '"checks": [{"step"' in story and '"todo": [' in story
     assert "When the page cannot be written, the four beats below are said in chat instead" in story
+
+
+def test_the_run_works_five_rows_at_a_time_and_resumes_from_its_checkpoint():
+    """Phase 2 reads the next rows from rows.jsonl through next-chunk, ends the turn after each chunk
+    with a progress line, runs through on `continue all`, never runs a row twice, and never skips a
+    checkpoint line it cannot read. The pages filter what is shown, never what the block sends."""
+    phase_2 = _between(SKILL, "## Phase 2: Generate questions + execute", "### 2a")
+    assert "**Work five rows at a time.**" in phase_2
+    assert "next-chunk --run-dir" in phase_2 and "--rows-file" in phase_2
+    assert "never run twice" in phase_2 and "**continue all**" in phase_2 and "**end the turn**" in phase_2
+    assert "Exit `4` means every row is in the checkpoint" in phase_2
+    assert "never skip it" in phase_2 and "The keep-offer stays one per run (3e), never one per chunk." in phase_2
+    intake = _between(SKILL, "### 1n — Normalize", "## Phase 1.5")
+    assert '--out "<artifacts_dir>/local/reconcile/<ts>/intake.json"' in intake
+    beats = _between(SKILL, "### 3a.5", "### 3b")
+    assert "Render it after every chunk" in beats and "never what the block sends" in beats
+    grading = _between(SKILL, "### 2.5 —", "## Phase 3")
+    assert "filters by grade state" in grading

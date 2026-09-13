@@ -34,6 +34,12 @@
     </header>
     <p class="lede">This is what we read from what you gave us, before anything runs. Each row is one thing to check: the question we will ask agami (edit it if we read your label wrong), the number you expect, and whether your SQL came with it. Untick a row to leave it out. Then generate the block and paste it back into Claude. Nothing runs until you do.</p>
     <div class="chips" id="chips"></div>
+    <div class="filters" id="filters">
+      <span class="k">Show</span><span id="owner-chips"></span>
+      <input type="search" id="q" placeholder="a word in the label, question or file" aria-label="narrow the rows by a word">
+      <button type="button" id="clear" class="linkish">Show all</button>
+      <span class="showing" id="showing"></span>
+    </div>
     <div id="items" class="intake"></div>
     <div class="footer">
       <button type="button" id="btn-generate" class="primary">Generate for Claude</button>
@@ -57,16 +63,29 @@
     const edits = {};   // row -> {keep, question}
     const SHAPE = { a: 'a question', b: 'a question with your SQL', c: 'a number from your dashboard', d: 'a number with the SQL behind it' };
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    // What is shown. A filter narrows the rows, never the block: decided() reads every row.
+    const view = { shape: new Set(), q: '' };
+    function visible() {
+      const q = view.q.trim().toLowerCase();
+      return DATA.items.filter(item => (!view.shape.size || view.shape.has(item.shape))
+        && (!q || [item.label, item.question, item.file, item.source, item.expected, (edits[item.row] || {}).question].filter(Boolean).join(' ').toLowerCase().includes(q)));
+    }
     function chips() {
       const counts = {};
       DATA.items.forEach(i => { counts[i.shape] = (counts[i.shape] || 0) + 1; });
-      document.getElementById('chips').innerHTML = Object.entries(counts).map(([shape, n]) =>
-        '<div class="chip noted"><b>' + n + '</b><span>' + esc(SHAPE[shape] || shape) + '</span></div>').join('');
+      const root = document.getElementById('chips');
+      root.classList.toggle('filtering', view.shape.size > 0);
+      root.innerHTML = Object.entries(counts).map(([shape, n]) =>
+        '<button type="button" class="chip noted' + (view.shape.has(shape) ? ' on' : '') + '" data-filter="' + esc(shape) + '" aria-pressed="' + view.shape.has(shape) + '"><b>' + n + '</b><span>' + esc(SHAPE[shape] || shape) + '</span></button>').join('');
+      root.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { const k = el.dataset.filter; if (view.shape.has(k)) view.shape.delete(k); else view.shape.add(k); renderItems(); }));
+      document.getElementById('filters').hidden = DATA.items.length < 2;
+      const filtered = view.shape.size || view.q.trim();
+      document.getElementById('showing').textContent = filtered ? 'Showing ' + visible().length + ' of ' + DATA.items.length + ' rows' : 'All ' + DATA.items.length + ' rows';
     }
     function renderItems() {
       chips();
       const root = document.getElementById('items');
-      root.innerHTML = DATA.items.map(item => {
+      root.innerHTML = visible().map(item => {
         const e = edits[item.row] || { keep: true, question: item.question || '' };
         return '<div class="card row' + (e.keep ? '' : ' dropped') + '" data-row="' + item.row + '">'
           + '<div><input type="checkbox" data-field="keep"' + (e.keep ? ' checked' : '') + ' aria-label="keep row ' + item.row + '"></div>'
@@ -77,7 +96,7 @@
           + (item.has_statement ? '<div class="k">your SQL: ' + esc(item.statement_preview || '') + '</div>' : '') + '</div>'
           + '<div><label class="k">The question we will ask agami<textarea data-field="question">' + esc(e.question) + '</textarea></label></div>'
           + '</div>';
-      }).join('');
+      }).join('') || '<p class="meta">No row matches this filter. Your edits on the hidden rows are kept.</p>';
       root.querySelectorAll('input[type=checkbox]').forEach(el => el.addEventListener('change', onKeep));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
       renderSummary();
@@ -106,6 +125,8 @@
       document.getElementById('modal').hidden = false; document.getElementById('modal-status').textContent = '';
     }
     document.getElementById('btn-generate').addEventListener('click', generate);
+    document.getElementById('q').addEventListener('input', e => { view.q = e.target.value; renderItems(); });
+    document.getElementById('clear').addEventListener('click', () => { view.shape.clear(); view.q = ''; document.getElementById('q').value = ''; renderItems(); });
     document.getElementById('modal-close').addEventListener('click', () => { document.getElementById('modal').hidden = true; });
     document.getElementById('modal-copy').addEventListener('click', async () => {
       const status = document.getElementById('modal-status');
