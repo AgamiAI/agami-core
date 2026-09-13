@@ -59,3 +59,14 @@ def test_a_diff_row_is_validated_and_never_carries_result_rows():
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "rows": [[1]]}])])
     with pytest.raises(ValueError, match="'sentence' must be text"):
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, sentence=["no"])])
+
+
+def test_each_decision_says_what_it_is_and_what_happens_and_the_box_asks_for_the_right_thing():
+    html = rr.render(title="t", profile="p", run="r", items=[ITEM, dict(ITEM, row=3)])
+    for token in ("change the semantic model", "fix my query", "reword the question",
+                  "What should the semantic model say?", "What you will fix, in a few words (optional)", "The question, in the words you mean",
+                  "SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword'", 'class="tag suggested"', 'class="opt'):
+        assert token in html, token
+    # The block's contract is untouched: the same five radio values, the same words field.
+    for token in ("value=\"' + v + '\"", 'data-field="words"', "['change', 'fix', 'reword'].includes(d.decision)"):
+        assert token in html, token

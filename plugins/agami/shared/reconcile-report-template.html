@@ -92,12 +92,29 @@
       if (item.delta_pct !== null && item.delta_pct !== undefined) parts.push((item.delta_pct > 0 ? '+' : '') + item.delta_pct + '%');
       return esc(parts.join(' · '));
     }
+    // The five decisions, each saying what it is and what happens next. The values are the block's
+    // contract (keep | change | fix | reword | nothing) and do not change; the words around them do.
+    const DECISIONS = {
+      keep: { word: 'keep', what: 'Keep this row as a worked example or a test. Offered only where the numbers agreed and every part held.' },
+      change: { word: 'change the semantic model', what: 'A definition is wrong or missing in the semantic model. Your words go to /agami-save-correction.',
+                prompt: 'What should the semantic model say?', ph: 'e.g. cancelled orders count toward the order count' },
+      fix: { word: 'fix my query', what: 'The mistake is in your SQL. You fix it and run this row again.',
+             prompt: 'What you will fix, in a few words (optional)', ph: 'e.g. the status value is lower-case delivered' },
+      reword: { word: 'reword the question', what: 'The question was read differently from what you meant. Ask it in other words.',
+                prompt: 'The question, in the words you mean', ph: 'e.g. How many orders were placed in Q3 2025, cancelled ones included?' },
+      nothing: { word: 'nothing', what: 'Leave this row as it is.' },
+    };
+    const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
     function controls(item, d) {
       const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
-      return '<div class="grade">' + choices.map(v =>
-          '<label><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '> ' + v + '</label>').join('') + '</div>'
+      const suggested = SUGGEST[item.owner] || null;
+      const spec = DECISIONS[d.decision] || {};
+      return '<div class="grade opts">' + choices.map(v =>
+          '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
+          + '<b>' + esc(DECISIONS[v].word) + (v === suggested && item.keep_allowed !== false || v === suggested && v !== 'keep' ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
+          + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</div>'
         + '<div class="more"' + (['change', 'fix', 'reword'].includes(d.decision) ? '' : ' hidden') + '>'
-        + '<label>Say what should change, in words<textarea data-field="words" placeholder="e.g. revenue should net refunds">' + esc(d.words || '') + '</textarea></label></div>';
+        + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
     }
     // What is shown. A filter narrows the cards, never the block: decided() reads every row.
     const view = { status: new Set(), owner: new Set(), q: '' };
@@ -238,7 +255,11 @@
     function onDecide(e) {
       const card = e.target.closest('.card'); const row = Number(card.dataset.row);
       decisions[row] = Object.assign(decisions[row] || {}, { decision: e.target.value });
-      card.querySelector('.more').hidden = !['change', 'fix', 'reword'].includes(e.target.value);
+      const more = card.querySelector('.more'); const spec = DECISIONS[e.target.value] || {};
+      more.hidden = !['change', 'fix', 'reword'].includes(e.target.value);
+      more.querySelector('.p').textContent = spec.prompt || 'Say it in words';
+      more.querySelector('textarea').placeholder = spec.ph || '';
+      card.querySelectorAll('.opt').forEach(el => el.classList.toggle('on', el.querySelector('input').value === e.target.value));
       renderSummary();
     }
     function onText(e) { const row = Number(e.target.closest('.card').dataset.row); decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value }); }

@@ -116,3 +116,12 @@
     .pill.question { background: var(--open-soft, #fbefd9); color: var(--open); } .pill.keep { background: var(--held-soft, #e3f2e9); color: var(--held); }
     .pill.agami, .pill.nothing { background: var(--noted-soft, #e9ecef); color: var(--noted); }
     @media (max-width: 640px) { .dg { grid-template-columns: 22px 1fr; } .dg .k { grid-column: 2; } .dg .v { grid-column: 2; border-top: 0; padding-top: 0; } .dg .v.yours::before { content: "yours · "; color: var(--fg-muted, #5b6875); font-family: inherit; } .dg .v.agami::before { content: "agami · "; color: var(--fg-muted, #5b6875); font-family: inherit; } .dg .h { display: none; } }
+    /* the decisions: each option says what it is and what happens next; the run's suggestion is tagged */
+    .grade.opts { display: grid; gap: 4px; margin-top: 10px; }
+    .grade.opts .opt { display: grid; grid-template-columns: 18px auto minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+    .grade.opts .opt.on { background: var(--bg-muted, #f3f5f7); }
+    .grade.opts .opt b { font-weight: 600; white-space: nowrap; }
+    .grade.opts .opt .what { color: var(--fg-muted, #5b6875); font-size: 13px; }
+    .tag.suggested { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; background: var(--accent-soft, #e6efff); color: var(--accent, #1d5fb4); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; }
+    .more label .p { display: block; font-size: 13px; color: var(--fg-muted, #5b6875); margin-bottom: 4px; }
+    @media (max-width: 640px) { .grade.opts .opt { grid-template-columns: 18px 1fr; } .grade.opts .opt .what { grid-column: 2; } }
