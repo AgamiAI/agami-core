@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<!--
+  agami · reconcile report page — used by the agami-reconcile skill via
+  scripts/render_reconcile_report.py.
+  One card per row, told in four beats: what you gave us and how we checked it; what agami did with
+  the question and what it answered; how it got there; what to change or keep. Same theme, logos and
+  paste-back grammar as the grading page and the model explorer.
+  Two rules this page keeps, both asserted by tests/test_render_reconcile_report.py:
+    * NO result rows. One recorded cell, or the shape of a table, never the rows themselves.
+    * A control decides nothing on its own. "keep" is the person's yes to Phase 3e's offer for that
+      row and is offered only where the run scored the row match; change, fix, reword and nothing go
+      back through the doors that exist. The skill applies each, never this page.
+  NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose.
+  Renderer fills:
+    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON,
+    ITEMS_JSON — [{row, label, question, source, status, expected, answer, read:[..], how:[..],
+                  words:[..], disagreement, change:[..], report_path, keep_allowed}]
+    AGAMI_LOGO_DARK_TEXT, AGAMI_LOGO_LIGHT_TEXT, THEME_CSS
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} — agami</title>
+  <style>
+{{THEME_CSS}}
+    body { margin: 0; font-family: var(--font-body, system-ui, sans-serif); background: var(--bg, #f7f7f8); color: var(--fg, #17212b); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 96px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border, #d9dde3); }
+    .logo svg { display: block; height: 26px; width: auto; }
+    .logo-light-mode { display: inline-block; } .logo-dark-mode { display: none; }
+    @media (prefers-color-scheme: dark) { .logo-light-mode { display: none; } .logo-dark-mode { display: inline-block; } }
+    h1 { font-size: 22px; margin: 0; }
+    .meta { font-size: 12px; color: var(--fg-muted, #5b6875); }
+    .lede { max-width: 70ch; font-size: 15px; color: var(--fg-muted, #5b6875); margin: 18px 0 8px; }
+    .card { background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 16px 18px; margin: 14px 0; }
+    .card .q { font-weight: 600; font-size: 16px; }
+    .card .n { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted, #5b6875); margin-right: 8px; }
+    .answer { margin: 10px 0; font-size: 15px; }
+    .answer code { background: var(--code-bg, #eef1f4); padding: 2px 6px; border-radius: 4px; }
+    .signals { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--fg-muted, #5b6875); }
+    .beat { margin: 10px 0; font-size: 14px; }
+    .beat b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted, #5b6875); margin-bottom: 4px; }
+    .beat ul { margin: 4px 0 0; padding-left: 18px; }
+    .status { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border, #d9dde3); margin-left: 8px; }
+    .status.match { border-color: #2e8b57; color: #2e8b57; } .status.mismatch, .status.expected_doubtful { border-color: #b3261e; color: #b3261e; } .status.match_unverified { border-color: #b8860b; color: #b8860b; }
+    .quote { color: var(--fg-muted, #5b6875); font-style: italic; }
+    .grade { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 14px; }
+    .grade label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .more { margin-top: 10px; display: grid; gap: 8px; }
+    .more[hidden] { display: none; }
+    .more label { font-size: 13px; color: var(--fg-muted, #5b6875); display: block; }
+    .more textarea { width: 100%; min-height: 64px; font-family: ui-monospace, monospace; font-size: 13px; border: 1px solid var(--border, #d9dde3); border-radius: 6px; padding: 8px; background: var(--bg, #fff); color: inherit; }
+    .receipt { font-size: 12px; margin-top: 8px; }
+    .footer { position: sticky; bottom: 0; background: var(--bg, #f7f7f8); border-top: 1px solid var(--border, #d9dde3); padding: 12px 0; display: flex; align-items: center; gap: 14px; }
+    button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border, #d9dde3); background: var(--card, #fff); color: inherit; cursor: pointer; }
+    button.primary { background: var(--accent, #1d5fb4); color: #fff; border-color: transparent; }
+    button[disabled] { opacity: 0.5; cursor: default; }
+    .summary { font-size: 13px; color: var(--fg-muted, #5b6875); }
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
+    .modal[hidden] { display: none; }
+    .modal-card { background: var(--card, #fff); border-radius: 10px; padding: 20px; width: min(720px, 92vw); }
+    .modal-card textarea { width: 100%; min-height: 200px; font-family: ui-monospace, monospace; font-size: 13px; }
+    .modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+    .modal-status { font-size: 13px; color: var(--fg-muted, #5b6875); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">
+        <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+        <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+      </div>
+      <div>
+        <h1>{{REPORT_TITLE}}</h1>
+        <div class="meta">profile {{PROFILE}} · run {{RUN}} · generated {{GENERATED_AT}}</div>
+      </div>
+    </header>
+
+    <p class="lede">Every row you gave us, in four beats: what we read and checked, what agami did with the question and answered, how it got there, and what to change or keep. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do, and a "keep" is only offered where the numbers agreed and every part held.</p>
+
+    <div id="items"></div>
+
+    <div class="footer">
+      <button type="button" id="btn-generate" class="primary" disabled>Generate decisions</button>
+      <span class="summary" id="summary"></span>
+    </div>
+  </div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Send to Claude</h2>
+      <p class="meta">Copy this block and paste it back into Claude. "keep" is your yes to the offer for that row. "change" sends a definition to save-correction, with your words. "fix" and "reword" come back to you. "nothing" changes nothing.</p>
+      <textarea id="modal-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" id="modal-copy" class="primary">Copy to clipboard</button>
+        <button type="button" id="modal-close">Close</button>
+        <span class="modal-status" id="modal-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, items: {{ITEMS_JSON}} };
+    const decisions = {};   // row -> {decision, words}
+
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function lines(list) { return (list || []).length ? '<ul>' + list.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''; }
+
+    function renderItems() {
+      const root = document.getElementById('items');
+      root.innerHTML = DATA.items.map(item => {
+        const d = decisions[item.row] || {};
+        const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
+        return '<div class="card" data-row="' + item.row + '">'
+          + '<div class="q"><span class="n">#' + item.row + '</span>' + esc(item.label || item.question)
+          + '<span class="status ' + esc(item.status) + '">' + esc(item.status) + '</span></div>'
+          + (item.source ? '<div class="meta">' + esc(item.source) + '</div>' : '')
+          + '<div class="beat"><b>1. What you gave us</b>' + esc(item.question) + lines(item.read) + '</div>'
+          + '<div class="beat"><b>2. What agami did</b>agami answered <code>' + esc(item.answer) + '</code>'
+          + (item.expected ? '; you expected <code>' + esc(item.expected) + '</code>' : '') + '</div>'
+          + '<div class="beat"><b>3. How it got there</b>' + lines(item.how)
+          + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
+          + (item.disagreement ? '<div>' + esc(item.disagreement) + '</div>' : '') + '</div>'
+          + '<div class="beat"><b>4. What to change or keep</b>' + lines(item.change) + '</div>'
+          + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+          + '<div class="grade">'
+          + choices.map(v =>
+              '<label><input type="radio" name="d' + item.row + '" value="' + v + '"'
+              + (d.decision === v ? ' checked' : '') + '> ' + v + '</label>').join('')
+          + '</div>'
+          + '<div class="more"' + (d.decision === 'change' || d.decision === 'fix' || d.decision === 'reword' ? '' : ' hidden') + '>'
+          + '<label>Say what should change, in words<textarea data-field="words" placeholder="e.g. revenue should net refunds">' + esc(d.words || '') + '</textarea></label>'
+          + '</div>'
+          + '</div>';
+      }).join('');
+      root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
+      root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
+      renderSummary();
+    }
+
+    function onDecide(e) {
+      const card = e.target.closest('.card');
+      const row = Number(card.dataset.row);
+      decisions[row] = Object.assign(decisions[row] || {}, { decision: e.target.value });
+      card.querySelector('.more').hidden = !['change', 'fix', 'reword'].includes(e.target.value);
+      renderSummary();
+    }
+
+    function onText(e) {
+      const row = Number(e.target.closest('.card').dataset.row);
+      decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value });
+    }
+
+    function decided() {
+      return Object.keys(decisions).filter(r => decisions[r].decision).map(r => {
+        const d = decisions[r];
+        const out = { row: Number(r), decision: d.decision };
+        if (d.words && d.words.trim() && d.decision !== 'keep' && d.decision !== 'nothing') out.words = d.words.trim();
+        return out;
+      }).sort((a, b) => a.row - b.row);
+    }
+
+    function renderSummary() {
+      const n = decided().length;
+      document.getElementById('btn-generate').disabled = n === 0;
+      document.getElementById('summary').textContent = n
+        ? n + ' of ' + DATA.items.length + ' decided. Nothing is applied until you paste the block into Claude.'
+        : 'Nothing decided yet.';
+    }
+
+    // The block Claude reads back: profile first, then the run, then the decisions under a bare
+    // header with the array on its own line, and done last: the grading page's format, unchanged.
+    function generateDecisions() {
+      const out = ['profile: ' + (DATA.profile || ''), 'reconcile-run: ' + (DATA.run || ''),
+                   'decisions:', JSON.stringify(decided()), 'done'];
+      document.getElementById('modal-text').value = out.join('\n') + '\n';
+      document.getElementById('modal').hidden = false;
+      document.getElementById('modal-status').textContent = '';
+    }
+
+    document.getElementById('btn-generate').addEventListener('click', generateDecisions);
+    document.getElementById('modal-close').addEventListener('click', () => {
+      document.getElementById('modal').hidden = true;
+    });
+    document.getElementById('modal-copy').addEventListener('click', async () => {
+      const status = document.getElementById('modal-status');
+      try {
+        await navigator.clipboard.writeText(document.getElementById('modal-text').value);
+        status.textContent = '✓ Copied. Paste it back in Claude.';
+      } catch (e) {
+        document.getElementById('modal-text').select();
+        status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.';
+      }
+    });
+
+    renderItems();
+  </script>
+</body>
+</html>

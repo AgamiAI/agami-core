@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""
+Reconcile report page renderer.
+
+One page per run, one card per row, told in the four beats Phase 3 tells them in: what you gave us
+and how we checked it; what agami did with the question and what it answered; how it got there;
+what to change or keep. Built from the same theme, logos and paste-back grammar as the grading page
+and the model explorer, so a run is shown the way the semantic model is shown. Stdlib only.
+
+Two rules, the grading page's own: never a result row (one cell or a shape), and no control decides
+anything on its own. A "keep" is the person's yes to Phase 3e's offer for that row and is offered
+only where the run scored the row `match`; every other decision goes back through the door that
+already exists (save-correction for a definition, the person for a fix or a reword).
+
+Usage:
+
+    python3 render_reconcile_report.py \\
+        --title "Reconcile · default" --profile default --run 20260912-101500 \\
+        --items-file /tmp/agami-reconcile-report-items.json \\
+        --out <artifacts_dir>/local/reconcile/20260912-101500/report.html
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import html
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
+TEMPLATE_PATH = SHARED_DIR / "reconcile-report-template.html"
+LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
+LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
+THEME_PATH = SHARED_DIR / "theme.css"
+
+# What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
+# plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
+_FIELDS = ("row", "label", "question", "source", "status", "expected", "answer",
+           "read", "how", "words", "disagreement", "change", "report_path")
+_LISTS = ("read", "how", "words", "change")
+_STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
+
+
+def _validate_item(item: dict, idx: int) -> None:
+    if not isinstance(item, dict):
+        raise ValueError(f"item {idx}: must be an object")
+    if not isinstance(item.get("row"), int) or isinstance(item.get("row"), bool):
+        raise ValueError(f"item {idx}: 'row' (integer) is required")
+    if not isinstance(item.get("question"), str) or not item["question"].strip():
+        raise ValueError(f"item {idx}: 'question' (string) is required")
+    if "rows" in item or "recorded" in item:
+        raise ValueError(f"item {idx}: result rows are never rendered; pass 'answer' as display text")
+    if item.get("status") not in _STATUSES:
+        raise ValueError(f"item {idx}: 'status' must be one of {sorted(_STATUSES)}")
+    for key in ("label", "source", "expected", "answer", "disagreement", "report_path"):
+        if key in item and item[key] is not None and not isinstance(item[key], str):
+            raise ValueError(f"item {idx}: '{key}' must be display text")
+    for key in _LISTS:
+        value = item.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
+            raise ValueError(f"item {idx}: '{key}' must be a list of sentences")
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
+    for i, item in enumerate(items):
+        _validate_item(item, i)
+    projected = [{k: item.get(k) for k in _FIELDS if k in item} for item in items]
+    for item in projected:
+        for key in _LISTS:
+            item.setdefault(key, [])
+        for key in ("label", "source", "expected", "answer", "disagreement", "report_path"):
+            item.setdefault(key, None)
+        # The one rule the page enforces about decisions: keep is offered where the run said match.
+        item["keep_allowed"] = item["status"] == "match"
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    values = {
+        "REPORT_TITLE": html.escape(title),
+        "GENERATED_AT": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "PROFILE": html.escape(profile or ""),
+        "RUN": html.escape(run or ""),
+        "PROFILE_JSON": _script_json(profile or ""),
+        "RUN_JSON": _script_json(run or ""),
+        "ITEMS_JSON": _script_json(projected),
+        "AGAMI_LOGO_DARK_TEXT": _read(LOGO_DARK_PATH),
+        "AGAMI_LOGO_LIGHT_TEXT": _read(LOGO_LIGHT_PATH),
+        "THEME_CSS": _read(THEME_PATH),
+    }
+    # One pass, so a placeholder token inside a person's text is copied and never expanded.
+    return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
+
+
+def _script_json(payload) -> str:
+    """JSON safe inside a `<script>` block: every `<` written as `\\u003c`."""
+    return json.dumps(payload).replace("<", "\\u003c")
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description="Render the reconcile report page.")
+    p.add_argument("--title", required=True)
+    p.add_argument("--profile", required=True, help="Active profile name")
+    p.add_argument("--run", required=True, help="The reconcile run's folder name (its timestamp)")
+    p.add_argument("--items-file", required=True,
+                   help="JSON array of {row, label, question, source, status, expected, answer, read, how, words, disagreement, change, report_path}")
+    p.add_argument("--out", required=True)
+    args = p.parse_args(argv)
+
+    with open(os.path.expanduser(args.items_file), encoding="utf-8") as f:
+        items = json.load(f)
+    if not isinstance(items, list):
+        sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
+        return 1
+    try:
+        page = render(title=args.title, profile=args.profile, run=args.run, items=items)
+    except ValueError as exc:
+        sys.stderr.write(f"render_reconcile_report: {exc}\n")
+        return 1
+    out_path = Path(os.path.expanduser(args.out))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(page, encoding="utf-8")
+    print(f"Wrote {out_path} ({len(items)} row{'s' if len(items) != 1 else ''})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

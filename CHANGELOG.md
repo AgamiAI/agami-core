@@ -113,6 +113,9 @@ below corresponds to one such version.
   the input, what agami did with the question and answered, how it got there, and what to change or
   keep. The tables and the offer keep their text. The ledger runs once per row, after the
   comparison. (ACE-122)
+- One reconcile report page per run, on the plugin's theme, tells every row in the four beats and
+  takes the person's decisions back as one pasted block; a keep is offered only where the run said
+  match, and every decision goes through a door that already exists. (ACE-123)
 
 ### Fixed
 
