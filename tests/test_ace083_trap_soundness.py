@@ -2700,3 +2700,139 @@ def test_the_derived_edge_does_not_depend_on_which_source_the_statement_wrote_fi
                for sql in (preserving_first, changing_first)]
     assert answers[0] == answers[1], answers
     assert answers[0] == [("SUM(p.total_amount)", rt.MULTIPLIED, ["orders (1) <- g (N)"])], answers
+
+
+# --- a chasm needs two INDEPENDENT paths to the dimension -------------------
+#
+# `_shared_dimension`'s docstring always required the sources to be "not directly related to each
+# other" and never checked it, so a CHAIN read as a chasm whenever the model also declared a
+# shortcut edge from the start of the chain to its end. That is a LOOSENING, so it comes with the
+# reverse pin beside it: the same model, with the two measures each joined to the dimension on
+# their own, is still a chasm.
+#
+# Its own model rather than `_sales_org`, which has no table with a declared shortcut past its
+# neighbour, and extending that shared fixture would move every receipt the batteries above pin.
+
+
+def _catalog_org() -> "m.Datasource":
+    """Order lines, products and categories, where a line carries its own `category_id` as well as
+    the product's — and the model declares BOTH edges to `categories`."""
+    tables = [
+        m.Table(name="order_lines", schema="public", storage_connection="c", grain=["id"],
+                description="order lines",
+                columns=[m.Column(name="id", type="integer"),
+                         m.Column(name="product_id", type="integer"),
+                         m.Column(name="category_id", type="integer"),
+                         m.Column(name="quantity", type="integer"),
+                         m.Column(name="amount", type="decimal")]),
+        m.Table(name="products", schema="public", storage_connection="c", grain=["id"],
+                description="products",
+                columns=[m.Column(name="id", type="integer"),
+                         m.Column(name="category_id", type="integer"),
+                         m.Column(name="cost", type="decimal")]),
+        m.Table(name="categories", schema="public", storage_connection="c", grain=["id"],
+                description="categories",
+                columns=[m.Column(name="id", type="integer"),
+                         m.Column(name="name", type="string")]),
+    ]
+    rels = [
+        m.Relationship(from_table="order_lines", to_table="products", from_column="product_id",
+                       to_column="id", relationship="many_to_one"),
+        m.Relationship(from_table="products", to_table="categories", from_column="category_id",
+                       to_column="id", relationship="many_to_one"),
+        m.Relationship(from_table="order_lines", to_table="categories", from_column="category_id",
+                       to_column="id", relationship="many_to_one"),
+    ]
+    return m.Datasource(datasource="Catalog",
+                        subject_areas=[m.SubjectArea(name="catalog", tables_defined=tables,
+                                                     relationships=rels)])
+
+
+# The chain: every join runs from a row to its one parent, so nothing is repeated.
+REVENUE_AND_COST_BY_CATEGORY_THROUGH_THE_PRODUCT = (
+    "SELECT c.name, SUM(ol.amount), SUM(ol.quantity * p.cost) FROM order_lines ol "
+    "JOIN products p ON ol.product_id = p.id "
+    "JOIN categories c ON p.category_id = c.id GROUP BY c.name"
+)
+# The chasm: lines and products each reach `categories` on their own and are never joined to each
+# other, so every line of a category pairs with every product of it.
+REVENUE_AND_COST_BY_CATEGORY_JOINED_SEPARATELY = (
+    "SELECT c.name, SUM(ol.amount), SUM(p.cost) FROM categories c "
+    "JOIN order_lines ol ON ol.category_id = c.id "
+    "JOIN products p ON p.category_id = c.id GROUP BY c.name"
+)
+
+
+def _catalog_reports(sql: str) -> list["rt.AggregateReport"]:
+    """`_reports`' guards, against the catalog model: an unparsed statement also returns no
+    aggregates, and "no report names a chasm" is true of an empty list."""
+    pf = rt.pre_flight_check(sql, _catalog_org())
+    assert pf.unchecked is None, pf.unchecked
+    assert pf.aggregates, sql
+    return pf.aggregates
+
+
+def _risks(sql: str) -> list[list[str]]:
+    return [[f.risk for f in a.findings] for a in _catalog_reports(sql)]
+
+
+def test_a_chain_is_not_a_chasm_because_the_model_also_declares_a_shortcut():
+    reports = _catalog_reports(REVENUE_AND_COST_BY_CATEGORY_THROUGH_THE_PRODUCT)
+
+    assert all("chasm_trap" not in [f.risk for f in a.findings] for a in reports), reports
+    assert all("order_lines -> categories" not in a.joins for a in reports), (
+        "the receipt must not name a join the statement never wrote"
+    )
+
+
+def test_two_measures_joined_to_the_dimension_separately_are_still_a_chasm():
+    """The reverse pin. The model edge `order_lines -> products` exists here too, and it clears
+    nothing: only a join the statement wrote does, and this statement wrote none between them."""
+    risks = _risks(REVENUE_AND_COST_BY_CATEGORY_JOINED_SEPARATELY)
+
+    assert len(risks) == 2
+    assert all("chasm_trap" in item for item in risks), risks
+
+
+def test_a_join_the_on_clause_cannot_pin_to_both_tables_clears_nothing():
+    """An unqualified column resolves to no table, so the pair is unread rather than joined — and an
+    unread pair is not evidence the two measures share a path."""
+    sql = (
+        "SELECT c.name, SUM(ol.amount), SUM(p.cost) FROM categories c "
+        "JOIN order_lines ol ON ol.category_id = c.id "
+        "JOIN products p ON p.category_id = c.id AND product_id = id GROUP BY c.name"
+    )
+
+    risks = _risks(sql)
+    assert all("chasm_trap" in item for item in risks), risks
+
+
+def test_a_compound_on_over_three_relations_clears_nothing():
+    """The ON below does write `ol.product_id = p.id`, but it reaches over lines, products AND
+    categories, which the joins section cannot reduce to one pair and reports undetermined. A pair
+    that section refused to read is not evidence here either, so the chasm stands."""
+    sql = (
+        "SELECT c.name, SUM(ol.amount), SUM(p.cost) FROM categories c "
+        "JOIN order_lines ol ON ol.category_id = c.id "
+        "JOIN products p ON p.category_id = c.id AND ol.product_id = p.id GROUP BY c.name"
+    )
+
+    risks = _risks(sql)
+    assert len(risks) == 2
+    assert all("chasm_trap" in item for item in risks), risks
+
+
+def test_a_chain_through_a_cte_on_the_right_is_not_a_chasm():
+    """The same chain as `REVENUE_AND_COST_BY_CATEGORY_THROUGH_THE_PRODUCT`, with products read through
+    a grain-preserving CTE. The join's written name is `p`, its columns resolve to `products`, and the
+    two must be compared through the same map or the valid join is discarded."""
+    sql = (
+        "WITH p AS (SELECT * FROM products) "
+        "SELECT c.name, SUM(ol.amount), SUM(ol.quantity * p.cost) FROM order_lines ol "
+        "JOIN p ON ol.product_id = p.id "
+        "JOIN categories c ON p.category_id = c.id GROUP BY c.name"
+    )
+
+    risks = _risks(sql)
+    assert all("chasm_trap" not in item for item in risks), risks
+

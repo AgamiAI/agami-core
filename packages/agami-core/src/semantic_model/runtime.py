@@ -1777,7 +1777,8 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     if agg_sources:
         # CHASM: two distinct aggregate source tables both 'many' to a shared dim
         if len(agg_sources) >= 2:
-            shared = _shared_dimension(agg_sources, table_set, rels)
+            shared = _shared_dimension(
+                agg_sources, table_set, rels, _joined_table_pairs(tree, tables_in_scope))
             if shared:
                 # WHICH of the sources the shared dimension fans out, re-derived with the same
                 # predicate `_shared_dimension` used to pick it. It is what turns one finding about
@@ -4556,17 +4557,72 @@ def _resolve_col_table(col: "exp.Column", scope: dict[str, str]) -> Optional[str
 
 
 def _shared_dimension(
-    agg_sources: set[str], table_set: set[str], rels: list[Relationship]
+    agg_sources: set[str], table_set: set[str], rels: list[Relationship],
+    joined: frozenset[frozenset[str]] = frozenset(),
 ) -> Optional[str]:
     """Find a dimension table that >=2 of the aggregate sources are each MANY-to
-    (the ONE side), with the sources not directly related to each other."""
+    (the ONE side), with the sources not directly related to each other.
+
+    **"Not directly related" is now checked, against the joins the statement WROTE.** The docstring
+    stated it and the loop never tested it, so a chain — lines joined to products, products joined to
+    categories — read as a chasm whenever the model ALSO declared a line-to-category edge: both
+    sources are many-to-one to `categories` in the model, and the model is all this looked at. That
+    edge was never traversed. A chasm is two measures reaching one dimension INDEPENDENTLY, and two
+    sources the statement joined to each other are one path, not two; the cross-product that inflates
+    a chasm has no room to happen between them.
+
+    Only a join the statement wrote clears a pair, and only one whose ON pins both tables. A model
+    edge between the two sources clears nothing, because a statement that joins each of them to the
+    dimension separately IS the chasm whatever else the model declares — and a pair this layer could
+    not read out of an ON is not evidence they were joined. Both of those leave the finding standing:
+    over-reporting is a receipt that says more than it had to, the other polarity says something
+    false (see `INFLATED_SHAPES`).
+    """
     for dim in table_set:
         if dim in agg_sources:
             continue
-        many_sources = [s for s in agg_sources if _many_side_facing_one(rels, s, dim)]
-        if len(many_sources) >= 2:
+        many_sources = sorted(s for s in agg_sources if _many_side_facing_one(rels, s, dim))
+        if any(
+            frozenset((_tkey(_bare(a)), _tkey(_bare(b)))) not in joined
+            for i, a in enumerate(many_sources)
+            for b in many_sources[i + 1:]
+        ):
             return dim
     return None
+
+
+def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozenset[frozenset[str]]:
+    """The pairs of tables THIS SELECT's own explicit joins connect, each an unordered pair.
+
+    Read off `_predicate_pairs`, so a pair is normalized exactly the way the joins section compares a
+    written join against a declaration, and an unqualified column — a relation this layer did not
+    resolve — contributes nothing. This SELECT's own `joins` argument rather than a subtree walk: a
+    join inside a CTE body or a subquery connects that scope's tables, not this one's, and the
+    per-arm rule `_preflight_select` states for its alias map holds here for the same reason.
+
+    **Only an ON pinned to its own join's two relations counts**, by the same rule `_join_sites`
+    applies: it names the right-hand relation and at most one other. A compound ON reaching back over
+    three relations is one the joins section reports UNDETERMINED, and a pair read out of it is no
+    firmer here than there — accepting it would clear a chasm on evidence that section refused.
+    """
+    pairs: set[frozenset[str]] = set()
+    for join in tree.args.get("joins") or ():
+        on = join.args.get("on")
+        if on is None:
+            continue
+        # Both sides through the SAME map. The column qualifiers are resolved through `scope_map`, which
+        # may already have turned a CTE name into the table it reads (`p` -> `products`); comparing
+        # them with the join's WRITTEN name threw out a valid join to a grain-preserving CTE and left
+        # the chain reported as a chasm.
+        right = scope_map.get(join.this.alias_or_name, _relation_name(join.this))
+        names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
+        if right not in names or len(names - {right}) > 1:
+            continue
+        for pair in _predicate_pairs(on, scope_map):
+            tables = frozenset(table for table, _column in pair)
+            if len(tables) == 2:
+                pairs.add(tables)
+    return frozenset(pairs)
 
 
 # `apply_default_filters` was deleted here by ACE-042: declared filters are business logic, not a
