@@ -341,3 +341,10 @@ def test_phase_3_keeps_to_plain_words():
     layout = (Path(__file__).resolve().parent.parent / "plugins" / "agami" / "shared" / "file-layout.md").read_text()
     assert "report-items.json" in layout and "intake.html" in layout
 
+
+def test_the_items_file_carries_the_result_and_the_fix():
+    story = _between(SKILL, "### 3a.5", "### 3b")
+    assert "`result` (`data`: matches, partly, differs or could_not_compare" in story and "`fix` (your query, the semantic model, the examples, the question, agami again, or nothing)" in story
+    table = _between(SKILL, "### 2d", "### 2e")
+    assert 'A query written differently from agami\'s is not this' in table and '"same answer, different query"' in table
+

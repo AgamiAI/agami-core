@@ -107,3 +107,27 @@ def test_the_second_reviews_findings_on_the_renderer():
     # a suggested keep on a row that cannot be kept falls back to nothing
     assert "(SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing'" in html
 
+
+def test_the_result_pill_and_the_fix_pill_come_from_the_verbs_two_fields():
+    item = dict(ITEM, result={"data": "matches", "query": "different", "label": "same answer, different query", "unchecked": 2, "differs_in": ["filters"]},
+                fix="examples", fix_words="add an example", keep_allowed=True)
+    html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
+    for token in ("function resultPill(item)", "'same answer, different query'".replace("'", '"')[1:-1], "check' : ' checks') + ' not run", "FIX_WORDS = { query: 'fix your query'",
+                  "examples: item.keep_allowed ? 'keep' : 'change'", 'id="result-chips"', "<b>fix</b>", '"fix": "examples"', '"label": "same answer, different query"'):
+        assert token in html, token
+    with pytest.raises(ValueError, match="'result' needs data in"):
+        rr.render(title="t", profile="p", run="r", items=[dict(item, result={"data": "maybe", "query": "same", "label": "x"})])
+    with pytest.raises(ValueError, match="'fix' must be one of"):
+        rr.render(title="t", profile="p", run="r", items=[dict(item, fix="rewrite")])
+    # an older items file without the two fields still renders with the status pill and the owner
+    old = dict(ITEM)
+    assert "resultPill(item)" in rr.render(title="t", profile="p", run="r", items=[old, dict(old, row=3)])
+
+
+def test_the_result_chips_filter_and_replace_the_status_chips_when_labels_exist():
+    item = dict(ITEM, result={"data": "differs", "query": "different", "label": "different answer", "unchecked": 0, "differs_in": ["columns"]}, fix="query", fix_words="fix your query")
+    html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
+    for token in ("view.result.has((item.result || {}).label || '')", 'data-result="\' + esc(label) + \'"'.replace("\\", ""), "toggle(view.result, el.dataset.result)",
+                  "document.getElementById('result-row').hidden = Object.keys(labels).length === 0;", "view.result.clear();"):
+        assert token in html, token
+

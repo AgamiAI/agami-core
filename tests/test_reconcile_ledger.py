@@ -401,7 +401,7 @@ def test_claims_are_read_only_when_asked_and_a_difference_is_named_not_judged(tm
         "gates": [], "gated": False})
     assert "predicates" not in _parts(ledger(tmp_path))
     parts = _parts(ledger(tmp_path, with_claims=True))
-    assert parts["predicates"]["verdict"] == "unresolved" and parts["predicates"]["evidence"]["generated"] == ["a"]
+    assert parts["predicates"]["verdict"] == "noted" and parts["predicates"]["kind"] == "different_query" and parts["predicates"]["evidence"]["generated"] == ["a"]
     assert parts["date_window"]["verdict"] == "unresolved"
 
 
