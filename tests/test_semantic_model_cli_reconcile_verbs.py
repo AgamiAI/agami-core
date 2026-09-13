@@ -870,3 +870,94 @@ def test_an_unreadable_plan_judges_to_the_same_shape_as_a_readable_one(tmp_path)
     out = _judge(tmp_path, {"literals": [], "columns": {}, "skipped": [], "unreadable": "the statement could not be read",
                             "dialect": None}, {})
     assert set(out) == {"literals", "columns", "unreadable", "dialect"} and out["columns"] == {}
+# --- mentions: the semantic model's own words about what a statement reads ------------------
+
+
+def _prose_model(root: Path) -> None:
+    """The verbs' fixture plus prose on every layer: a table caveat and a column caveat that name
+    DIFFERENT values for `orders.status`, a glossary line, a narrative paragraph, and an example."""
+    _model(root)
+    orders_yaml = root / "subject_areas" / "s" / "tables" / "orders.yaml"
+    orders = yaml.safe_load(orders_yaml.read_text())
+    orders["caveats"] = ["open orders are status NOT LIKE 'closed%'"]
+    for col in orders["columns"]:
+        if col["name"] == "status":
+            col["description"] = "The order's lifecycle state."
+            col["caveats"] = ["pending fulfillment is status IN ('pending', 'paid')"]
+    orders_yaml.write_text(yaml.safe_dump(orders))
+    ds_yaml = root / "datasource.yaml"
+    ds = yaml.safe_load(ds_yaml.read_text())
+    ds["key_terminology"] = {"pending": "an orders row whose status has not reached shipped"}
+    ds_yaml.write_text(yaml.safe_dump(ds))
+    (root / "datasource.md").write_text("Orders are the unit of sale.\n\nCustomers are people, never companies.\n")
+    (root / "prompt_examples" / "s").mkdir(parents=True)
+    (root / "prompt_examples" / "s" / "examples.yaml").write_text(yaml.safe_dump({"examples": [
+        {"question": "How many pending orders?", "sql": "SELECT COUNT(*) FROM orders WHERE status = 'pending'",
+         "notes": ["pending excludes paid"]},
+        {"question": "How many customers?", "sql": "SELECT COUNT(*) FROM customers"}]}))
+
+
+def _mentions(tmp_path: Path, sql: str) -> dict:
+    s = _write(tmp_path, "m.sql", sql)
+    rc, out = _run(["mentions", str(tmp_path), "--sql-file", s])
+    assert rc == 0, out
+    return json.loads(out)
+
+
+def test_mentions_quotes_every_prose_layer_about_what_the_statement_reads(tmp_path):
+    _prose_model(tmp_path)
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders o WHERE o.status = 'pending'")
+    assert d["subjects"] == ["orders", "orders.status"] and d["unreadable"] is None
+    by = {(m["about"], m["source"]) for m in d["mentions"]}
+    assert ("orders", "table.description") in by and ("orders", "table.caveat") in by
+    assert ("orders.status", "column.description") in by and ("orders.status", "column.caveat") in by
+    assert ("orders.status", "glossary") in by  # "an orders row whose status ..." names both words
+    assert ("orders", "datasource.md") in by
+    assert ("orders.status", "example") in by
+    example = next(m for m in d["mentions"] if m["source"] == "example" and m["about"] == "orders.status")
+    assert example["where"] == "How many pending orders?" and "pending excludes paid" in example["text"]
+    # The customers example and the customers paragraph are about a table the statement never reads.
+    assert not any("customers" in m["about"] for m in d["mentions"])
+    for m in d["mentions"]:
+        assert set(m) == {"about", "source", "where", "text"} and len(m["text"]) <= 300
+
+
+def test_two_caveats_naming_different_values_for_one_column_are_flagged(tmp_path):
+    _prose_model(tmp_path)
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'pending'")
+    (flag,) = [f for f in d["flags"] if f["kind"] == "values_named_differ"]
+    assert flag["about"] == "orders.status"
+    # The table caveat names the column, so it is about the column too and takes part in the flag.
+    assert set(flag["sources"]) >= {"orders", "orders.status", "How many pending orders?"}
+    # The same set everywhere is not a disagreement, and a line naming no value takes no part in it.
+    orders_yaml = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    orders = yaml.safe_load(orders_yaml.read_text())
+    orders["caveats"] = ["open orders are status IN ('pending', 'paid')"]
+    orders_yaml.write_text(yaml.safe_dump(orders))
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text(yaml.safe_dump({"examples": [
+        {"question": "How many open orders?", "sql": "SELECT COUNT(*) FROM orders WHERE status IN ('paid', 'pending')"}]}))
+    assert _mentions(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'pending'")["flags"] == []
+
+
+def test_mentions_are_empty_for_a_statement_that_reads_nothing_described_and_say_when_unreadable(tmp_path):
+    _model(tmp_path)
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM order_items")
+    assert d["subjects"] == ["order_items"]
+    assert [m["source"] for m in d["mentions"]] == ["table.description"]  # "oi", the fixture's one line
+    d = _mentions(tmp_path, "SELECT FROM WHERE")
+    assert d["mentions"] == [] and d["subjects"] == [] and d["flags"] == [] and "could not be parsed" in d["unreadable"]
+
+
+def test_a_prose_source_that_cannot_be_read_is_said_and_the_rest_still_flows(tmp_path):
+    """A narrative that is not UTF-8 and an examples file that is not YAML used to crash the verb,
+    leaving an empty file the ledger read as "no prose". Each is one `skipped` entry now."""
+    _prose_model(tmp_path)
+    (tmp_path / "datasource.md").write_bytes(b"\xff\xfe not utf-8")
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text("examples: [ {question: 'x', sql: [unclosed")
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'pending'")
+    assert {s["source"] for s in d["skipped"]} == {"datasource.md", "example"}
+    assert ("orders.status", "column.caveat") in {(m["about"], m["source"]) for m in d["mentions"]}
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text("examples: ['just a string', {question: 'How many orders?', sql: 'SELECT COUNT(*) FROM orders'}]")
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders")
+    assert any(s["reason"] == "an entry is not an object" for s in d["skipped"])
+    assert any(m["source"] == "example" for m in d["mentions"])

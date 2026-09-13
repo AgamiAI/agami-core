@@ -69,8 +69,16 @@ and writes `ledger.json` beside the inputs.
 | `<literal id>.exists.csv`, `<literal id>.exists_folded.csv` | the tier | one value's row count, and the folded near miss, run only when `exists` returned 0 |
 | `filter-values.judge.json` | `sm filter-values judge` | one grade per typed value |
 | `claims.json` | `sm claims` | the diff against the AI's own statement, once both exist |
+| `mentions.json` | `sm mentions --sql-file` | every description, caveat, glossary line, narrative paragraph and prompt example that mentions a table or column the statement reads, with a `values_named_differ` flag when two mentions about one column name different quoted values. Optional: absent, the ledger grades as before |
 | `receipt.json` | `sm receipt` | the receipt of the AI's statement |
 | `ledger.json` | `reconcile.py ledger` | the graded parts |
+
+**The semantic model's words ride on the parts that fell short.** When `mentions.json` is present,
+every part that is not `confirmed` or `noted` and names a table or column (`literal:`,
+`values_declared:`, `default_filter:`, `join:` and its siblings) carries `evidence.prose`: the
+mentions about that column and its table, at most twenty. A `values_named_differ` flag on the column
+lands in `evidence.prose_flags` and the note says two descriptions disagree. Never a grade: the words
+that shaped the SQL sit beside the number that went wrong, for a person to read.
 
 **A zero-byte probe CSV is a probe that failed**, because the tier writes CSV to stdout only on
 success. The ledger reads it as unresolved and says so. A header-only CSV is a probe that ran and
