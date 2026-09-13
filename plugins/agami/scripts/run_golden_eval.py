@@ -459,10 +459,11 @@ def _fixed_context(schema: str, org_context: str) -> str:
     very paragraph that says what a code means.
     """
     _, prose = _split_payload(schema)
+    present = _paragraphs(prose)
     missing = [
         paragraph
         for paragraph in org_context.split("\n\n")
-        if paragraph.strip() and paragraph.strip() not in prose
+        if paragraph.strip() and _normalized(paragraph) not in present
     ]
     if not missing:
         return schema
@@ -470,6 +471,33 @@ def _fixed_context(schema: str, org_context: str) -> str:
         f"{schema}\n\nWhat this datasource means, and what its codes stand for:\n"
         + "\n\n".join(missing)
     )
+
+
+# The headings the tool writes in front of the prose it appends, glued to that prose's first paragraph
+# by a single newline. Peeled off before comparing, or the glossary's own first paragraph — the same
+# text without the heading — would never be recognised as already sent.
+_TOOL_HEADINGS = ("## Domain context", "## USER_MEMORY.md")
+
+
+def _normalized(paragraph: str) -> str:
+    """A paragraph as compared: every run of whitespace one space, none at either end."""
+    return " ".join(paragraph.split())
+
+
+def _paragraphs(prose: str) -> set[str]:
+    """Every whole paragraph of the tool's prose, normalized, with a tool-added heading peeled off.
+
+    Whole paragraphs and not substrings, because a glossary line that happens to sit INSIDE a longer
+    paragraph is not the same paragraph: "paid orders are held" is inside "Unpaid orders are held",
+    and dropping it as already sent would lose the one line that says what a code means.
+    """
+    found: set[str] = set()
+    for paragraph in prose.split("\n\n"):
+        lines = paragraph.strip().splitlines()
+        if lines and lines[0].startswith(_TOOL_HEADINGS):
+            found.add(_normalized("\n".join(lines[1:])))
+        found.add(_normalized(paragraph))
+    return found - {""}
 
 
 # No `mode` is passed, and that is the point rather than an omission. `auto` is what a real session

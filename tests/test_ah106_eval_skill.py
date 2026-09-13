@@ -978,6 +978,9 @@ def test_a_glossary_paragraph_the_tool_already_sends_is_not_sent_twice():
     assert run_golden_eval._fixed_context(schema, "") == schema
     # A sentence that only matches a description inside the JSON is not the glossary, so it is kept.
     assert run_golden_eval._fixed_context(schema, "Refunds are negative amounts.") != schema
+    # Whole paragraphs, not substrings: a glossary line that only appears INSIDE a longer paragraph
+    # of the tool's prose is not that paragraph, and dropping it could lose what a code means.
+    assert run_golden_eval._fixed_context(schema, "counted at order grain.") != schema
 
 
 def _tool_response(document: dict) -> str:
