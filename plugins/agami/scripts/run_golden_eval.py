@@ -348,21 +348,18 @@ def _model_context(cached: dict, question: str) -> GenerationContext:
 
     The fixed half was fetched once for the run and is the same bytes for every question — that
     sameness is the whole of what lets the client read it from cache after the first item, so
-    nothing that depends on the question may be folded into it. The per-question half is the two
-    things a question changes: the metrics the tool selects for it, and the examples ranked nearest
-    to it.
+    nothing that depends on the question may be folded into it. The per-question half is what a
+    question changes: whatever the tool's answer for it adds to the fixed description — usually just
+    the metrics that description lacks — and the examples ranked nearest to it.
 
     Section order still mirrors `agami-query/SKILL.md` Phase 2b — the vocabulary, the datasource
-    context, then the examples — with the question's own metrics moved after the fixed vocabulary
-    rather than inside it.
+    context, then the examples — with what the question adds moved after the fixed vocabulary rather
+    than inside it.
     """
     sections: list[str] = []
-    metrics = _metrics_for_the_question(cached["profile"], question)
-    if metrics:
-        sections.append(
-            "The metrics this question touches — reuse a `binding` verbatim:\n"
-            + json.dumps(metrics, indent=2, default=str)
-        )
+    changed = _what_the_question_changes(cached["fixed"], cached["profile"], question)
+    if changed:
+        sections.append(changed)
     examples = _examples_text(cached["root"], cached["areas"], question, cached["top_k"])
     if examples:
         sections.append(
@@ -426,18 +423,36 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
     }
 
 
+def _split_payload(payload: str) -> tuple[dict, str]:
+    """The tool's response in its two parts: the leading JSON document, and the prose after it.
+
+    A response that does not open with a JSON object — an error sentence, say — has no document and
+    is all prose, which is the reading that keeps everything and drops nothing.
+    """
+    try:
+        document, end = json.JSONDecoder().raw_decode(payload)
+    except ValueError:
+        return {}, payload
+    return (document if isinstance(document, dict) else {}), payload[end:]
+
+
 def _fixed_context(schema: str, org_context: str) -> str:
     """The run's fixed half: the tool's own description, plus whatever of the glossary it lacks.
 
     Deduplicated by paragraph rather than dropped outright, because the tool composes its domain
     context from the same sources `sm org-context` reads but not on every profile, and not always
-    the whole of it. A paragraph already in the tool's payload is left out; one that is not is kept,
-    so the F22 failure above cannot come back on a profile whose payload is shorter.
+    the whole of it. A paragraph already in the tool's prose is left out; one that is not is kept, so
+    the F22 failure above cannot come back on a profile whose payload is shorter.
+
+    Only the prose is searched, not the JSON before it. A glossary sentence that happens to match a
+    table's or a metric's description is not the glossary, and counting it as covered would drop the
+    very paragraph that says what a code means.
     """
+    _, prose = _split_payload(schema)
     missing = [
         paragraph
         for paragraph in org_context.split("\n\n")
-        if paragraph.strip() and paragraph.strip() not in schema
+        if paragraph.strip() and paragraph.strip() not in prose
     ]
     if not missing:
         return schema
@@ -475,25 +490,43 @@ def _schema_from_the_product(profile: str) -> str:
     return tools.tool_get_datasource_schema({"datasource": profile})
 
 
-def _metrics_for_the_question(profile: str, question: str) -> list[dict]:
-    """The metrics the tool selects for this question, with their `calculation` and `binding`.
+def _what_the_question_changes(fixed: str, profile: str, question: str) -> str:
+    """What the product's answer for THIS question adds to the fixed description, ready for stdin.
 
     `query` is what makes the metrics come back in full rather than as bare names — the tool does
     not narrow on it, it picks which metrics get full detail. Without it a generator cannot reuse a
     binding verbatim, which is the thing F22 requires and the reason a metric exists at all.
 
-    Measured across questions, that list is the ONLY part of the tool's payload a question changes —
-    everything else is byte-identical — so it is read out here and sent with the question, leaving
-    the rest fixed. The payload is JSON followed by the domain context as prose, hence the decode
-    of the leading object alone.
+    Usually the metrics are all that differ, and then only the ones the fixed description does not
+    already carry are sent: in full detail it holds every metric, so resending the question's
+    selection would pay for it twice, outside the cache. But the tool sizes itself under a character
+    budget AFTER choosing metrics, so a question can tip its response to a different level of detail
+    than the fixed one, and then more than the metrics differs. That question gets its whole
+    response, because scoring a generator against a description the product would not have given it
+    for this question scores the wrong thing.
     """
-    payload = tools.tool_get_datasource_schema({"datasource": profile, "query": question})
-    try:
-        document, _ = json.JSONDecoder().raw_decode(payload)
-    except ValueError:
-        return []
-    metrics = document.get("metrics") if isinstance(document, dict) else None
-    return metrics if isinstance(metrics, list) else []
+    fixed_document, _ = _split_payload(fixed)
+    asked, _ = _split_payload(
+        tools.tool_get_datasource_schema({"datasource": profile, "query": question})
+    )
+    changed = {
+        key for key in set(asked) | set(fixed_document) if asked.get(key) != fixed_document.get(key)
+    }
+    if not changed:
+        return ""
+    if changed <= {"metrics"}:
+        already = fixed_document.get("metrics") or []
+        added = [metric for metric in asked.get("metrics") or [] if metric not in already]
+        if not added:
+            return ""
+        return "The metrics this question touches — reuse a `binding` verbatim:\n" + json.dumps(
+            added, indent=2, default=str
+        )
+    return (
+        "The product's own description for this question. It came back at a different level of "
+        "detail than the reference data, so where the two differ, this one applies:\n"
+        + json.dumps(asked, indent=2, default=str)
+    )
 
 
 # The second reason built from an answer-key column name, and the one that carries no structured

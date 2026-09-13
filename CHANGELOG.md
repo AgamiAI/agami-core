@@ -20,8 +20,9 @@ below corresponds to one such version.
   prompt naming a fresh temporary directory. So nothing was ever read from cache, and a dozen
   questions could spend a subscription's session limit. The part of the context that is the same
   for every question — the tool's description of the model, plus any glossary paragraph it lacks —
-  now goes in the child's system prompt, which the client caches; only the question's own metrics
-  and its ranked examples go with the question. Measured: a second call sharing an 11k-token system
+  now goes in the child's system prompt, which the client caches — fenced as reference data, so
+  text people wrote into a narrative or a note cannot act as an instruction. Only what the question
+  adds goes with it: metrics the cached description lacks, and its ranked examples. Measured: a second call sharing an 11k-token system
   prompt read all of it from cache and wrote 134 tokens. Two smaller savings come with it: the
   client's own ~6k-token default system prompt is replaced, and glossary paragraphs the tool already
   sends are no longer sent twice. What the generator is told, and how the answer is scored, are

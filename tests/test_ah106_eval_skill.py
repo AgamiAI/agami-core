@@ -939,10 +939,11 @@ def test_the_generator_is_handed_every_section_and_the_timeout(artifacts, monkey
     assert vocabulary["mode"] in ("full", "summary", "index")
     # The stub's glossary line is not in the tool's own payload, so it is kept, verbatim.
     assert "CustInvc -- a customer invoice" in context.fixed
-    # Metrics arrive in the tool's own shape, selected for THIS question — which is why they travel
-    # with the question and not in the fixed half. What has to survive is the SUBSTANCE: a metric
-    # that cannot be reused verbatim is the failure F22 records.
-    assert '"binding"' in context.per_question or '"calculation"' in context.per_question
+    # What has to survive is the SUBSTANCE: a metric that cannot be reused verbatim is the failure
+    # F22 records. On a model this small the tool answers in full detail, so the fixed half already
+    # carries every metric with its binding — and the question's own metric is not sent again.
+    assert '"binding"' in context.fixed or '"calculation"' in context.fixed
+    assert '"binding"' not in context.per_question, "a metric already cached is not resent"
     assert "like: How many orders?" in context.per_question  # the ranked examples, for this question
     # NOT asserted, and the absence is the finding: `get_datasource_schema` does not put entity
     # aliases in its payload at all — only a count, in prose ("8 entities are defined in the
@@ -963,8 +964,9 @@ def test_a_glossary_paragraph_the_tool_already_sends_is_not_sent_twice():
     kept, so the F22 failure — a code guessed where the glossary defines it — cannot come back on a
     profile whose payload is shorter."""
     schema = (
-        '{"datasource": "demo"}\n\n## Domain context\n'
-        "Orders are counted at order grain.\n\nRefunds are negative amounts."
+        '{"datasource": "demo", "subject_areas": [{"description": "Refunds are negative amounts."}]}'
+        "\n\n## Domain context\n"
+        "Orders are counted at order grain.\n\nPaid means settled."
     )
 
     partly_covered = run_golden_eval._fixed_context(
@@ -972,8 +974,54 @@ def test_a_glossary_paragraph_the_tool_already_sends_is_not_sent_twice():
     )
     assert partly_covered.count("Orders are counted at order grain.") == 1
     assert "CustInvc -- a customer invoice" in partly_covered
-    assert run_golden_eval._fixed_context(schema, "Refunds are negative amounts.") == schema
+    assert run_golden_eval._fixed_context(schema, "Paid means settled.") == schema
     assert run_golden_eval._fixed_context(schema, "") == schema
+    # A sentence that only matches a description inside the JSON is not the glossary, so it is kept.
+    assert run_golden_eval._fixed_context(schema, "Refunds are negative amounts.") != schema
+
+
+def _tool_response(document: dict) -> str:
+    """A schema tool response in its real shape: a JSON document, then prose."""
+    return json.dumps(document, indent=2) + "\n\n## Domain context\nA narrative."
+
+
+def test_a_question_sends_only_the_metrics_the_fixed_description_lacks(monkeypatch):
+    """In full detail the fixed description already carries every metric, so a question's own
+    selection would otherwise be paid for twice — once from the cache, and again beside the
+    question."""
+    revenue = {"name": "revenue", "binding": "SUM(total)"}
+    refunds = {"name": "refunds", "binding": "SUM(refund_amount)"}
+    fixed = _tool_response({"mode": "full", "metrics": [revenue]})
+    answers = {
+        "How much revenue?": _tool_response({"mode": "full", "metrics": [revenue]}),
+        "How much was refunded?": _tool_response({"mode": "full", "metrics": [refunds]}),
+    }
+    monkeypatch.setattr(
+        run_golden_eval.tools, "tool_get_datasource_schema", lambda args: answers[args["query"]]
+    )
+
+    assert run_golden_eval._what_the_question_changes(fixed, PROFILE, "How much revenue?") == ""
+    added = run_golden_eval._what_the_question_changes(fixed, PROFILE, "How much was refunded?")
+    assert "SUM(refund_amount)" in added and "SUM(total)" not in added
+
+
+def test_a_question_that_tips_the_detail_level_sends_its_whole_description(monkeypatch):
+    """The tool sizes itself under a budget AFTER choosing metrics, so a question can come back at a
+    different level of detail than the fixed description. Sending only its metrics then would score
+    the generator against a description the product would not have given it for that question."""
+    fixed = _tool_response({"mode": "full", "metrics": [], "subject_areas": ["with tables"]})
+    asked = _tool_response(
+        {
+            "mode": "summary",
+            "metrics": [{"name": "revenue"}],
+            "subject_areas": ["names only"],
+            "truncated": True,
+        }
+    )
+    monkeypatch.setattr(run_golden_eval.tools, "tool_get_datasource_schema", lambda args: asked)
+
+    sent = run_golden_eval._what_the_question_changes(fixed, PROFILE, "How much revenue?")
+    assert '"mode": "summary"' in sent and "names only" in sent and '"truncated": true' in sent
 
 
 def test_the_examples_are_ranked_for_the_question_being_asked(artifacts, scripted, sm, capsys):
