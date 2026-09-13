@@ -123,6 +123,9 @@ below corresponds to one such version.
 - Reconcile works five rows at a time: `reconcile.py next-chunk` reads the run's checkpoint
   (rows.jsonl) and hands back the next rows, so a long run resumes and no row runs twice; the
   report, intake and grading pages filter by status, owner, shape or a word. (ACE-125)
+- The reconcile report card is a diff grid built by code: `reconcile.py report-items` templates one row
+  per check from the run's files, the check named first, yours and agami as values with the differing
+  tokens highlighted, the sides aligned by construction; one sentence and one action per card. (ACE-126)
 
 ### Fixed
 

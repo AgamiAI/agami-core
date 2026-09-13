@@ -41,8 +41,9 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path")
+           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence")
 _LISTS = ("read", "how", "words", "change", "todo")
+_DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
@@ -77,6 +78,17 @@ def _validate_item(item: dict, idx: int) -> None:
         if (not isinstance(check, dict) or not isinstance(check.get("step"), str)
                 or check.get("state") not in _CHECK_STATES):
             raise ValueError(f"item {idx}: each check needs a 'step' and a 'state' in {sorted(_CHECK_STATES)}")
+    for row in item.get("diff", []) or []:
+        if (not isinstance(row, dict) or not isinstance(row.get("key"), str) or row.get("state") not in _CHECK_STATES):
+            raise ValueError(f"item {idx}: each diff row needs a 'key' and a 'state' in {sorted(_CHECK_STATES)}")
+        for side in ("yours", "agami"):
+            v = row.get(side)
+            if v is not None and not isinstance(v, str) and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+                raise ValueError(f"item {idx}: diff '{side}' must be text or a list of tokens")
+        if "rows" in row:
+            raise ValueError(f"item {idx}: result rows are never rendered, not even inside a diff row")
+    if item.get("sentence") is not None and not isinstance(item["sentence"], str):
+        raise ValueError(f"item {idx}: 'sentence' must be text")
 
 
 def _read(path: Path) -> str:
@@ -88,7 +100,7 @@ def choose_layout(items: list[dict], layout: str = "auto") -> str:
     for anything else. A person can force either."""
     if layout != "auto":
         return layout
-    return "audit" if len(items) == 1 and items[0].get("checks") else "cards"
+    return "audit" if len(items) == 1 and (items[0].get("checks") or items[0].get("diff")) else "cards"
 
 
 def render(*, title: str, profile: str, run: str, items: list[dict], layout: str = "auto") -> str:
@@ -97,6 +109,9 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
     for i, item in enumerate(items):
         _validate_item(item, i)
     projected = [{k: item.get(k) for k in _FIELDS if k in item} for item in items]
+    for item in projected:
+        if item.get("diff"):
+            item["diff"] = [{k: row.get(k) for k in _DIFF_KEYS if k in row} for row in item["diff"]]
     for item in projected:
         for key in _LISTS:
             item.setdefault(key, [])

@@ -1430,6 +1430,341 @@ def next_chunk(run_dir: Path, size: int = CHUNK_SIZE) -> dict:
         "progress": progress,
     }
 
+
+# --------------------------------------------------------------------------------------------
+# report-items: the report page's items, templated from what the run wrote, never written by hand
+# --------------------------------------------------------------------------------------------
+
+_STATE = {CONFIRMED: "held", QUERY_DEFECT: "defect", MODEL_GAP: "gap", UNRESOLVED: "open", NOTED: "noted"}
+_STATE_WORDS = {"held": "held", "defect": "a mistake in your query", "gap": "a gap in the semantic model",
+                "open": "could not check", "noted": "noticed"}
+_CLAIM_KEYS = {"tables": "tables read", "filter_predicates": "filters", "date_window": "date window",
+               "group_keys": "grouped by", "join_keys": "join keys", "ordering": "ordered by", "limit": "limit"}
+# The words a ledger part's grade takes on the page, by part family and grade. Every cell on the
+# page comes from this table, the run's files, or the receipt; none is written by hand.
+_PART_WORDS = {
+    "join": {"held": "declared", "defect": "wrong key", "gap": "undeclared, keys overlap", "open": "could not probe"},
+    "join_key": {"held": "keys match", "defect": "keys do not match", "open": "not probed"},
+    "cardinality": {"held": "one row per key", "defect": "many rows per key on both sides", "open": "unknown"},
+    "fan_out": {"held": "nothing multiplies", "defect": "multiplied by a join", "open": "could not bind"},
+    "aggregation": {"held": "legal", "defect": "risky"},
+    "default_filter": {"held": "applied", "gap": "omitted", "open": "unclear"},
+    "metric": {"held": "matched", "gap": "matches no metric", "open": "matched on another table"},
+    "literal": {"held": "exists", "defect": "matches no rows", "gap": "not in the declared list", "open": "not checked"},
+    "values_declared": {"held": "listed", "gap": "no value list", "noted": "no list expected", "open": "not probed"},
+    "dropped_rows": {"noted": "noticed"},
+    "question_fit": {"held": "yes", "open": "doubtful"},
+    "prose": {"noted": "read", "open": "could not read"},
+    "scope": {"held": "in scope", "gap": "refused: outside the semantic model"},
+    "runs": {"held": "ran", "defect": "failed", "gap": "refused", "open": "not run"},
+}
+_PART_KEYS = {"join": "join {a} to {b}", "join_key": "join key {a} to {b}", "cardinality": "one row per key, {a} to {b}",
+              "fan_out": "fan-out on {x}", "aggregation": "aggregation {x}", "default_filter": "default filter on {t}",
+              "metric": "metric {x}", "literal": "value {x}", "values_declared": "values declared on {x}",
+              "dropped_rows": "rows dropped by join {a} to {b}", "question_fit": "answers the question",
+              "prose": "caveats read", "scope": "scope", "runs": "ran"}
+_OWNER_CHANGE = {
+    "keep": ([], ["Keep as a worked example, if you say yes."]),
+    "you": (["Fix your query where the marks are red, then run this row again."], ["Your query: fix the red rows, then re-run."]),
+    "model": (["Decide which definition your team means. A change to the semantic model goes through /agami-save-correction."],
+              ["The semantic model: decide the definition."]),
+    "question": (["Reword the question, or change your query, so they ask the same thing."], ["The question: reword it and re-run."]),
+    "agami": (["Ask the question again in other words; agami's query failed."], ["agami: ask again."]),
+    "nothing": (["Nothing to change: the parts that could not be checked need a probe, not a fix."], ["Nothing to do; not offered as an example."]),
+}
+
+
+def _fmt(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not value.is_integer():
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        return f"{int(value):,}"
+    return str(value)
+
+
+def _recorded_display(recorded: Any, row_count: int | None = None) -> tuple[str | None, bool]:
+    """What a recorded result looks like on the page: one cell as text, or 'N rows'. Never a row."""
+    if not isinstance(recorded, dict):
+        return None, False
+    rows = recorded.get("rows")
+    if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], list) and len(rows[0]) == 1:
+        return _fmt(rows[0][0]), True
+    n = recorded.get("row_count", row_count)
+    if n is None and isinstance(rows, list) and rows:
+        n = len(rows)
+    if n is None:
+        return None, False
+    return f"{n:,} rows", False
+
+
+def _part_family(part: str) -> str:
+    return part.split(":", 1)[0]
+
+
+def _part_key(part: str) -> str:
+    fam = _part_family(part)
+    rest = part.split(":", 1)[1] if ":" in part else ""
+    tpl = _PART_KEYS.get(fam, part)
+    if rest == "*":
+        return {"join": "joins", "literal": "values", "fan_out": "fan-out", "receipt": "receipt"}.get(fam, fam)
+    if "{a}" in tpl:
+        a, _, b = rest.partition("-")
+        return tpl.format(a=a, b=b or "?")
+    if "{t}" in tpl:
+        return tpl.format(t=rest.split(":", 1)[0])
+    return tpl.format(x=rest) if "{x}" in tpl else tpl
+
+
+def _claim_text(value: Any) -> str | list[str] | None:
+    if value is None or value == [] or value == {}:
+        return None
+    if isinstance(value, dict):  # a date window
+        col = value.get("column") or ""
+        start = value.get("start"); end = value.get("end")
+        lo = ("≥ " if value.get("start_inclusive", True) else "> ") + str(start) if start else ""
+        hi = ("≤ " if value.get("end_inclusive") else "< ") + str(end) if end else ""
+        return " ".join(p for p in (col, lo, hi) if p) or None
+    if isinstance(value, list):
+        out = []
+        for v in value:
+            if isinstance(v, list) and v and all(isinstance(x, list) for x in v):
+                out.append(" = ".join(".".join(map(str, x)) for x in v))
+            elif isinstance(v, list):
+                out.append(" ".join(map(str, v)))
+            else:
+                out.append(str(v))
+        return out
+    return str(value)
+
+
+def _only(a: Any, b: Any) -> list[str]:
+    la = a if isinstance(a, list) else ([a] if a else [])
+    lb = b if isinstance(b, list) else ([b] if b else [])
+    return [x for x in la if x not in lb]
+
+
+def _receipt_filters(receipt: Any) -> dict[str, str]:
+    """`table:expr` → applied | omitted | undetermined, from a receipt's table items."""
+    out: dict[str, str] = {}
+    if not isinstance(receipt, dict):
+        return out
+    for item in ((receipt.get("tables") or {}).get("items") or []):
+        table = str(item.get("qname") or item.get("ref") or "").lower().split(".")[-1]
+        for flt in item.get("filters") or []:
+            if isinstance(flt, dict):
+                out[f"{table}:{str(flt.get('expr') or '').lower()}"] = str(flt.get("status") or "")
+    return out
+
+
+def _receipt_metrics(receipt: Any) -> dict[str, str]:
+    """output column → the metric it matched, from a receipt's column items."""
+    out: dict[str, str] = {}
+    if not isinstance(receipt, dict):
+        return out
+    for item in ((receipt.get("columns") or {}).get("items") or []):
+        if item.get("kind") == "output" and item.get("status") == "matched" and item.get("name"):
+            out[str(item.get("column") or "").lower()] = str(item["name"])
+    return out
+
+
+def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
+    rows: list[dict] = []
+    words: list[str] = []
+
+    def add(key, state, yours=None, agami=None, note=None, yours_hi=None, agami_hi=None):
+        row = {"key": key, "state": state, "yours": yours, "agami": agami, "note": note or None}
+        if yours_hi:
+            row["yours_hi"] = yours_hi
+        if agami_hi:
+            row["agami_hi"] = agami_hi
+        rows.append(row)
+
+    ledger_rows = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    parts = {r["part"]: r for r in ledger_rows if isinstance(r, dict) and "part" in r}
+    comparison = rec.get("comparison") or {}
+    has_statement = bool(rec.get("statement"))
+    result_set = comparison.get("result_set") if isinstance(comparison, dict) else None
+    scalar = comparison.get("scalar") if isinstance(comparison, dict) else None
+
+    # 1 · the answers. One row for a number; rows, columns and values for a table.
+    agami_text, _single = _recorded_display(rec.get("recorded"), (result_set or {}).get("generated_row_count"))
+    if rec.get("status") == "error" or rec.get("error"):
+        agami_text = "failed"
+    yours_text, _ = _recorded_display(rec.get("statement_recorded"), (result_set or {}).get("golden_row_count"))
+    if yours_text is None and rec.get("expected") is not None:
+        yours_text = _fmt(rec.get("expected"))
+    if agami_text is None and rec.get("actual") is not None:
+        agami_text = _fmt(rec.get("actual"))
+    runs = parts.get("runs")
+    if runs and runs["verdict"] != CONFIRMED:
+        yours_text = _PART_WORDS["runs"].get(_STATE[runs["verdict"]], yours_text)
+    if result_set:
+        same_rows = result_set.get("golden_row_count") == result_set.get("generated_row_count")
+        add("rows", "held" if same_rows else "defect", yours_text, agami_text)
+        yc = list(((rec.get("statement_recorded") or {}).get("columns")) or [])
+        ac = list(((rec.get("recorded") or {}).get("columns")) or [])
+        if yc or ac:
+            add("columns", "held" if sorted(map(str.lower, yc)) == sorted(map(str.lower, ac)) else "defect", yc, ac,
+                yours_hi=_only(yc, ac), agami_hi=_only(ac, yc),
+                note=(f"the comparison scores on columns; {len(result_set.get('unmatched_golden_columns') or [])} unmatched scored 0"
+                      if result_set.get("unmatched_golden_columns") else None))
+        acc = result_set.get("accuracy")
+        if acc is not None:
+            add("values", "held" if float(acc) >= 1.0 else "defect", "identical, row for row" if float(acc) >= 1.0 else "differ",
+                None if float(acc) >= 1.0 else "differ", note=None if float(acc) >= 1.0 else result_set.get("reason"))
+    else:
+        match = rec.get("match") if rec.get("match") is not None else (scalar or {}).get("match")
+        if rec.get("status") == "error":
+            state = "open"
+        elif runs and runs["verdict"] == QUERY_DEFECT:
+            state = "defect"
+        elif match is None:
+            state = "open"
+        else:
+            state = "held" if match else "defect"
+        delta = rec.get("delta_pct")
+        note = None
+        if state == "defect" and isinstance(delta, (int, float)):
+            note = f"agami is {delta * 100:+.1f}% from your number" if abs(delta) <= 1 else f"agami is {delta:+.1f}% from your number"
+        add("answer", state, yours_text, agami_text, note=note or rec.get("error"),
+            yours_hi=[yours_text] if state == "defect" and yours_text else None,
+            agami_hi=[agami_text] if state == "defect" and agami_text else None)
+
+    # 2 · what the two statements claim, side by side. The person's statement is the golden side.
+    claims = rec.get("claims") or {}
+    for claim in (claims.get("claims") or []) if isinstance(claims, dict) else []:
+        name = claim.get("name")
+        yours, agami = _claim_text(claim.get("golden")), _claim_text(claim.get("generated"))
+        status = claim.get("status")
+        if yours is None and agami is None and status in ("agrees", "same"):
+            continue
+        state = "held" if status in ("agrees", "same") else "defect" if status == "differs" else "open"
+        add(_CLAIM_KEYS.get(name, name), state, yours, agami,
+            yours_hi=_only(yours, agami) if state == "defect" else None, agami_hi=_only(agami, yours) if state == "defect" else None)
+
+    # 3 · every part of the person's statement the ledger graded, with agami's side where a receipt says.
+    filters, metrics = _receipt_filters(agami_receipt), _receipt_metrics(agami_receipt)
+    for part in ledger_rows:
+        pid = part.get("part", "")
+        fam = _part_family(pid)
+        if fam in ("runs", "predicates", "date_window") or pid == "receipt:*":
+            continue
+        if fam == "scope" and part.get("verdict") == CONFIRMED:
+            continue
+        state = _STATE.get(part.get("verdict"), "open")
+        ev = part.get("evidence") or {}
+        yours = _PART_WORDS.get(fam, {}).get(state, _STATE_WORDS[state])
+        agami = None
+        if fam == "default_filter":
+            t, _, expr = pid.split(":", 1)[1].partition(":")
+            agami = filters.get(f"{t.lower().split('.')[-1]}:{expr.lower()}")
+        elif fam == "metric":
+            if ev.get("metric"):
+                yours = f"matched {ev['metric']}" if state == "held" else f"matched {ev['metric']}, defined elsewhere"
+            agami = metrics.get(pid.split(":", 1)[1].lower())
+            if agami:
+                agami = f"matched {agami}"
+        elif fam == "cardinality" and ev.get("one_side"):
+            yours = f"one row per key on {ev['one_side']}"
+        elif fam == "dropped_rows" and ev.get("dropped") is not None:
+            yours = f"{_fmt(ev.get('dropped'))} of {_fmt(ev.get('total'))} {ev.get('left')} rows"
+        elif fam == "question_fit" and ev.get("fit"):
+            yours = {"plausible": "yes", "doubtful": "doubtful", "no_question": "no question given"}.get(ev["fit"], ev["fit"])
+        elif fam == "literal" and ev.get("near_miss"):
+            yours = f"matches no rows; the data spells it {ev['near_miss']}"
+        for mention in ev.get("prose") or []:
+            if isinstance(mention, dict) and mention.get("text"):
+                words.append(f"{mention.get('about') or mention.get('source') or 'the semantic model'}: \"{mention['text']}\"")
+        add(_part_key(pid), state, yours, agami, note=part.get("note") if state != "held" else None)
+    return rows, words
+
+
+def _owner(rec: dict, diff: list[dict]) -> str:
+    status = rec.get("status")
+    states = {r["state"] for r in diff}
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    fit = next((p for p in parts if p.get("part") == "question_fit"), None)
+    if status == "match":
+        return "keep"
+    if status == "error":
+        return "agami"
+    if status == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
+        return "you"
+    if fit and fit.get("verdict") != CONFIRMED:
+        return "question"
+    if any(p.get("verdict") == MODEL_GAP for p in parts) or "gap" in states:
+        return "model"
+    if status == "mismatch":
+        differing = {r["key"] for r in diff if r["state"] == "defect"}
+        if differing & {"date window", "grouped by", "ordered by", "limit", "columns"}:
+            return "question"
+        return "model"
+    return "nothing"
+
+
+def _sentence(rec: dict, diff: list[dict]) -> str:
+    status = rec.get("status")
+    red = [r["key"] for r in diff if r["state"] == "defect" and r["key"] not in ("answer", "rows", "values")]
+    open_ = [r["key"] for r in diff if r["state"] == "open"]
+    gaps = [r["key"] for r in diff if r["state"] == "gap"]
+    if status == "match":
+        return "The numbers agree and every part held." if not any(r["key"] == "rows" for r in diff) else "The two answers agree row for row, and every part held."
+    if status == "match_unverified":
+        return "The numbers agree, but " + (f"these parts could not be confirmed: {', '.join(open_ + red + gaps)}." if (open_ or red or gaps) else "a part of your query could not be confirmed.")
+    if status == "expected_doubtful":
+        return f"Your query has a mistake ({', '.join(red) or 'see the red rows'}), so the number you expected is doubtful."
+    if status == "error":
+        return f"agami's query failed{': ' + rec['error'] if rec.get('error') else ''}."
+    where = red + gaps
+    return f"The two answers differ; the parts that differ: {', '.join(where)}." if where else "The two answers differ, and no graded part explains why."
+
+
+def report_items(run_dir: Path) -> list[dict]:
+    """One report item per row of rows.jsonl, every field templated from the run's own files."""
+    records, bad = _done_rows(run_dir)
+    if bad:
+        raise ValueError(f"rows.jsonl has a line that cannot be read ({', '.join(bad)})")
+    items = []
+    for rec in records:
+        n = rec.get("row")
+        row_dir = run_dir / "rows" / str(n)
+        agami_receipt = None
+        for cand in (row_dir / "agami-receipt.json", row_dir / "receipt.json"):
+            if cand.exists():
+                agami_receipt = _load_json(cand)
+                break
+        if agami_receipt is None and str(rec.get("receipt_path") or "").endswith(".json") and Path(rec["receipt_path"]).exists():
+            agami_receipt = _load_json(Path(rec["receipt_path"]))
+        diff, words = _diff_rows(rec, agami_receipt)
+        owner = _owner(rec, diff)
+        change, todo = _OWNER_CHANGE[owner]
+        prov = rec.get("provenance") or {}
+        shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
+        source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
+                                       shape_words.get(prov.get("shape"))) if p)
+        result_set = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
+        answer, single = _recorded_display(rec.get("recorded"), (result_set or {}).get("generated_row_count"))
+        if answer is None and rec.get("actual") is not None:
+            answer, single = _fmt(rec.get("actual")), True
+        expected, _ = _recorded_display(rec.get("statement_recorded"), (result_set or {}).get("golden_row_count"))
+        if expected is None and rec.get("expected") is not None:
+            expected = _fmt(rec.get("expected"))
+        delta = rec.get("delta_pct")
+        items.append({
+            "row": n, "label": rec.get("label"), "question": rec.get("question") or rec.get("label") or f"row {n}",
+            "source": source or None, "status": rec.get("status") or "error",
+            "expected": expected, "answer": answer,
+            "delta_pct": (round(delta * 100, 1) if isinstance(delta, (int, float)) and abs(delta) <= 1 else delta),
+            "single_cell": bool(single), "owner": owner, "diff": diff, "sentence": _sentence(rec, diff),
+            "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
+            "report_path": rec.get("report_path"),
+        })
+    return items
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Reconciliation helper for agami-reconcile.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1469,6 +1804,10 @@ def main(argv: list[str] | None = None) -> int:
                          help="the applied intake rows; copied to <run-dir>/intake.json when that file does not exist yet")
     p_chunk.add_argument("--size", type=int, default=CHUNK_SIZE, help=f"rows per chunk (default {CHUNK_SIZE})")
 
+    p_items = sub.add_parser("report-items", help="Build the report page's items from a run's rows.jsonl, ledgers, comparisons and receipts.")
+    p_items.add_argument("--run-dir", required=True, dest="run_dir")
+    p_items.add_argument("--out", default=None, help="where the items file goes (default <run-dir>/report-items.json)")
+
     p_status = sub.add_parser("status", help="The status a row gets, from the number comparison and the ledger's verdict.")
     p_status.add_argument("--match", required=True, choices=["true", "false", "none"],
                           help="reconcile.py diff's match, or none when the row could not run")
@@ -1482,6 +1821,29 @@ def main(argv: list[str] | None = None) -> int:
         match = None if args.match == "none" else args.match == "true"
         verdict = None if args.ledger_verdict == "none" else args.ledger_verdict
         print(json.dumps({"status": row_status(match, verdict)}))
+        return 0
+
+    if args.cmd == "report-items":
+        run_dir = Path(args.run_dir).expanduser()
+        if not run_dir.is_dir():
+            print(f"reconcile report-items: run directory not found: {run_dir}", file=sys.stderr)
+            return 2
+        if not (run_dir / "rows.jsonl").exists():
+            print("reconcile report-items: no rows to read; the run wrote no rows.jsonl", file=sys.stderr)
+            return 4
+        try:
+            items = report_items(run_dir)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"reconcile report-items: {exc}", file=sys.stderr)
+            return 2
+        out = Path(args.out).expanduser() if args.out else run_dir / "report-items.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(items, indent=2), encoding="utf-8")
+        by_status: dict[str, int] = {}
+        for item in items:
+            by_status[item["status"]] = by_status.get(item["status"], 0) + 1
+        print(json.dumps({"items": len(items), "out": str(out), "by_status": by_status,
+                          "layout": "audit" if len(items) == 1 and items[0]["diff"] else "cards"}, indent=2))
         return 0
 
     if args.cmd == "next-chunk":

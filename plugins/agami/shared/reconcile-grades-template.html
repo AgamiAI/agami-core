@@ -119,7 +119,7 @@
           + '<div class="beats">'
           + '<div class="beat b1"><b>1 · What you asked</b>' + esc(item.question) + '</div>'
           + '<div class="beat b2"><b>2 · What agami did</b>Answered <code>' + esc(item.answer) + '</code></div>'
-          + '<div class="beat b3"><b>3 · How it got there</b>' + (signals ? '<ul>' + signals + '</ul>' : 'Nothing in the receipt needs your attention.')
+          + '<div class="beat b3"><b>3 · How it got there</b>' + (signals ? '<div class="dg one">' + (item.signals || []).map(s => '<div class="m noted">·</div><div class="v noted">' + esc(s) + '</div>').join('') + '</div>' : 'Nothing in the receipt needs your attention.')
           + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '') + '</div>'
           + '<div class="beat b4"><b>4 · Your grade</b>'
           + '<div class="grade">'

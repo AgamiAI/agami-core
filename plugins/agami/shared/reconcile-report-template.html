@@ -137,6 +137,56 @@
       const filtered = view.status.size || view.owner.size || view.q.trim();
       document.getElementById('showing').textContent = filtered ? 'Showing ' + n + ' of ' + DATA.items.length + ' rows' : 'All ' + DATA.items.length + ' rows';
     }
+    // The diff grid: one grid row per check, mark | what was checked | yours | agami, so a tall cell on
+    // one side never pushes the other out of line. Differing tokens are highlighted in place.
+    const MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·' };
+    function cell(v, hi, side, state) {
+      const cls = 'v ' + side + ' ' + state + (Array.isArray(v) || !(hi || []).length ? '' : ' whole');
+      if (v == null) return '<div class="' + cls + '"></div>';
+      if (Array.isArray(v)) return '<div class="' + cls + '">' + v.map(tok => '<span class="tok' + ((hi || []).includes(tok) ? ' hi' : '') + '">' + esc(tok) + '</span>').join('') + '</div>';
+      return '<div class="' + cls + '">' + ((hi || []).includes(v) ? '<span class="hi">' + esc(v) + '</span>' : esc(v)) + '</div>';
+    }
+    function diffGrid(item) {
+      const rows = item.diff || [];
+      return '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
+        + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
+        + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(r.state) + '">' + (MARK[r.state] || '·') + '</div>'
+            + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
+            + cell(r.yours, r.yours_hi, 'yours', r.state) + cell(r.agami, r.agami_hi, 'agami', r.state)
+            + (r.note && r.state !== 'held' ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
+        + '</div>';
+    }
+    function words(item) {
+      return (item.words || []).length
+        ? '<details class="words"><summary>The semantic model says</summary><ul>' + item.words.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul></details>' : '';
+    }
+    function action(item, d) {
+      const owner = item.owner || 'nothing';
+      return '<div class="act"><b>change</b><span class="pill ' + esc(owner) + '">' + esc(OWNER_SHORT[owner] || owner) + '</span><span>' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div>';
+    }
+    function diffCard(item) {
+      const d = decisions[item.row] || {};
+      return '<div class="card" data-row="' + item.row + '">'
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
+        + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
+        + diffGrid(item)
+        + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '')
+        + words(item) + action(item, d)
+        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+        + controls(item, d) + '</div>';
+    }
+    function diffAudit(item) {
+      const d = decisions[item.row] || {};
+      return '<div class="card" data-row="' + item.row + '">'
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
+        + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
+        + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + words(item) + '</div>'
+        + '<div class="rail"><b>What to do</b>' + lines(item.todo && item.todo.length ? item.todo : item.change) + action(item, d) + '</div></div>'
+        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+        + controls(item, d) + '</div>';
+    }
     function card(item) {
       const d = decisions[item.row] || {};
       const owner = item.owner || (item.status === 'match' ? 'keep' : 'nothing');
@@ -179,7 +229,7 @@
       const shown = visible();
       showing(shown.length);
       const root = document.getElementById('items');
-      root.innerHTML = shown.map(item => DATA.layout === 'audit' ? audit(item) : card(item)).join('')
+      root.innerHTML = shown.map(item => item.diff && item.diff.length ? (DATA.layout === 'audit' ? diffAudit(item) : diffCard(item)) : (DATA.layout === 'audit' ? audit(item) : card(item))).join('')
         || '<p class="meta">No row matches this filter. Your decisions on the hidden rows are kept.</p>';
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
