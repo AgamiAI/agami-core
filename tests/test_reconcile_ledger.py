@@ -671,7 +671,7 @@ def test_dropped_rows_are_noted_and_never_graded(tmp_path):
     result = ledger(tmp_path)
     noted = _parts(result)["dropped_rows:order_items-orders"]
     assert noted["verdict"] == "noted"
-    assert noted["evidence"] == {"total": 4000, "dropped": 12, "left": "order_items", "right": "orders"}
+    assert noted["evidence"] == {"total": 4000, "dropped": 12, "left": "order_items", "right": "orders", "unexamined": None}
     assert "12 of 4000 order_items rows have no orders partner" in noted["note"]
     assert result["verdict"] == "confirmed" and result["counts"]["noted"] == 1
     _write(tmp_path, "join-1.dropped_rows.csv", "")
@@ -753,4 +753,69 @@ def test_a_bare_aggregate_matched_to_a_metric_on_another_table_is_open(tmp_path)
     assert _parts(ledger(tmp_path))["metric:revenue"]["verdict"] == "confirmed"
     _write(tmp_path, "statement-receipt.json", _receipt(
         tables=[_table("payments")], columns=[_output("revenue", "matched")]))
+    assert _parts(ledger(tmp_path))["metric:revenue"]["verdict"] == "confirmed"
+
+
+# --- round 4: the model's spelling, the unexamined side, and the missing states ------------
+
+
+def test_the_one_row_stamp_reads_the_models_own_spelling_of_a_key(tmp_path):
+    """The probe file keys `unique_by_model` as the semantic model spells the column; the pair carries
+    the statement's lowercased spelling. An uppercase-introspected model must still confirm."""
+    _ran_ok(tmp_path)
+    join = _join_probe("orders", "customer_id", "customers", "id", declared_between=False, matches=False)
+    join["status"] = "declared"
+    join["probes"] = {"overlap": [], "cardinality": []}
+    _write(tmp_path, "join-probes.json", _probes(join, unique={"customers.ID": True, "orders.CUSTOMER_ID": False}))
+    _write(tmp_path, "statement-prepare.json", _prepare(_agg("COUNT(*)", "undetermined")))
+    parts = _parts(ledger(tmp_path))
+    assert parts["join:customers-orders"]["evidence"]["one_row_on_right"] is True
+    assert parts["fan_out:COUNT(*)"]["verdict"] == "confirmed"
+
+
+def test_the_unique_column_fallback_decides_a_declared_edge_whose_one_side_is_the_left(tmp_path):
+    """The live shape of the fallback: a declared relationship matched the written pair, its one
+    side is the LEFT table, and the right column is nevertheless unique by the semantic model."""
+    _ran_ok(tmp_path)
+    join = _join_probe("orders", "id", "order_items", "order_id", declared_between=True, matches=True)
+    join["declared_cardinality"] = [{"relationship": "one_to_many", "from": "orders", "to": "order_items",
+                                     "one_side": ["orders"], "matched": True}]
+    _write(tmp_path, "join-probes.json", _probes(join, unique={"order_items.order_id": True, "orders.id": True}))
+    assert _parts(ledger(tmp_path))["join:order_items-orders"]["evidence"]["one_row_on_right"] is True
+
+
+def test_dropped_rows_read_both_numbers_by_header_and_name_the_side_not_counted(tmp_path):
+    _complete(tmp_path)
+    join = _with_dropped_probe(
+        _join_probe("order_items", "order_id", "orders", "id", declared_between=True, matches=True))
+    join["dropped_rows_probe"]["unexamined"] = "orders"
+    _write(tmp_path, "join-probes.json", _probes(join, unique={"orders.id": True}))
+    _write(tmp_path, "join-1.dropped_rows.csv", "TOTAL,DROPPED\n4000,12\n")
+    noted = _parts(ledger(tmp_path))["dropped_rows:order_items-orders"]
+    assert noted["evidence"]["total"] == 4000 and noted["evidence"]["dropped"] == 12
+    assert "rows of orders with no order_items partner were not counted" in noted["note"]
+    # A one-column result is a probe that did not answer, never N of N dropped.
+    _write(tmp_path, "join-1.dropped_rows.csv", "dropped\n12\n")
+    noted = _parts(ledger(tmp_path))["dropped_rows:order_items-orders"]
+    assert "nothing is claimed" in noted["note"] and "total" not in noted["evidence"]
+
+
+def test_the_values_declared_part_reads_the_remaining_states(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "filter-values.judge.json", _judge_columns(**{
+        "orders.region": {"declared": "absent", "distinct": "empty", "observed_count": 0},
+        "orders.notes": {"declared": "absent", "distinct": "failed"},
+        "customers.email": {"declared": "absent", "distinct": "listed", "observed_count": 4, "sensitive": True},
+    }))
+    parts = _parts(ledger(tmp_path))
+    assert parts["values_declared:orders.region"]["verdict"] == "noted"
+    assert parts["values_declared:orders.notes"]["verdict"] == "unresolved"
+    # A sensitive column is noted before it can be a gap, however few values it holds.
+    assert parts["values_declared:customers.email"]["verdict"] == "noted"
+
+
+def test_a_metric_over_several_tables_is_confirmed_when_the_statement_reads_one_of_them(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("orders")], columns=[_output("revenue", "matched", source_tables=["orders", "customers"])]))
     assert _parts(ledger(tmp_path))["metric:revenue"]["verdict"] == "confirmed"

@@ -795,9 +795,12 @@ def _one_row_on_right(join: dict, probes: dict | None) -> bool:
         return True
     pairs = join.get("pairs") or []
     if len(pairs) == 1 and len(pairs[0]) == 2:
-        unique = (probes or {}).get("unique_by_model") or {}
+        # The probe file keys this map with the semantic model's own spelling; the pair carries the
+        # statement's, lowercased. Folded on both sides, so an uppercase-introspected model
+        # (`customers.ID`) still says its key is unique.
+        unique = {_fold(str(k)): v for k, v in ((probes or {}).get("unique_by_model") or {}).items()}
         for table, column in pairs[0]:
-            if _fold(str(table)) == right_key and unique.get(f"{table}.{column}"):
+            if _fold(str(table)) == right_key and unique.get(_fold(f"{table}.{column}")):
                 return True
     return False
 
@@ -808,18 +811,35 @@ def _dropped_rows(join: dict, label: str, jid: str, row_dir: Path) -> list[dict]
     if not probe:
         return []
     left_t, right_t = probe.get("left"), probe.get("right")
+    unexamined = probe.get("unexamined")
     got = _probe_csv(row_dir / f"{jid}.dropped_rows.csv")
-    total = _first_number(got, "total") if isinstance(got, list) and got else None
-    dropped = _first_number(got, "dropped") if isinstance(got, list) and got else None
+    # Both numbers by their own header, never the one-column fall-back: a result with one column
+    # would otherwise read as N of N dropped and be stated as a fact.
+    total = _named_number(got, "total")
+    dropped = _named_number(got, "dropped")
     if total is None or dropped is None:
         return [_part(f"dropped_rows:{label}", NOTED, evidence={"left": left_t, "right": right_t},
                       note="the dropped-rows probe was not run or failed; nothing is claimed")]
     t, d = int(total), int(dropped)
     said = (f"no {left_t} row is dropped by this join" if d == 0
             else f"{d} of {t} {left_t} rows have no {right_t} partner and are dropped by this inner join")
+    said += "; counted over the whole table, before the statement's own filters"
+    if unexamined:
+        said += f"; rows of {unexamined} with no {left_t} partner were not counted"
     return [_part(f"dropped_rows:{label}", NOTED,
-                  evidence={"total": t, "dropped": d, "left": left_t, "right": right_t},
-                  note=said + "; counted over the whole table, before the statement's own filters")]
+                  evidence={"total": t, "dropped": d, "left": left_t, "right": right_t, "unexamined": unexamined},
+                  note=said)]
+
+
+def _named_number(rows, key: str) -> float | None:
+    """The first row's `key` column as a number, by header only, whatever the header's case."""
+    if not isinstance(rows, list) or not rows:
+        return None
+    raw = next((v for k, v in rows[0].items() if k and k.strip().lower() == key.lower()), None)
+    try:
+        return float(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _joins_named(label: str, join_rows: list[dict]) -> list[str]:
