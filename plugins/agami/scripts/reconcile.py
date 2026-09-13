@@ -1713,13 +1713,17 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         ac = list(((rec.get("recorded") or {}).get("columns")) or [])
         pairs = [tuple(p) for p in (result_set.get("column_pairs") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
         if yc or ac:
-            if pairs or "unmatched_generated_columns" in result_set:
+            same_count = result_set.get("golden_row_count") == result_set.get("generated_row_count")
+            values_compared = same_count and (bool(pairs) or bool(result_set.get("unmatched_golden_columns")))
+            if values_compared:
                 # Columns are compared by the values they carry, never by name: the comparator says
                 # which of yours paired with which of agami's, and a renamed column is the same column.
-                only_yours = [c for c in (result_set.get("unmatched_golden_columns") or []) if c in yc] or [c for c in yc if c not in {p[0] for p in pairs}]
+                only_yours = [c for c in (result_set.get("unmatched_golden_columns") or []) if c in yc]
                 only_agami = list(result_set.get("unmatched_generated_columns") or [])
                 renamed = [f"{a} → {b}" for a, b in pairs if a != b]
-            else:  # an older score file: names are all there is
+            else:
+                # No values comparison ran (the row counts differ, or an older score file): names are
+                # all there is. Identical names are one column set; the rows check carries the counts.
                 only_yours, only_agami, renamed = _only(yc, ac), _only(ac, yc), []
             if not only_yours and not only_agami:
                 col_state = "held"

@@ -642,6 +642,11 @@ def _column_pairs(
     reports nothing rather than failing a score that already ran."""
     if match not in ("exact", "values") or not golden.rows or not generated.rows:
         return (), ()
+    if len(golden.rows) != len(generated.rows):
+        # Pairing is by value vectors, and two vectors of different length are never equal, so
+        # every column would read unpaired: not a fact about the columns, only about the counts,
+        # which the score already reports. Nothing is claimed here.
+        return (), ()
     try:
         pairing, _unmatched = match_columns(
             golden.columns, golden.rows, generated.columns, generated.rows,

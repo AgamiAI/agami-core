@@ -125,3 +125,18 @@ def test_the_change_text_the_prefill_and_the_fix_come_from_one_source(tmp_path):
     defect = items[2]
     assert defect["fix"] == "query" and defect["prefill"]["fix"] == "value orders.status='Delivered'"
 
+
+def test_identical_column_names_with_different_row_counts_are_one_column_set(tmp_path):
+    """Values cannot pair when the row counts differ, so the columns fall back to names: identical
+    names read as the same columns, and only the rows check carries the difference."""
+    rec = dict(TABLE_DIFF, row=1, statement_recorded={"columns": ["department", "pending_items"], "row_count": 13},
+               recorded={"columns": ["department", "pending_items"], "rows": []},
+               comparison={"result_set": {"accuracy": 0.0, "reason": "the answer key has 13 rows and the generated result has 759",
+                                          "unmatched_golden_columns": [], "column_pairs": [], "unmatched_generated_columns": [],
+                                          "golden_row_count": 13, "generated_row_count": 759}})
+    item = reconcile.report_items(_run(tmp_path, [rec]))[0]
+    rows = {r["key"]: r for r in item["diff"]}
+    assert rows["rows"]["state"] == "defect" and rows["rows"]["yours"] == "13 rows" and rows["rows"]["agami"] == "759 rows"
+    assert rows["columns"]["state"] == "held" and not rows["columns"].get("yours_hi") and not rows["columns"].get("agami_hi")
+    assert item["result"]["data"] == "differs" and "columns" not in item["result"]["differs_in"]
+

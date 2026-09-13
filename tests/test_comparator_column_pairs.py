@@ -27,3 +27,11 @@ def test_a_scalar_pair_serialises_and_other_levels_report_nothing():
     assert list(map(list, d["column_pairs"])) == [["revenue", "total"]] and d["unmatched_generated_columns"] == ()
     shape = compare_result_sets(ExecResult(columns=["a"], rows=[(1,)]), ExecResult(columns=["b"], rows=[(2,)]), match="shape")
     assert shape.column_pairs == () and shape.unmatched_generated_columns == ()
+
+
+def test_different_row_counts_report_no_pairs_and_no_extras():
+    golden = ExecResult(columns=["department", "pending_items"], rows=[("a", 1), ("b", 2)])
+    generated = ExecResult(columns=["department", "pending_items"], rows=[("a", 1), ("b", 2), ("c", 3)])
+    score = compare_result_sets(golden, generated, match="values")
+    assert score.accuracy == 0.0 and score.column_pairs == () and score.unmatched_generated_columns == () and score.unmatched_golden_columns == ()
+
