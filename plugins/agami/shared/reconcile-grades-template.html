@@ -3,7 +3,7 @@
   agami · reconcile grading page — used by the agami-reconcile skill via
   scripts/render_reconcile_grades.py.
   A list of questions has no answer to compare against, so a person grades what the AI answered.
-  One page, one block back: every question with the AI's answer and the receipt's signals, a grade
+  Same four beats and design language as the report page (shared/reconcile-pages.css). One page, one block back: every question with the AI's answer and the receipt's signals, a grade
   per row, and a single block the person pastes into chat. Self-contained: opens from file:// in
   any browser, no server, no relative-path dependencies.
   Two rules this page keeps, both asserted by tests/test_render_reconcile_grades.py:
@@ -31,39 +31,7 @@
   <title>{{REPORT_TITLE}} — agami</title>
   <style>
 {{THEME_CSS}}
-    body { margin: 0; font-family: var(--font-body, system-ui, sans-serif); background: var(--bg, #f7f7f8); color: var(--fg, #17212b); }
-    .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 96px; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border, #d9dde3); }
-    .logo svg { display: block; height: 26px; width: auto; }
-    .logo-light-mode { display: inline-block; } .logo-dark-mode { display: none; }
-    @media (prefers-color-scheme: dark) { .logo-light-mode { display: none; } .logo-dark-mode { display: inline-block; } }
-    h1 { font-size: 22px; margin: 0; }
-    .meta { font-size: 12px; color: var(--fg-muted, #5b6875); }
-    .lede { max-width: 70ch; font-size: 15px; color: var(--fg-muted, #5b6875); margin: 18px 0 8px; }
-    .card { background: var(--card, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 16px 18px; margin: 14px 0; }
-    .card .q { font-weight: 600; font-size: 16px; }
-    .card .n { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted, #5b6875); margin-right: 8px; }
-    .answer { margin: 10px 0; font-size: 15px; }
-    .answer code { background: var(--code-bg, #eef1f4); padding: 2px 6px; border-radius: 4px; }
-    .signals { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--fg-muted, #5b6875); }
-    .grade { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 14px; }
-    .grade label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-    .more { margin-top: 10px; display: grid; gap: 8px; }
-    .more[hidden] { display: none; }
-    .more label { font-size: 13px; color: var(--fg-muted, #5b6875); display: block; }
-    .more textarea { width: 100%; min-height: 64px; font-family: ui-monospace, monospace; font-size: 13px; border: 1px solid var(--border, #d9dde3); border-radius: 6px; padding: 8px; background: var(--bg, #fff); color: inherit; }
-    .receipt { font-size: 12px; margin-top: 8px; }
-    .footer { position: sticky; bottom: 0; background: var(--bg, #f7f7f8); border-top: 1px solid var(--border, #d9dde3); padding: 12px 0; display: flex; align-items: center; gap: 14px; }
-    button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border, #d9dde3); background: var(--card, #fff); color: inherit; cursor: pointer; }
-    button.primary { background: var(--accent, #1d5fb4); color: #fff; border-color: transparent; }
-    button[disabled] { opacity: 0.5; cursor: default; }
-    .summary { font-size: 13px; color: var(--fg-muted, #5b6875); }
-    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
-    .modal[hidden] { display: none; }
-    .modal-card { background: var(--card, #fff); border-radius: 10px; padding: 20px; width: min(720px, 92vw); }
-    .modal-card textarea { width: 100%; min-height: 200px; font-family: ui-monospace, monospace; font-size: 13px; }
-    .modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
-    .modal-status { font-size: 13px; color: var(--fg-muted, #5b6875); }
+{{PAGE_CSS}}
   </style>
 </head>
 <body>
@@ -116,10 +84,14 @@
         const g = grades[item.row] || {};
         const signals = (item.signals || []).map(s => '<li>' + esc(s) + '</li>').join('');
         return '<div class="card" data-row="' + item.row + '">'
-          + '<div class="q"><span class="n">#' + item.row + '</span>' + esc(item.question) + '</div>'
-          + '<div class="answer">agami answered: <code>' + esc(item.answer) + '</code></div>'
-          + (signals ? '<ul class="signals">' + signals + '</ul>' : '')
-          + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+          + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.question) + '</span>'
+          + '<span class="pill ' + (g.grade === 'right' ? 'held' : g.grade === 'wrong' ? 'defect' : 'open') + '">' + esc(g.grade || 'not graded yet') + '</span></div>'
+          + '<div class="beats">'
+          + '<div class="beat b1"><b>1 · What you asked</b>' + esc(item.question) + '</div>'
+          + '<div class="beat b2"><b>2 · What agami did</b>Answered <code>' + esc(item.answer) + '</code></div>'
+          + '<div class="beat b3"><b>3 · How it got there</b>' + (signals ? '<ul>' + signals + '</ul>' : 'Nothing in the receipt needs your attention.')
+          + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '') + '</div>'
+          + '<div class="beat b4"><b>4 · Your grade</b>'
           + '<div class="grade">'
           + ['right', 'wrong', 'unsure'].map(v =>
               '<label><input type="radio" name="g' + item.row + '" value="' + v + '"'
@@ -128,8 +100,8 @@
           + '<div class="more"' + (g.grade === 'wrong' ? '' : ' hidden') + '>'
           + '<label>The right SQL, if you know it<textarea data-field="sql" placeholder="SELECT ...">' + esc(g.sql || '') + '</textarea></label>'
           + '<label>Or say what is wrong, in words<textarea data-field="words" placeholder="e.g. revenue should exclude refunds">' + esc(g.words || '') + '</textarea></label>'
-          + '</div>'
-          + '</div>';
+          + '</div></div>'
+          + '</div></div>';
       }).join('');
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onGrade));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
@@ -141,7 +113,7 @@
       const row = Number(card.dataset.row);
       grades[row] = Object.assign(grades[row] || {}, { grade: e.target.value });
       card.querySelector('.more').hidden = e.target.value !== 'wrong';
-      renderSummary();
+      renderItems();
     }
 
     function onText(e) {

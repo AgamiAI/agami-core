@@ -36,6 +36,7 @@ TEMPLATE_PATH = SHARED_DIR / "reconcile-report-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
 LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
 THEME_PATH = SHARED_DIR / "theme.css"
+PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
@@ -119,6 +120,7 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
         "AGAMI_LOGO_DARK_TEXT": _read(LOGO_DARK_PATH),
         "AGAMI_LOGO_LIGHT_TEXT": _read(LOGO_LIGHT_PATH),
         "THEME_CSS": _read(THEME_PATH),
+        "PAGE_CSS": _read(PAGE_CSS_PATH),
     }
     # One pass, so a placeholder token inside a person's text is copied and never expanded.
     return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)

@@ -43,7 +43,23 @@ Same checks as agami-query / agami-connect:
    - **Numbers pasted inline** as a list/table — treat as inline CSV.
    - **SQL the person trusts** — one or more statements, pasted or in a `.sql` file, alone or beside the question each answers. Go to Phase 1's **statement branch**. The statement is evidence, never the answer: Phase 1.5 grades every part of it before it is compared with anything.
    - **A list of questions** with no answers — one per line. Go to Phase 1's **questions branch**.
-   A screenshot and the SQL behind its tiles may arrive together; Phase 1n joins them by label. If they gave nothing (or just asked "can you check my dashboard?"), ask once, welcoming all four: *"Show me what you want to check against — easiest is a **screenshot of your dashboard** (Metabase, Power BI, Tableau, a spreadsheet — whatever you have), but a CSV, a pasted list of `label: value`, the SQL you trust, or a list of questions works too."* Don't make them figure out an export format.
+   A screenshot and the SQL behind its tiles may arrive together; Phase 1n joins them by label. **If they gave nothing** (or just asked "can you check my dashboard?"), ask once the way `agami-connect` asks which database: **AskUserQuestion**, the four shapes as options, the lowest-friction one first, and the rarer inputs named in the prompt so they are visibly welcome (*"Something else, a pasted `label: value` list or a JSON export? Choose **Other** and paste it."*).
+
+   | label | description |
+   |---|---|
+   | `A screenshot of the dashboard` | Metabase, Power BI, Tableau, Looker, a spreadsheet: whatever you have. I read the tiles and confirm what I read with you before anything runs. |
+   | `A CSV or an export` | Two columns, label and value, or the template I can write for you (label, value, sql, question). |
+   | `The SQL you trust` | One or more statements, pasted or in a `.sql` file. Each is graded part by part before anything is compared. |
+   | `A list of questions` | One per line. Agami answers each and you grade the answers on one page. |
+
+   **When they pick the CSV and have nothing to hand, write the template and hand off**, the way connect writes `credentials.example`: with the Write tool, `<artifacts_dir>/local/reconcile/inbox/reconcile.example.csv`:
+   ```
+   # One line per number to check. Keep the header; these # lines are skipped.
+   # label: the tile's name.  value: the number as shown ($4.2M, 12,450, 3.1%).
+   # sql: the SQL behind it, if you have it.  question: the question in your words (optional).
+   label,value,sql,question
+   ```
+   Then: *"Fill in `local/reconcile/inbox/reconcile.example.csv`, one line per number, and come back and say **reconcile**. Nothing runs until you do."* **End the turn.** On re-entry, Phase 1n reads every `.csv` in the inbox through `reconcile.py intake`; a file still holding only the header and comments is reported as empty (exit `4`) and the person is asked again, never guessed at.
 5. **If they gave a file path, validate it exists.** If not, surface the error and stop.
 
 ---
@@ -92,8 +108,25 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" intake --file <path> [--file <
 
 Create the run directory `<artifacts_dir>/local/reconcile/<ts>/`, and `rows/<n>/` under it for every row that carries a statement.
 
-Surface to the user:
-> Parsed `<N>` rows from `<the screenshot / csv_path / the statements / the questions>`. Reconciling now — typically `<N> × 5–15s` per row depending on query latency.
+**Show what was read before anything runs, and hand off**, the way `agami-connect` shows the prune page before it introspects. The intake page lists every row: the question we will ask agami (read from a label, and editable), the number expected, whether SQL came with it, and which file and line it came from. The person fixes a question we read wrong or unticks a row, generates the block, and pastes it back. It is the same design language and the same paste-back grammar as the report and grading pages.
+
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_intake.py" --title "What we read · <profile>" \
+  --profile <profile> --run <ts> --intake-file /tmp/agami-reconcile-rows-<ts>.json \
+  --out "<artifacts_dir>/local/reconcile/<ts>/intake.html"
+```
+
+Then say it in two lines and **end the turn**:
+> I read `<N>` rows from `<the screenshot / csv_path / the statements / the questions>`: `<n>` numbers, `<m>` with your SQL, `<k>` questions. Open the page, fix any question I read wrong or untick a row, and paste the block back; then I run. Typically `<N> × 5–15s` per row.
+
+**On re-entry** (the block arrives, `profile:` / `reconcile-run:` / `intake:` / one JSON array / `done`), never hand-edit the rows: pipe the block to the parser, which applies it to the rows file and says what it did:
+
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_intake.py" --block-file /tmp/agami-reconcile-intake-<ts>.txt \
+  --rows-file /tmp/agami-reconcile-rows-<ts>.json --run <ts>
+```
+
+`ok: true` with `kept`, `dropped` and `edited` counts means the rows file now holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: ask for the block again. If the person answers in chat instead ("looks right, go ahead"), run with the rows as read; a per-row "is this the question?" in chat is never asked.
 
 ---
 
