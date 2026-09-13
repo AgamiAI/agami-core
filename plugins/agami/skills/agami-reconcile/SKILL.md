@@ -107,7 +107,7 @@ For every row that carries a `statement`. Skip this phase for a row that does no
 - **1.5b — Run it the way agami runs its own.** `sm prepare` first, then the profile's tier exactly as `agami-query` Phase 1e tabulates it (psql, mysql, snowsql, sqlite3, DuckDB, or `execute_sql`), never `--no-safety`, and always with the statement passed **by file**, never inline in a shell string. Write stdout to `statement.csv`, and into `run.json` the `status`, `exit`, classifier `kind`, guard `rule` and `remediation`, never the raw stderr. **A refusal is a finding, not a crash**: a `table_scope` or `column_scope` refusal grades `scope: model_gap`, because the person wanted a table or column the semantic model does not expose; `select_star` grades `runs: query_defect`. Never rewrite the statement and never retry. Other failures go through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md); `auth`, `dsn`, `network` and `permission` stop the run as `agami-query` Phase 3b stops it. Nothing in this phase writes `query_log.jsonl`: `agami-save-correction` reads that log's last successful line as the question to correct, and a probe there would be corrected instead of the answer. The phase keeps its own record instead: `run.json` for the statement and a `.run.json` beside every probe's CSV, so every execution and every refusal here is written down.
 - **1.5c — Its receipt, and the semantic model's words.** `sm receipt "$ROOT" --sql-file statement.sql > statement-receipt.json` whenever the statement parsed, and beside it `sm mentions "$ROOT" --sql-file statement.sql > mentions.json`: every description, caveat, glossary line, narrative paragraph and prompt example that mentions a table or column the statement reads. The ledger puts those words beside any part that falls short, so the caveat that shaped the SQL is read next to the number that went wrong. Quoted, never graded.
 - **1.5d — Probes.** `sm join-probes` and `sm filter-values plan` emit SQL; write each emitted probe to its own `.sql` file and run it through the same tier by path, each to the CSV `part-ledger.md` names with a `.run.json` beside it, then `sm filter-values judge`. A probe the tier refuses or fails leaves an empty CSV; leave it there, the ledger reads it as a probe that failed. A file the ledger expects and does not find, or finds empty, is a part it grades `unresolved`, never clean.
-- **1.5e — The ledger.** `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n>` writes `ledger.json`: one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`, and the weakest grade as the row's `ledger_verdict`; a part may also be `noted`, a fact the run states and never judges, which never decides the verdict. A part reaches `model_gap` only by measurement; the statement asserting something is never the evidence for it.
+- **1.5e — The ledger, run once.** `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n>` writes `ledger.json`: one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`, and the weakest grade as the row's `ledger_verdict`; a part may also be `noted`, a fact the run states and never judges, which never decides the verdict. **Run it once per row, in Phase 2e, after the comparison**, with `--with-claims` when agami's statement exists too and without it when agami's run failed. The files this phase wrote are what it reads, so nothing is lost by waiting, and a ledger written here and again later is the same ledger twice. A part reaches `model_gap` only by measurement; the statement asserting something is never the evidence for it.
 - **1.5f — Its result is the expected value.** For a row that came with no number, `expected` is the single cell `statement.csv` returned (its text folded to a number by `reconcile.py diff`, which reads `$4.2M` and `47,238,221.00` alike), or the table's shape when it returned several rows. For a row that came with a tile number too, run `reconcile.py diff` between the tile and the statement's own result: a disagreement means the statement is not the tile's statement, or the data moved; flag the row in Phase 3b.5 and keep the tile's number as `expected`.
 - **1.5g — Does the statement answer the question?** For every statement row, write `question_fit.json`; when the row carries a question, read the two side by side first, before anything is compared. Doubtful when the grain differs (a count of items for a question about orders), the measure differs (revenue for a question about a count), a filter is present the question never asked for or absent when it did, or the time window differs. Write `question_fit.json` in the row directory: `{"fit": "plausible" | "doubtful" | "no_question", "reason": "<one sentence, or null>"}`, with `no_question` only for a statement that came alone: against a row that carries a question it is a contradiction, and the findings verb refuses to keep such a row. This is a judgment made by reading, the one part of the ledger that is; it can withhold a row from the keep-offer and never proves anything about the semantic model. A doubtful row grades `match_unverified` at best, shows in Phase 3b.5 with the reason, and the person settles it by rewording the question or the statement and re-running that row. Phase 3e keeps a `match` row as a worked example, which teaches the AI a question-to-SQL pairing, and a sound statement paired with the wrong question is the most harmful thing that step could keep.
 
@@ -250,6 +250,8 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" claims "$ROOT" --sql-file rows/<n>/agami.sq
 python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n> --with-claims
 ```
 
+**This is the row's one ledger run.** Every file Phase 1.5 wrote is still there, so the grades are the same ones 1.5 would have produced, plus the two claim parts. When agami's own run failed and there is no statement to compare against, run it here without `--with-claims`. Never run it twice.
+
 The seven claims (tables, filter predicates, date window, group keys, join keys, ordering, limit) say which part differs; they never say who is right. Then set the row's `status` with `reconcile.py status`, from the diff's `match` and the ledger's verdict. For a table there is no `diff`: pass `--match true` when `compare-results` reports `accuracy` of `1.0`, `false` otherwise, and `none` when it could not score.
 
 ### 2f — Write the findings
@@ -266,6 +268,8 @@ It writes `findings.json` (one entry per place the semantic model was shown to b
 
 ## Phase 3: Present
 
+**Tell every row in four beats, in the reader's order.** What reconcile is for, given any input (SQL, a question, a chart, or a mix): (1) **how we read your input and how we checked it**, from Phase 1's shape and the question we read from a label, the parts of your statement that held and the ones that did not (the ledger), and whether the statement answers its question (1.5g); (2) **what agami did with the question and what it answered**, from Phase 2b, beside the value you expected; (3) **how agami got there**, from the receipt (the tables it read, the joins, the declared filters it applied, the metric it matched), the claim that differs between the two statements (2e), and the semantic model's own words about what it read (1.5c); (4) **what to change so the output matches, on whichever side the evidence points**, or **what to keep** when it already matches and every part held: a definition through `/agami-save-correction`, a mistake in your query, a reworded question, or nothing; keep is Phase 3e's offer, made once for the batch and never per row. The summary comes first (3a), then every row in its four beats (3a.5), then the tables the beats drew from (3b to 3d), then the one offer (3e) and the close (3f). The tables and the offer keep their exact text; the beats decide what is read first.
+
 Everything this phase says to the person follows [`shared/plain-language.md`](../../shared/plain-language.md): name who did what (you and your query, agami and its answer, the semantic model and its caveats, filters, joins and metrics, the prompt examples, and the data), and never write the word "model" on its own, because it can mean the semantic model, the AI, the prompt examples or the database and a reader cannot tell which; name the thing and never the mechanism; one idea per sentence, cause then effect then the one action; quote a caveat when it decided something. The part ids and file names stay in the tables below and in the files. The sentences around them are plain, and the AI never speaks of itself steering, front-running or deciding the answer.
 
 ### 3a — Summary line first
@@ -279,6 +283,26 @@ When any row carried a statement, add one more line, counting the two statuses t
 ```
 <U> agreed but a part of your statement could not be confirmed (match_unverified); <D> expected values are in doubt because your statement had a defect (expected_doubtful).
 ```
+
+### 3a.5 — Every row in four beats
+
+One block per row, four short paragraphs, in the words of `shared/plain-language.md`. A row with no statement skips beat 1's parts and says so; a row that matched with every part held has a one-line beat 4: keep it. Beat 4 never asks anything per row; the keep question is 3e's, once.
+
+```markdown
+**Q3 Revenue** (from your CSV, tile 3, with the SQL behind it)
+1. What you gave us: a question we read from the tile label as "What was total revenue in Q3 2025?", which you confirmed, and a query that held on every part but one: it leaves out the filter the semantic model declares on orders, `status != 'cancelled'`.
+2. What agami did: it asked the same question and answered $3,890,000; your number is $4,200,000, 7.4% apart.
+3. How it got there: agami read orders, applied the declared filter on status, and matched the metric "revenue". The two queries differ in one place, that filter. The semantic model's caveat on orders says: "cancelled orders are excluded from revenue".
+4. What to change: nothing on agami's side. Your query counts cancelled orders; add the filter and the numbers meet. If cancelled orders belong in revenue for you, the caveat and the declared filter are the things to change, through /agami-save-correction.
+
+**Order count** (from your CSV, tile 1)
+1. What you gave us: a number, and a question we read from the label as "How many orders were placed in Q3 2025?", which you confirmed. No query to check.
+2. What agami did: 12,450; your number is 12,450.
+3. How it got there: agami read orders with the declared filter on status and matched the metric "order count".
+4. Keep it: the numbers agree and there is nothing unconfirmed, so this row is offered below.
+```
+
+Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap, "the question" for a doubtful fit, and "agami's answer" for a mismatch where your statement held on every part (a worked example is the fix). It never says "the model".
 
 ### 3b — Mismatches table (lead with what didn't match)
 
@@ -323,7 +347,7 @@ Only when a row carried a statement, and only for the parts that did not grade `
 - Orders placed, question_fit: the statement may not answer the question: the question asks how many orders were placed and the statement counts order items; reword the question or the statement and re-run this row
 
 **What this run noticed**
-- Open items, dropped_rows: items-users: 3 of 8,345 items rows have no users partner and are dropped by this inner join; counted over the whole table, before the statement's own filters
+- Open items, dropped_rows: items-users: 3 of 8345 items rows have no users partner and are dropped by this inner join; counted over the whole table, before the statement's own filters; rows of users with no items partner were not counted
 
 **What the semantic model says in words**
 - items.state, column caveat: "open is state NOT LIKE 'Closed%'"
@@ -356,7 +380,7 @@ Don't dump every match's drill-down — they're not interesting. The matches bui
 
 ### 3e — Offer promotion
 
-The rows that agreed are the most reusable thing this run produced: a question, the statement that answered it, and a number the user's own dashboard already vouches for. Nothing else in the product carries evidence from outside agami. So keep them — and keep them in **both** of the places they are worth keeping.
+This is beat 4's keep half, made once for the batch. The rows that agreed are the most reusable thing this run produced: a question, the statement that answered it, and a number the user's own dashboard already vouches for. Nothing else in the product carries evidence from outside agami. So keep them — and keep them in **both** of the places they are worth keeping.
 
 **They are worth two different things, and one row cannot be both.**
 
