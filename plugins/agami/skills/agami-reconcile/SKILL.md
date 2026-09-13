@@ -180,10 +180,19 @@ The semantic model + examples library are loaded; let the LLM pick the right sub
 
 ### 2b — Run via the agami-query pipeline
 
-Invoke the same SQL-generation + execution path agami-query uses (Phases 2 + 3 of that skill — see [`agami-query/SKILL.md`](../agami-query/SKILL.md)). Capture:
+**Agami's answer comes from a cold client, never from this session.** This session holds your statement, the ledger's grades and the fit reasoning; anything it wrote would not be what a person gets from agami. Ask the way the golden run asks, once per chunk, with the five rows `next-chunk` handed back:
 
-- The generated SQL
-- The result (should be a single scalar, or a single row)
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/run_golden_eval.py" --profile <profile> \
+  --ask-file /tmp/agami-reconcile-chunk-<ts>.json --out-dir "<artifacts_dir>/local/reconcile/<ts>/rows" --parallel 4
+```
+
+`--ask-file` takes `next-chunk`'s output as it is (its `chunk`), fetches the model context once for the batch, spawns the operator's own client per question with every tool off, no MCP servers and no settings, several at a time, gives each the same context the golden run gives (the schema from the product's own tool, what the datasource means, the ranked prompt examples), and writes `rows/<n>/agami-answer.json` per row as `{row, question, sql, error}`. What is reused across the chunk is what does not depend on the question; the session itself is never reused, because a fresh one is the thing being measured. One question at a time is `--ask "<question>" --out rows/<n>/agami-answer.json`. Per row, exit `0` for the batch, or a `sql` in the row's file, carries a statement: write it verbatim to `rows/<n>/agami.sql`, run it through the profile's tier exactly as 1.5b runs yours (stdout to `rows/<n>/actual.csv`), then `sm receipt --sql-file rows/<n>/agami.sql` and the chart report, as agami-query Phase 3 does. A row whose file has no `sql` carries one of the generator's four fixed sentences as its `error` (the client could not be started, timed out, exited without answering, or answered without a statement); the batch exits `3` when any row is like that. That row is `error` with the sentence as its `error`. **Never write agami's SQL yourself, and never retry with your own wording**; a row with no cold answer is an error row, and that is the finding. Exit `2` means the profile's context could not be built: stop the run and say so.
+
+Capture, per row:
+
+- The generated SQL, verbatim, from `agami-answer.json`
+- The result (one cell, or the columns and a row count)
 - The full chart-template HTML report (so the user can drill in for mismatches)
 - The trust receipt (with confidence, signed-off-by, etc.)
 
