@@ -347,7 +347,7 @@ Only when a row carried a statement, and only for the parts that did not grade `
 - Orders placed, question_fit: the statement may not answer the question: the question asks how many orders were placed and the statement counts order items; reword the question or the statement and re-run this row
 
 **What this run noticed**
-- Open items, dropped_rows: items-users: 3 of 8,345 items rows have no users partner and are dropped by this inner join; counted over the whole table, before the statement's own filters
+- Open items, dropped_rows: items-users: 3 of 8345 items rows have no users partner and are dropped by this inner join; counted over the whole table, before the statement's own filters; rows of users with no items partner were not counted
 
 **What the semantic model says in words**
 - items.state, column caveat: "open is state NOT LIKE 'Closed%'"
