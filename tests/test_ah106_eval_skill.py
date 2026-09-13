@@ -921,22 +921,30 @@ def test_the_generator_is_handed_every_section_and_the_timeout(artifacts, monkey
 
     assert seen["timeout_s"] == 7.0
     context = seen["schema"]("How many orders?")
-    # The vocabulary is now the product's own description of the model — `get_datasource_schema`,
-    # the tool a real session calls — rather than a rendering assembled here. That is both why a run
+    # Two halves, because the prompt cache needs them apart: the fixed half becomes the child's
+    # system prompt and must be the same bytes for every question, or no question after the first
+    # reads it from cache.
+    assert isinstance(context, run_golden_eval.GenerationContext)
+    assert seen["schema"]("How many customers have placed an order?").fixed == context.fixed
+    # The vocabulary is the product's own description of the model — `get_datasource_schema`, the
+    # tool a real session calls — rather than a rendering assembled here. That is both why a run
     # costs a fraction of what it did and why a failure is now a failure about SQL rather than about
     # being handed a context no session ever sees.
-    vocabulary = json.loads(context[: context.index("\n\n")] if "\n\n" in context else context)
+    vocabulary, _ = json.JSONDecoder().raw_decode(context.fixed)
     assert vocabulary["datasource"] == PROFILE
     # No `mode` is passed to the tool, on purpose: `auto` is what a real session sends, and it picks
     # the verbosity itself from how much is in scope — `full` on a model this small, `summary` or
     # `index` on a larger one. Asserting a specific mode here would be asserting a property of the
     # sample model's size, not of this call; the call itself never names one.
     assert vocabulary["mode"] in ("full", "summary", "index")
-    assert "CustInvc -- a customer invoice" in context  # org-context, verbatim
-    # Metrics are no longer rendered here — they arrive inside the tool's own payload, in its shape.
-    # What has to survive the move is the SUBSTANCE, so that is what is asserted: a metric that
-    # cannot be reused verbatim is the failure F22 records.
-    assert '"binding"' in context or '"calculation"' in context, "a metric must arrive reusable"
+    # The stub's glossary line is not in the tool's own payload, so it is kept, verbatim.
+    assert "CustInvc -- a customer invoice" in context.fixed
+    # What has to survive is the SUBSTANCE: a metric that cannot be reused verbatim is the failure
+    # F22 records. On a model this small the tool answers in full detail, so the fixed half already
+    # carries every metric with its binding — and the question's own metric is not sent again.
+    assert '"binding"' in context.fixed or '"calculation"' in context.fixed
+    assert '"binding"' not in context.per_question, "a metric already cached is not resent"
+    assert "like: How many orders?" in context.per_question  # the ranked examples, for this question
     # NOT asserted, and the absence is the finding: `get_datasource_schema` does not put entity
     # aliases in its payload at all — only a count, in prose ("8 entities are defined in the
     # model") — so a real session asking this same question never sees them here either. This
@@ -948,6 +956,108 @@ def test_the_generator_is_handed_every_section_and_the_timeout(artifacts, monkey
     # This script used to render cardinality from the bundles unconditionally, which meant a golden
     # run judged a generator that knew more about fan-out than any real session does at this point
     # in its own turn. Matching the product is the point; the two-call case is filed separately.
+
+
+def test_a_glossary_paragraph_the_tool_already_sends_is_not_sent_twice():
+    """On a profile whose tool payload already carries the domain context, the glossary was the
+    single largest block every question paid for twice. A paragraph the payload lacks is still
+    kept, so the F22 failure — a code guessed where the glossary defines it — cannot come back on a
+    profile whose payload is shorter."""
+    schema = (
+        '{"datasource": "demo", "subject_areas": [{"description": "Refunds are negative amounts."}]}'
+        "\n\n## Domain context\n"
+        "Orders are counted at order grain.\n\nPaid means settled."
+    )
+
+    partly_covered = run_golden_eval._fixed_context(
+        schema, "Orders are counted at order grain.\n\nCustInvc -- a customer invoice"
+    )
+    assert partly_covered.count("Orders are counted at order grain.") == 1
+    assert "CustInvc -- a customer invoice" in partly_covered
+    assert run_golden_eval._fixed_context(schema, "Paid means settled.") == schema
+    assert run_golden_eval._fixed_context(schema, "") == schema
+    # A sentence that only matches a description inside the JSON is not the glossary, so it is kept.
+    assert run_golden_eval._fixed_context(schema, "Refunds are negative amounts.") != schema
+    # Whole paragraphs, not substrings: a glossary line that only appears INSIDE a longer paragraph
+    # of the tool's prose is not that paragraph, and dropping it could lose what a code means.
+    assert run_golden_eval._fixed_context(schema, "counted at order grain.") != schema
+
+
+def _tool_response(document: dict) -> str:
+    """A schema tool response in its real shape: a JSON document, then prose."""
+    return json.dumps(document, indent=2) + "\n\n## Domain context\nA narrative."
+
+
+def test_a_question_sends_only_the_metrics_the_fixed_description_lacks(monkeypatch):
+    """In full detail the fixed description already carries every metric, so a question's own
+    selection would otherwise be paid for twice — once from the cache, and again beside the
+    question."""
+    revenue = {"name": "revenue", "binding": "SUM(total)"}
+    refunds = {"name": "refunds", "binding": "SUM(refund_amount)"}
+    fixed = _tool_response({"mode": "full", "metrics": [revenue]})
+    answers = {
+        "How much revenue?": _tool_response({"mode": "full", "metrics": [revenue]}),
+        "How much was refunded?": _tool_response({"mode": "full", "metrics": [refunds]}),
+    }
+    monkeypatch.setattr(
+        run_golden_eval.tools, "tool_get_datasource_schema", lambda args: answers[args["query"]]
+    )
+
+    assert run_golden_eval._what_the_question_changes(fixed, PROFILE, "How much revenue?") == ""
+    added = run_golden_eval._what_the_question_changes(fixed, PROFILE, "How much was refunded?")
+    assert "SUM(refund_amount)" in added and "SUM(total)" not in added
+
+
+def test_a_question_that_tips_the_detail_level_sends_its_whole_description(monkeypatch):
+    """The tool sizes itself under a budget AFTER choosing metrics, so a question can come back at a
+    different level of detail than the fixed description. Sending only its metrics then would score
+    the generator against a description the product would not have given it for that question."""
+    fixed = _tool_response({"mode": "full", "metrics": [], "subject_areas": ["with tables"]})
+    asked = _tool_response(
+        {
+            "mode": "summary",
+            "metrics": [{"name": "revenue"}],
+            "subject_areas": ["names only"],
+            "truncated": True,
+        }
+    )
+    monkeypatch.setattr(run_golden_eval.tools, "tool_get_datasource_schema", lambda args: asked)
+
+    sent = run_golden_eval._what_the_question_changes(fixed, PROFILE, "How much revenue?")
+    assert '"mode": "summary"' in sent and "names only" in sent and '"truncated": true' in sent
+
+
+def test_the_effort_level_reaches_the_generator_and_is_recorded_with_the_run(
+    artifacts, monkeypatch, sm, capsys
+):
+    """A score measured at one reasoning level says nothing about another, so the level travels to
+    the generator AND into what the run records — two runs compared without it may never have been
+    measuring the same thing."""
+    seen: list[str | None] = []
+
+    class _Records(_Scripted):
+        def __init__(self, schema, *, timeout_s: float, effort: str | None = None) -> None:
+            super().__init__(schema, timeout_s=timeout_s)
+            seen.append(effort)
+
+    monkeypatch.setattr(run_golden_eval, "GENERATOR", _Records)
+    _write(artifacts, "green", PASSING_DATASET)
+
+    _, payload, _ = _run(capsys, "--dataset", "green", "--effort", "low")
+
+    assert seen and set(seen) == {"low"}  # the preflight probe and the run alike
+    assert payload["effort"] == "low"
+    assert json.loads(Path(payload["artifact"]).read_text(encoding="utf-8"))["effort"] == "low"
+
+
+def test_an_unset_effort_is_recorded_as_the_client_default(artifacts, scripted, sm, capsys):
+    """Unset is a level too — the client's own — and a run has to say so, or it cannot be told apart
+    from one whose level was simply not written down."""
+    _write(artifacts, "green", PASSING_DATASET)
+
+    _, payload, _ = _run(capsys, "--dataset", "green")
+
+    assert payload["effort"] == "default"
 
 
 def test_the_examples_are_ranked_for_the_question_being_asked(artifacts, scripted, sm, capsys):

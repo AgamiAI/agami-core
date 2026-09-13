@@ -10,6 +10,31 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Changed
+
+- **A golden run pays for the model's description once, not once per question.** Every question
+  starts its own client, and every one re-sent the whole model — about 35k tokens on a 22-area
+  profile — in a prompt that could not be reused, because it began with the client's own system
+  prompt naming a fresh temporary directory. So nothing was ever read from cache, and a dozen
+  questions could spend a subscription's session limit. The part of the context that is the same
+  for every question — the tool's description of the model, plus any glossary paragraph it lacks —
+  now goes in the child's system prompt, which the client caches — fenced as reference data, so
+  text people wrote into a narrative or a note cannot act as an instruction. Only what the question
+  adds goes with it: metrics the cached description lacks, and its ranked examples. Measured: a second call sharing an 11k-token system
+  prompt read all of it from cache and wrote 134 tokens. Two smaller savings come with it: the
+  client's own ~6k-token default system prompt is replaced, and glossary paragraphs the tool already
+  sends are no longer sent twice. What the generator is told, and how the answer is scored, are
+  unchanged.
+
+- **A golden run can set how hard the generator reasons.** `--effort low|medium|high|xhigh|max`
+  passes the client's own reasoning level to every generation; unset keeps the client's default,
+  as before. Once the model's description is cached, reasoning the answer never shows is most of
+  what a question costs — measured at 90-97% of its output tokens, against a statement of 50-80 —
+  so a lower level is the next large saving. The level is recorded in the run's JSON and artifact,
+  because a score measured at one level says nothing about another.
+
 ## [0.8.4] — 2026-09-12
 
 ### Fixed

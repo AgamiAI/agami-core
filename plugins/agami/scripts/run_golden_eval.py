@@ -82,6 +82,7 @@ try:
         _GENERATION_UNAVAILABLE,
         ClaudeCliGenerator,
         GeneratedSql,
+        GenerationContext,
         GoldenRunResult,
         run_golden_dataset,
     )
@@ -129,6 +130,16 @@ _PREFLIGHT_SCHEMA = "t(id integer)"
 # spawning a real client per case against the operator's own account. A single name cannot drift
 # that way — change it here and the substitutions follow it, or they fail loudly.
 GENERATOR = ClaudeCliGenerator
+
+
+def _effort(args: argparse.Namespace) -> dict[str, str]:
+    """The reasoning level as a keyword for `GENERATOR`, or nothing at all when none was asked for.
+
+    Nothing rather than `effort=None`, so a generator that predates the option — every scripted one
+    a test substitutes, and any injected by a caller — is constructed exactly as it always was until
+    somebody actually asks for a level.
+    """
+    return {"effort": args.effort} if args.effort else {}
 
 
 def _section(outcome: Any) -> str:
@@ -342,28 +353,30 @@ def _examples_text(root: Path, areas: list[str], question: str, top_k: int) -> s
     return "\n\n".join(lines)
 
 
-def _model_context(cached: dict, question: str) -> str:
-    """Everything the generator is given about the model, assembled for one question.
+def _model_context(cached: dict, question: str) -> GenerationContext:
+    """Everything the generator is given about the model, in the two halves the cache keeps apart.
 
-    One flattened string rather than several prompt fields, because `SqlGenerator.generate` takes
-    the schema already flattened and widening that signature is a contract change — the argument
-    list is the isolation boundary.
+    The fixed half was fetched once for the run and is the same bytes for every question — that
+    sameness is the whole of what lets the client read it from cache after the first item, so
+    nothing that depends on the question may be folded into it. The per-question half is what a
+    question changes: whatever the tool's answer for it adds to the fixed description — usually just
+    the metrics that description lacks — and the examples ranked nearest to it.
 
-    Section order mirrors `agami-query/SKILL.md` Phase 2b: the vocabulary, then the datasource
-    context, then the examples. Only the last of these depends on the question; everything above it
-    was fetched once for the run.
+    Section order still mirrors `agami-query/SKILL.md` Phase 2b — the vocabulary, the datasource
+    context, then the examples — with what the question adds moved after the fixed vocabulary rather
+    than inside it.
     """
-    sections = [_schema_from_the_product(cached["profile"], question)]
-    for heading, body in (
-        ("What this datasource means, and what its codes stand for:", cached["org_context"]),
-        (
-            "Worked examples this team has confirmed, nearest first — follow their conventions:",
-            _examples_text(cached["root"], cached["areas"], question, cached["top_k"]),
-        ),
-    ):
-        if body:
-            sections.append(f"{heading}\n{body}")
-    return "\n\n".join(sections)
+    sections: list[str] = []
+    changed = _what_the_question_changes(cached["fixed"], cached["profile"], question)
+    if changed:
+        sections.append(changed)
+    examples = _examples_text(cached["root"], cached["areas"], question, cached["top_k"])
+    if examples:
+        sections.append(
+            "Worked examples this team has confirmed, nearest first — follow their conventions:\n"
+            + examples
+        )
+    return GenerationContext(fixed=cached["fixed"], per_question="\n\n".join(sections))
 
 
 def _schema_text(bundles: list[dict]) -> str:
@@ -408,13 +421,83 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
         "areas": [area["name"] for area in areas],
         "top_k": top_k,
         "profile": profile,
-        # Kept, though the schema now comes from the tool. F22 records that the first live runs
-        # failed EVERY item because the generator was handed column names alone and guessed
-        # 'Invoice' where the data holds a code the profile's own glossary defines. The tool's
-        # payload does not carry that glossary on every profile, and ~4k tokens is a cheap price
-        # for the failure mode it prevents.
-        "org_context": _sm("org-context", str(root), json_out=False).strip(),
+        "fixed": _fixed_context(
+            _schema_from_the_product(profile),
+            # Kept, though the schema now comes from the tool. F22 records that the first live runs
+            # failed EVERY item because the generator was handed column names alone and guessed
+            # 'Invoice' where the data holds a code the profile's own glossary defines. The tool's
+            # payload does not carry that glossary on every profile — but where it does, sending it
+            # twice doubled the single largest block every question paid for.
+            _sm("org-context", str(root), json_out=False).strip(),
+        ),
     }
+
+
+def _split_payload(payload: str) -> tuple[dict, str]:
+    """The tool's response in its two parts: the leading JSON document, and the prose after it.
+
+    A response that does not open with a JSON object — an error sentence, say — has no document and
+    is all prose, which is the reading that keeps everything and drops nothing.
+    """
+    try:
+        document, end = json.JSONDecoder().raw_decode(payload)
+    except ValueError:
+        return {}, payload
+    return (document if isinstance(document, dict) else {}), payload[end:]
+
+
+def _fixed_context(schema: str, org_context: str) -> str:
+    """The run's fixed half: the tool's own description, plus whatever of the glossary it lacks.
+
+    Deduplicated by paragraph rather than dropped outright, because the tool composes its domain
+    context from the same sources `sm org-context` reads but not on every profile, and not always
+    the whole of it. A paragraph already in the tool's prose is left out; one that is not is kept, so
+    the F22 failure above cannot come back on a profile whose payload is shorter.
+
+    Only the prose is searched, not the JSON before it. A glossary sentence that happens to match a
+    table's or a metric's description is not the glossary, and counting it as covered would drop the
+    very paragraph that says what a code means.
+    """
+    _, prose = _split_payload(schema)
+    present = _paragraphs(prose)
+    missing = [
+        paragraph
+        for paragraph in org_context.split("\n\n")
+        if paragraph.strip() and _normalized(paragraph) not in present
+    ]
+    if not missing:
+        return schema
+    return (
+        f"{schema}\n\nWhat this datasource means, and what its codes stand for:\n"
+        + "\n\n".join(missing)
+    )
+
+
+# The headings the tool writes in front of the prose it appends, glued to that prose's first paragraph
+# by a single newline. Peeled off before comparing, or the glossary's own first paragraph — the same
+# text without the heading — would never be recognised as already sent.
+_TOOL_HEADINGS = ("## Domain context", "## USER_MEMORY.md")
+
+
+def _normalized(paragraph: str) -> str:
+    """A paragraph as compared: every run of whitespace one space, none at either end."""
+    return " ".join(paragraph.split())
+
+
+def _paragraphs(prose: str) -> set[str]:
+    """Every whole paragraph of the tool's prose, normalized, with a tool-added heading peeled off.
+
+    Whole paragraphs and not substrings, because a glossary line that happens to sit INSIDE a longer
+    paragraph is not the same paragraph: "paid orders are held" is inside "Unpaid orders are held",
+    and dropping it as already sent would lose the one line that says what a code means.
+    """
+    found: set[str] = set()
+    for paragraph in prose.split("\n\n"):
+        lines = paragraph.strip().splitlines()
+        if lines and lines[0].startswith(_TOOL_HEADINGS):
+            found.add(_normalized("\n".join(lines[1:])))
+        found.add(_normalized(paragraph))
+    return found - {""}
 
 
 # No `mode` is passed, and that is the point rather than an omission. `auto` is what a real session
@@ -424,7 +507,7 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
 # letting the product decide.
 
 
-def _schema_from_the_product(profile: str, question: str) -> str:
+def _schema_from_the_product(profile: str) -> str:
     """The model as the shipped product describes it, rather than as this script renders it.
 
     Two things fall out of asking `get_datasource_schema` instead of assembling the answer here.
@@ -435,15 +518,53 @@ def _schema_from_the_product(profile: str, question: str) -> str:
     hands its own generator — so a failure is a failure about SQL rather than about being given a
     context no real session ever sees.
 
+    Asked once per run, with no `query`, so it is the same bytes for every question and the client
+    can cache it. The question's own metrics are asked for separately, below.
+
     Called in-process, through the tool's own typed entry point rather than the registry it is
     filed under — a plain function over the model, so nothing here goes through MCP or a subprocess
     to reach the same bytes.
     """
-    # `query` is what makes the metrics come back with their `calculation` and `binding` rather
-    # than as bare names — the tool does not narrow on it, it picks which metrics get full detail.
-    # Without it a generator cannot reuse a binding verbatim, which is the thing F22 requires and
-    # the reason a metric exists at all. It costs a few hundred characters.
-    return tools.tool_get_datasource_schema({"datasource": profile, "query": question})
+    return tools.tool_get_datasource_schema({"datasource": profile})
+
+
+def _what_the_question_changes(fixed: str, profile: str, question: str) -> str:
+    """What the product's answer for THIS question adds to the fixed description, ready for stdin.
+
+    `query` is what makes the metrics come back in full rather than as bare names — the tool does
+    not narrow on it, it picks which metrics get full detail. Without it a generator cannot reuse a
+    binding verbatim, which is the thing F22 requires and the reason a metric exists at all.
+
+    Usually the metrics are all that differ, and then only the ones the fixed description does not
+    already carry are sent: in full detail it holds every metric, so resending the question's
+    selection would pay for it twice, outside the cache. But the tool sizes itself under a character
+    budget AFTER choosing metrics, so a question can tip its response to a different level of detail
+    than the fixed one, and then more than the metrics differs. That question gets its whole
+    response, because scoring a generator against a description the product would not have given it
+    for this question scores the wrong thing.
+    """
+    fixed_document, _ = _split_payload(fixed)
+    asked, _ = _split_payload(
+        tools.tool_get_datasource_schema({"datasource": profile, "query": question})
+    )
+    changed = {
+        key for key in set(asked) | set(fixed_document) if asked.get(key) != fixed_document.get(key)
+    }
+    if not changed:
+        return ""
+    if changed <= {"metrics"}:
+        already = fixed_document.get("metrics") or []
+        added = [metric for metric in asked.get("metrics") or [] if metric not in already]
+        if not added:
+            return ""
+        return "The metrics this question touches — reuse a `binding` verbatim:\n" + json.dumps(
+            added, indent=2, default=str
+        )
+    return (
+        "The product's own description for this question. It came back at a different level of "
+        "detail than the reference data, so where the two differ, this one applies:\n"
+        + json.dumps(asked, indent=2, default=str)
+    )
 
 
 # The second reason built from an answer-key column name, and the one that carries no structured
@@ -937,6 +1058,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=5,
         help="how many ranked prompt examples to give the generator per question",
     )
+    parser.add_argument(
+        "--effort",
+        choices=ClaudeCliGenerator.EFFORT_LEVELS,
+        help="how hard the generator reasons before answering; unset uses the client's default. "
+        "Most of a question's output is reasoning the answer never shows, so a lower level is "
+        "much cheaper. The level is recorded with the run, because a score measured at one level "
+        "says nothing about another",
+    )
     args = parser.parse_args(argv)
 
     if args.list:
@@ -997,7 +1126,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             # uses. The run's schema is a CALLABLE that ranks the example library per question —
             # one `sm` subprocess per subject area — and spending that on a throwaway probe would
             # cost more than the loop it protects on a model with many areas.
-            probe = GENERATOR(lambda _question: _PREFLIGHT_SCHEMA, timeout_s=args.timeout_s).generate(
+            probe = GENERATOR(
+                lambda _question: _PREFLIGHT_SCHEMA, timeout_s=args.timeout_s, **_effort(args)
+            ).generate(
                 _PREFLIGHT_QUESTION, tools.resolved_org_id(), args.profile
             )
         except Exception:
@@ -1038,7 +1169,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # The cost is one model call on a healthy run, against N model calls and up to 2N warehouse
     # queries on a broken one.
     generator = GENERATOR(
-        lambda question: _model_context(cached, question), timeout_s=args.timeout_s
+        lambda question: _model_context(cached, question),
+        timeout_s=args.timeout_s,
+        **_effort(args),
     )
 
     result = run_golden_dataset(
@@ -1058,6 +1191,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     keys = {item.item_key: item.expected.sql or "" for item in dataset.test_cases}
     payload = _run_payload(result, questions)
     joined = _joined(result, questions, keys, payload["summary"], selection)
+    # On both, before either is written: a score measured at one reasoning level says nothing about
+    # another, so a run that did not name its level could be compared against one it never matched.
+    payload["effort"] = joined["effort"] = args.effort or "default"
     # Microseconds because a person sorts these by name and two runs a second apart must not land
     # on the same one — an overwritten run is a report that silently describes something else. One
     # stamp for the pair, so the JSON and the page beside it are visibly the same run.
