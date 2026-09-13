@@ -21,25 +21,64 @@ Output (the standard contract):
      "data": {"profile": ..., "run": ..., "decisions": [{row, decision, words?}]},
      "anomalies": [...], "needs_judgment": {...}|null}
 
-A `keep` on a row the run did not score `match` is refused with an anomaly and dropped: the
-keep-offer's predicate is the ledger's, never the page's. Pass the rows the run scored `match` with
-`--match-rows 1,4,7`; without it, every `keep` is refused, because a keep nobody could check is a
-keep nobody should apply. Any dropped decision sends the whole block back as `needs_judgment`.
+A `keep` is applied only to a row the RUN says may be kept, and the run says so through its own
+files: pass `--run-dir <artifacts_dir>/local/reconcile/<ts>`, and the parser reads `rows.jsonl` for
+the rows whose status is `match` with a single recorded cell, and each row's `ledger.json` for the
+`question_fit` part a row with a question and a statement must carry. Nothing about who may be kept
+is typed by hand. A block whose `reconcile-run:` is not the run directory's name is refused whole. A
+`keep` on any other row, `words` beside a `keep` or a `nothing`, a misspelt decision, a row decided
+twice, a missing or non-list `decisions:` section: each sends the block back as `needs_judgment`.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
 _KEYS = {"profile", "reconcile-run", "decisions"}
 _DECISIONS = frozenset({"keep", "change", "fix", "reword", "nothing"})
+_WITH_WORDS = frozenset({"change", "fix", "reword"})
 _FIELDS = ("row", "decision", "words")
 _DROPPED_KINDS = frozenset({"unknown_decision", "decision_missing_row", "row_decided_twice",
-                            "decision_not_an_object", "keep_not_offered"})
+                            "decision_not_an_object", "keep_not_offered", "words_ignored_on_keep",
+                            "words_ignored_on_nothing"})
+
+
+def keepable_rows(run_dir: Path) -> set[int]:
+    """The rows Phase 3e may offer, read from the run's own files: status `match`, one recorded cell,
+    and, for a row that carries both a question and a statement, a `question_fit` part in its ledger.
+    The predicate is the ledger's; this function only reads it."""
+    rows_path = Path(run_dir) / "rows.jsonl"
+    if not rows_path.exists():
+        return set()
+    keep: set[int] = set()
+    for n, line in enumerate(rows_path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("status") != "match":
+            continue
+        recorded = record.get("recorded") or {}
+        rows = recorded.get("rows") if isinstance(recorded, dict) else None
+        if not (isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], list) and len(rows[0]) == 1):
+            continue
+        row = record.get("row", n)
+        if record.get("question") and record.get("statement"):
+            ledger_path = Path(run_dir) / "rows" / str(row) / "ledger.json"
+            try:
+                parts = json.loads(ledger_path.read_text(encoding="utf-8")).get("rows", [])
+            except (OSError, ValueError, AttributeError):
+                continue
+            if not any(isinstance(p, dict) and p.get("part") == "question_fit" and p.get("verdict") == "confirmed"
+                       for p in parts):
+                continue
+        keep.add(int(row))
+    return keep
 
 
 def _key_of(line: str):
@@ -73,7 +112,7 @@ def _sections(text: str) -> tuple[dict, list[str]]:
     return out, repeated
 
 
-def parse(text: str, match_rows: set[int] | None = None) -> tuple[dict, list, dict | None]:
+def parse(text: str, keepable: set[int] | None = None, run: str | None = None) -> tuple[dict, list, dict | None]:
     sec, repeated = _sections(text)
     anomalies: list = [{"kind": "key_repeated", "detail": key} for key in repeated]
     needs: dict | None = None
@@ -83,8 +122,15 @@ def parse(text: str, match_rows: set[int] | None = None) -> tuple[dict, list, di
         data["profile"] = sec["profile"].strip() or None
     if "reconcile-run" in sec:
         data["run"] = sec["reconcile-run"].strip() or None
+    if run is not None and data["run"] != run:
+        # A block from another run's page must never be applied to this run.
+        anomalies.append({"kind": "run_mismatch", "detail": data["run"], "expected": run})
+        return data, anomalies, {"kind": "run_mismatch", "section": "reconcile-run",
+                                 "ask": f"the block names run {data['run']!r}, this is run {run!r}; paste the block from this run's page"}
     if "decisions" not in sec:
-        return data, anomalies, needs
+        anomalies.append({"kind": "section_missing", "detail": "decisions"})
+        return data, anomalies, {"kind": "section_missing", "section": "decisions",
+                                 "ask": "the block has no `decisions:` section; re-copy it whole from the page"}
     try:
         parsed = json.loads(sec["decisions"])
     except Exception as e:
@@ -93,7 +139,8 @@ def parse(text: str, match_rows: set[int] | None = None) -> tuple[dict, list, di
                                  "ask": "the `decisions:` block isn't valid JSON; re-copy it from the page"}
     if not isinstance(parsed, list):
         anomalies.append({"kind": "decisions_not_list", "detail": "expected a JSON array"})
-        return data, anomalies, needs
+        return data, anomalies, {"kind": "decisions_not_list", "section": "decisions",
+                                 "ask": "the `decisions:` value is not a JSON array; re-copy it from the page"}
     seen: set[int] = set()
     for entry in parsed:
         if not isinstance(entry, dict):
@@ -109,9 +156,9 @@ def parse(text: str, match_rows: set[int] | None = None) -> tuple[dict, list, di
         if row in seen:
             anomalies.append({"kind": "row_decided_twice", "row": row})
             continue
-        if decision == "keep" and row not in (match_rows or set()):
-            # The offer's predicate belongs to the ledger: a keep the run did not score `match`
-            # is not the person's to grant from a page.
+        if decision == "keep" and row not in (keepable or set()):
+            # The offer's predicate belongs to the ledger: a keep the run's own files do not
+            # allow is not the person's to grant from a page.
             anomalies.append({"kind": "keep_not_offered", "row": row})
             continue
         seen.add(row)
@@ -120,6 +167,10 @@ def parse(text: str, match_rows: set[int] | None = None) -> tuple[dict, list, di
         if words is not None:
             if not isinstance(words, str):
                 anomalies.append({"kind": "words_not_text", "row": row})
+            elif decision not in _WITH_WORDS and words.strip():
+                # A keep or a nothing carries no instruction; words riding beside one are the hand
+                # edit this parser exists to catch, as the grading page's parser treats SQL on a right.
+                anomalies.append({"kind": f"words_ignored_on_{decision}", "row": row})
             elif words.strip():
                 out["words"] = words.strip()
         decisions.append({key: out[key] for key in _FIELDS if key in out})
@@ -131,19 +182,24 @@ def parse(text: str, match_rows: set[int] | None = None) -> tuple[dict, list, di
     return data, anomalies, needs
 
 
-def _match_rows(spec: str | None) -> set[int]:
-    if not spec:
-        return set()
-    return {int(part) for part in re.split(r"[,\s]+", spec.strip()) if part}
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Parse the reconcile report page's back-channel block.")
     ap.add_argument("--block-file", help="path to the pasted block (else stdin)")
-    ap.add_argument("--match-rows", help="comma-separated row numbers the run scored `match`; a keep on any other row is refused")
+    ap.add_argument("--run-dir", required=True,
+                    help="the run directory, <artifacts_dir>/local/reconcile/<ts>; which rows may be kept is read from its files")
     args = ap.parse_args(argv)
-    text = Path(args.block_file).read_text(encoding="utf-8") if args.block_file else sys.stdin.read()
-    data, anomalies, needs = parse(text, _match_rows(args.match_rows))
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        print(json.dumps({"ok": False, "data": None, "anomalies": [{"kind": "bad_argument", "detail": f"{run_dir} is not a directory"}],
+                          "needs_judgment": {"kind": "bad_argument", "ask": "pass the run directory the page was rendered from"}}, indent=2))
+        return 2
+    try:
+        text = Path(args.block_file).read_text(encoding="utf-8") if args.block_file else sys.stdin.read()
+    except OSError as exc:
+        print(json.dumps({"ok": False, "data": None, "anomalies": [{"kind": "bad_argument", "detail": str(exc)}],
+                          "needs_judgment": {"kind": "bad_argument", "ask": "the block file could not be read"}}, indent=2))
+        return 2
+    data, anomalies, needs = parse(text, keepable_rows(run_dir), run=run_dir.name)
     print(json.dumps({"ok": needs is None, "data": data, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
     return 0
 

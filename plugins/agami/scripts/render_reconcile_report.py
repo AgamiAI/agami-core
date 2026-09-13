@@ -39,7 +39,7 @@ THEME_PATH = SHARED_DIR / "theme.css"
 
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
-_FIELDS = ("row", "label", "question", "source", "status", "expected", "answer",
+_FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "single_cell",
            "read", "how", "words", "disagreement", "change", "report_path")
 _LISTS = ("read", "how", "words", "change")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
@@ -78,8 +78,10 @@ def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
             item.setdefault(key, [])
         for key in ("label", "source", "expected", "answer", "disagreement", "report_path"):
             item.setdefault(key, None)
-        # The one rule the page enforces about decisions: keep is offered where the run said match.
-        item["keep_allowed"] = item["status"] == "match"
+        # The one rule the page enforces about decisions: keep is offered where the run said match
+        # AND the answer is one cell, which is Phase 3e's own predicate; a table row can match and
+        # still never be offered.
+        item["keep_allowed"] = item["status"] == "match" and item.get("single_cell") is True
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {
         "REPORT_TITLE": html.escape(title),

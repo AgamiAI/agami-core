@@ -306,19 +306,19 @@ Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap
 
 **Render the same four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. The chat keeps 3a, 3a.5 and the tables below, so a person reading the transcript later loses nothing.
 
-1. **Build the report items file** with the Write tool, one entry per row: `{"row": <n>, "label": "...", "question": "...", "source": "<from your CSV, tile 3, with the SQL behind it>", "status": "<the row's status>", "expected": "<display text or null>", "answer": "<the one recorded cell, or 'a table of N rows, columns a, b'>", "read": ["<beat 1, one sentence per line>"], "how": ["<beat 3>"], "words": ["<one line per prose source from evidence.prose>"], "disagreement": "<the one sentence when two lines name different values, or null>", "change": ["<beat 4>"], "report_path": "<the receipt>"}`. Never a result row. Every sentence in the words of `shared/plain-language.md`.
+1. **Build the report items file** with the Write tool, one entry per row: `{"row": <n>, "label": "...", "question": "...", "source": "<from your CSV, tile 3, with the SQL behind it>", "status": "<the row's status>", "expected": "<display text or null>", "answer": "<the one recorded cell, or 'a table of N rows, columns a, b'>", "single_cell": <true when recorded is one cell>, "read": ["<beat 1, one sentence per line>"], "how": ["<beat 3>"], "words": ["<one line per prose source from evidence.prose>"], "disagreement": "<the one sentence when two lines name different values, or null>", "change": ["<beat 4>"], "report_path": "<the receipt>"}`. Never a result row. Every sentence in the words of `shared/plain-language.md`.
 2. **Render and point at it:**
    ```bash
    python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_report.py" --title "Reconcile · <profile>" \
      --profile <profile> --run <ts> --items-file /tmp/agami-reconcile-report-items-<ts>.json \
      --out "<artifacts_dir>/local/reconcile/<ts>/report.html"
    ```
-   The page offers `keep` only on rows whose status is `match`; the page draws that from the status you wrote, and the parser refuses any other keep, because the offer's predicate is the ledger's and never the page's.
-3. **Read the decisions back** when the block arrives (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`), passing the rows this run scored `match`:
+   The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from what you wrote, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's.
+3. **Read the decisions back** when the block arrives (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`), handing the parser the run directory the page was rendered from. It reads which rows may be kept from `rows.jsonl` and each row's `ledger.json`, never from anything typed, and refuses a block whose `reconcile-run` is not this run:
    ```bash
-   python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_report.py" --block-file /tmp/agami-reconcile-decisions-<ts>.txt --match-rows <the match rows, comma-separated>
+   python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_report.py" --block-file /tmp/agami-reconcile-decisions-<ts>.txt --run-dir "<artifacts_dir>/local/reconcile/<ts>"
    ```
-   A `needs_judgment` means the block did not parse or a decision could not be applied as written: ask for it again, apply nothing. Then, per decision: **`keep`** is the person's yes to Phase 3e's offer for that row, applied through 3e's own doors and its own rules (the split, the band, one call per row); **`change`** takes the finding and the person's words to `/agami-save-correction`, one definition at a time; **`fix`** and **`reword`** come back to the person as the next thing to do, with the row's beat 4 repeated; **`nothing`** changes nothing. No decision writes anything this skill does not already write.
+   A `needs_judgment` means the block did not parse, came from another run, or carries a decision that could not be applied as written (a keep the run does not allow, words beside a keep, a misspelt decision): ask for it again, apply nothing. Then, per decision: **`keep`** is the person's yes to Phase 3e's offer for that row, applied through 3e's own doors and its own rules (the split, the band, one call per row); **`change`** takes the finding and the person's words to `/agami-save-correction`, one definition at a time; **`fix`** and **`reword`** come back to the person as the next thing to do, with the row's beat 4 repeated; **`nothing`** changes nothing. No decision writes anything this skill does not already write.
 
 ### 3b — Mismatches table (lead with what didn't match)
 

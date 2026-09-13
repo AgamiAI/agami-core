@@ -43,7 +43,7 @@
     .beat b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted, #5b6875); margin-bottom: 4px; }
     .beat ul { margin: 4px 0 0; padding-left: 18px; }
     .status { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border, #d9dde3); margin-left: 8px; }
-    .status.match { border-color: #2e8b57; color: #2e8b57; } .status.mismatch, .status.expected_doubtful { border-color: #b3261e; color: #b3261e; } .status.match_unverified { border-color: #b8860b; color: #b8860b; }
+    .status.match { border-color: #2e8b57; color: #2e8b57; } .status.mismatch, .status.expected_doubtful { border-color: #b3261e; color: #b3261e; } .status.match_unverified { border-color: #b8860b; color: #b8860b; } .status.error { border-color: var(--fg-muted, #5b6875); color: var(--fg-muted, #5b6875); }
     .quote { color: var(--fg-muted, #5b6875); font-style: italic; }
     .grade { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 14px; }
     .grade label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
@@ -120,7 +120,8 @@
           + '<span class="status ' + esc(item.status) + '">' + esc(item.status) + '</span></div>'
           + (item.source ? '<div class="meta">' + esc(item.source) + '</div>' : '')
           + '<div class="beat"><b>1. What you gave us</b>' + esc(item.question) + lines(item.read) + '</div>'
-          + '<div class="beat"><b>2. What agami did</b>agami answered <code>' + esc(item.answer) + '</code>'
+          + '<div class="beat"><b>2. What agami did</b>'
+          + (item.answer ? 'agami answered <code>' + esc(item.answer) + '</code>' : 'agami could not answer this row')
           + (item.expected ? '; you expected <code>' + esc(item.expected) + '</code>' : '') + '</div>'
           + '<div class="beat"><b>3. How it got there</b>' + lines(item.how)
           + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')

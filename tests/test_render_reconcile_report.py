@@ -26,7 +26,7 @@ ITEMS = [
      "change": ["your query counts cancelled orders; add the filter and the numbers meet"],
      "report_path": "local/charts/p/3.html"},
     {"row": 1, "label": "Order count", "question": "How many orders were placed in Q3 2025?",
-     "status": "match", "expected": "12,450", "answer": "12,450",
+     "status": "match", "expected": "12,450", "answer": "12,450", "single_cell": True,
      "read": ["a number and a question we read from the label, which you confirmed; no query to check"],
      "how": ["agami read orders with the declared filter on status and matched the metric order count"],
      "change": ["keep it: the numbers agree and nothing is unconfirmed"]},
@@ -43,16 +43,27 @@ def test_renders_one_card_per_row_in_four_beats_and_the_block_grammar():
     for token in ("'profile: '", "'reconcile-run: '", "'decisions:'", "'done'"):
         assert token in html, token
     assert 'profile: "demo"' in html and 'run: "20260912-101500"' in html
-    assert "['change', 'fix', 'reword', 'nothing']" in html and "item.keep_allowed ? ['keep'] : []" in html
+    # An error row has no answer and says so instead of quoting an empty cell.
+    error = rr.render(title="t", profile="p", run="r", items=[{"row": 7, "question": "q", "status": "error"}])
+    assert "agami could not answer this row" in error
 
 
-def test_keep_is_offered_only_where_the_run_said_match():
-    html = rr.render(title="t", profile="p", run="r", items=ITEMS)
+def _payload(html: str) -> dict:
     import re
     payload = json.loads(re.search(r"const DATA = \{ profile: .*?, run: .*?, items: (\[.*\]) \};", html).group(1)
                          .replace("\\u003c", "<"))
-    by_row = {item["row"]: item for item in payload}
+    return {item["row"]: item for item in payload}
+
+
+def test_keep_is_offered_only_where_the_run_said_match_with_one_cell():
+    """Phase 3e's own predicate, both halves: a table can match and is still never offered."""
+    by_row = _payload(rr.render(title="t", profile="p", run="r", items=ITEMS))
     assert by_row[1]["keep_allowed"] is True and by_row[3]["keep_allowed"] is False
+    table = dict(ITEMS[1], row=9, single_cell=False, answer="a table of 3 rows, columns region, revenue")
+    by_row = _payload(rr.render(title="t", profile="p", run="r", items=[table]))
+    assert by_row[9]["keep_allowed"] is False
+    by_row = _payload(rr.render(title="t", profile="p", run="r", items=[dict(ITEMS[1], row=8, single_cell=None)]))
+    assert by_row[8]["keep_allowed"] is False
 
 
 def test_result_rows_are_refused_and_a_status_is_required():
