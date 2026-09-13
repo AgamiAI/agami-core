@@ -1727,14 +1727,12 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
                 col_state = "defect"
             else:
                 col_state = "noted"  # agami returned more than asked; nothing of yours is missing
-            note = None
-            if only_yours:
-                note = f"no column of agami's carries the values of: {', '.join(only_yours)}"
-            elif only_agami:
-                note = f"agami returned columns your query did not: {', '.join(only_agami)}"
+            # No sentence: the tokens carry the difference the way a diff does. A column only yours
+            # has reads as removed, one only agami's as added, and a pair with two names is marked in
+            # place so the reader sees they hold the same values.
+            add("columns", col_state, yc, ac, yours_hi=only_yours, agami_hi=only_agami)
             if renamed:
-                note = (note + "; " if note else "") + "same values under other names: " + ", ".join(renamed)
-            add("columns", col_state, yc, ac, yours_hi=only_yours, agami_hi=only_agami, note=note)
+                rows[-1]["renamed"] = [[a, b] for a, b in pairs if a != b]
         acc = result_set.get("accuracy")
         if acc is not None:
             same = float(acc) >= 1.0

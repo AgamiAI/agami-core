@@ -195,10 +195,21 @@
     // one side never pushes the other out of line. Differing tokens are highlighted in place.
     const MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·' };
     const MARK_WORDS = { held: 'passed', defect: 'does not match', open: 'could not check', gap: 'gap in the semantic model', noted: 'noted' };
-    function cell(v, hi, side, state) {
+    // A list cell reads like a diff: a token only on this side is removed (yours, red, a minus) or
+    // added (agami, green, a plus); a token whose partner on the other side has another name is
+    // marked in place, with the partner's name on hover. No sentence repeats what the marks show.
+    function cell(v, hi, side, state, renamed) {
       const cls = 'v ' + side + ' ' + state + (Array.isArray(v) || !(hi || []).length ? '' : ' whole');
       if (v == null) return '<div class="' + cls + '"></div>';
-      if (Array.isArray(v)) return '<div class="' + cls + '">' + v.map(tok => '<span class="tok' + ((hi || []).includes(tok) ? ' hi' : '') + '">' + esc(tok) + '</span>').join('') + '</div>';
+      if (Array.isArray(v)) {
+        const partner = {};
+        (renamed || []).forEach(([a, b]) => { if (side === 'yours') partner[a] = b; else partner[b] = a; });
+        return '<div class="' + cls + '">' + v.map(tok => {
+          if ((hi || []).includes(tok)) return '<span class="tok ' + (side === 'yours' ? 'del' : 'add') + '">' + (side === 'yours' ? '−' : '+') + esc(tok) + '</span>';
+          if (partner[tok]) return '<span class="tok renamed" title="same values as ' + esc(partner[tok]) + '">' + esc(tok) + '</span>';
+          return '<span class="tok">' + esc(tok) + '</span>';
+        }).join('') + '</div>';
+      }
       return '<div class="' + cls + '">' + ((hi || []).includes(v) ? '<span class="hi">' + esc(v) + '</span>' : esc(v)) + '</div>';
     }
     function diffGrid(item) {
@@ -210,7 +221,7 @@
         + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
         + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'
             + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
-            + cell(r.yours, r.yours_hi, 'yours', r.state) + cell(r.agami, r.agami_hi, 'agami', r.state)
+            + cell(r.yours, r.yours_hi, 'yours', r.state, r.renamed) + cell(r.agami, r.agami_hi, 'agami', r.state, r.renamed)
             + (r.note && (r.state !== 'held' || r.key === 'columns') ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
         + '</div></details>';
     }

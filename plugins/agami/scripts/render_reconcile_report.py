@@ -43,7 +43,7 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 _FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
            "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "keep_allowed", "result", "fix", "fix_words", "prefill")
 _LISTS = ("read", "how", "words", "change", "todo")
-_DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi")
+_DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
@@ -97,6 +97,9 @@ def _validate_item(item: dict, idx: int) -> None:
                 raise ValueError(f"item {idx}: diff '{hi}' must be a list of the tokens to highlight")
         if row.get("note") is not None and not isinstance(row["note"], str):
             raise ValueError(f"item {idx}: diff 'note' must be text")
+        renamed = row.get("renamed")
+        if renamed is not None and not (isinstance(renamed, list) and all(isinstance(p, list) and len(p) == 2 and all(isinstance(x, str) for x in p) for p in renamed)):
+            raise ValueError(f"item {idx}: diff 'renamed' must be a list of [yours, agami] name pairs")
         if "rows" in row or "recorded" in row:
             raise ValueError(f"item {idx}: result rows are never rendered, not even inside a diff row")
     if item.get("keep_allowed") is not None and not isinstance(item["keep_allowed"], bool):

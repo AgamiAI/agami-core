@@ -283,7 +283,7 @@ def test_the_first_reviews_findings(tmp_path):
     run = _run(tmp_path, [agami_extra, doubtful, unreadable, no_status, twice_a, twice_b])
     items = {i["row"]: i for i in reconcile.report_items(run)}
     cols = next(r for r in items[1]["diff"] if r["key"] == "columns")
-    assert cols["state"] == "noted" and cols["agami_hi"] == ["extra"] and cols["note"] == "agami returned columns your query did not: extra"
+    assert cols["state"] == "noted" and cols["agami_hi"] == ["extra"] and cols["note"] is None  # the tokens carry it, diff-style
     assert items[1]["owner"] != "you" and "every check passed" in items[1]["sentence"]
     assert items[2]["change"][0] == "Fix your query: value orders.status='Delivered'. Then run this row again."
     assert "tables read" not in items[2]["sentence"] and "value orders.status='Delivered'" in items[2]["sentence"]
