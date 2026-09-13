@@ -521,6 +521,7 @@ class _RecordedSpawn:
                  raises: BaseException | None = None) -> None:
         self.invocations: list[tuple[list[str], dict]] = []
         self.working_dirs: list[tuple[str | None, list[str] | None]] = []
+        self.system_prompts: list[tuple[str | None, str | None]] = []
         self._stdout, self._returncode, self._stderr = stdout, returncode, stderr
         self._raises = raises
 
@@ -530,16 +531,23 @@ class _RecordedSpawn:
         # exists only for the duration of the call, so its contents are unknowable afterwards.
         cwd = kwargs.get("cwd")
         self.working_dirs.append((cwd, sorted(os.listdir(cwd)) if cwd else None))
+        # And the system prompt file, for the same reason. It is a channel into the child exactly as
+        # stdin is, so an isolation assertion that read only the arguments would be blind to it.
+        prompt_path = _flag_value(list(args), "--system-prompt-file")
+        prompt_text = Path(prompt_path).read_text(encoding="utf-8") if prompt_path else None
+        self.system_prompts.append((prompt_path, prompt_text))
         if self._raises is not None:
             raise self._raises
         return subprocess.CompletedProcess(args, self._returncode, self._stdout, self._stderr)
 
     def everything_given(self) -> str:
-        """Every string the child could read: its arguments, its stdin, and its environment."""
+        """Every string the child could read: its arguments, its stdin, its system prompt file, and
+        its environment."""
         parts: list[str] = []
-        for args, kwargs in self.invocations:
+        for (args, kwargs), (_, prompt_text) in zip(self.invocations, self.system_prompts):
             parts += args
             parts.append(kwargs.get("input") or "")
+            parts.append(prompt_text or "")
             parts += [f"{key}={value}" for key, value in (kwargs.get("env") or {}).items()]
         return "\n".join(parts)
 
@@ -693,16 +701,64 @@ def test_the_child_environment_stays_an_allowlist(spawn, monkeypatch):
 def test_the_invocation_is_the_same_on_every_call(spawn):
     """One tuple, no branch: a flag that some runs get and others do not is a flag that will be
     missing on the run that mattered. The module-level constant is what makes that unrepresentable,
-    so a second generation is asserted to be argument-for-argument the first."""
+    so a second generation is asserted to be argument-for-argument the first.
+
+    The system prompt file's PATH is the one value allowed to differ — a fresh temporary file per
+    call, so nothing outlives the call — and it is the only thing normalized out."""
     generator = _cli_generator()
     generator.generate(QUESTION, ORG, DATASOURCE)
     generator.generate("How many customers are there?", ORG, None)
 
-    assert spawn.invocations[0][0] == spawn.invocations[1][0]
+    def _shape(args: list[str]) -> list[str]:
+        return [
+            "<system-prompt-file>" if previous == "--system-prompt-file" else arg
+            for previous, arg in zip([None, *args], args)
+        ]
+
+    assert _shape(spawn.invocations[0][0]) == _shape(spawn.invocations[1][0])
+    assert "--system-prompt-file" in spawn.invocations[0][0]
     assert isinstance(gr.client_argv(), tuple)
     # Resolution is cached, so a PATH that changes mid-run cannot change the argument list under
     # the items still to come.
     assert gr.client_argv() == gr.client_argv()
+
+
+def test_the_fixed_half_is_the_system_prompt_and_identical_on_every_call(spawn):
+    """The prompt cache matches a system prompt byte for byte, so this is the property the saving
+    rests on: two questions against one model hand the child the same system prompt, and the
+    question — with everything it changed — travels on stdin instead.
+
+    A question that leaked into the system prompt would not be caught by any score. Every item would
+    still be answered correctly; each one would just pay for the whole model again."""
+    fixed = "orders(id integer, status text, total real)"
+    generator = gr.ClaudeCliGenerator(
+        lambda question: gr.GenerationContext(fixed=fixed, per_question=f"nearest to: {question}"),
+        timeout_s=30.0,
+    )
+    generator.generate(QUESTION, ORG, DATASOURCE)
+    generator.generate("How many customers are there?", ORG, DATASOURCE)
+
+    (first_path, first), (second_path, second) = spawn.system_prompts
+    assert first == second and fixed in first
+    assert QUESTION not in first and "nearest to" not in first
+    assert first_path != second_path  # a fresh file each call; only its content is shared
+    stdins = [kwargs["input"] for _, kwargs in spawn.invocations]
+    assert all(fixed not in stdin for stdin in stdins)
+    assert QUESTION in stdins[0] and f"nearest to: {QUESTION}" in stdins[0]
+    assert "How many customers are there?" in stdins[1]
+
+
+def test_the_system_prompt_file_is_outside_the_working_directory_and_gone_after(spawn):
+    """The working directory stays empty — a setting source loaded by mistake would still find
+    nothing there — and the file holding the model's description does not outlive the call."""
+    _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    path, text = spawn.system_prompts[0]
+    workdir, contents = spawn.working_dirs[0]
+    assert path and text
+    assert contents == []
+    assert os.path.dirname(path) != workdir
+    assert not os.path.exists(path)
 
 
 def test_the_answer_key_is_in_nothing_the_generator_was_given(chokepoint, spawn):

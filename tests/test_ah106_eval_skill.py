@@ -921,22 +921,29 @@ def test_the_generator_is_handed_every_section_and_the_timeout(artifacts, monkey
 
     assert seen["timeout_s"] == 7.0
     context = seen["schema"]("How many orders?")
-    # The vocabulary is now the product's own description of the model — `get_datasource_schema`,
-    # the tool a real session calls — rather than a rendering assembled here. That is both why a run
+    # Two halves, because the prompt cache needs them apart: the fixed half becomes the child's
+    # system prompt and must be the same bytes for every question, or no question after the first
+    # reads it from cache.
+    assert isinstance(context, run_golden_eval.GenerationContext)
+    assert seen["schema"]("How many customers have placed an order?").fixed == context.fixed
+    # The vocabulary is the product's own description of the model — `get_datasource_schema`, the
+    # tool a real session calls — rather than a rendering assembled here. That is both why a run
     # costs a fraction of what it did and why a failure is now a failure about SQL rather than about
     # being handed a context no session ever sees.
-    vocabulary = json.loads(context[: context.index("\n\n")] if "\n\n" in context else context)
+    vocabulary, _ = json.JSONDecoder().raw_decode(context.fixed)
     assert vocabulary["datasource"] == PROFILE
     # No `mode` is passed to the tool, on purpose: `auto` is what a real session sends, and it picks
     # the verbosity itself from how much is in scope — `full` on a model this small, `summary` or
     # `index` on a larger one. Asserting a specific mode here would be asserting a property of the
     # sample model's size, not of this call; the call itself never names one.
     assert vocabulary["mode"] in ("full", "summary", "index")
-    assert "CustInvc -- a customer invoice" in context  # org-context, verbatim
-    # Metrics are no longer rendered here — they arrive inside the tool's own payload, in its shape.
-    # What has to survive the move is the SUBSTANCE, so that is what is asserted: a metric that
-    # cannot be reused verbatim is the failure F22 records.
-    assert '"binding"' in context or '"calculation"' in context, "a metric must arrive reusable"
+    # The stub's glossary line is not in the tool's own payload, so it is kept, verbatim.
+    assert "CustInvc -- a customer invoice" in context.fixed
+    # Metrics arrive in the tool's own shape, selected for THIS question — which is why they travel
+    # with the question and not in the fixed half. What has to survive is the SUBSTANCE: a metric
+    # that cannot be reused verbatim is the failure F22 records.
+    assert '"binding"' in context.per_question or '"calculation"' in context.per_question
+    assert "like: How many orders?" in context.per_question  # the ranked examples, for this question
     # NOT asserted, and the absence is the finding: `get_datasource_schema` does not put entity
     # aliases in its payload at all — only a count, in prose ("8 entities are defined in the
     # model") — so a real session asking this same question never sees them here either. This
@@ -948,6 +955,25 @@ def test_the_generator_is_handed_every_section_and_the_timeout(artifacts, monkey
     # This script used to render cardinality from the bundles unconditionally, which meant a golden
     # run judged a generator that knew more about fan-out than any real session does at this point
     # in its own turn. Matching the product is the point; the two-call case is filed separately.
+
+
+def test_a_glossary_paragraph_the_tool_already_sends_is_not_sent_twice():
+    """On a profile whose tool payload already carries the domain context, the glossary was the
+    single largest block every question paid for twice. A paragraph the payload lacks is still
+    kept, so the F22 failure — a code guessed where the glossary defines it — cannot come back on a
+    profile whose payload is shorter."""
+    schema = (
+        '{"datasource": "demo"}\n\n## Domain context\n'
+        "Orders are counted at order grain.\n\nRefunds are negative amounts."
+    )
+
+    partly_covered = run_golden_eval._fixed_context(
+        schema, "Orders are counted at order grain.\n\nCustInvc -- a customer invoice"
+    )
+    assert partly_covered.count("Orders are counted at order grain.") == 1
+    assert "CustInvc -- a customer invoice" in partly_covered
+    assert run_golden_eval._fixed_context(schema, "Refunds are negative amounts.") == schema
+    assert run_golden_eval._fixed_context(schema, "") == schema
 
 
 def test_the_examples_are_ranked_for_the_question_being_asked(artifacts, scripted, sm, capsys):

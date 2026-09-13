@@ -82,6 +82,7 @@ try:
         _GENERATION_UNAVAILABLE,
         ClaudeCliGenerator,
         GeneratedSql,
+        GenerationContext,
         GoldenRunResult,
         run_golden_dataset,
     )
@@ -342,28 +343,33 @@ def _examples_text(root: Path, areas: list[str], question: str, top_k: int) -> s
     return "\n\n".join(lines)
 
 
-def _model_context(cached: dict, question: str) -> str:
-    """Everything the generator is given about the model, assembled for one question.
+def _model_context(cached: dict, question: str) -> GenerationContext:
+    """Everything the generator is given about the model, in the two halves the cache keeps apart.
 
-    One flattened string rather than several prompt fields, because `SqlGenerator.generate` takes
-    the schema already flattened and widening that signature is a contract change — the argument
-    list is the isolation boundary.
+    The fixed half was fetched once for the run and is the same bytes for every question — that
+    sameness is the whole of what lets the client read it from cache after the first item, so
+    nothing that depends on the question may be folded into it. The per-question half is the two
+    things a question changes: the metrics the tool selects for it, and the examples ranked nearest
+    to it.
 
-    Section order mirrors `agami-query/SKILL.md` Phase 2b: the vocabulary, then the datasource
-    context, then the examples. Only the last of these depends on the question; everything above it
-    was fetched once for the run.
+    Section order still mirrors `agami-query/SKILL.md` Phase 2b — the vocabulary, the datasource
+    context, then the examples — with the question's own metrics moved after the fixed vocabulary
+    rather than inside it.
     """
-    sections = [_schema_from_the_product(cached["profile"], question)]
-    for heading, body in (
-        ("What this datasource means, and what its codes stand for:", cached["org_context"]),
-        (
-            "Worked examples this team has confirmed, nearest first — follow their conventions:",
-            _examples_text(cached["root"], cached["areas"], question, cached["top_k"]),
-        ),
-    ):
-        if body:
-            sections.append(f"{heading}\n{body}")
-    return "\n\n".join(sections)
+    sections: list[str] = []
+    metrics = _metrics_for_the_question(cached["profile"], question)
+    if metrics:
+        sections.append(
+            "The metrics this question touches — reuse a `binding` verbatim:\n"
+            + json.dumps(metrics, indent=2, default=str)
+        )
+    examples = _examples_text(cached["root"], cached["areas"], question, cached["top_k"])
+    if examples:
+        sections.append(
+            "Worked examples this team has confirmed, nearest first — follow their conventions:\n"
+            + examples
+        )
+    return GenerationContext(fixed=cached["fixed"], per_question="\n\n".join(sections))
 
 
 def _schema_text(bundles: list[dict]) -> str:
@@ -408,13 +414,37 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
         "areas": [area["name"] for area in areas],
         "top_k": top_k,
         "profile": profile,
-        # Kept, though the schema now comes from the tool. F22 records that the first live runs
-        # failed EVERY item because the generator was handed column names alone and guessed
-        # 'Invoice' where the data holds a code the profile's own glossary defines. The tool's
-        # payload does not carry that glossary on every profile, and ~4k tokens is a cheap price
-        # for the failure mode it prevents.
-        "org_context": _sm("org-context", str(root), json_out=False).strip(),
+        "fixed": _fixed_context(
+            _schema_from_the_product(profile),
+            # Kept, though the schema now comes from the tool. F22 records that the first live runs
+            # failed EVERY item because the generator was handed column names alone and guessed
+            # 'Invoice' where the data holds a code the profile's own glossary defines. The tool's
+            # payload does not carry that glossary on every profile — but where it does, sending it
+            # twice doubled the single largest block every question paid for.
+            _sm("org-context", str(root), json_out=False).strip(),
+        ),
     }
+
+
+def _fixed_context(schema: str, org_context: str) -> str:
+    """The run's fixed half: the tool's own description, plus whatever of the glossary it lacks.
+
+    Deduplicated by paragraph rather than dropped outright, because the tool composes its domain
+    context from the same sources `sm org-context` reads but not on every profile, and not always
+    the whole of it. A paragraph already in the tool's payload is left out; one that is not is kept,
+    so the F22 failure above cannot come back on a profile whose payload is shorter.
+    """
+    missing = [
+        paragraph
+        for paragraph in org_context.split("\n\n")
+        if paragraph.strip() and paragraph.strip() not in schema
+    ]
+    if not missing:
+        return schema
+    return (
+        f"{schema}\n\nWhat this datasource means, and what its codes stand for:\n"
+        + "\n\n".join(missing)
+    )
 
 
 # No `mode` is passed, and that is the point rather than an omission. `auto` is what a real session
@@ -424,7 +454,7 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
 # letting the product decide.
 
 
-def _schema_from_the_product(profile: str, question: str) -> str:
+def _schema_from_the_product(profile: str) -> str:
     """The model as the shipped product describes it, rather than as this script renders it.
 
     Two things fall out of asking `get_datasource_schema` instead of assembling the answer here.
@@ -435,15 +465,35 @@ def _schema_from_the_product(profile: str, question: str) -> str:
     hands its own generator — so a failure is a failure about SQL rather than about being given a
     context no real session ever sees.
 
+    Asked once per run, with no `query`, so it is the same bytes for every question and the client
+    can cache it. The question's own metrics are asked for separately, below.
+
     Called in-process, through the tool's own typed entry point rather than the registry it is
     filed under — a plain function over the model, so nothing here goes through MCP or a subprocess
     to reach the same bytes.
     """
-    # `query` is what makes the metrics come back with their `calculation` and `binding` rather
-    # than as bare names — the tool does not narrow on it, it picks which metrics get full detail.
-    # Without it a generator cannot reuse a binding verbatim, which is the thing F22 requires and
-    # the reason a metric exists at all. It costs a few hundred characters.
-    return tools.tool_get_datasource_schema({"datasource": profile, "query": question})
+    return tools.tool_get_datasource_schema({"datasource": profile})
+
+
+def _metrics_for_the_question(profile: str, question: str) -> list[dict]:
+    """The metrics the tool selects for this question, with their `calculation` and `binding`.
+
+    `query` is what makes the metrics come back in full rather than as bare names — the tool does
+    not narrow on it, it picks which metrics get full detail. Without it a generator cannot reuse a
+    binding verbatim, which is the thing F22 requires and the reason a metric exists at all.
+
+    Measured across questions, that list is the ONLY part of the tool's payload a question changes —
+    everything else is byte-identical — so it is read out here and sent with the question, leaving
+    the rest fixed. The payload is JSON followed by the domain context as prose, hence the decode
+    of the leading object alone.
+    """
+    payload = tools.tool_get_datasource_schema({"datasource": profile, "query": question})
+    try:
+        document, _ = json.JSONDecoder().raw_decode(payload)
+    except ValueError:
+        return []
+    metrics = document.get("metrics") if isinstance(document, dict) else None
+    return metrics if isinstance(metrics, list) else []
 
 
 # The second reason built from an answer-key column name, and the one that carries no structured

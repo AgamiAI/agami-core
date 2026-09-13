@@ -10,6 +10,23 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Changed
+
+- **A golden run pays for the model's description once, not once per question.** Every question
+  starts its own client, and every one re-sent the whole model — about 35k tokens on a 22-area
+  profile — in a prompt that could not be reused, because it began with the client's own system
+  prompt naming a fresh temporary directory. So nothing was ever read from cache, and a dozen
+  questions could spend a subscription's session limit. The part of the context that is the same
+  for every question — the tool's description of the model, plus any glossary paragraph it lacks —
+  now goes in the child's system prompt, which the client caches; only the question's own metrics
+  and its ranked examples go with the question. Measured: a second call sharing an 11k-token system
+  prompt read all of it from cache and wrote 134 tokens. Two smaller savings come with it: the
+  client's own ~6k-token default system prompt is replaced, and glossary paragraphs the tool already
+  sends are no longer sent twice. What the generator is told, and how the answer is scored, are
+  unchanged.
+
 ## [0.8.4] — 2026-09-12
 
 ### Fixed
