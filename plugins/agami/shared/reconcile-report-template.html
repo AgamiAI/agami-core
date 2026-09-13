@@ -47,6 +47,7 @@
     <div class="filters" id="result-row" hidden>
       <span class="k">Result</span><span class="chips result" id="result-chips"></span>
     </div>
+    <div class="legend" aria-label="what the colors mean"><span class="held">passed</span><span class="defect">your query</span><span class="gap">the semantic model</span><span class="open">the question, or could not check</span><span class="agami">agami</span><span class="noted">noted</span></div>
     <div class="filters" id="filters">
       <span class="k">Fix</span><span id="owner-chips"></span>
       <span class="k">Find</span><input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
@@ -216,7 +217,7 @@
       const rows = item.diff || [];
       const passed = rows.filter(r => r.state === 'held').length;
       const open = rows.length - passed;
-      return '<details class="checks"' + (open ? ' open' : '') + '><summary>Checks: ' + passed + ' passed' + (open ? ', ' + open + ' did not' : '') + '</summary>'
+      return '<details class="checks"><summary>Checks: ' + passed + ' passed' + (open ? ', ' + open + ' did not' : '') + '</summary>'
         + '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
         + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
         + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'

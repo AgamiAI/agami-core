@@ -154,3 +154,12 @@ def test_list_cells_read_like_a_diff():
     with pytest.raises(ValueError, match="name pairs"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, diff=[{"key": "columns", "state": "held", "renamed": ["number"]}])])
 
+
+def test_the_checks_start_closed_and_the_palette_has_one_meaning_per_color():
+    html = rr.render(title="t", profile="p", run="r", items=[ITEM, dict(ITEM, row=3)])
+    assert "'<details class=\"checks\"><summary>Checks: '" in html and "(open ? ' open' : '')" not in html
+    css = html[html.index("<style>"):html.index("</style>")]
+    assert "--agami:" in css and ".pill.agami { background: var(--agami-bg); color: var(--agami); }" in css
+    assert ".dg .v .tok.add { background: var(--agami-bg); color: var(--agami);" in css and "background: var(--agami-bg); color: var(--agami); border-radius: 999px" in css
+    assert '<div class="legend"' in html and 'class="agami">agami</span>' in html
+

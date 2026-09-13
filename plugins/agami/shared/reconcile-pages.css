@@ -2,12 +2,17 @@
    checklist and its rail, the decision controls, the footer and the paste-back modal. Read by
    render_reconcile_report.py, render_reconcile_grades.py and render_reconcile_intake.py into the
    PAGE_CSS placeholder, after the plugin's theme.css, so every page a run renders looks like one
-   product. Colors mean one thing everywhere: held (green), a mistake in the person's query (red),
-   a gap in the semantic model (violet), could not check (amber), noticed (gray). */
+   product. One palette, one meaning per color, on every pill, mark, chip and diff token:
+     green  (--held)   passed, match, keep
+     red    (--defect) your query: a mistake, a column only yours has
+     violet (--gap)    the semantic model: a gap, a fix to a definition
+     amber  (--open)   the question, or a check that could not run, or a partial match
+     blue   (--agami)  agami's side: a column only agami returned, add an example, ask again, the suggested decision
+     gray   (--noted)  noted, nothing to fix, could not compare */
     :root { --held: #1f7a4d; --held-bg: #e3f3ea; --open: #b7791f; --open-bg: #fbf1dc; --defect: #b3261e; --defect-bg: #f9e3e1;
-            --gap: #6b4fbb; --gap-bg: #ece7fa; --noted: #6b7684; --noted-bg: #eceff3; }
+            --gap: #6b4fbb; --gap-bg: #ece7fa; --noted: #6b7684; --noted-bg: #eceff3; --agami: #1d5fb4; --agami-bg: #e4edfb; }
     @media (prefers-color-scheme: dark) { :root { --held: #5cc48f; --held-bg: #173325; --open: #e0a94a; --open-bg: #3a2e14; --defect: #f08a82; --defect-bg: #3d1c19;
-            --gap: #b39cf2; --gap-bg: #2b2342; --noted: #a2adb9; --noted-bg: #252c35; } }
+            --gap: #b39cf2; --gap-bg: #2b2342; --noted: #a2adb9; --noted-bg: #252c35; --agami: #7fb0f0; --agami-bg: #16273d; } }
     body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--bg, #f7f7f8); color: var(--fg, #17212b); }
     .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 96px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border, #d9dde3); }
@@ -116,7 +121,7 @@
     .act b { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); }
     .pill.you { background: var(--defect-bg); color: var(--defect); } .pill.model { background: var(--gap-bg); color: var(--gap); }
     .pill.question { background: var(--open-bg); color: var(--open); } .pill.keep { background: var(--held-bg); color: var(--held); }
-    .pill.agami, .pill.nothing { background: var(--noted-bg); color: var(--noted); }
+    .pill.agami { background: var(--agami-bg); color: var(--agami); } .pill.nothing { background: var(--noted-bg); color: var(--noted); }
     @media (max-width: 640px) { .dg { grid-template-columns: 22px 1fr; } .dg .k { grid-column: 2; } .dg .v { grid-column: 2; border-top: 0; padding-top: 0; } .dg .v.yours::before { content: "yours · "; color: var(--muted, #5b6875); font-family: inherit; } .dg .v.agami::before { content: "agami · "; color: var(--muted, #5b6875); font-family: inherit; } .dg .h { display: none; } }
     /* the decisions: each option says what it is and what happens next; the run's suggestion is tagged */
     .grade.opts { display: grid; gap: 4px; margin-top: 10px; }
@@ -124,7 +129,7 @@
     .grade.opts .opt.on { background: var(--code-bg, #f3f5f7); }
     .grade.opts .opt b { font-weight: 600; white-space: nowrap; }
     .grade.opts .opt .what { color: var(--muted, #5b6875); font-size: 13px; }
-    .tag.suggested { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; background: var(--hi-bg, #e6efff); color: var(--accent, #1d5fb4); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; }
+    .tag.suggested { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; background: var(--agami-bg); color: var(--agami); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; }
     .more label .p { display: block; font-size: 13px; color: var(--muted, #5b6875); margin-bottom: 4px; }
     @media (max-width: 640px) { .grade.opts .opt { grid-template-columns: 18px 1fr; } .grade.opts .opt .what { grid-column: 2; } }
     /* the two statements, collapsed under the grid */
@@ -148,8 +153,13 @@
     details.checks > summary::-webkit-details-marker { display: none; }
     /* list cells read like a diff */
     .dg .v .tok.del { background: var(--defect-bg); color: var(--defect); text-decoration: none; font-weight: 600; padding: 0 4px; border-radius: 4px; }
-    .dg .v .tok.add { background: var(--held-bg); color: var(--held); font-weight: 600; padding: 0 4px; border-radius: 4px; }
+    .dg .v .tok.add { background: var(--agami-bg); color: var(--agami); font-weight: 600; padding: 0 4px; border-radius: 4px; }
     .dg .v .tok.renamed { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
     /* marks and arrows draw from a font that carries them on Windows too */
     .dg .m, .mark, .tok.del, .tok.add { font-family: "Segoe UI Symbol", "Segoe UI", ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; }
     .dg .v { font-size: 13px; }
+    /* the palette, said once under the filters */
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 2px 0 10px; font-size: 12px; color: var(--muted, #5b6875); }
+    .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: var(--noted); }
+    .legend .held::before { background: var(--held); } .legend .defect::before { background: var(--defect); } .legend .gap::before { background: var(--gap); }
+    .legend .open::before { background: var(--open); } .legend .agami::before { background: var(--agami); } .legend .noted::before { background: var(--noted); }
