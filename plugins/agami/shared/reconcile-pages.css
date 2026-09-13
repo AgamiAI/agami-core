@@ -132,3 +132,7 @@
     .sql2 b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); margin-bottom: 4px; }
     .sql2 pre { margin: 0; padding: 8px 10px; background: var(--code-bg, #f3f5f7); border: 1px solid var(--border, #d9dde3); border-radius: 6px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
     @media (max-width: 640px) { .sql2 { grid-template-columns: 1fr; } }
+    /* the result pill's companion tag, and the result count row */
+    .tag.unchecked { font-size: 11px; font-weight: 600; background: var(--open-bg); color: var(--open); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; white-space: nowrap; }
+    .chips.result { margin-top: 0; gap: 6px; }
+    .chips.result:empty { display: none; }

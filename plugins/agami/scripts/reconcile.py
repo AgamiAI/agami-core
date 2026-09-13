@@ -1112,8 +1112,10 @@ def _grade_claims(claims: dict | None) -> list[dict]:
         if claim.get("status") == "agrees":
             rows.append(_part(part, CONFIRMED, evidence=evidence, note="both statements say the same"))
         elif claim.get("status") == "differs":
-            rows.append(_part(part, UNRESOLVED, evidence=evidence,
-                              note="the two statements differ here; which is right is not decided by this comparison"))
+            # Two queries written differently is a fact about the pair, never a grade on yours: the
+            # answer decides whether they agree, and the report page carries "different query" as a tag.
+            rows.append(_part(part, NOTED, kind="different_query", evidence=evidence,
+                              note="the two queries differ here; the answers decide, not the spelling"))
         elif (part == "date_window" and no_date_filter_anywhere
               and claim.get("generated") is None and claim.get("golden") is None):
             rows.append(_part(part, CONFIRMED, evidence={**evidence, "temporal_predicates": temporal},
@@ -1802,6 +1804,114 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     return rows, words
 
 
+_DEFINITIONAL = {"tables read", "filters", "date window", "join keys", "grouped by"}
+_RESULT_LABEL = {
+    ("matches", "same"): "match", ("matches", "different"): "same answer, different query",
+    ("matches", "not_comparable"): "match",
+    ("partly", "same"): "same rows, different columns", ("partly", "different"): "same rows, different columns",
+    ("partly", "not_comparable"): "same rows, different columns",
+    ("differs", "same"): "same query, different answer", ("differs", "different"): "different answer",
+    ("differs", "not_comparable"): "different answer",
+}
+_FIX_WORDS = {"query": "fix your query", "semantic_model": "fix the semantic model", "examples": "fix the examples",
+              "question": "reword the question", "ask_again": "ask agami again", "none": "nothing to fix"}
+_FIX_OWNER = {"query": "you", "semantic_model": "model", "examples": "agami", "question": "question", "ask_again": "agami", "none": "nothing"}
+
+
+def _result(rec: dict, diff: list[dict]) -> dict:
+    """The result in two facts read by code: whether the data matches, and whether the two queries are
+    the same. `label` is the plain-word pill; `unchecked` counts the checks on your query that could
+    not run, shown as a tag rather than a status of their own."""
+    rows = {r["key"]: r for r in diff}
+    status = rec.get("status") or "error"
+    if status == "error" or (rows.get("answer") or {}).get("state") == "open" and "rows" not in rows:
+        data = "could_not_compare"
+    elif "rows" in rows:
+        cols = rows.get("columns"); values = rows.get("values")
+        same_rows = rows["rows"]["state"] == "held"
+        values_ok = values is None or values["state"] == "held"
+        if same_rows and values_ok and (cols is None or cols["state"] == "held"):
+            data = "matches"
+        elif same_rows and cols is not None and cols["state"] != "held" and _values_agree_on_shared_columns(rec):
+            data = "partly"
+        else:
+            data = "differs"
+    else:
+        answer = rows.get("answer") or {}
+        data = "matches" if answer.get("state") == "held" else "differs"
+    claims = ((rec.get("claims") or {}).get("claims") or []) if isinstance(rec.get("claims"), dict) else []
+    statuses = [c.get("status") for c in claims]
+    columns_differ = "columns" in rows and rows["columns"]["state"] != "held"
+    if (not claims or all(st == "unknown" for st in statuses)) and not columns_differ:
+        query = "not_comparable"
+    elif any(st == "differs" for st in statuses) or columns_differ:
+        # The seven claims do not cover the projection; two queries that return different columns
+        # are different queries even when every claim agrees.
+        query = "different"
+    else:
+        query = "same"
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    unchecked = sum(1 for p in parts if p.get("verdict") == UNRESOLVED) + sum(1 for st in statuses if st == "unknown")
+    label = "could not run" if data == "could_not_compare" else _RESULT_LABEL[(data, query)]
+    differing = sorted(r["key"] for r in diff
+                       if (r["state"] == "defect" or (r["key"] == "columns" and r["state"] == "noted"))
+                       and r["key"] in _DEFINITIONAL | {"ordered by", "limit", "columns"})
+    return {"data": data, "query": query, "label": label, "unchecked": unchecked, "differs_in": differing}
+
+
+def _values_agree_on_shared_columns(rec: dict) -> bool:
+    """A table compare whose only difference is the column set: every golden column the generated side
+    carries matched by value, so the score is exactly the matched share."""
+    score = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
+    if not score:
+        return False
+    cols = list(((rec.get("statement_recorded") or {}).get("columns")) or [])
+    unmatched = list(score.get("unmatched_golden_columns") or [])
+    acc = score.get("accuracy")
+    if acc is None or not cols:
+        return False
+    if float(acc) >= 1.0:
+        return True  # agami returned everything you did, and more
+    matched = len(cols) - len(unmatched)
+    return matched > 0 and abs(float(acc) - matched / len(cols)) < 1e-6
+
+
+def _fix(rec: dict, diff: list[dict], result: dict) -> str:
+    """What to change, in this order: the query the ledger proved wrong, the gap the ledger measured,
+    the examples when agami wrote a different query with nothing wrong behind it, the question when it
+    was read differently, agami again when it failed, nothing when both facts match."""
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    fit = next((p for p in parts if p.get("part") == "question_fit"), None)
+    cols = next((r for r in diff if r["key"] == "columns"), None)
+    if (rec.get("status") or "error") == "error":
+        return "ask_again"
+    if rec.get("status") == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
+        return "query"
+    if result["data"] == "partly" and cols and cols.get("yours_hi"):
+        return "query"
+    if any(p.get("verdict") == MODEL_GAP for p in parts):
+        return "semantic_model"
+    definitional = bool(set(result["differs_in"]) & _DEFINITIONAL)
+    if result["data"] == "matches":
+        return "examples" if result["query"] == "different" and definitional else "none"
+    if result["data"] == "partly":
+        return "none" if not definitional else "question"
+    if fit and fit.get("verdict") != CONFIRMED:
+        return "question"
+    if result["data"] == "differs" and result["query"] == "same":
+        return "ask_again"
+    if result["data"] == "differs" and result["query"] == "different":
+        return "examples"
+    return "question"
+
+
+_FIX_CHANGE = {
+    "examples": (["Add your query as a prompt example for this question through /agami-save-correction: agami wrote a different query, and nothing in the semantic model explains why."],
+                 ["The examples: add your query for this question."]),
+    "ask_again": (["Ask the question again; the same query gave a different answer, so the data moved or a run failed."], ["agami: ask again."]),
+}
+
+
 def _owner(rec: dict, diff: list[dict]) -> str:
     """Who acts, from the evidence, in this order: a mistake in the query is the person's; a gap the
     ledger measured is the semantic model's; a question read differently is the question's."""
@@ -1933,8 +2043,23 @@ def report_items(run_dir: Path) -> list[dict]:
         if agami_receipt is None and str(rec.get("receipt_path") or "").endswith(".json") and Path(rec["receipt_path"]).exists():
             agami_receipt = _load_json(Path(rec["receipt_path"]))
         diff, words = _diff_rows(rec, agami_receipt)
-        owner = _owner(rec, diff)
-        change, todo = _change(owner, rec, diff)
+        result = _result(rec, diff)
+        fix = _fix(rec, diff, result)
+        legacy_owner = _owner(rec, diff)
+        # keep is the fix "nothing" on a row the keep gate accepts; the page's keep offer is that
+        keep_ok = legacy_owner == "keep"
+        owner = "keep" if (fix == "none" and keep_ok) else _FIX_OWNER[fix]
+        change, todo = _change(owner if owner != "agami" else legacy_owner, rec, diff)
+        if fix in _FIX_CHANGE:
+            change, todo = list(_FIX_CHANGE[fix][0]), list(_FIX_CHANGE[fix][1])
+            if fix == "ask_again" and rec.get("status") == "error":
+                change, todo = list(_OWNER_CHANGE["agami"][0]), list(_OWNER_CHANGE["agami"][1])
+        if fix == "none" and not keep_ok and rec.get("status") == "match":
+            change, todo = _change("nothing", rec, diff)
+        if result["data"] == "matches" and result["query"] == "different":
+            clause = ("The two queries differ in: " + ", ".join(result["differs_in"]) + ("; the match may not hold on other data." if set(result["differs_in"]) & _DEFINITIONAL else "; a cosmetic difference."))
+        else:
+            clause = None
         prov = rec.get("provenance") or {}
         shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
         source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
@@ -1952,7 +2077,9 @@ def report_items(run_dir: Path) -> list[dict]:
             "source": source or None, "status": rec.get("status") or "error",
             "expected": expected, "answer": answer,
             "delta_pct": (round(delta * 100, 1) if isinstance(delta, (int, float)) and not isinstance(delta, bool) else None),
-            "single_cell": bool(single), "owner": owner, "keep_allowed": owner == "keep", "diff": diff, "sentence": _sentence(rec, diff),
+            "single_cell": bool(single), "owner": owner, "keep_allowed": owner == "keep", "diff": diff,
+            "result": result, "fix": fix, "fix_words": _FIX_WORDS[fix],
+            "sentence": _sentence(rec, diff) + (" " + clause if clause else ""),
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
             "report_path": rec.get("report_path"),

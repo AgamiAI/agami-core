@@ -44,6 +44,7 @@
 
     <p class="lede" id="lede"></p>
     <div class="chips" id="chips"></div>
+    <div class="chips result" id="result-chips"></div>
     <div class="filters" id="filters">
       <span class="k">Show</span><span id="owner-chips"></span>
       <input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
@@ -85,6 +86,19 @@
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function lines(list) { return (list || []).length ? '<ul>' + list.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''; }
     function pill(status) { const [cls, words] = STATUS[status] || ['noted', status]; return '<span class="pill ' + cls + '">' + esc(words) + '</span>'; }
+    // The result in two facts, when the items verb gave them: the pill takes the plain-word label and
+    // the state color from the data fact; checks that could not run are a tag, not a status.
+    const DATA_CLASS = { matches: 'held', partly: 'open', differs: 'defect', could_not_compare: 'noted' };
+    function resultPill(item) {
+      if (!item.result || !item.result.label) return pill(item.status);
+      const cls = item.result.data === 'matches' && item.result.query === 'different' ? 'open' : (DATA_CLASS[item.result.data] || 'noted');
+      const n = item.result.unchecked || 0;
+      return '<span class="pill ' + cls + '">' + esc(item.result.label) + '</span>'
+        + (n ? '<span class="tag unchecked">' + n + (n === 1 ? ' check' : ' checks') + ' not run</span>' : '');
+    }
+    const FIX_WORDS = { query: 'fix your query', semantic_model: 'fix the semantic model', examples: 'fix the examples', question: 'reword the question', ask_again: 'ask agami again', none: 'nothing to fix' };
+    const FIX_CLASS = { query: 'you', semantic_model: 'model', examples: 'agami', question: 'question', ask_again: 'agami', none: 'keep' };
+    function fixOf(item) { return item.fix || ({ you: 'query', model: 'semantic_model', question: 'question', agami: 'ask_again', keep: 'none', nothing: 'none' }[item.owner || 'nothing']); }
     function nums(item) {
       const parts = [];
       if (item.expected) parts.push('yours ' + item.expected);
@@ -107,7 +121,8 @@
     const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
     function controls(item, d) {
       const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
-      const suggested = (SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null);
+      const byFix = { query: 'fix', semantic_model: 'change', examples: item.keep_allowed ? 'keep' : 'change', question: 'reword', ask_again: 'nothing', none: item.keep_allowed ? 'keep' : 'nothing' };
+      const suggested = item.fix ? byFix[item.fix] : ((SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null));
       const spec = DECISIONS[d.decision] || {};
       return '<div class="grade opts">' + choices.map(v =>
           '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
@@ -129,25 +144,29 @@
     function visible() {
       const q = view.q.trim().toLowerCase();
       return DATA.items.filter(item => (!view.status.size || view.status.has(statusClass(item)))
-        && (!view.owner.size || view.owner.has(item.owner || 'nothing'))
+        && (!view.owner.size || view.owner.has(item.fix ? fixOf(item) : (item.owner || 'nothing')))
         && (!q || haystack(item).includes(q)));
     }
     function chips() {
       const counts = {};
       DATA.items.forEach(i => { const cls = statusClass(i); counts[cls] = (counts[cls] || 0) + 1; });
       const words = { held: 'match', defect: 'a mistake on your side', gap: 'differs', open: 'could not check', noted: 'did not run' };
+      const labels = {};
+      DATA.items.forEach(i => { if (i.result && i.result.label) labels[i.result.label] = (labels[i.result.label] || 0) + 1; });
+      document.getElementById('result-chips').innerHTML = Object.entries(labels).map(([label, n]) =>
+        '<span class="pill noted">' + n + ' · ' + esc(label) + '</span>').join(' ');
       const root = document.getElementById('chips');
       root.classList.toggle('filtering', view.status.size > 0);
       root.innerHTML = Object.entries(counts).map(([cls, n]) =>
         '<button type="button" class="chip ' + cls + (view.status.has(cls) ? ' on' : '') + '" data-filter="' + cls + '" aria-pressed="' + view.status.has(cls) + '"><b>' + n + '</b><span>' + esc(words[cls] || cls) + '</span></button>').join('');
       root.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { toggle(view.status, el.dataset.filter); renderItems(); }));
       const owners = {};
-      DATA.items.forEach(i => { const o = i.owner || 'nothing'; owners[o] = (owners[o] || 0) + 1; });
+      DATA.items.forEach(i => { const o = i.fix ? fixOf(i) : (i.owner || 'nothing'); owners[o] = (owners[o] || 0) + 1; });
       const bar = document.getElementById('filters');
       bar.hidden = DATA.layout === 'audit' || DATA.items.length < 2;
       bar.classList.toggle('filtering', view.owner.size > 0);
       document.getElementById('owner-chips').innerHTML = Object.entries(owners).map(([o, n]) =>
-        '<button type="button" class="pill ' + esc(o) + (view.owner.has(o) ? ' on' : '') + '" data-owner="' + esc(o) + '" aria-pressed="' + view.owner.has(o) + '">' + n + ' · ' + esc(OWNER_SHORT[o] || o) + '</button>').join(' ');
+        '<button type="button" class="pill ' + esc(FIX_CLASS[o] || o) + (view.owner.has(o) ? ' on' : '') + '" data-owner="' + esc(o) + '" aria-pressed="' + view.owner.has(o) + '">' + n + ' · ' + esc(FIX_WORDS[o] || OWNER_SHORT[o] || o) + '</button>').join(' ');
       document.getElementById('owner-chips').querySelectorAll('[data-owner]').forEach(el => el.addEventListener('click', () => { toggle(view.owner, el.dataset.owner); renderItems(); }));
     }
     function toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
@@ -188,13 +207,15 @@
         ? '<details class="words"><summary>The semantic model says</summary><ul>' + item.words.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul></details>' : '';
     }
     function action(item, d) {
+      const fix = fixOf(item);
       const owner = item.owner || 'nothing';
-      return '<div class="act"><b>change</b><span class="pill ' + esc(owner) + '">' + esc(OWNER_SHORT[owner] || owner) + '</span><span>' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div>';
+      const words = item.fix ? (item.fix_words || FIX_WORDS[fix] || fix) : (OWNER_SHORT[owner] || owner);
+      return '<div class="act"><b>fix</b><span class="pill ' + esc(item.fix ? FIX_CLASS[fix] : owner) + '">' + esc(words) + '</span><span>' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div>';
     }
     function diffCard(item) {
       const d = decisions[item.row] || {};
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + resultPill(item)
         + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
         + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
         + diffGrid(item)
@@ -206,7 +227,7 @@
     function diffAudit(item) {
       const d = decisions[item.row] || {};
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + resultPill(item)
         + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
         + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
         + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + sqlBlock(item) + words(item) + '</div>'

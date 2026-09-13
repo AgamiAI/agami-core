@@ -200,7 +200,7 @@ def test_owner_branches_a_number_only_mismatch_differing_tables_and_open_parts(t
     items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [number_only, tables_differ, open_only]))}
     assert items[1]["owner"] == "question" and items[1]["sentence"] == "The two answers do not match, and no check explains why."
     assert items[1]["diff"][0]["note"] == "agami is -10.0% from your number" and items[1]["diff"][0]["yours_hi"] == ["100"]
-    assert items[2]["owner"] == "question" and items[2]["sentence"] == "The two answers do not match. What differs: tables read."
+    assert items[2]["fix"] == "examples" and items[2]["owner"] == "agami" and items[2]["sentence"] == "The two answers do not match. What differs: tables read."
     assert items[3]["owner"] == "nothing" and items[3]["change"] == ["Nothing to change. Some checks could not run against the database, so this row is not offered as an example."]
     assert items[3]["sentence"] == "The numbers match, but these checks could not be confirmed: join orders to payments."
 
@@ -293,7 +293,8 @@ def test_the_first_reviews_findings(tmp_path):
     assert len(items) == 5 and items[5]["status"] == "match" and items[5]["owner"] == "keep"
     # 2 again, the other way: a difference in values beside extra columns of yours is not just the query
     both = dict(TABLE_DIFF, row=6, comparison={"result_set": {"accuracy": 0.4, "reason": "values differ", "unmatched_golden_columns": [], "golden_row_count": 21, "generated_row_count": 21}})
-    assert reconcile.report_items(_run(tmp_path / "b", [both]))[0]["owner"] == "question"
+    item = reconcile.report_items(_run(tmp_path / "b", [both]))[0]
+    assert item["owner"] != "you" and item["fix"] == "examples" and item["result"]["label"] == "different answer"
 
 
 def test_small_numbers_keep_their_digits_and_never_read_minus_zero():

@@ -41,7 +41,7 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "keep_allowed")
+           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "keep_allowed", "result", "fix", "fix_words")
 _LISTS = ("read", "how", "words", "change", "todo")
 _DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
@@ -50,6 +50,9 @@ _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "erro
 _OWNERS = {"you", "model", "question", "agami", "keep", "nothing"}
 _CHECK_STATES = {"held", "defect", "open", "gap", "noted"}
 _LAYOUTS = ("auto", "cards", "audit")
+_DATA_RESULTS = {"matches", "partly", "differs", "could_not_compare"}
+_QUERY_RESULTS = {"same", "different", "not_comparable"}
+_FIXES = {"query", "semantic_model", "examples", "question", "ask_again", "none"}
 
 
 def _validate_item(item: dict, idx: int) -> None:
@@ -98,6 +101,15 @@ def _validate_item(item: dict, idx: int) -> None:
             raise ValueError(f"item {idx}: result rows are never rendered, not even inside a diff row")
     if item.get("keep_allowed") is not None and not isinstance(item["keep_allowed"], bool):
         raise ValueError(f"item {idx}: 'keep_allowed' must be true or false")
+    result = item.get("result")
+    if result is not None:
+        if (not isinstance(result, dict) or result.get("data") not in _DATA_RESULTS or result.get("query") not in _QUERY_RESULTS
+                or not isinstance(result.get("label"), str) or not isinstance(result.get("unchecked", 0), int)):
+            raise ValueError(f"item {idx}: 'result' needs data in {sorted(_DATA_RESULTS)}, query in {sorted(_QUERY_RESULTS)}, a label and an unchecked count")
+    if item.get("fix") is not None and item["fix"] not in _FIXES:
+        raise ValueError(f"item {idx}: 'fix' must be one of {sorted(_FIXES)}")
+    if item.get("fix_words") is not None and not isinstance(item["fix_words"], str):
+        raise ValueError(f"item {idx}: 'fix_words' must be text")
     if item.get("sentence") is not None and not isinstance(item["sentence"], str):
         raise ValueError(f"item {idx}: 'sentence' must be text")
     for key in ("sql_yours", "sql_agami"):
