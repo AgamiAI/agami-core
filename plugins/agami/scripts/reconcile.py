@@ -1079,7 +1079,9 @@ def _part_subjects(part: str) -> list[str]:
         if part.startswith(prefix):
             return [part[len(prefix):].split("=", 1)[0].lower()]
     if part.startswith("default_filter:"):
-        return [part[len("default_filter:"):].split(":", 1)[0].lower()]
+        # The receipt spells the table as the statement wrote it, schema and all; the mentions verb
+        # keys tables bare, so `main.orders` must read as `orders` or its caveats never attach.
+        return [part[len("default_filter:"):].split(":", 1)[0].lower().split(".")[-1]]
     for prefix in ("join:", "join_key:", "cardinality:", "dropped_rows:"):
         if part.startswith(prefix):
             label = part[len(prefix):].split("#", 1)[0]
@@ -1087,17 +1089,36 @@ def _part_subjects(part: str) -> list[str]:
     return []
 
 
+def _prose_status(mentions: Any) -> list[dict]:
+    """One `noted` part when the semantic model's words were asked for and could not be read, in
+    whole or in part, so "no prose exists" and "the verb failed" stay tellable apart. Nothing when
+    the file is absent (the step was not run) or clean."""
+    if mentions is None:
+        return []
+    if not isinstance(mentions, dict) or mentions.get("error") or mentions.get("unreadable"):
+        why = (mentions.get("error") or mentions.get("unreadable")) if isinstance(mentions, dict) else "not a JSON object"
+        return [_part("prose:*", NOTED, evidence={"problem": why},
+                      note=f"the semantic model's words could not be read ({why}); nothing about them is claimed")]
+    skipped = mentions.get("skipped") or []
+    if skipped:
+        return [_part("prose:*", NOTED, evidence={"skipped": skipped[:20]},
+                      note=f"{len(skipped)} prose source(s) could not be read and are not quoted: "
+                           + ", ".join(sorted({str(s.get('where')) for s in skipped}))[:300])]
+    return []
+
+
 def _attach_prose(rows: list[dict], mentions: dict | None) -> None:
     """Put the semantic model's own words beside every part that fell short: the descriptions,
     caveats, glossary lines and examples that mention its table or column, from `sm mentions`.
     Never a grade; a person reads them. A part that is confirmed or noted gets none, so a clean
-    row's ledger does not grow a copy of the model's prose."""
-    if not isinstance(mentions, dict) or not mentions.get("mentions"):
+    row's ledger does not grow a copy of the semantic model's prose."""
+    if not isinstance(mentions, dict) or not isinstance(mentions.get("mentions"), list) or not mentions["mentions"]:
         return
     by_about: dict[str, list[dict]] = {}
     for mention in mentions["mentions"]:
-        by_about.setdefault(mention.get("about", ""), []).append(mention)
-    flags = {flag.get("about"): flag for flag in mentions.get("flags") or []}
+        if isinstance(mention, dict) and mention.get("about"):
+            by_about.setdefault(mention["about"], []).append(mention)
+    flags = {flag.get("about"): flag for flag in (mentions.get("flags") or []) if isinstance(flag, dict)}
     for row in rows:
         if row["verdict"] in (CONFIRMED, NOTED):
             continue
@@ -1160,6 +1181,7 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     rows.extend(_grade_literals(judge))
     rows.extend(_grade_claims(claims))
 
+    rows.extend(_prose_status(mentions))
     _attach_prose(rows, mentions if isinstance(mentions, dict) and not mentions.get("error") else None)
 
     counts = {v: 0 for v in _VERDICT_RANK}

@@ -945,4 +945,19 @@ def test_mentions_are_empty_for_a_statement_that_reads_nothing_described_and_say
     assert d["subjects"] == ["order_items"]
     assert [m["source"] for m in d["mentions"]] == ["table.description"]  # "oi", the fixture's one line
     d = _mentions(tmp_path, "SELECT FROM WHERE")
-    assert d["mentions"] == [] and d["unreadable"]
+    assert d["mentions"] == [] and d["subjects"] == [] and d["flags"] == [] and "could not be parsed" in d["unreadable"]
+
+
+def test_a_prose_source_that_cannot_be_read_is_said_and_the_rest_still_flows(tmp_path):
+    """A narrative that is not UTF-8 and an examples file that is not YAML used to crash the verb,
+    leaving an empty file the ledger read as "no prose". Each is one `skipped` entry now."""
+    _prose_model(tmp_path)
+    (tmp_path / "datasource.md").write_bytes(b"\xff\xfe not utf-8")
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text("examples: [ {question: 'x', sql: [unclosed")
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders WHERE status = 'pending'")
+    assert {s["source"] for s in d["skipped"]} == {"datasource.md", "example"}
+    assert ("orders.status", "column.caveat") in {(m["about"], m["source"]) for m in d["mentions"]}
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text("examples: ['just a string', {question: 'How many orders?', sql: 'SELECT COUNT(*) FROM orders'}]")
+    d = _mentions(tmp_path, "SELECT COUNT(*) FROM orders")
+    assert any(s["reason"] == "an entry is not an object" for s in d["skipped"])
+    assert any(m["source"] == "example" for m in d["mentions"])

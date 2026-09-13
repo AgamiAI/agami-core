@@ -919,10 +919,14 @@ def test_a_row_without_mentions_grades_exactly_as_before(tmp_path):
     _ran_ok(tmp_path)
     _write(tmp_path, "filter-values.judge.json", _judged("query_defect"))
     before = ledger(tmp_path)
-    _write(tmp_path, "mentions.json", "")
-    assert ledger(tmp_path) == before
+    # A clean file with nothing to say changes nothing; a zero-byte one adds only the note that
+    # the words could not be read, and every grade stays exactly as it was.
     _write(tmp_path, "mentions.json", {"mentions": [], "flags": [], "subjects": [], "dropped": 0, "unreadable": None})
     assert ledger(tmp_path) == before
+    _write(tmp_path, "mentions.json", "")
+    after = ledger(tmp_path)
+    assert [r for r in after["rows"] if r["part"] != "prose:*"] == before["rows"]
+    assert after["verdict"] == before["verdict"]
 
 
 def test_prose_reaches_the_findings_file(tmp_path):
@@ -936,3 +940,29 @@ def test_prose_reaches_the_findings_file(tmp_path):
     (finding,) = findings(run)["findings"]
     assert finding["key"] == "description:orders.status"
     assert [m["about"] for m in finding["evidence"][0]["ledger"]["prose"]] == ["orders.status", "orders"]
+
+
+def test_a_qualified_default_filter_still_receives_the_models_words(tmp_path):
+    """The receipt spells the table as the statement wrote it, schema and all; the mentions verb keys
+    tables bare. Without the fold the caveat never reached the one part where it matters most."""
+    _ran_ok(tmp_path)
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("main.orders", [{"expr": "o.status != 'cancelled'", "status": "omitted"}])]))
+    _write(tmp_path, "mentions.json", _mentions_file())
+    row = _parts(ledger(tmp_path))["default_filter:main.orders:o.status != 'cancelled'"]
+    assert [m["source"] for m in row["evidence"]["prose"]] == ["table.caveat"]
+
+
+def test_words_that_could_not_be_read_are_noted_not_silently_missing(tmp_path):
+    _complete(tmp_path)
+    _write(tmp_path, "mentions.json", "")
+    row = _parts(ledger(tmp_path))["prose:*"]
+    assert row["verdict"] == "noted" and "could not be read" in row["note"]
+    _write(tmp_path, "mentions.json", {**_mentions_file(), "skipped": [{"source": "datasource.md", "where": "datasource.md", "reason": "UnicodeDecodeError"}]})
+    row = _parts(ledger(tmp_path))["prose:*"]
+    assert row["verdict"] == "noted" and "datasource.md" in row["note"]
+    # A clean file, or no file, adds no part.
+    _write(tmp_path, "mentions.json", _mentions_file())
+    assert "prose:*" not in _parts(ledger(tmp_path))
+    (tmp_path / "mentions.json").unlink()
+    assert "prose:*" not in _parts(ledger(tmp_path))

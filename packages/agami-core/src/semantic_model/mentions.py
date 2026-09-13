@@ -62,9 +62,11 @@ def statement_subjects(org: Datasource, sql: str, grammar: Optional[str]) -> "tu
     return tables, columns, None
 
 
-def _prose_lines(org: Datasource, root: Path) -> Iterator[tuple[str, str, str, Optional[str]]]:
+def _prose_lines(org: Datasource, root: Path, skipped: list[dict[str, str]]) -> Iterator[tuple[str, str, str, Optional[str]]]:
     """`(source, where, text, about)`; `about` is set when the line belongs to a table or column of
-    its own (its description or caveats) and None when the line is free text matched by words."""
+    its own (its description or caveats) and None when the line is free text matched by words. A
+    source that cannot be read is recorded in `skipped` and the rest still flows: "no prose exists"
+    and "a file could not be read" must stay tellable apart, so nothing here raises."""
     for sa in org.subject_areas:
         if sa.description:
             yield "subject_area.description", sa.name, sa.description, None
@@ -90,12 +92,30 @@ def _prose_lines(org: Datasource, root: Path) -> Iterator[tuple[str, str, str, O
         yield "glossary", term, f"{term}: {definition}", None
     narrative = root / "datasource.md"
     if narrative.exists():
-        for paragraph in re.split(r"\n\s*\n", narrative.read_text(encoding="utf-8")):
+        try:
+            text = narrative.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            skipped.append({"source": "datasource.md", "where": "datasource.md", "reason": type(exc).__name__})
+            text = ""
+        for paragraph in re.split(r"\n\s*\n", text):
             if paragraph.strip():
                 yield "datasource.md", "datasource.md", paragraph, None
     for sa in org.subject_areas:
-        for example in L.list_prompt_examples(root, sa.name):
-            example = example or {}
+        try:
+            # Raw items: the loader's own rejected-filter assumes every entry is an object, and an
+            # entry that is not one is exactly the malformed case this must survive.
+            examples = L.list_prompt_examples(root, sa.name, include_rejected=True)
+        except Exception as exc:  # malformed YAML: said, not raised
+            skipped.append({"source": "example", "where": f"prompt_examples/{sa.name}/examples.yaml",
+                            "reason": type(exc).__name__})
+            continue
+        for example in examples:
+            if not isinstance(example, dict):
+                skipped.append({"source": "example", "where": f"prompt_examples/{sa.name}/examples.yaml",
+                                "reason": "an entry is not an object"})
+                continue
+            if example.get("status") == "rejected":
+                continue
             notes = example.get("notes") or []
             if isinstance(notes, list):
                 notes = " ".join(str(n) for n in notes)
@@ -152,11 +172,13 @@ def _values_flags(mentions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def prose_mentions(org: Datasource, root: Path, sql: str, grammar: Optional[str]) -> dict[str, Any]:
     tables, columns, why = statement_subjects(org, sql, grammar)
     if why:
-        return {"mentions": [], "subjects": [], "flags": [], "dropped": 0, "unreadable": why, "dialect": grammar}
+        return {"mentions": [], "subjects": [], "flags": [], "skipped": [], "dropped": 0, "unreadable": why,
+                "dialect": grammar}
     mentions: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
     per_subject: dict[str, int] = {}
     dropped = 0
-    for source, where, text, origin in _prose_lines(org, root):
+    for source, where, text, origin in _prose_lines(org, root, skipped):
         clipped = _clip(text)
         for about in _about(clipped, tables, columns, origin):
             if per_subject.get(about, 0) >= _MAX_PER_SUBJECT:
@@ -165,4 +187,4 @@ def prose_mentions(org: Datasource, root: Path, sql: str, grammar: Optional[str]
             per_subject[about] = per_subject.get(about, 0) + 1
             mentions.append({"about": about, "source": source, "where": _clip(where), "text": clipped})
     return {"mentions": mentions, "subjects": sorted(tables | columns), "flags": _values_flags(mentions),
-            "dropped": dropped, "unreadable": None, "dialect": grammar}
+            "skipped": skipped, "dropped": dropped, "unreadable": None, "dialect": grammar}
