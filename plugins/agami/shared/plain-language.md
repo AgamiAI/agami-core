@@ -35,9 +35,10 @@ run this probe").
 
 ## Name the thing, never the mechanism
 
-The ledger's words describe machinery. In chat, say what the machinery did to this row.
+The ledger's words describe machinery, and a first draft reaches for machinery words of its own
+(anti-join, child views). In chat, say what the machinery did to this row.
 
-| The ledger says | Say instead |
+| The ledger, or a first draft, says | Say instead |
 |---|---|
 | fan-out, multiplied, fan trap | the join repeats rows, so the total counts some rows more than once |
 | chasm trap | two joins meet through a shared table and multiply each other |
