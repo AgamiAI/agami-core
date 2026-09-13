@@ -771,7 +771,7 @@ def _grade_joins(probes: dict | None, row_dir: Path) -> list[dict]:
                               note="the join is not declared, and its keys resolve in the data"))
         elif hits and not overlap_failed:
             rows.append(_part(f"join:{label}", QUERY_DEFECT, evidence={"overlap": hits, **written},
-                              note="the join is not declared, and its keys never meet in the data"))
+                              note="the join is not declared, and no key on one side is found on the other"))
         else:
             # No hit, or a hit beside a probe that failed: half the evidence is not evidence.
             rows.append(_part(f"join:{label}", UNRESOLVED, evidence={"overlap": hits, **written},
@@ -1083,7 +1083,7 @@ def _grade_claims(claims: dict | None) -> list[dict]:
         evidence = {"status": claim.get("status"), "generated": claim.get("generated"),
                     "golden": claim.get("golden")}
         if claim.get("status") == "agrees":
-            rows.append(_part(part, CONFIRMED, evidence=evidence, note="both statements agree"))
+            rows.append(_part(part, CONFIRMED, evidence=evidence, note="both statements say the same"))
         elif claim.get("status") == "differs":
             rows.append(_part(part, UNRESOLVED, evidence=evidence,
                               note="the two statements differ here; which is right is not decided by this comparison"))
@@ -1309,7 +1309,7 @@ def findings(run_dir: Path) -> dict:
             key = f"example:{_fold(record['question'])}"
             entry = grouped.setdefault(key, {"key": key, "kind": "example", "evidence": []})
             entry["evidence"].append({**evidence_base, "part": None,
-                                      "note": "the statement held on every part and the AI's answer differed",
+                                      "note": "every check on the statement passed and agami's answer differed",
                                       "ledger": {}})
         # A person graded the answer wrong and said why, with no statement to grade. The receipt
         # could not say what was wrong, so the finding carries their words and nothing else.
@@ -1436,22 +1436,22 @@ def next_chunk(run_dir: Path, size: int = CHUNK_SIZE) -> dict:
 # --------------------------------------------------------------------------------------------
 
 _STATE = {CONFIRMED: "held", QUERY_DEFECT: "defect", MODEL_GAP: "gap", UNRESOLVED: "open", NOTED: "noted"}
-_STATE_WORDS = {"held": "held", "defect": "a mistake in your query", "gap": "a gap in the semantic model",
+_STATE_WORDS = {"held": "passed", "defect": "a mistake in your query", "gap": "a gap in the semantic model",
                 "open": "could not check", "noted": "noticed"}
 _CLAIM_KEYS = {"tables": "tables read", "filter_predicates": "filters", "date_window": "date window",
                "group_keys": "grouped by", "join_keys": "join keys", "ordering": "ordered by", "limit": "limit"}
 # The words a ledger part's grade takes on the page, by part family and grade. Every cell on the
 # page comes from this table, the run's files, or the receipt; none is written by hand.
 _PART_WORDS = {
-    "join": {"held": "declared", "defect": "wrong key", "gap": "undeclared, keys overlap", "open": "could not probe"},
+    "join": {"held": "declared in the semantic model", "defect": "wrong key", "gap": "not declared, but the keys match up", "open": "could not check"},
     "join_key": {"held": "keys match", "defect": "keys do not match", "open": "not probed"},
     "cardinality": {"held": "one row per key", "defect": "many rows per key on both sides", "open": "unknown"},
-    "fan_out": {"held": "nothing multiplies", "defect": "multiplied by a join", "open": "could not bind"},
-    "aggregation": {"held": "legal", "defect": "risky"},
+    "fan_out": {"held": "no row is counted twice", "defect": "a join repeats rows, so some are counted more than once", "open": "could not tell which table it counts"},
+    "aggregation": {"held": "allowed", "defect": "may be wrong for this column"},
     "default_filter": {"held": "applied", "gap": "omitted", "open": "unclear"},
-    "metric": {"held": "matched", "gap": "matches no metric", "open": "matched on another table"},
+    "metric": {"held": "matched", "gap": "matches no metric", "open": "matched a metric defined on another table"},
     "literal": {"held": "exists", "defect": "matches no rows", "gap": "not in the declared list", "open": "not checked"},
-    "values_declared": {"held": "listed", "gap": "no value list", "noted": "no list expected", "open": "not probed"},
+    "values_declared": {"held": "listed", "gap": "no value list", "noted": "too many values to list", "open": "not checked"},
     "dropped_rows": {"noted": "noticed"},
     "question_fit": {"held": "yes", "open": "doubtful"},
     "prose": {"noted": "read", "open": "could not read"},
@@ -1470,7 +1470,7 @@ _OWNER_CHANGE = {
               ["The semantic model: decide the definition."]),
     "question": (["Reword the question, or change your query, so they ask the same thing."], ["The question: reword it and re-run."]),
     "agami": (["Ask the question again in other words; agami's query failed."], ["agami: ask again."]),
-    "nothing": (["Nothing to change: the parts that could not be checked need a probe, not a fix."], ["Nothing to do; not offered as an example."]),
+    "nothing": (["Nothing to change. Some checks could not run against the database, so this row is not offered as an example."], ["Nothing to do; not offered as an example."]),
 }
 
 
@@ -1712,15 +1712,15 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
     open_ = [r["key"] for r in diff if r["state"] == "open"]
     gaps = [r["key"] for r in diff if r["state"] == "gap"]
     if status == "match":
-        return "The numbers agree and every part held." if not any(r["key"] == "rows" for r in diff) else "The two answers agree row for row, and every part held."
+        return "The numbers match and every check passed." if not any(r["key"] == "rows" for r in diff) else "The two answers match row for row, and every check passed."
     if status == "match_unverified":
-        return "The numbers agree, but " + (f"these parts could not be confirmed: {', '.join(open_ + red + gaps)}." if (open_ or red or gaps) else "a part of your query could not be confirmed.")
+        return "The numbers match, but " + (f"these checks could not be confirmed: {', '.join(open_ + red + gaps)}." if (open_ or red or gaps) else "one check on your query could not be confirmed.")
     if status == "expected_doubtful":
         return f"Your query has a mistake ({', '.join(red) or 'see the red rows'}), so the number you expected is doubtful."
     if status == "error":
         return f"agami's query failed{': ' + rec['error'] if rec.get('error') else ''}."
     where = red + gaps
-    return f"The two answers differ; the parts that differ: {', '.join(where)}." if where else "The two answers differ, and no graded part explains why."
+    return f"The two answers do not match. What differs: {', '.join(where)}." if where else "The two answers do not match, and no check explains why."
 
 
 def report_items(run_dir: Path) -> list[dict]:

@@ -68,7 +68,7 @@ def test_a_scalar_match_becomes_held_rows_a_keep_owner_and_a_one_line_sentence(t
     assert "limit" not in keys and "tables read" in keys  # an empty, agreeing claim is noise; a real one is a row
     assert {r["state"] for r in item["diff"]} == {"held"}
     assert item["owner"] == "keep" and item["single_cell"] is True and item["expected"] == "412,380"
-    assert item["sentence"] == "The numbers agree and every part held."
+    assert item["sentence"] == "The numbers match and every check passed."
     assert item["source"] == "the finance dashboard, tiles.csv:2, a number with the SQL behind it"
 
 
@@ -81,7 +81,7 @@ def test_a_table_that_differs_in_columns_names_the_extra_columns_and_blames_the_
     assert rows["date window"]["state"] == "open" and rows["date window"]["agami"] == "placed_at ≥ 2025-06-01"
     assert rows["caveats read"]["state"] == "noted" and item["words"] == ['orders: "shipped_at is the time anchor for order reporting."']
     assert item["owner"] == "question" and item["single_cell"] is False and item["expected"] == "21 rows"
-    assert item["sentence"].startswith("The two answers differ; the parts that differ: columns")
+    assert item["sentence"].startswith("The two answers do not match. What differs: columns")
 
 
 def test_a_mistake_in_the_query_is_the_persons_and_the_near_miss_is_said(tmp_path):

@@ -95,7 +95,7 @@
     // The five decisions, each saying what it is and what happens next. The values are the block's
     // contract (keep | change | fix | reword | nothing) and do not change; the words around them do.
     const DECISIONS = {
-      keep: { word: 'keep', what: 'Keep this row as a worked example or a test. Offered only where the numbers agreed and every part held.' },
+      keep: { word: 'keep', what: 'Keep this row as a worked example or a test. Offered only where the numbers matched and every check passed.' },
       change: { word: 'change the semantic model', what: 'A definition is wrong or missing in the semantic model. Your words go to /agami-save-correction.',
                 prompt: 'What should the semantic model say?', ph: 'e.g. cancelled orders count toward the order count' },
       fix: { word: 'fix my query', what: 'The mistake is in your SQL. You fix it and run this row again.',
@@ -157,6 +157,7 @@
     // The diff grid: one grid row per check, mark | what was checked | yours | agami, so a tall cell on
     // one side never pushes the other out of line. Differing tokens are highlighted in place.
     const MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·' };
+    const MARK_WORDS = { held: 'passed', defect: 'does not match', open: 'could not check', gap: 'gap in the semantic model', noted: 'noted' };
     function cell(v, hi, side, state) {
       const cls = 'v ' + side + ' ' + state + (Array.isArray(v) || !(hi || []).length ? '' : ' whole');
       if (v == null) return '<div class="' + cls + '"></div>';
@@ -167,7 +168,7 @@
       const rows = item.diff || [];
       return '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
         + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
-        + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(r.state) + '">' + (MARK[r.state] || '·') + '</div>'
+        + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'
             + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
             + cell(r.yours, r.yours_hi, 'yours', r.state) + cell(r.agami, r.agami_hi, 'agami', r.state)
             + (r.note && r.state !== 'held' ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
@@ -240,8 +241,8 @@
     }
     function renderItems() {
       document.getElementById('lede').textContent = DATA.layout === 'audit'
-        ? 'One query, checked part by part in the order the checks ran. The rail on the right is what to do about it. Decide below, generate the block, and paste it back into Claude; nothing changes until you do.'
-        : 'Every row you gave us, in four beats: what we read and checked, what agami did with the question and answered, how it got there, and what to change or keep. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do, and "keep" is only offered where the numbers agreed and every part held.';
+        ? 'One query, checked line by line. On the right: what to do about it. Decide below, generate the block, and paste it back into Claude. Nothing changes until you do.'
+        : 'Every row you gave us. Each check is one line: what was checked, your value, agami\'s value, with the differences highlighted. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do. "Keep" is only offered where the numbers matched and every check passed.';
       chips();
       const shown = visible();
       showing(shown.length);
