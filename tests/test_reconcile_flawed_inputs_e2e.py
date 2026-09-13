@@ -474,6 +474,16 @@ def test_14_a_sound_statement_paired_with_the_wrong_question_is_never_kept(store
     diff, ledger = compare(store, 14, expected, actual)
     rec = record(store, 14, "How many orders were placed?", sql, expected, diff, ledger)
     assert diff["match"] is True and rec["status"] == "match_unverified"
+    # The fit is the ONLY open part, so it alone is what withheld the row.
+    open_parts = {p for p, r in _parts(ledger).items() if r["verdict"] not in ("confirmed", "noted")}
+    assert open_parts == {"question_fit"}, open_parts
+    # The same statement read as a plausible fit reaches match.
+    twin = grade_statement(store, 16, sql, fit="plausible")
+    expected = scalar((store["run"] / "rows" / "16" / "statement.csv").read_text())
+    actual = ask_agami(store, 16, sql)
+    diff, twin = compare(store, 16, expected, actual)
+    rec = record(store, 16, "How many order items were placed?", sql, expected, diff, twin)
+    assert rec["status"] == "match"
 
 
 def test_8_the_profile_was_never_written_to(store):

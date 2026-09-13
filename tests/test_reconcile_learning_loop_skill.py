@@ -177,7 +177,9 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
         assert signal in fit, signal
     assert "`question_fit.json`" in fit and "a judgment made by reading" in fit
     assert "never proves anything about the semantic model" in fit
-    assert "question_fit:" in statements and "re-run the row" in statements
+    assert "question_fit:" in statements and "reword the question or the statement and re-run this row" in statements
+    assert "For every statement row, write `question_fit.json`" in PHASE_1_5
+    assert "only for a statement that came alone" in PHASE_1_5
     assert "| `question_fit` |" in REFERENCES["part-ledger.md"]
     assert "question_fit.json" in REFERENCES["statement-check.md"] and "question_fit" in REFERENCES["evidence-row.md"]
 

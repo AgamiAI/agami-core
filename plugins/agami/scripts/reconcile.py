@@ -1296,6 +1296,12 @@ def findings(run_dir: Path) -> dict:
         # grade, and bars nothing.
         own = [p for p in parts if p["part"] not in _CLAIM_PARTS]
         clean = bool(own) and all(p["verdict"] in (CONFIRMED, NOTED) for p in own)
+        # A `no_question` fit removes the `question_fit` part; against a row that carries a
+        # question, that is a contradiction and not a pass. The cross-check lives here because
+        # this is where the row record and the ledger meet.
+        if record.get("question") and record.get("statement") and graded is not None \
+                and not any(p["part"] == "question_fit" for p in parts):
+            clean = False
         if record.get("status") == "mismatch" and clean and record.get("question"):
             key = f"example:{_fold(record['question'])}"
             entry = grouped.setdefault(key, {"key": key, "kind": "example", "evidence": []})

@@ -1004,3 +1004,16 @@ def test_a_fit_that_was_never_checked_is_an_open_part_after_a_successful_run_onl
     failed = tmp_path / "failed"
     _write(failed, "run.json", {"status": "failed", "rule": None, "kind": "timeout", "detail": None})
     assert "question_fit" not in _parts(ledger(failed))
+
+
+def test_a_no_question_fit_against_a_row_that_carries_a_question_is_never_an_example(tmp_path):
+    """`no_question` removes the part; declared against a row that carries a question it is a
+    contradiction, and the findings verb refuses to treat the row as a statement that held."""
+    run = _run_dir(tmp_path, [{"row": 1, "question": "How many orders?", "statement": "s", "expected": 1,
+                               "status": "mismatch"}])
+    d = run / "rows" / "1"
+    _complete(d)
+    _write(d, "question_fit.json", {"fit": "no_question", "reason": None})
+    assert findings(run)["findings"] == []
+    _write(d, "question_fit.json", {"fit": "plausible", "reason": None})
+    assert [f["kind"] for f in findings(run)["findings"]] == ["example"]
