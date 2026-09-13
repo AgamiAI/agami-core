@@ -120,6 +120,9 @@ below corresponds to one such version.
   the person fills with a hand-off, and an intake page that shows what was read before anything
   runs, with one block back applied by a parser. The grading, intake and report pages share one
   stylesheet and the same four beats. (ACE-124)
+- Reconcile works five rows at a time: `reconcile.py next-chunk` reads the run's checkpoint
+  (rows.jsonl) and hands back the next rows, so a long run resumes and no row runs twice; the
+  report, intake and grading pages filter by status, owner, shape or a word. (ACE-125)
 
 ### Fixed
 

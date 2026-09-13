@@ -1363,6 +1363,73 @@ def row_status(match: bool | None, ledger_verdict: str | None) -> str:
 # --- CLI ------------------------------------------------------------------
 
 
+
+# --------------------------------------------------------------------------------------------
+# next-chunk: the run works five rows at a time, and rows.jsonl is its checkpoint
+# --------------------------------------------------------------------------------------------
+
+CHUNK_SIZE = 5
+
+
+def _done_rows(run_dir: Path) -> tuple[list[dict], list[str]]:
+    """The row records already written to rows.jsonl, and the lines that could not be read."""
+    path = run_dir / "rows.jsonl"
+    if not path.exists():
+        return [], []
+    done: list[dict] = []
+    bad: list[str] = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            bad.append(f"line {n}")
+            continue
+        if not isinstance(rec, dict) or "row" not in rec:
+            bad.append(f"line {n}")
+            continue
+        done.append(rec)
+    return done, bad
+
+
+def next_chunk(run_dir: Path, size: int = CHUNK_SIZE) -> dict:
+    """The next `size` rows of `<run_dir>/intake.json` that are not yet in `<run_dir>/rows.jsonl`.
+
+    `rows.jsonl` is the run's checkpoint: Phase 2d appends one record per finished row, so a run
+    interrupted anywhere resumes with this call and no row is ever run twice. The counts by status
+    over the finished rows travel too, so the progress line the skill says is read, never tallied by
+    hand. A checkpoint line that cannot be read is refused rather than skipped: skipping it would
+    run its row again and write it twice.
+    """
+    intake_path = run_dir / "intake.json"
+    data = json.loads(intake_path.read_text(encoding="utf-8"))
+    rows = data.get("rows", []) if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        raise ValueError("intake.json holds no list of rows")
+    for n, row in enumerate(rows, 1):
+        row.setdefault("row", n)
+    done, bad = _done_rows(run_dir)
+    if bad:
+        raise ValueError(f"rows.jsonl has a line that cannot be read ({', '.join(bad)}); fix or remove it "
+                         "before continuing, or the row it holds would be run twice")
+    done_ids = {rec["row"] for rec in done}
+    remaining = [row for row in rows if row["row"] not in done_ids]
+    chunk = remaining[:size]
+    progress: dict[str, int] = {}
+    for rec in done:
+        status = rec.get("status") or "unknown"
+        progress[status] = progress.get(status, 0) + 1
+    finished = len(rows) - len(remaining)
+    return {
+        "size": size, "total": len(rows), "done": sorted(done_ids & {r["row"] for r in rows}),
+        "finished": finished, "remaining": len(remaining), "complete": not remaining,
+        "chunk": chunk, "chunk_rows": [r["row"] for r in chunk],
+        "chunk_index": (finished // size) + 1 if chunk else None,
+        "chunks_total": -(-len(rows) // size) if size else None,
+        "progress": progress,
+    }
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Reconciliation helper for agami-reconcile.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1396,6 +1463,12 @@ def main(argv: list[str] | None = None) -> int:
     p_findings = sub.add_parser("findings", help="Write a run's findings, defects and ledgers beside its rows.jsonl.")
     p_findings.add_argument("--run-dir", required=True, dest="run_dir")
 
+    p_chunk = sub.add_parser("next-chunk", help="The next rows to run: those in the run's intake.json not yet in its rows.jsonl.")
+    p_chunk.add_argument("--run-dir", required=True, dest="run_dir")
+    p_chunk.add_argument("--rows-file", default=None, dest="rows_file",
+                         help="the applied intake rows; copied to <run-dir>/intake.json when that file does not exist yet")
+    p_chunk.add_argument("--size", type=int, default=CHUNK_SIZE, help=f"rows per chunk (default {CHUNK_SIZE})")
+
     p_status = sub.add_parser("status", help="The status a row gets, from the number comparison and the ledger's verdict.")
     p_status.add_argument("--match", required=True, choices=["true", "false", "none"],
                           help="reconcile.py diff's match, or none when the row could not run")
@@ -1410,6 +1483,34 @@ def main(argv: list[str] | None = None) -> int:
         verdict = None if args.ledger_verdict == "none" else args.ledger_verdict
         print(json.dumps({"status": row_status(match, verdict)}))
         return 0
+
+    if args.cmd == "next-chunk":
+        run_dir = Path(args.run_dir).expanduser()
+        if not run_dir.is_dir():
+            print(f"reconcile next-chunk: run directory not found: {run_dir}", file=sys.stderr)
+            return 2
+        if args.size < 1:
+            print("reconcile next-chunk: --size must be at least 1", file=sys.stderr)
+            return 2
+        intake_path = run_dir / "intake.json"
+        if args.rows_file and not intake_path.exists():
+            src = Path(args.rows_file).expanduser()
+            if not src.exists():
+                print(f"reconcile next-chunk: rows file not found: {src}", file=sys.stderr)
+                return 2
+            intake_path.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        if not intake_path.exists():
+            print(f"reconcile next-chunk: no intake.json in {run_dir}; pass --rows-file once to seed it", file=sys.stderr)
+            return 2
+        try:
+            result = next_chunk(run_dir, size=args.size)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"reconcile next-chunk: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, indent=2))
+        # Exit 4, "nothing to do", when every row is in the checkpoint: the skill reads it as
+        # "go to Phase 3", with the JSON above still carrying the counts for the summary.
+        return 4 if result["complete"] else 0
 
     if args.cmd == "ledger":
         row_dir = Path(args.row_dir).expanduser()

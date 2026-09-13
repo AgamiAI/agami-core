@@ -44,6 +44,12 @@
 
     <p class="lede" id="lede"></p>
     <div class="chips" id="chips"></div>
+    <div class="filters" id="filters">
+      <span class="k">Show</span><span id="owner-chips"></span>
+      <input type="search" id="q" placeholder="a word in the question, label or beats" aria-label="narrow the rows by a word">
+      <button type="button" id="clear" class="linkish">Show all</button>
+      <span class="showing" id="showing"></span>
+    </div>
     <div id="items"></div>
 
     <div class="footer">
@@ -93,12 +99,43 @@
         + '<div class="more"' + (['change', 'fix', 'reword'].includes(d.decision) ? '' : ' hidden') + '>'
         + '<label>Say what should change, in words<textarea data-field="words" placeholder="e.g. revenue should net refunds">' + esc(d.words || '') + '</textarea></label></div>';
     }
+    // What is shown. A filter narrows the cards, never the block: decided() reads every row.
+    const view = { status: new Set(), owner: new Set(), q: '' };
+    const OWNER_SHORT = { you: 'your query', model: 'the semantic model', question: 'the question', agami: 'agami', keep: 'keep', nothing: 'nothing' };
+    function statusClass(item) { return (STATUS[item.status] || ['noted'])[0]; }
+    function haystack(item) {
+      const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer]
+        .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')));
+      return parts.filter(Boolean).join(' ').toLowerCase();
+    }
+    function visible() {
+      const q = view.q.trim().toLowerCase();
+      return DATA.items.filter(item => (!view.status.size || view.status.has(statusClass(item)))
+        && (!view.owner.size || view.owner.has(item.owner || 'nothing'))
+        && (!q || haystack(item).includes(q)));
+    }
     function chips() {
       const counts = {};
-      DATA.items.forEach(i => { const cls = (STATUS[i.status] || ['noted'])[0]; counts[cls] = (counts[cls] || 0) + 1; });
+      DATA.items.forEach(i => { const cls = statusClass(i); counts[cls] = (counts[cls] || 0) + 1; });
       const words = { held: 'match', defect: 'a mistake on your side', gap: 'differs', open: 'could not check', noted: 'did not run' };
-      document.getElementById('chips').innerHTML = Object.entries(counts).map(([cls, n]) =>
-        '<div class="chip ' + cls + '"><b>' + n + '</b><span>' + esc(words[cls] || cls) + '</span></div>').join('');
+      const root = document.getElementById('chips');
+      root.classList.toggle('filtering', view.status.size > 0);
+      root.innerHTML = Object.entries(counts).map(([cls, n]) =>
+        '<button type="button" class="chip ' + cls + (view.status.has(cls) ? ' on' : '') + '" data-filter="' + cls + '" aria-pressed="' + view.status.has(cls) + '"><b>' + n + '</b><span>' + esc(words[cls] || cls) + '</span></button>').join('');
+      root.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { toggle(view.status, el.dataset.filter); renderItems(); }));
+      const owners = {};
+      DATA.items.forEach(i => { const o = i.owner || 'nothing'; owners[o] = (owners[o] || 0) + 1; });
+      const bar = document.getElementById('filters');
+      bar.hidden = DATA.layout === 'audit' || DATA.items.length < 2;
+      bar.classList.toggle('filtering', view.owner.size > 0);
+      document.getElementById('owner-chips').innerHTML = Object.entries(owners).map(([o, n]) =>
+        '<button type="button" class="pill ' + esc(o) + (view.owner.has(o) ? ' on' : '') + '" data-owner="' + esc(o) + '" aria-pressed="' + view.owner.has(o) + '">' + n + ' · ' + esc(OWNER_SHORT[o] || o) + '</button>').join(' ');
+      document.getElementById('owner-chips').querySelectorAll('[data-owner]').forEach(el => el.addEventListener('click', () => { toggle(view.owner, el.dataset.owner); renderItems(); }));
+    }
+    function toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
+    function showing(n) {
+      const filtered = view.status.size || view.owner.size || view.q.trim();
+      document.getElementById('showing').textContent = filtered ? 'Showing ' + n + ' of ' + DATA.items.length + ' rows' : 'All ' + DATA.items.length + ' rows';
     }
     function card(item) {
       const d = decisions[item.row] || {};
@@ -139,8 +176,11 @@
         ? 'One query, checked part by part in the order the checks ran. The rail on the right is what to do about it. Decide below, generate the block, and paste it back into Claude; nothing changes until you do.'
         : 'Every row you gave us, in four beats: what we read and checked, what agami did with the question and answered, how it got there, and what to change or keep. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do, and "keep" is only offered where the numbers agreed and every part held.';
       chips();
+      const shown = visible();
+      showing(shown.length);
       const root = document.getElementById('items');
-      root.innerHTML = DATA.items.map(item => DATA.layout === 'audit' ? audit(item) : card(item)).join('');
+      root.innerHTML = shown.map(item => DATA.layout === 'audit' ? audit(item) : card(item)).join('')
+        || '<p class="meta">No row matches this filter. Your decisions on the hidden rows are kept.</p>';
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
       renderSummary();
@@ -172,6 +212,8 @@
       document.getElementById('modal').hidden = false; document.getElementById('modal-status').textContent = '';
     }
     document.getElementById('btn-generate').addEventListener('click', generateDecisions);
+    document.getElementById('q').addEventListener('input', e => { view.q = e.target.value; renderItems(); });
+    document.getElementById('clear').addEventListener('click', () => { view.status.clear(); view.owner.clear(); view.q = ''; document.getElementById('q').value = ''; renderItems(); });
     document.getElementById('modal-close').addEventListener('click', () => { document.getElementById('modal').hidden = true; });
     document.getElementById('modal-copy').addEventListener('click', async () => {
       const status = document.getElementById('modal-status');
