@@ -109,6 +109,10 @@ below corresponds to one such version.
 - `shared/plain-language.md` says how reconcile talks to the person in Phase 3: four actors and no
   fifth, the thing and never the mechanism, one idea per sentence, the semantic model quoted when it
   decided something. Phase 3 points at it. (ACE-121)
+- Reconcile's Phase 3 tells every row in four beats, in the reader's order: how we read and checked
+  the input, what agami did with the question and answered, how it got there, and what to change or
+  keep. The tables and the offer keep their text. The ledger runs once per row, after the
+  comparison. (ACE-122)
 
 ### Fixed
 

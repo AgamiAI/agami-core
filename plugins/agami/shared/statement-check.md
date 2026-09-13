@@ -71,8 +71,10 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    `no_question` for a statement that came alone. This is the one step here that judges by reading;
    the ledger turns a doubtful fit into an open part, and a missing file into one too.
 
-Then `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir .` grades what was found,
-and again with `--with-claims` once `sm claims` has compared the two statements.
+Then, once per row and after the comparison, `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py"
+ledger --row-dir . --with-claims` grades what was found, or without `--with-claims` when agami's own
+statement is missing. One run: every file above is still there, so waiting loses nothing, and the same
+ledger written twice is a step somebody will skip or double.
 
 **The person's statement is never run with weaker guards than the AI's.** Every gate that refuses a
 generated statement refuses a supplied one, and the refusal is written down as a grade rather than
