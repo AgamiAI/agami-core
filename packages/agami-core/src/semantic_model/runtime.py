@@ -4599,11 +4599,20 @@ def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozen
     resolve — contributes nothing. This SELECT's own `joins` argument rather than a subtree walk: a
     join inside a CTE body or a subquery connects that scope's tables, not this one's, and the
     per-arm rule `_preflight_select` states for its alias map holds here for the same reason.
+
+    **Only an ON pinned to its own join's two relations counts**, by the same rule `_join_sites`
+    applies: it names the right-hand relation and at most one other. A compound ON reaching back over
+    three relations is one the joins section reports UNDETERMINED, and a pair read out of it is no
+    firmer here than there — accepting it would clear a chasm on evidence that section refused.
     """
     pairs: set[frozenset[str]] = set()
     for join in tree.args.get("joins") or ():
         on = join.args.get("on")
         if on is None:
+            continue
+        right = _relation_name(join.this)
+        names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
+        if right not in names or len(names - {right}) > 1:
             continue
         for pair in _predicate_pairs(on, scope_map):
             tables = frozenset(table for table, _column in pair)

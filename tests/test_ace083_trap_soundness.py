@@ -2763,13 +2763,21 @@ REVENUE_AND_COST_BY_CATEGORY_JOINED_SEPARATELY = (
 )
 
 
-def _risks(sql: str, org: "m.Datasource") -> list[list[str]]:
-    return [[f.risk for f in a.findings] for a in rt.pre_flight_check(sql, org).aggregates]
+def _catalog_reports(sql: str) -> list["rt.AggregateReport"]:
+    """`_reports`' guards, against the catalog model: an unparsed statement also returns no
+    aggregates, and "no report names a chasm" is true of an empty list."""
+    pf = rt.pre_flight_check(sql, _catalog_org())
+    assert pf.unchecked is None, pf.unchecked
+    assert pf.aggregates, sql
+    return pf.aggregates
+
+
+def _risks(sql: str) -> list[list[str]]:
+    return [[f.risk for f in a.findings] for a in _catalog_reports(sql)]
 
 
 def test_a_chain_is_not_a_chasm_because_the_model_also_declares_a_shortcut():
-    reports = rt.pre_flight_check(REVENUE_AND_COST_BY_CATEGORY_THROUGH_THE_PRODUCT,
-                                  _catalog_org()).aggregates
+    reports = _catalog_reports(REVENUE_AND_COST_BY_CATEGORY_THROUGH_THE_PRODUCT)
 
     assert all("chasm_trap" not in [f.risk for f in a.findings] for a in reports), reports
     assert all("order_lines -> categories" not in a.joins for a in reports), (
@@ -2780,7 +2788,7 @@ def test_a_chain_is_not_a_chasm_because_the_model_also_declares_a_shortcut():
 def test_two_measures_joined_to_the_dimension_separately_are_still_a_chasm():
     """The reverse pin. The model edge `order_lines -> products` exists here too, and it clears
     nothing: only a join the statement wrote does, and this statement wrote none between them."""
-    risks = _risks(REVENUE_AND_COST_BY_CATEGORY_JOINED_SEPARATELY, _catalog_org())
+    risks = _risks(REVENUE_AND_COST_BY_CATEGORY_JOINED_SEPARATELY)
 
     assert len(risks) == 2
     assert all("chasm_trap" in item for item in risks), risks
@@ -2795,4 +2803,20 @@ def test_a_join_the_on_clause_cannot_pin_to_both_tables_clears_nothing():
         "JOIN products p ON p.category_id = c.id AND product_id = id GROUP BY c.name"
     )
 
-    assert all("chasm_trap" in item for item in _risks(sql, _catalog_org()))
+    risks = _risks(sql)
+    assert all("chasm_trap" in item for item in risks), risks
+
+
+def test_a_compound_on_over_three_relations_clears_nothing():
+    """The ON below does write `ol.product_id = p.id`, but it reaches over lines, products AND
+    categories, which the joins section cannot reduce to one pair and reports undetermined. A pair
+    that section refused to read is not evidence here either, so the chasm stands."""
+    sql = (
+        "SELECT c.name, SUM(ol.amount), SUM(p.cost) FROM categories c "
+        "JOIN order_lines ol ON ol.category_id = c.id "
+        "JOIN products p ON p.category_id = c.id AND ol.product_id = p.id GROUP BY c.name"
+    )
+
+    risks = _risks(sql)
+    assert len(risks) == 2
+    assert all("chasm_trap" in item for item in risks), risks
