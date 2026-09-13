@@ -78,9 +78,13 @@ def test_a_table_that_differs_in_columns_names_the_extra_columns_and_blames_the_
     assert rows["rows"]["state"] == "held" and rows["rows"]["yours"] == "21 rows" and rows["rows"]["agami"] == "21 rows"
     assert rows["columns"]["state"] == "defect" and rows["columns"]["yours_hi"] == ["planned_ship_date", "delivered_at", "channel"] and rows["columns"].get("agami_hi") in (None, [])
     assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical, row for row"
-    assert rows["date window"]["state"] == "open" and rows["date window"]["agami"] == "placed_at ≥ 2025-06-01"
+    assert rows["date window"]["state"] == "open" and rows["date window"]["agami"] == "placed_at ≥ 2025-06-01" and rows["date window"]["yours"] == "could not read"
+    assert rows["date window"]["note"] == "a shape the claims reader does not fold"
     assert rows["caveats read"]["state"] == "noted" and item["words"] == ['orders: "shipped_at is the time anchor for order reporting."']
-    assert item["owner"] == "question" and item["single_cell"] is False and item["expected"] == "21 rows"
+    # The same rows come back; only the columns the person's query returns differ: the query is what to change.
+    assert item["owner"] == "you" and item["single_cell"] is False and item["expected"] == "21 rows"
+    assert item["change"] == ["Your query returns columns the question did not ask for: planned_ship_date, delivered_at, channel. Remove them, or name them in the question."]
+    assert rows["values"]["yours"] == "100% of the values match" or rows["values"]["state"] == "held"
     assert item["sentence"].startswith("The two answers do not match. What differs: columns")
 
 
@@ -90,7 +94,7 @@ def test_a_mistake_in_the_query_is_the_persons_and_the_near_miss_is_said(tmp_pat
     assert rows["answer"]["state"] == "defect" and rows["answer"]["yours_hi"] == ["0"] and rows["answer"]["agami_hi"] == ["0.83"]
     lit = rows["value orders.status='Delivered'"]
     assert lit["state"] == "defect" and lit["yours"] == "matches no rows; the data spells it delivered" and lit["note"] == "the data spells it delivered"
-    assert item["owner"] == "you" and item["change"] == ["Fix your query where the marks are red, then run this row again."]
+    assert item["owner"] == "you" and item["change"] == ["Fix your query: value orders.status='Delivered'. Then run this row again."]
     assert "so the number you expected is doubtful" in item["sentence"]
 
 
@@ -106,3 +110,42 @@ def test_an_error_row_and_the_cli(tmp_path, capsys):
     (run / "rows.jsonl").unlink()
     assert reconcile.main(["report-items", "--run-dir", str(run)]) == 4
     assert reconcile.main(["report-items", "--run-dir", str(tmp_path / "nope")]) == 2
+
+
+
+GAPS_AND_GRAIN = {"row": 5, "label": "Open requests", "question": "Show me all requests open from August that are still waiting on approval.",
+    "expected": None, "actual": None, "match": False, "status": "mismatch", "statement": "SELECT r.number FROM requests r JOIN request_items i ON r.id = i.request_id WHERE r.state = 'Work in Progress' AND i.approval = 'Requested'",
+    "sql": "SELECT i.request FROM request_items i WHERE i.approval = 'Requested' AND i.state NOT LIKE 'Closed%'",
+    "recorded": {"columns": ["request"], "rows": []}, "statement_recorded": {"columns": ["number"], "row_count": 55},
+    "provenance": {"shape": "b", "source": "your validation sheet", "file": "plan.csv", "line": 4},
+    "ledger": {"rows": [_part("runs", "confirmed"), _part("join:request_items-requests", "confirmed"),
+                        _part("question_fit", "unresolved", {"fit": "doubtful"}, note="the statement restricts the parent request to one state, a narrower notion of open than the question's"),
+                        _part("values_declared:requests.state", "model_gap", {"declared": "absent", "distinct": "listed"}, note="the column holds 6 distinct values and the semantic model lists none of them", kind="description"),
+                        _part("values_declared:request_items.approval", "model_gap", {"declared": "absent", "distinct": "listed"}, note="the column holds 4 distinct values and the semantic model lists none of them", kind="description")],
+               "verdict": "model_gap", "counts": {}}, "ledger_verdict": "model_gap",
+    "comparison": {"result_set": {"accuracy": 0.5, "reason": "no generated column carries the values of: number", "unmatched_golden_columns": ["number"], "golden_row_count": 55, "generated_row_count": 55}},
+    "claims": {"claims": [{"name": "tables", "status": "differs", "generated": ["request_items"], "golden": ["request_items", "requests"]},
+                          {"name": "filter_predicates", "status": "differs", "generated": ["eq(request_items.approval, 'Requested')", "not(like(request_items.state, 'Closed%'))"],
+                           "golden": ["eq(request_items.approval, 'Requested')", "eq(requests.state, 'Work in Progress')", "gte(requests.opened, add(timestamptrunc(currentdate(), var(year)), interval('7', var(months))))"]}]}}
+
+
+def test_gaps_the_ledger_measured_own_the_change_even_when_the_fit_is_doubtful_and_filters_read_as_words(tmp_path):
+    item = reconcile.report_items(_run(tmp_path, [GAPS_AND_GRAIN]))[0]
+    rows = {r["key"]: r for r in item["diff"]}
+    assert item["owner"] == "model"
+    assert item["change"] == ["The semantic model is missing: values declared on requests.state, values declared on request_items.approval. Add them through /agami-save-correction.",
+                              "Also: the statement restricts the parent request to one state, a narrower notion of open than the question's"]
+    assert rows["filters"]["yours"] == ["request_items.approval = 'Requested'", "requests.state = 'Work in Progress'",
+                                        "requests.opened ≥ date_trunc(current_date, year) + interval 7 months"]
+    assert rows["filters"]["yours_hi"] == ["requests.state = 'Work in Progress'", "requests.opened ≥ date_trunc(current_date, year) + interval 7 months"]
+    assert rows["values"]["yours"] == "50% of the values match" and rows["values"]["agami"] is None
+    assert item["sql_yours"].startswith("SELECT r.number") and item["sql_agami"].startswith("SELECT i.request")
+    assert [r["key"] for r in item["diff"] if r["key"].startswith("metric")] == []
+
+
+def test_readable_keys():
+    assert reconcile._readable("eq(orders.region, 'EU')") == "orders.region = 'EU'"
+    assert reconcile._readable("in(orders.status, 'a', 'b')") == "orders.status in ('a', 'b')"
+    assert reconcile._readable("not(like(x.state, 'Closed%'))") == "not x.state like 'Closed%'"
+    assert reconcile._readable("gte(o.d, add(datetrunc(var(year), currentdate()), interval('7', var(months))))") == "o.d ≥ date_trunc(year, current_date) + interval 7 months"
+    assert reconcile._readable("plain text") == "plain text" and reconcile._readable(None) is None

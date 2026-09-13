@@ -1017,3 +1017,22 @@ def test_a_no_question_fit_against_a_row_that_carries_a_question_is_never_an_exa
     assert findings(run)["findings"] == []
     _write(d, "question_fit.json", {"fit": "plausible", "reason": None})
     assert [f["kind"] for f in findings(run)["findings"]] == ["example"]
+
+
+
+def test_a_plain_column_in_a_list_query_is_never_a_metric_gap():
+    """`SELECT number, type FROM requests` matches no metric, by design: nothing there aggregates. With
+    the receipt saying so (`aggregate: false`), or with an older receipt and a pre-flight that lists no
+    aggregates, no `metric:` part is written; an aggregate that matches nothing still is."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "number", "status": "unmatched", "aggregate": False},
+                                     {"kind": "output", "column": "type", "status": "unmatched", "aggregate": False},
+                                     {"kind": "output", "column": "total", "status": "unmatched", "aggregate": True}]},
+               "tables": {"items": [{"qname": "requests"}]}}
+    parts = {r["part"]: r for r in reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(amount)"}]})}
+    assert set(parts) == {"metric:total"} and parts["metric:total"]["verdict"] == "model_gap"
+    older = {"columns": {"items": [{"kind": "output", "column": "number", "status": "unmatched"}]}, "tables": {"items": []}}
+    assert reconcile._grade_metrics(older, {"aggregates": []}) == []
+    assert [r["part"] for r in reconcile._grade_metrics(older, {"aggregates": [{"aggregate": "COUNT(x)"}]})] == ["metric:number"]
+    # A column the receipt could not settle stays open: a failure to read is never a gap, and never nothing.
+    unsettled = {"columns": {"items": [{"kind": "output", "column": "x", "status": "undetermined"}]}, "tables": {"items": []}}
+    assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(unsettled, {"aggregates": []})] == [("metric:x", "unresolved")]

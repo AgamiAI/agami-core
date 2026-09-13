@@ -636,7 +636,7 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
         frozenset({"kind", "column"}),
         frozenset({"kind", "column", "scope", "status", "name", "area", "definition_prose",
                    "expression", "confidence", "origin", "review_state", "signed_off_by",
-                   "signed_off_role", "signed_off_at", "source_tables"}),
+                   "signed_off_role", "signed_off_at", "source_tables", "aggregate"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {
         frozenset({"ref", "alias", "qname", "declared", "rows", "rows_as_of", "freshness",

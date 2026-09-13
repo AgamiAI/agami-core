@@ -125,3 +125,10 @@
     .tag.suggested { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; background: var(--accent-soft, #e6efff); color: var(--accent, #1d5fb4); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; }
     .more label .p { display: block; font-size: 13px; color: var(--fg-muted, #5b6875); margin-bottom: 4px; }
     @media (max-width: 640px) { .grade.opts .opt { grid-template-columns: 18px 1fr; } .grade.opts .opt .what { grid-column: 2; } }
+    /* the two statements, collapsed under the grid */
+    details.sql { margin-top: 8px; font-size: 13px; }
+    details.sql summary { cursor: pointer; color: var(--accent, #1d5fb4); font-weight: 600; }
+    .sql2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 6px; }
+    .sql2 b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted, #5b6875); margin-bottom: 4px; }
+    .sql2 pre { margin: 0; padding: 8px 10px; background: var(--bg-muted, #f3f5f7); border: 1px solid var(--border, #d9dde3); border-radius: 6px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+    @media (max-width: 640px) { .sql2 { grid-template-columns: 1fr; } }

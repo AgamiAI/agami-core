@@ -998,6 +998,13 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
         elif only_bare_counts:
             rows.append(_part(f"metric:{column}", CONFIRMED,
                               note="a bare count matches no metric by design"))
+        elif item.get("aggregate") is False or (item.get("aggregate") is None and not aggregates and status == "unmatched"):
+            # A plain column in a list query computes nothing a metric could define: `number`,
+            # `type` or `opened` matching no metric is not a gap, and saying so for every column of
+            # a twelve-column list would bury the one row that matters. The receipt says whether
+            # the output aggregates; an older receipt without the key is read through the
+            # pre-flight, which lists the statement's aggregates.
+            continue
         elif status == "unmatched":
             rows.append(_part(f"metric:{column}", MODEL_GAP, kind="metric", evidence={"column": column},
                               note="the output matches no metric the semantic model defines"))
@@ -1519,11 +1526,73 @@ def _part_key(part: str) -> str:
     return tpl.format(x=rest) if "{x}" in tpl else tpl
 
 
+_KEY_OPS = {"eq": "=", "neq": "≠", "gte": "≥", "gt": ">", "lte": "≤", "lt": "<", "add": "+", "sub": "-", "mul": "×", "div": "/",
+            "and": "and", "or": "or", "like": "like", "ilike": "ilike", "in": "in", "is": "is", "not": "not", "between": "between"}
+_KEY_FUNCS = {"currentdate": "current_date", "currenttimestamp": "now", "timestamptrunc": "date_trunc", "datetrunc": "date_trunc"}
+
+
+def _split_args(text: str) -> list[str]:
+    """Top-level comma split of `a, f(b, c), 'd, e'`."""
+    out, depth, quote, cur = [], 0, False, []
+    for ch in text:
+        if ch == "'" :
+            quote = not quote
+        if not quote:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                out.append("".join(cur).strip()); cur = []
+                continue
+        cur.append(ch)
+    if "".join(cur).strip():
+        out.append("".join(cur).strip())
+    return out
+
+
+def _readable(key: Any) -> Any:
+    """A claim key re-spelled for a person: `eq(orders.region, 'EU')` reads `orders.region = 'EU'`,
+    `gte(o.d, add(timestamptrunc(currentdate(), var(year)), interval('7', var(months))))` reads
+    `o.d ≥ date_trunc(year, current_date) + interval 7 months`. Words and symbols, never SQL: the key
+    is the claims reader's structural form and this only unfolds it for reading."""
+    if isinstance(key, list):
+        return [_readable(k) for k in key]
+    if not isinstance(key, str):
+        return key
+    m = re.fullmatch(r"\s*([a-z_]+)\((.*)\)\s*", key, flags=re.S)
+    if not m:
+        return key
+    name, inner = m.group(1), m.group(2)
+    args = [_readable(a) for a in _split_args(inner)]
+    if not args and name in _KEY_FUNCS:
+        return _KEY_FUNCS[name]  # current_date, now: a clock reading, written without brackets
+    if name == "var" and len(args) == 1:
+        return args[0]
+    if name == "interval" and len(args) == 2:
+        return f"interval {args[0].strip(chr(39))} {args[1]}"
+    if name == "paren" and len(args) == 1:
+        return f"({args[0]})"
+    if name in _KEY_OPS and len(args) == 2 and name not in ("not",):
+        return f"{args[0]} {_KEY_OPS[name]} {args[1]}"
+    if name in ("and", "or") and len(args) > 2:
+        return f" {name} ".join(args)
+    if name == "not" and len(args) == 1:
+        return f"not {args[0]}"
+    if name == "in" and len(args) >= 2:
+        return f"{args[0]} in ({', '.join(args[1:])})"
+    if name == "between" and len(args) == 3:
+        return f"{args[0]} between {args[1]} and {args[2]}"
+    if name == "cast" and len(args) == 2:
+        return f"{args[0]} as {args[1]}"
+    return f"{_KEY_FUNCS.get(name, name)}({', '.join(args)})"
+
+
 def _claim_text(value: Any) -> str | list[str] | None:
     if value is None or value == [] or value == {}:
         return None
     if isinstance(value, dict):  # a date window
-        col = value.get("column") or ""
+        col = _readable(value.get("column") or "")
         start = value.get("start"); end = value.get("end")
         lo = ("≥ " if value.get("start_inclusive", True) else "> ") + str(start) if start else ""
         hi = ("≤ " if value.get("end_inclusive") else "< ") + str(end) if end else ""
@@ -1614,8 +1683,9 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
                       if result_set.get("unmatched_golden_columns") else None))
         acc = result_set.get("accuracy")
         if acc is not None:
-            add("values", "held" if float(acc) >= 1.0 else "defect", "identical, row for row" if float(acc) >= 1.0 else "differ",
-                None if float(acc) >= 1.0 else "differ", note=None if float(acc) >= 1.0 else result_set.get("reason"))
+            same = float(acc) >= 1.0
+            add("values", "held" if same else "defect", "identical, row for row" if same else f"{float(acc):.0%} of the values match",
+                None, note=None if same else result_set.get("reason"))
     else:
         match = rec.get("match") if rec.get("match") is not None else (scalar or {}).get("match")
         if rec.get("status") == "error":
@@ -1638,12 +1708,18 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     claims = rec.get("claims") or {}
     for claim in (claims.get("claims") or []) if isinstance(claims, dict) else []:
         name = claim.get("name")
-        yours, agami = _claim_text(claim.get("golden")), _claim_text(claim.get("generated"))
+        yours, agami = _readable(_claim_text(claim.get("golden"))), _readable(_claim_text(claim.get("generated")))
         status = claim.get("status")
         if yours is None and agami is None and status in ("agrees", "same"):
             continue
         state = "held" if status in ("agrees", "same") else "defect" if status == "differs" else "open"
-        add(_CLAIM_KEYS.get(name, name), state, yours, agami,
+        note = None
+        if name == "date_window" and state == "open":
+            part = parts.get("date_window") or {}
+            note = part.get("note") or "the window could not be read from one of the two queries"
+            yours = yours or "could not read"
+            agami = agami or "could not read"
+        add(_CLAIM_KEYS.get(name, name), state, yours, agami, note=note,
             yours_hi=_only(yours, agami) if state == "defect" else None, agami_hi=_only(agami, yours) if state == "defect" else None)
 
     # 3 · every part of the person's statement the ledger graded, with agami's side where a receipt says.
@@ -1684,26 +1760,60 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
 
 
 def _owner(rec: dict, diff: list[dict]) -> str:
+    """Who acts, from the evidence, in this order: a mistake in the query is the person's; a gap the
+    ledger measured is the semantic model's; a question read differently is the question's."""
     status = rec.get("status")
-    states = {r["state"] for r in diff}
     parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
     fit = next((p for p in parts if p.get("part") == "question_fit"), None)
+    differing = {r["key"] for r in diff if r["state"] == "defect"}
     if status == "match":
         return "keep"
     if status == "error":
         return "agami"
     if status == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
         return "you"
-    if fit and fit.get("verdict") != CONFIRMED:
+    if any(p.get("verdict") == MODEL_GAP for p in parts):
+        return "model"
+    if differing & {"columns", "ordered by", "limit"} and not (differing & {"tables read", "filters", "join keys", "grouped by"}):
+        # The two answers hold the same rows and differ in what the person's query returns or how
+        # it orders them: that is the query to change, not a definition and not the question.
+        return "you"
+    if (fit and fit.get("verdict") != CONFIRMED) or (differing & {"tables read", "filters", "date window", "join keys", "grouped by"}):
         return "question"
-    if any(p.get("verdict") == MODEL_GAP for p in parts) or "gap" in states:
-        return "model"
     if status == "mismatch":
-        differing = {r["key"] for r in diff if r["state"] == "defect"}
-        if differing & {"date window", "grouped by", "ordered by", "limit", "columns"}:
-            return "question"
-        return "model"
+        return "question"
     return "nothing"
+
+
+def _change(owner: str, rec: dict, diff: list[dict]) -> tuple[list[str], list[str]]:
+    """Beat 4, templated from what the rows say: the gaps by name, the extra columns by name, the
+    reason the fit is doubtful. The AI may rewrite these words; it never adds a fact they lack."""
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    change, todo = _OWNER_CHANGE[owner]
+    change, todo = list(change), list(todo)
+    if owner == "model":
+        gaps = [r["key"] for r in diff if r["state"] == "gap"]
+        if gaps:
+            change = [f"The semantic model is missing: {', '.join(gaps)}. Add them through /agami-save-correction."]
+            todo = [f"The semantic model: {', '.join(gaps)}."]
+    if owner == "you":
+        cols = next((r for r in diff if r["key"] == "columns" and r["state"] == "defect"), None)
+        red = [r["key"] for r in diff if r["state"] == "defect" and r["key"] not in ("answer", "rows", "values", "columns")]
+        if cols and cols.get("yours_hi") and not red:
+            extra = ", ".join(cols["yours_hi"])
+            change = [f"Your query returns columns the question did not ask for: {extra}. Remove them, or name them in the question."]
+            todo = [f"Your query: remove {extra}, or name them in the question."]
+        elif red:
+            change = [f"Fix your query: {', '.join(red)}. Then run this row again."]
+            todo = [f"Your query: {', '.join(red)}; then re-run."]
+    fit = next((p for p in parts if p.get("part") == "question_fit"), None)
+    if fit and fit.get("verdict") != CONFIRMED and fit.get("note"):
+        line = f"Also: {fit['note']}"
+        if owner == "question":
+            change = [f"Reword the question, or change your query, so they ask the same thing. {fit['note']}"]
+        elif line not in change:
+            change.append(line)
+    return change, todo
 
 
 def _sentence(rec: dict, diff: list[dict]) -> str:
@@ -1741,7 +1851,7 @@ def report_items(run_dir: Path) -> list[dict]:
             agami_receipt = _load_json(Path(rec["receipt_path"]))
         diff, words = _diff_rows(rec, agami_receipt)
         owner = _owner(rec, diff)
-        change, todo = _OWNER_CHANGE[owner]
+        change, todo = _change(owner, rec, diff)
         prov = rec.get("provenance") or {}
         shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
         source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
@@ -1761,6 +1871,7 @@ def report_items(run_dir: Path) -> list[dict]:
             "delta_pct": (round(delta * 100, 1) if isinstance(delta, (int, float)) and abs(delta) <= 1 else delta),
             "single_cell": bool(single), "owner": owner, "diff": diff, "sentence": _sentence(rec, diff),
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
+            "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
             "report_path": rec.get("report_path"),
         })
     return items

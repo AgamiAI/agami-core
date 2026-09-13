@@ -174,6 +174,14 @@
             + (r.note && r.state !== 'held' ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
         + '</div>';
     }
+    // The two statements, collapsed: the person's own SQL shown to its author, and agami's, which
+    // the receipt already shows. Never a result row.
+    function sqlBlock(item) {
+      if (!item.sql_yours && !item.sql_agami) return '';
+      return '<details class="sql"><summary>The two SQL statements</summary><div class="sql2">'
+        + '<div><b>yours</b><pre>' + esc(item.sql_yours || '(none)') + '</pre></div>'
+        + '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div></div></details>';
+    }
     function words(item) {
       return (item.words || []).length
         ? '<details class="words"><summary>The semantic model says</summary><ul>' + item.words.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul></details>' : '';
@@ -190,7 +198,7 @@
         + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
         + diffGrid(item)
         + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '')
-        + words(item) + action(item, d)
+        + sqlBlock(item) + words(item) + action(item, d)
         + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
         + controls(item, d) + '</div>';
     }
@@ -200,7 +208,7 @@
         + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
         + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
         + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
-        + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + words(item) + '</div>'
+        + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + sqlBlock(item) + words(item) + '</div>'
         + '<div class="rail"><b>What to do</b>' + lines(item.todo && item.todo.length ? item.todo : item.change) + action(item, d) + '</div></div>'
         + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
         + controls(item, d) + '</div>';

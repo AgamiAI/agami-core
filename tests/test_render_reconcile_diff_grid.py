@@ -70,3 +70,12 @@ def test_each_decision_says_what_it_is_and_what_happens_and_the_box_asks_for_the
     # The block's contract is untouched: the same five radio values, the same words field.
     for token in ("value=\"' + v + '\"", 'data-field="words"', "['change', 'fix', 'reword'].includes(d.decision)"):
         assert token in html, token
+
+
+def test_the_two_statements_sit_collapsed_under_the_grid():
+    item = dict(ITEM, sql_yours="SELECT number FROM requests", sql_agami="SELECT request FROM request_items")
+    html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
+    assert "function sqlBlock(item)" in html and '<details class="sql"><summary>The two SQL statements</summary>' in html
+    assert "SELECT number FROM requests" in html and "SELECT request FROM request_items" in html
+    with pytest.raises(ValueError, match="statement's text"):
+        rr.render(title="t", profile="p", run="r", items=[dict(item, sql_yours=["no"])])

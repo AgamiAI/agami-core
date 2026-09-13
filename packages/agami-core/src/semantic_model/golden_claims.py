@@ -385,11 +385,11 @@ def _temporal_bounds(
         return None
     side, inclusive = bound
     if isinstance(node.this, exp.Column):
-        column, value = node.this, _date_literal(node.expression)
+        column, value = node.this, _date_literal(node.expression) or _relative_bound(node.expression)
     elif isinstance(node.expression, exp.Column):
         # `'2025-01-01' <= d` is `d >= '2025-01-01'` written the other way round, so the bound it
         # puts on the column is the mirror of the operator rather than the operator itself.
-        column, value = node.expression, _date_literal(node.this)
+        column, value = node.expression, _date_literal(node.this) or _relative_bound(node.this)
         side = "end" if side == "start" else "start"
     else:
         return None
@@ -450,6 +450,88 @@ def _date_literal(node: "exp.Expression | None") -> Optional[str]:
     if isinstance(node, exp.Literal) and node.is_string and _ISO_DATE.match(node.this):
         return node.this
     return None
+
+
+_RELATIVE_UNITS = {"year": "year", "years": "year", "quarter": "quarter", "quarters": "quarter", "month": "month", "months": "month",
+                   "week": "week", "weeks": "week", "day": "day", "days": "day", "hour": "hour", "hours": "hour"}
+
+
+def _unit_name(node: "exp.Expression | None") -> Optional[str]:
+    """The calendar unit a node names (`YEAR`, `'month'`, `var(months)`), normalised to one spelling."""
+    if node is None:
+        return None
+    text = node.this if isinstance(node, (exp.Var, exp.Literal)) else getattr(node, "name", None) or str(node)
+    return _RELATIVE_UNITS.get(str(text).strip().strip("'\"").lower())
+
+
+def _relative_bound(node: "exp.Expression | None") -> Optional[str]:
+    """The bound a node spells RELATIVE to the run date, as words: `today`, `start of this year`,
+    `start of this year + 7 month`, `today - 30 day`. None for any other shape.
+
+    A window written against the clock is the commonest way a dashboard says "this year so far",
+    and two statements that both write it should compare as the same window rather than read
+    `unknown`. The rendering is words, never a date: the module does not know what day it is, and a
+    date it computed would be a bound neither statement wrote. It is compared only against another
+    relative bound (`_window_status`), never against a literal date.
+    """
+    if node is None:
+        return None
+    if isinstance(node, exp.Paren):
+        return _relative_bound(node.this)
+    if isinstance(node, exp.Cast):
+        return _relative_bound(node.this)
+    if isinstance(node, (exp.CurrentDate, exp.CurrentTimestamp)):
+        return "today"
+    if isinstance(node, (exp.DateTrunc, exp.TimestampTrunc)):
+        inner = _relative_bound(node.this if isinstance(node, exp.TimestampTrunc) else node.args.get("this"))
+        unit = _unit_name(node.args.get("unit"))
+        if isinstance(node, exp.DateTrunc):
+            # sqlglot's DateTrunc holds the unit in `unit` and the value in `this`; some dialects
+            # parse the argument order the other way round, so both are tried.
+            inner = _relative_bound(node.this) or _relative_bound(node.args.get("unit"))
+            unit = _unit_name(node.args.get("unit")) or _unit_name(node.this)
+        if inner == "today" and unit:
+            return f"start of this {unit}"
+        return None
+    if isinstance(node, (exp.Add, exp.Sub)):
+        base = _relative_bound(node.this)
+        step = _interval_words(node.expression)
+        if base and step:
+            return f"{base} {'+' if isinstance(node, exp.Add) else '-'} {step}"
+        return None
+    if isinstance(node, (exp.DateAdd, exp.DateSub)):
+        base = _relative_bound(node.this)
+        n = node.expression
+        count = _integral(n) if isinstance(n, exp.Literal) else None
+        unit = _unit_name(node.args.get("unit"))
+        if base and count is not None and unit:
+            return f"{base} {'+' if isinstance(node, exp.DateAdd) else '-'} {count} {unit}"
+        return None
+    return None
+
+
+def _interval_words(node: "exp.Expression | None") -> Optional[str]:
+    """`INTERVAL '7' MONTH`, `INTERVAL '7 months'` or `INTERVAL 7 MONTH` as `7 month`."""
+    if not isinstance(node, exp.Interval):
+        return None
+    unit = _unit_name(node.args.get("unit"))
+    value = node.this
+    if isinstance(value, exp.Literal):
+        text = str(value.this).strip()
+        if unit is None and " " in text:
+            count, _, word = text.partition(" ")
+            unit = _unit_name(exp.Literal.string(word))
+            text = count
+        try:
+            count = int(text)
+        except ValueError:
+            return None
+        return f"{count} {unit}" if unit else None
+    return None
+
+
+def _symbolic(value: Optional[str]) -> bool:
+    return value is not None and not _ISO_DATE.match(value)
 
 
 def _integral(literal: "exp.Literal") -> Optional[int]:
@@ -676,6 +758,12 @@ def _window_status(generated: Optional[DateWindow], golden: Optional[DateWindow]
     """
     if generated is None or golden is None:
         return UNKNOWN
+    for a, b in ((generated.start, golden.start), (generated.end, golden.end)):
+        # A bound written against the clock and a literal date are not comparable here: the module
+        # does not know what day it is, so it cannot say whether `start of this year + 5 month` is
+        # `2025-06-01`. One relative side against one literal side reads `unknown`, never `differs`.
+        if (a is not None and b is not None) and (_symbolic(a) != _symbolic(b)):
+            return UNKNOWN
     return AGREES if _windows_agree(generated, golden) else DIFFERS
 
 
@@ -687,15 +775,18 @@ def _windows_agree(generated: DateWindow, golden: DateWindow) -> bool:
     rewrite on a qualifier. Which column each side constrains still rides on the claim, so a report
     can say so; it just does not decide.
     """
+    def canon(value: Optional[str]) -> Optional[str]:
+        return value if _symbolic(value) else _canonical_bound(value)
+
     return (
-        _canonical_bound(generated.start),
+        canon(generated.start),
         generated.start_inclusive,
-        _canonical_bound(generated.end),
+        canon(generated.end),
         generated.end_inclusive,
     ) == (
-        _canonical_bound(golden.start),
+        canon(golden.start),
         golden.start_inclusive,
-        _canonical_bound(golden.end),
+        canon(golden.end),
         golden.end_inclusive,
     )
 
