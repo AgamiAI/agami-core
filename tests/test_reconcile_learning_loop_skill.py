@@ -195,6 +195,7 @@ def test_reconcile_takes_input_the_way_connect_does():
     assert "render_reconcile_intake.py" in intake and "--intake-file" in intake
     assert "parse_reconcile_intake.py" in intake and "--rows-file" in intake
     assert "**end the turn**" in intake and "never hand-edit the rows" in intake
+    assert "inbox" in preflight.split("**If they gave nothing**")[0] and "local/reconcile/inbox/" in intake
     assert 'A per-row "is this the question?" in chat is never asked' in intake
     assert "only for a statement that came alone" in PHASE_1_5
     assert "| `question_fit` |" in REFERENCES["part-ledger.md"]
@@ -268,7 +269,7 @@ def test_phase_three_is_told_in_four_beats_and_the_ledger_runs_once():
     opening = SKILL.split("## Phase 3: Present", 1)[1].split("### 3a — Summary line first", 1)[0]
     assert "**Tell every row in four beats, in the reader's order.**" in opening
     for beat in ("**how we read your input and how we checked it**", "**what agami did with the question and what it answered**",
-                 "**how agami got there**", "**what to change so the output matches, on whichever side the evidence points**",
+                 "**how agami got there**", "**what to change so the output matches, on whichever side the mistake is**",
                  "**what to keep**"):
         assert beat in opening, beat
     assert "keep is Phase 3e's offer, made once for the batch and never per row" in opening
@@ -320,3 +321,23 @@ def test_the_run_works_five_rows_at_a_time_and_resumes_from_its_checkpoint():
     assert "Render it after every chunk" in beats and "never what the block sends" in beats
     grading = _between(SKILL, "### 2.5 —", "## Phase 3")
     assert "filters by grade state" in grading
+
+
+def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_through_intake():
+    story = _between(SKILL, "### 3a.5", "### 3b")
+    assert 'report-items --run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story
+    assert '--items-file "<artifacts_dir>/local/reconcile/<ts>/report-items.json"' in story
+    assert "/tmp/agami-reconcile-report-items" not in story
+    csv_branch = _between(SKILL, "### CSV branch", "### ")
+    assert "reconcile.py\" intake --file" in csv_branch and "parse --csv" not in csv_branch
+    phase_2 = _between(SKILL, "## Phase 2: Generate questions + execute", "### 2a")
+    assert 'resume --reconcile-dir' in phase_2 and "Exit `2` is a refusal and stderr says which" in phase_2
+
+
+def test_phase_3_keeps_to_plain_words():
+    phase_3 = SKILL[SKILL.index("## Phase 3: Present"):]
+    for phrase in ("the numbers meet", "the numbers agree", "held on every part", "the evidence points to"):
+        assert phrase not in phase_3, phrase
+    layout = (Path(__file__).resolve().parent.parent / "plugins" / "agami" / "shared" / "file-layout.md").read_text()
+    assert "report-items.json" in layout and "intake.html" in layout
+

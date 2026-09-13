@@ -118,3 +118,10 @@ def test_the_cli_reads_the_run_directory_and_says_ok_false_when_a_block_must_go_
     assert json.loads(capsys.readouterr().out)["ok"] is False
     assert pr.main(["--block-file", str(block), "--run-dir", str(tmp_path / "nowhere")]) == 2
     assert json.loads(capsys.readouterr().out)["needs_judgment"]["kind"] == "bad_argument"
+
+
+def test_words_that_are_not_text_drop_the_decision():
+    text = "profile: demo\nreconcile-run: r\ndecisions:\n" + json.dumps([{"row": 1, "decision": "change", "words": 5}]) + "\ndone\n"
+    data, anomalies, needs = pr.parse(text, set(), "r")
+    assert data["decisions"] == [] and {a["kind"] for a in anomalies} == {"words_not_text"} and needs is not None
+

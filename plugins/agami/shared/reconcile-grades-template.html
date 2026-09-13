@@ -139,11 +139,17 @@
     }
 
     function onGrade(e) {
+      // Updated in place: re-rendering here would drop the card out of a "not graded yet" filter the
+      // moment it is graded, taking the SQL and words boxes with it.
       const card = e.target.closest('.card');
       const row = Number(card.dataset.row);
       grades[row] = Object.assign(grades[row] || {}, { grade: e.target.value });
       card.querySelector('.more').hidden = e.target.value !== 'wrong';
-      renderItems();
+      const pill = card.querySelector('.head .pill');
+      pill.textContent = e.target.value;
+      pill.className = 'pill ' + (e.target.value === 'right' ? 'held' : e.target.value === 'wrong' ? 'defect' : 'open');
+      chips();
+      renderSummary();
     }
 
     function onText(e) {

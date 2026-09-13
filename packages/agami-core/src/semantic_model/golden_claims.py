@@ -363,8 +363,8 @@ def _temporal_bounds(
     does not model the shape it was written in."""
     if isinstance(node, exp.Between):
         column = node.this
-        low = _date_literal(node.args.get("low"))
-        high = _date_literal(node.args.get("high"))
+        low = _date_literal(node.args.get("low")) or _relative_bound(node.args.get("low"))
+        high = _date_literal(node.args.get("high")) or _relative_bound(node.args.get("high"))
         if isinstance(column, exp.Column) and low is not None and high is not None:
             # BETWEEN is inclusive at BOTH ends, and the upper one stays where it was written —
             # shifting it to the next day is only sound on a DATE column, and no column type
@@ -378,7 +378,7 @@ def _temporal_bounds(
         column, year = extracted
         # A calendar year IS a half-open interval, so this folds to exactly the chain form and the
         # two spellings compare equal.
-        return column, [("start", f"{year}-01-01", True), ("end", f"{year + 1}-01-01", False)]
+        return column, [("start", f"{year:04d}-01-01", True), ("end", f"{year + 1:04d}-01-01", False)]
 
     bound = _COMPARISON_BOUNDS.get(type(node))
     if bound is None:
@@ -480,8 +480,10 @@ def _relative_bound(node: "exp.Expression | None") -> Optional[str]:
         return _relative_bound(node.this)
     if isinstance(node, exp.Cast):
         return _relative_bound(node.this)
-    if isinstance(node, (exp.CurrentDate, exp.CurrentTimestamp)):
+    if isinstance(node, exp.CurrentDate):
         return "today"
+    if isinstance(node, exp.CurrentTimestamp) or (isinstance(node, exp.Anonymous) and str(node.this).lower() in ("now", "getdate", "sysdate", "current_timestamp")):
+        return "now"
     if isinstance(node, (exp.DateTrunc, exp.TimestampTrunc)):
         inner = _relative_bound(node.this if isinstance(node, exp.TimestampTrunc) else node.args.get("this"))
         unit = _unit_name(node.args.get("unit"))
@@ -490,48 +492,99 @@ def _relative_bound(node: "exp.Expression | None") -> Optional[str]:
             # parse the argument order the other way round, so both are tried.
             inner = _relative_bound(node.this) or _relative_bound(node.args.get("unit"))
             unit = _unit_name(node.args.get("unit")) or _unit_name(node.this)
-        if inner == "today" and unit:
+        if inner in ("today", "now") and unit:
             return f"start of this {unit}"
         return None
     if isinstance(node, (exp.Add, exp.Sub)):
         base = _relative_bound(node.this)
         step = _interval_words(node.expression)
         if base and step:
-            return f"{base} {'+' if isinstance(node, exp.Add) else '-'} {step}"
+            return _step(base, isinstance(node, exp.Add), *step)
         return None
-    if isinstance(node, (exp.DateAdd, exp.DateSub)):
+    date_add_types = tuple(t for t in (exp.DateAdd, getattr(exp, "TsOrDsAdd", None)) if t is not None)
+    if isinstance(node, date_add_types + (exp.DateSub,)):
         base = _relative_bound(node.this)
         n = node.expression
-        count = _integral(n) if isinstance(n, exp.Literal) else None
         unit = _unit_name(node.args.get("unit"))
+        count: Optional[int] = None
+        if isinstance(n, exp.Interval):
+            words = _interval_words(n)
+            if words:
+                count, unit = words
+        else:
+            count = _signed_integral(n)
         if base and count is not None and unit:
-            return f"{base} {'+' if isinstance(node, exp.DateAdd) else '-'} {count} {unit}"
+            return _step(base, not isinstance(node, exp.DateSub), count, unit)
         return None
     return None
 
 
-def _interval_words(node: "exp.Expression | None") -> Optional[str]:
-    """`INTERVAL '7' MONTH`, `INTERVAL '7 months'` or `INTERVAL 7 MONTH` as `7 month`."""
+def _signed_integral(node: "exp.Expression | None") -> Optional[int]:
+    """`7`, `-7` (a `Neg` over a literal) or `+7` as an int; None for anything else."""
+    if isinstance(node, exp.Paren):
+        return _signed_integral(node.this)
+    if isinstance(node, exp.Neg):
+        inner = _signed_integral(node.this)
+        return None if inner is None else -inner
+    if isinstance(node, exp.Literal) and not node.is_string:
+        return _integral(node)
+    if isinstance(node, exp.Literal) and node.is_string:
+        try:
+            return int(node.this.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _step(base: str, forward: bool, count: int, unit: str) -> str:
+    """`today - 30 day`: the sign lives in the operator, never in the count, so `+ INTERVAL '-30 days'`
+    and `- INTERVAL '30 days'` render alike."""
+    if count < 0:
+        forward, count = not forward, -count
+    return f"{base} {'+' if forward else '-'} {count} {unit}"
+
+
+def _interval_words(node: "exp.Expression | None") -> "Optional[tuple[int, str]]":
+    """`INTERVAL '7' MONTH`, `INTERVAL '7 months'`, `INTERVAL 7 MONTH` or `INTERVAL '-30 days'` as
+    (count, unit); the count keeps its sign for the caller to fold into the operator."""
     if not isinstance(node, exp.Interval):
         return None
     unit = _unit_name(node.args.get("unit"))
     value = node.this
+    if isinstance(value, exp.Neg):
+        inner = _interval_words(exp.Interval(this=value.this, unit=node.args.get("unit")))
+        return None if inner is None else (-inner[0], inner[1])
     if isinstance(value, exp.Literal):
         text = str(value.this).strip()
         if unit is None and " " in text:
-            count, _, word = text.partition(" ")
+            count_text, _, word = text.partition(" ")
             unit = _unit_name(exp.Literal.string(word))
-            text = count
+            text = count_text
         try:
             count = int(text)
         except ValueError:
             return None
-        return f"{count} {unit}" if unit else None
+        return (count, unit) if unit else None
     return None
 
 
 def _symbolic(value: Optional[str]) -> bool:
     return value is not None and not _ISO_DATE.match(value)
+
+
+_EXACT_UNITS = {"week": (7, "day"), "year": (12, "month"), "quarter": (3, "month")}
+
+
+def _canonical_words(value: Optional[str]) -> Optional[str]:
+    """`today - 4 week` and `today - 28 day` are one window; `1 month` and `30 day` are not. Only the
+    conversions that hold on every calendar are applied: weeks to days, years and quarters to months."""
+    if value is None:
+        return None
+    parts = value.split(" ")
+    if len(parts) >= 3 and parts[-1] in _EXACT_UNITS and parts[-2].lstrip("-").isdigit():
+        factor, unit = _EXACT_UNITS[parts[-1]]
+        parts[-2], parts[-1] = str(int(parts[-2]) * factor), unit
+    return " ".join(parts)
 
 
 def _integral(literal: "exp.Literal") -> Optional[int]:
@@ -764,6 +817,10 @@ def _window_status(generated: Optional[DateWindow], golden: Optional[DateWindow]
         # `2025-06-01`. One relative side against one literal side reads `unknown`, never `differs`.
         if (a is not None and b is not None) and (_symbolic(a) != _symbolic(b)):
             return UNKNOWN
+        # `now - 30 day` against `today - 30 day` differ by the time of day, which decides rows on a
+        # timestamp column and nothing on a date column; nothing here knows the column type.
+        if (a is not None and b is not None) and _symbolic(a) and (a.startswith("now") != b.startswith("now")):
+            return UNKNOWN
     return AGREES if _windows_agree(generated, golden) else DIFFERS
 
 
@@ -776,7 +833,7 @@ def _windows_agree(generated: DateWindow, golden: DateWindow) -> bool:
     can say so; it just does not decide.
     """
     def canon(value: Optional[str]) -> Optional[str]:
-        return value if _symbolic(value) else _canonical_bound(value)
+        return _canonical_words(value) if _symbolic(value) else _canonical_bound(value)
 
     return (
         canon(generated.start),

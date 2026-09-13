@@ -46,7 +46,7 @@
     <div class="chips" id="chips"></div>
     <div class="filters" id="filters">
       <span class="k">Show</span><span id="owner-chips"></span>
-      <input type="search" id="q" placeholder="a word in the question, label or beats" aria-label="narrow the rows by a word">
+      <input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
       <button type="button" id="clear" class="linkish">Show all</button>
       <span class="showing" id="showing"></span>
     </div>
@@ -107,11 +107,11 @@
     const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
     function controls(item, d) {
       const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
-      const suggested = SUGGEST[item.owner] || null;
+      const suggested = (SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null);
       const spec = DECISIONS[d.decision] || {};
       return '<div class="grade opts">' + choices.map(v =>
           '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
-          + '<b>' + esc(DECISIONS[v].word) + (v === suggested && item.keep_allowed !== false || v === suggested && v !== 'keep' ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
+          + '<b>' + esc(DECISIONS[v].word) + (v === suggested ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
           + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</div>'
         + '<div class="more"' + (['change', 'fix', 'reword'].includes(d.decision) ? '' : ' hidden') + '>'
         + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
@@ -121,8 +121,9 @@
     const OWNER_SHORT = { you: 'your query', model: 'the semantic model', question: 'the question', agami: 'agami', keep: 'keep', nothing: 'nothing' };
     function statusClass(item) { return (STATUS[item.status] || ['noted'])[0]; }
     function haystack(item) {
-      const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer]
-        .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')));
+      const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer, item.sentence, item.sql_yours, item.sql_agami]
+        .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')))
+        .concat((item.diff || []).flatMap(r => [r.key, r.note].concat(r.yours || [], r.agami || [])));
       return parts.filter(Boolean).join(' ').toLowerCase();
     }
     function visible() {
@@ -215,7 +216,7 @@
     }
     function card(item) {
       const d = decisions[item.row] || {};
-      const owner = item.owner || (item.status === 'match' ? 'keep' : 'nothing');
+      const owner = item.owner || 'nothing';
       return '<div class="card" data-row="' + item.row + '">'
         + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
         + '<span class="nums">' + nums(item) + '</span></div>'

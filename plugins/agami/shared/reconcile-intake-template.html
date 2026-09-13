@@ -91,7 +91,7 @@
           + '<div><input type="checkbox" data-field="keep"' + (e.keep ? ' checked' : '') + ' aria-label="keep row ' + item.row + '"></div>'
           + '<div><div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question || '(no label)') + '</span>'
           + '<span class="pill noted">' + esc(SHAPE[item.shape] || item.shape) + '</span></div>'
-          + '<div class="k">' + esc(item.file || '') + (item.line ? ':' + item.line : '') + (item.source ? ' · ' + esc(item.source) : '') + '</div>'
+          + '<div class="k">' + esc(item.file || '') + (item.line ? ':' + esc(item.line) : '') + (item.source ? ' · ' + esc(item.source) : '') + '</div>'
           + '<div class="dg one">' + (item.expected ? '<div class="m held">·</div><div class="v">you expect ' + esc(item.expected) + '</div>' : '<div class="m noted">·</div><div class="v noted">no number to compare against; agami answers and you grade</div>')
           + (item.has_statement ? '<div class="m held">·</div><div class="v">your SQL: ' + esc(item.statement_preview || '') + '</div>' : '') + '</div></div>'
           + '<div><label class="k">The question we will ask agami<textarea data-field="question">' + esc(e.question) + '</textarea></label></div>'

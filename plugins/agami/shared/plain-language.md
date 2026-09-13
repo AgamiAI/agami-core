@@ -53,7 +53,7 @@ The ledger's words describe machinery, and a first draft reaches for machinery w
 | noted | worth knowing; not a problem with your query or the semantic model |
 | scope gate, refused | agami does not expose that table (or column), so it would not run this |
 | expected_doubtful | your own number is in doubt, because `<the mistake>` |
-| match_unverified | the numbers agree, but one part of your query could not be confirmed, so the agreement may be luck |
+| match_unverified | the numbers match, but one check on your query could not be confirmed, so the match may be luck |
 | claims differ, filter_predicates | the two queries filter differently: yours `<how>`, agami's `<how>` |
 
 Part ids (`fan_out:`, `values_declared:`), file names (`findings.json`) and column keys stay in the

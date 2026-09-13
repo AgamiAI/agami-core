@@ -1036,3 +1036,18 @@ def test_a_plain_column_in_a_list_query_is_never_a_metric_gap():
     # A column the receipt could not settle stays open: a failure to read is never a gap, and never nothing.
     unsettled = {"columns": {"items": [{"kind": "output", "column": "x", "status": "undetermined"}]}, "tables": {"items": []}}
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(unsettled, {"aggregates": []})] == [("metric:x", "unresolved")]
+
+
+def test_a_plain_column_beside_a_bare_count_is_skipped_not_confirmed_as_a_count():
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "unmatched", "aggregate": True},
+                                     {"kind": "output", "column": "region", "status": "unmatched", "aggregate": False}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    parts = {r["part"]: r["verdict"] for r in reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "COUNT(*)"}]})}
+    assert parts == {"metric:n": "confirmed"}
+
+
+def test_without_a_pre_flight_an_unmatched_aggregate_stays_open():
+    older = {"columns": {"items": [{"kind": "output", "column": "total", "status": "unmatched"}]}, "tables": {"items": []}}
+    assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, None)] == [("metric:total", "unresolved")]
+    assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, {"error": "empty_file"})] == [("metric:total", "unresolved")]
+

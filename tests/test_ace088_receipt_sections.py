@@ -975,3 +975,15 @@ def test_a_case_folded_statement_does_not_deny_a_relationship_the_model_declares
     assert join["status"] == rt.DECLARED
     assert join["name"] == "orders_to_customers"
     assert join["from_to"] == "ORDERS → CUSTOMERS"
+
+
+def test_a_windowed_function_is_not_an_aggregate_for_the_metric_reader(tmp_path):
+    """`LAG(x) OVER (...)` and `SUM(x) OVER (...)` compute one value per row, like a plain column; only
+    an aggregate that collapses rows reads `aggregate: true`."""
+    from semantic_model import runtime as rt
+    from sqlglot import exp, parse_one
+    sel = parse_one("SELECT id, LAG(amount) OVER (ORDER BY d) AS prev, SUM(amount) OVER (PARTITION BY id) AS run, SUM(amount) AS total FROM t", read="postgres")
+    cols = rt._output_columns(sel)
+    flags = {oc.key: bool(oc.expr is not None and any(agg.find_ancestor(exp.Window) is None for agg in oc.expr.find_all(exp.AggFunc))) for oc in cols}
+    assert flags == {"id": False, "prev": False, "run": False, "total": True}
+

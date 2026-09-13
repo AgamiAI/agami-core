@@ -79,3 +79,31 @@ def test_the_two_statements_sit_collapsed_under_the_grid():
     assert "SELECT number FROM requests" in html and "SELECT request FROM request_items" in html
     with pytest.raises(ValueError, match="statement's text"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, sql_yours=["no"])])
+
+
+def test_the_second_reviews_findings_on_the_renderer():
+    # highlights and notes are typed; checks never carry rows; rows are unique; keep_allowed is the verb's word
+    with pytest.raises(ValueError, match="tokens to highlight"):
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "yours_hi": "channel"}])])
+    with pytest.raises(ValueError, match="'note' must be text"):
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "note": 3}])])
+    with pytest.raises(ValueError, match="inside a check"):
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, checks=[{"step": "s", "state": "held", "rows": [[1]]}])])
+    with pytest.raises(ValueError, match="share a row number"):
+        rr.render(title="t", profile="p", run="r", items=[ITEM, ITEM])
+    with pytest.raises(ValueError, match="true or false"):
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, keep_allowed="yes")])
+    html = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, checks=[{"step": "s", "state": "held", "secret": "leak-me"}]), dict(ITEM, row=3)])
+    assert "leak-me" not in html
+    # the verb's keep gate wins over the renderer's two facts
+    gated = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, status="match", single_cell=True, keep_allowed=False), dict(ITEM, row=3)])
+    assert '"keep_allowed": false' in gated
+    # the search box reads the grid, the sentence and the SQL; the key column wraps
+    assert "(item.diff || []).flatMap(r => [r.key, r.note].concat(r.yours || [], r.agami || []))" in html and "item.sentence, item.sql_yours, item.sql_agami" in html
+    assert re.search(r"\.dg \.k \{[^}]*overflow-wrap: anywhere", html)
+    # every CSS variable the page uses is defined by the theme or the shared sheet
+    css = html[html.index("<style>"):html.index("</style>")]
+    assert set(re.findall(r"var\((--[a-z0-9-]+)", css)) - set(re.findall(r"(--[a-z0-9-]+)\s*:", css)) == set()
+    # a suggested keep on a row that cannot be kept falls back to nothing
+    assert "(SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing'" in html
+

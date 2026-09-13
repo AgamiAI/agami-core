@@ -39,3 +39,44 @@ def test_a_relative_window_against_a_literal_date_reads_unknown_never_differs():
 def test_a_shape_the_resolver_still_does_not_model_reads_none():
     assert _window("o.order_date >= NOW() - o.grace_period") is None
     assert _window("DATE_TRUNC('quarter', o.order_date) = '2025-04-01'") is None
+
+
+def _status(a: str, b: str, dialect: str = "postgres") -> str:
+    return {c.name: c.status for c in gc.compare_statements(a, b, dialect=dialect).claims}["date_window"]
+
+
+def test_a_negative_count_folds_into_the_operator_so_two_spellings_agree_and_never_gate():
+    q = "SELECT COUNT(*) FROM orders WHERE order_date >= {}"
+    assert _status(q.format("CURRENT_DATE + INTERVAL '-30 days'"), q.format("CURRENT_DATE - INTERVAL '30 days'")) == gc.AGREES
+    assert _status(q.format("DATE_ADD(CURDATE(), INTERVAL -30 DAY)"), q.format("CURDATE() - INTERVAL 30 DAY"), "mysql") == gc.AGREES
+    assert _status(q.format("DATE_SUB(CURRENT_DATE(), INTERVAL -7 DAY)"), q.format("DATE_ADD(CURRENT_DATE(), INTERVAL 7 DAY)"), "bigquery") == gc.AGREES
+    assert _status(q.format("DATEADD(month, -7, CURRENT_DATE)"), q.format("CURRENT_DATE - INTERVAL '7 months'"), "snowflake") == gc.AGREES
+    assert _status(q.format("DATEADD(month, 7, CURRENT_DATE)"), q.format("CURRENT_DATE + INTERVAL '7 months'"), "redshift") == gc.AGREES
+    assert _status(q.format("DATE_ADD(CURRENT_DATE, INTERVAL -30 DAY)"), q.format("CURRENT_DATE - INTERVAL 30 DAY"), "duckdb") == gc.AGREES
+    for a, b in ((q.format("CURRENT_DATE + INTERVAL '-30 days'"), q.format("CURRENT_DATE - INTERVAL '30 days'")),):
+        assert not gc.compare_statements(a, b, dialect="postgres").gated
+
+
+def test_exactly_convertible_units_compare_alike_and_inexact_ones_do_not():
+    q = "SELECT COUNT(*) FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL {}"
+    assert _status(q.format("'4 weeks'"), q.format("'28 days'")) == gc.AGREES
+    assert _status(q.format("'1 year'"), q.format("'12 months'")) == gc.AGREES
+    assert _status(q.format("'1 quarter'"), q.format("'3 months'")) == gc.AGREES
+    assert _status(q.format("'1 month'"), q.format("'30 days'")) == gc.DIFFERS
+
+
+def test_now_against_today_reads_unknown_except_under_a_truncation():
+    q = "SELECT COUNT(*) FROM orders WHERE order_date >= {}"
+    assert _status(q.format("NOW() - INTERVAL '30 days'"), q.format("CURRENT_DATE - INTERVAL '30 days'")) == gc.UNKNOWN
+    assert _status(q.format("DATE_TRUNC('month', NOW())"), q.format("DATE_TRUNC('month', CURRENT_DATE)")) == gc.AGREES
+    assert _status(q.format("NOW() - INTERVAL 7 MONTH"), q.format("CURRENT_TIMESTAMP - INTERVAL 7 MONTH"), "mysql") == gc.AGREES
+    assert _window("o.order_date >= NOW() - INTERVAL '30 days'").start == "now - 30 day"
+
+
+def test_between_reads_relative_bounds_and_a_two_digit_year_stays_a_date():
+    a = "SELECT COUNT(*) FROM orders WHERE order_date BETWEEN DATE_TRUNC('year', CURRENT_DATE) AND CURRENT_DATE"
+    b = "SELECT COUNT(*) FROM orders WHERE order_date >= DATE_TRUNC('year', CURRENT_DATE) AND order_date <= CURRENT_DATE"
+    assert _status(a, b) == gc.AGREES
+    w = gc.read_claims("SELECT COUNT(*) FROM orders WHERE EXTRACT(YEAR FROM order_date) = 25", dialect="postgres").date_window
+    assert w is not None and w.start == "0025-01-01" and not gc._symbolic(w.start)
+

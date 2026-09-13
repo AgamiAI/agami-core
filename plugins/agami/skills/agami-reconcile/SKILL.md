@@ -43,7 +43,7 @@ Same checks as agami-query / agami-connect:
    - **Numbers pasted inline** as a list/table — treat as inline CSV.
    - **SQL the person trusts** — one or more statements, pasted or in a `.sql` file, alone or beside the question each answers. Go to Phase 1's **statement branch**. The statement is evidence, never the answer: Phase 1.5 grades every part of it before it is compared with anything.
    - **A list of questions** with no answers — one per line. Go to Phase 1's **questions branch**.
-   A screenshot and the SQL behind its tiles may arrive together; Phase 1n joins them by label. **If they gave nothing** (or just asked "can you check my dashboard?"), ask once the way `agami-connect` asks which database: **AskUserQuestion**, the four shapes as options, the lowest-friction one first, and the rarer inputs named in the prompt so they are visibly welcome (*"Something else, a pasted `label: value` list or a JSON export? Choose **Other** and paste it."*).
+   A screenshot and the SQL behind its tiles may arrive together; Phase 1n joins them by label. A filled `.csv` in `<artifacts_dir>/local/reconcile/inbox/` is the CSV branch: check the inbox before asking, so a person who filled the template and came back to say **reconcile** is not asked again. **If they gave nothing** (or just asked "can you check my dashboard?"), ask once the way `agami-connect` asks which database: **AskUserQuestion**, the four shapes as options, the lowest-friction one first, and the rarer inputs named in the prompt so they are visibly welcome (*"Something else, a pasted `label: value` list or a JSON export? Choose **Other** and paste it."*).
 
    | label | description |
    |---|---|
@@ -77,8 +77,8 @@ Whatever the input shape, the goal is the same normalized rows JSON. **Number pa
 ### CSV branch — a CSV path or inline-pasted CSV
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" parse --csv "<csv_path>" \
-  > /tmp/agami-reconcile-rows-<ts>.json
+python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" intake --file "<csv_path>" \
+  --source "<the person's own words for where this came from>" > /tmp/agami-reconcile-rows-<ts>.json
 ```
 
 The helper (used by **both** branches) handles:
@@ -98,6 +98,8 @@ If the SQL was pasted, write it to `/tmp/agami-reconcile-<ts>.sql` with the Writ
 Write the lines to `/tmp/agami-reconcile-<ts>.txt` with the Write tool, one question per line. These rows carry no expected value: Phase 2 asks agami each question, and until the person grades the answers there is nothing to compare against. Say so up front: *"No answers to compare with, so I'll ask agami each one and you grade what comes back."*
 
 ### 1n — Normalize every input into evidence rows
+
+A filled template in `<artifacts_dir>/local/reconcile/inbox/` is one of the files here, passed with its own `--file`.
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" intake --file <path> [--file <path> ...] \
@@ -159,7 +161,7 @@ Exit `0` hands back `chunk`, the next five rows not yet in `rows.jsonl`, with `f
 
 > Rows 6 to 10 of 50 done. So far: `<progress as colored words, in 3a's wording>`. Page: `<artifacts_dir>/local/reconcile/<ts>/report.html`. Say **continue** for the next five, or **continue all** to run the rest without stopping.
 
-`continue` calls `next-chunk` again. `continue all` runs chunk after chunk, a progress line per chunk and no stop, until exit `4`. Exit `4` means every row is in the checkpoint: go to Phase 3. **A run interrupted anywhere resumes with the same call**: a row in `rows.jsonl` is never run twice, and "resume the reconcile" on a later day means the newest run directory that still has rows remaining. Exit `2` names a checkpoint line that cannot be read; fix or remove it before continuing, never skip it, since skipping would run its row again. The first five are a smoke test: a wrong profile, a misread file or a question in the wrong words is caught at five rows, not fifty. The keep-offer stays one per run (3e), never one per chunk.
+`continue` calls `next-chunk` again. `continue all` runs chunk after chunk, a progress line per chunk and no stop, until exit `4`. Exit `4` means every row is in the checkpoint: go to Phase 3. **A run interrupted anywhere resumes with the same call**: a row in `rows.jsonl` is never run twice, and "resume the reconcile" on a later day is `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" resume --reconcile-dir "<artifacts_dir>/local/reconcile"`, which names the newest run directory that still has rows remaining (exit `4` when none does), then `next-chunk` on it. Exit `2` is a refusal and stderr says which: a run directory or rows file that is not there, a rows file that is not a list of row objects, or a checkpoint line that cannot be read. When it names a `rows.jsonl` line, fix or remove that line before continuing, never skip it, since skipping would run its row again. The first five are a smoke test: a wrong profile, a misread file or a question in the wrong words is caught at five rows, not fifty. The keep-offer stays one per run (3e), never one per chunk.
 
 For each row in the chunk:
 
@@ -265,8 +267,8 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|non
 
 | Status | When |
 |---|---|
-| `match` | the numbers agree, and every graded part is `confirmed` (or there was no statement to grade) |
-| `match_unverified` | the numbers agree, but a part of the person's statement is not `confirmed`. Phase 3e never sees it: a match nobody could verify may be luck |
+| `match` | the numbers match, and every graded part is `confirmed` (or there was no statement to grade) |
+| `match_unverified` | the numbers match, but a part of the person's statement is not `confirmed`. Phase 3e never sees it: a match nobody could verify may be luck |
 | `mismatch` | the numbers differ and the person's statement has no `query_defect`, so agami is the likelier culprit |
 | `expected_doubtful` | the numbers differ and the person's statement has a `query_defect`, so the expected value itself is in doubt. Kept out of the mismatch tally |
 | `error` | the row could not run |
@@ -314,7 +316,7 @@ It writes `findings.json` (one entry per place the semantic model was shown to b
 
 ## Phase 3: Present
 
-**Tell every row in four beats, in the reader's order.** What reconcile is for, given any input (SQL, a question, a chart, or a mix): (1) **how we read your input and how we checked it**, from Phase 1's shape and the question we read from a label, the parts of your statement that held and the ones that did not (the ledger), and whether the statement answers its question (1.5g); (2) **what agami did with the question and what it answered**, from Phase 2b, beside the value you expected; (3) **how agami got there**, from the receipt (the tables it read, the joins, the declared filters it applied, the metric it matched), the claim that differs between the two statements (2e), and the semantic model's own words about what it read (1.5c); (4) **what to change so the output matches, on whichever side the evidence points**, or **what to keep** when it already matches and every part held: a definition through `/agami-save-correction`, a mistake in your query, a reworded question, or nothing; keep is Phase 3e's offer, made once for the batch and never per row. The summary comes first (3a), then every row in its four beats (3a.5), then the tables the beats drew from (3b to 3d), then the one offer (3e) and the close (3f). The tables and the offer keep their exact text; the beats decide what is read first.
+**Tell every row in four beats, in the reader's order.** What reconcile is for, given any input (SQL, a question, a chart, or a mix): (1) **how we read your input and how we checked it**, from Phase 1's shape and the question we read from a label, the parts of your statement that held and the ones that did not (the ledger), and whether the statement answers its question (1.5g); (2) **what agami did with the question and what it answered**, from Phase 2b, beside the value you expected; (3) **how agami got there**, from the receipt (the tables it read, the joins, the declared filters it applied, the metric it matched), the claim that differs between the two statements (2e), and the semantic model's own words about what it read (1.5c); (4) **what to change so the output matches, on whichever side the mistake is**, or **what to keep** when it already matches and every check passed: a definition through `/agami-save-correction`, a mistake in your query, a reworded question, or nothing; keep is Phase 3e's offer, made once for the batch and never per row. The summary comes first (3a), then every row in its four beats (3a.5), then the tables the beats drew from (3b to 3d), then the one offer (3e) and the close (3f). The tables and the offer keep their exact text; the beats decide what is read first.
 
 Everything this phase says to the person follows [`shared/plain-language.md`](../../shared/plain-language.md): name who did what (you and your query, agami and its answer, the semantic model and its caveats, filters, joins and metrics, the prompt examples, and the data), and never write the word "model" on its own, because it can mean the semantic model, the AI, the prompt examples or the database and a reader cannot tell which; name the thing and never the mechanism; one idea per sentence, cause then effect then the one action; quote a caveat when it decided something. The part ids and file names stay in the tables below and in the files. The sentences around them are plain, and the AI never speaks of itself steering, front-running or deciding the answer.
 
@@ -332,33 +334,33 @@ When any row carried a statement, add one more line, counting the two statuses t
 
 ### 3a.5 — Every row in four beats
 
-The four beats are told on the **report page**, one card per row for a batch and a checklist with a rail for a single audited query, and the chat carries only three lines: the summary of 3a with the counts as colored words, the report's path, and one line of next steps naming what to fix, what to decide and how many rows are ready to keep. A person reading the transcript later keeps the counts and the actions; the page holds the story. When the page cannot be written, the four beats below are said in chat instead, one block per row, in the words of `shared/plain-language.md`. A row with no statement skips beat 1's parts and says so; a row that matched with every part held has a one-line beat 4: keep it. Beat 4 never asks anything per row; the keep question is 3e's, once.
+The four beats are told on the **report page**, one card per row for a batch and a checklist with a rail for a single audited query, and the chat carries only three lines: the summary of 3a with the counts as colored words, the report's path, and one line of next steps naming what to fix, what to decide and how many rows are ready to keep. A person reading the transcript later keeps the counts and the actions; the page carries the checks. When the page cannot be written, the four beats below are said in chat instead, one block per row, in the words of `shared/plain-language.md`. A row with no statement skips beat 1's parts and says so; a row that matched with every check passed has a one-line beat 4: keep it. Beat 4 never asks anything per row; the keep question is 3e's, once.
 
 What each card says, whether on the page or, without one, in chat:
 
 ```markdown
 **Q3 Revenue** (from your CSV, tile 3, with the SQL behind it)
-1. What you gave us: a question we read from the tile label as "What was total revenue in Q3 2025?", which you confirmed, and a query that held on every part but one: it leaves out the filter the semantic model declares on orders, `status != 'cancelled'`.
+1. What you gave us: a question we read from the tile label as "What was total revenue in Q3 2025?", which you confirmed, and a query that passed every check but one: it leaves out the filter the semantic model declares on orders, `status != 'cancelled'`.
 2. What agami did: it asked the same question and answered $3,890,000; your number is $4,200,000, 7.4% apart.
 3. How it got there: agami read orders, applied the declared filter on status, and matched the metric "revenue". The two queries differ in one place, that filter. The semantic model's caveat on orders says: "cancelled orders are excluded from revenue".
-4. What to change: nothing on agami's side. Your query counts cancelled orders; add the filter and the numbers meet. If cancelled orders belong in revenue for you, the caveat and the declared filter are the things to change, through /agami-save-correction.
+4. What to change: nothing on agami's side. Your query counts cancelled orders; add the filter and the numbers match. If cancelled orders belong in revenue for you, the caveat and the declared filter are the things to change, through /agami-save-correction.
 
 **Order count** (from your CSV, tile 1)
 1. What you gave us: a number, and a question we read from the label as "How many orders were placed in Q3 2025?", which you confirmed. No query to check.
 2. What agami did: 12,450; your number is 12,450.
 3. How it got there: agami read orders with the declared filter on status and matched the metric "order count".
-4. Keep it: the numbers agree and there is nothing unconfirmed, so this row is offered below.
+4. Keep it: the numbers match and there is nothing unconfirmed, so this row is offered below.
 ```
 
-Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap, "the question" for a doubtful fit, and "agami's answer" for a mismatch where your statement held on every part (a worked example is the fix). It never says "the model".
+Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap, "the question" for a doubtful fit, and "agami's answer" for a mismatch where your statement passed every check (a worked example is the fix). It never says "the model".
 
 **Render the four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. The page picks its layout from the items: **cards** for a batch of rows, the four beats as four columns with the fourth colored by who acts; **audit** for a single statement row that carries `checks`, the checks in the order they ran with pass, fail, open, gap and noticed marks, and a rail of what to do. Force one with `--layout cards|audit` when the person asks. Render it after every chunk with every row finished so far; the render after Phase 2's exit `4` is the one 3a points at. The page filters by status, by who acts and by a word in the question or the beats; a filter narrows what is shown, never what the block sends, so a row decided and then filtered away is still in the block. The chat keeps 3a, the link and one line of next steps; 3b to 3d below still render when the page could not be written.
 
-1. **Build the report items file with the verb, never by hand:** `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" report-items --run-dir "<artifacts_dir>/local/reconcile/<ts>"` writes `<run_dir>/report-items.json`, one item per row of `rows.jsonl`, from each row's ledger, its comparison, its claims and the two receipts. Every item carries `diff`: one row per check, `{key, state, yours, agami, note, yours_hi?, agami_hi?}`, the check named first (`answer`, `rows`, `columns`, `values`, the seven claims, then every graded part in plain words), the two sides as values with the differing tokens listed in `*_hi`, and the ledger's note only off a held row. It also carries `sentence`, one templated line that says what the difference amounts to, and `change` and `todo` templated from `owner`. **Read the file and rewrite only `sentence` and `change`**, in the words of `shared/plain-language.md`, where the templated words are wrong or unclear for this row; never touch `diff`, `status`, `owner` or the values. Never a result row.
+1. **Build the report items file with the verb, never by hand:** `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" report-items --run-dir "<artifacts_dir>/local/reconcile/<ts>"` writes `<run_dir>/report-items.json`, one item per row of `rows.jsonl`, from each row's ledger, its comparison, its claims and the two receipts. Every item carries `diff`: one row per check, `{key, state, yours, agami, note, yours_hi?, agami_hi?}`, the check named first (`answer`, `rows`, `columns`, `values`, the seven claims, then every graded part in plain words), the two sides as values with the differing tokens listed in `*_hi`, and the ledger's note only off a row that did not pass. It also carries `sentence`, one templated line that says what the difference amounts to, and `change` and `todo` templated from `owner`. **Read the file and rewrite only `sentence` and `change`**, in the words of `shared/plain-language.md`, where the templated words are wrong or unclear for this row; never touch `diff`, `status`, `owner` or the values. Never a result row.
 2. **Render and point at it:**
    ```bash
    python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_report.py" --title "Reconcile · <profile>" \
-     --profile <profile> --run <ts> --items-file /tmp/agami-reconcile-report-items-<ts>.json \
+     --profile <profile> --run <ts> --items-file "<artifacts_dir>/local/reconcile/<ts>/report-items.json" \
      --out "<artifacts_dir>/local/reconcile/<ts>/report.html"
    ```
    Then say the three lines: the 3a summary with its counts as colored words (match, differs, a mistake on your side, could not check), the report's path, and one line of next steps. The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from what you wrote, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's.

@@ -40,18 +40,34 @@ _SHAPES = {"a", "b", "c", "d"}
 
 def items_from_intake(intake: dict) -> list[dict]:
     """The page's items from `reconcile.py intake`'s output, so the skill writes no items file by hand."""
+    if not isinstance(intake, dict) or not isinstance(intake.get("rows"), list):
+        raise ValueError("the intake file is not the output of `reconcile.py intake` (an object with a `rows` list)")
     out = []
-    for n, row in enumerate(intake.get("rows", []), 1):
+    for n, row in enumerate(intake["rows"], 1):
+        if not isinstance(row, dict):
+            raise ValueError(f"intake row {n} is not an object; pass `reconcile.py intake` output, not `parse` output")
         prov = row.get("provenance") or {}
         statement = row.get("statement")
         out.append({
             "row": row.get("row", n), "file": prov.get("file"), "line": prov.get("line"), "shape": prov.get("shape"),
-            "label": row.get("label"), "question": row.get("question"), "expected": row.get("raw_value"),
+            "label": row.get("label"), "question": row.get("question"),
+            "expected": row.get("raw_value") if row.get("raw_value") is not None else _number_text(row.get("expected")),
             "has_statement": bool(statement),
             "statement_preview": (re.sub(r"\s+", " ", statement)[:80] if isinstance(statement, str) else None),
             "source": prov.get("source"),
         })
     return out
+
+
+def _number_text(value) -> str | None:
+    """The report page's number format, from reconcile.py, so the two pages spell a value alike."""
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        from reconcile import _fmt
+        return _fmt(value)
+    except ImportError:  # run from somewhere reconcile.py is not importable
+        return f"{value:,.2f}".rstrip("0").rstrip(".") if isinstance(value, float) and not value.is_integer() else f"{int(value):,}"
 
 
 def _validate_item(item: dict, idx: int) -> None:
@@ -66,6 +82,10 @@ def _validate_item(item: dict, idx: int) -> None:
     for key in ("file", "label", "question", "expected", "statement_preview", "source"):
         if item.get(key) is not None and not isinstance(item[key], str):
             raise ValueError(f"item {idx}: '{key}' must be text")
+    if item.get("line") is not None and (not isinstance(item["line"], int) or isinstance(item["line"], bool)):
+        raise ValueError(f"item {idx}: 'line' must be a whole number")
+    if item.get("line") is not None and (not isinstance(item["line"], int) or isinstance(item["line"], bool)):
+        raise ValueError(f"item {idx}: 'line' must be a whole number")
     if item.get("statement_preview") and len(item["statement_preview"]) > 80:
         raise ValueError(f"item {idx}: 'statement_preview' is at most 80 characters")
 
@@ -81,6 +101,8 @@ def _script_json(payload) -> str:
 def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
     for i, item in enumerate(items):
         _validate_item(item, i)
+    if len({item["row"] for item in items}) != len(items):
+        raise ValueError("two items share a row number; edits are keyed by row, so each must be unique")
     projected = [{k: item.get(k) for k in _FIELDS if k in item} for item in items]
     for item in projected:
         for key in _FIELDS:
