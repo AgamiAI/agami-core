@@ -10,6 +10,17 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Fixed
+
+- **A chain of joins is no longer reported as a chasm trap.** The aggregates section flagged two
+  measures as inflating each other through a shared dimension whenever the model declared both of
+  their tables many-to-one to it — even when the statement joined one table to the other and only
+  then to the dimension, so no cross-product could occur. The receipt then named a join the SQL never
+  wrote. Two measures now count as a chasm only when the statement did not join their tables to each
+  other; a statement joining each of them to the dimension separately is still reported.
+
 ## [0.8.4] — 2026-09-12
 
 ### Fixed
