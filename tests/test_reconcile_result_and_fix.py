@@ -59,7 +59,7 @@ def test_every_result_label_and_its_fix(tmp_path):
     }
     assert items[2]["sentence"].endswith("The two queries differ in: filters; the match may not hold on other data.")
     assert items[3]["sentence"].endswith("The two queries differ in: ordered by; a cosmetic difference.")
-    assert items[2]["owner"] == "agami" and items[2]["fix_words"] == "fix the examples"
+    assert items[2]["owner"] == "agami" and items[2]["fix_words"] == "add an example"
     assert items[2]["change"][0].startswith("Add your query as a prompt example")
     assert items[1]["owner"] == "keep" and items[1]["keep_allowed"] is True and items[1]["fix_words"] == "nothing to fix"
     assert items[3]["keep_allowed"] is True  # a cosmetic difference does not block the keep offer

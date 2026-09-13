@@ -1813,7 +1813,7 @@ _RESULT_LABEL = {
     ("differs", "same"): "same query, different answer", ("differs", "different"): "different answer",
     ("differs", "not_comparable"): "different answer",
 }
-_FIX_WORDS = {"query": "fix your query", "semantic_model": "fix the semantic model", "examples": "fix the examples",
+_FIX_WORDS = {"query": "fix your query", "semantic_model": "fix the semantic model", "examples": "add an example",
               "question": "reword the question", "ask_again": "ask agami again", "none": "nothing to fix"}
 _FIX_OWNER = {"query": "you", "semantic_model": "model", "examples": "agami", "question": "question", "ask_again": "agami", "none": "nothing"}
 

@@ -134,5 +134,7 @@
     @media (max-width: 640px) { .sql2 { grid-template-columns: 1fr; } }
     /* the result pill's companion tag, and the result count row */
     .tag.unchecked { font-size: 11px; font-weight: 600; background: var(--open-bg); color: var(--open); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; white-space: nowrap; }
-    .chips.result { margin-top: 0; gap: 6px; }
+    .chips.result { margin: 0; display: inline-flex; }
+    .filters .k { min-width: 44px; }
+    .chips[hidden] { display: none; }
     .chips.result:empty { display: none; }

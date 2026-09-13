@@ -44,11 +44,13 @@
 
     <p class="lede" id="lede"></p>
     <div class="chips" id="chips"></div>
-    <div class="chips result" id="result-chips"></div>
+    <div class="filters" id="result-row" hidden>
+      <span class="k">Result</span><span class="chips result" id="result-chips"></span>
+    </div>
     <div class="filters" id="filters">
-      <span class="k">Show</span><span id="owner-chips"></span>
-      <input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
-      <button type="button" id="clear" class="linkish">Show all</button>
+      <span class="k">Fix</span><span id="owner-chips"></span>
+      <span class="k">Find</span><input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
+      <button type="button" id="clear" class="linkish">Clear filters</button>
       <span class="showing" id="showing"></span>
     </div>
     <div id="items"></div>
@@ -96,7 +98,7 @@
       return '<span class="pill ' + cls + '">' + esc(item.result.label) + '</span>'
         + (n ? '<span class="tag unchecked">' + n + (n === 1 ? ' check' : ' checks') + ' not run</span>' : '');
     }
-    const FIX_WORDS = { query: 'fix your query', semantic_model: 'fix the semantic model', examples: 'fix the examples', question: 'reword the question', ask_again: 'ask agami again', none: 'nothing to fix' };
+    const FIX_WORDS = { query: 'fix your query', semantic_model: 'fix the semantic model', examples: 'add an example', question: 'reword the question', ask_again: 'ask agami again', none: 'nothing to fix' };
     const FIX_CLASS = { query: 'you', semantic_model: 'model', examples: 'agami', question: 'question', ask_again: 'agami', none: 'keep' };
     function fixOf(item) { return item.fix || ({ you: 'query', model: 'semantic_model', question: 'question', agami: 'ask_again', keep: 'none', nothing: 'none' }[item.owner || 'nothing']); }
     function nums(item) {
@@ -132,7 +134,7 @@
         + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
     }
     // What is shown. A filter narrows the cards, never the block: decided() reads every row.
-    const view = { status: new Set(), owner: new Set(), q: '' };
+    const view = { status: new Set(), owner: new Set(), result: new Set(), q: '' };
     const OWNER_SHORT = { you: 'your query', model: 'the semantic model', question: 'the question', agami: 'agami', keep: 'keep', nothing: 'nothing' };
     function statusClass(item) { return (STATUS[item.status] || ['noted'])[0]; }
     function haystack(item) {
@@ -144,6 +146,7 @@
     function visible() {
       const q = view.q.trim().toLowerCase();
       return DATA.items.filter(item => (!view.status.size || view.status.has(statusClass(item)))
+        && (!view.result.size || view.result.has((item.result || {}).label || ''))
         && (!view.owner.size || view.owner.has(item.fix ? fixOf(item) : (item.owner || 'nothing')))
         && (!q || haystack(item).includes(q)));
     }
@@ -151,10 +154,19 @@
       const counts = {};
       DATA.items.forEach(i => { const cls = statusClass(i); counts[cls] = (counts[cls] || 0) + 1; });
       const words = { held: 'match', defect: 'a mistake on your side', gap: 'differs', open: 'could not check', noted: 'did not run' };
+      // The result chips filter like every other chip; when the items carry result labels they are
+      // the one filter row, and the older status chips step aside.
       const labels = {};
+      const RESULT_CLASS = { 'match': 'held', 'same answer, different query': 'open', 'same rows, different columns': 'open',
+                             'different answer': 'defect', 'same query, different answer': 'defect', 'could not run': 'noted' };
       DATA.items.forEach(i => { if (i.result && i.result.label) labels[i.result.label] = (labels[i.result.label] || 0) + 1; });
-      document.getElementById('result-chips').innerHTML = Object.entries(labels).map(([label, n]) =>
-        '<span class="pill noted">' + n + ' · ' + esc(label) + '</span>').join(' ');
+      const results = document.getElementById('result-chips');
+      results.classList.toggle('filtering', view.result.size > 0);
+      results.innerHTML = Object.entries(labels).map(([label, n]) =>
+        '<button type="button" class="chip ' + (RESULT_CLASS[label] || 'noted') + (view.result.has(label) ? ' on' : '') + '" data-result="' + esc(label) + '" aria-pressed="' + view.result.has(label) + '"><b>' + n + '</b><span>' + esc(label) + '</span></button>').join('');
+      results.querySelectorAll('[data-result]').forEach(el => el.addEventListener('click', () => { toggle(view.result, el.dataset.result); renderItems(); }));
+      root.hidden = Object.keys(labels).length > 0;
+      document.getElementById('result-row').hidden = Object.keys(labels).length === 0;
       const root = document.getElementById('chips');
       root.classList.toggle('filtering', view.status.size > 0);
       root.innerHTML = Object.entries(counts).map(([cls, n]) =>
@@ -171,7 +183,7 @@
     }
     function toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
     function showing(n) {
-      const filtered = view.status.size || view.owner.size || view.q.trim();
+      const filtered = view.status.size || view.owner.size || view.result.size || view.q.trim();
       document.getElementById('showing').textContent = filtered ? 'Showing ' + n + ' of ' + DATA.items.length + ' rows' : 'All ' + DATA.items.length + ' rows';
     }
     // The diff grid: one grid row per check, mark | what was checked | yours | agami, so a tall cell on
@@ -315,7 +327,7 @@
     }
     document.getElementById('btn-generate').addEventListener('click', generateDecisions);
     document.getElementById('q').addEventListener('input', e => { view.q = e.target.value; renderItems(); });
-    document.getElementById('clear').addEventListener('click', () => { view.status.clear(); view.owner.clear(); view.q = ''; document.getElementById('q').value = ''; renderItems(); });
+    document.getElementById('clear').addEventListener('click', () => { view.status.clear(); view.owner.clear(); view.result.clear(); view.q = ''; document.getElementById('q').value = ''; renderItems(); });
     document.getElementById('modal-close').addEventListener('click', () => { document.getElementById('modal').hidden = true; });
     document.getElementById('modal-copy').addEventListener('click', async () => {
       const status = document.getElementById('modal-status');
