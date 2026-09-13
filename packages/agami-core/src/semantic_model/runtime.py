@@ -4610,7 +4610,11 @@ def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozen
         on = join.args.get("on")
         if on is None:
             continue
-        right = _relation_name(join.this)
+        # Both sides through the SAME map. The column qualifiers are resolved through `scope_map`, which
+        # may already have turned a CTE name into the table it reads (`p` -> `products`); comparing
+        # them with the join's WRITTEN name threw out a valid join to a grain-preserving CTE and left
+        # the chain reported as a chasm.
+        right = scope_map.get(join.this.alias_or_name, _relation_name(join.this))
         names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
         if right not in names or len(names - {right}) > 1:
             continue

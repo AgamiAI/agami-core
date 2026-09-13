@@ -2820,3 +2820,19 @@ def test_a_compound_on_over_three_relations_clears_nothing():
     risks = _risks(sql)
     assert len(risks) == 2
     assert all("chasm_trap" in item for item in risks), risks
+
+
+def test_a_chain_through_a_cte_on_the_right_is_not_a_chasm():
+    """The same chain as `REVENUE_AND_COST_BY_CATEGORY_THROUGH_THE_PRODUCT`, with products read through
+    a grain-preserving CTE. The join's written name is `p`, its columns resolve to `products`, and the
+    two must be compared through the same map or the valid join is discarded."""
+    sql = (
+        "WITH p AS (SELECT * FROM products) "
+        "SELECT c.name, SUM(ol.amount), SUM(ol.quantity * p.cost) FROM order_lines ol "
+        "JOIN p ON ol.product_id = p.id "
+        "JOIN categories c ON p.category_id = c.id GROUP BY c.name"
+    )
+
+    risks = _risks(sql)
+    assert all("chasm_trap" not in item for item in risks), risks
+
