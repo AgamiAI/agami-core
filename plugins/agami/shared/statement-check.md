@@ -60,7 +60,7 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    `probes.plan.json`, a list of `{id, sql_file, out}` (one entry per probe, `out` the CSV named
    above), and run `"$PY" -m execute_sql --profile <profile> --batch probes.plan.json`; the door
    resolves the semantic model once and keeps the connection open, and writes each CSV, each `.run.json` and
-   the manifest itself (ACE-137). The other tiers keep one call per probe.
+   the manifest itself. The other tiers keep one call per probe.
 9. **Nothing in these steps writes `query_log.jsonl`, and nothing here runs unrecorded.**
    `agami-save-correction` reads that log's last successful line as the question to correct, and a
    probe there would be corrected instead of the answer. The record of this phase is the row
