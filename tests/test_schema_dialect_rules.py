@@ -74,7 +74,7 @@ def test_unknown_or_missing_engines_have_no_rules():
     assert sql_dialect_rules.dialect_rules_for("NotAnEngine") is None
 
 
-def test_the_field_is_declared_and_the_client_is_told_to_follow_it(monkeypatch):
+def test_the_field_is_declared_and_the_client_is_told_to_follow_it():
     assert "dialect_rules" in contracts.DatasourceSchemaResult.model_fields
     assert "dialect_rules" in tools.TOOLS["get_datasource_schema"]["description"]
     assert "dialect_rules" in tools._SHARED_INSTRUCTIONS

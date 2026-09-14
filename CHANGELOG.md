@@ -24,7 +24,7 @@ below corresponds to one such version.
   over "the deployment row ceiling" was refused and never said what the ceiling was, so a client
   learned it by being refused. The numbers now come from the same settings the executor enforces
   (`AGAMI_SQL_MAX_ROWS`, `AGAMI_SQL_TIMEOUT_S`), with what to do about each. `tools.statement_limits()`
-  returns both for an embedder that wants to show them.
+  returns both, so an administration screen can show the limits in force.
 
 ### Fixed
 

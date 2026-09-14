@@ -21,7 +21,8 @@ Amazon Redshift is PostgreSQL-derived but rejects several PostgreSQL features. W
 - No FILTER on aggregates. COUNT(*) FILTER (WHERE c) -> SUM(CASE WHEN c THEN 1 ELSE 0 END); a \
 filtered average -> AVG(CASE WHEN c THEN v END) (NULL, not 0, in the ELSE).
 - No STRING_AGG or ARRAY_AGG. Use LISTAGG(col, ', ') WITHIN GROUP (ORDER BY col). The delimiter must \
-be a constant, and every LISTAGG in one SELECT must use the same WITHIN GROUP ordering.
+be a constant, and every ordered aggregate in one SELECT (LISTAGG, PERCENTILE_CONT, MEDIAN) must use \
+the same ordering.
 - LISTAGG, MEDIAN and PERCENTILE_CONT cannot share a SELECT with any DISTINCT aggregate \
 (COUNT(DISTINCT ...)). Compute them in separate CTEs and join the CTEs.
 - Date arithmetic takes the unit first, unquoted: DATEADD(day, -30, CURRENT_DATE), \
@@ -33,7 +34,8 @@ CASE WHEN col THEN 'true' ELSE 'false' END.
 ORDER BY ...) in a subquery and keep row 1 (QUALIFY also works).
 - Many correlated subqueries are rejected. Rewrite them as a JOIN to a CTE that aggregates once.
 - FULL JOIN needs a plain equality join condition.
-- Double-quote a column whose name is a reserved word, e.g. "table", "end", "user".
+- Double-quote any identifier (column, table or alias) that is a reserved word, e.g. "table", "end", \
+"user".
 - No GENERATE_SERIES against tables. No REGEXP_MATCHES; use REGEXP_SUBSTR, REGEXP_REPLACE, \
 REGEXP_COUNT or ~.
 """
