@@ -46,7 +46,7 @@ def test_ask_answers_one_question_with_the_golden_runs_generator_and_context(mon
     out = tmp_path / "rows" / "1" / "agami-answer.json"
     assert rge.main(["--profile", "demo", "--ask", "How many orders?", "--top-k", "3", "--timeout-s", "45", "--out", str(out)]) == 0
     printed = json.loads(capsys.readouterr().out)
-    assert printed == {"question": "How many orders?", "sql": "SELECT COUNT(*) AS n FROM orders", "error": None}
+    assert printed == {"question": "How many orders?", "sql": "SELECT COUNT(*) AS n FROM orders", "statements": ["SELECT COUNT(*) AS n FROM orders"], "error": None}
     assert json.loads(out.read_text()) == printed
     gen = _Generator.made[0]
     assert gen.timeout_s == 45.0 and gen.asked == ("How many orders?", "local", "demo", "schema for How many orders? with 3 examples")
@@ -101,3 +101,13 @@ def test_ask_file_fetches_the_context_once_and_spawns_per_question_in_parallel(m
     assert rge.main(["--profile", "demo", "--ask-file", str(tmp_path / "bad.json")]) == rge._CANNOT_START
     assert rge.main(["--profile", "demo", "--ask", "q", "--ask-file", str(chunk)]) == rge._CANNOT_START
 
+
+
+def test_ask_writes_every_statement_the_client_wrote_and_answers_with_the_last(monkeypatch, tmp_path, capsys):
+    _wire(monkeypatch, tmp_path)
+    _Generator.answer = gr.GeneratedSql(sql="SELECT COUNT(*) AS n FROM orders", error=None,
+                                        statements=("SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders"))
+    assert rge.main(["--profile", "demo", "--ask", "How many orders?"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["sql"] == "SELECT COUNT(*) AS n FROM orders"
+    assert printed["statements"] == ["SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders"]

@@ -364,3 +364,10 @@ def test_agamis_answer_comes_from_a_cold_client_never_from_the_session():
     assert "four fixed sentences" in phase_2b and "the batch exits `3` when any row is like that" in phase_2b
     assert "Invoke the same SQL-generation + execution path agami-query uses" not in phase_2b
 
+
+
+def test_agamis_several_statements_are_kept_and_only_the_last_is_run():
+    ask = _between(SKILL, "### 2b", "### 2c")
+    assert "{row, question, sql, statements, error}" in ask and "never run the earlier ones" in ask
+    record = _between(SKILL, "### 2d", "### 2e")
+    assert '"agami_statements":' in record and "sql is the last" in record
