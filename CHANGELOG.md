@@ -12,6 +12,34 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **An organisation can have its own row cap and statement time limit** (#329, engine half). Core
+  stores no such setting: an embedder registers a provider, `(org_id) -> {"max_rows", "timeout_s"}`,
+  through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
+  unusable value (not a positive whole number, or a provider that raises) falls back to
+  `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
+  the log. There is no ceiling. A time limit too large for the platform to arm a timer on (at or
+  above Python's `threading.TIMEOUT_MAX`, counting the supervisor's 60-second slack) is treated as
+  unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` alike.
+  - An evaluation run scores both statements of each case under the named organisation's limits.
+  - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
+    child is handed the same two numbers in its environment, so the watchdog, the native bound, the
+    outer bound and the supervisor still derive from one budget on both sides of the fork.
+  - `tools.statement_limits(org_id=None)` reports the limits in force for the current (or a named)
+    organisation; `tools.statement_limit_defaults()` reports the deployment values and the
+    recommended ones (1000 rows, 30 seconds). `tools.pinned_statement_limits(org_id)` lets a direct
+    caller of `execute_guarded` apply an organisation's limits.
+  - The `execute_sql` description states the caller's organisation's numbers, built when tools are
+    listed rather than once at start-up. A client keeps the list for its session, so a changed limit
+    reaches new sessions; an existing session meets it in the refusal, which names the number per call.
+- **`sm set-description`, and onboarding asks for a datasource description** (#327). The one line
+  `list_datasources` shows an agent to route a question by could only be hand-edited into
+  `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
+  `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
+  model, as it does for the database narrative — and `model_deploy` warns when a datasource is
+  deployed without one.
+
 ### Fixed
 
 - **A same-named table in another schema no longer passes as the declared one** (#332). With the
@@ -66,6 +94,20 @@ below corresponds to one such version.
     declare. It uses the model the semantic-model pass already loaded, so it applies only when that
     pass is on — which is off by default on a server (see `SECURITY.md`); there, the summary tier's
     `schema` is the fix.
+- **A query that names no datasource no longer runs against a guessed one** (#327). On an
+  organization serving several datasources, an omitted `datasource` fell through to a fallback (an
+  env var, an active profile) and the statement ran there — so SQL written for one datasource reached
+  another and was refused as out of scope. `execute_sql`, `get_datasource_schema` and
+  `get_prompt_examples` now refuse an omitted `datasource` when more than one is served, naming the
+  choices (new `datasource_required` rule, decided before any model is consulted). One served
+  datasource still resolves as before.
+- **A table-scope refusal names the datasource that declares the table** (#327). It said "add the
+  table to the model" when the table was already declared in another of the organization's
+  datasources; it now says which one to run the query against — only a datasource that declares every
+  table in the statement — or that the tables live in different datasources and one statement cannot
+  join them. Only the same organization's datasources are named. Table-scope refusals come from the
+  semantic-model pass, which is off by default on a server (see `SECURITY.md`), so there the hint has
+  nothing to rewrite.
 
 ## [0.8.6] — 2026-09-14
 

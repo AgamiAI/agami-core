@@ -20,6 +20,7 @@ Design constraints (match the rest of agami):
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import functools
 import io
@@ -32,7 +33,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import asdict
 from pathlib import Path
@@ -286,13 +287,15 @@ def _served_datasources(org_id: str) -> "list[str] | None":
         return None
 
 
-def _choose_datasource_error(org_id: str) -> "str | None":
+def _choose_datasource_error(org_id: str, served: "list[str] | None" = None) -> "str | None":
     """The refusal for an omitted `datasource` that resolved to nothing — naming the real choices.
 
     Returns None when the store cannot answer, so the caller keeps whatever message it already had:
-    a guess about the customer's datasources is exactly what this function exists to stop.
+    a guess about the customer's datasources is exactly what this function exists to stop. A caller
+    that already listed the datasources passes them as `served`, so one omitted call costs one query.
     """
-    served = _served_datasources(org_id)
+    if served is None:
+        served = _served_datasources(org_id)
     if served is None:
         return None
     if not served:
@@ -318,6 +321,32 @@ def _choose_datasource_error(org_id: str) -> "str | None":
         },
         indent=2,
     )
+
+
+def _datasources_to_choose_from(args: dict[str, Any]) -> "list[str] | None":
+    """The organization's datasources when this call must name one and did not, else None (#327).
+
+    A call that names no `datasource` used to fall through `resolve_profile`'s chain — an env var, an
+    active profile — and run against whatever that picked. On an organization serving ONE datasource
+    that is unambiguous and stays allowed. On one serving several it is a guess, and a wrong guess sent
+    SQL written for one datasource to another: refused as out of scope, with advice to add a table the
+    model already declared elsewhere. So with several served, an omission is refused and the choices
+    are named.
+
+    Falsy, not `is None`, for `resolve_profile`'s reason: `""` is an omission there too. None when the
+    store cannot answer (a local install, or a blip) — refusing on a guess about the customer's
+    datasources is what this exists to stop, so the old behaviour stands there."""
+    if args.get("datasource"):
+        return None
+    org_id = _current_org_id()
+    if _SOLE_SERVED.get(org_id) is not None:
+        # Already known to serve exactly one — the common case answers from the cache `resolve_profile`
+        # keeps, so an omitted call on a single-datasource organization adds no query.
+        return None
+    served = _served_datasources(org_id)
+    if served is None or len(served) < 2:
+        return None
+    return served
 
 
 # Same name tests already reach for on `resolved_org_id`, so a test that varies the store clears
@@ -1539,6 +1568,13 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     `metric_index` (name->description for every metric in scope) + `large_tables` are always
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
+    # With several datasources served, an omission is refused before it can resolve to a fallback
+    # (#327); `_choose_datasource_error` names the choices.
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        choose = _choose_datasource_error(_current_org_id(), served=choices)
+        if choose is not None:
+            return choose
     profile = _resolve_call_datasource(args)
     try:
         org = get_cached_org(profile)
@@ -1765,6 +1801,13 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     corrections) never floods the context. Local serving (files): returns the curated examples.yaml
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
+    # Same refusal as `get_datasource_schema` for an omission with several datasources served (#327):
+    # examples from a guessed datasource would teach SQL for the wrong one.
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        choose = _choose_datasource_error(_current_org_id(), served=choices)
+        if choose is not None:
+            return choose
     profile = _resolve_call_datasource(args)
 
     from store import Store
@@ -1973,6 +2016,129 @@ def set_injected_executor(executor: Any | None) -> None:
     _INJECTED_EXECUTOR = executor
 
 
+# The composition-root statement-limits provider (#329). ``None`` (the default) means every
+# organisation gets the deployment's own `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`. Core stores no
+# per-organisation setting; the consumer that owns the admin screen and its storage registers a
+# callable here, and core only asks it. Process-global for the reason `_INJECTED_EXECUTOR` is: the
+# provider is a composition-root singleton, while the ANSWER it gives is per-request.
+_STATEMENT_LIMITS_PROVIDER: Callable[[str], Mapping[str, Any] | None] | None = None
+
+# The two keys a provider may answer, and the only two read from its mapping — anything else it
+# returns is ignored rather than rejected, so a consumer can carry its own bookkeeping in the row.
+_STATEMENT_LIMIT_KEYS = ("max_rows", "timeout_s")
+
+
+def set_statement_limits_provider(
+    provider: Callable[[str], Mapping[str, Any] | None] | None,
+) -> None:
+    """Register (or clear) the per-organisation statement-limits provider.
+
+    ``provider(org_id)`` returns ``{"max_rows": int | None, "timeout_s": int | None}`` or ``None``. A
+    missing key, a ``None``, or a ``None`` result means "this organisation has no limit of its own" and
+    the deployment's environment value applies. There is no ceiling: an administrator may set either
+    number to any positive whole number. Called by ``mcp_http.create_app`` from
+    ``adapters.statement_limits``; an embedder with no HTTP app may call it directly."""
+    global _STATEMENT_LIMITS_PROVIDER
+    if provider is not None and not callable(provider):
+        # Fail at registration, like `set_injected_executor`: a malformed adapter should stop the app
+        # being built, not surface as a warning on every statement.
+        raise TypeError("statement limits provider must be callable: (org_id) -> mapping | None")
+    _STATEMENT_LIMITS_PROVIDER = provider
+
+
+def _provider_limit(org_id: str, key: str, value: Any) -> int | None:
+    """One provider value, validated: a positive int, or ``None`` to fall back to the deployment.
+
+    ``bool`` is refused although it is an ``int``, because ``True`` reaching the row cap as ``1`` is a
+    storage bug that would look like a setting. Anything unusable is logged at warning and declined —
+    never raised: this runs at the entry of every statement and while tools are listed, and one
+    organisation's bad row must cost that organisation its override, not everybody their query."""
+    if value is None:
+        return None
+    from execute_sql import _timeout_is_representable
+
+    usable = isinstance(value, int) and not isinstance(value, bool) and value > 0
+    # No ceiling, but a timeout the platform cannot arm is not a setting: see
+    # `execute_sql._timeout_is_representable` for how one would disable the abandoned-worker cap.
+    if usable and key == "timeout_s" and not _timeout_is_representable(value):
+        usable = False
+    if usable:
+        return value
+    _LOG.warning(
+        "statement limits provider returned %s=%r for org %s, which is not a usable positive whole "
+        "number; using the deployment value.",
+        key,
+        value,
+        org_id,
+    )
+    return None
+
+
+def _effective_statement_limits(org_id: str | None) -> tuple[int, int]:
+    """(row cap, timeout seconds) for ``org_id`` (the current request's when None): the provider's
+    value where it gave a usable one, the deployment's environment value everywhere else.
+
+    The organisation is looked up only when a provider is registered. Without one the answer cannot
+    depend on it, and the registry renders the limits sentence at import, where resolving an org would
+    read configuration files for a number that is not going to be used."""
+    from execute_sql import _row_cap_from_env, _timeout_s_from_env
+
+    limits = {"max_rows": _row_cap_from_env(), "timeout_s": _timeout_s_from_env()}
+    provider = _STATEMENT_LIMITS_PROVIDER
+    if provider is None:
+        return limits["max_rows"], limits["timeout_s"]
+    org_id = org_id or _current_org_id()
+    try:
+        supplied = provider(org_id)
+    except Exception:
+        # The provider is the consumer's code, usually a database read. Failing it must not fail the
+        # statement: the deployment's own limits are a safe, known answer, and the log carries why.
+        _LOG.warning(
+            "statement limits provider failed for org %s; using the deployment values.",
+            org_id,
+            exc_info=True,
+        )
+        supplied = None
+    if supplied is not None and not isinstance(supplied, Mapping):
+        _LOG.warning(
+            "statement limits provider returned %r for org %s, not a mapping; using the deployment "
+            "values.",
+            type(supplied).__name__,
+            org_id,
+        )
+        supplied = None
+    for key in _STATEMENT_LIMIT_KEYS:
+        value = _provider_limit(org_id, key, (supplied or {}).get(key))
+        if value is not None:
+            limits[key] = value
+    return limits["max_rows"], limits["timeout_s"]
+
+
+def has_statement_limits_provider() -> bool:
+    """Whether a provider is registered — so a caller can skip work that only a provider makes
+    necessary (the HTTP server's thread hop when listing tools)."""
+    return _STATEMENT_LIMITS_PROVIDER is not None
+
+
+@contextlib.contextmanager
+def pinned_statement_limits(org_id: str | None = None) -> Iterator[tuple[int, int]]:
+    """Resolve an organisation's effective limits ONCE and hold them for the enclosed block.
+
+    ``tool_execute_sql`` opens this around every call; an embedder calling
+    ``execute_sql.execute_guarded`` directly (an evaluation run, say) opens it itself to get the same
+    organisation's limits rather than the deployment's. ``org_id`` defaults to the current request's.
+    Reset in a ``finally``, because a worker thread serves one organisation after another and a pin
+    that outlived its call would hand the next one these limits."""
+    import execute_sql
+
+    max_rows, timeout_s = _effective_statement_limits(org_id)
+    token = execute_sql._pin_statement_limits(max_rows, timeout_s)
+    try:
+        yield max_rows, timeout_s
+    finally:
+        execute_sql._statement_limits.reset(token)
+
+
 def _finalize_execution(
     columns: list,
     data_rows: list,
@@ -2054,6 +2220,93 @@ def _envelope(
     )
 
 
+def _declared_elsewhere(names: list[str], profile: str) -> dict[str, list[str]]:
+    """`{name: [datasource, ...]}` — the OTHER datasources of the caller's organization that declare
+    each name (#327). Empty when there is no store to ask. Scoped to the caller's org by the query."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is None:
+        return {}
+    try:
+        from model_store import datasources_declaring
+
+        found = datasources_declaring(store, names, org_id=_current_org_id())
+    finally:
+        store.close()
+    others = {name: [ds for ds in homes if ds != profile] for name, homes in found.items()}
+    return {name: homes for name, homes in others.items() if homes}
+
+
+def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str | None) -> Envelope:
+    """A table-scope refusal whose tables are declared in another of the organization's datasources,
+    with advice that says which (#327). Any other envelope comes back unchanged — the same object.
+
+    The gate sees one datasource's model, so "not declared here" is all it can say, and its advice was
+    to add the table to the model: wrong when the table is declared, just in another datasource, and a
+    client cannot add tables anyway. Only the REMEDIATION changes; the rule, reason and detail stay the
+    gate's own. The table names come from the same parse the gates use (`build_guard_context`), never a
+    second parser. Best-effort by design: any failure to look keeps the gate's refusal as it was,
+    because a hint must never be the thing that breaks a refusal."""
+    from guardrail import RULE_TABLE_SCOPE
+
+    refusal = env.refusal
+    if env.status != "refused" or refusal is None or refusal.rule != RULE_TABLE_SCOPE:
+        return env
+    if not sql or not profile:
+        return env
+    try:
+        from semantic_model import runtime as RT
+
+        org = get_cached_org(profile)
+        ctx = RT.build_guard_context(sql, org)
+        tree = getattr(ctx, "tree", None)
+        if tree is None:
+            return env
+        declared = set(RT._model_table_index(org))
+        ctes = {name.lower() for name in RT._cte_names(tree)}
+        referenced = {ref.bare.lower() for ref in RT._table_references(tree) if ref.bare} - ctes
+        undeclared = sorted(referenced - declared)
+        if not undeclared:
+            return env
+        # Every referenced table, not only the undeclared ones: a datasource is only worth naming if it
+        # declares the WHOLE statement, or the retry is refused again on the tables declared here.
+        homes = _declared_elsewhere(sorted(referenced), profile)
+        echo = RT._echo_identifiers
+    except Exception:  # noqa: BLE001 - a hint that cannot be computed leaves the refusal as it was
+        return env
+    if not all(homes.get(name) for name in undeclared):
+        return env  # at least one table is declared nowhere: the gate's own advice is the right one
+    # Caller-written names go through the gate's own echo bound — capped in count, shortened, and
+    # stripped to an identifier's alphabet — because refusal text reads to the caller as server-authored.
+    listed = echo(undeclared)
+    targets = set.intersection(*(set(homes.get(name, [])) for name in sorted(referenced)))
+    if len(targets) == 1:
+        (target,) = targets
+        remediation = (
+            f"The tables in this statement ({echo(sorted(referenced))}) are all declared in "
+            f"datasource `{target}`, not `{profile}`. Read its schema and run the query with "
+            f"`datasource` set to `{target}`."
+        )
+    elif targets:
+        remediation = (
+            f"The tables in this statement are all declared in datasources "
+            f"{', '.join(f'`{d}`' for d in sorted(targets))}, not `{profile}`. Run the query with "
+            f"`datasource` set to the one this question is about."
+        )
+    else:
+        where = "; ".join(f"{echo([name])} in {', '.join(homes[name])}" for name in undeclared)
+        verb = "is" if len(undeclared) == 1 else "are"
+        remediation = (
+            f"{listed} {verb} not in `{profile}`, and the tables this statement joins live in "
+            f"different datasources ({where}); one statement cannot join across datasources. Query "
+            f"each datasource separately."
+        )
+    from dataclasses import replace as _replace
+
+    return _replace(env, refusal=_replace(refusal, remediation=remediation))
+
+
 def _emit(
     env: Envelope,
     *,
@@ -2088,6 +2341,8 @@ def _emit(
     This is also where the audit row is written — see `_record_execution`. Both branches below fall
     through to ONE record call and ONE `json.dumps`, so "exactly one row per tool call, on every
     outcome" is a property of the control flow rather than of six call sites staying in step."""
+    # Before the body AND the audit row, so both carry the same advice (#327).
+    env = _point_to_declaring_datasource(env, sql, profile)
     if env.status == "ok":
         columns = list(env.data.columns)
         rows = [["" if v is None else str(v) for v in row] for row in env.data.rows]
@@ -2434,18 +2689,30 @@ def tool_execute_sql(args: dict[str, Any]) -> str:
     """
     cache_token = begin_request_cache()
     try:
-        return _tool_execute_sql(args)
+        # The organisation's limits are pinned here for the same "one point both paths pass through"
+        # reason (#329): the in-process path's bounds, the fork path's supervisor bound and the child
+        # environment `_pass_child_env` builds all read this one resolution, so a provider whose answer
+        # changes mid-call cannot give the two sides of the fork different budgets.
+        with pinned_statement_limits():
+            return _tool_execute_sql(args)
     finally:
         end_request_cache(cache_token)
 
 
 def _pass_child_env() -> dict[str, str]:
-    """The child's environment: this process's, with the ACE-101 posture written in explicitly.
+    """The child's environment: this process's, with the ACE-101 posture and this call's effective
+    statement limits written in explicitly.
 
     Everything else is inherited untouched, which the fork depends on: the child re-resolves its own
     timeout, row cap and credentials from the environment, and the supervisor bound computed on this
-    side is only correct because the child reaches the identical number. This adds one key and
-    overrides nothing else.
+    side is only correct because the child reaches the identical number.
+
+    The two limit keys are why that still holds with a per-organisation limit (#329). The child has no
+    provider and no pin; it reads `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S` and nothing else. Writing
+    the numbers this side RESOLVED — the organisation's where it has one, the deployment's otherwise —
+    into exactly those keys is what makes the child's budget the parent's budget. Written always, not
+    only when an override applies, for the posture's reason below: the child then parses a value this
+    process already resolved instead of repeating the resolution from text that might read differently.
 
     The one key is added because the posture is the one value the two processes must agree on that
     they would otherwise each read at a different MOMENT. `_pin_model_pass_posture` fixed it on this
@@ -2454,11 +2721,13 @@ def _pass_child_env() -> dict[str, str]:
     Spelled as the canonical `true`/`false` rather than passing the operator's own text through, so
     the child parses a value this process has already resolved rather than repeating the resolution.
     """
-    from execute_sql import _model_pass_disabled
+    from execute_sql import _model_pass_disabled, _resolve_row_cap, _resolve_timeout_s
 
     return {
         **os.environ,
         "AGAMI_GOVERNANCE_ENFORCED": "false" if _model_pass_disabled() else "true",
+        "AGAMI_SQL_MAX_ROWS": str(_resolve_row_cap()),
+        "AGAMI_SQL_TIMEOUT_S": str(_resolve_timeout_s()),
     }
 
 
@@ -2518,6 +2787,27 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # datasource it was aimed at. `resolve_profile` reads an argument, an env var and a local config
     # file — it opens no connection and touches no credential, so a mutation still never reaches the
     # warehouse; what it no longer does is land in the audit trail with an empty `datasource`.
+    # Before resolving: with several datasources served, an omitted `datasource` would resolve to a
+    # fallback and run there, which is the wrong-datasource failure #327 exists to stop. Refused as a
+    # PRE_MODEL rule, so it costs no model and no connection beyond the one listing.
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        from guardrail import RULE_DATASOURCE_REQUIRED, refuse
+
+        refusal = refuse(
+            RULE_DATASOURCE_REQUIRED,
+            detail="this organization serves more than one datasource and the call named none: "
+            + ", ".join(choices),
+            remediation="Pass `datasource` set to the one this question is about — read each one's "
+            "description with list_datasources if unsure — then run it again.",
+        )
+        return _emit(
+            _envelope("refused", refusal=refusal, receipt=_refusal_receipt("", sql, refusal)),
+            sql=sql,
+            execution_ms=None,
+            args=args,
+        )
+
     profile = _resolve_call_datasource(args)
 
     refusal = check_read_only(sql)
@@ -2568,14 +2858,14 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # `failed`/`timeout` naming nothing the caller can act on. Imported lazily for the same
     # reason `_run_in_process` does it.
     #
-    # Resolved HERE and enforced on a child that re-resolves for itself, which only works because the
-    # resolver reads the environment and nothing else: the child inherits `os.environ` (no `env=`
-    # below) and therefore reaches the identical number. A request-scoped override would be the one
-    # thing that could break that — it would outrank the environment on this side of the fork and be
-    # invisible on the other, so a parent bound of 65s could sit against a child budget of 300s and
-    # fire first, inverting the order this whole family exists to hold. There is deliberately no such
-    # override; `_resolve_timeout_s` documents why, and a test pins that the budget keeps exactly one
-    # configuration surface.
+    # Resolved HERE and enforced on a child that re-resolves for itself, which only works because both
+    # sides reach the identical number. A request-scoped override is the one thing that could break
+    # that — it outranks the environment on this side of the fork, and unless it is carried across, a
+    # parent bound of 65s could sit against a child budget of 300s and fire first, inverting the order
+    # this whole family exists to hold. The per-organisation limit (#329) is such an override, so it is
+    # carried: `tool_execute_sql` pinned it before this line, this bound reads the pin, and
+    # `_pass_child_env` below writes the same numbers into the child's `AGAMI_SQL_*` keys.
+    # `_resolve_timeout_s` documents the construction, and a test drives it across a real fork.
     import execute_sql
 
     supervisor_timeout_s = execute_sql._resolve_timeout_s() + execute_sql._SUPERVISOR_SKEW_S
@@ -3268,31 +3558,88 @@ def require_thread_id(registry: dict[str, dict[str, Any]]) -> dict[str, dict[str
     return out
 
 
-def statement_limits() -> dict[str, int]:
-    """The row cap and per-statement deadline this deployment enforces, read from the same resolvers
-    the executor uses — so anything that shows them (the tool description, an admin screen) cannot
-    disagree with the bound actually applied."""
-    from execute_sql import _resolve_row_cap, _resolve_timeout_s
+def statement_limits(org_id: str | None = None) -> dict[str, int]:
+    """The row cap and per-statement deadline enforced for an organisation — ``org_id``, or the
+    current request's when omitted — computed the way the executor's own call computes them, so
+    anything that shows them (the tool description, an admin screen) cannot disagree with the bound
+    actually applied.
 
-    return {"max_rows": _resolve_row_cap(), "timeout_s": _resolve_timeout_s()}
+    Inside a call that already pinned its limits, and with ``org_id`` omitted, the pin is returned
+    rather than a fresh resolution: that is the number this call is enforcing, even if the provider
+    would now answer differently. Passing an ``org_id`` — even the current request's own — always asks
+    the provider afresh, because the pin records numbers and not whose they are; a caller that wants
+    what this call enforces omits the argument."""
+    import execute_sql
+
+    pinned = execute_sql._statement_limits.get()
+    if org_id is None and pinned is not None:
+        max_rows, timeout_s = pinned
+    else:
+        max_rows, timeout_s = _effective_statement_limits(org_id)
+    return {"max_rows": max_rows, "timeout_s": timeout_s}
+
+
+def statement_limit_defaults() -> dict[str, dict[str, int]]:
+    """What applies to an organisation with no limits of its own, and what we recommend.
+
+    ``deployment`` is the operator's environment (``AGAMI_SQL_MAX_ROWS`` / ``AGAMI_SQL_TIMEOUT_S``);
+    ``recommended`` is the shipped default (1000 rows, 30 seconds). They are the same number until an
+    operator moves the environment, which is why an admin screen needs both: "reset to default" means
+    the deployment value, while "recommended" is advice that holds on any deployment."""
+    import execute_sql
+
+    return {
+        "deployment": {
+            "max_rows": execute_sql._row_cap_from_env(),
+            "timeout_s": execute_sql._timeout_s_from_env(),
+        },
+        "recommended": {
+            "max_rows": execute_sql._DEFAULT_MAX_ROWS,
+            "timeout_s": execute_sql._DEFAULT_TIMEOUT_S,
+        },
+    }
 
 
 def _execute_sql_limits_sentence() -> str:
-    """The limits, stated to the client before it writes SQL (#326).
+    """The limits, stated to the client before it writes SQL (#326), for the current organisation.
 
     The description used to name "the deployment row ceiling" and "a per-statement deadline" without
     either number, so a client learned them by being refused — a warehouse round trip and a retry
-    each time. Built when the registry is built: both resolvers read only the process environment,
-    which is fixed at start-up, so the number stated is the number enforced."""
+    each time. The registry is built once, at import, when no organisation is known; the numbers in
+    it are then REPLACED per caller at list-tools time by `tool_description`, because with a
+    per-organisation limit (#329) the start-up numbers can be wrong for the organisation reading them."""
     limits = statement_limits()
     return (
         # "Refused", not "cancelled": some executors can only stop waiting at the bound, and the claim
         # the client relies on is that no answer comes back — not what happens to the work behind it.
-        f"Limits on this deployment: a result over {limits['max_rows']:,} rows is refused, and so is "
+        f"Limits in force for you: a result over {limits['max_rows']:,} rows is refused, and so is "
         f"a statement still running after about {limits['timeout_s']}s. Plan for both before "
         "running: bound a listing with ORDER BY and LIMIT, and group a breakdown more coarsely or "
         "filter its time range first.\n"
     )
+
+
+# The sentence as the registry was built with it, at import, with no organisation known. Kept by name
+# so `tool_description` can find exactly this text and swap in the caller's numbers — matching the
+# import-time string rather than re-rendering it means an operator changing the environment after
+# start-up cannot make the search miss.
+_EXECUTE_SQL_LIMITS_AT_IMPORT = _execute_sql_limits_sentence()
+
+
+def tool_description(name: str, description: str) -> str:
+    """A tool's description as THIS caller should read it.
+
+    Only `execute_sql` varies: it states the row cap and deadline, and those are per organisation
+    (#329), so the import-time numbers are replaced with the current request's. Called by both MCP
+    servers at list-tools time, inside the request whose organisation is already set. A description
+    without the import-time sentence — a consumer's own `execute_sql` under that name — is returned
+    untouched, because rewriting text we did not write would be reshaping someone else's tool.
+
+    A client caches the list for its session, so a changed limit reaches new sessions; an existing one
+    meets the new numbers in the refusal, which re-resolves them per call."""
+    if name != "execute_sql" or _EXECUTE_SQL_LIMITS_AT_IMPORT not in description:
+        return description
+    return description.replace(_EXECUTE_SQL_LIMITS_AT_IMPORT, _execute_sql_limits_sentence())
 
 
 TOOLS: dict[str, dict[str, Any]] = {
@@ -3477,7 +3824,8 @@ TOOLS: dict[str, dict[str, Any]] = {
             "than the deployment row ceiling (refused rather than trimmed, so a partial answer "
             "never arrives looking whole).\n"
             # The numbers behind the two limits above (#326); see `_execute_sql_limits_sentence`.
-            + _execute_sql_limits_sentence()
+            # Replaced per caller at list-tools time (#329); see `tool_description`.
+            + _EXECUTE_SQL_LIMITS_AT_IMPORT
             +
             # The failure channel shipped from the start and the description documented two of the
             # three statuses, so a client met this shape for the first time at the moment it was

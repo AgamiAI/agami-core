@@ -74,7 +74,7 @@ import threading
 import urllib.parse
 import uuid
 from collections.abc import Callable, Iterator
-from contextvars import ContextVar, copy_context
+from contextvars import ContextVar, Token, copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1514,25 +1514,61 @@ def _pin_model_pass_posture() -> bool:
     return value
 
 
-def _resolve_row_cap() -> int:
-    """Effective result-row cap. `AGAMI_SQL_MAX_ROWS` is the operator-configurable DEPLOYMENT cap
-    (default 1000 when unset) — an operator owns their availability tradeoff and may set it higher OR
-    lower than 1000; it is NOT a hard 1000 ceiling. A missing/invalid/zero env value falls back to
-    1000.
+# The effective (row cap, timeout seconds) for THIS call, when the caller's organisation has its own
+# (#329). Absent means "the deployment's environment", which is every call that did not come through
+# a pinning entry point. Both numbers in one value rather than two ContextVars, so a reader can never
+# see one organisation's row cap beside another's deadline.
+#
+# This is a second, higher-precedence input to the budget, which is exactly the hazard
+# `_resolve_timeout_s` used to rule out by having no such thing: a value that outranks the environment
+# in the parent and is invisible to a forked child would let the supervisor bound the parent derives
+# sit below the budget the child enforces. It is allowed now on the same terms `_pass_posture` was:
+# it is resolved ONCE per call, before any bound is derived, and `tools._pass_child_env` writes both
+# numbers into the child's `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, so the child re-resolves the
+# identical budget from its environment. The fork carries it explicitly; it is never lost across it.
+#
+# The values held here are already validated positive ints — the provider that supplies them lives in
+# `tools`, which does the checking, so nothing here needs to re-parse them.
+_statement_limits: ContextVar[tuple[int, int] | None] = ContextVar(
+    "_statement_limits", default=None
+)
 
-    The operator is the only voice here. A per-call override used to be able to lower it, and it went
-    with the trim (ACE-087): the one thing a caller might know better than the deployment — that it
-    wants MORE rows — is the thing a lowering-only override structurally could not express, and a
-    caller that wants 200 rows says so in the statement, where the intent is legible to everything
-    downstream."""
+
+def _pin_statement_limits(max_rows: int, timeout_s: int) -> Token[tuple[int, int] | None]:
+    """Fix this call's effective budget. Returns the token the caller must reset with, in a
+    `finally`: the pin is request-scoped, and one left behind on a reused worker would hand the next
+    organisation's call this one's limits."""
+    return _statement_limits.set((max_rows, timeout_s))
+
+
+def _row_cap_from_env() -> int:
+    """The DEPLOYMENT row cap: `AGAMI_SQL_MAX_ROWS`, default 1000 when unset. An operator owns their
+    availability tradeoff and may set it higher OR lower than 1000; it is NOT a hard 1000 ceiling. A
+    missing/invalid/zero env value falls back to 1000."""
     raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
-    # `isdecimal`, not `isdigit`, for the reason `_resolve_timeout_s` gives: `isdigit` admits `²`,
+    # `isdecimal`, not `isdigit`, for the reason `_timeout_s_from_env` gives: `isdigit` admits `²`,
     # which `int()` then refuses. `tools` now resolves this while building its registry, so a raise
     # here would stop the module importing at all rather than failing one call.
     cap = int(raw) if raw.isdecimal() else _DEFAULT_MAX_ROWS
     if cap <= 0:
         cap = _DEFAULT_MAX_ROWS  # "0" / "00" → the default, never an empty result
     return cap
+
+
+def _resolve_row_cap() -> int:
+    """Effective result-row cap for THIS call: the organisation's own when a call pinned one
+    (`_statement_limits`, #329), otherwise the deployment's (`_row_cap_from_env`).
+
+    No per-CALL override exists, and that is unchanged. One used to be able to lower the cap, and it
+    went with the trim (ACE-087): the one thing a caller might know better than the deployment — that
+    it wants MORE rows — is the thing a lowering-only override structurally could not express, and a
+    caller that wants 200 rows says so in the statement, where the intent is legible to everything
+    downstream. What the pin carries is an administrator's setting for the organisation, resolved
+    before the call and not chosen by it."""
+    pinned = _statement_limits.get()
+    if pinned is not None:
+        return pinned[0]
+    return _row_cap_from_env()
 
 
 _DEFAULT_TIMEOUT_S = 30  # wall-clock seconds one statement may run before the watchdog cancels it
@@ -1581,18 +1617,47 @@ _abandoned_workers = 0
 
 
 def _resolve_timeout_s() -> int:
-    """Effective per-statement timeout, in whole seconds. `AGAMI_SQL_TIMEOUT_S` is the
-    operator-configurable DEPLOYMENT budget (default 30 when unset) — an operator owns their
-    availability tradeoff and may set it higher OR lower than 30. A missing or non-positive value
-    falls back to the default.
+    """Effective per-statement timeout for THIS call, in whole seconds: the organisation's own when
+    a call pinned one (`_statement_limits`, #329), otherwise the deployment's (`_timeout_s_from_env`).
+    Every bound in the ordered family — watchdog, native skew, outer bound, supervisor — reads this,
+    so they all derive from the one effective budget.
 
-    **The environment is the ONLY source, deliberately.** A request-scoped override would outrank it
-    in the parent and be invisible to a forked child, which re-resolves from `os.environ` alone — so
-    the supervisor bound the parent derives could sit BELOW the budget the child actually enforces
-    and fire first, inverting the ordered family the whole design rests on. One source, readable on
-    both sides of the fork, makes that inversion unrepresentable rather than merely unlikely.
+    **Two sources, and one budget on both sides of the fork.** The environment used to be the ONLY
+    source, deliberately: a request-scoped override would outrank it in the parent and be invisible to
+    a forked child, which re-resolves from `os.environ` alone — so the supervisor bound the parent
+    derives could sit BELOW the budget the child actually enforces and fire first, inverting the
+    ordered family the whole design rests on. A per-organisation limit needs exactly such an override,
+    so the hazard is now closed by construction instead of by absence: the pin is set once per call,
+    before the supervisor bound is derived, and `tools._pass_child_env` writes the pinned numbers into
+    the child's environment, where this same resolver (with no pin of its own) reads them back. The
+    parent and the child therefore reach the identical number, which is the property the old rule
+    existed to guarantee."""
+    pinned = _statement_limits.get()
+    if pinned is not None:
+        return pinned[1]
+    return _timeout_s_from_env()
 
-    Unlike `_resolve_row_cap`, a value that is PRESENT and does not survive to become the budget is
+
+def _timeout_is_representable(timeout_s: int) -> bool:
+    """Whether every bound derived from `timeout_s` can actually be armed.
+
+    Not a ceiling — there is deliberately none (#329) — but a statement of what the platform can
+    express. `threading.Timer` (the watchdog), `Thread.join` (the outer bound) and the supervisor's
+    wait all refuse a timeout at or above `threading.TIMEOUT_MAX` with an `OverflowError`. The outer
+    bound raises it AFTER its worker has started and BEFORE the abandonment is counted, so an
+    unrepresentable budget would not merely fail one call: it would leave `_MAX_ABANDONED_WORKERS`
+    bounding nothing. The largest derived bound is the supervisor's, so that is the one checked, and a
+    value failing it is treated as unusable like any other and falls back to the deployment's."""
+    return timeout_s + _SUPERVISOR_SKEW_S < threading.TIMEOUT_MAX
+
+
+def _timeout_s_from_env() -> int:
+    """The DEPLOYMENT per-statement timeout: `AGAMI_SQL_TIMEOUT_S`, default 30 when unset. An operator
+    owns their availability tradeoff and may set it higher OR lower than 30. A missing or non-positive
+    value falls back to the default. It is also what an organisation with no limit of its own gets,
+    and what a forked child reads the pinned budget back from.
+
+    Unlike `_row_cap_from_env`, a value that is PRESENT and does not survive to become the budget is
     logged at warning before the fallback. That covers `45.5` and `30s`, which cannot be read at all,
     and equally `-5` and `0`, which can be read and are then declined: an operator who wrote either
     asked for something specific, and a deployment quietly running 30 instead is exactly the
@@ -1605,7 +1670,8 @@ def _resolve_timeout_s() -> int:
     # a misconfigured deployment into a ValueError raised out of this resolver, at a call site (the
     # fork path's supervisor bound) that sits outside any handler.
     written = int(raw) if digits.isdecimal() else None
-    timeout_s = written if written is not None and written > 0 else _DEFAULT_TIMEOUT_S
+    usable = written is not None and written > 0 and _timeout_is_representable(written)
+    timeout_s = written if usable else _DEFAULT_TIMEOUT_S
     if raw and timeout_s != written:
         _LOG.warning(
             "AGAMI_SQL_TIMEOUT_S=%r is not a usable whole number of seconds; falling back to %ds.",
@@ -1711,8 +1777,9 @@ def _resource_limit_refusal(exc: _ResourceLimit | None) -> Refusal:
     invariant that survives is one rule with one emit site, not one sentence.
 
     The budget is re-resolved rather than carried: nothing between the engine call and here can
-    change the environment the resolvers read, so both `_resolve_timeout_s` and `_resolve_row_cap`
-    return the same number the bound itself used. The configured number belongs in the detail — it
+    change what the resolvers read — the call's pinned organisation limits, or the environment when
+    none were pinned (and, in a forked child, the environment its parent wrote the pin into) — so
+    both `_resolve_timeout_s` and `_resolve_row_cap` return the same number the bound itself used. The configured number belongs in the detail — it
     is a deployment setting, not a data value, and a bound the caller cannot see is one it cannot
     plan around.
     """
@@ -2636,8 +2703,9 @@ def _execute_bounded(
 
     The call runs inside a copy of the CALLER's context, and what that is FOR changed when the
     per-call row cap went (ACE-087). It used to carry ``_max_rows_override`` to ``_resolve_row_cap``
-    inside the worker; the cap is the deployment's environment now and needs no carrier. What it
-    still carries is the *caller's* request scope — ``tools._current_org_ctx``, the resolve-once
+    inside the worker; that override is gone. It now also carries the call's pinned organisation
+    limits (``_statement_limits``, #329), though nothing in the worker reads them today — every bound
+    is derived on the caller's side. What it chiefly carries is the *caller's* request scope — ``tools._current_org_ctx``, the resolve-once
     request cache, the actor and session on the served path — into the one place a consumer's own
     code runs. That is the point of the ``Executor`` seam: a pooled / per-user-RBAC executor picks
     its connection from exactly that context, and a new thread starts with an empty one, so dropping
@@ -2742,8 +2810,9 @@ def execute_guarded(
 
     ``_load_credentials`` sits INSIDE the try deliberately, so a bad profile / missing DSN becomes a
     ``failed``/``dsn`` Envelope carrying its detailed message rather than escaping as an exception
-    the two callers would each have to translate. The row cap is the deployment's alone
-    (``AGAMI_SQL_MAX_ROWS``); no caller can lower it for one call."""
+    the two callers would each have to translate. The row cap is the organisation's
+    limit when the caller pinned one (``tools.pinned_statement_limits``) and the deployment's
+    ``AGAMI_SQL_MAX_ROWS`` otherwise; no caller can change it for one statement."""
     # Clear before anything can set it, so a detail from a PREVIOUS call in this context can never
     # be attributed to this one. The recorder reads it unconditionally; a stale value would put the
     # wrong error text on a row that succeeded.
