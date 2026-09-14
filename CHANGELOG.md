@@ -172,6 +172,19 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **The reconcile card reads how many rows agree, names the side that failed, and still says what
+  the two queries are when the data could not be compared.** One differing cell used to print "0% of
+  the values match" for a column that was there; the values row now reads the comparator's share
+  ("9 of 10 rows match, differs in total on 1 of 10 rows"), and "same rows, different columns" needs
+  the paired columns to agree on every row. Every error row said "agami's query failed" although the
+  cause was often the person's statement, two empty results or a bare question; the card now reads
+  the cause from the row's files ("This row could not be compared: your query did not run: …"),
+  offers agami again only when agami failed, and sends a question-only row to the grading page. The
+  result pill reads "could not compare", or "same query, answer not compared" and "different query,
+  answer not compared" when the claims could be read, the new `outputs` claim ("selects") included.
+  Phase 2e passes `--unordered`, so a different sort is a different query and never a different
+  answer. (ACE-134)
+
 - **A join on the key the model declares one-to-one is no longer reported as a fan trap because a
   second edge exists between the same two tables.** The fan and chasm pre-flight matched a declared
   edge to a join by table pair and never read the columns the join wrote, so a subclass view joined

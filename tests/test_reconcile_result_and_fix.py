@@ -53,7 +53,7 @@ def test_every_result_label_and_its_fix(tmp_path):
         5: ("same query, different answer", "differs", "same", "ask_again"),
         6: ("different answer", "differs", "different", "examples"),
         7: ("different answer", "differs", "not_comparable", "question"),
-        8: ("could not run", "could_not_compare", "not_comparable", "ask_again"),
+        8: ("could not compare", "could_not_compare", "not_comparable", "ask_again"),
         9: ("different answer", "differs", "not_comparable", "query"),
         10: ("different answer", "differs", "different", "semantic_model"),
     }
@@ -140,3 +140,13 @@ def test_identical_column_names_with_different_row_counts_are_one_column_set(tmp
     assert rows["columns"]["state"] == "held" and not rows["columns"].get("yours_hi") and not rows["columns"].get("agami_hi")
     assert item["result"]["data"] == "differs" and "columns" not in item["result"]["differs_in"]
 
+
+
+def test_a_different_projection_alone_is_a_different_query(tmp_path):
+    """The eighth claim: two statements that select different expressions are not the same query,
+    however the other seven agree."""
+    only_outputs = dict(SCALAR_MATCH, row=2, claims=_claims(("tables", "agrees", ["orders"], ["orders"]),
+                                                            ("outputs", "differs", ["sum(orders.amount)"], ["avg(orders.amount)"])))
+    items = _items(tmp_path, [only_outputs])
+    assert items[2]["result"]["query"] == "different" and items[2]["result"]["label"] == "same answer, different query"
+    assert items[2]["result"]["differs_in"] == ["selects"] and items[2]["fix"] == "examples"
