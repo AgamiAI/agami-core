@@ -84,8 +84,6 @@ def _validate_item(item: dict, idx: int) -> None:
             raise ValueError(f"item {idx}: '{key}' must be text")
     if item.get("line") is not None and (not isinstance(item["line"], int) or isinstance(item["line"], bool)):
         raise ValueError(f"item {idx}: 'line' must be a whole number")
-    if item.get("line") is not None and (not isinstance(item["line"], int) or isinstance(item["line"], bool)):
-        raise ValueError(f"item {idx}: 'line' must be a whole number")
     if item.get("statement_preview") and len(item["statement_preview"]) > 80:
         raise ValueError(f"item {idx}: 'statement_preview' is at most 80 characters")
 

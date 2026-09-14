@@ -67,3 +67,10 @@ def test_each_filter_row_on_the_report_page_is_labelled():
     for token in ('<span class="k">Result</span>', '<span class="k">Fix</span>', '<span class="k">Find</span>', '>Clear filters</button>', 'id="result-row"'):
         assert token in html, token
 
+
+def test_each_chip_row_counts_the_rows_the_other_filters_leave():
+    html = rr.render(title="t", profile="p", run="r", items=CARDS)
+    assert "function passes(item, ignore)" in html and "function visible() { return DATA.items.filter(item => passes(item)); }" in html
+    assert "(passes(i, 'owner') ? 1 : 0)" in html and "(passes(i, 'result') ? 1 : 0)" in html and "(passes(i, 'status') ? 1 : 0)" in html
+    assert "(n ? '' : ' zero')" in html
+

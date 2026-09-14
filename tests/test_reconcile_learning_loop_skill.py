@@ -348,3 +348,8 @@ def test_the_items_file_carries_the_result_and_the_fix():
     table = _between(SKILL, "### 2d", "### 2e")
     assert 'A query written differently from agami\'s is not this' in table and '"same answer, different query"' in table
 
+
+def test_the_example_decision_has_a_route():
+    story = _between(SKILL, "### 3a.5", "### 3b")
+    assert "**`example`** takes the person's statement and its question to `/agami-save-correction` as a prompt example" in story
+
