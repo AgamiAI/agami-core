@@ -233,6 +233,48 @@ def test_a_failing_lookup_never_breaks_the_refusal(local, monkeypatch):
     )
 
 
+def test_a_name_declared_under_two_schemas_here_is_not_pointed_elsewhere(local, monkeypatch):
+    """#332: `invoices` in two schemas of THIS datasource is refused as ambiguous, not undeclared.
+    The bare-name index leaves such a name out, so reading it as "declared" would send the caller to
+    another datasource for a table it only has to qualify."""
+    from semantic_model import models as m
+
+    def _invoices(schema):
+        return m.Table(name="invoices", schema=schema, storage_connection="c", grain=["id"],
+                       columns=[m.Column(name="id", type="integer")])
+
+    org = m.Datasource(datasource="acme_crm", subject_areas=[
+        m.SubjectArea(name="billing", tables_defined=[_invoices("billing")]),
+        m.SubjectArea(name="crm", tables_defined=[_invoices("crm")]),
+    ])
+    monkeypatch.setattr(tools, "get_cached_org", lambda profile: org)
+    monkeypatch.setattr(
+        tools, "_declared_elsewhere", lambda names, profile: {"invoices": ["acme_erp"]}
+    )
+    original = _scope_refusal_envelope()
+
+    assert (
+        tools._point_to_declaring_datasource(original, "SELECT id FROM invoices", "acme_crm")
+        is original
+    )
+
+
+def test_a_physical_table_beside_a_same_named_inner_cte_still_gets_the_hint(local, monkeypatch):
+    """The inner WITH binds `invoices` for its own subquery only; the outer read is the physical
+    table, which the gate refused — so the hint judges it too, rather than dropping it by name."""
+    monkeypatch.setattr(
+        tools, "_declared_elsewhere", lambda names, profile: {"invoices": ["acme_erp"]}
+    )
+
+    env = tools._point_to_declaring_datasource(
+        _scope_refusal_envelope(),
+        "SELECT id FROM invoices WHERE EXISTS (WITH invoices AS (SELECT 1 AS id) SELECT id FROM invoices)",
+        "acme_crm",
+    )
+
+    assert "acme_erp" in env.refusal.remediation
+
+
 def test_the_lookup_is_scoped_to_the_organization(tmp_path):
     url = "sqlite://" + str(tmp_path / "m.db")
     store = Store.connect(url)

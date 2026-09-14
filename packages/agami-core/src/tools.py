@@ -2263,9 +2263,16 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
         tree = getattr(ctx, "tree", None)
         if tree is None:
             return env
-        declared = set(RT._model_table_index(org))
-        ctes = {name.lower() for name in RT._cte_names(tree)}
-        referenced = {ref.bare.lower() for ref in RT._table_references(tree) if ref.bare} - ctes
+        # `.schemas` holds EVERY name the model declares. The bare-name map itself leaves out a name
+        # declared under two schemas (#332), and reading it here would call an ambiguity refusal's
+        # table undeclared and point the caller at another datasource for a table declared in this one.
+        declared = set(RT._model_table_index(org).schemas)
+        # Which references name a CTE, per reference against the WITH that encloses it — the gate's
+        # own resolution. By name across the statement, a physical table beside a same-named CTE
+        # anywhere else would drop out of `referenced` and the hint would judge a different statement.
+        cte_refs = RT._cte_references(tree)
+        referenced = {site.ref.bare.lower() for site in RT._reference_sites(tree)
+                      if site.ref.bare and id(site.node) not in cte_refs}
         undeclared = sorted(referenced - declared)
         if not undeclared:
             return env
