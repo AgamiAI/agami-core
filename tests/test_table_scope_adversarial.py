@@ -187,19 +187,6 @@ def test_a_cte_its_with_encloses_is_still_not_a_table(sql):
     assert rt.check_table_scope(sql, _scope_org()) is None
 
 
-def _scope_org_on(storage_type):
-    """`_scope_org` with an engine declared, so the gate reads the statement in that dialect."""
-    if storage_type is None:
-        return _scope_org()
-    return m.Datasource(
-        datasource="Shop",
-        storage_connections=[m.StorageConnection(name="c", storage_type=storage_type)],
-        subject_areas=_scope_org().subject_areas,
-    )
-
-
-_ENGINES = [None, "PostgreSQL", "DuckDB", "Snowflake"]
-
 # Under WITH RECURSIVE a CTE's own name is the CTE only in the recursive term — the arms of a UNION
 # after the first. DuckDB reads a self-reference anywhere else as the physical table, and each of
 # these returned the undeclared table's row with every gate silent.
@@ -223,50 +210,38 @@ _RECURSIVE_ESCAPES = {
 }
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
 @pytest.mark.parametrize("sql", list(_RECURSIVE_ESCAPES.values()), ids=list(_RECURSIVE_ESCAPES))
-def test_a_recursive_self_reference_outside_the_recursive_term_is_the_physical_table(sql, engine):
-    _assert_tables_refused(rt.check_table_scope(sql, _scope_org_on(engine)), "secret")
+def test_a_recursive_self_reference_outside_the_recursive_term_is_the_physical_table(sql):
+    _assert_tables_refused(rt.check_table_scope(sql, _scope_org()), "secret")
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_a_self_reference_in_the_recursive_term_is_still_the_cte(engine):
+def test_a_self_reference_in_the_recursive_term_is_still_the_cte():
     sql = (
         "WITH RECURSIVE t AS (SELECT id FROM orders UNION ALL SELECT id + 1 FROM t WHERE id < 3) "
         "SELECT id FROM t"
     )
     assert rt._parse_sql(sql, None) is not None
-    assert rt.check_table_scope(sql, _scope_org_on(engine)) is None
+    assert rt.check_table_scope(sql, _scope_org()) is None
 
 
-# A quoted identifier is case-sensitive. A reference is the CTE only when the two are provably the
-# same identifier under the engine's folding rule; each refusal below read a table named differently
-# from the CTE on the engine it lists.
-@pytest.mark.parametrize(("sql", "echo", "engines"), [
-    ('WITH "Secret" AS (SELECT id FROM orders) SELECT id FROM secret', "secret", _ENGINES),
-    ('WITH secret AS (SELECT id FROM orders) SELECT id FROM "SECRET"', "SECRET",
-     [None, "PostgreSQL", "DuckDB"]),
-    ('WITH "secret" AS (SELECT id FROM orders) SELECT id FROM secret', "secret",
-     [None, "Snowflake"]),
+# A quoted identifier is case-sensitive, so a CTE name binds a reference only when both are unquoted
+# (equal ignoring case) or both are quoted (exactly equal). Each refusal below read a physical table
+# on Postgres; a mixed pair is always checked as a table.
+@pytest.mark.parametrize(("sql", "echo"), [
+    ('WITH "Secret" AS (SELECT id FROM orders) SELECT id FROM secret', "secret"),
+    ('WITH secret AS (SELECT id FROM orders) SELECT id FROM "SECRET"', "SECRET"),
+    ('WITH "secret" AS (SELECT id FROM orders) SELECT id FROM secret', "secret"),
 ], ids=["quoted_mixed_case_cte", "quoted_upper_reference", "quoted_lower_cte"])
-def test_a_differently_quoted_name_is_not_the_cte(sql, echo, engines):
-    for engine in engines:
-        _assert_tables_refused(rt.check_table_scope(sql, _scope_org_on(engine)), echo)
+def test_a_differently_quoted_name_is_not_the_cte(sql, echo):
+    _assert_tables_refused(rt.check_table_scope(sql, _scope_org()), echo)
 
 
-@pytest.mark.parametrize(("sql", "engines"), [
-    # both unquoted: case-insensitive everywhere
-    ("WITH X AS (SELECT id FROM orders) SELECT id FROM x", _ENGINES),
-    # quoted equals the engine's fold of the unquoted name
-    ('WITH "secret" AS (SELECT id FROM orders) SELECT id FROM secret', ["PostgreSQL", "DuckDB"]),
-    ('WITH "SECRET" AS (SELECT id FROM orders) SELECT id FROM secret', ["Snowflake"]),
-    ('WITH secret AS (SELECT id FROM orders) SELECT id FROM "SECRET"', ["Snowflake"]),
-    # quoted vs quoted, exact
-    ('WITH "Secret" AS (SELECT id FROM orders) SELECT id FROM "Secret"', _ENGINES),
-], ids=["unquoted", "postgres_fold", "snowflake_fold_cte", "snowflake_fold_reference", "exact"])
-def test_the_same_identifier_under_the_engines_rules_is_still_the_cte(sql, engines):
-    for engine in engines:
-        assert rt.check_table_scope(sql, _scope_org_on(engine)) is None, engine
+@pytest.mark.parametrize("sql", [
+    "WITH X AS (SELECT id FROM orders) SELECT id FROM x",
+    'WITH "Secret" AS (SELECT id FROM orders) SELECT id FROM "Secret"',
+], ids=["both_unquoted", "both_quoted_exact"])
+def test_the_same_identifier_is_still_the_cte(sql):
+    assert rt.check_table_scope(sql, _scope_org()) is None
 
 
 def test_every_undeclared_table_is_named_not_just_the_first():

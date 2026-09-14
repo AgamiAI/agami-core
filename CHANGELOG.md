@@ -63,10 +63,9 @@ below corresponds to one such version.
     earlier siblings and enclosing `WITH`s; its own name only under `WITH RECURSIVE`, in the arms of a
     `UNION` after the first (the recursive term) — DuckDB reads a self-reference anywhere else as the
     physical table; and a schema-qualified name is never a CTE. A reference binds to a CTE only when
-    the two are the same identifier under the engine's quoting rules (a quoted name is
-    case-sensitive; it equals an unquoted one only as that engine folds it — lower on Postgres,
-    Redshift and DuckDB, upper on Snowflake — and never on an engine with no known rule). A shape
-    that cannot be resolved is checked as a table.
+    both names are unquoted and equal ignoring case, or both are quoted and exactly equal; a quoted
+    name against an unquoted one is always checked as a table (so `WITH "orders" … FROM orders` is
+    refused; write both the same way). A shape that cannot be resolved is checked as a table.
   - Column scope binds columns to the table actually read, rather than to every table sharing its
     name. The receipt, the declared-filter accounting and the refusal receipt resolve references the
     same way the gate does.

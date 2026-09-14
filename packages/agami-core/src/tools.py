@@ -2287,7 +2287,7 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
         # Which references name a CTE, per reference against the WITH that encloses it — the gate's
         # own resolution. By name across the statement, a physical table beside a same-named CTE
         # anywhere else would drop out of `referenced` and the hint would judge a different statement.
-        cte_refs = RT._cte_references(tree, getattr(ctx, "dialect", None))
+        cte_refs = RT._cte_references(tree)
         referenced = {site.ref.bare.lower() for site in RT._reference_sites(tree)
                       if site.ref.bare and id(site.node) not in cte_refs}
         undeclared = sorted(referenced - declared)
