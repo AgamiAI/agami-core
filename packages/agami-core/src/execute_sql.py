@@ -1638,6 +1638,19 @@ def _resolve_timeout_s() -> int:
     return _timeout_s_from_env()
 
 
+def _timeout_is_representable(timeout_s: int) -> bool:
+    """Whether every bound derived from `timeout_s` can actually be armed.
+
+    Not a ceiling — there is deliberately none (#329) — but a statement of what the platform can
+    express. `threading.Timer` (the watchdog), `Thread.join` (the outer bound) and the supervisor's
+    wait all refuse a timeout at or above `threading.TIMEOUT_MAX` with an `OverflowError`. The outer
+    bound raises it AFTER its worker has started and BEFORE the abandonment is counted, so an
+    unrepresentable budget would not merely fail one call: it would leave `_MAX_ABANDONED_WORKERS`
+    bounding nothing. The largest derived bound is the supervisor's, so that is the one checked, and a
+    value failing it is treated as unusable like any other and falls back to the deployment's."""
+    return timeout_s + _SUPERVISOR_SKEW_S < threading.TIMEOUT_MAX
+
+
 def _timeout_s_from_env() -> int:
     """The DEPLOYMENT per-statement timeout: `AGAMI_SQL_TIMEOUT_S`, default 30 when unset. An operator
     owns their availability tradeoff and may set it higher OR lower than 30. A missing or non-positive
@@ -1657,7 +1670,8 @@ def _timeout_s_from_env() -> int:
     # a misconfigured deployment into a ValueError raised out of this resolver, at a call site (the
     # fork path's supervisor bound) that sits outside any handler.
     written = int(raw) if digits.isdecimal() else None
-    timeout_s = written if written is not None and written > 0 else _DEFAULT_TIMEOUT_S
+    usable = written is not None and written > 0 and _timeout_is_representable(written)
+    timeout_s = written if usable else _DEFAULT_TIMEOUT_S
     if raw and timeout_s != written:
         _LOG.warning(
             "AGAMI_SQL_TIMEOUT_S=%r is not a usable whole number of seconds; falling back to %ds.",

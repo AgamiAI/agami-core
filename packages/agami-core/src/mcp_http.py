@@ -51,6 +51,7 @@ from tools import (
     TOOLS,
     _current_org_ctx,
     bootstrap_paths,
+    has_statement_limits_provider,
     record_tool_call,
     require_thread_id,
     reset_typed_outcome,
@@ -503,6 +504,9 @@ def build_server(
         # Off the loop, for ACE-048's reason: the limits provider is the consumer's code and usually a
         # database read, and on the loop one slow read would stall every in-flight request.
         # `run_blocking` copies the request context, so the organisation is still set in the worker.
+        # Without a provider nothing here blocks, so the hop would be a thread per listing for nothing.
+        if not has_statement_limits_provider():
+            return _listed()
         return await run_blocking(_listed)
 
     @server.call_tool()

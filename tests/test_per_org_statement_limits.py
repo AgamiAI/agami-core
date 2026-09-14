@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -193,7 +194,9 @@ def test_a_real_child_resolves_the_budget_the_parent_bounded():
     child_rows, child_timeout = (int(x) for x in child.stdout.split())
 
     assert (child_rows, child_timeout) == (5000, 90)
-    assert parent_bound > child_timeout
+    # The parent's supervisor bound is derived from the SAME number the child enforces — not merely
+    # larger, which the fixed skew alone would make true of any budget the child might have reached.
+    assert parent_bound - execute_sql._SUPERVISOR_SKEW_S == child_timeout
 
 
 def test_without_a_provider_the_child_env_spells_the_deployment_values(monkeypatch):
@@ -388,4 +391,149 @@ def test_create_app_registers_the_adapters_provider(monkeypatch):
 
     mcp_http.create_app()
     assert tools._STATEMENT_LIMITS_PROVIDER is None
-    assert os.environ.get("AGAMI_SQL_MAX_ROWS") is None  # registration touches no environment
+    # And behaviourally: acme's own limits no longer apply once an app without a provider is built.
+    assert tools.statement_limits("acme") == {
+        "max_rows": execute_sql._DEFAULT_MAX_ROWS,
+        "timeout_s": execute_sql._DEFAULT_TIMEOUT_S,
+    }
+
+
+def test_listing_tools_without_a_provider_does_not_hop_threads(monkeypatch):
+    pytest.importorskip("mcp")
+    import mcp.types as mt
+    import mcp_http
+
+    async def _no_hop(*args, **kwargs):
+        raise AssertionError("listed on a worker thread with no provider registered")
+
+    monkeypatch.setattr(mcp_http, "run_blocking", _no_hop)
+    handler = mcp_http.build_server().request_handlers[mt.ListToolsRequest]
+
+    result = asyncio.run(handler(mt.ListToolsRequest(method="tools/list")))
+
+    assert "execute_sql" in {t.name for t in result.root.tools}
+
+
+def test_naming_an_org_inside_a_call_asks_the_provider_again():
+    """The pin records numbers, not whose they are, so only the argument-less form returns it."""
+    calls: list[str] = []
+
+    def _counting(org_id):
+        calls.append(org_id)
+        return {"timeout_s": 90 + len(calls)}
+
+    tools.set_statement_limits_provider(_counting)
+
+    with tools.pinned_statement_limits("acme"):
+        assert tools.statement_limits()["timeout_s"] == 91
+        assert tools.statement_limits("acme")["timeout_s"] == 92
+
+    assert calls == ["acme", "acme"]
+
+
+# ----------------------------------------------------------------------------------------------
+# The bounds themselves run on the pinned budget, and every budget is one they can arm
+# ----------------------------------------------------------------------------------------------
+
+
+class _Blocking:
+    """An executor that does not return until released — the shape the outer bound exists for."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    def execute(self, vetted_sql, creds, *, profile):
+        self.release.wait(30)
+        return execute_sql.ExecResult(columns=["c"], rows=[(1,)], truncated=False)
+
+
+def _drain_abandoned(deadline_s: float = 5) -> None:
+    deadline = time.monotonic() + deadline_s
+    while execute_sql._abandoned_workers and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_the_outer_bound_fires_on_the_pinned_timeout_not_the_deployments(monkeypatch):
+    """The resolvers returning the pin is not the claim; the bound waiting that long is. With the
+    deployment at 30s and acme at 1s, the outer bound must stop waiting after about one second."""
+    monkeypatch.setattr(execute_sql, "_OUTER_BOUND_SKEW_S", 0)
+    tools.set_statement_limits_provider(lambda org_id: {"timeout_s": 1})
+    blocking = _Blocking()
+
+    started = time.monotonic()
+    try:
+        with tools.pinned_statement_limits("acme"), pytest.raises(execute_sql._OuterBoundExpired):
+            execute_sql._execute_bounded(blocking, "SELECT 1", {}, profile="demo")
+        elapsed = time.monotonic() - started
+    finally:
+        blocking.release.set()
+        _drain_abandoned()
+
+    assert elapsed < 10, (
+        f"the outer bound waited {elapsed:.1f}s — the deployment's budget, not acme's"
+    )
+
+
+def test_the_watchdog_fires_on_the_pinned_timeout(monkeypatch):
+    tools.set_statement_limits_provider(lambda org_id: {"timeout_s": 1})
+    cancelled = threading.Event()
+
+    started = time.monotonic()
+    with tools.pinned_statement_limits("acme"):
+        with execute_sql._deadline(cancelled.set, execute_sql._resolve_timeout_s()) as fired:
+            cancelled.wait(10)
+    elapsed = time.monotonic() - started
+
+    assert fired.is_set() and cancelled.is_set()
+    assert elapsed < 10
+
+
+_UNREPRESENTABLE = int(threading.TIMEOUT_MAX)
+_LARGEST_ARMABLE = int(threading.TIMEOUT_MAX) - execute_sql._SUPERVISOR_SKEW_S - 1
+
+
+def test_a_provider_timeout_the_platform_cannot_arm_falls_back(caplog):
+    tools.set_statement_limits_provider(lambda org_id: {"timeout_s": _UNREPRESENTABLE})
+
+    with caplog.at_level(logging.WARNING, logger=tools._LOG.name):
+        assert tools.statement_limits("acme")["timeout_s"] == execute_sql._DEFAULT_TIMEOUT_S
+
+    assert any("timeout_s" in r.getMessage() for r in caplog.records)
+
+
+def test_the_largest_armable_timeout_is_still_accepted():
+    """Representability, not a ceiling: one second below the edge is the administrator's to set."""
+    tools.set_statement_limits_provider(lambda org_id: {"timeout_s": _LARGEST_ARMABLE})
+
+    assert tools.statement_limits("acme")["timeout_s"] == _LARGEST_ARMABLE
+
+
+@pytest.mark.parametrize("raw", [str(_UNREPRESENTABLE), "99999999999999999999"])
+def test_an_environment_timeout_the_platform_cannot_arm_falls_back(monkeypatch, caplog, raw):
+    monkeypatch.setenv("AGAMI_SQL_TIMEOUT_S", raw)
+
+    with caplog.at_level(logging.WARNING, logger=execute_sql._LOG.name):
+        assert execute_sql._timeout_s_from_env() == execute_sql._DEFAULT_TIMEOUT_S
+
+    assert any("AGAMI_SQL_TIMEOUT_S" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unrepresentable_timeout_cannot_disable_the_abandoned_worker_cap(monkeypatch):
+    """The reported failure: `join(huge)` raised OverflowError after the worker started and before
+    the abandonment was counted, so the cap stopped bounding anything. The fallback budget is shrunk
+    to one second so the abandonment happens inside the test; the cap is shrunk to one so a single
+    abandonment reaches it."""
+    monkeypatch.setenv("AGAMI_SQL_TIMEOUT_S", str(_UNREPRESENTABLE))
+    monkeypatch.setattr(execute_sql, "_DEFAULT_TIMEOUT_S", 1)
+    monkeypatch.setattr(execute_sql, "_OUTER_BOUND_SKEW_S", 0)
+    monkeypatch.setattr(execute_sql, "_MAX_ABANDONED_WORKERS", execute_sql._abandoned_workers + 1)
+    blocking = _Blocking()
+
+    try:
+        with pytest.raises(execute_sql._OuterBoundExpired):  # not OverflowError
+            execute_sql._execute_bounded(blocking, "SELECT 1", {}, profile="demo")
+        with pytest.raises(execute_sql._ExecutorSaturated):
+            execute_sql._execute_bounded(blocking, "SELECT 1", {}, profile="demo")
+    finally:
+        blocking.release.set()
+        _drain_abandoned()

@@ -1929,11 +1929,18 @@ def _provider_limit(org_id: str, key: str, value: Any) -> int | None:
     organisation's bad row must cost that organisation its override, not everybody their query."""
     if value is None:
         return None
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+    from execute_sql import _timeout_is_representable
+
+    usable = isinstance(value, int) and not isinstance(value, bool) and value > 0
+    # No ceiling, but a timeout the platform cannot arm is not a setting: see
+    # `execute_sql._timeout_is_representable` for how one would disable the abandoned-worker cap.
+    if usable and key == "timeout_s" and not _timeout_is_representable(value):
+        usable = False
+    if usable:
         return value
     _LOG.warning(
-        "statement limits provider returned %s=%r for org %s, which is not a positive whole number; "
-        "using the deployment value.",
+        "statement limits provider returned %s=%r for org %s, which is not a usable positive whole "
+        "number; using the deployment value.",
         key,
         value,
         org_id,
@@ -1979,6 +1986,12 @@ def _effective_statement_limits(org_id: str | None) -> tuple[int, int]:
         if value is not None:
             limits[key] = value
     return limits["max_rows"], limits["timeout_s"]
+
+
+def has_statement_limits_provider() -> bool:
+    """Whether a provider is registered — so a caller can skip work that only a provider makes
+    necessary (the HTTP server's thread hop when listing tools)."""
+    return _STATEMENT_LIMITS_PROVIDER is not None
 
 
 @contextlib.contextmanager
@@ -3315,9 +3328,11 @@ def statement_limits(org_id: str | None = None) -> dict[str, int]:
     anything that shows them (the tool description, an admin screen) cannot disagree with the bound
     actually applied.
 
-    Inside a call that already pinned its limits, and asked about no other organisation, the pin is
-    returned rather than a fresh resolution: that is the number this call is enforcing, even if the
-    provider would now answer differently."""
+    Inside a call that already pinned its limits, and with ``org_id`` omitted, the pin is returned
+    rather than a fresh resolution: that is the number this call is enforcing, even if the provider
+    would now answer differently. Passing an ``org_id`` — even the current request's own — always asks
+    the provider afresh, because the pin records numbers and not whose they are; a caller that wants
+    what this call enforces omits the argument."""
     import execute_sql
 
     pinned = execute_sql._statement_limits.get()

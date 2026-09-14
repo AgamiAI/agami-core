@@ -19,7 +19,10 @@ below corresponds to one such version.
   through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
   unusable value (not a positive whole number, or a provider that raises) falls back to
   `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
-  the log. There is no ceiling.
+  the log. There is no ceiling. A time limit too large for the platform to arm a timer on (at or
+  above Python's `threading.TIMEOUT_MAX`, counting the supervisor's 60-second slack) is treated as
+  unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` alike.
+  - An evaluation run scores both statements of each case under the named organisation's limits.
   - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
     child is handed the same two numbers in its environment, so the watchdog, the native bound, the
     outer bound and the supervisor still derive from one budget on both sides of the fork.
