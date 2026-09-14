@@ -39,8 +39,8 @@ jobs:
         continue-on-error: true
 
       # Coverage is ENFORCED, not just reported. Measured 2026-07-29 at 85.66% on every leg of this
-      # matrix — 3.10, 3.11 and 3.12 alike, 1584 tests — so the floor sits just below it and no matrix
-      # leg is closer to the line than any other. Before this the job printed a coverage report and
+      # matrix — 3.10, 3.11 and 3.12 alike, 1584 tests — so the floor sits just below it, and because
+      # no leg measured differently, enforcing it on one leg (below) loses nothing. Before this the job printed a coverage report and
       # failed on nothing: OCR-024 claimed a >=80% floor that was never in the workflow, so coverage
       # could regress to zero and CI stayed green.
       # Ratchet upward as the suite grows; never lower it to make a red build pass.
