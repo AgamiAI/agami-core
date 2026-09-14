@@ -326,9 +326,21 @@ def test_the_run_works_five_rows_at_a_time_and_resumes_from_its_checkpoint():
 
 def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_through_intake():
     story = _between(SKILL, "### 3a.5", "### 3b")
-    assert 'report-items --run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story
-    assert '--items-file "<artifacts_dir>/local/reconcile/<ts>/report-items.json"' in story
-    assert "/tmp/agami-reconcile-report-items" not in story
+    assert 'render_reconcile_report.py" --title "Reconcile · <profile>"' in story
+    assert '--run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story and "--words-file /tmp/agami-reconcile-words-<ts>.json" in story
+    assert 'check-run --run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story
+    assert "--items-file" not in story and "/tmp/agami-reconcile-report-items" not in story
+    assert "Say the three lines the renderer printed" in story
+    assert "Never write `report.html`, `report-items.json` or `rows.jsonl` with the Write tool" in story
+    record = _between(SKILL, "### 2d", "### 2e")
+    assert 'record --run-dir "<artifacts_dir>/local/reconcile/<ts>" --row <n>' in record and "never by hand" in record
+    assert "never written as `error`" in record and "/tmp/agami-reconcile-results" not in record
+    diff = _between(SKILL, "### 2c", "### 2d")
+    assert "> rows/<n>/diff.json" in diff
+    ask = _between(SKILL, "### 2b", "### 2c")
+    assert "rows/<n>/agami-run.json" in ask
+    sheet = SKILL[SKILL.index("## Error handling cheat sheet"):]
+    assert "`record`, `report-items`, `render_reconcile_report.py` or `check-run` fails" in sheet
     csv_branch = _between(SKILL, "### CSV branch", "### ")
     assert "reconcile.py\" intake --file" in csv_branch and "parse --csv" not in csv_branch
     phase_2 = _between(SKILL, "## Phase 2: Generate questions + execute", "### 2a")
