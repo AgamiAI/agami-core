@@ -503,8 +503,9 @@ Then confirm both landed: `<artifacts_dir>/organization.yaml` now shows `name:`/
 
 Options: `Write it now (Other field)` / `Generate one for me (Recommended)` / `Skip`.
 
-- **Write it now** → `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "<their line>"`.
-- **Generate one for me** → defer to **Phase 2f**: once every table is enriched, synthesize ONE line from the subject-area and table descriptions (what the data covers, and the questions it answers — grounded in the model, never product memory), write it with the same `sm set-description` command, and show it in the Phase 7 summary as a draft they can edit.
+**Nothing is written at this step** — `datasource.yaml` does not exist until introspection (1.7) creates it. Bind the answer and act on it after 1.7:
+- **Write it now** → bind `$DATASOURCE_DESCRIPTION` to their line. Right after 1.7 succeeds, write it: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "$DATASOURCE_DESCRIPTION"`.
+- **Generate one for me** → bind `$DATASOURCE_DESCRIPTION = generate`. **Phase 2f** writes it once every table is enriched (see 2f), and the Phase 7 summary shows it as a draft they can edit.
 - **Skip** → leave it empty. Say plainly that `model_deploy` will warn about it, and that an agent picking between several datasources will be guessing from the name.
 
 If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask only whether to keep it.
@@ -800,6 +801,14 @@ chmod 644 "$ROOT/datasource.md"   # non-secret model file — must stay readable
 
 If the user **did** write a narrative in 1.4, leave it untouched. The glossary from `set-terminology` (2b) needs no re-render — it's surfaced automatically by `org-context`. Mention in the Phase 7 summary that the glossary + summary are auto-derived and the narrative is theirs to edit.
 
+**The one-line datasource description (from 1.4 C).** Act on `$DATASOURCE_DESCRIPTION` now, every onboard:
+- a line the user wrote → it was already written right after 1.7; nothing to do.
+- `generate` → synthesize **ONE line** from the subject-area and table descriptions you just wrote: what this datasource covers and the questions it answers (e.g. *"Invoices, payments, products and margins — use for revenue and profitability questions."*). Ground it in the model, never product memory. Write it:
+  ```bash
+  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "<the line>"
+  ```
+- skipped → leave it; `datasource.yaml` keeps whatever description it already had (re-introspection preserves it).
+
 ---
 
 ## Phase 3: Review the subject-area split
@@ -969,6 +978,8 @@ agami-connect just ran. Here's what we found:
   that use them and self-approve as you query.
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
+
+After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
 Then **AskUserQuestion**: `Open the review queue` (→ `/agami-model review` — sign off the pending metrics/entities) / `Browse the full model` (→ `/agami-model` — explore + exclude tables/columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
 

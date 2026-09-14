@@ -286,13 +286,15 @@ def _served_datasources(org_id: str) -> "list[str] | None":
         return None
 
 
-def _choose_datasource_error(org_id: str) -> "str | None":
+def _choose_datasource_error(org_id: str, served: "list[str] | None" = None) -> "str | None":
     """The refusal for an omitted `datasource` that resolved to nothing — naming the real choices.
 
     Returns None when the store cannot answer, so the caller keeps whatever message it already had:
-    a guess about the customer's datasources is exactly what this function exists to stop.
+    a guess about the customer's datasources is exactly what this function exists to stop. A caller
+    that already listed the datasources passes them as `served`, so one omitted call costs one query.
     """
-    served = _served_datasources(org_id)
+    if served is None:
+        served = _served_datasources(org_id)
     if served is None:
         return None
     if not served:
@@ -335,7 +337,12 @@ def _datasources_to_choose_from(args: dict[str, Any]) -> "list[str] | None":
     datasources is what this exists to stop, so the old behaviour stands there."""
     if args.get("datasource"):
         return None
-    served = _served_datasources(_current_org_id())
+    org_id = _current_org_id()
+    if _SOLE_SERVED.get(org_id) is not None:
+        # Already known to serve exactly one — the common case answers from the cache `resolve_profile`
+        # keeps, so an omitted call on a single-datasource organization adds no query.
+        return None
+    served = _served_datasources(org_id)
     if served is None or len(served) < 2:
         return None
     return served
@@ -1478,8 +1485,9 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     """
     # With several datasources served, an omission is refused before it can resolve to a fallback
     # (#327); `_choose_datasource_error` names the choices.
-    if _datasources_to_choose_from(args) is not None:
-        choose = _choose_datasource_error(_current_org_id())
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        choose = _choose_datasource_error(_current_org_id(), served=choices)
         if choose is not None:
             return choose
     profile = _resolve_call_datasource(args)
@@ -1710,8 +1718,9 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     """
     # Same refusal as `get_datasource_schema` for an omission with several datasources served (#327):
     # examples from a guessed datasource would teach SQL for the wrong one.
-    if _datasources_to_choose_from(args) is not None:
-        choose = _choose_datasource_error(_current_org_id())
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        choose = _choose_datasource_error(_current_org_id(), served=choices)
         if choose is not None:
             return choose
     profile = _resolve_call_datasource(args)
@@ -2048,35 +2057,42 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
             return env
         declared = set(RT._model_table_index(org))
         ctes = {name.lower() for name in RT._cte_names(tree)}
-        undeclared = sorted(
-            {ref.bare.lower() for ref in RT._table_references(tree) if ref.bare} - declared - ctes
-        )
+        referenced = {ref.bare.lower() for ref in RT._table_references(tree) if ref.bare} - ctes
+        undeclared = sorted(referenced - declared)
         if not undeclared:
             return env
-        homes = _declared_elsewhere(undeclared, profile)
+        # Every referenced table, not only the undeclared ones: a datasource is only worth naming if it
+        # declares the WHOLE statement, or the retry is refused again on the tables declared here.
+        homes = _declared_elsewhere(sorted(referenced), profile)
+        echo = RT._echo_identifiers
     except Exception:  # noqa: BLE001 - a hint that cannot be computed leaves the refusal as it was
         return env
     if not all(homes.get(name) for name in undeclared):
         return env  # at least one table is declared nowhere: the gate's own advice is the right one
-    listed = ", ".join(f"`{name}`" for name in undeclared)
-    shared = set.intersection(*(set(homes[name]) for name in undeclared))
-    if len(shared) == 1:
-        (target,) = shared
-        verb = "is" if len(undeclared) == 1 else "are"
+    # Caller-written names go through the gate's own echo bound — capped in count, shortened, and
+    # stripped to an identifier's alphabet — because refusal text reads to the caller as server-authored.
+    listed = echo(undeclared)
+    targets = set.intersection(*(set(homes.get(name, [])) for name in sorted(referenced)))
+    if len(targets) == 1:
+        (target,) = targets
         remediation = (
-            f"{listed} {verb} declared in datasource `{target}`, not `{profile}`. Read its schema "
-            f"and run the query with `datasource` set to `{target}`."
+            f"The tables in this statement ({echo(sorted(referenced))}) are all declared in "
+            f"datasource `{target}`, not `{profile}`. Read its schema and run the query with "
+            f"`datasource` set to `{target}`."
         )
-    elif shared:
+    elif targets:
         remediation = (
-            f"{listed} are declared in datasources {', '.join(f'`{d}`' for d in sorted(shared))}, "
-            f"not `{profile}`. Run the query with `datasource` set to the one this question is about."
+            f"The tables in this statement are all declared in datasources "
+            f"{', '.join(f'`{d}`' for d in sorted(targets))}, not `{profile}`. Run the query with "
+            f"`datasource` set to the one this question is about."
         )
     else:
-        where = "; ".join(f"`{name}` in {', '.join(homes[name])}" for name in undeclared)
+        where = "; ".join(f"{echo([name])} in {', '.join(homes[name])}" for name in undeclared)
+        verb = "is" if len(undeclared) == 1 else "are"
         remediation = (
-            f"These tables are declared in different datasources ({where}), and one statement cannot "
-            f"join across datasources. Query each datasource separately."
+            f"{listed} {verb} not in `{profile}`, and the tables this statement joins live in "
+            f"different datasources ({where}); one statement cannot join across datasources. Query "
+            f"each datasource separately."
         )
     from dataclasses import replace as _replace
 

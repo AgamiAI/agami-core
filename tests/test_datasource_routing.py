@@ -148,15 +148,48 @@ def test_tables_declared_in_one_other_datasource_are_pointed_there(local, monkey
     )
 
     env = tools._point_to_declaring_datasource(
-        _scope_refusal_envelope(), "SELECT id FROM invoices JOIN orders USING (id)", "acme_crm"
+        _scope_refusal_envelope(), "SELECT id FROM invoices", "acme_crm"
     )
 
     remediation = env.refusal.remediation
     assert "acme_erp" in remediation and "invoices" in remediation
     assert "Add the table to the model" not in remediation
-    assert (
-        env.refusal.rule == guardrail.RULE_TABLE_SCOPE
-    )  # the verdict is unchanged; only the advice
+    # The verdict is unchanged; only the advice.
+    assert env.refusal.rule == guardrail.RULE_TABLE_SCOPE
+
+
+def test_a_target_must_declare_every_table_in_the_statement(local, monkeypatch):
+    """`orders` is declared only here and `invoices` only in `acme_erp`: sending the statement to
+    `acme_erp` would be refused again on `orders`, so no datasource is named as the place to run it."""
+    monkeypatch.setattr(
+        tools, "_declared_elsewhere", lambda names, profile: {"invoices": ["acme_erp"]}
+    )
+
+    env = tools._point_to_declaring_datasource(
+        _scope_refusal_envelope(), "SELECT id FROM invoices JOIN orders USING (id)", "acme_crm"
+    )
+
+    assert "cannot join" in env.refusal.remediation
+    assert "set to `acme_erp`" not in env.refusal.remediation
+
+
+def test_emit_carries_the_hint_in_the_body(local, monkeypatch):
+    """The hint is applied inside `_emit`, before the body and the audit row are built."""
+    monkeypatch.setattr(
+        tools, "_declared_elsewhere", lambda names, profile: {"invoices": ["acme_erp"]}
+    )
+
+    body = json.loads(
+        tools._emit(
+            _scope_refusal_envelope(),
+            sql="SELECT id FROM invoices",
+            execution_ms=None,
+            profile="acme_crm",
+            args={"datasource": "acme_crm"},
+        )
+    )
+
+    assert "acme_erp" in body["refusal"]["remediation"]
 
 
 def test_tables_split_across_datasources_say_one_statement_cannot_join_them(local, monkeypatch):
@@ -252,3 +285,19 @@ def test_deploy_warns_about_a_missing_description_and_not_a_present_one(tmp_path
 
     assert "acme_crm" in warned and "no description" in warned
     assert "no description" not in quiet
+
+
+def test_reintrospect_keeps_an_existing_description_and_a_new_one_wins(tmp_path):
+    """The introspector builds a model with no description; writing it must not wipe the line a
+    human set, while a model that carries its own description still replaces the old one."""
+    from semantic_model import build, loader
+
+    root = tmp_path / "acme_crm"
+    _write_profile(root, description="Orders and customers for sales questions.")
+    org = loader.load_datasource(root)
+
+    build.write_tree(org.model_copy(update={"description": ""}), root)
+    assert loader.load_datasource(root).description == "Orders and customers for sales questions."
+
+    build.write_tree(org.model_copy(update={"description": "Orders only."}), root)
+    assert loader.load_datasource(root).description == "Orders only."

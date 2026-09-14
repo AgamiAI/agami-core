@@ -38,8 +38,11 @@ below corresponds to one such version.
   datasource still resolves as before.
 - **A table-scope refusal names the datasource that declares the table** (#327). It said "add the
   table to the model" when the table was already declared in another of the organization's
-  datasources; it now says which one to run the query against, or that the tables live in different
-  datasources and one statement cannot join them. Only the same organization's datasources are named.
+  datasources; it now says which one to run the query against — only a datasource that declares every
+  table in the statement — or that the tables live in different datasources and one statement cannot
+  join them. Only the same organization's datasources are named. Table-scope refusals come from the
+  semantic-model pass, which is off by default on a server (see `SECURITY.md`), so there the hint has
+  nothing to rewrite.
 
 ### Added
 
