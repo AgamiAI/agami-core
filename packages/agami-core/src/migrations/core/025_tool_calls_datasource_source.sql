@@ -1,0 +1,18 @@
+-- Where this call's `datasource` came from (#328).
+--
+-- `tool_calls.datasource` recorded the argument the client sent, so a call that omitted it was
+-- logged with an empty datasource even though it ran against one — the handler resolves a fallback
+-- (`AGAMI_PROFILE`, the active profile, the sole served datasource) and uses it. The column now holds
+-- the datasource the call RESOLVED to, and this one keeps what the old value told a reader that the
+-- new one would otherwise hide: whether the client named it.
+--
+--   'explicit'  the client sent `datasource`
+--   'resolved'  the client sent none and the server chose it
+--   NULL        the tool is not about one datasource (`list_datasources`), or a row written before 025
+--
+-- The distinction is worth a column: a client that omits `datasource` on a deployment serving several
+-- runs against whichever the fallback picks, and this is how that shows up in the log.
+--
+-- Forward-only and portable (SQLite + Postgres). No `IF NOT EXISTS` — SQLite's ALTER does not accept
+-- it; re-run safety comes from the runner's applied-filename ledger. No index: nothing filters on it.
+ALTER TABLE tool_calls ADD COLUMN datasource_source TEXT;
