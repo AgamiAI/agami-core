@@ -21,18 +21,35 @@ below corresponds to one such version.
   looked up:
   - A schema-qualified reference must match a table declared with that schema. A table declared
     without a schema is reachable only unqualified.
-  - An unqualified name declared under two or more schemas is refused as ambiguous, naming those
-    schemas and asking for the qualified name. A name declared under one schema passes as before.
-  - A schema-qualified reference is never taken for a CTE of the same name; it was skipped by name.
+  - An unqualified name declared under two or more schemas is refused as ambiguous and the caller is
+    asked for the qualified name. The refusal does not list the schemas (it names only what the caller
+    sent). A name declared under one schema passes as before.
+  - **CTE names are resolved per reference, against the `WITH` that actually encloses it.** They
+    were skipped by name across the whole statement, which let an undeclared table through table and
+    column scope beside a same-named CTE anywhere else: an inner `WITH secret AS (…)` in a subquery
+    hid the outer `FROM secret`, a CTE body could read a physical table named like a later sibling,
+    and a non-recursive CTE could read the physical table of its own name. A CTE body now sees only
+    earlier siblings and enclosing `WITH`s, its own name only under `WITH RECURSIVE`, and a
+    schema-qualified name is never a CTE. A shape that cannot be resolved is checked as a table.
   - Column scope binds columns to the table actually read, rather than to every table sharing its
     name. The receipt, the declared-filter accounting and the refusal receipt resolve references the
     same way the gate does.
   - Model lookups (`get_table_context`, the schema index) no longer resolve a name declared under two
     schemas to whichever was defined first: a qualified name or the area's `TableRef` schema settles
     it, and an unsettled clash reports not found.
+  - `get_datasource_schema` serves every same-named table in the `full` tier, each resolved in its own
+    subject area and keyed `schema.name` when the name clashes (e.g. `billing.products` and
+    `crm.products`). `dataset_names` accepts `schema.table`, which is how a caller picks one of them;
+    a bare name still works for a unique table, and a bare clashing name returns an error asking for
+    the qualified form.
   - The validator reports an error when two tables with the same name are defined in one subject
     area; the model store keys tables by area and name, so such a model cannot be stored faithfully.
-    The same name in different areas is allowed.
+    The same name in different areas is allowed. `agami-connect` never produces this, but on a model
+    hand-edited into that shape **every curation write is reverted** (curation re-validates and rolls
+    back on any error) until the area is split.
+  - On DuckDB, a statement qualifying a table by its attached database name (`FROM mydb.orders`) is
+    now refused when the model records the table's schema as `main`: the qualifier is compared as a
+    schema. Write the table unqualified, or as `main.orders`.
 
 - **A table outside the connection's default schema resolves when the client names it without its
   schema** (#258). A large model is served at the `summary` tier, whose area table lists carried a

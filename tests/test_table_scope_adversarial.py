@@ -136,6 +136,57 @@ def test_schema_qualification_does_not_evade():
         rt.check_table_scope("SELECT id FROM private.secret", _scope_org()), "private.secret")
 
 
+# A CTE name hides only the references its own WITH encloses. Each of these used to pass because
+# the gate subtracted every name any WITH bound, anywhere in the statement, and each returned rows
+# from `secret` on a real engine.
+_CTE_ESCAPES = {
+    # an inner WITH inside a subquery hid the outer, physical reference
+    "inner_with_hides_outer": (
+        "SELECT id FROM secret WHERE EXISTS "
+        "(WITH secret AS (SELECT id FROM orders) SELECT id FROM secret)"
+    ),
+    # a CTE body cannot see a sibling defined after it, so `secret` there is the physical table
+    "forward_sibling": "WITH a AS (SELECT id FROM secret), secret AS (SELECT 1 AS id) SELECT id FROM a",
+    # without RECURSIVE a CTE's own name inside its body is the physical table
+    "non_recursive_self_reference": "WITH secret AS (SELECT id FROM secret) SELECT id FROM secret",
+}
+
+
+@pytest.mark.parametrize("sql", list(_CTE_ESCAPES.values()), ids=list(_CTE_ESCAPES))
+def test_a_cte_name_does_not_hide_a_reference_its_with_does_not_enclose(sql):
+    _assert_tables_refused(rt.check_table_scope(sql, _scope_org()), "secret")
+
+
+_CTE_LEGITIMATE = {
+    "plain_cte": "WITH recent AS (SELECT id FROM orders) SELECT id FROM recent",
+    "earlier_sibling": (
+        "WITH a AS (SELECT id FROM orders), b AS (SELECT id FROM a) SELECT id FROM b"
+    ),
+    "recursive_self_reference": (
+        "WITH RECURSIVE walk AS (SELECT id FROM orders UNION ALL SELECT id FROM walk) "
+        "SELECT id FROM walk"
+    ),
+    "with_over_a_union": (
+        "WITH recent AS (SELECT id FROM orders) "
+        "SELECT id FROM recent UNION SELECT id FROM customers"
+    ),
+    "cte_inside_a_union_arm": (
+        "SELECT id FROM customers UNION "
+        "SELECT id FROM (WITH recent AS (SELECT id FROM orders) SELECT id FROM recent) AS r"
+    ),
+    "cte_inside_a_subquery": (
+        "SELECT id FROM orders WHERE EXISTS (WITH c AS (SELECT id FROM customers) SELECT id FROM c)"
+    ),
+}
+
+
+@pytest.mark.parametrize("sql", list(_CTE_LEGITIMATE.values()), ids=list(_CTE_LEGITIMATE))
+def test_a_cte_its_with_encloses_is_still_not_a_table(sql):
+    # Parsed first, so a statement the parser cannot read never passes here by degrading to allow.
+    assert rt._parse_sql(sql, None) is not None
+    assert rt.check_table_scope(sql, _scope_org()) is None
+
+
 def test_every_undeclared_table_is_named_not_just_the_first():
     # A caller fixing one name at a time would otherwise need as many round trips as it had
     # undeclared tables, and would reasonably read the first refusal as the whole problem.

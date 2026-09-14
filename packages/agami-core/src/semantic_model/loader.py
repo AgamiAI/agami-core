@@ -345,7 +345,9 @@ def _pick_declared(cands: list[Table], table_name: str) -> Optional[Table]:
     if len({_table_identity(t) for t in cands}) == 1:
         return cands[0]
     if "." in table_name:
-        qualifier = table_name.rsplit(".", 1)[0].lower()
+        # The segment just before the name. `db.sales_data.orders` qualifies by `sales_data`; taking
+        # everything before the last dot would compare `db.sales_data` against a schema and miss.
+        qualifier = table_name.split(".")[-2].lower()
         hits = [t for t in cands if (t.schema_name or "").lower() == qualifier]
         if hits and len({_table_identity(t) for t in hits}) == 1:
             return hits[0]

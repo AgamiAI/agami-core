@@ -245,31 +245,24 @@ def test_a_cte_that_shadows_a_declared_table_is_not_declared(org):
     assert items[0]["filters"] == []
 
 
-def test_a_reference_a_shadowing_cte_zeroed_is_counted_rather_than_called_complete(org):
-    """The CTE subtraction is statement-GLOBAL, so a WITH-bound name collides with every reference
-    to the declared table of that name — including a genuine read of the real table.
+def test_a_real_read_beside_a_shadowing_cte_is_resolved_per_reference(org):
+    """A WITH-bound name no longer collides with a genuine read of the declared table.
 
-    The statement below reads `public.orders` for real and applies none of its declared filters, and
-    the subtraction hands that reference `filters: []` anyway. `[]` is the same list a table
-    declaring nothing gets, so the item cannot say which of the two happened, and the marker used to
-    go null beside it: a real read of a declared table, no accounting at all, under the positive
-    claim that nothing is missing. The fixed sentence this section shipped before covered both
-    meanings of `[]`; nothing does now except the marker.
-
-    Scope-aware CTE resolution is what would let the item answer properly, and it is not this
-    section's to build. What is fixed here is the marker: the accounting for such a reference is
-    genuinely undetermined, so it is counted and said out loud. `declared` and `filters` are asserted
-    unchanged beside it, because the counting is not licence to restate the item.
+    This test used to pin the limitation: the CTE subtraction was statement-GLOBAL, so the
+    `public.orders` below — a real read of the real table, which no WITH can bind because it is
+    qualified — was handed `declared: false` and `filters: []`, and the marker counted it as
+    unresolved. The table gate judged the same reference as the physical table, so the two
+    disagreed. `_cte_references` (#332) resolves each reference against the WITH clauses that
+    enclose it, so the item is now what the statement did: a declared read, accounted for.
     """
     shadowing = "WITH orders AS (SELECT 1 AS id) SELECT count(*) FROM public.orders"
     section = rt.assemble_receipt(org, shadowing)["tables"]
 
     assert [i["ref"] for i in section["items"]] == ["public.orders"]
-    assert section["items"][0]["declared"] is False
-    assert section["items"][0]["filters"] == []
-    assert section["undetermined"] == (
-        "1 of the listed reference(s) could not be resolved to a model table."
-    )
+    assert section["items"][0]["declared"] is True
+    assert section["items"][0]["qname"] == "public.orders"
+    assert section["items"][0]["filters"] != []
+    assert "could not be resolved" not in (section["undetermined"] or "")
 
 
 def test_tables_section_carries_the_models_row_estimate_not_a_count(org):

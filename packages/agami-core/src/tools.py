@@ -1198,46 +1198,106 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
     not override that: forcing a named table into the declared area returns "not found in scope"
     for any table outside it, while its metrics stay advertised — a silent hide.
     """
-    # A name defined under two or more schemas gets no owning area. Keyed by name alone, the LAST
-    # definition's area won, and the per-area lookup then resolved the name inside that area — so a
-    # clash silently served one of the two tables. Left ungrouped, it resolves org-wide, where the
-    # loader refuses to pick between them rather than picking by definition order.
-    schemas_of: dict[str, set] = {}
+    # Each requested name is resolved to ONE definition — and so to the area that defines it — before
+    # anything is fetched. Keyed by name alone, a name defined in two schemas (which is what connect
+    # produces for a multi-schema warehouse: `billing.products` and `crm.products`, one area each)
+    # took whichever area was defined last, and the table the caller got depended on model order.
+    # `schema.table` settles such a clash; a bare name settles only a unique one, and an unsettled
+    # clash says so rather than guessing.
+    defs = _table_definitions(org)
+    clashing = _clashing_table_names(defs)
+    picks: list[tuple[str, str | None, Any, str | None]] = []
+    for requested in table_names:
+        bare = _bare_name(requested)
+        cands = sorted(defs.get(requested, []) + (defs.get(bare, []) if bare != requested else []),
+                       key=lambda d: d[0])
+        table = L._pick_declared([t for _, _, t in cands], requested)
+        if table is None:
+            error = ("declared in more than one schema; name it as schema.table" if cands
+                     else "not found in scope")
+            picks.append((requested, None, None, error))
+            continue
+        area = next(a for _, a, t in cands if t is table)
+        picks.append((_served_key(table, clashing), area, table, None))
+    return _contexts_for(org, picks, L, index=index)
+
+
+def _table_definitions(org) -> dict[str, list[tuple[int, str, Any]]]:
+    """table name -> every definition of it as (scan rank, defining area, Table), in scan order."""
+    defs: dict[str, list[tuple[int, str, Any]]] = {}
+    rank = 0
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            schemas_of.setdefault(t.name, set()).add((t.schema_name or "").lower())
-    area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined
-               if len(schemas_of[t.name]) == 1}
-    by_area: dict[str | None, list[str]] = {}
-    for t in table_names:
-        by_area.setdefault(area_of.get(t), []).append(t)
+            defs.setdefault(t.name, []).append((rank, sa.name, t))
+            rank += 1
+    return defs
+
+
+def _clashing_table_names(defs: dict[str, list[tuple[int, str, Any]]]) -> set[str]:
+    """Names defined under more than one schema — the ones a bare name cannot identify."""
+    return {name for name, ds in defs.items()
+            if len({(t.schema_name or "").lower() for _, _, t in ds}) > 1}
+
+
+def _served_key(table, clashing: set[str]) -> str:
+    """The key a table's context is served under: its name, or `schema.name` when the name clashes.
+
+    Keyed by bare name, two clashing tables collided in the one `tables` dict and the second
+    silently replaced the first, so a full-tier response carried one `products` and no sign that a
+    second existed. The qualified key is also exactly what a caller passes back in `dataset_names`.
+    """
+    if table.name in clashing and table.schema_name:
+        return f"{table.schema_name}.{table.name}"
+    return table.name
+
+
+def _contexts_for(org, picks: list[tuple[str, str | None, Any, str | None]], L,
+                  index=None) -> dict[str, Any]:
+    """Fetch contexts for already-resolved `(served key, defining area, Table, error)` picks.
+
+    Each group is fetched in the area that DEFINES its tables, where the validator guarantees a
+    name is unique, so the loader never has to choose between clashing definitions. The served key
+    doubles as the loader query: `schema.name` for a clash settles it inside the loader as well.
+    """
+    by_area: dict[str | None, list[tuple[str, Any, str | None]]] = {}
+    for key, area, table, error in picks:
+        by_area.setdefault(area, []).append((key, table, error))
     contexts: dict[str, Any] = {}
     relationships: list[Any] = []
     seen: set[tuple] = set()
-    for grp_area, tbls in by_area.items():
-        ctx = L.get_table_context(
-            org,
-            tbls,
-            area=grp_area,
-            include=["default_filters", "relationships", "caveats", "value_transforms"],
-            index=index,
-        )
-        contexts.update(ctx.get("tables", {}))
-        for rel in ctx.get("relationships", []):
-            # `_relationships_among` returns a cross-area edge for EITHER endpoint, so an edge
-            # whose two tables land in different area groups arrives once per group. Dedupe on the
-            # endpoints rather than the whole dict: two genuinely distinct edges between the same
-            # pair differ by their join columns, which are part of the key.
-            key = (
-                rel.get("from_table"),
-                rel.get("to_table"),
-                rel.get("from_column"),
-                rel.get("to_column"),
-                rel.get("on"),
+    for grp_area, group in by_area.items():
+        found = [key for key, table, _error in group if table is not None]
+        got: dict[str, Any] = {}
+        if found:
+            ctx = L.get_table_context(
+                org,
+                found,
+                area=grp_area,
+                include=["default_filters", "relationships", "caveats", "value_transforms"],
+                index=index,
             )
-            if key not in seen:
-                seen.add(key)
-                relationships.append(rel)
+            got = ctx.get("tables", {})
+            for rel in ctx.get("relationships", []):
+                # `_relationships_among` returns a cross-area edge for EITHER endpoint, so an edge
+                # whose two tables land in different area groups arrives once per group. Dedupe on
+                # the endpoints rather than the whole dict: two genuinely distinct edges between the
+                # same pair differ by their join columns, which are part of the key.
+                rkey = (
+                    rel.get("from_table"),
+                    rel.get("to_table"),
+                    rel.get("from_column"),
+                    rel.get("to_column"),
+                    rel.get("on"),
+                )
+                if rkey not in seen:
+                    seen.add(rkey)
+                    relationships.append(rel)
+        for key, table, error in group:
+            if table is None:
+                contexts[key] = {"error": error}
+            else:
+                # The loader keys a found table by its own name and a miss by the query.
+                contexts[key] = got.get(table.name, got.get(key, {"error": "not found in scope"}))
     return {"tables": contexts, "relationships": relationships}
 
 
@@ -1264,7 +1324,7 @@ class Scope(NamedTuple):
 
     level: str  # "datasource" | "area" | "table"
     area: "str | None"  # the declared area; None at datasource scope
-    tables: tuple[str, ...]  # bare names, schema stripped; empty unless level == "table"
+    tables: tuple[str, ...]  # as the caller wrote them (`schema.table` allowed); empty unless level == "table"
 
 
 def _resolve_scope(args: dict[str, Any]) -> Scope:
@@ -1287,7 +1347,10 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
     """
     area = args.get("area")
     area = area.strip() if isinstance(area, str) and area.strip() else None
-    tables = tuple(_bare_name(str(n)) for n in (args.get("dataset_names") or []))
+    # Kept as the caller wrote them. Stripping the schema here left no way to name one of two tables
+    # sharing a name — the thing a scope refusal tells the caller to do. Every consumer that wants the
+    # bare name (metric scoping, the area check) strips it itself.
+    tables = tuple(str(n) for n in (args.get("dataset_names") or []))
     if tables:
         return Scope("table", area, tables)
     if area:
@@ -1435,8 +1498,15 @@ def _schema_payload(
             for sa in areas
         ]
     if mode == "full":
-        result["tables"] = _table_contexts(
-            org, [t.name for sa in areas for t in sa.tables_defined], L, index=index
+        # Every definition in its own area, keyed `schema.name` where the name clashes. Passing bare
+        # names here resolved a clashing name to no area and then to not-found, so a multi-schema
+        # model served neither `billing.products` nor `crm.products` in full.
+        clashing = _clashing_table_names(_table_definitions(org))
+        result["tables"] = _contexts_for(
+            org,
+            [(_served_key(t, clashing), sa.name, t, None) for sa in areas for t in sa.tables_defined],
+            L,
+            index=index,
         )["tables"]
     # metrics in full: the matched set (a query/metric_names limits them); else every metric in
     # full mode (back-compat); else none (rely on metric_index).
@@ -1512,8 +1582,8 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
             if not any(
                 sa.name == scope.area
                 and (
-                    any(_bare_name(d.name) == tbl for d in sa.tables_defined)
-                    or any(_bare_name(getattr(r, "table", "")) == tbl for r in sa.tables)
+                    any(_bare_name(d.name) == _bare_name(tbl) for d in sa.tables_defined)
+                    or any(_bare_name(getattr(r, "table", "")) == _bare_name(tbl) for r in sa.tables)
                 )
                 for sa in org.subject_areas
             )
@@ -3307,7 +3377,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string"},
                     "description": (
                         "Scope to these tables — full field-level detail, their joins, and the "
-                        "metrics that apply to them (no downgrade). Narrowest scope."
+                        "metrics that apply to them (no downgrade). Narrowest scope. Name a table "
+                        "as `schema.table` when its name exists in more than one schema."
                     ),
                 },
                 "query": {

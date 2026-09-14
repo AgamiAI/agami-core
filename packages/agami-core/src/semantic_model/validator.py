@@ -557,7 +557,9 @@ def _check_duplicate_table_names(sa: SubjectArea, res: ValidationResult) -> None
     """
     by_name: dict[str, list[Table]] = {}
     for t in sa.tables_defined:
-        by_name.setdefault(bare_name(t.name).lower(), []).append(t)
+        # The full name, folded — the key `runtime._model_table_index` and the store use. Folding
+        # `bare_name` here flagged `sales.orders` beside `orders`, which the runtime keeps apart.
+        by_name.setdefault(t.name.lower(), []).append(t)
     for name, tables in sorted(by_name.items()):
         if len(tables) < 2:
             continue
