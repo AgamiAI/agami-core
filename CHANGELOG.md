@@ -33,6 +33,12 @@ below corresponds to one such version.
   - The `execute_sql` description states the caller's organisation's numbers, built when tools are
     listed rather than once at start-up. A client keeps the list for its session, so a changed limit
     reaches new sessions; an existing session meets it in the refusal, which names the number per call.
+- **`sm set-description`, and onboarding asks for a datasource description** (#327). The one line
+  `list_datasources` shows an agent to route a question by could only be hand-edited into
+  `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
+  `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
+  model, as it does for the database narrative — and `model_deploy` warns when a datasource is
+  deployed without one.
 
 ### Fixed
 
@@ -65,15 +71,6 @@ below corresponds to one such version.
   join them. Only the same organization's datasources are named. Table-scope refusals come from the
   semantic-model pass, which is off by default on a server (see `SECURITY.md`), so there the hint has
   nothing to rewrite.
-
-### Added
-
-- **`sm set-description`, and onboarding asks for a datasource description** (#327). The one line
-  `list_datasources` shows an agent to route a question by could only be hand-edited into
-  `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
-  `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
-  model, as it does for the database narrative — and `model_deploy` warns when a datasource is
-  deployed without one.
 
 ## [0.8.6] — 2026-09-14
 
