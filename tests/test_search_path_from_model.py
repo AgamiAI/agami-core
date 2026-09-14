@@ -31,8 +31,8 @@ def _model(*tables: tuple[str, str | None]) -> SimpleNamespace:
 # --- which schemas ---------------------------------------------------------------------------------
 
 
-def test_a_model_in_one_schema_gets_that_schema():
-    org = _model(("orders", "sales_data"), ("refunds", "sales_data"), ("regions", "public"))
+def test_a_model_entirely_in_one_schema_gets_that_schema():
+    org = _model(("orders", "sales_data"), ("refunds", "sales_data"))
 
     assert execute_sql._search_path_schemas(org) == ["sales_data"]
 
@@ -46,7 +46,23 @@ def test_a_model_spanning_two_schemas_gets_no_path():
     assert execute_sql._search_path_schemas(org) == []
 
 
-def test_tables_without_a_schema_no_model_and_public_only_contribute_nothing():
+def test_a_declared_public_table_beside_another_schema_gets_no_path():
+    """`public` stays on the path but after `sales_data`, so a bare `regions` meant for the declared
+    `public.regions` would resolve to an undeclared `sales_data.regions` first."""
+    org = _model(("orders", "sales_data"), ("regions", "public"))
+
+    assert execute_sql._search_path_schemas(org) == []
+
+
+def test_a_table_with_no_schema_beside_another_schema_gets_no_path():
+    """A schema-less table resolves through the connection's defaults, which the path would outrank:
+    a bare `events` meant for it could read an undeclared `sales_data.events` instead."""
+    org = _model(("orders", "sales_data"), ("events", None))
+
+    assert execute_sql._search_path_schemas(org) == []
+
+
+def test_schema_less_public_only_and_no_model_get_no_path():
     assert execute_sql._search_path_schemas(_model(("orders", None))) == []
     assert execute_sql._search_path_schemas(_model(("orders", "public"))) == []
     assert execute_sql._search_path_schemas(None) == []

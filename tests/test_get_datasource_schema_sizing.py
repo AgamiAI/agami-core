@@ -24,6 +24,7 @@ def _write_model(
     metrics: dict[str, list[str]] | None = None,
     wide: bool = False,
     big_rows: bool = False,
+    schema: str = "public",
 ) -> None:
     """Write a synthetic on-disk model: `n_areas` subject areas, each with `tables_per_area`
     tables. `metrics` maps area-index → metric names. `wide` pads columns to inflate full-mode
@@ -42,7 +43,7 @@ def _write_model(
         refs = []
         for j in range(tables_per_area):
             tname = f"t{i}_{j}"
-            refs.append({"storage_connection": "c", "schema": "public", "table": tname})
+            refs.append({"storage_connection": "c", "schema": schema, "table": tname})
             cols = [{"name": "id", "type": "integer", "primary_key": True}]
             n_cols = 10 if wide else 1
             for k in range(n_cols):
@@ -55,7 +56,7 @@ def _write_model(
                 )
             tdoc = {
                 "name": tname,
-                "schema": "public",
+                "schema": schema,
                 "storage_connection": "c",
                 "grain": ["id"],
                 "description": f"table {tname} description",
@@ -213,14 +214,15 @@ def test_the_real_payload_validates_against_the_published_contract(
 
 
 def test_the_area_summary_names_its_tables_rather_than_listing_bare_strings(monkeypatch, tmp_path):
-    prof = _run(monkeypatch, tmp_path, n_areas=2, tables_per_area=2)
+    # A non-default schema, so a payload that hard-coded `public` could not pass.
+    prof = _run(monkeypatch, tmp_path, n_areas=2, tables_per_area=2, schema="sales_data")
     head = _schema(prof, mode="summary")
     tables = head["subject_areas"][0]["tables"]
     assert [t["name"] for t in tables] == ["t0_0", "t0_1"]
     assert all(t["description"] for t in tables), "the description is why these are objects"
     # #258: the schema travels with the name, or a client writes `FROM t0_0` and a warehouse whose
     # tables are outside the default schema cannot resolve it.
-    assert [t["schema"] for t in tables] == ["public", "public"]
+    assert [t["schema"] for t in tables] == ["sales_data", "sales_data"]
 
 
 def test_the_index_mode_area_carries_a_count_not_a_table_list(monkeypatch, tmp_path):

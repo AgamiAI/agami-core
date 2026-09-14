@@ -21,12 +21,14 @@ below corresponds to one such version.
   changes:
   - `get_datasource_schema`'s summary table list now carries each table's `schema`, as the full
     and table-scoped tiers already did.
-  - On Postgres, Redshift and Supabase, when every schema-qualified table in the model lives in one
-    schema, a statement runs with `SET LOCAL search_path` set to that schema (plus `public`), so a
-    bare name still resolves. A model spanning two or more schemas gets no path: a bare name could
-    then resolve to a same-named table the model does not declare, silently. It uses the model the
-    semantic-model pass already loaded, so it applies only when that pass is on — which is off by
-    default on a server (see `SECURITY.md`); there, the summary tier's `schema` is the fix.
+  - On Postgres, Redshift and Supabase, when every table in the model declares the same schema and it
+    is not `public`, a statement runs with `SET LOCAL search_path` set to that schema (plus `public`),
+    so a bare name still resolves. Any other model — two or more schemas, a table in `public`, or a
+    table with no schema — gets no path: the path would outrank the schema those tables resolve
+    through, and a bare name meant for one could silently read a same-named table the model does not
+    declare. It uses the model the semantic-model pass already loaded, so it applies only when that
+    pass is on — which is off by default on a server (see `SECURITY.md`); there, the summary tier's
+    `schema` is the fix.
 
 ## [0.8.6] — 2026-09-14
 

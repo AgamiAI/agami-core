@@ -2017,30 +2017,33 @@ _SEARCH_PATH_ENGINES = frozenset({"postgres", "redshift", "supabase"})
 
 
 def _search_path_schemas(org: Any) -> list[str]:
-    """The schema for `SET LOCAL search_path` (#258): `[schema]` when every schema-qualified table in
-    the model lives in that one schema, else `[]`.
+    """The schema for `SET LOCAL search_path` (#258): `[schema]` when EVERY table in the model declares
+    that one schema and it is not `public`, else `[]`.
 
     The client was served bare table names and wrote `FROM orders`, which cannot resolve when the
-    table lives in `sales_data`; setting the path lets that statement run as written. ONE schema is
-    the whole safety argument. With `finance` listed before `sales_data`, a bare `orders` would resolve
-    to `finance.orders` if the warehouse has one — a table the model does not declare, read silently
-    under a receipt that names the model's table — and the model cannot see the warehouse's catalog to
-    rule that out. So a model spanning two or more schemas gets no path and keeps today's behaviour
-    (the statement fails and names the relation). `public` does not count: it stays on the path
-    anyway. A schema name with a control character gets no path either — a NUL makes the driver raise
-    on every statement for the profile."""
+    table lives in `sales_data`; setting the path lets that statement run as written. The path puts
+    `sales_data` ahead of the connection's defaults, so it is only safe when no declared table relies
+    on those defaults — otherwise a bare name meant for that table can resolve to a same-named
+    `sales_data` relation the model does not declare, silently, under a receipt naming the model's
+    table. The model cannot see the warehouse catalog to rule that out, so it is refused structurally:
+    - two or more schemas: `finance` first would capture a bare `orders` meant for `sales_data`;
+    - any table with no schema: it resolves through the defaults, which the path now outranks;
+    - a table in `public`: `public` stays on the path but AFTER the chosen schema, so it is outranked
+      the same way — and a model entirely in `public` needs no path at all.
+    Each of those keeps today's behaviour (the statement fails and names the relation). A schema name
+    with a control character gets no path either — a NUL makes the driver raise on every statement."""
     if org is None:
         return []
-    schemas: set[str] = set()
+    schemas: set[str | None] = set()
     for area in getattr(org, "subject_areas", None) or []:
         for table in getattr(area, "tables_defined", None) or []:
-            schema = getattr(table, "schema_name", None)
-            if schema and schema != "public":
-                schemas.add(schema)
+            schemas.add(getattr(table, "schema_name", None) or None)
     if len(schemas) != 1:
         return []
     (schema,) = schemas
-    return [] if any(ord(ch) < 32 for ch in schema) else [schema]
+    if schema is None or schema == "public" or any(ord(ch) < 32 for ch in schema):
+        return []
+    return [schema]
 
 
 def _quote_ident(name: str) -> str:
