@@ -1770,6 +1770,13 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
         # edge to it would leak this query's CTE into the next one's analysis.
         rels = rels + cte_rels
     table_set = set(tables_in_scope.values())
+    # Only the edges the statement's own joins could have traversed count below (ACE-133). The fan
+    # and chasm detectors match a declared edge to a join by TABLE PAIR, and a model can declare two
+    # edges between one pair: a subclass view joined to its base table on the key the model declares
+    # one-to-one was reported as a fan trap because a sibling many-to-one between the same two
+    # tables was also in the list, while the joins section of the same receipt, which reads the
+    # written key, called the join one-to-one. The written key names the edge.
+    rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0])
 
     sites = _aggregate_sites(tree, tables_in_scope, scope, visible)
     # The set the detectors read, derived from the sites rather than walked again — the two must
@@ -4662,6 +4669,75 @@ def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozen
             if len(tables) == 2:
                 pairs.add(tables)
     return frozenset(pairs)
+
+
+def _written_join_pairs(
+    tree: "exp.Select", scope_map: dict[str, str]
+) -> dict[frozenset[str], frozenset[frozenset[tuple[str, str]]]]:
+    """THIS SELECT's own explicit joins as the column pairs each one wrote, keyed by the unordered
+    pair of tables it connects: the same reading as `_joined_table_pairs`, keeping the columns. The
+    same pinning rule too: only an ON that names its own join's two relations counts, and a pair an
+    unqualified column kept this layer from resolving contributes nothing."""
+    out: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
+    for join in tree.args.get("joins") or ():
+        on = join.args.get("on")
+        if on is None:
+            continue
+        right = scope_map.get(join.this.alias_or_name, _relation_name(join.this))
+        names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
+        if right not in names or len(names - {right}) > 1:
+            continue
+        for pair in _predicate_pairs(on, scope_map):
+            tables = frozenset(table for table, _column in pair)
+            if len(tables) == 2:
+                out.setdefault(tables, set()).add(pair)
+    return {tables: frozenset(pairs) for tables, pairs in out.items()}
+
+
+def _edges_as_written(
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None"
+) -> list[Relationship]:
+    """The declared edges the fan and chasm detectors may lean on, given the joins the statement
+    wrote.
+
+    Both detectors match a declared edge to a join by TABLE PAIR, which is right when the model
+    declares one edge between two tables and wrong when it declares two: a subclass view joined to
+    its base table on the key the model declares `one_to_one` was reported as a fan trap because a
+    sibling `many_to_one` between the same pair was also in the list, and the identity edge cannot
+    win, shadow or suppress because nothing consulted the columns. The joins section of the same
+    receipt reads the written key (`_declared_pairs(rel) <= js.pairs`) and called the same join
+    one-to-one.
+
+    So: for a pair of tables the statement joined with a readable key, when at least one declared
+    edge between them matches that key, only the matching edges stay in the list. When the written
+    key matches no declared edge (a join on a key the model does not know) or the two tables meet
+    without a join between them (a CROSS JOIN, a chain through a third table), every edge stays and
+    today's pair-level rule stands, which is the conservative side: over-reporting a fan is a receipt
+    that says more than it had to; clearing one on a key nobody declared would say something false.
+    The declared side is reduced with `_declared_pairs`, whose None means "cannot be compared" and
+    is treated here as "does not match", never as a wildcard.
+    """
+    written = _written_join_pairs(tree, scope_map)
+    if not written:
+        return rels
+    by_pair: dict[frozenset[str], list[Relationship]] = {}
+    for rel in rels:
+        by_pair.setdefault(_rel_tables(rel), []).append(rel)
+    kept: list[Relationship] = []
+    for rel in rels:
+        tables = _rel_tables(rel)
+        pairs_written = written.get(tables)
+        if pairs_written is None:
+            kept.append(rel)
+            continue
+        matching = [
+            candidate for candidate in by_pair[tables]
+            if (declared := _declared_pairs(candidate, dialect)) is not None
+            and declared <= pairs_written
+        ]
+        if not matching or rel in matching:
+            kept.append(rel)
+    return kept
 
 
 # `apply_default_filters` was deleted here by ACE-042: declared filters are business logic, not a
