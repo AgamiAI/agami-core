@@ -295,10 +295,10 @@ For a row whose `expected` is one number, Phase 2c's diff is the comparison. For
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" compare-results "$ROOT" \
   --golden-csv rows/<n>/statement.csv --generated-csv rows/<n>/actual.csv \
-  --match values --golden-sql-file rows/<n>/statement.sql > rows/<n>/comparison.json
+  --match values --unordered > rows/<n>/comparison.json
 ```
 
-`accuracy` of `1.0` is a match. The person's statement is handed over as `--golden-sql-file` for one reason only: whether it ordered its rows.
+`accuracy` of `1.0` is a match. Row order is never part of this comparison (`--unordered`): the `ordering` claim below says whether the two statements sort the same way, and a different sort is a different query, not a different answer. The score also says how far the two tables agree when they do not match: `paired_row_share` and `column_agreement` beside `column_pairs`, which the report page reads as "9 of 10 rows match".
 
 When the row carries both statements, name where they differ before anyone reads two receipts side by side:
 
@@ -309,7 +309,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n> --wi
 
 **This is the row's one ledger run.** Every file Phase 1.5 wrote is still there, so the grades are the same ones 1.5 would have produced, plus the two claim parts. When agami's own run failed and there is no statement to compare against, run it here without `--with-claims`. Never run it twice.
 
-The seven claims (tables, filter predicates, date window, group keys, join keys, ordering, limit) say which part differs; they never say who is right. Then set the row's `status` with `reconcile.py status`, from the diff's `match` and the ledger's verdict. For a table there is no `diff`: pass `--match true` when `compare-results` reports `accuracy` of `1.0`, `false` otherwise, and `none` when it could not score.
+The eight claims (tables, what is selected, filter predicates, date window, group keys, join keys, ordering, limit) say which part differs; they never say who is right. Two statements are the same query only when every claim that could be read agrees, what they select included; when the data could not be compared, the page still says "same query, answer not compared" or "different query, answer not compared". Then set the row's `status` with `reconcile.py status`, from the diff's `match` and the ledger's verdict. For a table there is no `diff`: pass `--match true` when `compare-results` reports `accuracy` of `1.0`, `false` otherwise, and `none` when it could not score.
 
 ### 2f — Write the findings
 

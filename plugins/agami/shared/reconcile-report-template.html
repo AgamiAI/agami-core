@@ -169,7 +169,8 @@
       // the one filter row, and the older status chips step aside.
       const labels = {};
       const RESULT_CLASS = { 'match': 'held', 'same answer, different query': 'open', 'same rows, different columns': 'open',
-                             'different answer': 'defect', 'same query, different answer': 'defect', 'could not run': 'noted' };
+                             'different answer': 'defect', 'same query, different answer': 'defect', 'could not compare': 'noted',
+                             'same query, answer not compared': 'open', 'different query, answer not compared': 'defect' };
       DATA.items.forEach(i => { if (i.result && i.result.label) labels[i.result.label] = (labels[i.result.label] || 0) + (passes(i, 'result') ? 1 : 0); });
       const results = document.getElementById('result-chips');
       results.classList.toggle('filtering', view.result.size > 0);

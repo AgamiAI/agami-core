@@ -79,14 +79,14 @@ def test_a_table_that_differs_in_columns_names_the_extra_columns_and_blames_the_
     rows = {r["key"]: r for r in item["diff"]}
     assert rows["rows"]["state"] == "held" and rows["rows"]["yours"] == "21 rows" and rows["rows"]["agami"] == "21 rows"
     assert rows["columns"]["state"] == "defect" and rows["columns"]["yours_hi"] == ["planned_ship_date", "delivered_at", "channel"] and rows["columns"].get("agami_hi") in (None, [])
-    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical, row for row"
+    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical"
     assert rows["date window"]["state"] == "open" and rows["date window"]["agami"] == "placed_at ≥ 2025-06-01" and rows["date window"]["yours"] == "could not read"
     assert rows["date window"]["note"] == "a shape the claims reader does not fold"
     assert rows["caveats read"]["state"] == "noted" and item["words"] == ['orders: "shipped_at is the time anchor for order reporting."']
     # The same rows come back; only the columns the person's query returns differ: the query is what to change.
     assert item["owner"] == "you" and item["single_cell"] is False and item["expected"] == "21 rows"
     assert item["change"] == ["Your query returns columns the question did not ask for: planned_ship_date, delivered_at, channel. Remove them, or name them in the question."]
-    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical, row for row"
+    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical"
     assert item["sentence"].startswith("The two answers do not match. What differs: columns")
 
 
@@ -290,7 +290,7 @@ def test_the_first_reviews_findings(tmp_path):
     claim_rows = [r for r in items[3]["diff"] if r["key"] in ("claims", "tables read", "filters", "limit")]
     assert [r["key"] for r in claim_rows] == ["claims"] and claim_rows[0]["state"] == "open"
     assert "limit" not in items[3]["sentence"] and "claims" in items[3]["sentence"]
-    assert items[4]["owner"] == "agami" and items[4]["sentence"] == "agami's query failed: boom." and items[4]["status"] == "error"
+    assert items[4]["owner"] == "agami" and items[4]["sentence"] == "This row could not be compared: agami's query failed: boom." and items[4]["status"] == "error"
     assert len(items) == 5 and items[5]["status"] == "match" and items[5]["owner"] == "keep"
     # 2 again, the other way: a difference in values beside extra columns of yours is not just the query
     both = dict(TABLE_DIFF, row=6, comparison={"result_set": {"accuracy": 0.4, "reason": "values differ", "unmatched_golden_columns": [], "golden_row_count": 21, "generated_row_count": 21}})
@@ -335,3 +335,91 @@ def test_keep_allowed_on_the_items_equals_the_parsers_keep_gate(tmp_path):
     keepable = pr.keepable_rows(run)
     assert {i["row"]: i["keep_allowed"] for i in items} == {r: (r in keepable) for r in (1, 2, 3)} == {1: True, 2: False, 3: True}
 
+
+
+# --- ACE-134: the values row reads the comparator's agreement; an error row names the side that failed ---
+
+def _table(row, **score):
+    base = {"accuracy": 0.9, "reason": "9 of the answer key's 10 rows matched, and the generated statement returned 10 rows",
+            "unmatched_golden_columns": [], "unmatched_generated_columns": [], "golden_row_count": 10, "generated_row_count": 10,
+            "column_pairs": [["customer", "customer"], ["total", "amount"]], "column_agreement": [1.0, 0.9], "paired_row_share": 0.9,
+            "order_sensitive": False}
+    base.update(score)
+    return dict(TABLE_DIFF, row=row, recorded={"columns": ["customer", "amount"], "rows": []},
+                statement_recorded={"columns": ["customer", "total"], "row_count": 10}, comparison={"result_set": base})
+
+
+def test_one_differing_cell_reads_as_rows_that_match_and_the_column_that_differs(tmp_path):
+    items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [_table(1)]))}
+    rows = {r["key"]: r for r in items[1]["diff"]}
+    assert rows["values"]["state"] == "defect" and rows["values"]["yours"] == "9 of 10 rows match"
+    assert rows["values"]["note"] == "differs in total on 1 of 10 rows"
+    assert rows["columns"]["state"] == "held" and rows["columns"]["renamed"] == [["total", "amount"]]
+    assert items[1]["result"]["data"] == "differs" and items[1]["result"]["label"] == "different answer"
+
+
+def test_paired_columns_agreeing_on_every_row_beside_an_unpaired_one_read_partly(tmp_path):
+    partly = _table(1, accuracy=0.0, reason="no generated column carries the values of: channel",
+                    unmatched_golden_columns=["channel"], column_agreement=[1.0, 1.0], paired_row_share=1.0)
+    partly["statement_recorded"] = {"columns": ["customer", "total", "channel"], "row_count": 10}
+    # ...and not partly when the paired columns disagree too: the values differ, whatever the columns.
+    both = _table(2, accuracy=0.0, unmatched_golden_columns=["channel"], column_agreement=[1.0, 0.9], paired_row_share=0.9)
+    both["statement_recorded"] = {"columns": ["customer", "total", "channel"], "row_count": 10}
+    items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [partly, both]))}
+    rows = {r["key"]: r for r in items[1]["diff"]}
+    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical on the 2 paired columns"
+    assert items[1]["result"]["data"] == "partly" and items[1]["result"]["label"] == "same rows, different columns"
+    assert items[2]["result"]["data"] == "differs"
+
+
+def test_an_older_score_without_the_share_keeps_the_paired_columns_grace(tmp_path):
+    old = _table(1, accuracy=0.0, unmatched_golden_columns=["channel"])
+    del old["comparison"]["result_set"]["column_agreement"]; del old["comparison"]["result_set"]["paired_row_share"]
+    old["statement_recorded"] = {"columns": ["customer", "total", "channel"], "row_count": 10}
+    rows = {r["key"]: r for r in reconcile.report_items(_run(tmp_path, [old]))[0]["diff"]}
+    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical on the 2 paired columns"
+
+
+def test_each_error_cause_names_the_side_that_failed(tmp_path):
+    yours = dict(ERROR, row=1, statement="SELECT ...", error="relation orders_v does not exist",
+                 ledger={"rows": [_part("runs", "query_defect", note="the database named a missing table")], "verdict": "query_defect", "counts": {}})
+    scope = dict(ERROR, row=2, statement="SELECT ...", error="refused: table_scope",
+                 ledger={"rows": [_part("runs", "unresolved"), _part("scope", "model_gap", note="a table the semantic model does not declare")], "verdict": "model_gap", "counts": {}})
+    agami = dict(ERROR, row=3, statement="SELECT ...", error="the generator's answer did not carry a statement this run could read")
+    empty = dict(ERROR, row=4, statement="SELECT ...", sql="SELECT ...", recorded={"columns": ["n"], "rows": []},
+                 statement_recorded={"columns": ["n"], "row_count": 0}, error=None,
+                 comparison={"result_set": {"status": "unscored", "accuracy": None, "reason": "both result sets are empty, so the comparison would check no value",
+                                            "golden_row_count": 0, "generated_row_count": 0}})
+    question_only = dict(ERROR, row=5, sql="SELECT ...", recorded={"columns": ["n"], "rows": [[3]]}, error=None)
+    unknown = dict(ERROR, row=6, statement="SELECT ...", sql="SELECT ...", recorded={"columns": ["n"], "rows": [[3]]}, error="boom\nmore")
+    items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [yours, scope, agami, empty, question_only, unknown]))}
+    got = {r: (i["fix"], i["owner"], i["sentence"]) for r, i in items.items()}
+    assert got == {
+        1: ("query", "you", "This row could not be compared: your query did not run: relation orders_v does not exist."),
+        2: ("semantic_model", "model", "This row could not be compared: your query did not run: refused: table_scope."),
+        3: ("ask_again", "agami", "This row could not be compared: agami's query failed: the generator's answer did not carry a statement this run could read."),
+        4: ("none", "nothing", "This row could not be compared: both queries returned no rows, so there is nothing to compare."),
+        5: ("none", "nothing", "This row could not be compared: there is nothing to compare against; agami's answer is graded on the grading page."),
+        6: ("ask_again", "agami", "This row could not be compared: the run's files do not say why: boom."),
+    }
+    assert items[1]["change"][0] == "Your query did not run: relation orders_v does not exist. Fix it, then run this row again."
+    assert items[3]["change"][0].startswith("Ask the question again in other words; agami's query failed")
+    assert items[4]["change"][0].startswith("Both queries returned no rows")
+    assert items[5]["change"][0].startswith("Grade agami's answer on the grading page")
+    assert items[6]["change"][0].startswith("Run this row again")
+    assert all(i["result"]["label"] == "could not compare" for i in items.values())
+
+
+def test_the_two_statements_still_say_what_they_are_when_the_data_could_not_be_compared(tmp_path):
+    agree = [{"name": n, "status": "agrees", "generated": v, "golden": v} for n, v in
+             (("tables", ["orders"]), ("outputs", ["sum(orders.amount)"]), ("filter_predicates", ["eq(orders.status, 'paid')"]),
+              ("date_window", None), ("group_keys", []), ("join_keys", []), ("ordering", []), ("limit", None))]
+    same = dict(ERROR, row=1, statement="SELECT ...", error="the generator did not answer within the time this run allows", claims={"claims": agree})
+    differ = dict(same, row=2, claims={"claims": [dict(c, status="differs", generated=["avg(orders.amount)"]) if c["name"] == "outputs" else c for c in agree]})
+    items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [same, differ]))}
+    assert items[1]["result"]["label"] == "same query, answer not compared" and items[1]["result"]["query"] == "same"
+    assert items[2]["result"]["label"] == "different query, answer not compared" and items[2]["result"]["query"] == "different"
+    selects = next(r for r in items[2]["diff"] if r["key"] == "selects")
+    assert selects["state"] == "differs" and selects["yours"] == ["sum(orders.amount)"] and selects["agami"] == ["avg(orders.amount)"]
+    # A structural match never makes the row keepable: the gate is the data's.
+    assert items[1]["keep_allowed"] is False and items[1]["status"] == "error"

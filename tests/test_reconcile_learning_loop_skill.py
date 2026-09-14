@@ -135,7 +135,8 @@ def test_compare_and_findings_sit_between_the_record_and_present():
     assert (SKILL.index("### 2d — Build the row record") < SKILL.index("### 2e — Compare")
             < SKILL.index("### 2f — Write the findings") < SKILL.index("## Phase 3: Present"))
     compare = _between(SKILL, "### 2e — Compare", "### 2f")
-    assert "compare-results" in compare and "--golden-sql-file" in compare
+    assert "compare-results" in compare and "--unordered" in compare and "--golden-sql-file" not in compare
+    assert "Row order is never part of this comparison" in compare and "eight claims" in compare
     assert 'sm" claims' in compare and "--with-claims" in compare
     assert "they never say who is right" in compare
     findings = _between(SKILL, "### 2f — Write the findings", "## Phase 3: Present")
