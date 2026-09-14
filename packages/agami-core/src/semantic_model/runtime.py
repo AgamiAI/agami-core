@@ -1279,7 +1279,52 @@ def _cte_names(tree: "exp.Expression") -> set[str]:
     return {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
 
 
-def _cte_references(tree: "exp.Expression") -> set[int]:
+# How each engine folds an UNQUOTED identifier before comparing it, which is the only thing that can
+# make a quoted name and an unquoted one the same identifier. Only engines whose rule is documented
+# and relied on are listed. For any other dialect — or none — a quoted name is never taken to equal an
+# unquoted one, so such a reference stays a physical table and is checked.
+_UNQUOTED_IDENTIFIER_FOLD: dict[str, Callable[[str], str]] = {
+    "postgres": str.lower,
+    "redshift": str.lower,
+    "duckdb": str.lower,
+    "snowflake": str.upper,
+}
+
+
+def _identifier_key(ident: object) -> Optional[tuple[bool, str]]:
+    """(quoted, text) for a plain identifier, or None for anything else — which never binds."""
+    if isinstance(ident, exp.Identifier) and ident.name:
+        return bool(ident.args.get("quoted")), ident.name
+    return None
+
+
+def _same_identifier(a: tuple[bool, str], b: tuple[bool, str],
+                     fold: Optional[Callable[[str], str]]) -> bool:
+    """Whether two identifiers are PROVABLY the same name to the engine.
+
+    Case-folding both sides, as this module does for model names, is wrong for a CTE binding: a
+    quoted identifier is case-sensitive, so on Postgres `WITH "Secret" AS (…) SELECT … FROM secret`
+    reads the physical `secret`, and `WITH secret AS (…) SELECT … FROM "SECRET"` reads a table named
+    `SECRET`. Treating either as the CTE let an undeclared table through with every gate silent.
+
+    * unquoted vs unquoted — case-insensitive, as every engine we speak compares them;
+    * quoted vs quoted — exact;
+    * quoted vs unquoted — equal only when the quoted text is the unquoted text as the engine folds
+      it (`"secret"` is `secret` on Postgres, `"SECRET"` is `secret` on Snowflake). With no known
+      fold rule, they are not the same.
+    """
+    (a_quoted, a_text), (b_quoted, b_text) = a, b
+    if not a_quoted and not b_quoted:
+        return a_text.lower() == b_text.lower()
+    if a_quoted and b_quoted:
+        return a_text == b_text
+    if fold is None:
+        return False
+    quoted, unquoted = (a_text, b_text) if a_quoted else (b_text, a_text)
+    return quoted == fold(unquoted)
+
+
+def _cte_references(tree: "exp.Expression", dialect: "str | None") -> set[int]:
     """The `exp.Table` nodes (by id) that name a CTE VISIBLE where they are written.
 
     `_cte_names` is the set of every name any WITH binds, anywhere, and subtracting it from the
@@ -1294,39 +1339,68 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
     * a WITH's names are visible in the statement that carries it and everything nested inside —
       subqueries, set-operation arms, later CTE bodies — and nowhere outside it;
     * a CTE body sees the CTEs defined EARLIER in the same WITH, plus any enclosing WITH's names;
-    * a CTE body sees its OWN name only under `WITH RECURSIVE`. A forward reference to a later
-      sibling is not treated as bound even under RECURSIVE (some engines allow it): refusing a shape
-      we have not proven is the direction a confinement gate may err in;
-    * a schema-qualified name is never a CTE reference.
+    * a CTE body sees its OWN name only under `WITH RECURSIVE`, only when the body is a
+      `UNION [ALL]`, and only in the arms AFTER the first — the recursive term. DuckDB reads a
+      self-reference anywhere else (a non-union body, the anchor arm, a CTE that is merely listed in
+      a RECURSIVE clause) as the PHYSICAL table, so binding the name across the whole body let
+      `WITH RECURSIVE secret AS (SELECT id FROM secret) …` return the undeclared table's rows;
+    * a forward reference to a later sibling is not treated as bound even under RECURSIVE (some
+      engines allow it): refusing a shape we have not proven is the direction a confinement gate may
+      err in;
+    * a schema-qualified name is never a CTE reference;
+    * a reference and a CTE name bind only when `_same_identifier` proves they are one identifier
+      under `dialect`'s quoting rules.
 
     Fail-closed by construction: a node is marked bound only when a WITH that encloses it is proven
     to define its name, so any shape this walk does not understand leaves the reference physical and
-    it is checked like any other table. Folded like every other name comparison in this module.
-    Iterative rather than recursive, because a caller controls how deep the tree goes and a long
-    `AND` chain is already deeper than the interpreter's recursion limit.
+    it is checked like any other table. Iterative rather than recursive, because a caller controls
+    how deep the tree goes and a long `AND` chain is already deeper than the interpreter's recursion
+    limit.
     """
+    fold = _UNQUOTED_IDENTIFIER_FOLD.get(dialect or "")
     bound: set[int] = set()
-    stack: list[tuple["exp.Expression", frozenset[str]]] = [(tree, frozenset())]
+    stack: list[tuple[object, tuple[tuple[bool, str], ...]]] = [(tree, ())]
+
+    def push_children(node: "exp.Expression", visible: tuple, skip: tuple[str, ...]) -> None:
+        for key, value in node.args.items():
+            if key in skip:
+                continue
+            for child in value if isinstance(value, list) else (value,):
+                if isinstance(child, exp.Expression):
+                    stack.append((child, visible))
+
     while stack:
         node, visible = stack.pop()
-        if (isinstance(node, exp.Table) and node.name and not node.db
-                and _tkey(node.name) in visible):
-            bound.add(id(node))
+        if isinstance(node, exp.Table) and not node.db:
+            key = _identifier_key(node.this)
+            if key is not None and any(_same_identifier(key, v, fold) for v in visible):
+                bound.add(id(node))
         with_ = node.args.get("with_") or node.args.get("with")
         inner = visible
         if isinstance(with_, exp.With):
             recursive = bool(with_.args.get("recursive"))
             for cte in with_.expressions:
-                name = _tkey(cte.alias_or_name)
-                stack.append((cte, inner | {name} if recursive and name else inner))
-                if name:
-                    inner = inner | {name}
-        for key, value in node.args.items():
-            if key in ("with_", "with"):
-                continue
-            for child in value if isinstance(value, list) else (value,):
-                if isinstance(child, exp.Expression):
-                    stack.append((child, inner))
+                alias = cte.args.get("alias")
+                name = _identifier_key(alias.this) if isinstance(alias, exp.TableAlias) else None
+                body = cte.this
+                if recursive and name is not None and isinstance(body, exp.Union):
+                    # Left-deep: `A UNION ALL B UNION ALL C` is Union(Union(A, B), C). Every
+                    # right-hand arm is part of the recursive term and sees the name; the leftmost
+                    # leaf is the anchor and does not. A union's own modifiers (ORDER BY, LIMIT, a
+                    # WITH hung on it) are walked without the name, so a WITH there defines nothing
+                    # this walk credits and its references stay physical.
+                    push_children(cte, inner, ("this",))
+                    arm = body
+                    while isinstance(arm, exp.Union):
+                        stack.append((arm.expression, inner + (name,)))
+                        push_children(arm, inner, ("this", "expression"))
+                        arm = arm.this
+                    stack.append((arm, inner))
+                else:
+                    stack.append((cte, inner))
+                if name is not None:
+                    inner = inner + (name,)
+        push_children(node, inner, ("with_", "with"))
     return bound
 
 
@@ -1403,7 +1477,7 @@ def check_table_scope(sql: str, org: Datasource,
     if tree is None or tree.find(exp.Select) is None:
         return None
 
-    cte_refs = _cte_references(tree)
+    cte_refs = _cte_references(tree, ctx.dialect if ctx is not None else _dialect_of(org)[0])
     offending: set[str] = set()
     # folded name -> the spelling the caller first wrote it in, so the echo is the caller's text.
     ambiguous: dict[str, str] = {}
@@ -1585,7 +1659,7 @@ def check_column_scope(sql: str, org: Datasource,
     # Per reference and per enclosing WITH, the same resolution table scope just applied — see
     # `_cte_references`. Skipping by name let an outer `FROM orders o` be read as a CTE beside an
     # inner `WITH orders AS (…)`, leaving `o` unbound so every `o.<column>` failed open.
-    cte_refs = _cte_references(tree)
+    cte_refs = _cte_references(tree, ctx.dialect if ctx is not None else _dialect_of(org)[0])
 
     def _select_chain(node):
         """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
@@ -1806,7 +1880,9 @@ def _aggregate_reports(tree, org: Datasource,
             # Minus every name the statement wrote in a form that resolves to no declared table
             # (`staging.orders` beside a declared `sales_data.orders`): the analysis below resolves
             # by bare name and would otherwise see behind the declared table for it.
-            visible = set(tidx) - cte_names - _unresolved_names(tree, tidx, _cte_references(tree))
+            cte_refs = _cte_references(
+                tree, ctx.dialect if ctx is not None else _dialect_of(org)[0])
+            visible = set(tidx) - cte_names - _unresolved_names(tree, tidx, cte_refs)
     reports: list[AggregateReport] = []
     for arm in _output_select_arms(tree):
         for sel in arm:
@@ -3028,7 +3104,7 @@ def assemble_receipt(
     # Which references name a CTE, per reference; see `_cte_references`. The name-keyed lookups
     # below still subtract `cte_names` wholesale, because a bare name carries no reference to resolve
     # — that only ever withholds a model fact, never credits one.
-    cte_refs = _cte_references(tree)
+    cte_refs = _cte_references(tree, dialect)
     unresolved = _unresolved_names(tree, tidx, cte_refs)
     # The names the analysis can see BEHIND: a table the model declares, minus any name the
     # statement bound to a result of its own or wrote unresolvably. Computed once and handed to both
@@ -3649,7 +3725,7 @@ def assemble_refusal_receipt(
         return {"model_version": model_version,
                 **_undetermined_sections(UNDETERMINED_UNPARSEABLE)}
 
-    cte_refs = _cte_references(tree)
+    cte_refs = _cte_references(tree, _dialect_of(org)[0])
     tidx = _model_table_index(org)
     sites = _reference_sites(tree)
     items: list[dict[str, Any]] = [
@@ -5439,7 +5515,7 @@ def check_declared_filters(
     # The same case-folded lookup every other model resolution uses, with the same CTE subtraction:
     # `WITH orders AS (…)` names a result the statement defined for itself, so reporting the real
     # `orders` table's declared filters against it would be an accounting of a table nothing read.
-    cte_refs = _cte_references(node)
+    cte_refs = _cte_references(node, dialect)
     # id(select) -> that select's folded filtering conjuncts, built lazily and shared across every
     # reference judged inside it. Two references to the same table in one WHERE ask the same question
     # of the same conjunct list, and folding is a deep copy per conjunct; without this the cost is

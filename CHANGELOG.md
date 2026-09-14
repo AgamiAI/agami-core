@@ -57,8 +57,13 @@ below corresponds to one such version.
     column scope beside a same-named CTE anywhere else: an inner `WITH secret AS (…)` in a subquery
     hid the outer `FROM secret`, a CTE body could read a physical table named like a later sibling,
     and a non-recursive CTE could read the physical table of its own name. A CTE body now sees only
-    earlier siblings and enclosing `WITH`s, its own name only under `WITH RECURSIVE`, and a
-    schema-qualified name is never a CTE. A shape that cannot be resolved is checked as a table.
+    earlier siblings and enclosing `WITH`s; its own name only under `WITH RECURSIVE`, in the arms of a
+    `UNION` after the first (the recursive term) — DuckDB reads a self-reference anywhere else as the
+    physical table; and a schema-qualified name is never a CTE. A reference binds to a CTE only when
+    the two are the same identifier under the engine's quoting rules (a quoted name is
+    case-sensitive; it equals an unquoted one only as that engine folds it — lower on Postgres,
+    Redshift and DuckDB, upper on Snowflake — and never on an engine with no known rule). A shape
+    that cannot be resolved is checked as a table.
   - Column scope binds columns to the table actually read, rather than to every table sharing its
     name. The receipt, the declared-filter accounting and the refusal receipt resolve references the
     same way the gate does.
