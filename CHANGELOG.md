@@ -12,6 +12,26 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The import door reads an Excel workbook.** `golden_author.py parse --file bank.xlsx` reads one
+  sheet of an `.xlsx` into the same parse a CSV goes through, with the standard library alone — a
+  workbook is a zip of XML, so no dependency is added to a plugin that installs with none. A workbook
+  with several sheets stops and names them, because which tab holds the questions is the person's
+  call; `--sheet` names it. In a workbook the header no longer has to be the first row: the first row
+  within the top 20 that names a question column is taken, so a title block above the table is fine,
+  and every row above the header is reported rather than silently dropped. A CSV's header is still
+  its first row. Rows keep Excel's own numbering, so a skipped row is reported at the number the
+  person sees, and trailing rows Excel formats but never fills are dropped rather than reported as
+  empty questions. Both the Transitional and Strict flavours of `.xlsx` are read. Every coordinate
+  in the file is checked against Excel's own limits before it is used, and a part declaring a DTD is
+  refused in any encoding, so a crafted workbook costs a refusal rather than memory. An `.xls` file
+  — Excel's older binary format — is still refused, with how to get past it, and `--csv` keeps
+  working. A column the import doesn't read, but that looks like a field it does — a header with
+  `sql` or `question` in it, for a field the sheet hasn't supplied — is reported rather than
+  silently ignored, the skill asks the person about it, and `--column sql="<header>"` reads it
+  without renaming anything. (#261)
+
 ### Changed
 
 - **A schema response says when a datasource has stored examples.** Clients often skipped
