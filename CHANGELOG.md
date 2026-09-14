@@ -19,13 +19,14 @@ below corresponds to one such version.
   through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
   unusable value (not a positive whole number, or a provider that raises) falls back to
   `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
-  the log. There is no ceiling. A time limit too large for the platform to arm a timer on (at or
-  above Python's `threading.TIMEOUT_MAX`, counting the supervisor's 60-second slack) is treated as
-  unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` alike.
+  the log. There is no policy ceiling, only what the engines can represent: a time limit over seven
+  days (604,800 seconds, Snowflake's own maximum and the smallest among the supported engines) and a
+  row cap of 2,147,483,647 or more (the drivers fetch one row past the cap, in a 32-bit count) are
+  treated as unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` / `AGAMI_SQL_MAX_ROWS` alike.
   - An evaluation run scores both statements of each case under the named organisation's limits.
   - `tools.statement_limit_is_usable(key, value)` is the rule a provider's values are held to (a
-    positive whole number, and a timeout the platform can arm), public so a settings screen can
-    refuse at save time what the executor would otherwise decline on every statement.
+    positive whole number within those two bounds), public so a settings screen can refuse at save
+    time what the executor would otherwise decline on every statement.
   - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
     child is handed the same two numbers in its environment, so the watchdog, the native bound, the
     outer bound and the supervisor still derive from one budget on both sides of the fork.
@@ -45,6 +46,16 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Follow-ups to per-organisation statement limits** (#334, #338):
+  - A row cap too large for the drivers to fetch (2,147,483,647 or more) and a time limit over seven
+    days now fall back to the deployment value, instead of failing every statement with an
+    `OverflowError` or a native timeout the engine rejects before the query runs.
+  - A provider mapping that raises when read falls back like a provider that raises, instead of
+    escaping the resolver.
+  - With a provider registered, the HTTP server's tool-visibility predicate runs in the request task
+    again, as `build_server` documents; only the descriptions are computed off the event loop.
+  - The `execute_sql` description no longer names "the deployment row ceiling" before stating the
+    caller's own row limit.
 - **A table outside the connection's default schema resolves when the client names it without its
   schema** (#258). A large model is served at the `summary` tier, whose area table lists carried a
   bare name, so the client wrote `FROM orders` and a warehouse keeping it in `sales_data` answered

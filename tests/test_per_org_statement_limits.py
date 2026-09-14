@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -489,7 +490,7 @@ def test_the_watchdog_fires_on_the_pinned_timeout(monkeypatch):
 
 
 _UNREPRESENTABLE = int(threading.TIMEOUT_MAX)
-_LARGEST_ARMABLE = int(threading.TIMEOUT_MAX) - execute_sql._SUPERVISOR_SKEW_S - 1
+_LARGEST_ARMABLE = 604_800  # seven days: the smallest native maximum among the engines
 
 
 def test_a_provider_timeout_the_platform_cannot_arm_falls_back(caplog):
@@ -516,6 +517,65 @@ def test_an_environment_timeout_the_platform_cannot_arm_falls_back(monkeypatch, 
         assert execute_sql._timeout_s_from_env() == execute_sql._DEFAULT_TIMEOUT_S
 
     assert any("AGAMI_SQL_TIMEOUT_S" in r.getMessage() for r in caplog.records)
+
+
+class _ExplodingMapping(Mapping):
+    """A mapping whose every read is the consumer's code failing — the lazy row a provider may return."""
+
+    def __getitem__(self, key):
+        raise ConnectionError("settings row went away")
+
+    def __iter__(self):
+        raise ConnectionError("settings row went away")
+
+    def __len__(self):
+        raise ConnectionError("settings row went away")
+
+    def get(self, key, default=None):
+        raise ConnectionError("settings row went away")
+
+
+def test_a_mapping_that_raises_when_read_falls_back_like_a_raising_provider(caplog):
+    tools.set_statement_limits_provider(lambda org_id: _ExplodingMapping())
+
+    with caplog.at_level(logging.WARNING, logger=tools._LOG.name):
+        with tools.pinned_statement_limits("acme") as pinned:
+            assert pinned == (execute_sql._DEFAULT_MAX_ROWS, execute_sql._DEFAULT_TIMEOUT_S)
+
+    assert any("failed" in r.getMessage() for r in caplog.records)
+
+
+def test_the_visibility_predicate_runs_in_the_request_task_when_a_provider_is_registered():
+    """`build_server` promises the predicate the request task. A provider moves the descriptions onto
+    a worker thread; it must not move the predicate with them."""
+    pytest.importorskip("mcp")
+    import mcp.types as mt
+    import mcp_http
+
+    tools.set_statement_limits_provider(_by_org)
+    in_request_task: list[bool] = []
+
+    def _predicate(name: str) -> bool:
+        try:
+            in_request_task.append(asyncio.current_task() is not None)
+        except RuntimeError:  # no running loop: a worker thread
+            in_request_task.append(False)
+        return True
+
+    handler = mcp_http.build_server(visibility=_predicate).request_handlers[mt.ListToolsRequest]
+
+    async def _list() -> dict:
+        token = tools._current_org_ctx.set("acme")
+        try:
+            result = await handler(mt.ListToolsRequest(method="tools/list"))
+        finally:
+            tools._current_org_ctx.reset(token)
+        return {t.name: t.description for t in result.root.tools}
+
+    listed = asyncio.run(_list())
+
+    assert in_request_task and all(in_request_task)
+    assert "5,000 rows" in listed["execute_sql"]  # and the descriptions are still the caller's
 
 
 def test_an_unrepresentable_timeout_cannot_disable_the_abandoned_worker_cap(monkeypatch):
