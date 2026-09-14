@@ -122,6 +122,9 @@ class SubjectAreaTable(_Contract):
     """One table named on an area summary: enough to decide whether to ask for its full context."""
 
     name: str
+    # The schema the table lives in, when the model knows it (#258). A client writing SQL from this
+    # listing needs it to qualify `FROM`; null for engines or models without one.
+    schema_: str | None = Field(default=None, alias="schema")
     description: str | None = None
 
 

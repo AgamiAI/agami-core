@@ -745,6 +745,14 @@ def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
                     "SET LOCAL statement_timeout = %s",
                     ((timeout_s + _NATIVE_BOUND_SKEW_S) * 1000,),  # the setting is in milliseconds
                 )
+            # The model's schemas, so a table named without its schema still resolves (#258). Same
+            # transaction and same reason for `SET LOCAL` as the timeout above: it cannot outlive this
+            # statement or reach a pooled connection's next user. Present only when
+            # `execute_guarded` found an unambiguous set; see `_search_path_schemas`.
+            schemas = creds.get(_SEARCH_PATH_KEY)
+            if schemas:
+                with conn.cursor() as path_cur:
+                    path_cur.execute(_search_path_statement(schemas))
             # A server-side (named) cursor so the row cap bounds TRANSFER, not just what we write:
             # psycopg2's default client-side cursor buffers the ENTIRE result before we can fetchmany,
             # so a runaway result would still be pulled whole. The named cursor streams from the
@@ -1998,6 +2006,61 @@ def _disk_model_root(profile: str) -> Path | None:
     return root if (root / "datasource.yaml").exists() else None
 
 
+# Where `execute_guarded` hands the model's schemas to the Postgres-wire engines (#258). A credentials
+# key rather than a new executor argument: `Executor.execute` is a published seam, and an injected
+# executor that does not know the key simply never reads it. Underscored so it cannot collide with a
+# real credential field.
+_SEARCH_PATH_KEY = "_agami_search_path"
+
+# Engines that read `_SEARCH_PATH_KEY` — the ones `_builtin_execute` sends through `_run_postgres`.
+_SEARCH_PATH_ENGINES = frozenset({"postgres", "redshift", "supabase"})
+
+
+def _search_path_schemas(org: Any) -> list[str]:
+    """The schema for `SET LOCAL search_path` (#258): `[schema]` when EVERY table in the model declares
+    that one schema and it is not `public`, else `[]`.
+
+    The client was served bare table names and wrote `FROM orders`, which cannot resolve when the
+    table lives in `sales_data`; setting the path lets that statement run as written. The path puts
+    `sales_data` ahead of the connection's defaults, so it is only safe when no declared table relies
+    on those defaults — otherwise a bare name meant for that table can resolve to a same-named
+    `sales_data` relation the model does not declare, silently, under a receipt naming the model's
+    table. The model cannot see the warehouse catalog to rule that out, so it is refused structurally:
+    - two or more schemas: `finance` first would capture a bare `orders` meant for `sales_data`;
+    - any table with no schema: it resolves through the defaults, which the path now outranks;
+    - a table in `public`: `public` stays on the path but AFTER the chosen schema, so it is outranked
+      the same way — and a model entirely in `public` needs no path at all.
+    Each of those keeps today's behaviour (the statement fails and names the relation). A schema name
+    with a control character gets no path either — a NUL makes the driver raise on every statement."""
+    if org is None:
+        return []
+    schemas: set[str | None] = set()
+    for area in getattr(org, "subject_areas", None) or []:
+        for table in getattr(area, "tables_defined", None) or []:
+            schemas.add(getattr(table, "schema_name", None) or None)
+    if len(schemas) != 1:
+        return []
+    (schema,) = schemas
+    if schema is None or schema == "public" or any(ord(ch) < 32 for ch in schema):
+        return []
+    return [schema]
+
+
+def _quote_ident(name: str) -> str:
+    """A Postgres identifier, double-quoted with embedded quotes doubled. Schema names come from the
+    operator's model, but they are still spliced into SQL, so they are quoted rather than trusted."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _search_path_statement(schemas: list[str]) -> str:
+    """`SET LOCAL search_path` for the model's schemas, with `public` kept on the end so an
+    unqualified reference to a table there still resolves as it did before."""
+    path = [_quote_ident(s) for s in schemas]
+    if "public" not in schemas:
+        path.append("public")
+    return "SET LOCAL search_path TO " + ", ".join(path)
+
+
 def _resolve_guard_model(profile: str):
     """Resolve the semantic model for the safety pass, mirroring `tools._load_org` (ACE-051): from
     the DB when one is configured (hosted — the `/artifacts` disk mount may be absent), else the
@@ -2786,6 +2849,13 @@ def execute_guarded(
             if mismatch is not None:
                 return _envelope("refused", refusal=mismatch,
                                  receipt=_refusal_receipt(mismatch, received_sql, profile))
+        # The model's schema for the Postgres-wire engines, so a bare table name resolves (#258). From
+        # the model the pass above already resolved and published, never a second load: that is a
+        # full DB or disk read per query, and on a deployment with the pass off there is no model in
+        # hand to read, so nothing is set there and a bare name fails exactly as before.
+        schemas = _search_path_schemas(_guard_model.get())
+        if schemas and str(creds.get("type", "")).lower() in _SEARCH_PATH_ENGINES:
+            creds = {**creds, _SEARCH_PATH_KEY: schemas}
         # Bounded at the CHOKEPOINT, so the limit reaches every executor rather than only the
         # built-in one whose engines carry the inner watchdog. See `_execute_bounded` for the
         # mechanism and for the leaked worker it costs on expiry.
