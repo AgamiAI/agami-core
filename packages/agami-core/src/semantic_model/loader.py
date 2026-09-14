@@ -316,27 +316,74 @@ def _load_cross_metrics(root: Path, ds_doc: dict) -> list[Metric]:
 # ---------------------------------------------------------------------------
 
 
+def _table_identity(t: Table) -> tuple[Optional[str], str]:
+    """(folded schema or None, folded bare name) — what makes two definitions the SAME table."""
+    return ((t.schema_name or "").lower() or None, bare_name(t.name).lower())
+
+
+def _pick_declared(cands: list[Table], table_name: str) -> Optional[Table]:
+    """The table a lookup resolves to among `cands` (name-or-bare matches, in scan order).
+
+    Used to be `cands[0]` unconditionally: with `sales_data.orders` and `staging.orders` both
+    defined, a lookup of `orders` returned whichever area came first, and handed the caller that
+    table's columns, filters and relationships for a name that may have meant the other. Now:
+
+    * every candidate is the same identity (the ordinary case, including one table defined twice)
+      → the first, exactly as before;
+    * the query is qualified (`staging.orders`) → the candidates declared under that schema, when
+      they are one identity;
+    * otherwise → None. A clash the query does not settle is reported as not found rather than
+      resolved by definition order — the same fail-closed answer `runtime._resolve_table` gives an
+      ambiguous bare reference.
+
+    A qualified query for a name that does NOT clash still resolves by bare name, as it always has:
+    this is model lookup for serving context, not the scope gate, and `bare_name` documents that
+    the prefix it strips may be an area rather than a schema.
+    """
+    if not cands:
+        return None
+    if len({_table_identity(t) for t in cands}) == 1:
+        return cands[0]
+    if "." in table_name:
+        qualifier = table_name.rsplit(".", 1)[0].lower()
+        hits = [t for t in cands if (t.schema_name or "").lower() == qualifier]
+        if hits and len({_table_identity(t) for t in hits}) == 1:
+            return hits[0]
+    return None
+
+
+def _qualify_by_ref(table_name: str, ref: TableRef) -> str:
+    """`table_name`, qualified by the TableRef's schema when the name carries none.
+
+    A TableRef names the schema of the table the area means, so the multi-area fallback can settle a
+    clash the bare name cannot: an area referencing `staging.orders` resolves to that one, not to
+    whichever `orders` was defined first."""
+    if "." in table_name or not ref.schema_name:
+        return table_name
+    return f"{ref.schema_name}.{table_name}"
+
+
 @dataclass(frozen=True)
 class TableIndex:
     """O(1) name→Table lookup that reproduces `_find_table` EXACTLY, so the schema hot path stops
     linear-scanning the whole model per table (ACE-047, scalability-audit finding P12). Match rule:
-    a defined table's name equals the query OR its bare form; on a name clash the first table in
-    scan order wins; area scoping and the TableRef multi-area fallback are preserved. Built once
-    from the cached model and threaded through get_table_context; byte-identical to the scan."""
+    a defined table's name equals the query OR its bare form; among several matches
+    `_pick_declared` decides (first in scan order when they are one table, by schema when they are
+    not); area scoping and the TableRef multi-area fallback are preserved. Built once from the
+    cached model and threaded through get_table_context; byte-identical to the scan."""
 
-    org_wide: dict[str, tuple[Table, int]]           # t.name -> (table, global scan rank)
-    per_area: dict[str, dict[str, tuple[Table, int]]]  # area -> {t.name -> (table, rank)}
-    area_refs: dict[str, set[str]]                   # area -> {ref.table} for the fallback test
+    org_wide: dict[str, list[tuple[Table, int]]]           # t.name -> [(table, global scan rank)]
+    per_area: dict[str, dict[str, list[tuple[Table, int]]]]  # area -> {t.name -> [(table, rank)]}
+    area_refs: dict[str, dict[str, tuple[TableRef, int]]]    # area -> {ref.table -> (first ref, rank)}
 
     @staticmethod
-    def _pick(m: dict[str, tuple[Table, int]], query: str, bare: str) -> Optional[Table]:
-        # Return the earlier-in-scan-order table among a name-match and a bare-match — exactly what
-        # `_find_table`'s in-order `t.name == query or t.name == bare` scan would have returned.
-        a = m.get(query)
-        b = m.get(bare) if bare != query else None
-        if a and b:
-            return a[0] if a[1] <= b[1] else b[0]
-        return a[0] if a else (b[0] if b else None)
+    def _pick(m: dict[str, list[tuple[Table, int]]], query: str, bare: str) -> Optional[Table]:
+        # Every name-match and bare-match, merged back into scan order — exactly the candidate list
+        # `_find_table`'s in-order `t.name == query or t.name == bare` scan collects.
+        hits = list(m.get(query, []))
+        if bare != query:
+            hits += m.get(bare, [])
+        return _pick_declared([t for t, _ in sorted(hits, key=lambda h: h[1])], query)
 
     def find(self, table_name: str, area: Optional[str] = None) -> Optional[Table]:
         bare = bare_name(table_name)
@@ -344,32 +391,38 @@ class TableIndex:
             hit = self._pick(self.per_area.get(area, {}), table_name, bare)
             if hit is not None:
                 return hit
-            refs = self.area_refs.get(area, set())
-            if table_name in refs or bare in refs:
-                return self._pick(self.org_wide, table_name, bare)
+            refs = self.area_refs.get(area, {})
+            matches = [r for r in (refs.get(table_name), refs.get(bare) if bare != table_name else None) if r]
+            if matches:
+                ref = min(matches, key=lambda r: r[1])[0]
+                query = _qualify_by_ref(table_name, ref)
+                return self._pick(self.org_wide, query, bare_name(query))
             return None
         return self._pick(self.org_wide, table_name, bare)
 
 
 def build_table_index(org: Datasource) -> TableIndex:
     """Build the O(1) name→Table index once per schema call (ACE-047). Scan order (areas, then
-    tables) matches `_find_table`, and first-occurrence-wins via setdefault keeps a clash resolving
-    identically."""
-    org_wide: dict[str, tuple[Table, int]] = {}
-    per_area: dict[str, dict[str, tuple[Table, int]]] = {}
-    area_refs: dict[str, set[str]] = {}
+    tables) matches `_find_table`; every definition of a name is kept, with its rank, so a clash is
+    decided by `_pick_declared` on both paths rather than by which one `setdefault` kept."""
+    org_wide: dict[str, list[tuple[Table, int]]] = {}
+    per_area: dict[str, dict[str, list[tuple[Table, int]]]] = {}
+    area_refs: dict[str, dict[str, tuple[TableRef, int]]] = {}
     rank = 0
     for sa in org.subject_areas:
-        amap: dict[str, tuple[Table, int]] = {}
+        amap: dict[str, list[tuple[Table, int]]] = {}
         for t in sa.tables_defined:
-            org_wide.setdefault(t.name, (t, rank))
-            amap.setdefault(t.name, (t, rank))
+            org_wide.setdefault(t.name, []).append((t, rank))
+            amap.setdefault(t.name, []).append((t, rank))
             rank += 1
         # Area names are NOT enforced unique; `_find_table` resolves an area via
         # `org.subject_area(area)`, which returns the FIRST area of that name — so the per-area maps
         # must be first-wins too (setdefault), or a duplicate name would resolve the wrong area.
         per_area.setdefault(sa.name, amap)
-        area_refs.setdefault(sa.name, {ref.table for ref in sa.tables})
+        refs: dict[str, tuple[TableRef, int]] = {}
+        for i, ref in enumerate(sa.tables):
+            refs.setdefault(ref.table, (ref, i))
+        area_refs.setdefault(sa.name, refs)
     return TableIndex(org_wide=org_wide, per_area=per_area, area_refs=area_refs)
 
 
@@ -381,19 +434,19 @@ def _find_table(
         return index.find(table_name, area)
     bare = bare_name(table_name)
     areas = [org.subject_area(area)] if area else org.subject_areas
-    for sa in areas:
-        if sa is None:
-            continue
-        for t in sa.tables_defined:
-            if t.name == table_name or t.name == bare:
-                return t
+    cands = [t for sa in areas if sa is not None for t in sa.tables_defined
+             if t.name == table_name or t.name == bare]
+    if cands:
+        return _pick_declared(cands, table_name)
     # Multi-area membership: a table is DEFINED in exactly one area but may be REFERENCED from
     # others via a TableRef (a shared dimension like `sys_user`). When the named area lists it
-    # among its `tables`, fall back to the org-wide definition instead of reporting "not found".
+    # among its `tables`, fall back to the org-wide definition instead of reporting "not found" —
+    # qualified by the TableRef's schema, which is what settles a name defined in two schemas.
     if area:
         sa = org.subject_area(area)
-        if sa and any(ref.table == table_name or ref.table == bare for ref in sa.tables):
-            return _find_table(org, table_name, area=None)
+        ref = next((r for r in sa.tables if r.table == table_name or r.table == bare), None) if sa else None
+        if ref is not None:
+            return _find_table(org, _qualify_by_ref(table_name, ref), area=None)
     return None
 
 

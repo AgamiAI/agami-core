@@ -454,7 +454,10 @@ def check_scopable(sql: str, org: Datasource,
     """
     if not _HAVE_SQLGLOT:
         return None
-    if not (ctx.model_table_index if ctx is not None else _model_table_index(org)):
+    # `.qualified`, not the bare-name map itself: a model whose every table shares its name with one
+    # in another schema has no bare keys, and reading that as "declares no tables" would switch
+    # this gate off for exactly the model where names are hardest to tell apart.
+    if not (ctx.model_table_index if ctx is not None else _model_table_index(org)).qualified:
         return None
     tree = ctx.tree if ctx is not None else _parse_sql(sql, _dialect_of(org)[0])
     # An unparseable statement and a non-SELECT are both somebody else's refusal — `check_readable`
@@ -1308,10 +1311,20 @@ def check_table_scope(sql: str, org: Datasource,
 
     Only *physical* table references count: CTE names (defined by WITH) and
     derived/subquery aliases are not tables and are never treated as undeclared.
-    Matching is on the bare table name, case-insensitively (unquoted identifiers
-    fold case in Postgres and friends), against the model's declared tables via
-    `_model_table_index`, whose keys already exclude review_state='rejected'
-    tables (dropped at load time) — so an excluded table is correctly refused.
+    A SCHEMA-QUALIFIED reference is never a CTE name, whatever it is spelled like —
+    a WITH binds an unqualified name only, so `WITH orders AS (…) SELECT … FROM
+    staging.orders` reads the physical table and is judged as one. Skipping it by
+    name, as this did, let any qualified table through beside a CTE of the same name.
+
+    Matching is on (schema, name), case-insensitively (unquoted identifiers fold case
+    in Postgres and friends), through `_resolve_table` — whose docstring holds the
+    rules for a qualified reference, an unqualified one, and a table the model
+    declares without a schema — against `_model_table_index`, whose keys already
+    exclude review_state='rejected' tables (dropped at load time) — so an excluded
+    table is correctly refused. An unqualified name the model declares under two or
+    more schemas is refused as ambiguous, naming those schemas so the caller can
+    qualify it; the schemas are the model's, but only for a name the caller already
+    wrote, which is the membership the gate's allow/refuse answer already exposes.
 
     Degrades to allow when sqlglot is unavailable or the SQL doesn't parse (the
     same posture as the fan/chasm and sensitive gates; the upstream read-only
@@ -1324,8 +1337,8 @@ def check_table_scope(sql: str, org: Datasource,
     """
     if not _HAVE_SQLGLOT:
         return None
-    allow = {name.lower() for name in (ctx.model_table_index if ctx is not None else _model_table_index(org))}
-    if not allow:
+    tidx = ctx.model_table_index if ctx is not None else _model_table_index(org)
+    if not tidx.qualified:
         return None
     if ctx is not None:
         tree = ctx.tree
@@ -1340,30 +1353,72 @@ def check_table_scope(sql: str, org: Datasource,
 
     cte_names = _cte_names(tree)
     offending: set[str] = set()
+    # folded name -> the spelling the caller first wrote it in, so the echo is the caller's text.
+    ambiguous: dict[str, str] = {}
+    wrong_schema = False
     for tbl in tree.find_all(exp.Table):
         name = tbl.name
-        if not name or name.lower() in cte_names:
+        if not name:
+            continue
+        if not tbl.db and name.lower() in cte_names:
             continue  # a CTE reference, not a physical table
-        if name.lower() not in allow:
-            offending.add(name)
-    if not offending:
+        status, _ident = _resolve_table(tidx, tbl.db, name)
+        if status == _UNDECLARED:
+            offending.add(f"{tbl.db}.{name}" if tbl.db else name)
+            wrong_schema = wrong_schema or bool(tbl.db and _tkey(name) in tidx.schemas)
+        elif status == _AMBIGUOUS:
+            ambiguous.setdefault(_tkey(name), name)
+    if not offending and not ambiguous:
         return None
 
-    tables = sorted(offending)
-    # `detail` and `remediation` carry the former `reason` / `suggestion` text verbatim. Both are
+    # `detail` and `remediation` carry the former `reason` / `suggestion` text verbatim for the
+    # undeclared case, which is still the whole refusal when nothing is ambiguous. That half is
     # echo-only by construction: static prose plus the table names the CALLER put in its own
-    # statement. Nothing here reads the model's declared set, so a refusal can never turn into a
-    # schema listing — the property the contract calls "echo, never enumerate". The echo itself is
-    # bounded by `_echo_identifiers`: echoing the caller's names is not the same as echoing arbitrary
-    # caller text, and a quoted identifier can hold either.
+    # statement, so a refusal can never turn into a schema listing — the property the contract calls
+    # "echo, never enumerate". The echo itself is bounded by `_echo_identifiers`: echoing the
+    # caller's names is not the same as echoing arbitrary caller text, and a quoted identifier can
+    # hold either.
+    details: list[str] = []
+    remediations: list[str] = []
+    if offending:
+        details.append("query references table(s) not in the semantic model: "
+                       + _echo_identifiers(sorted(offending))
+                       + " — only tables declared in the model may be queried.")
+        remediations.append("Add the table to the model (agami-connect / '/agami-model'), "
+                            "or remove it from the query.")
+        if wrong_schema:
+            # Says a table of that NAME is declared, which the unqualified form of the same
+            # statement would already have told the caller, and deliberately not under which
+            # schema: that would be a model fact about a table the caller did not name.
+            remediations.append("A table of that name is declared under a different schema "
+                                "(or none); use the schema get_datasource_schema serves for it.")
+    if ambiguous:
+        details.append("query references table(s) declared in more than one schema, so which one "
+                       "is meant cannot be decided: " + _echo_ambiguous(ambiguous, tidx) + ".")
+        remediations.append("Qualify each of those tables with its schema (schema.table).")
     return guardrail.refuse(
         guardrail.RULE_TABLE_SCOPE,
-        detail="query references table(s) not in the semantic model: "
-               + _echo_identifiers(tables)
-               + " — only tables declared in the model may be queried.",
-        remediation="Add the table to the model (agami-connect / '/agami-model'), "
-                    "or remove it from the query.",
+        detail=" ".join(details),
+        remediation=" ".join(remediations),
     )
+
+
+def _echo_ambiguous(ambiguous: dict[str, str], tidx: _ModelTableIndex) -> str:
+    """`orders (in sales_data, staging)` for each ambiguous name, capped like `_echo_identifiers`.
+
+    The name is the caller's and takes the per-name bound. The schemas are the MODEL's and are
+    named on purpose — the owner's call, because "qualify it" is not actionable without them — but
+    only for a name the caller itself wrote, never for anything else the model declares. A
+    schema-less declaration reads `no schema`, which is also what the caller must write: nothing.
+    """
+    keys = sorted(ambiguous)
+    shown = [
+        f"{_echo_name(ambiguous[k])} (in "
+        + ", ".join(_echo_name(s) if s else "no schema" for s in tidx.schemas[k]) + ")"
+        for k in keys[:_ECHO_MAX_NAMES]
+    ]
+    remaining = len(keys) - len(shown)
+    return ", ".join(shown) + (f" and {remaining} more" if remaining > 0 else "")
 
 
 # ---------------------------------------------------------------------------
@@ -1472,8 +1527,14 @@ def check_column_scope(sql: str, org: Datasource,
     """
     if not _HAVE_SQLGLOT:
         return None
-    colidx = ctx.column_index if ctx is not None else _column_index(org)
-    if not colidx:
+    tidx = ctx.model_table_index if ctx is not None else _model_table_index(org)
+    # Keyed by the table's IDENTITY — (folded schema or None, folded name) — rather than its bare
+    # name. `_column_index` unions the columns of every table sharing a name, so with
+    # `sales_data.orders` and `staging.orders` both declared, a column only `staging.orders` has was
+    # accepted on a statement reading `sales_data.orders`. Each physical reference below binds to
+    # the identity `_resolve_table` gives it, the same resolution the table-scope gate just applied.
+    declared = {ident: cols for ident, cols in tidx.columns.items() if cols}
+    if not declared:
         return None
     if ctx is not None:
         tree = ctx.tree
@@ -1482,8 +1543,6 @@ def check_column_scope(sql: str, org: Datasource,
     if tree is None or tree.find(exp.Select) is None:
         return None
 
-    # case-insensitive declared-column index: lower(table) -> {lower(column)}
-    declared = {t.lower(): {c.lower() for c in cols} for t, cols in colidx.items()}
     cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
 
     def _select_chain(node):
@@ -1504,8 +1563,11 @@ def check_column_scope(sql: str, org: Datasource,
     # physical tables it reads directly (alias -> bare table), its output aliases, and
     # whether it reads from a CTE ref / derived subquery (→ a bare column we can't
     # match may be that source's output, so fail-open).
-    alias_by_select: dict[int, dict[str, str]] = {}  # id(select) -> {alias -> bare physical table}
-    direct_phys: dict[int, set[str]] = {}            # id(select) -> {bare physical table read directly}
+    # A physical table that does not resolve (undeclared, or ambiguous) is still recorded under its
+    # alias, bound to `False`: the qualifier is then known to name a physical table this gate has no
+    # columns for — table scope has already refused it — rather than looking like a CTE alias.
+    alias_by_select: dict[int, dict[str, Any]] = {}  # id(select) -> {alias -> table identity | False}
+    direct_phys: dict[int, set[tuple]] = {}          # id(select) -> {identity of a table read directly}
     has_derived: dict[int, bool] = {}                # id(select) -> reads a CTE ref / derived subquery directly
     output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
     for tbl in tree.find_all(exp.Table):
@@ -1513,13 +1575,16 @@ def check_column_scope(sql: str, org: Datasource,
         if not name:
             continue
         sel = _enclosing_select(tbl)
-        if name in cte_names:
+        if not tbl.db and name in cte_names:
             if sel is not None:
                 has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
             continue
         if sel is not None:
-            alias_by_select.setdefault(id(sel), {})[tbl.alias_or_name.lower()] = name
-            direct_phys.setdefault(id(sel), set()).add(name)
+            status, ident = _resolve_table(tidx, tbl.db, tbl.name)
+            alias_by_select.setdefault(id(sel), {})[tbl.alias_or_name.lower()] = (
+                ident if status == _DECLARED else False)
+            if status == _DECLARED:
+                direct_phys.setdefault(id(sel), set()).add(ident)
     for sq in tree.find_all(exp.Subquery):
         # a derived table in FROM/JOIN (NOT a WHERE/scalar subquery, which adds no columns to its select)
         if isinstance(sq.parent, (exp.From, exp.Join)):
@@ -1552,8 +1617,10 @@ def check_column_scope(sql: str, org: Datasource,
                     break
             if phys is None:
                 continue  # qualified by a CTE/derived alias — validated at its own source
-            if phys in declared and lname not in declared[phys]:
-                offending.add(f"{phys}.{name}")
+            if phys and phys in declared and lname not in declared[phys]:
+                # The label is `table.column` on the bare name, exactly as before: the refusal
+                # echoes the caller's statement, and the schema half is the model's to know.
+                offending.add(f"{phys[1]}.{name}")
             continue
         # unqualified: judge against the tables its own SELECT reads directly
         if sel is not None and lname in output_by_select.get(id(sel), set()):
@@ -1690,8 +1757,14 @@ def _aggregate_reports(tree, org: Datasource,
     # table in the model, which is not work to repeat on a path that runs for every executed query.
     # The index goes DOWN as well, because `_preflight_select` needs it too and rebuilt it per arm.
     if visible is None or tidx is None:
-        tidx = tidx or (ctx.model_table_index if ctx is not None else _model_table_index(org))
-        visible = set(tidx) - _cte_names(tree) if visible is None else visible
+        tidx = tidx if tidx is not None else (
+            ctx.model_table_index if ctx is not None else _model_table_index(org))
+        if visible is None:
+            cte_names = _cte_names(tree)
+            # Minus every name the statement wrote in a form that resolves to no declared table
+            # (`staging.orders` beside a declared `sales_data.orders`): the analysis below resolves
+            # by bare name and would otherwise see behind the declared table for it.
+            visible = set(tidx) - cte_names - _unresolved_names(tree, tidx, cte_names)
     reports: list[AggregateReport] = []
     for arm in _output_select_arms(tree):
         for sel in arm:
@@ -2297,12 +2370,21 @@ def _group_by_grain(body: "exp.Expression") -> list[str]:
 
 
 def _column_index(org: Datasource) -> dict[str, dict[str, Column]]:
-    """bare table name -> {column name -> Column}."""
+    """bare table name -> {column name -> Column}, for names declared under ONE schema only.
+
+    A name declared under two schemas is left out rather than unioned. This index is keyed by the
+    bare name the aggregation analysis resolves a column's table to, and that name cannot say which
+    of the two tables was read — so unioning them attributed one table's `aggregation` class to the
+    other's column, and first-wins would pick by definition order. Absent, the lookup finds nothing
+    and no aggregation finding is made about a table the analysis could not identify. Column scope
+    does not read this; it binds by identity through `_ModelTableIndex.columns`."""
     idx: dict[str, dict[str, Column]] = {}
+    schemas: dict[str, set[Optional[str]]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             idx.setdefault(t.name, {}).update({c.name: c for c in t.columns})
-    return idx
+            schemas.setdefault(t.name, set()).add(_tkey(t.schema_name) or None)
+    return {name: cols for name, cols in idx.items() if len(schemas[name]) == 1}
 
 
 def _lookup_column(col: "exp.Column", scope: dict[str, str],
@@ -2469,25 +2551,155 @@ def _check_aggregation_semantics(
 # ---------------------------------------------------------------------------
 
 
-def _model_table_index(org: Datasource) -> dict[str, tuple]:
-    """bare table name, CASE-FOLDED -> (Table, area_name). First occurrence wins (a cross-schema
-    name clash is rare and the relationships now carry schema to disambiguate).
+class _ModelTableIndex(dict):
+    """bare table name, CASE-FOLDED -> (Table, area_name), for every name the model declares under
+    exactly ONE schema — plus the two facts a bare name cannot carry, on attributes.
 
-    Folded because `check_table_scope` folds: it compares `{name.lower()}` against the statement's
+    A dict subclass rather than a new shape because a dozen callers read this as the bare-name map
+    (`set(tidx)`, `tidx.get(_tkey(...))`, `.items()`), and every one of them is right to keep doing
+    so for a name that is unique. What changed is what a bare name is allowed to resolve to when it
+    is NOT unique. It used to be first-occurrence-wins, so with `sales_data.orders` and
+    `staging.orders` both declared, every bare lookup of `orders` handed back whichever area was
+    defined first — its columns, its filters, its row estimate — for a statement that may have read
+    the other one. A clashing name now has no bare key at all, so a bare lookup finds nothing rather
+    than the wrong thing, and only `_resolve_table` (which has the statement's schema in hand) can
+    reach either table.
+
+    * `qualified` — (folded schema or None, folded name) -> (Table, area_name), for EVERY declared
+      table. This is the table's identity. First occurrence wins only among definitions of the SAME
+      identity, which is the same table written twice rather than two tables.
+    * `schemas` — folded name -> the distinct schemas it is declared under, in the model's own
+      spelling, `None` standing for "declared with no schema". Its length is what makes a bare
+      reference ambiguous, and its values are what the ambiguity refusal names.
+    * `columns` — identity -> folded declared column names, unioned across definitions of that
+      identity exactly as `_column_index` unions them by name. Column scope binds to this, so a
+      column declared only on `staging.orders` is not reachable through `sales_data.orders`.
+
+    Built once per guard battery, like the plain dict it replaces, so `tests/test_guard_context.py`
+    still counts one build.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.qualified: dict[tuple[Optional[str], str], tuple] = {}
+        self.schemas: dict[str, list[Optional[str]]] = {}
+        self.columns: dict[tuple[Optional[str], str], set[str]] = {}
+
+
+def _model_table_index(org: Datasource) -> _ModelTableIndex:
+    """The model's declared tables, keyed for both bare and schema-qualified lookup.
+
+    Folded because `check_table_scope` folds: it compares folded names against the statement's
     names, since Postgres and friends fold unquoted identifiers. When this index did not, the gate
     and the receipt disagreed about the same statement: `FROM ORDERS` passed the gate and the
     receipt reported the table as undeclared, which is the one fact the refusal receipt exists to
-    state. Look up through `_tkey`, never with the raw name."""
-    idx: dict[str, tuple] = {}
+    state. Look up through `_tkey` / `_resolve_table`, never with the raw name. See
+    `_ModelTableIndex` for why a name declared under two schemas has no bare key."""
+    idx = _ModelTableIndex()
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            idx.setdefault(_tkey(t.name), (t, sa.name))
+            key = _tkey(t.name)
+            ident = (_tkey(t.schema_name) or None, key)
+            idx.qualified.setdefault(ident, (t, sa.name))
+            idx.columns.setdefault(ident, set()).update(_tkey(c.name) for c in t.columns)
+            seen = idx.schemas.setdefault(key, [])
+            if ident[0] not in {_tkey(s) or None for s in seen}:
+                seen.append(t.schema_name or None)
+    for (schema, key), info in idx.qualified.items():
+        if len(idx.schemas[key]) == 1:
+            idx.setdefault(key, info)
     return idx
 
 
-def _tkey(name: str) -> str:
+def _tkey(name: Optional[str]) -> str:
     """The one spelling of a table name that `_model_table_index` is keyed by."""
     return (name or "").lower()
+
+
+# The three answers `_resolve_table` gives. Strings rather than an enum because they never leave
+# this module and a test reading one reads better as the word.
+_DECLARED = "declared"
+_UNDECLARED = "undeclared"
+_AMBIGUOUS = "ambiguous"
+
+
+def _resolve_table(tidx: _ModelTableIndex, db: Optional[str],
+                   name: str) -> tuple[str, Optional[tuple[Optional[str], str]]]:
+    """Which declared table a statement's `db.name` reference is, as (status, identity).
+
+    **A table is (schema, name).** The gates used to compare the bare name alone, so with only
+    `sales_data.orders` declared, `SELECT … FROM staging.orders` passed table scope and the receipt
+    called it declared — a same-named table in another schema defeated confinement silently. The
+    rules, each fail-closed:
+
+    * **Qualified** (`db` set) — matches only a table declared WITH that schema, case-folded like
+      the name. Anything else is `undeclared`, including a table the model declares with NO schema:
+      the model never said which schema that table lives in, so it cannot vouch that `staging.orders`
+      is it rather than a same-named neighbour, and the fix is a rewrite the caller can make (drop
+      the qualifier, or declare the schema). That is stricter than before for a hand-written model
+      that omits `schema`; introspection always records one.
+    * **Unqualified** — matches when the name is declared under exactly one schema (or exactly once
+      with none), which is today's behaviour for every model without a clash. Declared under two or
+      more, it is `ambiguous`: which table the warehouse reads depends on a search path the guard
+      cannot see, so it is refused and the caller is told to qualify it. A schema-less declaration
+      counts as one of the "schemas" here, so `orders` beside `staging.orders` is ambiguous too.
+
+    Only the schema (`exp.Table.db`) takes part. A catalog (`exp.Table.catalog` — a Snowflake
+    database, a BigQuery project) is not part of a table's identity in the model, which records no
+    such field, so it is neither compared nor able to rescue a mismatched schema.
+    """
+    key = _tkey(name)
+    if db:
+        ident = (_tkey(db), key)
+        return (_DECLARED, ident) if ident in tidx.qualified else (_UNDECLARED, None)
+    schemas = tidx.schemas.get(key, [])
+    if len(schemas) > 1:
+        return _AMBIGUOUS, None
+    if not schemas:
+        return _UNDECLARED, None
+    return _DECLARED, (_tkey(schemas[0]) or None, key)
+
+
+def _site_table(tidx: _ModelTableIndex, site: "_RefSite",
+                cte_names: set[str]) -> Optional[tuple]:
+    """The model row one reference site resolves to, or None — the RECEIPT's per-reference lookup.
+
+    Every receipt fact about a table reference goes through here so that it reads the reference the
+    way `check_table_scope` does: by schema and name, through `_resolve_table`. Resolving the bare
+    name instead is what let the receipt report `staging.orders` as the declared `sales_data.orders`.
+
+    The CTE subtraction stays by NAME, statement-globally, as it always has on the receipt, and that
+    is the conservative direction: a name the statement bound for itself is never credited with a
+    model row, even where a qualified reference could only have meant the physical table. The gate
+    is stricter the other way (a qualified reference is never a CTE there), and the two differences
+    both land on "not declared", so they cannot make the receipt vouch for something the gate refused.
+    """
+    node = site.node
+    if not isinstance(node, exp.Table) or not node.name:
+        return None
+    if _tkey(node.name) in cte_names:
+        return None
+    status, ident = _resolve_table(tidx, node.db, node.name)
+    return tidx.qualified[ident] if status == _DECLARED else None
+
+
+def _unresolved_names(tree: "exp.Expression", tidx: _ModelTableIndex,
+                      cte_names: set[str]) -> set[str]:
+    """Folded bare names the statement wrote in a form that does NOT resolve to a declared table.
+
+    The receipt's name-keyed lookups (`_declared_table`, the `visible` set behind joins and
+    aggregates) carry a bare name and nothing else — the alias maps they are fed from drop the
+    schema. For a name unique in the model that bare lookup would find the declared table even when
+    the statement read `staging.orders`, so any name written even once in an unresolvable form is
+    withheld from them for the whole statement. That overstates what was not established rather
+    than crediting a table nobody read, which is the same trade the CTE subtraction makes.
+    """
+    return {
+        _tkey(tbl.name)
+        for tbl in tree.find_all(exp.Table)
+        if tbl.name and _tkey(tbl.name) not in cte_names
+        and _resolve_table(tidx, tbl.db, tbl.name)[0] != _DECLARED
+    }
 
 
 # `_norm_sql` stood here and is gone with the containment test that was its only caller. It
@@ -2769,10 +2981,15 @@ def assemble_receipt(
     # attributed to a table, and attributing one to a table nothing read is the same error.
     used = {bare for bare in scope.values() if _tkey(bare) not in cte_names}
     tidx = _model_table_index(org)
+    # Names written in a form that resolves to no declared table — a schema the model does not
+    # declare the name under, or a bare name declared under two schemas. Every name-keyed lookup
+    # below withholds the model row for them; see `_unresolved_names`.
+    unresolved = _unresolved_names(tree, tidx, cte_names)
     # The names the analysis can see BEHIND: a table the model declares, minus any name the
-    # statement bound to a result of its own. Computed once and handed to both callers that need
-    # it — `_model_table_index` walks the whole model and this path runs for every executed query.
-    visible = set(tidx) - cte_names
+    # statement bound to a result of its own or wrote unresolvably. Computed once and handed to both
+    # callers that need it — `_model_table_index` walks the whole model and this path runs for every
+    # executed query.
+    visible = set(tidx) - cte_names - unresolved
 
     # ONE ITEM PER JOIN THE STATEMENT WROTE, not per declared relationship whose two tables are both
     # in scope. The old walk described the MODEL filtered by the statement: it listed a relationship
@@ -3008,7 +3225,8 @@ def assemble_receipt(
         `tables` while `columns` handed back `public.orders.amount` and `assumptions` handed back
         the AI-written prose for a column the answer never touched.
         """
-        return None if _tkey(bare) in cte_names else tidx.get(_tkey(bare))
+        key = _tkey(bare)
+        return None if key in cte_names or key in unresolved else tidx.get(key)
 
     def _tables_defining(cname: str) -> list[str]:
         out = []
@@ -3156,13 +3374,19 @@ def assemble_receipt(
     # Iterated as the PAIRS the check returns rather than by index into `sites`, because that is the
     # coupling the pair shape exists to remove: a cap applied to one list and not the other would
     # report one reference's filters under another reference's name.
-    for r, ref_filters in check_declared_filters(
-            tree, org, refs=sites[:_RECEIPT_MAX_REFS], ctx=None):
+    listed = sites[:_RECEIPT_MAX_REFS]
+    # Zipped with the sites it was handed, strictly, because the resolution below needs the site's
+    # NODE (its schema) and the pair carries only the reference. `check_declared_filters` returns
+    # exactly one pair per site in order; `strict` turns any future drift into an error rather
+    # than one reference's resolution landing on another's item.
+    for site, (r, ref_filters) in zip(
+            listed, check_declared_filters(tree, org, refs=listed, ctx=None), strict=True):
         # A CTE name resolved through the bare-name index, so `WITH orders AS (…)` reported
         # `declared: true` and borrowed the real table's row estimate — a fact about a table the
-        # statement never read. `_declared_table` is the one place that subtraction lives, and
-        # `_cte_names` is the same set `check_table_scope` subtracts.
-        info = _declared_table(r.bare)
+        # statement never read. And a bare-name lookup reported `staging.orders` as the declared
+        # `sales_data.orders`. `_site_table` resolves by schema and name, as `check_table_scope`
+        # does, with the same CTE subtraction `_declared_table` makes.
+        info = _site_table(tidx, site, cte_names)
         t = info[0] if info else None
         ph = t.performance_hints if t else None
         table_items.append({
@@ -3386,10 +3610,10 @@ def assemble_refusal_receipt(
 
     cte_names = _cte_names(tree)
     tidx = _model_table_index(org)
-    refs = _table_references(tree)
+    sites = _reference_sites(tree)
     items: list[dict[str, Any]] = [
         {
-            "ref": _echo_name(r.written),
+            "ref": _echo_name(site.ref.written),
             # A CTE name is a name the statement defined for itself, so the model does not declare
             # it however closely it resembles something that is declared.
             #
@@ -3400,11 +3624,15 @@ def assemble_refusal_receipt(
             # this reported `{"ref": "ORDERS", "declared": false}`, which is exactly the
             # gate-versus-receipt contradiction the fold exists to close, on the one fact a refused
             # caller is given.
-            "declared": _tkey(r.bare) not in cte_names and _tkey(r.bare) in tidx,
+            #
+            # Resolved by schema AND name through `_site_table` for the same reason: a bare-name
+            # lookup answered `declared: true` for `staging.orders` — the very reference the table
+            # gate had just refused because only `sales_data.orders` is declared.
+            "declared": _site_table(tidx, site, cte_names) is not None,
         }
-        for r in refs[:_ECHO_MAX_NAMES]
+        for site in sites[:_ECHO_MAX_NAMES]
     ]
-    dropped = len(refs) - len(items)
+    dropped = len(sites) - len(items)
     sections = _undetermined_sections(UNDETERMINED_REFUSED)
     sections["tables"] = {
         "items": items,
@@ -5179,8 +5407,10 @@ def check_declared_filters(
     folded: dict[int, set["exp.Expression"]] = {}
     out: list[tuple[TableRef, list[dict[str, str]]]] = []
     for site in sites:
-        key = _tkey(site.ref.bare)
-        info = None if key in cte_names else tidx.get(key)
+        # By schema and name, the one resolution `check_table_scope` and the receipt's `tables`
+        # section use: a bare-name lookup would account `sales_data.orders`' declared filters
+        # against a statement that read `staging.orders`.
+        info = _site_table(tidx, site, cte_names)
         table = info[0] if info else None
         # RAW `Table.default_filters`, deliberately not `loader.collect_default_filters`: that one
         # binds `{alias}` to the table's bare name and dedupes across tables, and both destroy the

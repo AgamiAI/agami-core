@@ -14,6 +14,26 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A same-named table in another schema no longer passes as the declared one** (#332). With the
+  semantic-model pass on, table scope compared a referenced table's bare name only, so with
+  `sales_data.orders` declared, `SELECT … FROM staging.orders` passed and the receipt called it
+  declared. A table is now identified by its schema and name wherever the model is compared or
+  looked up:
+  - A schema-qualified reference must match a table declared with that schema. A table declared
+    without a schema is reachable only unqualified.
+  - An unqualified name declared under two or more schemas is refused as ambiguous, naming those
+    schemas and asking for the qualified name. A name declared under one schema passes as before.
+  - A schema-qualified reference is never taken for a CTE of the same name; it was skipped by name.
+  - Column scope binds columns to the table actually read, rather than to every table sharing its
+    name. The receipt, the declared-filter accounting and the refusal receipt resolve references the
+    same way the gate does.
+  - Model lookups (`get_table_context`, the schema index) no longer resolve a name declared under two
+    schemas to whichever was defined first: a qualified name or the area's `TableRef` schema settles
+    it, and an unsettled clash reports not found.
+  - The validator reports an error when two tables with the same name are defined in one subject
+    area; the model store keys tables by area and name, so such a model cannot be stored faithfully.
+    The same name in different areas is allowed.
+
 - **A table outside the connection's default schema resolves when the client names it without its
   schema** (#258). A large model is served at the `summary` tier, whose area table lists carried a
   bare name, so the client wrote `FROM orders` and a warehouse keeping it in `sales_data` answered

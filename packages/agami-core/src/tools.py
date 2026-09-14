@@ -1198,7 +1198,16 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
     not override that: forcing a named table into the declared area returns "not found in scope"
     for any table outside it, while its metrics stay advertised — a silent hide.
     """
-    area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+    # A name defined under two or more schemas gets no owning area. Keyed by name alone, the LAST
+    # definition's area won, and the per-area lookup then resolved the name inside that area — so a
+    # clash silently served one of the two tables. Left ungrouped, it resolves org-wide, where the
+    # loader refuses to pick between them rather than picking by definition order.
+    schemas_of: dict[str, set] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schemas_of.setdefault(t.name, set()).add((t.schema_name or "").lower())
+    area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined
+               if len(schemas_of[t.name]) == 1}
     by_area: dict[str | None, list[str]] = {}
     for t in table_names:
         by_area.setdefault(area_of.get(t), []).append(t)

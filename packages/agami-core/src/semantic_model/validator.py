@@ -173,6 +173,7 @@ def _validate_area(
     # (entity mappings + each relationship's FK-type check), instead of rebuilding it per
     # relationship — that per-rel rebuild was the O(R×T) cost this pass eliminates (ACE-046).
     defined = _all_tables(sa)
+    _check_duplicate_table_names(sa, ares)
     _check_subject_area_sizing(sa, ares)
     _check_table_refs_resolve(sa, ares, org_tables)
     _check_expose_column_groups(sa, ares, org_tables)
@@ -541,6 +542,33 @@ def _check_metric_combine(metric: CrossDatasourceMetric, res: ValidationResult) 
 
 def _all_tables(sa: SubjectArea) -> dict[str, Table]:
     return {t.name: t for t in sa.tables_defined}
+
+
+def _check_duplicate_table_names(sa: SubjectArea, res: ValidationResult) -> None:
+    """Two tables with the same case-folded bare name in ONE subject area are an error.
+
+    A table's identity is (schema, name), and the scope gates and receipts now honour that
+    (`runtime._resolve_table`) — but the `model_table` store is keyed on (org, datasource, area,
+    name), with no schema in the key. Two same-named tables in one area therefore cannot both be
+    stored: the second silently overwrites the first, and the model the gates judge after a
+    round-trip is not the model that was validated. Refusing it here is the alternative to a storage
+    migration. The same name in DIFFERENT areas stores faithfully and is allowed; an unqualified
+    reference to it is refused as ambiguous at query time instead.
+    """
+    by_name: dict[str, list[Table]] = {}
+    for t in sa.tables_defined:
+        by_name.setdefault(bare_name(t.name).lower(), []).append(t)
+    for name, tables in sorted(by_name.items()):
+        if len(tables) < 2:
+            continue
+        count = "two" if len(tables) == 2 else str(len(tables))
+        schemas = ", ".join(t.schema_name or "no schema" for t in tables)
+        res.error(
+            "duplicate_table_name",
+            f"{count} tables named {name} in subject area {sa.name} ({schemas}); "
+            "put them in different subject areas",
+            locator=f"{sa.name}.tables_defined[{name}]",
+        )
 
 
 def _check_storage_connection_refs(org: Datasource, res: ValidationResult) -> None:
