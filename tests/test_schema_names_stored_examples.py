@@ -16,6 +16,7 @@ import pytest
 pytest.importorskip("pydantic")
 pytest.importorskip("yaml")
 
+import contracts  # noqa: E402
 import model_store  # noqa: E402
 import tools  # noqa: E402
 from semantic_model import build  # noqa: E402
@@ -133,3 +134,50 @@ def test_the_surface_names_the_pointer_and_keeps_the_calls_independent(monkeypat
         assert "`prompt_examples`" in text
         # The fallback does not undo the decision to issue both grounding calls in one turn.
         assert "INDEPENDENT" in text
+
+
+def test_a_served_schema_call_carries_the_pointer(tmp_path, monkeypatch):
+    """The hosted path end to end: a model and its examples in the database, and the pointer in the
+    response the tool actually returns — not only in `_context_sources`."""
+    for var in ("APP_DATABASE_URL", "AGAMI_ORG_ID", "AGAMI_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "no-files-here"))
+    tools.resolved_org_id.cache_clear()
+    org = tools._current_org_id()
+    url = "sqlite://" + str(tmp_path / "agami.db")
+    store = Store.connect(url)
+    store.run_migrations()
+    model = Datasource(
+        datasource="served_crm",
+        subject_areas=[
+            SubjectArea(name="Sales", description="Sales area"),
+            SubjectArea(name="Support", description="Support area"),
+        ],
+    )
+    model_store.write_datasource(store, "served_crm", model, org_id=org)
+    model_store.write_examples(
+        store,
+        "served_crm",
+        [
+            {"area": "Sales", "question": "top reps by revenue", "sql": "SELECT 1"},
+            {"area": "Support", "question": "tickets assigned to me", "sql": "SELECT 2"},
+        ],
+        org,
+    )
+    store.close()
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+
+    out = tools.tool_get_datasource_schema({"datasource": "served_crm", "area": "Sales"})
+
+    assert _head(out)["prompt_examples"] == {"stored": 2, "next": tools._EXAMPLES_REMINDER}
+    assert "tickets assigned to me" not in out
+
+
+def test_the_shared_contract_declares_the_pointer():
+    """Declared, not carried on `extra="allow"`: a consumer of the typed contract has to see it."""
+    assert "prompt_examples" in contracts.DatasourceSchemaResult.model_fields
+    pointer = {"stored": 2, "next": "fetch them"}
+    parsed = contracts.DatasourceSchemaResult.model_validate(
+        {"datasource": "crm", "prompt_examples": pointer}
+    )
+    assert parsed.prompt_examples == pointer

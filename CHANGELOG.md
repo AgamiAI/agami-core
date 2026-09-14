@@ -21,8 +21,8 @@ below corresponds to one such version.
   a one-line reminder to fetch them — whenever it has any. It carries a count, never the examples:
   ranking and returning them stays `get_prompt_examples`' job. The count is datasource-wide even on
   an `area`-scoped call, and the instructions and both tool descriptions now say to pass the
-  question as `query` and leave `area` out unless sure, because an `area` drops every example
-  outside it.
+  question as `query` and leave `area` out unless sure, because an `area` drops every other
+  area's examples, however well they match.
 
 - **A golden run pays for the model's description once, not once per question.** Every question
   starts its own client, and every one re-sent the whole model — about 35k tokens on a 22-area

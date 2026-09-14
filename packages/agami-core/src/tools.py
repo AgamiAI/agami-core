@@ -126,7 +126,7 @@ _SHARED_INSTRUCTIONS = (
     "metrics; a `dataset_names` call also returns those tables' joins and metrics, so it is what "
     "you need to write the SQL). (2) Examples-first — call get_prompt_examples with the user's "
     "question as `query` and mirror the closest match; leave `area` out unless you are sure of "
-    "it, because it drops every example outside that area. Use "
+    "it, because it drops every other area's examples, however well they match. Use "
     "metric `calculation`/`binding` verbatim. (3) execute_sql (the safety pass runs inside it; "
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
@@ -1528,6 +1528,15 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     matched = list(dict.fromkeys(explicit + _match_metrics(args.get("query"), metrics)))
     selected = matched or list(metrics)
 
+    # Read before the response is built, so the stored-example pointer is inside the JSON the size
+    # budget below measures — every piece still on ONE DB connection (see _context_sources).
+    org_md_raw, user_md_raw, record, company_md, example_count = _context_sources(
+        profile, _current_org_id()
+    )
+    # A pointer, never the examples (#301). Counted datasource-wide whatever `area` scoped this call:
+    # an area-scoped count would hide exactly the other areas' examples an `area` filter drops.
+    pointer = {"stored": example_count, "next": _EXAMPLES_REMINDER} if example_count else None
+
     if scope.level == "table":
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
         # O(1) name→table index so this resolves each table by lookup, not a per-table rescan
@@ -1554,6 +1563,8 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # always have been: a caller that named its tables is not asking for the area map, and
         # `relationships` above answers "how do I join these" better than the org-level edge list,
         # which carries only endpoints.
+        if pointer:
+            result["prompt_examples"] = pointer
     else:
         # Sized by the areas IN SCOPE, not by the whole datasource. The ladder and the budget are
         # unchanged (both out of this spec's scope); what changes is the count fed to the selector,
@@ -1573,6 +1584,8 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         truncated = False
         while True:
             result = _schema_payload(org, profile, mode, matched, metrics, L, scope, index=index)
+            if pointer:
+                result["prompt_examples"] = pointer
             if len(json.dumps(result, default=str)) <= _SCHEMA_CHAR_BUDGET:
                 break
             nxt = _SCHEMA_MODE_DOWNGRADE[mode]
@@ -1597,16 +1610,6 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # The boundary the never-hide guarantee is relative to. A guarantee stated against a scope is
     # only honest if the reader can see which scope they got.
     result["scope"] = {"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
-
-    # Read before the JSON head is serialized, so the stored-example count can go in it — every
-    # piece still on ONE DB connection (see _context_sources).
-    org_md_raw, user_md_raw, record, company_md, example_count = _context_sources(
-        profile, _current_org_id()
-    )
-    if example_count:
-        # A pointer, never the examples (#301). Counted datasource-wide whatever `area` scoped this
-        # call: an area-scoped count would hide exactly the examples an `area` filter drops.
-        result["prompt_examples"] = {"stored": example_count, "next": _EXAMPLES_REMINDER}
 
     parts = [json.dumps(result, indent=2, default=str)]
     # Domain context = the human's datasource.md narrative + the model-DERIVED summary
@@ -3251,7 +3254,8 @@ TOOLS: dict[str, dict[str, Any]] = {
             "then reuse the tagged tables/columns/SQL. On a served deployment each example carries "
             "a stable `id` — cite it as a basis ref on execute_sql to say which one you followed. "
             "Pass the user's question as `query`, and leave `area` out unless you are sure of it: "
-            "an `area` drops every example outside that area, however well it matches."
+            "an `area` drops every other area's examples (cross-area ones stay), however well "
+            "they match."
         ),
         "inputSchema": {
             "type": "object",
