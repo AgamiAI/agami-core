@@ -363,7 +363,7 @@ def cmd_set_terminology(args) -> int:
     `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
     default (layers over a human's edits); --replace overwrites. Validated + committed."""
     from . import curate
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         terms = json.load(fh)
     if isinstance(terms, dict) and "key_terminology" in terms:
         terms = terms["key_terminology"]
@@ -386,7 +386,7 @@ def cmd_set_description(args) -> int:
 
 def cmd_curate(args) -> int:
     from . import curate
-    with open(args.ops_file) as fh:
+    with open(args.ops_file, encoding="utf-8") as fh:
         ops = json.load(fh)
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
@@ -420,7 +420,7 @@ def cmd_approve_queue(args) -> int:
 
 def cmd_add(args) -> int:
     from . import curate
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         items = json.load(fh)
     if isinstance(items, dict):
         items = items.get(args.kind + "s", items.get("items", []))
@@ -432,7 +432,7 @@ def cmd_add(args) -> int:
 
 def cmd_add_example(args) -> int:
     from . import curate
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         items = json.load(fh)
     if isinstance(items, dict):
         items = items.get("examples", items.get("items", []))
@@ -707,7 +707,7 @@ def cmd_seed_examples(args) -> int:
         if block is not None:
             _print_json(block)
             return 2
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         cands = json.load(fh)
     if isinstance(cands, dict):
         cands = cands.get("examples", cands.get("items", []))
