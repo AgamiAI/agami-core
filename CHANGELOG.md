@@ -10,6 +10,19 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Fixed
+
+- **Text past plain ASCII survives `sm` on Windows.** Five `sm` commands — `set-terminology`,
+  `curate`, `add`, `add-example` and `seed-examples` — read their JSON file in the platform's
+  default encoding, which on Windows is not UTF-8. An em dash became `â€”`, and was saved as valid
+  UTF-8, so nothing flagged it. Worse, that garbled text holds a byte Windows' encoding cannot read
+  back, so the next read of the file failed — and because `get_prompt_examples` reads every subject
+  area into one response, one such file dropped the curated examples for every area. Both reads now
+  use UTF-8, and a file that still cannot be read is skipped on its own rather than failing the
+  rest. Text already garbled by an earlier `sm` run is not repaired by this; re-save it. (#236)
+
 ## [0.8.8] — 2026-09-15
 
 ### Fixed
