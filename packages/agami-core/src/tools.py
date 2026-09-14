@@ -1180,7 +1180,8 @@ def _large_tables(org) -> dict[str, int]:
     return out
 
 
-def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
+def _table_contexts(org, table_names: list[str], L, index=None, *,
+                    picks: "list[tuple[str, str | None, Any, str | None]] | None" = None) -> dict[str, Any]:
     """Full get_table_context for the named tables: `{"tables": {name: ctx}, "relationships": [...]}`.
 
     `index` (from L.build_table_index) resolves tables in O(1) instead of a per-table linear scan
@@ -1198,67 +1199,13 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
     not override that: forcing a named table into the declared area returns "not found in scope"
     for any table outside it, while its metrics stay advertised — a silent hide.
     """
-    # Each requested name is resolved to ONE definition — and so to the area that defines it — before
-    # anything is fetched. Keyed by name alone, a name defined in two schemas (which is what connect
-    # produces for a multi-schema warehouse: `billing.products` and `crm.products`, one area each)
-    # took whichever area was defined last, and the table the caller got depended on model order.
-    # `schema.table` settles such a clash; a bare name settles only a unique one, and an unsettled
-    # clash says so rather than guessing.
-    defs = _table_definitions(org)
-    clashing = _clashing_table_names(defs)
-    picks: list[tuple[str, str | None, Any, str | None]] = []
-    for requested in table_names:
-        bare = _bare_name(requested)
-        cands = sorted(defs.get(requested, []) + (defs.get(bare, []) if bare != requested else []),
-                       key=lambda d: d[0])
-        table = L._pick_declared([t for _, _, t in cands], requested)
-        if table is None:
-            error = ("declared in more than one schema; name it as schema.table" if cands
-                     else "not found in scope")
-            picks.append((requested, None, None, error))
-            continue
-        area = next(a for _, a, t in cands if t is table)
-        picks.append((_served_key(table, clashing), area, table, None))
-    return _contexts_for(org, picks, L, index=index)
-
-
-def _table_definitions(org) -> dict[str, list[tuple[int, str, Any]]]:
-    """table name -> every definition of it as (scan rank, defining area, Table), in scan order."""
-    defs: dict[str, list[tuple[int, str, Any]]] = {}
-    rank = 0
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            defs.setdefault(t.name, []).append((rank, sa.name, t))
-            rank += 1
-    return defs
-
-
-def _clashing_table_names(defs: dict[str, list[tuple[int, str, Any]]]) -> set[str]:
-    """Names defined under more than one schema — the ones a bare name cannot identify."""
-    return {name for name, ds in defs.items()
-            if len({(t.schema_name or "").lower() for _, _, t in ds}) > 1}
-
-
-def _served_key(table, clashing: set[str]) -> str:
-    """The key a table's context is served under: its name, or `schema.name` when the name clashes.
-
-    Keyed by bare name, two clashing tables collided in the one `tables` dict and the second
-    silently replaced the first, so a full-tier response carried one `products` and no sign that a
-    second existed. The qualified key is also exactly what a caller passes back in `dataset_names`.
-    """
-    if table.name in clashing and table.schema_name:
-        return f"{table.schema_name}.{table.name}"
-    return table.name
-
-
-def _contexts_for(org, picks: list[tuple[str, str | None, Any, str | None]], L,
-                  index=None) -> dict[str, Any]:
-    """Fetch contexts for already-resolved `(served key, defining area, Table, error)` picks.
-
-    Each group is fetched in the area that DEFINES its tables, where the validator guarantees a
-    name is unique, so the loader never has to choose between clashing definitions. The served key
-    doubles as the loader query: `schema.name` for a clash settles it inside the loader as well.
-    """
+    # `picks` lets a caller that already holds the definitions (the full tier, which walks every
+    # table) skip name resolution; otherwise each requested name is resolved first. Either way every
+    # group is fetched in the area that DEFINES its tables, where the validator guarantees a name is
+    # unique, so the loader never has to choose between clashing definitions. The served key doubles
+    # as the loader query: `schema.name` for a clash settles it inside the loader as well.
+    if picks is None:
+        picks = _resolve_table_picks(org, table_names, L)
     by_area: dict[str | None, list[tuple[str, Any, str | None]]] = {}
     for key, area, table, error in picks:
         by_area.setdefault(area, []).append((key, table, error))
@@ -1299,6 +1246,62 @@ def _contexts_for(org, picks: list[tuple[str, str | None, Any, str | None]], L,
                 # The loader keys a found table by its own name and a miss by the query.
                 contexts[key] = got.get(table.name, got.get(key, {"error": "not found in scope"}))
     return {"tables": contexts, "relationships": relationships}
+
+
+def _resolve_table_picks(org, table_names: list[str], L) -> list[tuple[str, str | None, Any, str | None]]:
+    """Each requested name as `(served key, defining area, Table, error)` — ONE definition per name.
+
+    Keyed by name alone, a name defined in two schemas (which is what connect produces for a
+    multi-schema warehouse: `billing.products` and `crm.products`, one area each) took whichever area
+    was defined last, and the table the caller got depended on model order. `schema.table` settles
+    such a clash; a bare name settles only a unique one, and an unsettled clash says so rather than
+    guessing.
+    """
+    defs = _table_definitions(org)
+    clashing = _clashing_table_names(defs)
+    picks: list[tuple[str, str | None, Any, str | None]] = []
+    for requested in table_names:
+        bare = _bare_name(requested)
+        cands = sorted(defs.get(requested, []) + (defs.get(bare, []) if bare != requested else []),
+                       key=lambda d: d[0])
+        table = L._pick_declared([t for _, _, t in cands], requested)
+        if table is None:
+            error = ("declared in more than one schema; name it as schema.table" if cands
+                     else "not found in scope")
+            picks.append((requested, None, None, error))
+            continue
+        area = next(a for _, a, t in cands if t is table)
+        picks.append((_served_key(table, clashing), area, table, None))
+    return picks
+
+
+def _table_definitions(org) -> dict[str, list[tuple[int, str, Any]]]:
+    """table name -> every definition of it as (scan rank, defining area, Table), in scan order."""
+    defs: dict[str, list[tuple[int, str, Any]]] = {}
+    rank = 0
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            defs.setdefault(t.name, []).append((rank, sa.name, t))
+            rank += 1
+    return defs
+
+
+def _clashing_table_names(defs: dict[str, list[tuple[int, str, Any]]]) -> set[str]:
+    """Names defined under more than one schema — the ones a bare name cannot identify."""
+    return {name for name, ds in defs.items()
+            if len({(t.schema_name or "").lower() for _, _, t in ds}) > 1}
+
+
+def _served_key(table, clashing: set[str]) -> str:
+    """The key a table's context is served under: its name, or `schema.name` when the name clashes.
+
+    Keyed by bare name, two clashing tables collided in the one `tables` dict and the second
+    silently replaced the first, so a full-tier response carried one `products` and no sign that a
+    second existed. The qualified key is also exactly what a caller passes back in `dataset_names`.
+    """
+    if table.name in clashing and table.schema_name:
+        return f"{table.schema_name}.{table.name}"
+    return table.name
 
 
 def _bare_name(name: str) -> str:
@@ -1502,11 +1505,13 @@ def _schema_payload(
         # names here resolved a clashing name to no area and then to not-found, so a multi-schema
         # model served neither `billing.products` nor `crm.products` in full.
         clashing = _clashing_table_names(_table_definitions(org))
-        result["tables"] = _contexts_for(
+        result["tables"] = _table_contexts(
             org,
-            [(_served_key(t, clashing), sa.name, t, None) for sa in areas for t in sa.tables_defined],
+            [],
             L,
             index=index,
+            picks=[(_served_key(t, clashing), sa.name, t, None)
+                   for sa in areas for t in sa.tables_defined],
         )["tables"]
     # metrics in full: the matched set (a query/metric_names limits them); else every metric in
     # full mode (back-compat); else none (rely on metric_index).
