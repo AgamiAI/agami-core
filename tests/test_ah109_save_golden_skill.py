@@ -36,6 +36,15 @@ def test_the_skill_carries_the_four_frontmatter_keys():
     assert 'argument-hint: "[dataset-name]"' in FRONTMATTER
 
 
+def test_a_workbook_is_parsed_rather_than_refused_and_the_sheet_is_the_users_call():
+    """#261. The import door used to refuse `.xlsx` and ask for a CSV export. The parse reads a
+    workbook now, so the skill hands one over instead of refusing it — and never picks the sheet
+    itself, because a real workbook's first tab is as likely to be a cover page as the questions."""
+    assert "Save As → CSV UTF-8" not in SKILL
+    assert "--file" in SKILL and "--sheet" in SKILL
+    assert "which sheet holds the questions is the user's call" in SKILL
+
+
 def test_the_skill_refuses_in_plan_mode():
     """SC-9. Every door here writes to the model tree, so none of them can proceed read-only.
 

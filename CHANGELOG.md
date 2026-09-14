@@ -12,6 +12,19 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The import door reads an Excel workbook.** `golden_author.py parse --file bank.xlsx` reads one
+  sheet of an `.xlsx` into the same parse a CSV goes through, with the standard library alone — a
+  workbook is a zip of XML, so no dependency is added to a plugin that installs with none. A workbook
+  with several sheets stops and names them, because which tab holds the questions is the person's
+  call; `--sheet` names it. The header no longer has to be the first row: the first row within the
+  top 20 that names a question column is taken, so a title block above the table is fine, and rows
+  keep Excel's own numbering, so a skipped row is reported at the number the person sees. Rows Excel
+  formats but never fills are dropped rather than reported as empty questions. An `.xls` file —
+  Excel's older binary format — is still refused, with how to get past it, and `--csv` keeps
+  working. (#261)
+
 ### Changed
 
 - **A golden run pays for the model's description once, not once per question.** Every question

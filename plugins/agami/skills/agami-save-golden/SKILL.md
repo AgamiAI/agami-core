@@ -1,6 +1,6 @@
 ---
 name: agami-save-golden
-description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, or a table pasted into chat — into items after the parsed rows have been shown and agreed to: a row that already carries a statement is written confirmed, a bare question is written unconfirmed. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item. The curation door applies the changes queued on the golden-dataset explorer page, which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
+description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, one sheet of an Excel .xlsx workbook, or a table pasted into chat — into items after the parsed rows have been shown and agreed to: a row that already carries a statement is written confirmed, a bare question is written unconfirmed. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item. The curation door applies the changes queued on the golden-dataset explorer page, which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
 when_to_use: "Use when the user says 'save this as a golden question', 'add this to the golden dataset', 'import my question bank', 'turn this spreadsheet into a golden dataset', 'this answer is correct — remember it as ground truth', 'show me the golden datasets', 'what does this dataset not test', 'apply my queued changes', or '/agami-save-golden <dataset>' — any ask to record a question, or a bank of questions, that the model should be scored against later. Also use when the user replies with a back-channel block from a previously-rendered golden-dataset explorer page (first line `profile: <name>`, then `golden-ops:` and a JSON array, ending `done`) — paste it and nothing else is needed. Requires agami-connect to have been run first (needs a profile with a semantic model). To RUN a dataset and see the verdicts, use `/agami-eval` instead: that skill reads and scores, this one writes and never runs or scores."
 argument-hint: "[dataset-name]"
 ---
@@ -65,24 +65,22 @@ Route on what the user brought, and say which door you are opening:
 
 ## Phase 2: The import door
 
-### 2a — Get a CSV
+### 2a — Get the file
 
-The parser reads **one format**, and that is deliberate: one parser is one place where a column can be misread.
+The parse reads the question bank straight from the file, and there is still **one parser**: a workbook is read into rows and then parsed exactly as a CSV is, so there is one place a column can be misread.
 
 - **A `.csv` path** — use it as given.
-- **A `.xlsx` / `.xls` path** — refuse and say how to get past it. Do not try to read it, and do not guess at its contents:
-
-  > I can't read `.xlsx` directly. Open it in Excel (or Numbers / Google Sheets) and **Save As → CSV UTF-8**, then re-invoke me with the `.csv` path.
-
+- **A `.xlsx` path** — use it as given. Do not open it with the Read tool (it cannot read a workbook) and do not guess at its contents; the parse reads it. A workbook often holds several sheets — a cover page, a schema reference, the questions — and **which sheet holds the questions is the user's call, not yours**. Run the parse without `--sheet` first: a workbook with more than one sheet stops with exit `2` and lists every sheet. Show the list, suggest the one whose name reads like the question bank, and re-run with `--sheet "<name>"` once they confirm.
+- **A `.xls` path** (Excel's older binary format) — it cannot be read. Ask the user to save it as `.xlsx` (or CSV) from Excel and re-invoke.
 - **A table pasted into chat** — write it out as a CSV with the **Write tool** and then parse that file. One parser, one code path, and the file is also the thing the user can fix and re-run. Per [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md): **never a heredoc, never `python3 -c`, never a shell variable** — quoting mangles the commas and quotes that are the whole point of a CSV. Write it to `/tmp/agami-golden-pasted-<ts>.csv` and tell the user where it went.
 
-The sheet needs a header row with a **question column** — `question`, `query`, `nl question`, `prompt` or `ask` (case, underscores and hyphens all fold). Optional columns: `id`, `expected` / `expected value` / `answer`, `sql` / `statement`, `tags`. A header the contract does not know is left alone — matching is exact, never fuzzy, so an analyst's note column costs nothing.
+The table needs a header row with a **question column** — `question`, `query`, `nl question`, `prompt` or `ask` (case, underscores and hyphens all fold). It does not have to be the first row: a title or a note above the table is fine, and the parse takes the first row within the top 20 that names a question column. Optional columns: `id`, `expected` / `expected value` / `answer`, `sql` / `statement`, `tags`. A header the contract does not know is left alone — matching is exact, never fuzzy, so an analyst's note column costs nothing. The same exactness means a column is only picked up under one of those names: a statement column headed `Warehouse SQL` is not `sql`, so if the rows come back without the statements the user expected, say which header held them and have them rename it.
 
 ### 2b — Parse (this writes nothing)
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" parse \
-  --csv <path-to-csv> \
+  --file <path-to-csv-or-xlsx> [--sheet "<sheet name>"] \
   > /tmp/agami-golden-parse-<ts>.json
 ```
 
@@ -272,13 +270,15 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
 | Exit `2` | Cannot start. Read the `agami-save-golden:` line on stderr — it names the cause. Nothing was written; a rolled-back write left the previous bytes exactly as they were. |
 | `agami-save-golden: this file is empty` / `no column here holds the question` / `this file has no header row` | The sheet's question column can't be identified. The refusal lists every header it read — quote it back, ask which column holds the question, and have them rename it (or add a header row) and re-invoke. Never guess at column 0: a bank of ids imported as questions fails every future run in a way that looks exactly like a model regression. |
 | `agami-save-golden: N row(s) were skipped` on a successful parse | A warning, not a stop. List every entry in `skipped` with its row number and reason before asking for the import — a question silently missing from a dataset is the failure this line exists to prevent. |
-| A `.xlsx` / `.xls` path | Refuse with the Save As → CSV UTF-8 instruction (Phase 2a). Do not attempt to read it and do not reconstruct its contents from memory. |
+| `agami-save-golden: this workbook has N sheets, so which one holds the questions has to be named with --sheet` | Not a fault — the workbook has more than one tab. List the sheets the message names, suggest the one that reads like the question bank, and on the user's word re-run with `--sheet "<name>"`. Never pick one yourself. |
+| `agami-save-golden: this workbook has no sheet named '<name>'` | The name matched no tab (case and surrounding spaces are already forgiven). Show the sheets the message lists and re-run with the one the user means. |
+| `agami-save-golden: this is Excel's older binary .xls format` / `this file is not a readable .xlsx workbook` | The file can't be read as a workbook. Ask the user to save it as `.xlsx` (or CSV) from Excel and re-invoke. Do not open it with the Read tool, and do not reconstruct its contents from memory. |
 | `agami-save-golden: this item does not say how its answer was confirmed` | `confirmed_by.method` was blank. Ask how the result was checked and re-write the item JSON — provenance is most of what a receipt is for. |
 | `agami-save-golden: '<name>' is not a usable dataset name` / `profile name` | The stem or the profile was a path, not a name. Ask for the plain name (`orders`, not `orders/2024` or `../orders`) and re-invoke. Nothing was read and nothing was written. |
 | `agami-save-golden: dataset '<name>' names the file rather than the dataset` | The extension was typed too. The stem *is* the dataset's name, so pass `orders`, not `orders.yaml`. Re-invoke; nothing was written. |
 | `agami-save-golden: this batch carries the id '<id>' twice` | The sheet's own `id` column repeats a key, so two questions would land under one. Nothing was written. Show the user the two rows and ask which keeps the id. |
 | `agami-save-golden: this does not fit a golden case — …` | The item JSON is a shape the dataset reader refuses — most often `match: bounded` with no `bounds` block, or a `sql: null` on a save. The sentence names the field and the reason (never the value). Fix the item JSON and re-run. |
-| `agami-save-golden: <path> does not exist` / `this file is not readable JSON` | The `--csv` / `--rows` / `--item` path is wrong or the file you wrote is truncated. Re-write it with the Write tool and re-run; nothing was written. |
+| `agami-save-golden: <path> does not exist` / `this file is not readable JSON` | The `--file` / `--rows` / `--item` path is wrong or the file you wrote is truncated. Re-write it with the Write tool and re-run; nothing was written. |
 | `agami-save-golden: <name>.yaml cannot be read as it stands` | The existing dataset has a fault that costs it a case, so nothing may be merged into it — a merge into a file the reader can't fully read would drop whatever it couldn't parse. Report the finding, point at [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md), and let the user fix the named case first. (A dataset that merely *reports* a relative question over a frozen answer key is not this: that finding drops nothing, and writing to the dataset still works.) |
 | A relative question refused at save time | The window slides and the SQL doesn't. Anchor the statement to the current date, or rewrite the question to name its window, then re-invoke. Don't save it "for now". |
 | `golden_author's write doors need agami-core and its model extra` | The plugin's interpreter is missing `agami-core[model]`. Route to `/agami-connect`, which sets the environment up; nothing was written. |
