@@ -57,9 +57,10 @@ tests, docstrings, fixtures, sample data, or docs.
   existing self-contained style (`pytest.importorskip(...)`, `sys.path` to the scripts dir).
 - **Check your change is covered:** `uv run dev.py cover` reports coverage of just the lines your
   branch touched and fails on untested ones — independent of overall coverage.
-- **Coverage is measured, not yet floored.** The suite currently sits around the mid-70s%; a
-  `--cov-fail-under` floor will be added in `pyproject.toml` once the baseline is locked, and it
-  will be the single source of that number (don't hard-code a different one here).
+- **Coverage is floored in CI.** The gate is `--cov-fail-under` on the py3.12 leg of `lint + test`
+  in `.github/workflows/ci.yml` — the one leg that traces coverage — and that flag is the single
+  source of the number (don't hard-code a copy here). It is not in `pyproject.toml`, so a bare
+  local `pytest` stays un-floored.
 
 ## Proposing a substantial change
 

@@ -39,8 +39,8 @@ jobs:
         continue-on-error: true
 
       # Coverage is ENFORCED, not just reported. Measured 2026-07-29 at 85.66% on every leg of this
-      # matrix — 3.10, 3.11 and 3.12 alike, 1584 tests — so the floor sits just below it and no matrix
-      # leg is closer to the line than any other. Before this the job printed a coverage report and
+      # matrix — 3.10, 3.11 and 3.12 alike, 1584 tests — so the floor sits just below it, and because
+      # no leg measured differently, enforcing it on one leg (below) loses nothing. Before this the job printed a coverage report and
       # failed on nothing: OCR-024 claimed a >=80% floor that was never in the workflow, so coverage
       # could regress to zero and CI stayed green.
       # Ratchet upward as the suite grows; never lower it to make a red build pass.
@@ -49,12 +49,31 @@ jobs:
       # [model] extra (pydantic/pyyaml/sqlglot — sqlglot backs the binding-validation and
       # unit-resolution paths; without it ~287 tests skip). DB drivers are intentionally
       # omitted: those tests skip cleanly without a database.
-      - name: pytest --cov
+      #
+      # Why two steps and `-n auto` (#296): this step took ~600s on EVERY leg, one test at a time,
+      # under coverage tracing. `--durations` showed no handful of slow tests to fix — the slowest is
+      # ~4s and the 40 slowest are a quarter of the run — so the time is the long tail, and the lever
+      # is running it in parallel, not trimming it. The floor is enforced on 3.12 only, with the
+      # `sysmon` tracer that 3.12 added, because tracing is what costs most on the older versions and
+      # the three legs measured the same coverage when the floor was set. 3.10 and 3.11 still run the
+      # whole suite; they just don't trace it. Nothing is deselected on any leg.
+      - name: pytest
+        if: matrix.python-version != '3.12'
         run: >-
           uvx --python ${{ matrix.python-version }}
-          --with pytest --with pytest-cov
+          --with pytest --with pytest-xdist
           --with-editable "packages/agami-core[model,server]"
-          pytest tests/ -q --cov=plugins --cov=packages/agami-core/src --cov-report=term-missing
+          pytest tests/ -q -n auto
+
+      - name: pytest --cov
+        if: matrix.python-version == '3.12'
+        env:
+          COVERAGE_CORE: sysmon
+        run: >-
+          uvx --python ${{ matrix.python-version }}
+          --with pytest --with pytest-cov --with pytest-xdist
+          --with-editable "packages/agami-core[model,server]"
+          pytest tests/ -q -n auto --cov=plugins --cov=packages/agami-core/src --cov-report=term-missing
           --cov-fail-under=85
 
   # The safety corpus gets its own required checks rather than riding inside `lint-and-test`.

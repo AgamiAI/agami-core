@@ -29,7 +29,9 @@ from pathlib import Path
 RUFF = ["uvx", "ruff@0.15.19"]
 # The suite imports the agami-core library, so install it editable with the [model]
 # extra (pydantic/pyyaml/sqlglot). DB drivers are omitted on purpose — those tests skip without a DB.
-TEST_DEPS = ["--with", "pytest-cov", "--with-editable", "packages/agami-core[model,server]"]
+TEST_DEPS = ["--with", "pytest-cov", "--with", "pytest-xdist", "--with-editable", "packages/agami-core[model,server]"]
+# One worker per core, as CI runs it — the suite is a long tail of short tests, not a few slow ones.
+PARALLEL = ["-n", "auto"]
 # `dev/` is here because it holds gate logic CI executes (changelog_gate.py), not just local
 # helpers — code the build depends on should be linted like the code it guards.
 TARGETS = ["plugins", "packages", "tests", "dev.py", "dev"]
@@ -68,7 +70,7 @@ def fmt() -> int:
 
 
 def test() -> int:
-    return run(["uvx", *TEST_DEPS, "pytest", "tests/", "-q"])
+    return run(["uvx", *TEST_DEPS, "pytest", "tests/", "-q", *PARALLEL])
 
 
 def secrets() -> int:
@@ -113,7 +115,7 @@ def cover() -> int:
     """Coverage of the lines THIS branch changed (fails on untested changed lines)."""
     # Make sure origin/main exists locally (fresh clones / worktrees may not have it).
     run(["git", "fetch", "--quiet", "origin", "main"], allow_fail=True)
-    rc = run(["uvx", *TEST_DEPS, "pytest", "tests/", "-q",
+    rc = run(["uvx", *TEST_DEPS, "pytest", "tests/", "-q", *PARALLEL,
               "--cov=plugins", "--cov=packages/agami-core/src", "--cov-report=xml"])
     return rc or run(["uvx", "diff-cover", "coverage.xml", "--compare-branch=origin/main"])
 
