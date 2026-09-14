@@ -148,6 +148,17 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A filter value the warehouse spells differently is no longer graded as a mistake in your query.**
+  The value grader compared the literal your statement wrote, as text, against the column's distinct
+  values, as the CSV rendered them, and returned a defect on a miss before it read the existence
+  count it had already run. `WHERE is_active = 1` over a column whose values render as `True` and
+  `False` graded "not a value the column holds" while its own probe had counted thousands of rows
+  with it, and the reconcile report told the person their working query was wrong. The count now
+  decides: a value missing from the list but matched by the statement's own predicate is confirmed,
+  with a note that the spelling check did not decide and, when the list spells it another way, what
+  that spelling is. The grade stays a defect when the count was zero, or when the probe did not run
+  (the note says which). (ACE-130)
+
 - **A chain of joins is no longer reported as a chasm trap.** The aggregates section flagged two
   measures as inflating each other through a shared dimension whenever the model declared both of
   their tables many-to-one to it — even when the statement joined one table to the other and only
