@@ -1414,8 +1414,13 @@ def _schema_payload(
                 "name": sa.name,
                 "description": sa.description,
                 "default_time_window": sa.default_time_window,
+                # `schema` rides with the name (#258): this is the listing a large model is served in,
+                # and a bare name here is what a client copies into `FROM`. On a warehouse whose tables
+                # are not in the connection's default schema that statement cannot resolve, while the
+                # full and table-scoped tiers already said `schema` all along.
                 "tables": [
-                    {"name": t.name, "description": t.description} for t in sa.tables_defined
+                    {"name": t.name, "schema": t.schema_name, "description": t.description}
+                    for t in sa.tables_defined
                 ],
             }
             for sa in areas

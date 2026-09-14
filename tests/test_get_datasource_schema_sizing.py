@@ -218,6 +218,9 @@ def test_the_area_summary_names_its_tables_rather_than_listing_bare_strings(monk
     tables = head["subject_areas"][0]["tables"]
     assert [t["name"] for t in tables] == ["t0_0", "t0_1"]
     assert all(t["description"] for t in tables), "the description is why these are objects"
+    # #258: the schema travels with the name, or a client writes `FROM t0_0` and a warehouse whose
+    # tables are outside the default schema cannot resolve it.
+    assert [t["schema"] for t in tables] == ["public", "public"]
 
 
 def test_the_index_mode_area_carries_a_count_not_a_table_list(monkeypatch, tmp_path):

@@ -10,6 +10,22 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Fixed
+
+- **A table outside the connection's default schema resolves when the client names it without its
+  schema** (#258). A large model is served at the `summary` tier, whose area table lists carried a
+  bare name, so the client wrote `FROM orders` and a warehouse keeping it in `sales_data` answered
+  `relation "orders" does not exist` — a failed statement and a retry on every such question. Two
+  changes:
+  - `get_datasource_schema`'s summary table list now carries each table's `schema`, as the full
+    and table-scoped tiers already did.
+  - On Postgres, Redshift and Supabase, a statement runs with `SET LOCAL search_path` set to the
+    model's declared schemas (plus `public`), so a bare name still resolves. It is skipped when a
+    bare name is declared in more than one schema, where the path would pick one silently, and it
+    uses the model the semantic-model pass already loaded, so it applies when that pass is on.
+
 ## [0.8.6] — 2026-09-14
 
 ### Added
