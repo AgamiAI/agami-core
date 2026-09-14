@@ -312,6 +312,112 @@ def _column_vectors(
     return vectors
 
 
+class ColumnPairing(NamedTuple):
+    """How the golden columns paired with the generated ones, and how far each pair agrees.
+
+    `agreement` is per golden index: the share of rows on which the pair's cells are equal, 1.0 for
+    a pair the exact stage made. It is what lets a reader say "9 of 10 rows agree on this column"
+    where the old all-or-nothing pairing could only say the column was missing.
+    """
+
+    pairing: dict[int, int]
+    unmatched: tuple[str, ...]
+    agreement: dict[int, float]
+
+
+def _folded_name(name: str) -> str:
+    """A column name as two statements would spell the same column: lowercase, the qualifier off, so
+    `o.Total` and `total` are one name."""
+    return name.rsplit(".", 1)[-1].strip().lower()
+
+
+def _agreement(
+    left: tuple[tuple[str, Any], ...], right: tuple[tuple[str, Any], ...], ordered: bool
+) -> float:
+    """The share of rows on which two column vectors agree: position by position when the order is
+    part of the answer, as a multiset when it is not. The vectors are the same length here."""
+    if not left:
+        return 0.0
+    if ordered:
+        overlap = sum(1 for a, b in zip(left, right) if a == b)
+    else:
+        overlap = sum((Counter(left) & Counter(right)).values())
+    return overlap / len(left)
+
+
+# A best-effort pair needs more than half the rows to agree. Below that the two columns share a few
+# values by coincidence (an id and a count on a short result), and pairing them would put the wrong
+# column's difference on the card. Strict, so a two-row result agreeing on one row does not pair.
+_MAJORITY = 0.5
+
+
+def pair_columns(
+    golden_columns: Sequence[str],
+    golden_rows: Sequence[Sequence[Any]],
+    generated_columns: Sequence[str],
+    generated_rows: Sequence[Sequence[Any]],
+    *,
+    ordered: bool,
+    quantize: bool = False,
+) -> ColumnPairing:
+    """Pair golden columns with generated columns, by values first and then by best effort.
+
+    Stage one pairs on whole value-vector equality and consults neither a column's name nor its
+    position: a generated statement that aliases the total and selects it second still answered the
+    question. It is greedy and deliberately NOT a maximum-matching algorithm: equality is transitive,
+    so the candidate sets are equivalence classes, partners inside one class are interchangeable, and
+    taking the first unclaimed one can never strand a later column that had an option of its own.
+
+    Stage two is for what stage one left: one differing cell would otherwise unpair a column that is
+    plainly there, and the score would read "no generated column carries the values of total" for a
+    column agreeing on nine rows of ten. Over the golden columns still unmatched, in order, and the
+    generated columns still unclaimed: a candidate with the same folded name pairs at any agreement
+    (the name says it is the same column; the agreement says how much of it differs); otherwise the
+    candidate with the highest share of agreeing rows pairs when that share is above one half, ties
+    going to generated order. A golden column with no such partner is reported unmatched, as before.
+    """
+    golden_vectors = _column_vectors(
+        golden_columns, golden_rows, ordered=ordered, quantize=quantize
+    )
+    generated_vectors = _column_vectors(
+        generated_columns, generated_rows, ordered=ordered, quantize=quantize
+    )
+    unclaimed: dict[tuple[tuple[str, Any], ...], list[int]] = {}
+    for index, vector in enumerate(generated_vectors):
+        unclaimed.setdefault(vector, []).append(index)
+    pairing: dict[int, int] = {}
+    agreement: dict[int, float] = {}
+    for index, vector in enumerate(golden_vectors):
+        partners = unclaimed.get(vector)
+        if partners:
+            pairing[index] = partners.pop(0)
+            agreement[index] = 1.0
+
+    claimed = set(pairing.values())
+    for index, vector in enumerate(golden_vectors):
+        if index in pairing:
+            continue
+        candidates = [i for i in range(len(generated_vectors)) if i not in claimed]
+        if not candidates:
+            continue
+        wanted = _folded_name(golden_columns[index])
+        by_name = [i for i in candidates if _folded_name(generated_columns[i]) == wanted]
+        if by_name:
+            chosen = by_name[0]
+        else:
+            shares = [(_agreement(vector, generated_vectors[i], ordered), -i) for i in candidates]
+            best_share, negative_index = max(shares)
+            if best_share <= _MAJORITY:
+                continue
+            chosen = -negative_index
+        pairing[index] = chosen
+        claimed.add(chosen)
+        agreement[index] = _agreement(vector, generated_vectors[chosen], ordered)
+
+    unmatched = tuple(name for index, name in enumerate(golden_columns) if index not in pairing)
+    return ColumnPairing(pairing, unmatched, agreement)
+
+
 def match_columns(
     golden_columns: Sequence[str],
     golden_rows: Sequence[Sequence[Any]],
@@ -321,35 +427,13 @@ def match_columns(
     ordered: bool,
     quantize: bool = False,
 ) -> tuple[dict[int, int], tuple[str, ...]]:
-    """Pair golden columns with the generated columns carrying the same values.
-
-    Returns the golden-index → generated-index pairing and the golden column names that found no
-    partner. Neither a column's NAME nor its position is ever consulted: a generated statement
-    that aliases the total and selects it second still answered the question, and a statement that
-    reused the golden name for a different value did not.
-    """
-    golden_vectors = _column_vectors(
-        golden_columns, golden_rows, ordered=ordered, quantize=quantize
+    """`pair_columns` as the golden-index → generated-index pairing and the golden column names that
+    found no partner, the shape every caller and pin has read since Slice 1."""
+    paired = pair_columns(
+        golden_columns, golden_rows, generated_columns, generated_rows,
+        ordered=ordered, quantize=quantize,
     )
-    generated_vectors = _column_vectors(
-        generated_columns, generated_rows, ordered=ordered, quantize=quantize
-    )
-    # Greedy, and deliberately NOT a maximum-matching algorithm. A golden column pairs with a
-    # generated one only when their value vectors are equal, and equality is transitive: the
-    # candidate sets are equivalence classes, so two golden columns either compete for exactly the
-    # same partners or for none of the same. Partners inside one class are interchangeable, so
-    # taking the first unclaimed one can never strand a later column that had an option of its own
-    # — there is no augmenting path to find, and adding one back would be dead weight.
-    unclaimed: dict[tuple[tuple[str, Any], ...], list[int]] = {}
-    for index, vector in enumerate(generated_vectors):
-        unclaimed.setdefault(vector, []).append(index)
-    pairing: dict[int, int] = {}
-    for index, vector in enumerate(golden_vectors):
-        partners = unclaimed.get(vector)
-        if partners:
-            pairing[index] = partners.pop(0)
-    unmatched = tuple(name for index, name in enumerate(golden_columns) if index not in pairing)
-    return pairing, unmatched
+    return paired.pairing, paired.unmatched
 
 
 def _project(
@@ -419,6 +503,13 @@ class ItemScore:
     generated_row_count: Optional[int] = None
     order_sensitive: Optional[bool] = None
     notes: tuple[str, ...] = ()
+    # Beside `column_pairs`, pair for pair: the share of rows on which that pair agrees (1.0 for a
+    # pair made on whole-vector equality). And the share of rows on which EVERY paired column agrees,
+    # computed even when a golden column has no partner, so a reader can tell "identical on the
+    # paired columns, one column missing" from "the paired columns disagree too". None when nothing
+    # paired or the row counts differ. Additive, like the pairs.
+    column_agreement: tuple[float, ...] = ()
+    paired_row_share: Optional[float] = None
 
 
 class _Verdict(NamedTuple):
@@ -634,31 +725,45 @@ def _judge(
     return _Verdict("error", None, f"{match!r} is not a match level this comparison knows")
 
 
-def _column_pairs(
+def _pairing_facts(
     golden: ExecResult, generated: ExecResult, match: MatchLevel, ordered: bool
-) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
-    """(golden column, generated column) pairs matched by values, and the generated columns left
-    over, for the two levels that pair columns at all. Never raises; a shape the pairing cannot read
-    reports nothing rather than failing a score that already ran."""
+) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...], tuple[float, ...], Optional[float]]:
+    """(golden column, generated column) pairs, the generated columns left over, each pair's
+    agreement and the share of rows every pair agrees on, for the two levels that pair columns at
+    all. Never raises; a shape the pairing cannot read reports nothing rather than failing a score
+    that already ran."""
+    nothing: tuple[tuple[tuple[str, str], ...], tuple[str, ...], tuple[float, ...], Optional[float]]
+    nothing = ((), (), (), None)
     if match not in ("exact", "values") or not golden.rows or not generated.rows:
-        return (), ()
+        return nothing
     if len(golden.rows) != len(generated.rows):
         # Pairing is by value vectors, and two vectors of different length are never equal, so
         # every column would read unpaired: not a fact about the columns, only about the counts,
         # which the score already reports. Nothing is claimed here.
-        return (), ()
+        return nothing
+    quantize = match == "values"
     try:
-        pairing, _unmatched = match_columns(
+        paired = pair_columns(
             golden.columns, golden.rows, generated.columns, generated.rows,
-            ordered=ordered, quantize=match == "values",
+            ordered=ordered, quantize=quantize,
         )
+        share: Optional[float] = None
+        if paired.pairing:
+            overlap, golden_count, _generated_count = compare_rows(
+                golden.rows, generated.rows, paired.pairing, ordered=ordered, quantize=quantize
+            )
+            share = _accuracy(overlap, golden_count)
     except Exception:
         # The score itself has already reported a ragged or malformed result as an error with a
         # value-free reason; the pairing is a courtesy on top and must never turn that into a raise.
-        return (), ()
-    pairs = tuple((golden.columns[g], generated.columns[i]) for g, i in sorted(pairing.items()))
-    extra = tuple(name for i, name in enumerate(generated.columns) if i not in set(pairing.values()))
-    return pairs, extra
+        return nothing
+    ordered_pairs = sorted(paired.pairing.items())
+    pairs = tuple((golden.columns[g], generated.columns[i]) for g, i in ordered_pairs)
+    agreement = tuple(paired.agreement[g] for g, _ in ordered_pairs)
+    taken = set(paired.pairing.values())
+    extra = tuple(name for i, name in enumerate(generated.columns) if i not in taken)
+    return pairs, extra, agreement, share
+
 
 def compare_result_sets(
     golden: ExecResult,
@@ -668,6 +773,7 @@ def compare_result_sets(
     golden_sql: Optional[str] = None,
     bounds: Optional[GoldenBounds] = None,
     dialect: Optional[str] = None,
+    ordered: Optional[bool] = None,
 ) -> ItemScore:
     """Score one generated result against its answer key. Never raises.
 
@@ -675,8 +781,15 @@ def compare_result_sets(
     generated statement is deliberately not a parameter: the ordering that has to hold is the one
     the ANSWER KEY asked for, so a generated statement that drops the ORDER BY is still judged
     against it rather than excused by it.
+
+    `ordered`, when given, decides instead of the statement. Reconcile passes False: it compares two
+    trusted statements whose ordering is a claim of its own, so the rows are a set here and the
+    ORDER BY is judged where it is named. The golden run never passes it.
     """
-    ordered, note = has_top_level_order_by(golden_sql, dialect=dialect)
+    if ordered is None:
+        ordered, note = has_top_level_order_by(golden_sql, dialect=dialect)
+    else:
+        note = None if ordered else "row order was not compared"
     try:
         verdict = _judge(golden, generated, match, bounds, ordered)
     except RaggedRow as exc:
@@ -688,7 +801,7 @@ def compare_result_sets(
         verdict = _Verdict(
             "error", None, f"the comparison failed with an unexpected {type(exc).__name__}"
         )
-    pairs, extra = _column_pairs(golden, generated, match, ordered)
+    pairs, extra, agreement, share = _pairing_facts(golden, generated, match, ordered)
     return ItemScore(
         status=verdict.status,
         accuracy=verdict.accuracy,
@@ -700,6 +813,8 @@ def compare_result_sets(
         generated_row_count=len(generated.rows),
         order_sensitive=ordered,
         notes=(note,) if note else (),
+        column_agreement=agreement,
+        paired_row_share=share,
     )
 
 

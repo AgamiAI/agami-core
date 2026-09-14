@@ -14,6 +14,18 @@ below corresponds to one such version.
 
 ### Changed
 
+- **The result comparator pairs a column that mostly agrees instead of calling it missing.** One
+  differing cell used to unpair a column: the score fell to 0 with "no generated column carries the
+  values of: total" for a column agreeing on nine rows of ten, and every reader keyed on the pairs
+  saw an empty list. Columns still pair on whole-vector equality first; what is left pairs by name
+  when the two sides spell one (the qualifier and case dropped), or by the highest share of agreeing
+  rows when more than half agree. The score then counts rows ("9 of the answer key's 10 rows
+  matched") and carries `column_agreement` beside `column_pairs` and `paired_row_share` over the
+  paired columns. An item still passes at exactly 1.0; a golden column with no partner at all still
+  scores 0 with its name. Three pins moved with it: a same-named column of another type, a null
+  against an empty string, and one differing row now read as a pair that disagrees, not a column
+  that is absent. (ACE-131)
+
 - **A golden run pays for the model's description once, not once per question.** Every question
   starts its own client, and every one re-sent the whole model — about 35k tokens on a 22-area
   profile — in a prompt that could not be reused, because it began with the client's own system
@@ -36,6 +48,18 @@ below corresponds to one such version.
   because a score measured at one level says nothing about another.
 
 ### Added
+
+- **An eighth claim, `outputs`, says what a statement selects.** `sm claims` and the golden run
+  compared tables, filters, date window, group keys, join keys, ordering and limit, and never the
+  projection, so two statements selecting different expressions could still read as the same
+  query. The new claim reads each output expression with its alias peeled (`total` and
+  `o.amount_total` over one `SUM(orders.amount)` agree; `SUM` against `AVG` differs; `SELECT *` is the
+  one key `*`). It reports and never gates. Every reader that counted seven now counts eight.
+  (ACE-131)
+- **`sm compare-results --unordered`** compares the rows as a set whatever ORDER BY either statement
+  wrote, for a caller whose ordering is a claim of its own (reconcile's 2e, in ACE-134). The
+  comparator's `compare_result_sets` takes the same as `ordered=False`; the golden run is unchanged.
+  (ACE-131)
 
 - **Four `sm` verbs that grade a statement a person supplied, part by part.** `agami-reconcile` is
   learning to take a trusted query as evidence rather than as the answer, and these are the

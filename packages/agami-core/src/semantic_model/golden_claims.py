@@ -3,10 +3,10 @@
 A golden item that fails on its numbers says the two statements returned different rows. It cannot
 say *why*, and "why" is the whole value of the failure: a window off by a quarter, a required filter
 left out and a genuinely different question all look identical from a row count. This module is the
-sentence after that one. It reads each statement into seven claims about what the statement asks
+sentence after that one. It reads each statement into eight claims about what the statement asks
 for, compares them claim by claim, and hands the caller a structured diff.
 
-**It is a describer with two gates, and the split is the design.** Five of the seven claims are
+**It is a describer with two gates, and the split is the design.** Six of the eight claims are
 REPORTED — a difference in them is a fact for a person to read, not a verdict — and exactly two are
 allowed to decide anything:
 
@@ -53,11 +53,13 @@ AGREES = "agrees"
 DIFFERS = "differs"
 UNKNOWN = "unknown"
 
-# Exactly seven, and the tuple is the contract: an eighth claim is a change to what a golden item
-# is allowed to assert about a statement, not an implementation detail of this module. The order is
-# the order a diff renders in.
+# Exactly eight, and the tuple is the contract: a new claim is a change to what a golden item is
+# allowed to assert about a statement, not an implementation detail of this module (the eighth,
+# `outputs`, was added by ACE-131 so that "the same query" can mean "selects the same things" too).
+# The order is the order a diff renders in.
 CLAIM_NAMES = (
     "tables",
+    "outputs",
     "filter_predicates",
     "date_window",
     "group_keys",
@@ -113,13 +115,19 @@ class DateWindow:
 
 @dataclass
 class ClaimSet:
-    """What one statement asks for, in the seven terms two statements are compared in.
+    """What one statement asks for, in the eight terms two statements are compared in.
 
     Every field defaults to its own empty value so that `ClaimSet(unreadable=…)` is the whole of
     the unreadable case; `read_claims` is the only constructor, and it always fills all of them.
     """
 
     tables: frozenset[str] = frozenset()  # bare, case-folded
+    # What the statement selects: one key per output expression with its alias peeled, so two
+    # statements that select the same expressions under different names agree, and a statement
+    # that selects a different expression differs. `SELECT *` is the one key `*`. A describer,
+    # never a gate: the projection is what an answer's columns come from, and a comparison of the
+    # columns' VALUES lives in the comparator, not here.
+    outputs: frozenset[str] = frozenset()
     filter_predicates: frozenset[str] = frozenset()  # normalized keys, not the statement's text
     # Every column any predicate the statement writes mentions — the `must_filter` gate's input,
     # and a different question from the one above: *is this column constrained anywhere* rather
@@ -141,6 +149,7 @@ class ClaimSet:
     def as_dict(self) -> dict[str, Any]:
         return {
             "tables": sorted(self.tables),
+            "outputs": sorted(self.outputs),
             "filter_predicates": sorted(self.filter_predicates),
             # Bounded here rather than at the source: a quoted identifier is written by whoever
             # wrote the statement, and this is the one claim value that is held raw so the gate can
@@ -162,7 +171,7 @@ def _join_keys_as_list(keys: "frozenset[frozenset[tuple[str, str]]]") -> list[li
 
 
 def read_claims(sql: str, *, dialect: str) -> ClaimSet:
-    """Read one statement into its seven claims. Never raises: an input this module cannot read
+    """Read one statement into its eight claims. Never raises: an input this module cannot read
     comes back as a `ClaimSet` whose `unreadable` says so."""
     tree, why = rt._parse_reporting(sql, dialect=dialect)
     if tree is None:
@@ -187,6 +196,7 @@ def read_claims(sql: str, *, dialect: str) -> ClaimSet:
         # written, and these are the values that would otherwise arrive in the diff at whatever
         # length and with whatever line breaks the statement gave them.
         tables=frozenset(rt._echo_name(rt._tkey(ref.bare)) for ref in rt._table_references(select)),
+        outputs=_outputs(select, aliases),
         filter_predicates=frozenset(_expression_key(node, aliases) for node in conjuncts),
         filtered_columns=_constrained_columns(select),
         date_window=_resolve_date_window(conjuncts, aliases),
@@ -195,6 +205,22 @@ def read_claims(sql: str, *, dialect: str) -> ClaimSet:
         ordering=_ordering(select, aliases),
         limit=_limit(select),
     )
+
+
+def _outputs(select: "exp.Select", aliases: dict[str, str]) -> frozenset[str]:
+    """What the statement selects, one key per output expression, the alias peeled off first: an
+    alias is the author's name for a value and not the value. `SELECT *` (and `t.*`) is the key `*`,
+    because a star selects whatever the table has and no list of names can be read out of it here.
+    `DISTINCT` is not read: this claim says what is selected, not how many times."""
+    keys = []
+    for node in select.expressions:
+        if isinstance(node, exp.Alias):
+            node = node.this
+        if isinstance(node, exp.Star) or (isinstance(node, exp.Column) and isinstance(node.this, exp.Star)):
+            keys.append("*")
+            continue
+        keys.append(_expression_key(node, aliases))
+    return frozenset(keys)
 
 
 def _expression_key(node: "exp.Expression", aliases: dict[str, str]) -> str:
@@ -710,7 +736,7 @@ _DATE_WINDOW_REASON = "the two statements resolve their date filters to differen
 
 @dataclass
 class Claim:
-    """One of the seven claims, and whether the two statements agree on it.
+    """One of the eight claims, and whether the two statements agree on it.
 
     `generated` and `golden` are the claim's own value on each side, in the JSON-able form
     `ClaimSet.as_dict` renders it — identifiers, bounds and counts, never a statement.
@@ -744,9 +770,9 @@ class GateVerdict:
 
 @dataclass
 class ClaimDiff:
-    """What two statements say about each other: seven claims, and whatever gated."""
+    """What two statements say about each other: eight claims, and whatever gated."""
 
-    claims: list[Claim]  # exactly seven, in CLAIM_NAMES order
+    claims: list[Claim]  # exactly eight, in CLAIM_NAMES order
     gates: list[GateVerdict]  # empty when nothing gates
 
     @property
@@ -793,7 +819,7 @@ def diff_claims(
         if unreadable:
             claims.append(Claim(name=name, status=UNKNOWN, generated=None, golden=None))
             continue
-        # Six of the seven are decided on the RENDERED value, which `as_dict` has already sorted —
+        # Seven of the eight are decided on the RENDERED value, which `as_dict` has already sorted —
         # so every claim that is a set underneath compares order-insensitively for free, and the
         # value a reader is shown is the same value the status was decided from. The window is the
         # exception, because its own rule ignores one of its fields.

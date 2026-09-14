@@ -514,14 +514,16 @@ def test_a_duplicated_golden_column_leaves_one_unmatched():
     assert unmatched[0] in ("a", "b")
 
 
-def test_a_bool_column_does_not_match_an_int_column():
+def test_a_bool_column_pairs_with_the_int_column_of_its_name_and_agrees_on_no_row():
     # Slice 1's tags exist for this: `is_active` as a real boolean against the 0/1 SQLite stores
-    # is a different answer, and raw equality would have called it a match.
-    pairing, unmatched = c.match_columns(
-        ["is_active"], [(True,), (False,)], ["is_active"], [(1,), (0,)], ordered=True
+    # is a different answer, and raw equality would have called it a match. The two columns share
+    # a name, so they are paired as the same column; the agreement says every row differs, and the
+    # score then reads "0 of 2 rows matched" rather than "no generated column carries is_active".
+    paired = c.pair_columns(
+        ["is_active"], [(True,), (False,)], ["is_active"], [(1,), (0,)], ordered=True, quantize=False
     )
-    assert pairing == {}
-    assert unmatched == ("is_active",)
+    assert paired.pairing == {0: 0} and paired.unmatched == ()
+    assert paired.agreement == {0: 0.0}
 
 
 def test_column_values_in_a_different_row_order_match_when_unordered():
@@ -532,12 +534,18 @@ def test_column_values_in_a_different_row_order_match_when_unordered():
     assert unmatched == ()
 
 
-def test_column_values_in_a_different_row_order_do_not_match_when_ordered():
+def test_column_values_in_a_different_row_order_pair_by_name_and_disagree_row_for_row_when_ordered():
+    # The column is there under its own name, so it pairs; the rows then disagree position by
+    # position, which is what an ordered comparison is for. The score says so in rows, not columns.
     pairing, unmatched = c.match_columns(
         ["channel"], [("web",), ("store",)], ["channel"], [("store",), ("web",)], ordered=True
     )
-    assert pairing == {}
-    assert unmatched == ("channel",)
+    assert pairing == {0: 0} and unmatched == ()
+    golden = c.ExecResult(columns=["channel"], rows=[("web",), ("store",)])
+    generated = c.ExecResult(columns=["channel"], rows=[("store",), ("web",)])
+    score = c.compare_result_sets(golden, generated, golden_sql="SELECT channel FROM t ORDER BY channel")
+    assert score.accuracy == 0.0 and score.reason.startswith("0 of the answer key's 2 rows matched")
+    assert score.column_pairs == (("channel", "channel"),) and score.column_agreement == (0.0,)
 
 
 def test_a_mixed_type_column_sorts_without_raising_when_unordered():
@@ -553,11 +561,13 @@ def test_a_mixed_type_column_sorts_without_raising_when_unordered():
 def test_matching_forwards_quantize():
     golden_rows = [(Decimal("1.00000000001"),)]
     generated_rows = [(Decimal("1.0"),)]
-    assert c.match_columns(["v"], golden_rows, ["v"], generated_rows, ordered=True)[0] == {}
-    pairing, _ = c.match_columns(
-        ["v"], golden_rows, ["v"], generated_rows, ordered=True, quantize=True
-    )
-    assert pairing == {0: 0}
+    # Under another name the two pair only when quantize makes the cells equal...
+    assert c.match_columns(["v"], golden_rows, ["w"], generated_rows, ordered=True)[0] == {}
+    assert c.match_columns(["v"], golden_rows, ["w"], generated_rows, ordered=True, quantize=True)[0] == {0: 0}
+    # ...and under the same name they pair either way, quantize deciding whether the one row agrees.
+    strict = c.pair_columns(["v"], golden_rows, ["v"], generated_rows, ordered=True, quantize=False)
+    loose = c.pair_columns(["v"], golden_rows, ["v"], generated_rows, ordered=True, quantize=True)
+    assert strict.agreement == {0: 0.0} and loose.agreement == {0: 1.0}
 
 
 def test_matching_a_ragged_row_is_surfaced_as_this_module_s_error():
@@ -807,7 +817,9 @@ def test_a_null_does_not_match_the_empty_string_end_to_end():
     generated = _res(["note"], [("",)])
     score = c.compare_result_sets(golden, generated, golden_sql=_UNORDERED)
     assert score.accuracy == 0.0
-    assert score.unmatched_golden_columns == ("note",)
+    # The column pairs by its name and the one row disagrees: a null is not an empty string.
+    assert score.column_pairs == (("note", "note"),) and score.column_agreement == (0.0,)
+    assert score.unmatched_golden_columns == ()
 
 
 def test_a_boolean_agrees_with_its_text_spelling_but_never_with_an_int():
@@ -818,7 +830,9 @@ def test_a_boolean_agrees_with_its_text_spelling_but_never_with_an_int():
     assert spelled.accuracy == 1.0
     stored = c.compare_result_sets(golden, _res(["is_active"], [(1,), (0,)]), golden_sql=_UNORDERED)
     assert stored.accuracy == 0.0
-    assert stored.unmatched_golden_columns == ("is_active",)
+    # Paired by name, agreeing on no row: the difference is in every value, not in a missing column.
+    assert stored.column_pairs == (("is_active", "is_active"),) and stored.column_agreement == (0.0,)
+    assert stored.unmatched_golden_columns == ()
 
 
 # --- the five levels -------------------------------------------------------------------------
@@ -828,7 +842,7 @@ def test_a_boolean_agrees_with_its_text_spelling_but_never_with_an_int():
     "level, golden, generated, bounds, expected",
     [
         ("exact", _res(["orders"], [(1,), (2,)]), _res(["orders"], [(1,), (2,)]), None, 1.0),
-        ("exact", _res(["orders"], [(1,), (2,)]), _res(["orders"], [(1,), (9,)]), None, 0.0),
+        ("exact", _res(["orders"], [(1,), (2,)]), _res(["orders"], [(1,), (9,)]), None, 0.5),  # same name, one of two rows agrees: the share, not a missing column
         # A twelfth-digit difference is inside `values`' tolerance and outside `exact`'s.
         (
             "values",
@@ -1302,3 +1316,59 @@ def test_the_module_exports_only_its_public_surface():
     # The scoring call and the value it hands back. Everything else is an internal these tests
     # reach as a module attribute, and `MatchLevel`/`GoldenBounds` belong to `golden`.
     assert set(c.__all__) == {"compare_result_sets", "ItemScore"}
+
+
+# --- pairing by agreement --------------------------------------------------------------------------
+
+_TEN = [(f"c{i}", i * 10) for i in range(10)]
+
+
+def test_a_column_agreeing_on_most_rows_pairs_and_the_score_counts_the_rows_that_match():
+    golden = c.ExecResult(columns=["customer", "total"], rows=_TEN)
+    rows = list(_TEN)
+    rows[3] = ("c3", 31)
+    generated = c.ExecResult(columns=["customer", "amount"], rows=rows)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.column_pairs == (("customer", "customer"), ("total", "amount"))
+    assert score.column_agreement == (1.0, 0.9)
+    assert score.accuracy == 0.9 and score.paired_row_share == 0.9
+    assert score.reason.startswith("9 of the answer key's 10 rows matched")
+    assert score.unmatched_golden_columns == () and score.unmatched_generated_columns == ()
+
+
+def test_a_differently_named_column_agreeing_on_a_minority_of_rows_stays_unmatched():
+    golden = c.ExecResult(columns=["customer", "total"], rows=_TEN)
+    rows = [(name, value if i < 3 else value + 1) for i, (name, value) in enumerate(_TEN)]
+    generated = c.ExecResult(columns=["customer", "amount"], rows=rows)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.unmatched_golden_columns == ("total",) and score.unmatched_generated_columns == ("amount",)
+    assert score.accuracy == 0.0 and score.reason == "no generated column carries the values of: total"
+    # The customer column paired and agrees on every row: the share over the paired columns says so.
+    assert score.column_pairs == (("customer", "customer"),) and score.paired_row_share == 1.0
+
+
+def test_a_same_named_column_pairs_at_any_agreement():
+    golden = c.ExecResult(columns=["customer", "total"], rows=_TEN)
+    generated = c.ExecResult(columns=["customer", "o.total"], rows=[(n, v + 1) for n, v in _TEN])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.column_pairs == (("customer", "customer"), ("total", "o.total"))
+    assert score.column_agreement == (1.0, 0.0)
+    assert score.accuracy == 0.0 and score.reason.startswith("0 of the answer key's 10 rows matched")
+
+
+def test_the_caller_can_ask_for_the_rows_as_a_set_whatever_the_statement_ordered():
+    golden = c.ExecResult(columns=["channel"], rows=[("web",), ("store",)])
+    generated = c.ExecResult(columns=["channel"], rows=[("store",), ("web",)])
+    ordered_sql = "SELECT channel FROM t ORDER BY channel"
+    score = c.compare_result_sets(golden, generated, golden_sql=ordered_sql, ordered=False)
+    assert score.accuracy == 1.0 and score.order_sensitive is False
+    assert score.notes == ("row order was not compared",)
+    # The statement still decides when the caller says nothing.
+    assert c.compare_result_sets(golden, generated, golden_sql=ordered_sql).accuracy == 0.0
+
+
+def test_nothing_pairs_when_the_row_counts_differ_and_the_share_is_absent():
+    golden = c.ExecResult(columns=["customer"], rows=_TEN)
+    generated = c.ExecResult(columns=["customer"], rows=_TEN[:9])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.column_pairs == () and score.column_agreement == () and score.paired_row_share is None
