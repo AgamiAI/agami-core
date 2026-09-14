@@ -46,8 +46,10 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 **`python -m execute_sql` CLI surface** — exhaustive, read before invoking:
 
 ```
-python3 execute_sql.py [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE)
+python3 execute_sql.py [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE | --batch PLAN) [--manifest PATH] [--area AREA]
 ```
+
+- **`--batch PLAN`** runs a JSON list of `{id, sql | sql_file, out, area?}` in one process: the semantic model is resolved once and the connection is kept open across the items (Postgres, Redshift, Supabase and SQLite; the other engines still connect per item), while every item goes through the same guard on its own. Each item's CSV goes to `out` (empty when refused or failed), its outcome to `<out>.run.json` in `run.json`'s shape (`status`, `exit`, `kind`, `rule`, `detail`), and the manifest (`<plan>.manifest.json`, or `--manifest`) lists them all; stdout carries the manifest. Exit `0` when every item ran, else the first non-ok item's single-statement exit code. Reconcile's statement check uses it for a row's probes.
 
 - **Output is RFC-4180 CSV on stdout, always.** No `--format` flag exists; don't pass one.
 - **Either** `--sql 'SELECT 1'` (string) **or** `--sql-file /tmp/q.sql` (path). Positional SQL is rejected.
