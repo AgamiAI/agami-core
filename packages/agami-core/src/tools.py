@@ -110,12 +110,23 @@ _HOSTED_PREAMBLE = (
     "SQL on the server against the configured warehouse — query text and result rows leave your "
     "machine and are recorded in this deployment's activity log.\n"
 )
+# What a `get_datasource_schema` response tells a client when the datasource has stored examples
+# (#301). The only instruction to call get_prompt_examples lived in the instructions above, which a
+# host may weight below its own, and clients skipped it — so the call every client makes carries a
+# count and this line. Never the examples themselves: ranking and returning them is
+# get_prompt_examples' job, and the schema response stays the model.
+_EXAMPLES_REMINDER = (
+    "Call get_prompt_examples with the user's question as `query` before writing SQL, unless you "
+    "already have for this question. Leave `area` out unless you are sure of it."
+)
+
 _SHARED_INSTRUCTIONS = (
     "Flow: (1) list_datasources, then get_datasource_schema for the datasource the question "
     "touches (it sizes itself — pass `area` or `dataset_names` to SCOPE it, `query` to rank "
     "metrics; a `dataset_names` call also returns those tables' joins and metrics, so it is what "
-    "you need to write the SQL). (2) Examples-first — call get_prompt_examples and mirror the "
-    "closest match; use "
+    "you need to write the SQL). (2) Examples-first — call get_prompt_examples with the user's "
+    "question as `query` and mirror the closest match; leave `area` out unless you are sure of "
+    "it, because it drops every example outside that area. Use "
     "metric `calculation`/`binding` verbatim. (3) execute_sql (the safety pass runs inside it; "
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
@@ -123,6 +134,8 @@ _SHARED_INSTRUCTIONS = (
     "and neither reads the other's answer, so issue them in the same turn with the same question "
     "text. Never serialize what is independent — and when a question spans several datasources, "
     "fan the pair out per datasource rather than walking them one at a time.\n"
+    "If a get_datasource_schema response carries `prompt_examples`, the datasource has stored "
+    "examples: fetch them before writing SQL if you have not already.\n"
     "Dialect: take it from the `database_type` list_datasources reports for that datasource, and "
     "never assume one. A metric's `binding` already arrives resolved to that dialect, so copy it "
     "rather than translating it — but the rest of the statement is yours to write in the right "
@@ -685,18 +698,37 @@ def get_cached_org(profile: str):
         return org
 
 
-def _context_sources(profile: str, org_id: str) -> "tuple[str, str | None, Any, str]":
+def _count_local_examples(examples_dir: Path) -> int:
+    """How many curated examples a local install holds: the entries across every area's
+    `examples.yaml`. Datasource-wide, like the served count, for the reason `_EXAMPLES_REMINDER`
+    gives. A file that does not parse counts nothing rather than failing the schema call."""
+    if not examples_dir.is_dir():
+        return 0
+    import yaml
+
+    total = 0
+    for ex_file in examples_dir.glob("*/examples.yaml"):
+        try:
+            doc = yaml.safe_load(_read_text(ex_file) or "")
+        except yaml.YAMLError:
+            continue
+        if isinstance(doc, list):
+            total += len(doc)
+    return total
+
+
+def _context_sources(profile: str, org_id: str) -> "tuple[str, str | None, Any, str, int]":
     """Every piece of domain-context text the served schema needs, read in ONE place: the per-datasource
     datasource.md, USER_MEMORY.md, the deployment ``OrgRecord``, and the company narrative. Under the DB
     backend all of it is read on a SINGLE connection — this is a hot tool path, so open ``Store`` once, not
     per-source; with no DB configured it falls back to file reads (a DB deploy reads no files at runtime).
-    Returns ``(datasource_md, user_md, record | None, company_md)``; missing pieces come back empty/``None`` so the
+    Returns ``(datasource_md, user_md, record | None, company_md, example_count)``; missing pieces come back empty/``None``/0 so the
     two-level composition degrades cleanly."""
     from store import Store
 
     store = Store.from_env()
     if store is not None:
-        from model_store import load_memory, load_organization_record
+        from model_store import count_examples, load_memory, load_organization_record
 
         try:
             mem = load_memory(
@@ -706,6 +738,7 @@ def _context_sources(profile: str, org_id: str) -> "tuple[str, str | None, Any, 
             company = load_memory(
                 store, "", org_id=org_id
             )  # company narrative rides the datasource='' row
+            examples = count_examples(store, profile, org_id=org_id)  # every area, never ranked
         finally:
             store.close()
         return (
@@ -713,6 +746,7 @@ def _context_sources(profile: str, org_id: str) -> "tuple[str, str | None, Any, 
             mem.get("user"),
             record,
             (company.get("datasource") or ""),
+            examples,
         )
 
     from semantic_model import org_record as OR
@@ -723,6 +757,7 @@ def _context_sources(profile: str, org_id: str) -> "tuple[str, str | None, Any, 
         _read_text(art / "USER_MEMORY.md"),
         OR.load_org_record(art),
         _read_text(OR.narrative_path(art)) or "",
+        _count_local_examples(art / profile / "prompt_examples"),
     )
 
 
@@ -1559,6 +1594,16 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # only honest if the reader can see which scope they got.
     result["scope"] = {"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
 
+    # Read before the JSON head is serialized, so the stored-example count can go in it — every
+    # piece still on ONE DB connection (see _context_sources).
+    org_md_raw, user_md_raw, record, company_md, example_count = _context_sources(
+        profile, _current_org_id()
+    )
+    if example_count:
+        # A pointer, never the examples (#301). Counted datasource-wide whatever `area` scoped this
+        # call: an area-scoped count would hide exactly the examples an `area` filter drops.
+        result["prompt_examples"] = {"stored": example_count, "next": _EXAMPLES_REMINDER}
+
     parts = [json.dumps(result, indent=2, default=str)]
     # Domain context = the human's datasource.md narrative + the model-DERIVED summary
     # (subject areas, conventions, decoded glossary) assembled fresh from the structured model.
@@ -1570,7 +1615,6 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # narrative + derived summary. All the text is read on ONE DB connection (see _context_sources). No
     # record ⇒ compose_org_context degrades to the single-level output, so a deployment without a record
     # is unaffected.
-    org_md_raw, user_md_raw, record, company_md = _context_sources(profile, _current_org_id())
     domain_context = _OD.compose_org_context(
         record,
         [org],
@@ -3138,7 +3182,9 @@ TOOLS: dict[str, dict[str, Any]] = {
             "`caveats` and `value_transforms`. An entry in `default_filters` is the org's own "
             "definition of what that table means and is NOT applied to your SQL — read them HERE, "
             "while you are writing the statement, rather than meeting them on the receipt "
-            "afterwards."
+            "afterwards. When the datasource has stored examples the response also carries "
+            "`prompt_examples`: how many are `stored`, and a reminder to fetch them with "
+            "get_prompt_examples, which ranks them — no example is sent here."
         ),
         "inputSchema": {
             "type": "object",
@@ -3199,7 +3245,9 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Fetch the curated few-shot NL→SQL examples for a datasource, grouped by subject area. "
             "Use before generating SQL to ground dialect and house style; match on the question, "
             "then reuse the tagged tables/columns/SQL. On a served deployment each example carries "
-            "a stable `id` — cite it as a basis ref on execute_sql to say which one you followed."
+            "a stable `id` — cite it as a basis ref on execute_sql to say which one you followed. "
+            "Pass the user's question as `query`, and leave `area` out unless you are sure of it: "
+            "an `area` drops every example outside that area, however well it matches."
         ),
         "inputSchema": {
             "type": "object",
