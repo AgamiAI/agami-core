@@ -121,7 +121,14 @@ _NOPKG = [sys.executable, "-S"]
 # `execute_sql` after `_model_safety` has already returned a refusal, so on this surface it is
 # shadowed rather than reachable. Measured, both directions — see this module's docstring and
 # `test_a_modelless_vendored_install_still_answers_and_still_bounds`.
-STATEMENT_REACHABLE_RULES = guardrail.PRE_MODEL_RULES - {guardrail.RULE_AUDIT_UNAVAILABLE}
+#
+# `datasource_required` (#327) comes out for the same kind of reason: no statement provokes it. It is
+# decided from the CALL — an omitted `datasource` on an organization serving several — which needs a
+# served, multi-datasource configuration; `tests/test_datasource_routing.py` asserts it there.
+STATEMENT_REACHABLE_RULES = guardrail.PRE_MODEL_RULES - {
+    guardrail.RULE_AUDIT_UNAVAILABLE,
+    guardrail.RULE_DATASOURCE_REQUIRED,
+}
 
 # Unsupported on purpose rather than merely unreachable, and the same value
 # `test_safety_envelope.py` drives the package surface with, so the two surfaces are answering one

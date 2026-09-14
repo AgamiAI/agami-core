@@ -29,6 +29,29 @@ below corresponds to one such version.
     declare. It uses the model the semantic-model pass already loaded, so it applies only when that
     pass is on — which is off by default on a server (see `SECURITY.md`); there, the summary tier's
     `schema` is the fix.
+- **A query that names no datasource no longer runs against a guessed one** (#327). On an
+  organization serving several datasources, an omitted `datasource` fell through to a fallback (an
+  env var, an active profile) and the statement ran there — so SQL written for one datasource reached
+  another and was refused as out of scope. `execute_sql`, `get_datasource_schema` and
+  `get_prompt_examples` now refuse an omitted `datasource` when more than one is served, naming the
+  choices (new `datasource_required` rule, decided before any model is consulted). One served
+  datasource still resolves as before.
+- **A table-scope refusal names the datasource that declares the table** (#327). It said "add the
+  table to the model" when the table was already declared in another of the organization's
+  datasources; it now says which one to run the query against — only a datasource that declares every
+  table in the statement — or that the tables live in different datasources and one statement cannot
+  join them. Only the same organization's datasources are named. Table-scope refusals come from the
+  semantic-model pass, which is off by default on a server (see `SECURITY.md`), so there the hint has
+  nothing to rewrite.
+
+### Added
+
+- **`sm set-description`, and onboarding asks for a datasource description** (#327). The one line
+  `list_datasources` shows an agent to route a question by could only be hand-edited into
+  `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
+  `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
+  model, as it does for the database narrative — and `model_deploy` warns when a datasource is
+  deployed without one.
 
 ## [0.8.6] — 2026-09-14
 

@@ -222,6 +222,32 @@ def model_table_counts(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, int
     return {r["datasource"]: int(r["n"]) for r in rows}
 
 
+def datasources_declaring(
+    store: Store, names: list[str], org_id: str = DEFAULT_ORG
+) -> dict[str, list[str]]:
+    """`{bare table name (lowercased): [datasource, ...]}` for the org's served models that declare
+    each of `names`, in ONE query (#327).
+
+    For a table-scope refusal on the wrong datasource: the refused tables are usually declared — just
+    in another of the same organization's datasources — and saying which one turns a guess into one
+    certain retry. Scoped to `org_id` by construction, so it can never name another tenant's
+    datasource. Matching is case-folded, as the scope gate folds unquoted identifiers. A name no
+    served model declares is simply absent from the result."""
+    wanted = sorted({n.lower() for n in names if n})
+    if not wanted:
+        return {}
+    marks = ", ".join("?" for _ in wanted)
+    rows = store.query(
+        f"SELECT DISTINCT datasource, lower(name) AS name FROM model_table "
+        f"WHERE org_id = ? AND lower(name) IN ({marks}) ORDER BY datasource",
+        (org_id, *wanted),
+    )
+    found: dict[str, list[str]] = {}
+    for r in rows:
+        found.setdefault(r["name"], []).append(r["datasource"])
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Memory (datasource.md / USER_MEMORY.md) + model_version — served from the DB too, so a DB-only
 # deploy reads NO files at runtime (get_datasource_schema's domain context + the receipt's version
