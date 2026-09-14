@@ -1672,8 +1672,14 @@ def check_column_scope(sql: str, org: Datasource,
             continue
         if sel is not None:
             status, ident = _resolve_table(tidx, tbl.db, tbl.name)
-            alias_by_select.setdefault(id(sel), {})[tbl.alias_or_name.lower()] = (
-                ident if status == _DECLARED else False)
+            binding = ident if status == _DECLARED else False
+            aliases = alias_by_select.setdefault(id(sel), {})
+            aliases[tbl.alias_or_name.lower()] = binding
+            if not tbl.alias and tbl.db:
+                # Also under `schema.table`: `FROM sales_data.orders JOIN staging.orders` binds both
+                # to the key `orders`, last one winning, so `sales_data.orders.amount` was checked
+                # against staging's columns and wrongly refused.
+                aliases[f"{tbl.db}.{tbl.name}".lower()] = binding
             if status == _DECLARED:
                 direct_phys.setdefault(id(sel), set()).add(ident)
     for sq in tree.find_all(exp.Subquery):
@@ -1700,10 +1706,13 @@ def check_column_scope(sql: str, org: Datasource,
         if col.table:
             # resolve the qualifier within the column's own scope, walking outward:
             # a correlated ref sees ancestor aliases; an inner alias shadows an outer.
-            qual = col.table.lower()
+            # A schema-qualified column (`sales_data.orders.amount`) resolves by `schema.table` first,
+            # falling back to the table alone so an unregistered spelling still binds as before.
+            quals = ([f"{col.db}.{col.table}".lower()] if col.db else []) + [col.table.lower()]
             phys = None
             for s in chain:
-                phys = alias_by_select.get(id(s), {}).get(qual)
+                scope_aliases = alias_by_select.get(id(s), {})
+                phys = next((scope_aliases[q] for q in quals if q in scope_aliases), None)
                 if phys is not None:
                     break
             if phys is None:

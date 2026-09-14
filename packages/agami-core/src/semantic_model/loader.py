@@ -382,9 +382,13 @@ class TableIndex:
     def _pick(m: dict[str, list[tuple[Table, int]]], query: str, bare: str) -> Optional[Table]:
         # Every name-match and bare-match, merged back into scan order — exactly the candidate list
         # `_find_table`'s in-order `t.name == query or t.name == bare` scan collects.
-        hits = list(m.get(query, []))
-        if bare != query:
-            hits += m.get(bare, [])
+        # Folded, like `runtime._model_table_index`: keyed by the exact spelling, `orders` and `ORDERS`
+        # declared under two schemas looked like two unique names, and a lookup served one of them
+        # where the gate refuses the pair as ambiguous.
+        q, b = query.lower(), bare.lower()
+        hits = list(m.get(q, []))
+        if b != q:
+            hits += m.get(b, [])
         return _pick_declared([t for t, _ in sorted(hits, key=lambda h: h[1])], query)
 
     def find(self, table_name: str, area: Optional[str] = None) -> Optional[Table]:
@@ -394,7 +398,8 @@ class TableIndex:
             if hit is not None:
                 return hit
             refs = self.area_refs.get(area, {})
-            matches = [r for r in (refs.get(table_name), refs.get(bare) if bare != table_name else None) if r]
+            q, b = table_name.lower(), bare.lower()
+            matches = [r for r in (refs.get(q), refs.get(b) if b != q else None) if r]
             if matches:
                 ref = min(matches, key=lambda r: r[1])[0]
                 query = _qualify_by_ref(table_name, ref)
@@ -414,8 +419,8 @@ def build_table_index(org: Datasource) -> TableIndex:
     for sa in org.subject_areas:
         amap: dict[str, list[tuple[Table, int]]] = {}
         for t in sa.tables_defined:
-            org_wide.setdefault(t.name, []).append((t, rank))
-            amap.setdefault(t.name, []).append((t, rank))
+            org_wide.setdefault(t.name.lower(), []).append((t, rank))
+            amap.setdefault(t.name.lower(), []).append((t, rank))
             rank += 1
         # Area names are NOT enforced unique; `_find_table` resolves an area via
         # `org.subject_area(area)`, which returns the FIRST area of that name — so the per-area maps
@@ -423,7 +428,7 @@ def build_table_index(org: Datasource) -> TableIndex:
         per_area.setdefault(sa.name, amap)
         refs: dict[str, tuple[TableRef, int]] = {}
         for i, ref in enumerate(sa.tables):
-            refs.setdefault(ref.table, (ref, i))
+            refs.setdefault(ref.table.lower(), (ref, i))
         area_refs.setdefault(sa.name, refs)
     return TableIndex(org_wide=org_wide, per_area=per_area, area_refs=area_refs)
 
@@ -436,8 +441,9 @@ def _find_table(
         return index.find(table_name, area)
     bare = bare_name(table_name)
     areas = [org.subject_area(area)] if area else org.subject_areas
+    wanted = {table_name.lower(), bare.lower()}  # folded, the same keys `TableIndex` uses
     cands = [t for sa in areas if sa is not None for t in sa.tables_defined
-             if t.name == table_name or t.name == bare]
+             if t.name.lower() in wanted]
     if cands:
         return _pick_declared(cands, table_name)
     # Multi-area membership: a table is DEFINED in exactly one area but may be REFERENCED from
@@ -446,7 +452,7 @@ def _find_table(
     # qualified by the TableRef's schema, which is what settles a name defined in two schemas.
     if area:
         sa = org.subject_area(area)
-        ref = next((r for r in sa.tables if r.table == table_name or r.table == bare), None) if sa else None
+        ref = next((r for r in sa.tables if r.table.lower() in wanted), None) if sa else None
         if ref is not None:
             return _find_table(org, _qualify_by_ref(table_name, ref), area=None)
     return None

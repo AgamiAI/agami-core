@@ -1290,8 +1290,8 @@ def _resolve_table_picks(org, table_names: list[str], L) -> list[tuple[str, str 
     clashing = _clashing_table_names(defs)
     picks: list[tuple[str, str | None, Any, str | None]] = []
     for requested in table_names:
-        bare = _bare_name(requested)
-        cands = sorted(defs.get(requested, []) + (defs.get(bare, []) if bare != requested else []),
+        req, bare = requested.lower(), _bare_name(requested).lower()
+        cands = sorted(defs.get(req, []) + (defs.get(bare, []) if bare != req else []),
                        key=lambda d: d[0])
         table = L._pick_declared([t for _, _, t in cands], requested)
         if table is None:
@@ -1305,12 +1305,15 @@ def _resolve_table_picks(org, table_names: list[str], L) -> list[tuple[str, str 
 
 
 def _table_definitions(org) -> dict[str, list[tuple[int, str, Any]]]:
-    """table name -> every definition of it as (scan rank, defining area, Table), in scan order."""
+    """FOLDED table name -> every definition of it as (scan rank, defining area, Table), in scan order.
+
+    Folded like `runtime._model_table_index`, so `orders` and `ORDERS` under two schemas are one
+    clashing name here too rather than two unique ones. Output keeps the model's own spelling."""
     defs: dict[str, list[tuple[int, str, Any]]] = {}
     rank = 0
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            defs.setdefault(t.name, []).append((rank, sa.name, t))
+            defs.setdefault(t.name.lower(), []).append((rank, sa.name, t))
             rank += 1
     return defs
 
@@ -1321,6 +1324,31 @@ def _clashing_table_names(defs: dict[str, list[tuple[int, str, Any]]]) -> set[st
             if len({(t.schema_name or "").lower() for _, _, t in ds}) > 1}
 
 
+def _in_area(org, area: str, requested: str, table) -> bool:
+    """Whether a requested table is in `area`: defined there, or referenced there by a TableRef
+    naming the same table AND schema. An unresolved request (not found, or an unsettled clash) keeps
+    the bare-name test, so its error still comes back from the table lookup rather than from here."""
+    for sa in org.subject_areas:
+        if sa.name != area:
+            continue
+        if table is None:
+            bare = _bare_name(requested).lower()
+            if any(_bare_name(d.name).lower() == bare for d in sa.tables_defined) or any(
+                _bare_name(getattr(r, "table", "")).lower() == bare for r in sa.tables
+            ):
+                return True
+            continue
+        if any(d is table for d in sa.tables_defined):
+            return True
+        if any(
+            _bare_name(getattr(r, "table", "")).lower() == _bare_name(table.name).lower()
+            and (getattr(r, "schema_name", None) or "").lower() == (table.schema_name or "").lower()
+            for r in sa.tables
+        ):
+            return True
+    return False
+
+
 def _served_key(table, clashing: set[str]) -> str:
     """The key a table's context is served under: its name, or `schema.name` when the name clashes.
 
@@ -1328,7 +1356,7 @@ def _served_key(table, clashing: set[str]) -> str:
     silently replaced the first, so a full-tier response carried one `products` and no sign that a
     second existed. The qualified key is also exactly what a caller passes back in `dataset_names`.
     """
-    if table.name in clashing and table.schema_name:
+    if table.name.lower() in clashing and table.schema_name:
         return f"{table.schema_name}.{table.name}"
     return table.name
 
@@ -1617,17 +1645,15 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # "not found in scope" for a table outside the area while its metrics stayed advertised.
         # A table that is not in the declared area makes the two halves contradict each other, and
         # answering anyway would echo a scope the response does not have.
+        # Judged on the table each name RESOLVES to, not on its bare name: `crm.products` with
+        # `area="billing"` passed when billing also had a `products`, and then served crm's table
+        # under a scope that said billing.
         misplaced = [
-            tbl
-            for tbl in scope.tables
-            if not any(
-                sa.name == scope.area
-                and (
-                    any(_bare_name(d.name) == _bare_name(tbl) for d in sa.tables_defined)
-                    or any(_bare_name(getattr(r, "table", "")) == _bare_name(tbl) for r in sa.tables)
-                )
-                for sa in org.subject_areas
+            requested
+            for requested, (_key, _area, table, _error) in zip(
+                scope.tables, _resolve_table_picks(org, list(scope.tables), L)
             )
+            if not _in_area(org, scope.area, requested, table)
         ]
         if misplaced:
             return json.dumps(

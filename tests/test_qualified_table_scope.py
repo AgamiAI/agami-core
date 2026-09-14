@@ -496,3 +496,42 @@ def test_dataset_names_bare_and_qualified_unique_table_still_resolve(schema_head
     assert schema_head(dataset_names=["missing"])["tables"] == {
         "missing": {"error": "not found in scope"}
     }
+
+
+def test_a_case_only_clash_across_schemas_is_ambiguous_to_every_lookup():
+    # `orders` and `ORDERS` in two schemas: the runtime folds them into one clashing name, and the
+    # loader and the schema tool must agree rather than serving whichever spelling was asked for.
+    import tools
+
+    org = _org(
+        m.SubjectArea(name="sales", tables_defined=[_table("orders", "sales_data", "amount")]),
+        m.SubjectArea(name="landing", tables_defined=[_table("ORDERS", "staging", "raw_payload")]),
+    )
+    assert rt.check_table_scope("SELECT id FROM orders", org) is not None
+    assert L._find_table(org, "orders") is None
+    assert L._find_table(org, "orders", index=L.build_table_index(org)) is None
+    ((key, _area, table, error),) = tools._resolve_table_picks(org, ["orders"], L)
+    assert table is None and "more than one schema" in error
+    ((key, _area, table, _error),) = tools._resolve_table_picks(org, ["staging.orders"], L)
+    assert table is not None and table.name == "ORDERS" and key == "staging.ORDERS"
+
+
+def test_a_declared_area_is_checked_against_the_table_a_qualified_name_resolves_to(schema_head):
+    # billing also has a `products`, which is what let `crm.products` through before.
+    head = schema_head(area="billing", dataset_names=["crm.products"])
+    assert head["error"]["kind"] == "not_found"
+    ok = schema_head(area="billing", dataset_names=["billing.products"])
+    assert _columns(ok["tables"]["billing.products"]) == {"id", "price"}
+
+
+def test_fully_qualified_columns_bind_to_their_own_unaliased_table():
+    org = _clash_org()
+    join = "FROM sales_data.orders JOIN staging.orders ON sales_data.orders.id = staging.orders.id"
+    for sql in (
+        f"SELECT sales_data.orders.amount {join}",
+        f"SELECT staging.orders.raw_payload {join}",
+    ):
+        assert _both_paths(sql, org, rt.check_column_scope) is None, sql
+    assert (
+        _both_paths(f"SELECT staging.orders.amount {join}", org, rt.check_column_scope) is not None
+    )
