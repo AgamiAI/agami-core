@@ -426,6 +426,16 @@ def write_examples(
     store.commit()
 
 
+def count_examples(store: Store, datasource: str, org_id: str = DEFAULT_ORG) -> int:
+    """How many examples this org holds for `datasource`, across every area — the number
+    `get_datasource_schema` reports so a client knows fetching them is worth a call (#301)."""
+    rows = store.query(
+        "SELECT COUNT(*) AS n FROM prompt_example WHERE org_id = ? AND datasource = ?",
+        (org_id, datasource),
+    )
+    return int(rows[0]["n"]) if rows else 0
+
+
 def select_examples(
     store: Store,
     datasource: str,

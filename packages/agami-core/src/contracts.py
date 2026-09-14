@@ -162,6 +162,9 @@ class DatasourceSchemaResult(_Contract):
     # ridden in on `extra="allow"` — never-hide is stated relative to a scope, so the scope has to
     # be part of the contract for the guarantee to be checkable by a consumer.
     scope: dict[str, Any] | None = None
+    # `{"stored", "next"}` when the datasource has stored examples, absent when it has none (#301).
+    # Declared for the same reason as `scope`: a client acts on it, so it belongs in the contract.
+    prompt_examples: dict[str, Any] | None = None
     # Pass 2 (dataset_names): per-table context + relationships/metrics from get_table_context.
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None
