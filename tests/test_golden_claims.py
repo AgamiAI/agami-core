@@ -389,8 +389,8 @@ def _parsed_or_none(text: str, engine: str):
 
 
 # The statement a golden item would carry: a filtered, windowed, joined, grouped, ordered, capped
-# aggregate over the demo shop. Every one of the seven claims is present in it, which is what lets
-# the rewrite below assert that all seven AGREE rather than that none of them differs.
+# aggregate over the demo shop. Every one of the eight claims is present in it, which is what lets
+# the rewrite below assert that all eight AGREE rather than that none of them differs.
 GOLDEN_SHAPE = (
     "SELECT o.region, SUM(o.amount) AS revenue "
     "FROM orders o JOIN customers c ON o.customer_id = c.id "
@@ -401,15 +401,18 @@ GOLDEN_SHAPE = (
 
 @pytest.mark.parametrize("engine", ENGINES)
 class TestComparingTwoStatements:
-    """Seven claims out, and exactly two of them allowed to decide anything."""
+    """Eight claims out, and exactly two of them allowed to decide anything."""
 
-    def test_the_claim_set_is_exactly_seven_claims(self, engine):
-        """Seven is the contract, not an implementation detail: an eighth claim changes what a
-        golden item is allowed to assert about a statement."""
+    def test_the_claim_set_is_exactly_eight_claims(self, engine):
+        """Eight is the contract, not an implementation detail: a new claim changes what a golden
+        item is allowed to assert about a statement. The eighth, `outputs`, was added on purpose
+        (ACE-131) so two statements can be called the same query only when they select the same
+        expressions; it reports and never gates."""
         diff = _diff(GOLDEN_SHAPE, GOLDEN_SHAPE, engine)
 
         assert gc.CLAIM_NAMES == (
             "tables",
+            "outputs",
             "filter_predicates",
             "date_window",
             "group_keys",
@@ -417,8 +420,32 @@ class TestComparingTwoStatements:
             "ordering",
             "limit",
         )
-        assert len(diff.claims) == 7
+        assert len(diff.claims) == 8
         assert tuple(claim.name for claim in diff.claims) == gc.CLAIM_NAMES
+
+    def test_the_outputs_claim_reads_what_is_selected_with_the_aliases_peeled(self, engine):
+        a = "SELECT o.region, SUM(o.amount) AS revenue FROM orders o GROUP BY o.region"
+        b = "SELECT SUM(orders.amount) AS total_revenue, orders.region FROM orders GROUP BY orders.region"
+        claim = _claim(_diff(a, b, engine), "outputs")
+        assert claim.status == gc.AGREES
+        assert claim.generated == claim.golden == ["orders.region", "sum(orders.amount)"]
+
+    def test_the_outputs_claim_differs_on_a_different_expression(self, engine):
+        a = "SELECT region, SUM(amount) AS revenue FROM orders GROUP BY region"
+        b = "SELECT region, AVG(amount) AS revenue FROM orders GROUP BY region"
+        assert _claim(_diff(a, b, engine), "outputs").status == gc.DIFFERS
+
+    def test_a_bare_column_in_a_single_table_statement_is_its_tables_column_in_the_outputs_claim(self, engine):
+        claim = _claim(_diff("SELECT o.total FROM orders o", "SELECT total FROM orders", engine), "outputs")
+        assert claim.status == gc.AGREES and claim.golden == ["orders.total"]
+
+    def test_select_star_differs_from_a_column_list_in_the_outputs_claim(self, engine):
+        claim = _claim(_diff("SELECT * FROM orders", "SELECT region FROM orders", engine), "outputs")
+        assert claim.status == gc.DIFFERS and claim.generated == ["*"]
+
+    def test_the_outputs_claim_never_gates(self, engine):
+        diff = _diff("SELECT region FROM orders", "SELECT SUM(amount) FROM orders", engine)
+        assert _claim(diff, "outputs").status == gc.DIFFERS and not diff.gated
 
     def test_an_aliased_reordered_rewrite_agrees_on_every_claim(self, engine):
         """The property the whole module rests on: two spellings of one question produce identical
@@ -433,7 +460,7 @@ class TestComparingTwoStatements:
         )
         diff = _diff(rewritten, GOLDEN_SHAPE, engine)
 
-        assert [claim.status for claim in diff.claims] == [gc.AGREES] * 7
+        assert [claim.status for claim in diff.claims] == [gc.AGREES] * 8
         assert diff.gates == []
         assert diff.gated is False
 
@@ -614,7 +641,7 @@ class TestComparingTwoStatements:
         the same reason."""
         diff = _diff("SELECT FROM WHERE ,", GOLDEN_SHAPE, engine, must_filter=["region"])
 
-        assert [claim.status for claim in diff.claims] == [gc.UNKNOWN] * 7
+        assert [claim.status for claim in diff.claims] == [gc.UNKNOWN] * 8
         assert diff.gates == []
         assert diff.gated is False
 

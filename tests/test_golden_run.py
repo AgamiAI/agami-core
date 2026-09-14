@@ -389,14 +389,15 @@ def test_a_required_filter_left_out_turns_a_would_be_pass_into_a_fail(chokepoint
     assert result.failed == 1 and result.gating_failures == 1
 
 
-def test_a_scored_item_carries_the_seven_claims(chokepoint):
+def test_a_scored_item_carries_the_eight_claims(chokepoint):
     """A failing item's whole value is the sentence after 'the rows disagree', so the diff rides on
     every item that had two statements to read."""
     result = _run(_dataset(_item()), _StubGenerator(), _SpyExecutor())
 
     claims = result.outcomes[0].claims
     assert [claim["name"] for claim in claims["claims"]] == [
-        "tables", "filter_predicates", "date_window", "group_keys", "join_keys", "ordering", "limit",
+        "tables", "outputs", "filter_predicates", "date_window", "group_keys", "join_keys", "ordering",
+        "limit",
     ]
     assert claims["gated"] is False and result.outcomes[0].passed
 

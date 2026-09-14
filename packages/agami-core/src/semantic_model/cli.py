@@ -313,10 +313,10 @@ def _read_sql_file(path: str) -> Optional[str]:
 
 
 def cmd_claims(args) -> int:
-    """Where two statements differ, in the seven claims the golden runner already compares.
+    """Where two statements differ, in the eight claims the golden runner already compares.
     `golden_claims.compare_statements` has been reachable from the runner and the save door and
     from no command; this is that command. A side that could not be read says so, rather than
-    leaving seven `unknown` claims to explain themselves."""
+    leaving eight `unknown` claims to explain themselves."""
     from .golden_claims import compare_statements, count_temporal_predicates, read_claims
     org = L.load_datasource(args.root)
     grammar = _grammar(org)
@@ -371,7 +371,8 @@ def cmd_compare_results(args) -> int:
         if golden_sql is None:
             return 2
     score = compare_result_sets(golden, generated, match=args.match, golden_sql=golden_sql,
-                                bounds=bounds, dialect=_grammar(org))
+                                bounds=bounds, dialect=_grammar(org),
+                                ordered=False if args.unordered else None)
     _print_json(dataclasses.asdict(score))
     return 0
 
@@ -1348,7 +1349,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="optional freshness timestamp for the receipt's tables section")
     sp.set_defaults(func=cmd_receipt)
 
-    sp = sub.add_parser("claims", help="where two statements differ: the seven claims the golden runner compares, as a diff")
+    sp = sub.add_parser("claims", help="where two statements differ: the eight claims the golden runner compares, as a diff")
     sp.add_argument("root")
     sp.add_argument("--sql-file", required=True, dest="sql_file")
     sp.add_argument("--against-sql-file", required=True, dest="against_sql_file")
@@ -1361,7 +1362,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--match", default="exact", choices=["exact", "values", "shape", "bounded", "nonempty"],
                     help="the comparator's own default is exact; reconcile passes values for a number that may carry a float tail")
     sp.add_argument("--golden-sql-file", default=None, dest="golden_sql_file",
-                    help="the answer key's statement, read only for whether it ordered its rows")
+                    help="the answer key's statement, read only for whether it ordered its rows; not read when --unordered is given")
+    sp.add_argument("--unordered", action="store_true",
+                    help="compare the rows as a set whatever ORDER BY either statement wrote; reconcile passes it because the ordering claim carries the order")
     sp.add_argument("--bounds", default=None, help="JSON with min_rows/max_rows/min_value/max_value, for --match bounded")
     sp.set_defaults(func=cmd_compare_results)
 

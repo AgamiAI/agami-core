@@ -57,7 +57,7 @@ SECTIONS = ("failure", "error", "unscored", "unconfirmed", "pass")
 
 
 def _claims(generated: list[str], golden: list[str], status: str = "differs") -> dict[str, Any]:
-    """A statement difference in the shape the run writes it — seven claims, tables first."""
+    """A statement difference in the shape the run writes it — the claims, tables first."""
     rest = [
         {"name": name, "status": "agrees", "generated": None, "golden": None}
         for name in (

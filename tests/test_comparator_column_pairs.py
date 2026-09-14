@@ -15,10 +15,12 @@ def test_renamed_and_extra_columns_are_reported_as_pairs_and_extras():
     score = compare_result_sets(golden, generated, match="values")
     assert score.accuracy == 0.0 and score.unmatched_golden_columns == ("channel",)
     assert score.column_pairs == (("number", "o.number"), ("status", "o.status")) and score.unmatched_generated_columns == ("region",)
+    assert score.column_agreement == (1.0, 1.0) and score.paired_row_share == 1.0
     generated2 = ExecResult(columns=["o.number", "o.status", "o.channel", "region"], rows=[("A1", "paid", "web", "EU"), ("A2", "open", "shop", "US")])
     score2 = compare_result_sets(golden, generated2, match="values")
     assert score2.accuracy == 1.0 and score2.column_pairs == (("number", "o.number"), ("status", "o.status"), ("channel", "o.channel"))
     assert score2.unmatched_generated_columns == ("region",) and score2.unmatched_golden_columns == ()
+    assert score2.column_agreement == (1.0, 1.0, 1.0) and score2.paired_row_share == 1.0
 
 
 def test_a_scalar_pair_serialises_and_other_levels_report_nothing():
@@ -34,4 +36,5 @@ def test_different_row_counts_report_no_pairs_and_no_extras():
     generated = ExecResult(columns=["department", "pending_items"], rows=[("a", 1), ("b", 2), ("c", 3)])
     score = compare_result_sets(golden, generated, match="values")
     assert score.accuracy == 0.0 and score.column_pairs == () and score.unmatched_generated_columns == () and score.unmatched_golden_columns == ()
+    assert score.column_agreement == () and score.paired_row_share is None
 
