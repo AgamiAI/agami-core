@@ -86,9 +86,11 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" parse \
 
 Then `Read` the file. `parse` is inert **by construction** — it has no write in it at all, which is what makes "the rows are confirmed before anything is written" a fact about the software rather than a promise about how you behave.
 
-The payload carries `columns` (the header as found), `rows`, `skipped` (each with its row number in the user's own sheet and why) and `summary`. Exit `2` means no column could be identified as the question; the stderr line names every header it read, which is the whole of what the user needs to rename one and re-invoke.
+The payload carries `columns` (the header as found), `header_row` (the sheet's own row number for that header), `rows`, `skipped` (each with its row number in the user's own sheet and why) and `summary`. A workbook adds `sheet` (the tab that was read) and `above_header` (every row above the header that had anything in it — usually a title — none of which was read). Exit `2` means the parse could not start: no column could be identified as the question — the stderr line names every header it read, which is the whole of what the user needs to rename one and re-invoke — or, for a workbook, the sheet has to be named or the file can't be read, and the stderr line says which.
 
 ### 2c — Render the rows and get an explicit yes
+
+**Say what was read, before the rows.** For a workbook, name the sheet and the header row (*"Read the **Questions** sheet, header on row 4."*) and quote every `above_header` row, so the user can see nothing they meant as a question sat above the header. A right-looking table from the wrong tab is the one mistake the rows alone won't show.
 
 **Show the rows as a markdown table.** Not a count, not a summary — the rows:
 
@@ -273,6 +275,8 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
 | `agami-save-golden: this workbook has N sheets, so which one holds the questions has to be named with --sheet` | Not a fault — the workbook has more than one tab. List the sheets the message names, suggest the one that reads like the question bank, and on the user's word re-run with `--sheet "<name>"`. Never pick one yourself. |
 | `agami-save-golden: this workbook has no sheet named '<name>'` | The name matched no tab (case and surrounding spaces are already forgiven). Show the sheets the message lists and re-run with the one the user means. |
 | `agami-save-golden: this is Excel's older binary .xls format` / `this file is not a readable .xlsx workbook` | The file can't be read as a workbook. Ask the user to save it as `.xlsx` (or CSV) from Excel and re-invoke. Do not open it with the Read tool, and do not reconstruct its contents from memory. |
+| `agami-save-golden: more than one sheet matches '<name>' once case and spaces are ignored` | Two tabs differ only in case or a trailing space. Show the matching sheets the message lists and re-run with `--sheet` spelled exactly as the tab the user means. |
+| `agami-save-golden: this workbook contains XML this reader will not parse` / `… has a damaged part` / `… is missing a part` / `a part of this workbook is too large` / `… has a row …` / `… has a cell …` / `this sheet has data on row …` / `this sheet is too large` | The workbook can't be read as a question bank as it stands — damaged, not written by Excel, or far larger than a question bank runs. Nothing was read. Ask the user to re-save it from Excel as `.xlsx`, or to copy just the question table into a fresh workbook or a CSV, and re-invoke. Never try to open it another way. |
 | `agami-save-golden: this item does not say how its answer was confirmed` | `confirmed_by.method` was blank. Ask how the result was checked and re-write the item JSON — provenance is most of what a receipt is for. |
 | `agami-save-golden: '<name>' is not a usable dataset name` / `profile name` | The stem or the profile was a path, not a name. Ask for the plain name (`orders`, not `orders/2024` or `../orders`) and re-invoke. Nothing was read and nothing was written. |
 | `agami-save-golden: dataset '<name>' names the file rather than the dataset` | The extension was typed too. The stem *is* the dataset's name, so pass `orders`, not `orders.yaml`. Re-invoke; nothing was written. |

@@ -247,10 +247,10 @@ def _cell(row: list[str], index: Optional[int]) -> str:
     return row[index].strip()
 
 
-# How far down a sheet the header is looked for. A workbook often opens with a title, a date or a note
-# above the table, and a CSV exported from one keeps them. Twenty rows covers a title block without
-# reading so far into the data that a question which happens to read "question" could be taken for
-# the header.
+# How far down a WORKBOOK the header is looked for. A workbook often opens with a title, a date or a
+# note above the table. Twenty rows covers a title block without reading so far into the data that a
+# question which happens to read "question" could be taken for the header — and the rows above the
+# header are reported, never silently dropped.
 _HEADER_SCAN_ROWS = 20
 
 
@@ -277,15 +277,26 @@ def _read_rows(path: str, sheet: Optional[str] = None) -> tuple[Optional[str], l
         return None, list(csv.reader(handle))
 
 
-def _header_index(rows: list[list[str]]) -> Optional[int]:
-    """Which row is the header: the first, within `_HEADER_SCAN_ROWS`, that names a question column.
+def _header_index(rows: list[list[str]], *, workbook: bool) -> Optional[int]:
+    """Which row is the header, or None when no row can be.
 
-    An exact alias match, never a guess at the first non-empty row: a title line above the table
-    names no column, and the row that does is the header by the same rule `_columns` applies to it.
+    In a workbook it is the first row, within `_HEADER_SCAN_ROWS`, that names a question column — by
+    the same exact alias match `_columns` applies to any header, never a guess. A workbook often
+    opens with a title block, and `_parse` reports every row above the header rather than dropping
+    it unsaid.
+
+    In a CSV it is the first row with anything in it, as it always was. A CSV has no title block to
+    scan past, and scanning one would turn a headerless bank whose second question happens to read
+    "question" into a bank whose first question silently vanished.
     """
-    for index, row in enumerate(rows[:_HEADER_SCAN_ROWS]):
-        if "query" in _columns(row):
-            return index
+    if workbook:
+        for index, row in enumerate(rows[:_HEADER_SCAN_ROWS]):
+            if "query" in _columns(row):
+                return index
+        return None
+    for index, row in enumerate(rows):
+        if any(cell.strip() for cell in row):
+            return index if "query" in _columns(row) else None
     return None
 
 
@@ -375,7 +386,7 @@ def _parse(path: str, sheet: Optional[str] = None) -> Optional[dict[str, Any]]:
     if not filled:
         _stop("this file is empty — the sheet needs a header row naming its question column")
         return None
-    header_index = _header_index(all_rows)
+    header_index = _header_index(all_rows, workbook=sheet_name is not None)
     if header_index is None:
         header = filled[0]
         cells = ", ".join(repr(cell.strip()) for cell in header)
@@ -399,6 +410,18 @@ def _parse(path: str, sheet: Optional[str] = None) -> Optional[dict[str, Any]]:
     payload["header_row"] = header_index + 1
     if sheet_name is not None:
         payload["sheet"] = sheet_name
+        # Every row above the header that had anything in it — usually a title. Not read, and said,
+        # because a row the parse passes over without a word is a question somebody can lose.
+        payload["above_header"] = [
+            {"row": index + 1, "text": next(cell.strip() for cell in row if cell.strip())[:120]}
+            for index, row in enumerate(all_rows[:header_index])
+            if any(cell.strip() for cell in row)
+        ]
+        if payload["above_header"]:
+            _warn(
+                f"{len(payload['above_header'])} row(s) above the header on row "
+                f"{header_index + 1} were not read — see `above_header` in the payload"
+            )
     if payload["skipped"]:
         # The counts are in the payload, but a person reading a terminal sees the summary line, and
         # a skip they never notice is a question missing from their dataset.
