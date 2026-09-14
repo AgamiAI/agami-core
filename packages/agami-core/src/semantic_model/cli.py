@@ -373,6 +373,17 @@ def cmd_set_terminology(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_set_description(args) -> int:
+    """Write the datasource's one-line description onto datasource.yaml — the line an agent routes a
+    question by (#327). Onboarding calls this with the user's line or one generated from the enriched
+    model. Validated + committed."""
+    from . import curate
+    res = curate.set_datasource_description(args.root, args.description)
+    _print_json({"applied": res.applied, "validated": res.validated,
+                 "committed": res.committed, "errors": res.errors})
+    return 0 if res.validated else 1
+
+
 def cmd_curate(args) -> int:
     from . import curate
     with open(args.ops_file) as fh:
@@ -1237,6 +1248,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", required=True, help="JSON object {term: definition, ...} (or {key_terminology: {...}})")
     sp.add_argument("--replace", action="store_true", help="replace the glossary instead of merging over it")
     sp.set_defaults(func=cmd_set_terminology)
+
+    sp = sub.add_parser("set-description", help="write the datasource's one-line description onto datasource.yaml (what list_datasources routes on)")
+    sp.add_argument("root")
+    sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
+    sp.set_defaults(func=cmd_set_description)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
     sp.add_argument("root")

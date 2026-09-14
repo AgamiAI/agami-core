@@ -287,13 +287,15 @@ def _served_datasources(org_id: str) -> "list[str] | None":
         return None
 
 
-def _choose_datasource_error(org_id: str) -> "str | None":
+def _choose_datasource_error(org_id: str, served: "list[str] | None" = None) -> "str | None":
     """The refusal for an omitted `datasource` that resolved to nothing — naming the real choices.
 
     Returns None when the store cannot answer, so the caller keeps whatever message it already had:
-    a guess about the customer's datasources is exactly what this function exists to stop.
+    a guess about the customer's datasources is exactly what this function exists to stop. A caller
+    that already listed the datasources passes them as `served`, so one omitted call costs one query.
     """
-    served = _served_datasources(org_id)
+    if served is None:
+        served = _served_datasources(org_id)
     if served is None:
         return None
     if not served:
@@ -319,6 +321,32 @@ def _choose_datasource_error(org_id: str) -> "str | None":
         },
         indent=2,
     )
+
+
+def _datasources_to_choose_from(args: dict[str, Any]) -> "list[str] | None":
+    """The organization's datasources when this call must name one and did not, else None (#327).
+
+    A call that names no `datasource` used to fall through `resolve_profile`'s chain — an env var, an
+    active profile — and run against whatever that picked. On an organization serving ONE datasource
+    that is unambiguous and stays allowed. On one serving several it is a guess, and a wrong guess sent
+    SQL written for one datasource to another: refused as out of scope, with advice to add a table the
+    model already declared elsewhere. So with several served, an omission is refused and the choices
+    are named.
+
+    Falsy, not `is None`, for `resolve_profile`'s reason: `""` is an omission there too. None when the
+    store cannot answer (a local install, or a blip) — refusing on a guess about the customer's
+    datasources is what this exists to stop, so the old behaviour stands there."""
+    if args.get("datasource"):
+        return None
+    org_id = _current_org_id()
+    if _SOLE_SERVED.get(org_id) is not None:
+        # Already known to serve exactly one — the common case answers from the cache `resolve_profile`
+        # keeps, so an omitted call on a single-datasource organization adds no query.
+        return None
+    served = _served_datasources(org_id)
+    if served is None or len(served) < 2:
+        return None
+    return served
 
 
 # Same name tests already reach for on `resolved_org_id`, so a test that varies the store clears
@@ -1456,6 +1484,13 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     `metric_index` (name->description for every metric in scope) + `large_tables` are always
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
+    # With several datasources served, an omission is refused before it can resolve to a fallback
+    # (#327); `_choose_datasource_error` names the choices.
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        choose = _choose_datasource_error(_current_org_id(), served=choices)
+        if choose is not None:
+            return choose
     profile = _resolve_call_datasource(args)
     try:
         org = get_cached_org(profile)
@@ -1682,6 +1717,13 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     corrections) never floods the context. Local serving (files): returns the curated examples.yaml
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
+    # Same refusal as `get_datasource_schema` for an omission with several datasources served (#327):
+    # examples from a guessed datasource would teach SQL for the wrong one.
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        choose = _choose_datasource_error(_current_org_id(), served=choices)
+        if choose is not None:
+            return choose
     profile = _resolve_call_datasource(args)
 
     from store import Store
@@ -2094,6 +2136,93 @@ def _envelope(
     )
 
 
+def _declared_elsewhere(names: list[str], profile: str) -> dict[str, list[str]]:
+    """`{name: [datasource, ...]}` — the OTHER datasources of the caller's organization that declare
+    each name (#327). Empty when there is no store to ask. Scoped to the caller's org by the query."""
+    from store import Store
+
+    store = Store.from_env()
+    if store is None:
+        return {}
+    try:
+        from model_store import datasources_declaring
+
+        found = datasources_declaring(store, names, org_id=_current_org_id())
+    finally:
+        store.close()
+    others = {name: [ds for ds in homes if ds != profile] for name, homes in found.items()}
+    return {name: homes for name, homes in others.items() if homes}
+
+
+def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str | None) -> Envelope:
+    """A table-scope refusal whose tables are declared in another of the organization's datasources,
+    with advice that says which (#327). Any other envelope comes back unchanged — the same object.
+
+    The gate sees one datasource's model, so "not declared here" is all it can say, and its advice was
+    to add the table to the model: wrong when the table is declared, just in another datasource, and a
+    client cannot add tables anyway. Only the REMEDIATION changes; the rule, reason and detail stay the
+    gate's own. The table names come from the same parse the gates use (`build_guard_context`), never a
+    second parser. Best-effort by design: any failure to look keeps the gate's refusal as it was,
+    because a hint must never be the thing that breaks a refusal."""
+    from guardrail import RULE_TABLE_SCOPE
+
+    refusal = env.refusal
+    if env.status != "refused" or refusal is None or refusal.rule != RULE_TABLE_SCOPE:
+        return env
+    if not sql or not profile:
+        return env
+    try:
+        from semantic_model import runtime as RT
+
+        org = get_cached_org(profile)
+        ctx = RT.build_guard_context(sql, org)
+        tree = getattr(ctx, "tree", None)
+        if tree is None:
+            return env
+        declared = set(RT._model_table_index(org))
+        ctes = {name.lower() for name in RT._cte_names(tree)}
+        referenced = {ref.bare.lower() for ref in RT._table_references(tree) if ref.bare} - ctes
+        undeclared = sorted(referenced - declared)
+        if not undeclared:
+            return env
+        # Every referenced table, not only the undeclared ones: a datasource is only worth naming if it
+        # declares the WHOLE statement, or the retry is refused again on the tables declared here.
+        homes = _declared_elsewhere(sorted(referenced), profile)
+        echo = RT._echo_identifiers
+    except Exception:  # noqa: BLE001 - a hint that cannot be computed leaves the refusal as it was
+        return env
+    if not all(homes.get(name) for name in undeclared):
+        return env  # at least one table is declared nowhere: the gate's own advice is the right one
+    # Caller-written names go through the gate's own echo bound — capped in count, shortened, and
+    # stripped to an identifier's alphabet — because refusal text reads to the caller as server-authored.
+    listed = echo(undeclared)
+    targets = set.intersection(*(set(homes.get(name, [])) for name in sorted(referenced)))
+    if len(targets) == 1:
+        (target,) = targets
+        remediation = (
+            f"The tables in this statement ({echo(sorted(referenced))}) are all declared in "
+            f"datasource `{target}`, not `{profile}`. Read its schema and run the query with "
+            f"`datasource` set to `{target}`."
+        )
+    elif targets:
+        remediation = (
+            f"The tables in this statement are all declared in datasources "
+            f"{', '.join(f'`{d}`' for d in sorted(targets))}, not `{profile}`. Run the query with "
+            f"`datasource` set to the one this question is about."
+        )
+    else:
+        where = "; ".join(f"{echo([name])} in {', '.join(homes[name])}" for name in undeclared)
+        verb = "is" if len(undeclared) == 1 else "are"
+        remediation = (
+            f"{listed} {verb} not in `{profile}`, and the tables this statement joins live in "
+            f"different datasources ({where}); one statement cannot join across datasources. Query "
+            f"each datasource separately."
+        )
+    from dataclasses import replace as _replace
+
+    return _replace(env, refusal=_replace(refusal, remediation=remediation))
+
+
 def _emit(
     env: Envelope,
     *,
@@ -2128,6 +2257,8 @@ def _emit(
     This is also where the audit row is written — see `_record_execution`. Both branches below fall
     through to ONE record call and ONE `json.dumps`, so "exactly one row per tool call, on every
     outcome" is a property of the control flow rather than of six call sites staying in step."""
+    # Before the body AND the audit row, so both carry the same advice (#327).
+    env = _point_to_declaring_datasource(env, sql, profile)
     if env.status == "ok":
         columns = list(env.data.columns)
         rows = [["" if v is None else str(v) for v in row] for row in env.data.rows]
@@ -2572,6 +2703,27 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # datasource it was aimed at. `resolve_profile` reads an argument, an env var and a local config
     # file — it opens no connection and touches no credential, so a mutation still never reaches the
     # warehouse; what it no longer does is land in the audit trail with an empty `datasource`.
+    # Before resolving: with several datasources served, an omitted `datasource` would resolve to a
+    # fallback and run there, which is the wrong-datasource failure #327 exists to stop. Refused as a
+    # PRE_MODEL rule, so it costs no model and no connection beyond the one listing.
+    choices = _datasources_to_choose_from(args)
+    if choices is not None:
+        from guardrail import RULE_DATASOURCE_REQUIRED, refuse
+
+        refusal = refuse(
+            RULE_DATASOURCE_REQUIRED,
+            detail="this organization serves more than one datasource and the call named none: "
+            + ", ".join(choices),
+            remediation="Pass `datasource` set to the one this question is about — read each one's "
+            "description with list_datasources if unsure — then run it again.",
+        )
+        return _emit(
+            _envelope("refused", refusal=refusal, receipt=_refusal_receipt("", sql, refusal)),
+            sql=sql,
+            execution_ms=None,
+            args=args,
+        )
+
     profile = _resolve_call_datasource(args)
 
     refusal = check_read_only(sql)
