@@ -34,6 +34,16 @@ below corresponds to one such version.
 
 ### Changed
 
+- **A schema response says when a datasource has stored examples.** Clients often skipped
+  `get_prompt_examples` (#301): the only instruction to call it lived in the server instructions,
+  which a host may weight below its own, so curated corrections never reached the SQL.
+  `get_datasource_schema` now carries `prompt_examples` — how many examples the datasource has, and
+  a one-line reminder to fetch them — whenever it has any. It carries a count, never the examples:
+  ranking and returning them stays `get_prompt_examples`' job. The count is datasource-wide even on
+  an `area`-scoped call, and the instructions and both tool descriptions now say to pass the
+  question as `query` and leave `area` out unless sure, because an `area` drops every other
+  area's examples, however well they match.
+
 - **A golden run pays for the model's description once, not once per question.** Every question
   starts its own client, and every one re-sent the whole model — about 35k tokens on a 22-area
   profile — in a prompt that could not be reused, because it began with the client's own system
