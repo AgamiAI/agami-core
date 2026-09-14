@@ -12,6 +12,25 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **An organisation can have its own row cap and statement time limit** (#329, engine half). Core
+  stores no such setting: an embedder registers a provider, `(org_id) -> {"max_rows", "timeout_s"}`,
+  through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
+  unusable value (not a positive whole number, or a provider that raises) falls back to
+  `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
+  the log. There is no ceiling.
+  - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
+    child is handed the same two numbers in its environment, so the watchdog, the native bound, the
+    outer bound and the supervisor still derive from one budget on both sides of the fork.
+  - `tools.statement_limits(org_id=None)` reports the limits in force for the current (or a named)
+    organisation; `tools.statement_limit_defaults()` reports the deployment values and the
+    recommended ones (1000 rows, 30 seconds). `tools.pinned_statement_limits(org_id)` lets a direct
+    caller of `execute_guarded` apply an organisation's limits.
+  - The `execute_sql` description states the caller's organisation's numbers, built when tools are
+    listed rather than once at start-up. A client keeps the list for its session, so a changed limit
+    reaches new sessions; an existing session meets it in the refusal, which names the number per call.
+
 ### Fixed
 
 - **A table outside the connection's default schema resolves when the client names it without its
