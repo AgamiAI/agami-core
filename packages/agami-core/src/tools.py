@@ -1962,23 +1962,40 @@ def set_statement_limits_provider(
     _STATEMENT_LIMITS_PROVIDER = provider
 
 
-def _provider_limit(org_id: str, key: str, value: Any) -> int | None:
-    """One provider value, validated: a positive int, or ``None`` to fall back to the deployment.
+_STATEMENT_LIMIT_KEYS = ("max_rows", "timeout_s")
 
-    ``bool`` is refused although it is an ``int``, because ``True`` reaching the row cap as ``1`` is a
-    storage bug that would look like a setting. Anything unusable is logged at warning and declined —
-    never raised: this runs at the entry of every statement and while tools are listed, and one
-    organisation's bad row must cost that organisation its override, not everybody their query."""
+
+def statement_limit_is_usable(key: str, value: Any) -> bool:
+    """Whether ``value`` is a limit the executor would enforce for ``key`` (``max_rows`` or
+    ``timeout_s``) — the rule the provider's values are held to, exposed so a settings screen can refuse
+    at save time what the executor would otherwise decline, with a warning, on every statement.
+
+    A positive ``int``, and not a ``bool``: ``True`` reaching the row cap as ``1`` is a storage bug that
+    would look like a setting. There is no ceiling (#329), but a timeout the platform cannot arm is not
+    a setting either — see ``execute_sql._timeout_is_representable`` for how one would disable the
+    abandoned-worker cap. An unknown ``key`` raises ``ValueError``: that is the caller's bug, not a value
+    to decline."""
+    if key not in _STATEMENT_LIMIT_KEYS:
+        raise ValueError(f"unknown statement limit {key!r}; expected one of {_STATEMENT_LIMIT_KEYS}")
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return False
+    if key == "timeout_s":
+        from execute_sql import _timeout_is_representable
+
+        return _timeout_is_representable(value)
+    return True
+
+
+def _provider_limit(org_id: str, key: str, value: Any) -> int | None:
+    """One provider value, validated by `statement_limit_is_usable`, or ``None`` to fall back to the
+    deployment.
+
+    Anything unusable is logged at warning and declined — never raised: this runs at the entry of every
+    statement and while tools are listed, and one organisation's bad row must cost that organisation its
+    override, not everybody their query."""
     if value is None:
         return None
-    from execute_sql import _timeout_is_representable
-
-    usable = isinstance(value, int) and not isinstance(value, bool) and value > 0
-    # No ceiling, but a timeout the platform cannot arm is not a setting: see
-    # `execute_sql._timeout_is_representable` for how one would disable the abandoned-worker cap.
-    if usable and key == "timeout_s" and not _timeout_is_representable(value):
-        usable = False
-    if usable:
+    if statement_limit_is_usable(key, value):
         return value
     _LOG.warning(
         "statement limits provider returned %s=%r for org %s, which is not a usable positive whole "
