@@ -498,6 +498,17 @@ Then confirm both landed: `<artifacts_dir>/organization.yaml` now shows `name:`/
 
 `Yes` → write to the **per-profile** `<artifacts_dir>/<profile>/datasource.md` under `# About this database` (this datasource's narrative only). `Skip` → leave it absent; Phase 2f writes a short per-database starter from the enriched model.
 
+**C. One-line datasource description — ask on EVERY onboard.** This is a different thing from B's narrative: it is the single line `list_datasources` shows an agent so it can pick the right datasource for a question, and an organization with several datasources refuses a query that names none. A datasource with no description routes on its name alone. **AskUserQuestion**:
+> In one line, what does **this database** hold, and when would someone query it? (e.g. *"Invoices, payments, products and margins — use for revenue and profitability questions."*)
+
+Options: `Write it now (Other field)` / `Generate one for me (Recommended)` / `Skip`.
+
+- **Write it now** → `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "<their line>"`.
+- **Generate one for me** → defer to **Phase 2f**: once every table is enriched, synthesize ONE line from the subject-area and table descriptions (what the data covers, and the questions it answers — grounded in the model, never product memory), write it with the same `sm set-description` command, and show it in the Phase 7 summary as a draft they can edit.
+- **Skip** → leave it empty. Say plainly that `model_deploy` will warn about it, and that an agent picking between several datasources will be guessing from the name.
+
+If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask only whether to keep it.
+
 `chmod 644` whatever you write — these are **non-secret model files** and must stay readable (e.g. by the deploy container / a teammate reading a checked-in copy); never `chmod 600` them (that's for `local/` secrets only). See [`shared/organization-context-format.md`](../../shared/organization-context-format.md) for the content-routing rule (company-wide → root; per-database → the profile; per-column units → the structured model; personal → `USER_MEMORY.md`).
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
