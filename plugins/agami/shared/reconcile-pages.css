@@ -166,3 +166,5 @@
     /* a claim that differs between the two queries: amber, its own mark, the differing tokens marked without blame */
     .dg .differs.v .tok.diff { background: var(--open-bg); color: var(--open); font-weight: 600; padding: 0 4px; border-radius: 4px; }
     .dg .differs.k { color: var(--open); }
+    /* a chip whose count fell to zero under the other filters stays, dimmed, so it can still be toggled */
+    .chip.zero, .pill.zero { opacity: 0.45; }
