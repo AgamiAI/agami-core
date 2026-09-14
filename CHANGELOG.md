@@ -34,6 +34,7 @@ below corresponds to one such version.
   what a question costs — measured at 90-97% of its output tokens, against a statement of 50-80 —
   so a lower level is the next large saving. The level is recorded in the run's JSON and artifact,
   because a score measured at one level says nothing about another.
+
 ### Added
 
 - **Four `sm` verbs that grade a statement a person supplied, part by part.** `agami-reconcile` is
@@ -134,6 +135,10 @@ below corresponds to one such version.
   they carry (the compare-results score names `column_pairs` and `unmatched_generated_columns`), a bare
   column reads as its table's column in the claims reader, the change text and the decision boxes derive
   from the one fix, an `example` decision joins the block, the checks panel folds. (ACE-128)
+- Reconcile asks agami cold: `run_golden_eval.py --ask` answers one question and `--ask-file` a chunk of
+  them with the golden run's own generator and context, fetching the context once and spawning the
+  client per question several at a time; Phase 2b never writes agami's SQL in the reconcile session, and
+  a missing client is an error row, never the session's own statement. (ACE-129)
 - From the first test of the grid: a plain column in a list query is no longer graded as a missing
   metric (the receipt's output items say whether they aggregate); a date window written against the
   clock (`date_trunc('year', current_date) + interval`) resolves and compares against another such
