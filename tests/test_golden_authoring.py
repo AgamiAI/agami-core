@@ -187,6 +187,85 @@ def test_header_aliases_fold_case_and_underscores(tmp_path, monkeypatch, capsys)
     assert payload["rows"][0]["expected_value"] == 7.0
 
 
+def _parse_with(tmp_path, monkeypatch, capsys, body: str, *extra: str):
+    """The parse verb over `body`, with extra arguments — (exit code, stdout payload, stderr)."""
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    code = golden_author.main(["parse", "--csv", _csv(tmp_path, body), *extra])
+    captured = capsys.readouterr()
+    return code, (json.loads(captured.out) if captured.out.strip() else None), captured.err
+
+
+def test_an_unread_column_that_looks_like_the_statement_is_reported_not_silently_ignored(
+    tmp_path, monkeypatch, capsys
+):
+    """Matching stays exact, so `Warehouse SQL` is not read as `sql`. But a sheet with no statement
+    column and two headers saying SQL has almost certainly got its statements in one of them — and
+    importing without a word would drop every one. So each is reported, and the skill asks."""
+    body = f"question,Warehouse SQL,Result: SQL,Notes\n{QUERY},{SQL},matched,checked\n"
+
+    code, payload, err = _parse_with(tmp_path, monkeypatch, capsys, body)
+
+    assert code == 0
+    assert payload["rows"][0]["sql"] is None
+    assert payload["unrecognized"] == [
+        {"column": "Warehouse SQL", "could_be": "sql"},
+        {"column": "Result: SQL", "could_be": "sql"},
+    ]
+    assert "'Warehouse SQL'" in err and "--column" in err
+
+
+def test_a_mapped_column_is_read_as_the_field_it_is_mapped_to(tmp_path, monkeypatch, capsys):
+    """The person's answer, applied: once `sql` is mapped, that column is the statement — folded the
+    way any header is, so the spacing and case they typed don't matter — and the other look-alike
+    is no longer asked about, because the field is supplied."""
+    body = f"question,Warehouse SQL,Result: SQL\n{QUERY},{SQL},matched\n"
+
+    code, payload, _ = _parse_with(
+        tmp_path, monkeypatch, capsys, body, "--column", "sql=warehouse  sql"
+    )
+
+    assert code == 0
+    assert payload["rows"][0]["sql"] == SQL
+    assert payload["unrecognized"] == []
+
+
+def test_a_question_column_named_differently_can_be_mapped(tmp_path, monkeypatch, capsys):
+    """A question column the contract doesn't know by name is still refused on its own — never a
+    guess — and reads once the person says which column it is."""
+    body = f"Prompt (Natural Language),sql\n{QUERY},{SQL}\n"
+
+    code, payload, _ = _parse_with(tmp_path, monkeypatch, capsys, body)
+    assert code == 2 and payload is None
+
+    code, payload, _ = _parse_with(
+        tmp_path, monkeypatch, capsys, body, "--column", "query=Prompt (Natural Language)"
+    )
+    assert code == 0
+    assert payload["rows"][0]["query"] == QUERY and payload["rows"][0]["sql"] == SQL
+
+
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        (["--column", "sql"], "FIELD=HEADER"),
+        (["--column", "statement=Warehouse SQL"], "not a field this import reads"),
+        (["--column", "sql=Warehouse SQL", "--column", "sql=Result: SQL"], "twice"),
+        (["--column", "tags=Labels here"], "'Labels here'"),
+    ],
+)
+def test_a_column_mapping_that_cannot_apply_is_refused_rather_than_half_applied(
+    tmp_path, monkeypatch, capsys, arguments, message
+):
+    """A mapping is the person's answer to "is this the column you meant?", so one that names no
+    known field, names a field twice, or names a header the sheet doesn't have is refused outright."""
+    body = f"question,Warehouse SQL,Result: SQL\n{QUERY},{SQL},matched\n"
+
+    code, payload, err = _parse_with(tmp_path, monkeypatch, capsys, body, *arguments)
+
+    assert code == 2 and payload is None
+    assert message in err
+
+
 def test_expected_values_are_normalized_and_an_unparseable_one_is_null(
     tmp_path, monkeypatch, capsys
 ):
@@ -317,7 +396,9 @@ def test_an_import_confirms_exactly_the_rows_that_carried_an_answer(tmp_path, mo
     assert [item.expected.sql_confirmed for item in items] == [False, True]
     assert items[1].expected.sql == REVENUE_SQL
     assert items[0].confirmed_by is None
-    assert items[1].confirmed_by.method == "provided as a pre-validated answer in the imported sheet"
+    assert (
+        items[1].confirmed_by.method == "provided as a pre-validated answer in the imported sheet"
+    )
     assert items[1].confirmed_by.at
 
 
@@ -1208,7 +1289,9 @@ def test_the_departure_is_written_once_somebody_says_it_is_deliberate(
         sql="SELECT COUNT(*) AS order_count FROM orders WHERE placed_at >= '2024-01-01'",
     )
 
-    code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(item, "orders", "--confirm-convention"))
+    code, _, _ = _run(
+        tmp_path, monkeypatch, capsys, _save_argv(item, "orders", "--confirm-convention")
+    )
 
     assert code == 0
     assert _items(tmp_path)[0].expected.sql.count("placed_at")
@@ -1219,9 +1302,7 @@ def test_a_key_that_matches_the_convention_is_written_without_a_question(
 ):
     """The check has to be silent when there is nothing to say, or it becomes a prompt people learn
     to click through."""
-    monkeypatch.setattr(
-        golden_author, "_nearest_example", lambda profile, question: _example(SQL)
-    )
+    monkeypatch.setattr(golden_author, "_nearest_example", lambda profile, question: _example(SQL))
 
     code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path)))
 
@@ -1305,8 +1386,15 @@ def test_an_unrelated_example_is_not_treated_as_the_convention(tmp_path, monkeyp
         # judgement that the match is not close enough to be one.
         return {
             "high_confidence": False,
-            "matches": [{"score": 0.606, "example": {"question": "Anything else?",
-                                                     "sql": "SELECT COUNT(*) FROM suppliers"}}],
+            "matches": [
+                {
+                    "score": 0.606,
+                    "example": {
+                        "question": "Anything else?",
+                        "sql": "SELECT COUNT(*) FROM suppliers",
+                    },
+                }
+            ],
         }
 
     monkeypatch.setattr(golden_author, "_sm_json", _ranked)
@@ -1374,9 +1462,7 @@ def test_a_departure_that_is_also_a_replacement_asks_both_questions_at_once(
     that each re-arm the other. The exit-code table already promised a payload could carry more than
     one key; this is the code keeping that promise.
     """
-    monkeypatch.setattr(
-        golden_author, "_nearest_example", lambda profile, question: _example(SQL)
-    )
+    monkeypatch.setattr(golden_author, "_nearest_example", lambda profile, question: _example(SQL))
     # An item on disk first, so the second save is a replacement.
     code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path)))
     assert code == 0
@@ -1405,7 +1491,9 @@ def test_a_departure_that_is_also_a_replacement_asks_both_questions_at_once(
 
     # Both flags together, and it writes.
     code, _, _ = _run(
-        tmp_path, monkeypatch, capsys,
+        tmp_path,
+        monkeypatch,
+        capsys,
         _save_argv(item, "orders", "--confirm-convention", "--confirm-replace"),
     )
     assert code == 0 and "placed_at" in _items(tmp_path)[0].expected.sql

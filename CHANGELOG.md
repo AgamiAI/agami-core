@@ -27,7 +27,10 @@ below corresponds to one such version.
   in the file is checked against Excel's own limits before it is used, and a part declaring a DTD is
   refused in any encoding, so a crafted workbook costs a refusal rather than memory. An `.xls` file
   — Excel's older binary format — is still refused, with how to get past it, and `--csv` keeps
-  working. (#261)
+  working. A column the import doesn't read, but that looks like a field it does — a header with
+  `sql` or `question` in it, for a field the sheet hasn't supplied — is reported rather than
+  silently ignored, the skill asks the person about it, and `--column sql="<header>"` reads it
+  without renaming anything. (#261)
 
 ### Changed
 

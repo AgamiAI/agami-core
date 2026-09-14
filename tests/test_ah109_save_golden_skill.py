@@ -43,6 +43,9 @@ def test_a_workbook_is_parsed_rather_than_refused_and_the_sheet_is_the_users_cal
     assert "Save As → CSV UTF-8" not in SKILL
     assert "--file" in SKILL and "--sheet" in SKILL
     assert "which sheet holds the questions is the user's call" in SKILL
+    # A look-alike column is asked about, and only mapped on the person's word.
+    assert "`unrecognized`" in SKILL and '--column sql="Warehouse SQL"' in SKILL
+    assert "never map a column on your own" in SKILL
 
 
 def test_the_skill_refuses_in_plan_mode():
