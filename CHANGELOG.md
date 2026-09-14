@@ -49,6 +49,14 @@ below corresponds to one such version.
 
 ### Added
 
+- **Agami's answer may be several statements, and the reconcile page shows every one.** The cold
+  client's reply was read as one string under `sql`; a list, or several statements in one string,
+  lost everything but the first object or read as unreadable. The generator now keeps every
+  statement in order (`statements`), answers with the last, and the prompt says so; the ask door
+  writes `statements` beside `sql`; the row record carries `agami_statements`; the report card's
+  SQL block lists them numbered with the last marked "compared", and the rows check notes that
+  agami ran N queries. Only the last is run and graded. (ACE-135)
+
 - **An eighth claim, `outputs`, says what a statement selects.** `sm claims` and the golden run
   compared tables, filters, date window, group keys, join keys, ordering and limit, and never the
   projection, so two statements selecting different expressions could still read as the same

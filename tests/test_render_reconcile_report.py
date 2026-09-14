@@ -131,3 +131,15 @@ def test_owner_delta_and_check_states_come_from_closed_sets():
         rr.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "status": "match", "checks": [{"step": "x", "state": "maybe"}]}])
     with pytest.raises(ValueError, match="layout must be"):
         rr.render(title="t", profile="p", run="r", items=ITEMS, layout="table")
+
+
+# --- ACE-135: several statements in the SQL block -----------------------------------------------
+
+def test_the_sql_block_lists_every_statement_agami_wrote_and_marks_the_compared_one():
+    item = {"row": 1, "question": "How many orders?", "status": "match", "sql_yours": "SELECT COUNT(*) FROM orders",
+            "sql_agami": "SELECT COUNT(*) AS n FROM orders", "sql_agami_steps": ["SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders"]}
+    page = rr.render(title="t", profile="demo", run="r", items=[item], layout="cards")
+    assert "the last is compared" in page and "SELECT status FROM orders LIMIT 5" in page
+    import pytest
+    with pytest.raises(ValueError, match="sql_agami_steps"):
+        rr._validate_item(dict(item, sql_agami_steps="SELECT 1"), 0)

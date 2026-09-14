@@ -41,7 +41,7 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "keep_allowed", "result", "fix", "fix_words", "prefill")
+           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill")
 _LISTS = ("read", "how", "words", "change", "todo")
 _DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
@@ -73,6 +73,9 @@ def _validate_item(item: dict, idx: int) -> None:
         value = item.get(key, [])
         if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
             raise ValueError(f"item {idx}: '{key}' must be a list of sentences")
+    steps = item.get("sql_agami_steps", [])
+    if steps is not None and (not isinstance(steps, list) or not all(isinstance(s, str) for s in steps)):
+        raise ValueError(f"item {idx}: 'sql_agami_steps' must be a list of statements")
     if item.get("owner") is not None and item["owner"] not in _OWNERS:
         raise ValueError(f"item {idx}: 'owner' must be one of {sorted(_OWNERS)}")
     if item.get("delta_pct") is not None and not isinstance(item["delta_pct"], (int, float)):

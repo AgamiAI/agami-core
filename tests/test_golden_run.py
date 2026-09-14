@@ -1036,3 +1036,44 @@ def test_a_client_that_cannot_be_found_still_fails_as_a_generation(monkeypatch, 
 
     assert generated.sql == "" and generated.error == gr._GENERATION_UNAVAILABLE
 
+
+
+# --- ACE-135: several statements in one answer ---------------------------------------------------
+
+
+def test_a_list_of_statements_keeps_every_one_and_answers_with_the_last(monkeypatch):
+    reply = json.dumps({"sql": ["SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders"]})
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=reply))
+
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    assert generated.error is None and generated.sql == "SELECT COUNT(*) AS n FROM orders"
+    assert generated.statements == ("SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders")
+
+
+def test_several_statements_in_one_string_are_cut_at_top_level_semicolons_only(monkeypatch):
+    text = "SELECT status FROM orders WHERE note = 'a;b' -- not; here\n; /* nor; here */ SELECT COUNT(*) AS n FROM orders;"
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=json.dumps({"sql": text})))
+
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    assert generated.statements == ("SELECT status FROM orders WHERE note = 'a;b' -- not; here",
+                                    "/* nor; here */ SELECT COUNT(*) AS n FROM orders")
+    assert generated.sql == "/* nor; here */ SELECT COUNT(*) AS n FROM orders"
+
+
+def test_one_statement_is_one_statement(monkeypatch):
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=ANSWER))
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+    assert generated.statements == (generated.sql,) and generated.sql.startswith("SELECT COUNT")
+
+
+@pytest.mark.parametrize("raw", [[], ["", "  "], ["SELECT 1", 3], "  ;  ; "])
+def test_a_list_carrying_anything_but_statements_is_unreadable(monkeypatch, raw):
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=json.dumps({"sql": raw})))
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+    assert generated.sql == "" and generated.error == gr._GENERATION_UNREADABLE and generated.statements == ()
+
+
+def test_the_prompt_says_how_to_answer_with_several_queries():
+    assert "put them in order in a list under sql; the last must be the statement whose result answers the question" in gr._QUESTION_PROMPT
