@@ -2017,29 +2017,30 @@ _SEARCH_PATH_ENGINES = frozenset({"postgres", "redshift", "supabase"})
 
 
 def _search_path_schemas(org: Any) -> list[str]:
-    """The model's declared schemas, in first-seen order, for `SET LOCAL search_path` (#258).
+    """The schema for `SET LOCAL search_path` (#258): `[schema]` when every schema-qualified table in
+    the model lives in that one schema, else `[]`.
 
     The client was served bare table names and wrote `FROM orders`, which cannot resolve when the
-    table lives in `sales_data`; setting the path lets that statement run as written. It is only safe
-    when a bare name means ONE table: if the model declares `orders` in two schemas, the path would
-    pick whichever is listed first, silently — so an ambiguous model gets no path at all and keeps
-    today's behaviour (the statement fails and names the relation). Tables with no schema contribute
-    nothing. Returns `[]` for no model."""
+    table lives in `sales_data`; setting the path lets that statement run as written. ONE schema is
+    the whole safety argument. With `finance` listed before `sales_data`, a bare `orders` would resolve
+    to `finance.orders` if the warehouse has one — a table the model does not declare, read silently
+    under a receipt that names the model's table — and the model cannot see the warehouse's catalog to
+    rule that out. So a model spanning two or more schemas gets no path and keeps today's behaviour
+    (the statement fails and names the relation). `public` does not count: it stays on the path
+    anyway. A schema name with a control character gets no path either — a NUL makes the driver raise
+    on every statement for the profile."""
     if org is None:
         return []
-    schema_of: dict[str, str] = {}
-    schemas: list[str] = []
+    schemas: set[str] = set()
     for area in getattr(org, "subject_areas", None) or []:
         for table in getattr(area, "tables_defined", None) or []:
             schema = getattr(table, "schema_name", None)
-            if not schema:
-                continue
-            name = table.name.lower()  # folded, as the scope gate folds unquoted identifiers
-            if schema_of.setdefault(name, schema) != schema:
-                return []
-            if schema not in schemas:
-                schemas.append(schema)
-    return schemas
+            if schema and schema != "public":
+                schemas.add(schema)
+    if len(schemas) != 1:
+        return []
+    (schema,) = schemas
+    return [] if any(ord(ch) < 32 for ch in schema) else [schema]
 
 
 def _quote_ident(name: str) -> str:
@@ -2845,16 +2846,16 @@ def execute_guarded(
             if mismatch is not None:
                 return _envelope("refused", refusal=mismatch,
                                  receipt=_refusal_receipt(mismatch, received_sql, profile))
-        # Bounded at the CHOKEPOINT, so the limit reaches every executor rather than only the
-        # built-in one whose engines carry the inner watchdog. See `_execute_bounded` for the
-        # mechanism and for the leaked worker it costs on expiry.
-        # The model's schemas for the Postgres-wire engines, so a bare table name resolves (#258). From
+        # The model's schema for the Postgres-wire engines, so a bare table name resolves (#258). From
         # the model the pass above already resolved and published, never a second load: that is a
         # full DB or disk read per query, and on a deployment with the pass off there is no model in
         # hand to read, so nothing is set there and a bare name fails exactly as before.
         schemas = _search_path_schemas(_guard_model.get())
         if schemas and str(creds.get("type", "")).lower() in _SEARCH_PATH_ENGINES:
             creds = {**creds, _SEARCH_PATH_KEY: schemas}
+        # Bounded at the CHOKEPOINT, so the limit reaches every executor rather than only the
+        # built-in one whose engines carry the inner watchdog. See `_execute_bounded` for the
+        # mechanism and for the leaked worker it costs on expiry.
         result = _execute_bounded(executor, sql, creds, profile=profile)
         # Inside the try on purpose: an executor that returns `None` (or anything else the contract
         # does not accept) breaks here rather than at the chokepoint's caller — that is a broken
