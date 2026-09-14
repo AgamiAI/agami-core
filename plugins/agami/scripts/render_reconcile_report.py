@@ -195,29 +195,133 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Render the reconcile report page.")
     p.add_argument("--title", required=True)
     p.add_argument("--profile", required=True, help="Active profile name")
-    p.add_argument("--run", required=True, help="The reconcile run's folder name (its timestamp)")
-    p.add_argument("--items-file", required=True,
+    p.add_argument("--run", default=None, help="The reconcile run's folder name (its timestamp); with --run-dir, the directory's name")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--run-dir", default=None, dest="run_dir",
+                        help="the run directory: the items are built from its files by reconcile.py report-items, never from a typed file")
+    p.add_argument("--words-file", default=None, dest="words_file",
+                   help='with --run-dir: {"<row>": {"sentence": "...", "change": ["..."]}}, the only two fields the session writes')
+    source.add_argument("--items-file", dest="items_file",
                    help="JSON array of {row, label, question, source, status, expected, answer, read, how, words, disagreement, change, report_path}")
     p.add_argument("--layout", choices=list(_LAYOUTS), default="auto",
                    help="cards for a batch, audit for one statement read part by part; auto picks from the items")
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
 
-    with open(os.path.expanduser(args.items_file), encoding="utf-8") as f:
-        items = json.load(f)
-    if not isinstance(items, list):
-        sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
+    run_dir = Path(os.path.expanduser(args.run_dir)) if args.run_dir else None
+    if run_dir is None and args.words_file:
+        sys.stderr.write("--words-file goes with --run-dir\n")
         return 1
+    run = args.run or (run_dir.name if run_dir else None)
+    if not run:
+        sys.stderr.write("--run is required with --items-file\n")
+        return 1
+    if run_dir is not None:
+        try:
+            items = _items_from_run(run_dir, Path(os.path.expanduser(args.words_file)) if args.words_file else None)
+        except ValueError as exc:
+            sys.stderr.write(f"render_reconcile_report: {exc}\n")
+            return 1
+    else:
+        with open(os.path.expanduser(args.items_file), encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
+            return 1
     try:
-        page = render(title=args.title, profile=args.profile, run=args.run, items=items, layout=args.layout)
+        page = render(title=args.title, profile=args.profile, run=run, items=items, layout=args.layout)
     except ValueError as exc:
         sys.stderr.write(f"render_reconcile_report: {exc}\n")
         return 1
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if run_dir is not None:
+        page = _stamped(page, _reconcile().stamp_for(run, items))
+        (run_dir / "report-items.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
     out_path.write_text(page, encoding="utf-8")
-    print(f"Wrote {out_path} ({len(items)} row{'s' if len(items) != 1 else ''})")
+    if run_dir is not None:
+        for line in _three_lines(items, out_path):
+            print(line)
+    else:
+        print(f"Wrote {out_path} ({len(items)} row{'s' if len(items) != 1 else ''})")
     return 0
+
+
+def _reconcile():
+    """The items verb, imported from beside this file: the renderer builds the items itself so
+    nothing between the run's files and the page is typed."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import reconcile  # noqa: PLC0415
+    return reconcile
+
+
+_WORD_FIELDS = {"sentence": str, "change": list}
+
+
+def _items_from_run(run_dir: Path, words_file: Path | None) -> list[dict]:
+    """The items `reconcile.py report-items` builds from the run directory, with the session's words
+    laid over the two fields it may write. Any other field in the words file is refused: it belongs to
+    the run's files, and a page that showed a typed check would be a page nobody could trust."""
+    if not (run_dir / "rows.jsonl").exists():
+        raise ValueError(f"{run_dir} holds no rows.jsonl; nothing to render")
+    items = _reconcile().report_items(run_dir)
+    if words_file is None:
+        return items
+    try:
+        words = json.loads(words_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"words file: {exc}") from exc
+    if not isinstance(words, dict):
+        raise ValueError("words file: expected an object keyed by row number")
+    by_row = {item["row"]: item for item in items}
+    for key, fields in words.items():
+        try:
+            row = int(key)
+        except (TypeError, ValueError):
+            raise ValueError(f"words file: {key!r} is not a row number") from None
+        if row not in by_row:
+            raise ValueError(f"words file: row {row} is not in this run")
+        if not isinstance(fields, dict):
+            raise ValueError(f"words file: row {row} must carry an object")
+        for field, value in fields.items():
+            kind = _WORD_FIELDS.get(field)
+            if kind is None:
+                raise ValueError(f"words file: row {row} carries {field!r}, which only the run's files may write; "
+                                 "the session writes sentence and change and nothing else")
+            if not isinstance(value, kind) or (kind is list and not all(isinstance(v, str) for v in value)):
+                raise ValueError(f"words file: row {row} {field} must be {'a sentence' if kind is str else 'a list of sentences'}")
+            by_row[row][field] = value
+    return items
+
+
+def _stamped(page: str, stamp: str) -> str:
+    """The page with its render stamp in the head, so `check-run` can tell which items it shows."""
+    head = page.find("<head>")
+    if head == -1:
+        return stamp + "\n" + page
+    at = head + len("<head>")
+    return page[:at] + "\n  " + stamp + page[at:]
+
+
+def _three_lines(items: list[dict], out_path: Path) -> list[str]:
+    """What the skill says after rendering, counted from the items and never tallied by hand: the
+    results and the fixes as words, the page's path, the next step."""
+    results: dict[str, int] = {}
+    fixes: dict[str, int] = {}
+    for item in items:
+        label = ((item.get("result") or {}).get("label") if isinstance(item.get("result"), dict) else None) or item.get("status") or "unknown"
+        results[label] = results.get(label, 0) + 1
+        fix = item.get("fix_words") or item.get("fix") or "unknown"
+        fixes[fix] = fixes.get(fix, 0) + 1
+    said = lambda counts: "; ".join(f"{label} {n}" for label, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))  # noqa: E731
+    n = len(items)
+    return [
+        f"{n} row{'s' if n != 1 else ''}. Result: {said(results)}. Fix: {said(fixes)}.",
+        f"Report: {out_path}",
+        "Next: open the report, decide per row, and paste the block back.",
+    ]
 
 
 if __name__ == "__main__":
