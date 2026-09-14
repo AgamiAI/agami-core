@@ -23,6 +23,9 @@ below corresponds to one such version.
   above Python's `threading.TIMEOUT_MAX`, counting the supervisor's 60-second slack) is treated as
   unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` alike.
   - An evaluation run scores both statements of each case under the named organisation's limits.
+  - `tools.statement_limit_is_usable(key, value)` is the rule a provider's values are held to (a
+    positive whole number, and a timeout the platform can arm), public so a settings screen can
+    refuse at save time what the executor would otherwise decline on every statement.
   - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
     child is handed the same two numbers in its environment, so the watchdog, the native bound, the
     outer bound and the supervisor still derive from one budget on both sides of the fork.
