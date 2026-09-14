@@ -549,6 +549,47 @@ def test_judge_uses_the_distinct_probe_on_a_low_cardinality_column(tmp_path):
     assert v["near_miss"] == "EU" and v["observed"] == ["APAC", "EU", "US"]
 
 
+def test_judge_trusts_the_existence_count_over_the_distinct_lists_spelling(tmp_path):
+    """The distinct probe renders values as text and the literal is compared as text, so a column the
+    warehouse spells `True`/`False` never lists `1`. The existence probe ran the statement's own
+    predicate and counted rows: when it counted some, the value is one the column holds, whatever the
+    two spellings look like, and the grade must not say otherwise."""
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = '1'")
+    (v,) = _judge(tmp_path, plan, {
+        "orders.region.distinct.csv": "v\nTrue\nFalse\n",
+        "lit-1.exists.csv": "n\n4000\n",
+    })["literals"]
+    assert v["tier"] == "distinct" and v["verdict"] == "confirmed"
+    assert v["rows_with_value"] == 4000 and v["near_miss"] is None
+    assert "matches 4000 rows" in v["note"] and "spelling check did not decide" in v["note"]
+    assert "did you mean" not in v["note"]
+
+
+def test_judge_names_the_columns_spelling_in_the_note_when_the_count_confirms_the_value(tmp_path):
+    """A miscased literal that still matches rows (a case-insensitive collation, say) is confirmed by
+    the count; the spelling the fold found goes into the note, never into `near_miss`, because the
+    report page prints "matches no rows; the data spells it …" from that field alone."""
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = 'eu'")
+    (v,) = _judge(tmp_path, plan, {
+        "orders.region.distinct.csv": "v\nEU\nUS\n",
+        "lit-1.exists.csv": "n\n12\n",
+    })["literals"]
+    assert v["verdict"] == "confirmed" and v["near_miss"] is None
+    assert "the column spells it 'EU'" in v["note"] and "matches 12 rows" in v["note"]
+
+
+def test_judge_keeps_the_defect_when_the_existence_probe_did_not_run(tmp_path):
+    """Without the count the distinct list is the only evidence, and the note says the probe that
+    could have overruled it never ran."""
+    _model(tmp_path)
+    plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = 'eu'")
+    (v,) = _judge(tmp_path, plan, {"orders.region.distinct.csv": "v\nEU\nUS\n"})["literals"]
+    assert v["tier"] == "distinct" and v["verdict"] == "query_defect" and v["near_miss"] == "EU"
+    assert "the existence probe did not run" in v["note"] and "did you mean 'EU'" in v["note"]
+
+
 def test_judge_confirms_a_value_the_distinct_probe_lists(tmp_path):
     _model(tmp_path)
     plan = _plan(tmp_path, "SELECT COUNT(*) FROM orders WHERE region = 'EU'")
