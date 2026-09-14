@@ -80,6 +80,17 @@ def test_the_field_is_declared_and_the_client_is_told_to_follow_it():
     assert "dialect_rules" in tools._SHARED_INSTRUCTIONS
 
 
+def test_rewrites_keep_the_result_not_just_avoid_the_error():
+    """A rewrite that trades an error for a quietly different answer is worse than the error: an
+    empty conditional count must stay 0, a NULL boolean must stay NULL, and an array must not
+    silently become text."""
+    rules = sql_dialect_rules.dialect_rules_for("Redshift")
+    assert "COUNT(CASE WHEN c THEN 1 END)" in rules  # SUM(CASE ...) is NULL on an empty input
+    assert "WHEN NOT col THEN 'false' END" in rules  # an ELSE 'false' would turn NULL into 'false'
+    assert "No STRING_AGG. Use LISTAGG" in rules
+    assert "ARRAY_AGG. Use LISTAGG" not in rules
+
+
 def test_rules_cover_reads_only():
     """The guard admits only SELECT, so a write-path rule is tokens spent on the impossible."""
     rules = sql_dialect_rules.dialect_rules_for("Redshift")

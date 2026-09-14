@@ -3197,8 +3197,10 @@ def _execute_sql_limits_sentence() -> str:
     which is fixed at start-up, so the number stated is the number enforced."""
     limits = statement_limits()
     return (
-        f"Limits on this deployment: a result over {limits['max_rows']:,} rows is refused, and a "
-        f"statement still running after {limits['timeout_s']}s is cancelled. Plan for both before "
+        # "Refused", not "cancelled": some executors can only stop waiting at the bound, and the claim
+        # the client relies on is that no answer comes back — not what happens to the work behind it.
+        f"Limits on this deployment: a result over {limits['max_rows']:,} rows is refused, and so is "
+        f"a statement still running after about {limits['timeout_s']}s. Plan for both before "
         "running: bound a listing with ORDER BY and LIMIT, and group a breakdown more coarsely or "
         "filter its time range first.\n"
     )

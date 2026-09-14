@@ -36,6 +36,16 @@ def test_the_sentence_names_both_numbers_and_what_to_do(monkeypatch):
     assert "LIMIT" in sentence and "ORDER BY" in sentence
 
 
+@pytest.mark.parametrize("raw", ["²", "①", "abc", "-5", "0"])
+def test_an_unusable_row_cap_falls_back_instead_of_raising(monkeypatch, raw):
+    """The registry resolves the cap at import now, so a value `int()` refuses would stop `tools`
+    importing at all. `²` is the case `isdigit` admitted and `int()` rejected."""
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", raw)
+
+    assert tools.statement_limits()["max_rows"] == execute_sql._DEFAULT_MAX_ROWS
+    assert f"{execute_sql._DEFAULT_MAX_ROWS:,} rows" in tools._execute_sql_limits_sentence()
+
+
 def test_the_description_carries_the_sentence(monkeypatch):
     """Built when the registry is built, from the environment the executor also reads — the process
     environment, fixed at start-up — so what the client is told is what is enforced."""

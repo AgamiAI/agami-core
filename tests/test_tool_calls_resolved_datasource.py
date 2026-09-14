@@ -71,6 +71,26 @@ def test_a_named_datasource_with_no_override_is_still_explicit(db):
     assert (row["datasource"], row["datasource_source"]) == ("crm", "explicit")
 
 
+def test_both_values_reach_the_activity_reader(db):
+    """`_TOOL_CALL_COLS` is narrower than the INSERT, so a column missing from it is written on every
+    row and read by nobody — the Activity view reads through `list_sessions`, not `SELECT *`."""
+    import model_store
+
+    _record({}, datasource="crm")
+    _record({"datasource": "billing"}, datasource="billing")
+    s = Store.connect(db)
+    # Rows are stamped with the store's own tenant, not the reader's `local` default.
+    (org_id,) = {r["org_id"] for r in s.query("SELECT org_id FROM tool_calls")}
+    sessions = model_store.list_sessions(s, org_id=org_id)
+    s.close()
+
+    calls = [c for session in sessions for turn in session["turns"] for c in turn["calls"]]
+    assert sorted((c["datasource"], c["datasource_source"]) for c in calls) == [
+        ("billing", "explicit"),
+        ("crm", "resolved"),
+    ]
+
+
 def test_a_tool_about_no_datasource_records_neither(db):
     tools.record_tool_call(
         name="list_datasources", arguments={}, result_text="{}", execution_ms=1, actor="a"

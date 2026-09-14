@@ -1518,7 +1518,10 @@ def _resolve_row_cap() -> int:
     caller that wants 200 rows says so in the statement, where the intent is legible to everything
     downstream."""
     raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
-    cap = int(raw) if raw.isdigit() else _DEFAULT_MAX_ROWS
+    # `isdecimal`, not `isdigit`, for the reason `_resolve_timeout_s` gives: `isdigit` admits `²`,
+    # which `int()` then refuses. `tools` now resolves this while building its registry, so a raise
+    # here would stop the module importing at all rather than failing one call.
+    cap = int(raw) if raw.isdecimal() else _DEFAULT_MAX_ROWS
     if cap <= 0:
         cap = _DEFAULT_MAX_ROWS  # "0" / "00" → the default, never an empty result
     return cap

@@ -6,7 +6,9 @@ costs a warehouse round trip and a full client turn to rewrite. Handing the clie
 writes is the only fix that removes the retry: a refusal naming the rewrite still spends the turn.
 
 Rules are per ENGINE, never per customer, and read-path only — the guard admits nothing but SELECT,
-so a rule about INSERT or RETURNING would be tokens spent on something that cannot happen.
+so a rule about INSERT or RETURNING would be tokens spent on something that cannot happen. Each
+rewrite must return the same result as the construct it replaces, NULLs and empty inputs included: a
+rule that trades an error for a quietly different answer is worse than the error.
 
 Keyed by `StorageType` exactly as the model spells it (`Redshift`), the same key
 `semantic_model.sql_dialect` maps to a sqlglot dialect. An engine with no entry gets nothing, which
@@ -18,18 +20,20 @@ from __future__ import annotations
 
 _REDSHIFT = """\
 Amazon Redshift is PostgreSQL-derived but rejects several PostgreSQL features. Write these instead:
-- No FILTER on aggregates. COUNT(*) FILTER (WHERE c) -> SUM(CASE WHEN c THEN 1 ELSE 0 END); a \
-filtered average -> AVG(CASE WHEN c THEN v END) (NULL, not 0, in the ELSE).
-- No STRING_AGG or ARRAY_AGG. Use LISTAGG(col, ', ') WITHIN GROUP (ORDER BY col). The delimiter must \
-be a constant, and every ordered aggregate in one SELECT (LISTAGG, PERCENTILE_CONT, MEDIAN) must use \
-the same ordering.
+- No FILTER on aggregates. COUNT(*) FILTER (WHERE c) -> COUNT(CASE WHEN c THEN 1 END); \
+SUM(v) FILTER (WHERE c) -> SUM(CASE WHEN c THEN v END); AVG likewise. Leave the ELSE out so \
+non-matching rows are NULL and ignored.
+- No STRING_AGG. Use LISTAGG(col, ', ') WITHIN GROUP (ORDER BY col). The delimiter must be a \
+constant, and every ordered aggregate in one SELECT (LISTAGG, PERCENTILE_CONT, MEDIAN) must use the \
+same ordering. There is no ARRAY_AGG and no array result type; LISTAGG returns text, so use it only \
+when a text list is what the question wants.
 - LISTAGG, MEDIAN and PERCENTILE_CONT cannot share a SELECT with any DISTINCT aggregate \
 (COUNT(DISTINCT ...)). Compute them in separate CTEs and join the CTEs.
 - Date arithmetic takes the unit first, unquoted: DATEADD(day, -30, CURRENT_DATE), \
 DATEDIFF(day, start_ts, end_ts). DATE_TRUNC('month', ts) is fine. Use GETDATE() or CURRENT_DATE.
 - Use SUBSTRING(s, start, length), not SUBSTR.
 - A BOOLEAN cannot be cast to VARCHAR or passed to a string function (BTRIM, CONCAT). Use \
-CASE WHEN col THEN 'true' ELSE 'false' END.
+CASE WHEN col THEN 'true' WHEN NOT col THEN 'false' END, which keeps NULL as NULL.
 - No DISTINCT ON and no LATERAL joins. For one row per group use ROW_NUMBER() OVER (PARTITION BY ... \
 ORDER BY ...) in a subquery and keep row 1 (QUALIFY also works).
 - Many correlated subqueries are rejected. Rewrite them as a JOIN to a CTE that aggregates once.
