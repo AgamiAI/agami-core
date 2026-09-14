@@ -699,21 +699,25 @@ def get_cached_org(profile: str):
 
 
 def _count_local_examples(examples_dir: Path) -> int:
-    """How many curated examples a local install holds: the entries across every area's
-    `examples.yaml`. Datasource-wide, like the served count, for the reason `_EXAMPLES_REMINDER`
-    gives. A file that does not parse counts nothing rather than failing the schema call."""
+    """How many curated examples a local install holds, across every area. Datasource-wide, like the
+    served count, for the reason `_EXAMPLES_REMINDER` gives.
+
+    Read through the loader's own `list_prompt_examples`, so a file is counted in whichever shape
+    the loader accepts (a bare list, or `{examples: [...]}`) rather than a second copy of that rule.
+    Rejected examples count, because the local `get_prompt_examples` returns the file whole. A file
+    that cannot be read counts nothing: a pointer is not worth failing the schema call over."""
     if not examples_dir.is_dir():
         return 0
-    import yaml
+    from semantic_model import loader as L
 
     total = 0
-    for ex_file in examples_dir.glob("*/examples.yaml"):
-        try:
-            doc = yaml.safe_load(_read_text(ex_file) or "")
-        except yaml.YAMLError:
+    for area_dir in examples_dir.iterdir():
+        if not area_dir.is_dir():
             continue
-        if isinstance(doc, list):
-            total += len(doc)
+        try:
+            total += len(L.list_prompt_examples(examples_dir.parent, area_dir.name, include_rejected=True))
+        except Exception:
+            continue
     return total
 
 

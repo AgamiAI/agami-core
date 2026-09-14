@@ -78,6 +78,21 @@ def test_an_area_scoped_call_still_counts_every_area(local_model):
     assert _head(out)["prompt_examples"]["stored"] == 3
 
 
+def test_a_file_in_the_loaders_other_shape_is_counted_too(local_model):
+    """The loader reads `examples.yaml` as a bare list or as `{examples: [...]}`. Counting only the
+    first left an install written in the second with no pointer at all — the #301 failure itself."""
+    directory = local_model / "crm" / "prompt_examples" / "Support"
+    directory.mkdir(parents=True)
+    (directory / "examples.yaml").write_text(
+        "examples:\n- question: tickets assigned to me\n  sql: SELECT 1\n"
+        "- question: open incidents by priority\n  sql: SELECT 2\n"
+    )
+
+    out = tools.tool_get_datasource_schema({"datasource": "crm"})
+
+    assert _head(out)["prompt_examples"]["stored"] == 2
+
+
 def test_a_datasource_with_no_examples_is_not_told_to_fetch_any(local_model):
     out = tools.tool_get_datasource_schema({"datasource": "crm"})
 
