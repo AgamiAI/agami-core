@@ -770,6 +770,15 @@ _NO_VECTOR = {
         "to a caller who only sent SQL. Driven directly, in both spellings, by "
         "test_ungovernable_engine_fails_closed.py."
     ),
+    guardrail.RULE_DATASOURCE_REQUIRED: (
+        "Not drivable from this matrix: no STATEMENT produces it. It fires on the CALL — an omitted "
+        "`datasource` on an organization serving more than one — and every vector here names a "
+        "datasource on a single-datasource fixture. Its detail does list names, and they are not "
+        "model facts: they are the organization's datasource names, the exact list `list_datasources` "
+        "already returns to the same caller, and nothing about tables, columns or the statement is "
+        "interpolated. So it enumerates nothing the caller could not already read, which is the "
+        "property this file guards. Driven directly by tests/test_datasource_routing.py."
+    ),
     # `RULE_MODEL_SAFETY` sat here and its note said THIS IS THE ENTRY TO DELETE FIRST, because the
     # branch it stood in for included the sensitive-column refusal, whose `sens.columns` listed every
     # sensitive column of a `SELECT *`-ed table — declared names the caller never sent. The entry has
