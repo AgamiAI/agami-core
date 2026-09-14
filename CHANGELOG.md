@@ -172,6 +172,15 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A join on the key the model declares one-to-one is no longer reported as a fan trap because a
+  second edge exists between the same two tables.** The fan and chasm pre-flight matched a declared
+  edge to a join by table pair and never read the columns the join wrote, so a subclass view joined
+  to its base table on its id fanned whenever the model also declared a many-to-one between the pair
+  on another key, and the same receipt's joins section, which does read the key, called the join
+  one-to-one. The pre-flight now keeps only the edges whose declared columns the written join
+  matches; a join on a key the model does not declare, or two tables in scope with no join between
+  them, keep every edge and today's verdict. (ACE-133)
+
 - **A database failure nobody could read is no longer reported as a syntax error.** Every engine
   raises its execution failure with the same exit code, and the classifier read that code back as
   `syntax` whenever none of its rules matched the message, so a connection dropping mid-statement
