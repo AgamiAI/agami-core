@@ -139,7 +139,9 @@ _SHARED_INSTRUCTIONS = (
     "Dialect: take it from the `database_type` list_datasources reports for that datasource, and "
     "never assume one. A metric's `binding` already arrives resolved to that dialect, so copy it "
     "rather than translating it — but the rest of the statement is yours to write in the right "
-    "one, and date arithmetic, string functions and casts are where a guess shows up.\n"
+    "one, and date arithmetic, string functions and casts are where a guess shows up. When a "
+    "get_datasource_schema response carries `dialect_rules`, follow them: they list what that "
+    "engine rejects and what to write instead.\n"
     "The receipt is on EVERY status execute_sql returns, and execute_sql's own description defines "
     "its five sections — columns, tables, joins, aggregates, assumptions — field by field, "
     "including what each status value means. Read it there. What belongs here is what you DO with "
@@ -349,6 +351,21 @@ def resolve_profile(explicit: str | None = None) -> str:
     if served:
         return served
     return "default"
+
+
+# The datasource THIS call resolved to, published for the activity row (#328). The row used to record
+# the `datasource` argument, so a call that omitted it — and ran against the fallback — was logged with
+# an empty datasource. Read back through `typed_outcome_overrides`, from the Context the transport owns,
+# for the same reason the typed outcome is: a set inside the worker's copied context is invisible to
+# the recorder otherwise. Cleared by `reset_typed_outcome`, so one tool's value never reaches the next.
+_resolved_datasource: ContextVar[str | None] = ContextVar("agami_resolved_datasource", default=None)
+
+
+def _resolve_call_datasource(args: dict[str, Any]) -> str:
+    """`resolve_profile` for a tool handler about one datasource, publishing what it resolved."""
+    profile = resolve_profile(args.get("datasource"))
+    _resolved_datasource.set(profile)
+    return profile
 
 
 def resolve_artifacts_dir() -> Path:
@@ -1433,7 +1450,7 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     `metric_index` (name->description for every metric in scope) + `large_tables` are always
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
-    profile = resolve_profile(args.get("datasource"))
+    profile = _resolve_call_datasource(args)
     try:
         org = get_cached_org(profile)
     except FileNotFoundError as e:
@@ -1536,6 +1553,11 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # A pointer, never the examples (#301). Counted datasource-wide whatever `area` scoped this call:
     # an area-scoped count would hide exactly the other areas' examples an `area` filter drops.
     pointer = {"stored": example_count, "next": _EXAMPLES_REMINDER} if example_count else None
+    # What this engine rejects, handed over before the SQL is written (#325). Added beside the pointer
+    # on both branches below, so on the budgeted branch it is inside what the budget measures.
+    from sql_dialect_rules import dialect_rules_for
+
+    dialect_rules = dialect_rules_for(engine)
 
     if scope.level == "table":
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
@@ -1565,6 +1587,8 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # which carries only endpoints.
         if pointer:
             result["prompt_examples"] = pointer
+        if dialect_rules:
+            result["dialect_rules"] = dialect_rules
     else:
         # Sized by the areas IN SCOPE, not by the whole datasource. The ladder and the budget are
         # unchanged (both out of this spec's scope); what changes is the count fed to the selector,
@@ -1586,6 +1610,8 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
             result = _schema_payload(org, profile, mode, matched, metrics, L, scope, index=index)
             if pointer:
                 result["prompt_examples"] = pointer
+            if dialect_rules:
+                result["dialect_rules"] = dialect_rules
             if len(json.dumps(result, default=str)) <= _SCHEMA_CHAR_BUDGET:
                 break
             nxt = _SCHEMA_MODE_DOWNGRADE[mode]
@@ -1650,7 +1676,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     corrections) never floods the context. Local serving (files): returns the curated examples.yaml
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
-    profile = resolve_profile(args.get("datasource"))
+    profile = _resolve_call_datasource(args)
 
     from store import Store
 
@@ -2403,7 +2429,7 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # datasource it was aimed at. `resolve_profile` reads an argument, an env var and a local config
     # file — it opens no connection and touches no credential, so a mutation still never reaches the
     # warehouse; what it no longer does is land in the audit trail with an empty `datasource`.
-    profile = resolve_profile(args.get("datasource"))
+    profile = _resolve_call_datasource(args)
 
     refusal = check_read_only(sql)
     if refusal is not None:
@@ -2665,6 +2691,9 @@ def reset_typed_outcome() -> None:
     from execute_sql import _last_outcome
 
     _last_outcome.set(None)
+    # The same inheritance, for the resolved datasource: `list_datasources` after a schema call would
+    # otherwise be recorded against the schema call's datasource.
+    _resolved_datasource.set(None)
 
 
 def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
@@ -2675,7 +2704,8 @@ def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
     to the caller, because anyio gives the thread a copy — so reading the var directly at the
     recorder would read `None` on the one surface that records tool calls at all.
 
-    Returns `{}` for every other tool. The model-backed tools do not speak the Envelope (they return
+    Returns no outcome for every other tool — only the resolved `datasource`, when the handler
+    published one (#328). The model-backed tools do not speak the Envelope (they return
     the older `{"error": {kind, remediation}}` body) and never reach `_emit`, so there is nothing
     typed to read and the body parse stays their path. `{}` means "derive it the way you always
     have", which is exactly what `record_tool_call`'s override seam already documents.
@@ -2685,12 +2715,19 @@ def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
     """
     from execute_sql import _last_outcome
 
+    # The resolved datasource is an identity, not an outcome, so it rides independently of the trio:
+    # the model-backed tools publish one and no outcome (#328).
+    overrides: dict[str, Any] = {}
+    resolved = ctx.get(_resolved_datasource)
+    if resolved:
+        overrides["datasource"] = resolved
     outcome = ctx.get(_last_outcome)
     if outcome is None:
-        return {}
+        return overrides
     status, rule, row_count = outcome
     success = status == "ok"
     return {
+        **overrides,
         "success": success,
         # The rule the gate chose, straight off the `Refusal` — strictly more informative than the
         # status alone, and no longer a `json.loads` of our own output. `status` is the fallback for
@@ -2717,6 +2754,7 @@ def record_tool_call(
     error_kind: str | None = None,
     audit_id: str | None = None,
     org_id: str | None = None,
+    datasource: str | None = None,
 ) -> None:
     """Record one MCP tool call to the activity log (the transport calls this for **every** tool). The
     audit-grade fields are server-observed; `success`/`row_count`/`error_kind` are derived from the
@@ -2871,7 +2909,12 @@ def record_tool_call(
         "tool_name": name,
         "source": current_call_source() if source is None else source,
         "actor": actor,
-        "datasource": args.get("datasource"),
+        # The datasource the call RAN against when the handler published one (#328), else the argument.
+        # `datasource_source` keeps what the argument alone used to show: whether the client named it.
+        "datasource": datasource or args.get("datasource"),
+        "datasource_source": (
+            "explicit" if args.get("datasource") else ("resolved" if datasource else None)
+        ),
         "sql": args.get("sql"),
         "row_count": derived_row_count if isinstance(derived_row_count, int) else None,
         "execution_ms": execution_ms,
@@ -3136,6 +3179,31 @@ def require_thread_id(registry: dict[str, dict[str, Any]]) -> dict[str, dict[str
     return out
 
 
+def statement_limits() -> dict[str, int]:
+    """The row cap and per-statement deadline this deployment enforces, read from the same resolvers
+    the executor uses — so anything that shows them (the tool description, an admin screen) cannot
+    disagree with the bound actually applied."""
+    from execute_sql import _resolve_row_cap, _resolve_timeout_s
+
+    return {"max_rows": _resolve_row_cap(), "timeout_s": _resolve_timeout_s()}
+
+
+def _execute_sql_limits_sentence() -> str:
+    """The limits, stated to the client before it writes SQL (#326).
+
+    The description used to name "the deployment row ceiling" and "a per-statement deadline" without
+    either number, so a client learned them by being refused — a warehouse round trip and a retry
+    each time. Built when the registry is built: both resolvers read only the process environment,
+    which is fixed at start-up, so the number stated is the number enforced."""
+    limits = statement_limits()
+    return (
+        f"Limits on this deployment: a result over {limits['max_rows']:,} rows is refused, and a "
+        f"statement still running after {limits['timeout_s']}s is cancelled. Plan for both before "
+        "running: bound a listing with ORDER BY and LIMIT, and group a breakdown more coarsely or "
+        "filter its time range first.\n"
+    )
+
+
 TOOLS: dict[str, dict[str, Any]] = {
     "list_datasources": {
         "handler": tool_list_datasources,
@@ -3191,7 +3259,9 @@ TOOLS: dict[str, dict[str, Any]] = {
             "while you are writing the statement, rather than meeting them on the receipt "
             "afterwards. When the datasource has stored examples the response also carries "
             "`prompt_examples`: how many are `stored`, and a reminder to fetch them with "
-            "get_prompt_examples, which ranks them — no example is sent here."
+            "get_prompt_examples, which ranks them — no example is sent here. On an engine with "
+            "known gaps (Redshift today) it also carries `dialect_rules`: what that engine rejects "
+            "and what to write instead. Follow them when writing the SQL."
         ),
         "inputSchema": {
             "type": "object",
@@ -3314,6 +3384,9 @@ TOOLS: dict[str, dict[str, Any]] = {
             "do an out-of-scope table or column, a per-statement deadline, and a result larger "
             "than the deployment row ceiling (refused rather than trimmed, so a partial answer "
             "never arrives looking whole).\n"
+            # The numbers behind the two limits above (#326); see `_execute_sql_limits_sentence`.
+            + _execute_sql_limits_sentence()
+            +
             # The failure channel shipped from the start and the description documented two of the
             # three statuses, so a client met this shape for the first time at the moment it was
             # least able to reason about it. The kinds are `guardrail.FailureKind`.

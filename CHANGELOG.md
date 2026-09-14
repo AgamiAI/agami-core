@@ -10,6 +10,30 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Added
+
+- **A Redshift schema response tells the client what Redshift rejects** (#325). The client was told
+  the engine and still wrote PostgreSQL — `FILTER` on aggregates, `SUBSTR`, date arithmetic in
+  PostgreSQL argument order, boolean casts — and each statement failed at the warehouse and cost a
+  retry. `get_datasource_schema` now carries `dialect_rules` for an engine with known gaps (Redshift
+  today): each construct it rejects and what to write instead, read before the SQL is written. Rules
+  are per engine and read-path only; an engine with no entry gets nothing.
+- **`execute_sql`'s description states the row cap and statement deadline** (#326). It said a result
+  over "the deployment row ceiling" was refused and never said what the ceiling was, so a client
+  learned it by being refused. The numbers now come from the same settings the executor enforces
+  (`AGAMI_SQL_MAX_ROWS`, `AGAMI_SQL_TIMEOUT_S`), with what to do about each. `tools.statement_limits()`
+  returns both for an embedder that wants to show them.
+
+### Fixed
+
+- **The activity log records the datasource a call ran against** (#328). `tool_calls.datasource`
+  was the argument the client sent, so every call that omitted it — and the server resolved one —
+  was logged with an empty datasource. It is now the resolved datasource, and the new
+  `datasource_source` column (migration 025) says whether the client named it (`explicit`) or the
+  server chose it (`resolved`).
+
 ## [0.8.5] — 2026-09-14
 
 ### Added
