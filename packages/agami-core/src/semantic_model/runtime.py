@@ -3308,8 +3308,10 @@ def assemble_receipt(
             tree, org, refs=sites[:_RECEIPT_MAX_REFS], ctx=None):
         # A CTE name resolved through the bare-name index, so `WITH orders AS (…)` reported
         # `declared: true` and borrowed the real table's row estimate — a fact about a table the
-        # statement never read. `_declared_table` is the one place that subtraction lives, and
-        # `_cte_names` is the same set `check_table_scope` subtracts.
+        # statement never read. `_declared_table` is the one place that subtraction lives. It still
+        # skips a CTE name anywhere in the statement, unlike `check_table_scope`, which resolves each
+        # reference against its enclosing WITH (#332); the receipt can therefore disagree with the
+        # gate on a statement the gate refuses.
         info = _declared_table(r.bare)
         t = info[0] if info else None
         ph = t.performance_hints if t else None
