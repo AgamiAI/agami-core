@@ -2724,7 +2724,7 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         raise RecordError(f"row {row} has nothing to compare against; grade agami's answer on the grading page "
                           "(Phase 2.5) before writing its record")
     else:
-        error = ("the result is not one number and no table comparison was written; run compare-results (Phase 2e)"
+        error = ("the two results are tables, and they were not compared"
                  if exp is None or actual is None else "the two values could not be compared")
     status = row_status(match, ledger_verdict)
     is_error = status == ERROR

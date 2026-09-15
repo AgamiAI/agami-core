@@ -34,9 +34,10 @@
     .pill.noted { color: var(--noted); background: var(--noted-bg); }
     .chips { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0 6px; }
     .chip { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--bg-elev, #fff); border: 1px solid var(--border, #d9dde3); }
-    .chip b { font-size: var(--t-verdict); font-family: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Roboto Mono", "Liberation Mono", monospace; font-variant-numeric: tabular-nums; }
-    .chip span { color: var(--muted, #5b6875); font-size: var(--t-body); }
-    .chip.held b { color: var(--held); } .chip.open b { color: var(--open); } .chip.defect b { color: var(--defect); } .chip.gap b { color: var(--gap); } .chip.noted b { color: var(--noted); }
+    .chip b { font-size: var(--t-body); font-weight: 600; color: var(--muted, #5b6875); font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 4px; }
+    .chip span { font-size: var(--t-body); }
+    .chip.held span { color: var(--held); } .chip.open span { color: var(--open); } .chip.defect span { color: var(--defect); } .chip.gap span { color: var(--gap); } .chip.noted span { color: var(--noted); }
+    .pill b { font-weight: 700; font-variant-numeric: tabular-nums; opacity: 0.75; }
     /* cards */
     .card { background: var(--bg-elev, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 14px 16px; margin: 12px 0; }
     .card .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

@@ -204,7 +204,8 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {
         "REPORT_TITLE": html.escape(title),
-        "GENERATED_AT": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        # A date a person reads, in their own day, not an ISO string in UTC.
+        "GENERATED_AT": datetime.datetime.now().strftime("%d %B %Y at %H:%M"),
         "PROFILE": html.escape(profile or ""),
         "RUN": html.escape(run or ""),
         "PROFILE_JSON": _script_json(profile or ""),

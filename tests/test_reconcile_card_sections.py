@@ -287,3 +287,20 @@ def test_a_section_key_and_its_summary_key_are_the_same_word():
     keys = re.findall(r"section\(item, '([a-z]+)'", tpl)
     rows = [_row("answer", "held", k) for k in keys]
     assert set(reconcile._summaries(rows, {"label": "match", "data": "matches"})) == set(keys)
+
+
+def test_a_filter_chip_reads_label_first_then_its_count():
+    # A leading numeral on a chip reads as an ordinal marker, and a filter row is scanned by its
+    # labels. GitHub, Gmail and GOV.UK facets all trail the count for that reason.
+    tpl = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-report-template.html").read_text(encoding="utf-8")
+    for built in re.findall(r"'\"><(?:span|b)>.*?</button>'", tpl):
+        assert built.index("<span>") < built.index("<b>"), built
+    assert "'<b>' + n + '</b><span>'" not in tpl
+
+
+def test_only_the_verdict_is_set_at_the_largest_size():
+    # The chip counts were at the verdict's size and coloured while their labels were grey, so the
+    # loudest thing on the page was a filter count.
+    css = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-pages.css").read_text(encoding="utf-8")
+    assert css.count("font-size: var(--t-verdict)") == 1
+    assert ".card .vl { font-size: var(--t-verdict)" in css
