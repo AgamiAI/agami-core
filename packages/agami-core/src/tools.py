@@ -3503,7 +3503,16 @@ def require_thread_id(registry: dict[str, dict[str, Any]]) -> dict[str, dict[str
         if "thread_id" not in properties or "thread_id" in required:
             out[name] = meta
             continue
-        out[name] = {**meta, "inputSchema": {**schema, "required": [*required, "thread_id"]}}
+        # A blank id satisfies `required` without naming a conversation (#257).
+        thread_id = {**properties["thread_id"], "pattern": r"\S"}
+        out[name] = {
+            **meta,
+            "inputSchema": {
+                **schema,
+                "properties": {**properties, "thread_id": thread_id},
+                "required": [*required, "thread_id"],
+            },
+        }
     return out
 
 

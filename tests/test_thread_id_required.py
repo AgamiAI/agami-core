@@ -114,3 +114,40 @@ def test_the_served_surface_is_unchanged_while_the_flag_is_off(monkeypatch):
     for meta in TOOLS.values():
         schema = meta.get("inputSchema") or {}
         assert "thread_id" not in (schema.get("required") or ())
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_a_blank_id_does_not_satisfy_the_requirement(blank):
+    """#257: `required` only checks the key is present, so `""` passed without naming a conversation."""
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = require_thread_id(TOOLS)["list_datasources"]["inputSchema"]
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"thread_id": blank}, schema)
+    jsonschema.validate({"thread_id": "t-1"}, schema)
+
+
+def test_a_blank_id_is_still_accepted_while_the_flag_is_off():
+    """The rule lives on the promoted copy only; putting it on the shared property would start
+    rejecting calls on every deployment that never opted in."""
+    jsonschema = pytest.importorskip("jsonschema")
+    require_thread_id(TOOLS)
+
+    jsonschema.validate({"thread_id": ""}, TOOLS["list_datasources"]["inputSchema"])
+
+
+def test_the_served_server_refuses_a_blank_id_when_the_flag_is_on(monkeypatch):
+    """The schema the MCP SDK validates against, not just the function's output."""
+    import asyncio
+
+    jsonschema = pytest.importorskip("jsonschema")
+    import mcp.types as types
+    from mcp_http import build_server
+
+    monkeypatch.setenv("AGAMI_REQUIRE_THREAD_ID", "1")
+    server = build_server()
+    listed = asyncio.run(server.request_handlers[types.ListToolsRequest](types.ListToolsRequest()))
+    schema = next(t for t in listed.root.tools if t.name == "list_datasources").inputSchema
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"thread_id": ""}, schema)

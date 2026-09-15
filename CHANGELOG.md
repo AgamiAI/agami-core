@@ -22,6 +22,10 @@ below corresponds to one such version.
   area into one response, one such file dropped the curated examples for every area. Both reads now
   use UTF-8, and a file that still cannot be read is skipped on its own rather than failing the
   rest. Text already garbled by an earlier `sm` run is not repaired by this; re-save it. (#236)
+- **`AGAMI_REQUIRE_THREAD_ID` no longer accepts a blank `thread_id`.** A required field only has to
+  be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
+  blank id is now rejected as an input validation error — a deployment turning the flag on should
+  confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
 
 ## [0.8.8] — 2026-09-15
 
