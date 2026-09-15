@@ -262,13 +262,16 @@
           + r.agami.map((v, i) => '<td class="' + (r.same || v === r.yours[i] ? '' : 'differs') + '">' + esc(v) + '</td>').join('') + '</tr>' : '';
         return y + a;
       }).join('');
-      const notes = [sample.shown + ' of ' + sample.total + ' rows'];
-      if (!sample.aligned) notes.push('the two results returned different row counts, so these are not aligned; agami\'s are not shown beside yours');
+      const extra = (sample.agami_rows || []).map(r => '<tr class="a"><th>agami</th>'
+        + r.map(v => '<td>' + esc(v) + '</td>').join('') + '</tr>').join('');
+      const notes = [sample.shown + ' of ' + sample.total + (sample.total === 1 ? ' row' : ' rows') + ' from yours'];
+      if (!sample.aligned) notes.push('the two returned different row counts, so they are listed rather than lined up'
+        + (sample.agami_rows ? ' (' + sample.agami_rows.length + ' of ' + sample.agami_total + (sample.agami_total === 1 ? ' row' : ' rows') + ' from agami)' : ''));
       if (sample.by_name) notes.push('columns paired by name');
       if (sample.only_yours.length) notes.push('only yours: ' + sample.only_yours.join(', '));
       if (sample.only_agami.length) notes.push('only agami: ' + sample.only_agami.join(', '));
       return '<div class="grid-wrap"><table class="sample"><thead><tr><th></th>' + head + '</tr></thead><tbody>'
-        + body + '</tbody></table><p class="gnote">' + esc(notes.join(' · ')) + '</p></div>';
+        + body + extra + '</tbody></table><p class="gnote">' + esc(notes.join(' · ')) + '</p></div>';
     }
     // The three sections, all closed at rest. Each summary names the exception when there is one and
     // a count when there is not, so most cards need no opening at all.

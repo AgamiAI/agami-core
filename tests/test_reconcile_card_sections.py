@@ -212,3 +212,57 @@ def test_the_suggestion_is_selected_before_anyone_clicks_and_the_block_carries_i
     assert "function seedDecisions()" in html and "seedDecisions();\n    renderItems();" in html
     # and it is still labelled, so a reader sees the tool chose it
     assert "' <span class=\"tag suggested\">suggested</span>'" in html
+
+
+# --- never report an artefact of the method as a fact about the data --------------------------------
+
+
+def _table_rec(golden_rows, generated_rows, **score):
+    s = {"status": "scored", "accuracy": 0.0, "column_pairs": [], "reason": "the answer key has 5 rows and the generated result has 1",
+         "golden_row_count": golden_rows, "generated_row_count": generated_rows}
+    s.update(score)
+    return {"status": "mismatch", "statement": "SELECT 1", "sql": "SELECT 1", "match": False,
+            "recorded": {"columns": ["n"], "row_count": generated_rows},
+            "statement_recorded": {"columns": ["n"], "row_count": golden_rows},
+            "comparison": {"result_set": s},
+            "ledger": {"rows": [], "verdict": "confirmed", "counts": {}}, "ledger_verdict": "confirmed"}
+
+
+def test_differing_row_counts_never_read_as_a_percentage_of_values():
+    # The comparator decides on the row counts BEFORE pairing anything, so its 0.0 means "not
+    # compared", not "nothing matched". A school can sit in both results while this reads 0%.
+    rows, _ = reconcile._diff_rows(_table_rec(5, 1), None)
+    values = next(r for r in rows if r["key"] == "values")
+    assert values["state"] == "open" and values["yours"] == "not compared row by row"
+    assert values["note"] == "your query returned 5 rows and agami's 1 row, so the two results were not lined up"
+    assert "%" not in str(values["yours"])
+    # and the sentence says the same thing rather than naming columns
+    assert reconcile._sentence(_table_rec(5, 1), rows).startswith("Your query returned 5 rows")
+
+
+def test_one_row_is_a_row():
+    assert reconcile._rows_word(1) == "1 row" and reconcile._rows_word(5) == "5 rows"
+    assert reconcile._recorded_display({"columns": ["n"], "row_count": 1})[0] == "1 row"
+
+
+def test_the_comparators_answer_key_vocabulary_does_not_reach_the_page():
+    # comparator.py serves the golden run first, where the two sides are an answer key and a
+    # generated result. A reader who never wrote an answer key cannot place those words.
+    said = reconcile._in_our_words("the answer key has 4 rows and the generated result has 3")
+    assert said == "your query has 4 rows and agami's result has 3"
+    assert reconcile._in_our_words(None) is None
+
+
+def test_agamis_own_rows_are_listed_when_the_two_cannot_be_lined_up(tmp_path):
+    d = _csvs(tmp_path, "name\na\nb\nc\n", "name\nz\n")
+    sample = reconcile._sample(d, {"column_pairs": []})
+    assert sample["aligned"] is False and sample["agami_rows"] == [["z"]] and sample["agami_total"] == 1
+
+
+def test_the_fit_reason_is_one_sentence_not_three_fragments():
+    note = ("the statement may not answer the question: The question asks for the highest rated ELEMENTARY "
+            "school, and the statement does not restrict to elementary schools; reword the question or the "
+            "statement and re-run this row")
+    said = reconcile._fit_reason(note)
+    assert said.startswith("The question asks for the highest rated ELEMENTARY school")
+    assert "reword the question or the statement" not in said and said.endswith(".")

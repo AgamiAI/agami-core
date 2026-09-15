@@ -78,6 +78,9 @@ def _validate_sample(sample: Any, idx: int) -> None:
     pairs = sample.get("pairs")
     if not isinstance(pairs, list) or not all(isinstance(p, list) and len(p) == 2 for p in pairs):
         raise ValueError(f"item {idx}: 'sample.pairs' must be a list of two-name pairs")
+    other = sample.get("agami_rows")
+    if other is not None and (not isinstance(other, list) or len(other) > _SAMPLE_ROWS):
+        raise ValueError(f"item {idx}: 'sample.agami_rows' is at most {_SAMPLE_ROWS} rows")
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("yours"), list):
             raise ValueError(f"item {idx}: every 'sample.rows' entry needs a 'yours' list")

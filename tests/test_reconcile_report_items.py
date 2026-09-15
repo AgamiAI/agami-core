@@ -166,7 +166,8 @@ def test_keep_is_the_owner_only_where_the_offer_can_be_made(tmp_path):
     assert items[6]["owner"] == "nothing" and items[6]["change"] == ["The two answers match. A table is not kept as an example; nothing to change."]
     # a doubtful fit on a matching number is the question's fix, and never kept
     assert items[7]["owner"] == "question" and items[7]["fix"] == "question" and items[7]["keep_allowed"] is False
-    assert items[7]["change"][0].startswith("Reword the question, or change your query, so they ask the same thing. the grain differs")
+    assert items[7]["change"][0] == "The grain differs."
+    assert items[7]["change"][-1] == "Reword the question, or change your query, so they ask the same thing."
 
 
 def test_agamis_side_is_read_from_its_receipt_where_one_exists(tmp_path):

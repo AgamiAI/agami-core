@@ -1572,6 +1572,37 @@ def _fmt(value: Any) -> str | None:
     return str(value)
 
 
+def _fit_reason(note: Any) -> str | None:
+    """The fit note as one sentence: the ledger's lead-in and its trailing instruction stripped."""
+    if not isinstance(note, str) or not note.strip():
+        return None
+    text = note.split(":", 1)[1].strip() if note.startswith("the statement may not answer the question:") else note.strip()
+    text = text.split("; reword the question")[0].strip().rstrip(".;")
+    return (text[0].upper() + text[1:] + ".") if text else None
+
+
+def _rows_word(n: int) -> str:
+    """`1 row`, `5 rows`. One place, so no card says "1 rows"."""
+    return f"{n:,} {'row' if n == 1 else 'rows'}"
+
+
+def _in_our_words(reason: Any) -> str | None:
+    """The comparator's reason in this page's vocabulary.
+
+    `comparator.py` serves the golden run first, where the two sides are an answer key and a
+    generated result. On a reconcile card they are the analyst's query and agami's, and a reader who
+    never wrote an answer key cannot place the words. Same rule as the status words: the machinery
+    keeps its terms, the page does not show them.
+    """
+    if not isinstance(reason, str) or not reason:
+        return None
+    for their, ours in (("the answer key's", "your query's"), ("the answer key", "your query"),
+                        ("the generated result", "agami's result"), ("the generated statement", "agami's query"),
+                        ("generated", "agami's")):
+        reason = reason.replace(their, ours)
+    return reason
+
+
 def _recorded_display(recorded: Any, row_count: int | None = None) -> tuple[str | None, bool]:
     """What a recorded result looks like on the page: one cell as text, or 'N rows'. Never a row."""
     if not isinstance(recorded, dict):
@@ -1584,7 +1615,7 @@ def _recorded_display(recorded: Any, row_count: int | None = None) -> tuple[str 
         n = len(rows)
     if n is None:
         return None, False
-    return f"{n:,} rows", False
+    return f"{n:,} {'row' if n == 1 else 'rows'}", False
 
 
 def _part_family(part: str) -> str:
@@ -1827,7 +1858,18 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
                 add("values", "held", f"identical on {paired_word}", None,
                     note="a column of yours has no partner; the paired columns match")
             else:
-                add("values", "defect", f"{float(acc):.0%} of the values match", None, note=result_set.get("reason"))
+                gc, ac_n = result_set.get("golden_row_count"), result_set.get("generated_row_count")
+                if isinstance(gc, int) and isinstance(ac_n, int) and gc != ac_n:
+                    # The comparator decides on the row counts BEFORE it pairs anything, so no value
+                    # was compared. Printing its 0.0 as "0% of the values match" reports an artefact
+                    # of the method as a fact about the data, on a row where a school can sit in both
+                    # results. Say what actually happened instead.
+                    add("values", "open", "not compared row by row", None,
+                        note=f"your query returned {_rows_word(gc)} and agami's {_rows_word(ac_n)}, "
+                             "so the two results were not lined up")
+                else:
+                    add("values", "defect", f"{float(acc):.0%} of the values match", None,
+                        note=_in_our_words(result_set.get("reason")))
     else:
         match = rec.get("match") if rec.get("match") is not None else (scalar or {}).get("match")
         if rec.get("status") == "error":
@@ -2023,7 +2065,11 @@ def _sample(row_dir: Path, score: Any, limit: int = 5) -> dict | None:
         g = [abody[n][ai[b]] if ai[b] < len(abody[n]) else "" for _, b in pairs] if aligned else None
         out.append({"yours": y, "agami": g, "same": g is not None and y == g})
     out.sort(key=lambda r: r["same"])  # the rows that disagree first; False sorts before True
+    # When the counts differ the rows cannot sit beside each other, but agami still answered, and a
+    # grid showing five rows all labelled "yours" reads as though it did not. Carry its rows too.
+    agami_rows = None if aligned else [[r[ai[b]] if ai[b] < len(r) else "" for _, b in pairs] for r in abody[:limit]]
     return {"pairs": [list(p) for p in pairs], "rows": out[:limit], "shown": min(len(out), limit),
+            "agami_rows": agami_rows, "agami_total": len(abody),
             "total": len(ybody), "aligned": aligned, "by_name": by_name,
             "only_yours": [c for c in yours[0] if c not in {a for a, _ in pairs}],
             "only_agami": [c for c in agami[0] if c not in {b for _, b in pairs}]}
@@ -2292,8 +2338,12 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
     elif fix == "examples":
         change, todo = list(_FIX_CHANGE["examples"][0]), list(_FIX_CHANGE["examples"][1])
     elif fix == "question":
-        reason = (fit or {}).get("note") or ""
-        change = [("Reword the question, or change your query, so they ask the same thing. " + reason).strip()]
+        # The fit note already says what does not line up, in a full sentence. Prefixing a generic
+        # instruction and suffixing the todo produced three fragments joined by a semicolon, starting
+        # mid-sentence in lower case. Say the finding, then the one instruction.
+        reason = _fit_reason((fit or {}).get("note"))
+        change = [reason or "The question and your query do not ask the same thing.",
+                  "Reword the question, or change your query, so they ask the same thing."]
         todo = ["The question: reword it and re-run."]
     elif fix == "ask_again":
         if cause == "agami_failed":
@@ -2423,6 +2473,11 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
     measured = (values or {}).get("yours")          # the comparator's own phrasing, "9 of 10 rows match"
     if measured and " of " in str(measured):
         return f"{measured}."
+    if values is not None and values.get("state") == "open" and values.get("note"):
+        # Nothing was compared. Saying which columns differ here would imply the values were looked
+        # at and found wanting, which is the thing that made this card unreadable.
+        note = values["note"]
+        return f"{note[0].upper()}{note[1:]}."
     if scalar and scalar.get("note"):               # a number: how far apart the two are
         return f"{scalar['note']}."                 # left as written: the product's name is lowercase
     where = [k for k in red + gaps if k in ("columns", "rows")]

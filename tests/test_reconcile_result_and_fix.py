@@ -89,7 +89,7 @@ def test_a_doubtful_fit_is_the_questions_fix_even_when_the_answer_matches(tmp_pa
     doubtful["claims"] = _claims(("tables", "differs", ["orders", "payments"], ["orders"]))
     item = reconcile.report_items(_run(tmp_path, [doubtful]))[0]
     assert item["result"]["label"] == "same answer, different query" and item["fix"] == "question" and item["keep_allowed"] is False
-    assert item["change"][0].startswith("Reword the question, or change your query, so they ask the same thing.")
+    assert item["change"][-1] == "Reword the question, or change your query, so they ask the same thing."
 
 
 def test_columns_are_compared_by_data_and_a_renamed_column_is_the_same_column(tmp_path):
