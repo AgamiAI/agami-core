@@ -128,6 +128,7 @@ class GuardContext:
     # "could not read it", which are the same empty tree and opposite verdicts.
     dialect: "str | None" = None
     unreadable: "UnreadableStatement | None" = None
+    schema_index: "dict[str, dict[str | None, set[str]]] | None" = None
 
 
 class UnreadableStatement(NamedTuple):
@@ -300,6 +301,7 @@ def build_guard_context(sql: str, org: Datasource) -> "GuardContext | None":
         model_table_index=_model_table_index(org),
         dialect=dialect,
         unreadable=unreadable,
+        schema_index=_schema_index(org),
     )
 
 
@@ -1276,6 +1278,117 @@ def _cte_names(tree: "exp.Expression") -> set[str]:
     return {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
 
 
+def _identifier_key(ident: object) -> Optional[tuple[bool, str]]:
+    """(quoted, text) for a plain identifier, or None for anything else — which never binds."""
+    if isinstance(ident, exp.Identifier) and ident.name:
+        return bool(ident.args.get("quoted")), ident.name
+    return None
+
+
+def _same_identifier(a: tuple[bool, str], b: tuple[bool, str]) -> bool:
+    """Both unquoted and equal ignoring case, or both quoted and exactly equal. A quoted identifier
+    is case-sensitive, and whether an engine folds an unquoted name to match a quoted one differs per
+    engine, so a mixed pair is checked as a table — the cheap direction to be wrong in."""
+    return a[0] == b[0] and (a[1] == b[1] if a[0] else a[1].lower() == b[1].lower())
+
+
+def _cte_references(tree: "exp.Expression") -> set[int]:
+    """The `exp.Table` nodes (by id) that name a CTE VISIBLE where they are written.
+
+    The scope gates used to skip every table whose name ANY WITH bound, anywhere in the statement,
+    which let a physical table through: an inner `WITH secret AS (…)` inside an EXISTS hid the outer
+    `FROM secret`; a CTE body naming a sibling defined after it read the physical table; so did a
+    CTE's own name inside its non-recursive body. Visibility is resolved lexically instead:
+
+    * a WITH's names are visible in the statement carrying it and everything nested inside it;
+    * a CTE body sees EARLIER siblings plus enclosing WITHs' names, never a later sibling;
+    * a CTE body sees its OWN name only under `WITH RECURSIVE`, only when the body is a UNION, and
+      only in the arms after the first — DuckDB reads a self-reference anywhere else as the table;
+    * a schema-qualified name is never a CTE reference;
+    * names bind only when `_same_identifier` says so.
+
+    Fail-closed: a node is marked only when an enclosing WITH is proven to define it, so any shape
+    this walk does not understand is checked as a table. Iterative, because a caller controls the
+    tree depth and a long `AND` chain already exceeds the recursion limit.
+    """
+    bound: set[int] = set()
+    stack: list[tuple[object, tuple[tuple[bool, str], ...]]] = [(tree, ())]
+
+    def push_children(node: "exp.Expression", visible: tuple, skip: tuple[str, ...]) -> None:
+        for key, value in node.args.items():
+            if key in skip:
+                continue
+            for child in value if isinstance(value, list) else (value,):
+                if isinstance(child, exp.Expression):
+                    stack.append((child, visible))
+
+    while stack:
+        node, visible = stack.pop()
+        if isinstance(node, exp.Table) and not node.db:
+            key = _identifier_key(node.this)
+            if key is not None and any(_same_identifier(key, v) for v in visible):
+                bound.add(id(node))
+        # sqlglot renamed the arg from `with` to `with_`; read both.
+        with_ = node.args.get("with_") or node.args.get("with")
+        inner = visible
+        if isinstance(with_, exp.With):
+            recursive = bool(with_.args.get("recursive"))
+            for cte in with_.expressions:
+                alias = cte.args.get("alias")
+                name = _identifier_key(alias.this) if isinstance(alias, exp.TableAlias) else None
+                body = cte.this
+                if recursive and name is not None and isinstance(body, exp.Union):
+                    # Left-deep: `A UNION ALL B UNION ALL C` is Union(Union(A, B), C). Only the
+                    # outermost right arm is the recursive term and sees the name; DuckDB reads a
+                    # self-reference in B as the physical table, so everything left of it, and the
+                    # union's own modifiers, is checked as the anchor.
+                    push_children(cte, inner, ("this",))
+                    stack.append((body.expression, inner + (name,)))
+                    stack.append((body.this, inner))
+                    push_children(body, inner, ("this", "expression"))
+                else:
+                    stack.append((cte, inner))
+                if name is not None:
+                    inner = inner + (name,)
+        push_children(node, inner, ("with_", "with"))
+    return bound
+
+
+def _schema_index(org: Datasource) -> dict[str, dict[Optional[str], set[str]]]:
+    """folded table name -> {folded schema, or None when declared without one -> folded columns}.
+
+    What the scope gates judge a reference against. `_model_table_index` and `_column_index` are
+    keyed by bare name alone — first-wins and union respectively — so neither can tell
+    `sales_data.orders` from `staging.orders`, which is #332.
+    """
+    idx: dict[str, dict[Optional[str], set[str]]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            by_schema = idx.setdefault(_tkey(t.name), {})
+            by_schema.setdefault(_tkey(t.schema_name) or None, set()).update(
+                _tkey(c.name) for c in t.columns)
+    return idx
+
+
+def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
+                   tbl: "exp.Table") -> "tuple[Optional[str], str] | str | None":
+    """The declared (schema, name) a physical reference reads, `"ambiguous"`, or None if undeclared.
+
+    Qualified: only a table declared with that schema — not one declared with no schema, since the
+    model never said which schema that one lives in. Unqualified: the name must be declared under
+    exactly one schema; under two or more, which table the engine reads depends on a search path
+    the guard cannot see. Only `db` counts: the model records no catalog.
+    """
+    name = _tkey(tbl.name)
+    by_schema = sidx.get(name, {})
+    if tbl.db:
+        schema = _tkey(tbl.db)
+        return (schema, name) if schema in by_schema else None
+    if len(by_schema) > 1:
+        return "ambiguous"
+    return (next(iter(by_schema)), name) if by_schema else None
+
+
 # ---------------------------------------------------------------------------
 # Table-scope guard
 #
@@ -1308,9 +1421,11 @@ def check_table_scope(sql: str, org: Datasource,
 
     Only *physical* table references count: CTE names (defined by WITH) and
     derived/subquery aliases are not tables and are never treated as undeclared.
-    Matching is on the bare table name, case-insensitively (unquoted identifiers
-    fold case in Postgres and friends), against the model's declared tables via
-    `_model_table_index`, whose keys already exclude review_state='rejected'
+    Which references name a CTE is resolved per reference (`_cte_references`).
+    Matching is on (schema, name) through `_resolve_table`, case-insensitively
+    (unquoted identifiers fold case in Postgres and friends); an unqualified name
+    declared under two or more schemas is refused as ambiguous (#332). The declared
+    tables come from the model, which already excludes review_state='rejected'
     tables (dropped at load time) — so an excluded table is correctly refused.
 
     Degrades to allow when sqlglot is unavailable or the SQL doesn't parse (the
@@ -1338,31 +1453,46 @@ def check_table_scope(sql: str, org: Datasource,
     if tree is None or tree.find(exp.Select) is None:
         return None
 
-    cte_names = _cte_names(tree)
+    sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
+            else _schema_index(org))
+    cte_refs = _cte_references(tree)
     offending: set[str] = set()
+    ambiguous: dict[str, str] = {}  # folded name -> the caller's first spelling, for the echo
     for tbl in tree.find_all(exp.Table):
         name = tbl.name
-        if not name or name.lower() in cte_names:
-            continue  # a CTE reference, not a physical table
-        if name.lower() not in allow:
-            offending.add(name)
-    if not offending:
+        if not name or id(tbl) in cte_refs:
+            continue  # a CTE an enclosing WITH defines, not a physical table
+        resolved = _resolve_table(sidx, tbl)
+        if resolved is None:
+            # The caller's own qualified spelling: echoing only `orders` for `staging.orders` would
+            # read as nonsense beside a declared `sales_data.orders`.
+            offending.add(f"{tbl.db}.{name}" if tbl.db else name)
+        elif resolved == "ambiguous":
+            ambiguous.setdefault(_tkey(name), name)
+    if not offending and not ambiguous:
         return None
 
-    tables = sorted(offending)
-    # `detail` and `remediation` carry the former `reason` / `suggestion` text verbatim. Both are
-    # echo-only by construction: static prose plus the table names the CALLER put in its own
-    # statement. Nothing here reads the model's declared set, so a refusal can never turn into a
-    # schema listing — the property the contract calls "echo, never enumerate". The echo itself is
-    # bounded by `_echo_identifiers`: echoing the caller's names is not the same as echoing arbitrary
-    # caller text, and a quoted identifier can hold either.
+    # Echo-only by construction: static prose plus the table names the CALLER put in its own
+    # statement. Nothing here reads the model's declared set — in particular the ambiguity sentence
+    # does not name the schemas a name is declared under — so a refusal can never turn into a
+    # schema listing ("echo, never enumerate"). The echo is bounded by `_echo_identifiers`.
+    details: list[str] = []
+    remediations: list[str] = []
+    if offending:
+        details.append("query references table(s) not in the semantic model: "
+                       + _echo_identifiers(sorted(offending))
+                       + " — only tables declared in the model may be queried.")
+        remediations.append("Add the table to the model (agami-connect / '/agami-model'), "
+                            "or remove it from the query.")
+    if ambiguous:
+        details.append("query references table(s) whose name matches tables in more than one "
+                       "schema, so which one is meant cannot be decided: "
+                       + _echo_identifiers(sorted(ambiguous.values())) + ".")
+        remediations.append("Qualify each of those tables with its schema (schema.table).")
     return guardrail.refuse(
         guardrail.RULE_TABLE_SCOPE,
-        detail="query references table(s) not in the semantic model: "
-               + _echo_identifiers(tables)
-               + " — only tables declared in the model may be queried.",
-        remediation="Add the table to the model (agami-connect / '/agami-model'), "
-                    "or remove it from the query.",
+        detail=" ".join(details),
+        remediation=" ".join(remediations),
     )
 
 
@@ -1482,9 +1612,13 @@ def check_column_scope(sql: str, org: Datasource,
     if tree is None or tree.find(exp.Select) is None:
         return None
 
-    # case-insensitive declared-column index: lower(table) -> {lower(column)}
-    declared = {t.lower(): {c.lower() for c in cols} for t, cols in colidx.items()}
-    cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+    # Keyed by (schema, name) rather than bare name: `_column_index` unions every same-named table's
+    # columns, so a column only `staging.orders` declares passed on a read of `sales_data.orders`.
+    sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
+            else _schema_index(org))
+    declared = {(schema, name): cols for name, by_schema in sidx.items()
+                for schema, cols in by_schema.items()}
+    cte_refs = _cte_references(tree)
 
     def _select_chain(node):
         """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
@@ -1504,8 +1638,10 @@ def check_column_scope(sql: str, org: Datasource,
     # physical tables it reads directly (alias -> bare table), its output aliases, and
     # whether it reads from a CTE ref / derived subquery (→ a bare column we can't
     # match may be that source's output, so fail-open).
-    alias_by_select: dict[int, dict[str, str]] = {}  # id(select) -> {alias -> bare physical table}
-    direct_phys: dict[int, set[str]] = {}            # id(select) -> {bare physical table read directly}
+    # An unresolvable physical table (undeclared or ambiguous — table scope refuses it) binds its
+    # alias to False, so the qualifier is known to be a physical table rather than a CTE alias.
+    alias_by_select: dict[int, dict[str, Any]] = {}  # id(select) -> {alias -> (schema, name) | False}
+    direct_phys: dict[int, set[tuple]] = {}          # id(select) -> {(schema, name) read directly}
     has_derived: dict[int, bool] = {}                # id(select) -> reads a CTE ref / derived subquery directly
     output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
     for tbl in tree.find_all(exp.Table):
@@ -1513,13 +1649,21 @@ def check_column_scope(sql: str, org: Datasource,
         if not name:
             continue
         sel = _enclosing_select(tbl)
-        if name in cte_names:
+        if id(tbl) in cte_refs:
             if sel is not None:
                 has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
             continue
         if sel is not None:
-            alias_by_select.setdefault(id(sel), {})[tbl.alias_or_name.lower()] = name
-            direct_phys.setdefault(id(sel), set()).add(name)
+            resolved = _resolve_table(sidx, tbl)
+            binding = resolved if isinstance(resolved, tuple) else False
+            aliases = alias_by_select.setdefault(id(sel), {})
+            aliases[tbl.alias_or_name.lower()] = binding
+            if tbl.db and not tbl.alias:
+                # `sales_data.orders.amount` beside `staging.orders` in one FROM: both register
+                # under `orders`, last wins, so also register the qualified spelling.
+                aliases[f"{tbl.db}.{name}".lower()] = binding
+            if binding:
+                direct_phys.setdefault(id(sel), set()).add(binding)
     for sq in tree.find_all(exp.Subquery):
         # a derived table in FROM/JOIN (NOT a WHERE/scalar subquery, which adds no columns to its select)
         if isinstance(sq.parent, (exp.From, exp.Join)):
@@ -1544,16 +1688,20 @@ def check_column_scope(sql: str, org: Datasource,
         if col.table:
             # resolve the qualifier within the column's own scope, walking outward:
             # a correlated ref sees ancestor aliases; an inner alias shadows an outer.
-            qual = col.table.lower()
+            quals = ([f"{col.db}.{col.table}".lower()] if col.db else []) + [col.table.lower()]
             phys = None
-            for s in chain:
-                phys = alias_by_select.get(id(s), {}).get(qual)
+            # Each spelling across the whole chain before the next: an inner `staging.orders` must
+            # not capture `sales_data.orders.col`, which the engine resolves to the outer table.
+            for q in quals:
+                phys = next((alias_by_select[id(s)][q] for s in chain
+                             if q in alias_by_select.get(id(s), {})), None)
                 if phys is not None:
                     break
             if phys is None:
                 continue  # qualified by a CTE/derived alias — validated at its own source
-            if phys in declared and lname not in declared[phys]:
-                offending.add(f"{phys}.{name}")
+            if phys and lname not in declared[phys]:
+                # Bare `table.column`: the schema half is the model's to know, not the echo's.
+                offending.add(f"{phys[1]}.{name}")
             continue
         # unqualified: judge against the tables its own SELECT reads directly
         if sel is not None and lname in output_by_select.get(id(sel), set()):
@@ -3160,8 +3308,10 @@ def assemble_receipt(
             tree, org, refs=sites[:_RECEIPT_MAX_REFS], ctx=None):
         # A CTE name resolved through the bare-name index, so `WITH orders AS (…)` reported
         # `declared: true` and borrowed the real table's row estimate — a fact about a table the
-        # statement never read. `_declared_table` is the one place that subtraction lives, and
-        # `_cte_names` is the same set `check_table_scope` subtracts.
+        # statement never read. `_declared_table` is the one place that subtraction lives. It still
+        # skips a CTE name anywhere in the statement, unlike `check_table_scope`, which resolves each
+        # reference against its enclosing WITH (#332); the receipt can therefore disagree with the
+        # gate on a statement the gate refuses.
         info = _declared_table(r.bare)
         t = info[0] if info else None
         ph = t.performance_hints if t else None
