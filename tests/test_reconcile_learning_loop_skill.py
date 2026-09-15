@@ -150,7 +150,15 @@ def test_compare_and_findings_sit_between_the_record_and_present():
 
 def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table():
     summary = _between(SKILL, "### 3a — Summary line first", "### 3b — Mismatches")
-    assert "match_unverified" in summary and "expected_doubtful" in summary
+    # ACE-138: the second line says what happened, never what the machinery calls it. A person
+    # reading `expected_doubtful` has to look it up, and that is the row where their own query
+    # is the thing in doubt, so it is the last place a token belongs.
+    # The fenced blocks are the lines the skill puts in front of the person verbatim; the prose
+    # around them is instruction to the AI, where naming the token is the point.
+    said = "\n".join(re.findall(r"```[a-z]*\n(.*?)```", summary, re.S))
+    assert "part of your query could not be checked" in said
+    assert "your query has a problem" in said
+    assert "match_unverified" not in said and "expected_doubtful" not in said
     assert SKILL.index("### 3b — Mismatches") < SKILL.index("### 3b.5 — Your statements") < SKILL.index("### 3c —")
     statements = _between(SKILL, "### 3b.5 — Your statements", "### 3c")
     assert "no SQL in chat" in statements
@@ -178,7 +186,9 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
         assert signal in fit, signal
     assert "`question_fit.json`" in fit and "a judgment made by reading" in fit
     assert "never proves anything about the semantic model" in fit
-    assert "question_fit:" in statements and "reword the question or the statement and re-run this row" in statements
+    # ACE-138: the worked table shows the part by the name the card gives it ("answers the
+    # question"), not by its part id, because that table is what the person reads.
+    assert "answers the question:" in statements and "reword the question or the statement and re-run this row" in statements
     assert "For every statement row, write `question_fit.json`" in PHASE_1_5
 
 
