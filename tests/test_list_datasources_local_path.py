@@ -70,12 +70,14 @@ def test_no_credentials_gives_the_connect_hint_not_the_deploy_hint(tmp_path, mon
 def test_the_store_step_sits_below_every_step_that_was_already_there(tmp_path, monkeypatch):
     """`resolve_profile` gained ONE step and it is the last one before the literal fallback.
 
-    Order is the contract: explicit -> AGAMI_PROFILE -> `.config.active_profile` -> sole served
-    datasource -> 'default'. A store lookup that preempted `.config` would silently retarget any
-    local install that has both, which is every developer machine with a server DB configured.
+    Order is the contract on the local path (no DB URL): explicit -> AGAMI_PROFILE ->
+    `.config.active_profile` -> sole served datasource -> 'default'. A served deployment skips
+    `.config` (#253).
     """
     import json as _json
 
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     (tmp_path / "local").mkdir(parents=True)
     (tmp_path / "local" / ".config").write_text(_json.dumps({"active_profile": "from_config"}))
