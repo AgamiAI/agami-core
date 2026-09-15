@@ -2145,6 +2145,9 @@ def _summaries(rows: list[dict], result: dict) -> dict:
         model = f"{passed} check{'' if passed == 1 else 's'} passed."
     if failed:
         model += f" {_count_word(len(failed)).capitalize()} didn't: {failed[0]['key']}."
+    unrun = int(result.get("unchecked") or 0)
+    if unrun:
+        model += f" {_count_word(unrun).capitalize()} couldn't be run."
 
     return {"data": data, "sql": sql, "checks": model}
 

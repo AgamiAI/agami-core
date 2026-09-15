@@ -112,16 +112,18 @@ def test_the_result_pill_and_the_fix_pill_come_from_the_verbs_two_fields():
     item = dict(ITEM, result={"data": "matches", "query": "different", "label": "same answer, different query", "unchecked": 2, "differs_in": ["filters"]},
                 fix="examples", fix_words="add an example", keep_allowed=True)
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
-    for token in ("function resultPill(item)", "'same answer, different query'".replace("'", '"')[1:-1], "check' : ' checks') + ' not run", "const FIX_WORDS = {};",
-                  "function suggestionFor(item)", "item.fix === 'examples' && item.keep_allowed ? 'keep'", 'id="result-chips"', "<b>fix</b>", '"fix": "examples"', '"label": "same answer, different query"'):
+    for token in ("function verdict(item)", "'same answer, different query'".replace("'", '"')[1:-1], "const FIX_WORDS = {};",
+                  "function suggestionFor(item)", "item.fix === 'examples' && item.keep_allowed ? 'keep'", 'id="result-chips"', 'class="vact"', '"fix": "examples"', '"label": "same answer, different query"'):
         assert token in html, token
     with pytest.raises(ValueError, match="'result' needs data in"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, result={"data": "maybe", "query": "same", "label": "x"})])
     with pytest.raises(ValueError, match="'fix' must be one of"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, fix="rewrite")])
-    # an older items file without the two fields still renders with the status pill and the owner
+    # an older items file without the two fields still renders: the verdict falls back to the
+    # status in words, and the bar to the owner.
     old = dict(ITEM)
-    assert "resultPill(item)" in rr.render(title="t", profile="p", run="r", items=[old, dict(old, row=3)])
+    html = rr.render(title="t", profile="p", run="r", items=[old, dict(old, row=3)])
+    assert "r.label || item.status_words" in html and "FIX_CLASS[fix] || 'noted'" in html
 
 
 def test_the_result_chips_filter_and_replace_the_status_chips_when_labels_exist():

@@ -49,6 +49,10 @@
     </div>
     <div class="filters" id="filters">
       <span class="k">Fix</span><span id="owner-chips"></span>
+    </div>
+    <!-- Find is a different act from filtering by facet: one narrows by a value the page computed,
+         the other by whatever the reader remembers. Its own row, under the two facet rows. -->
+    <div class="filters find">
       <span class="k">Find</span><input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
       <button type="button" id="clear" class="linkish">Clear filters</button>
       <span class="showing" id="showing"></span>
@@ -97,16 +101,6 @@
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function lines(list) { return (list || []).length ? '<ul>' + list.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''; }
     function pill(item) { return '<span class="pill ' + statusClass(item) + '">' + esc(item.status_words || '') + '</span>'; }
-    // The result in two facts, when the items verb gave them: the pill takes the plain-word label and
-    // the state color from the data fact; checks that could not run are a tag, not a status.
-    const DATA_CLASS = { matches: 'held', partly: 'open', differs: 'defect', could_not_compare: 'noted' };
-    function resultPill(item) {
-      if (!item.result || !item.result.label) return pill(item);
-      const cls = item.result.data === 'matches' && item.result.query === 'different' ? 'open' : (DATA_CLASS[item.result.data] || 'noted');
-      const n = item.result.unchecked || 0;
-      return '<span class="pill ' + cls + '">' + esc(item.result.label) + '</span>'
-        + (n ? '<span class="tag unchecked">' + n + (n === 1 ? ' check' : ' checks') + ' not run</span>' : '');
-    }
     // The fix words come from the items themselves (report-items writes fix_words); one home for six strings.
     const FIX_WORDS = {};
     DATA.items.forEach(i => { if (i.fix && i.fix_words) FIX_WORDS[i.fix] = i.fix_words; });
@@ -186,14 +180,11 @@
       // The result chips filter like every other chip; when the items carry result labels they are
       // the one filter row, and the older status chips step aside.
       const labels = {};
-      const RESULT_CLASS = { 'match': 'held', 'same answer, different query': 'open', 'same rows, different columns': 'open',
-                             'different answer': 'defect', 'same query, different answer': 'defect', 'could not compare': 'noted',
-                             'same query, answer not compared': 'open', 'different query, answer not compared': 'defect' };
       DATA.items.forEach(i => { if (i.result && i.result.label) labels[i.result.label] = (labels[i.result.label] || 0) + (passes(i, 'result') ? 1 : 0); });
       const results = document.getElementById('result-chips');
       results.classList.toggle('filtering', view.result.size > 0);
       results.innerHTML = Object.entries(labels).map(([label, n]) =>
-        '<button type="button" class="chip ' + (RESULT_CLASS[label] || 'noted') + (view.result.has(label) ? ' on' : '') + (n ? '' : ' zero') + '" data-result="' + esc(label) + '" aria-pressed="' + view.result.has(label) + '"><span>' + esc(label) + '</span><b>' + n + '</b></button>').join('');
+        '<button type="button" class="chip plain' + (view.result.has(label) ? ' on' : '') + (n ? '' : ' zero') + '" data-result="' + esc(label) + '" aria-pressed="' + view.result.has(label) + '"><span>' + esc(label) + '</span><b>' + n + '</b></button>').join('');
       results.querySelectorAll('[data-result]').forEach(el => el.addEventListener('click', () => { toggle(view.result, el.dataset.result); renderItems(); }));
       // `root` (the status chips) is declared further down in this function; reach it by id here.
       document.getElementById('chips').hidden = Object.keys(labels).length > 0;
@@ -207,6 +198,7 @@
       DATA.items.forEach(i => { const o = i.fix ? fixOf(i) : (i.owner || 'nothing'); owners[o] = (owners[o] || 0) + (passes(i, 'owner') ? 1 : 0); });
       const bar = document.getElementById('filters');
       bar.hidden = DATA.layout === 'audit' || DATA.items.length < 2;
+      document.querySelector('.filters.find').hidden = DATA.items.length < 2;
       bar.classList.toggle('filtering', view.owner.size > 0);
       document.getElementById('owner-chips').innerHTML = Object.entries(owners).map(([o, n]) =>
         '<button type="button" class="pill ' + esc(FIX_CLASS[o] || o) + (view.owner.has(o) ? ' on' : '') + (n ? '' : ' zero') + '" data-owner="' + esc(o) + '" aria-pressed="' + view.owner.has(o) + '">' + esc(FIX_WORDS[o] || OWNER_SHORT[o] || o) + ' <b>' + n + '</b></button>').join(' ');
@@ -290,8 +282,11 @@
     // disclosure, so these two are what a reader sees on fifty rows in a row.
     function verdict(item) {
       const r = item.result || {};
-      const cls = r.data === 'matches' && r.query === 'different' ? 'open' : (DATA_CLASS[r.data] || 'noted');
+      // The bar takes the FIX's colour, not the outcome's. Colour on this page answers one question,
+      // "who has to act", and an outcome is not an owner: a different answer can be agami's to learn
+      // from or the question's to reword, and the words already say which.
       const fix = fixOf(item);
+      const cls = FIX_CLASS[fix] || 'noted';
       const label = r.label || item.status_words || '';
       return '<div class="verdict ' + esc(cls) + '"><div class="vl">' + esc(label) + '</div>'
         + (item.sentence ? '<p class="vs">' + esc(item.sentence) + '</p>' : '')
@@ -323,12 +318,6 @@
         + w.map(x => '<li>' + esc(x) + '</li>').join('')
         + ((item.words || []).length > 3 ? '<li class="more">and ' + ((item.words || []).length - 3) + ' more, in mentions.json</li>' : '')
         + '</ul></div>' : '';
-    }
-    function action(item, d) {
-      const fix = fixOf(item);
-      const owner = item.owner || 'nothing';
-      const words = item.fix ? (item.fix_words || FIX_WORDS[fix] || fix) : (OWNER_SHORT[owner] || owner);
-      return '<div class="act"><b>fix</b><span class="pill ' + esc(item.fix ? FIX_CLASS[fix] : owner) + '">' + esc(words) + '</span><span>' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div>';
     }
     function diffCard(item) {
       const d = decisions[item.row] || {};
@@ -380,7 +369,7 @@
     function renderItems() {
       document.getElementById('lede').textContent = DATA.layout === 'audit'
         ? 'One query, with what we found and what we suggest doing about it. Open Data, SQL or Checks to see the working. Change the suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.'
-        : 'Every row you gave us, with what we found and what we suggest doing about it. Open Data, SQL or Checks on any row to see the working. Change a suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.';
+        : 'Every row you gave us, with what we found and what we suggest doing about it. The point is to teach agami to answer these questions the way you would, so the colours say who acts: an example or a definition changes what agami writes next time. Open Data, SQL or Checks on any row to see the working, change a suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.';
       chips();
       const shown = visible();
       showing(shown.length);

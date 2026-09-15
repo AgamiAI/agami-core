@@ -36,6 +36,7 @@
     .chip { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--bg-elev, #fff); border: 1px solid var(--border, #d9dde3); }
     .chip b { font-size: var(--t-body); font-weight: 600; color: var(--muted, #5b6875); font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 4px; }
     .chip span { font-size: var(--t-body); }
+    .chip.plain span { color: var(--fg, #17212b); }
     .chip.held span { color: var(--held); } .chip.open span { color: var(--open); } .chip.defect span { color: var(--defect); } .chip.gap span { color: var(--gap); } .chip.noted span { color: var(--noted); }
     .pill b { font-weight: 700; font-variant-numeric: tabular-nums; opacity: 0.75; }
     /* cards */
@@ -95,6 +96,7 @@
     .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 10px; font-size: var(--t-body); color: var(--muted, #5b6875); }
     .filters input[type=search] { flex: 1 1 220px; min-width: 180px; font: inherit; font-size: var(--t-body); padding: 6px 10px; border: 1px solid var(--border, #d9dde3); border-radius: 6px; background: var(--bg, #fff); color: inherit; }
     .filters[hidden] { display: none; }
+    .filters.find { border-top: 1px solid var(--border, #d9dde3); padding-top: 9px; margin-top: 8px; }
     button.chip, button.pill { font: inherit; cursor: pointer; text-align: left; }
     button.pill { border: 0; }
     .chip.on, .pill.on { outline: 2px solid var(--accent, #1d5fb4); outline-offset: 1px; }
