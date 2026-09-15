@@ -7,14 +7,11 @@ breaks silently on a rename. One rule, used by both the provider path and the em
 
 from __future__ import annotations
 
-import threading
-
 import pytest
 
-pytest.importorskip("pydantic")
-
-import execute_sql  # noqa: E402
-import tools  # noqa: E402
+# No `importorskip("pydantic")`: `tools` keeps its model imports lazy and this rule is part of the
+# bare install's surface, so it runs there too.
+import tools
 
 
 @pytest.mark.parametrize("key", ["max_rows", "timeout_s"])
@@ -29,14 +26,16 @@ def test_anything_else_is_not(key, value):
     assert tools.statement_limit_is_usable(key, value) is False
 
 
-def test_there_is_no_row_cap_ceiling():
-    assert tools.statement_limit_is_usable("max_rows", 10**15) is True
+def test_a_row_cap_the_drivers_cannot_fetch_is_not_usable():
+    # The fetch window is cap + 1, and it has to fit a signed 32-bit int.
+    assert tools.statement_limit_is_usable("max_rows", 2**31 - 2) is True
+    assert tools.statement_limit_is_usable("max_rows", 2**31 - 1) is False
 
 
-def test_a_timeout_the_platform_cannot_arm_is_not_usable():
-    edge = int(threading.TIMEOUT_MAX) - execute_sql._SUPERVISOR_SKEW_S
-    assert tools.statement_limit_is_usable("timeout_s", edge - 1) is True
-    assert tools.statement_limit_is_usable("timeout_s", edge) is False
+def test_a_timeout_whose_native_value_passes_seven_days_is_not_usable():
+    # The engine receives the budget plus the 5-second native skew, so 604,795 is the last usable one.
+    assert tools.statement_limit_is_usable("timeout_s", 604_795) is True
+    assert tools.statement_limit_is_usable("timeout_s", 604_796) is False
 
 
 def test_an_unknown_key_is_the_callers_bug():
@@ -50,8 +49,9 @@ def test_an_unknown_key_is_the_callers_bug():
         ("max_rows", 500),
         ("max_rows", 0),
         ("max_rows", True),
+        ("max_rows", 2**31 - 1),
         ("timeout_s", 45),
-        ("timeout_s", int(threading.TIMEOUT_MAX)),
+        ("timeout_s", 604_796),
     ],
 )
 def test_the_provider_path_applies_the_same_rule(key, value):

@@ -485,29 +485,32 @@ def build_server(
         instructions = f"{instructions}\n{extra_instructions}"
     server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
-    def _listed() -> list:
+    def _described(names: list[str]) -> list:
         return [
             # `tool_description` states execute_sql's limits for THIS caller's organisation (#329).
             # That is core describing its own tool per request, not the subtractive-only hook above
             # reshaping one: a consumer's description passes through it untouched.
             mt.Tool(
                 name=name,
-                description=tool_description(name, meta["description"]),
-                inputSchema=meta["inputSchema"],
+                description=tool_description(name, registry[name]["description"]),
+                inputSchema=registry[name]["inputSchema"],
             )
-            for name, meta in registry.items()
-            if _visible(name)
+            for name in names
         ]
 
     @server.list_tools()
     async def _list_tools() -> list:
-        # Off the loop, for ACE-048's reason: the limits provider is the consumer's code and usually a
-        # database read, and on the loop one slow read would stall every in-flight request.
-        # `run_blocking` copies the request context, so the organisation is still set in the worker.
-        # Without a provider nothing here blocks, so the hop would be a thread per listing for nothing.
+        # The visibility predicate runs HERE, in the request task, before any hop: that is the context
+        # its contract promises a consumer, who may read request-task state from it. Only the
+        # descriptions go off the loop, for ACE-048's reason: the limits provider is the consumer's
+        # code and usually a database read, and on the loop one slow read would stall every in-flight
+        # request. `run_blocking` copies the request context, so the organisation is still set in the
+        # worker. Without a provider nothing here blocks, so the hop would be a thread per listing for
+        # nothing.
+        names = [name for name in registry if _visible(name)]
         if not has_statement_limits_provider():
-            return _listed()
-        return await run_blocking(_listed)
+            return _described(names)
+        return await run_blocking(_described, names)
 
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict) -> list:
