@@ -1006,9 +1006,12 @@ def _served_db_type(datasource: str) -> str:
 
 
 def _read_text(path: Path) -> str | None:
+    # UTF-8 named rather than left to the platform: Windows defaults to its locale codepage, which
+    # silently mis-reads anything past ASCII. A file that still cannot be decoded is treated like a
+    # missing one, so the caller skips it instead of the error taking down everything read with it.
     try:
-        return path.read_text()
-    except OSError:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return None
 
 
