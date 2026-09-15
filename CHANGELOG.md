@@ -10,6 +10,23 @@ is the source of truth a host installs against — bumping it is what invalidate
 user's plugin cache (see [CONTRIBUTING.md](CONTRIBUTING.md)). Each released section
 below corresponds to one such version.
 
+## [Unreleased]
+
+### Fixed
+
+- **A same-named table in another schema no longer passes table or column scope** (#332). With
+  `sales_data.orders` declared, `SELECT … FROM staging.orders` used to pass because only the bare
+  name was compared. A schema-qualified reference must now match a table declared with that schema
+  (a table declared without one is reachable only unqualified), and an unqualified name the model
+  declares under two or more schemas is refused as ambiguous, asking for `schema.table`. Column
+  scope checks a column against the schema actually read, not every same-named table.
+- **A CTE name no longer hides a physical table its `WITH` does not enclose.** CTE references are
+  resolved per reference: a body sees earlier siblings and enclosing `WITH`s, its own name only in
+  the recursive arms of a `WITH RECURSIVE … UNION`, a schema-qualified name is never a CTE, and a
+  quoted name binds only a quoted reference spelled exactly the same.
+- The validator warns when one table name is declared under two or more schemas: lookups and schema
+  serving still treat such names by bare name, so queries must use the qualified form.
+
 ## [0.8.7] — 2026-09-15
 
 ### Added
