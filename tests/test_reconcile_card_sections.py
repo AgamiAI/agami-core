@@ -9,6 +9,7 @@ surface that publishes it rather than trusted from whatever built it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -46,7 +47,7 @@ def test_a_diff_row_carries_the_section_it_belongs_to():
     by_key = {r["key"]: r for r in rows}
     assert by_key["answer"]["section"] == "data"
     assert by_key["tables read"]["section"] == "sql"
-    assert by_key["join a to b"]["section"] == "model"
+    assert by_key["join a to b"]["section"] == "checks"
     # the fit is a judgment about the statement against its question, so it sits with the queries
     assert by_key["answers the question"]["section"] == "sql"
 
@@ -57,33 +58,33 @@ def test_a_diff_row_carries_the_section_it_belongs_to():
 def test_a_wide_column_having_no_declared_value_list_earns_no_line():
     # The probe reads the whole column and ignores the statement's own filters, so a query pinned to
     # one city still reported "more than 25 distinct values". True, and no use to anybody.
-    rows = [_row("value list for schools.city", "noted", "model", "values_declared",
+    rows = [_row("value list for schools.city", "noted", "checks", "values_declared",
                  yours="too many values to list")]
     assert reconcile._condense(rows) == []
 
 
 def test_a_value_list_that_is_actually_missing_is_kept():
-    rows = [_row("value list for orders.state", "gap", "model", "values_declared", yours="no value list")]
+    rows = [_row("value list for orders.state", "gap", "checks", "values_declared", yours="no value list")]
     assert len(reconcile._condense(rows)) == 1
 
 
 def test_a_join_that_dropped_nothing_earns_no_line_and_one_that_dropped_rows_does():
-    nothing = [_row("rows dropped by join a to b", "noted", "model", "dropped_rows", yours="0 of 4,000 a rows")]
-    some = [_row("rows dropped by join a to b", "noted", "model", "dropped_rows", yours="63,931 of 269,158 a rows")]
+    nothing = [_row("rows dropped by join a to b", "noted", "checks", "dropped_rows", yours="0 of 4,000 a rows")]
+    some = [_row("rows dropped by join a to b", "noted", "checks", "dropped_rows", yours="63,931 of 269,158 a rows")]
     assert reconcile._condense(nothing) == []
     assert len(reconcile._condense(some)) == 1
 
 
 def test_twelve_value_checks_that_all_passed_become_one_counted_line():
-    rows = [_row(f"value t.c={n}", "held", "model", "literal", yours="exists") for n in range(12)]
+    rows = [_row(f"value t.c={n}", "held", "checks", "literal", yours="exists") for n in range(12)]
     out = reconcile._condense(rows)
     assert len(out) == 1 and out[0]["key"] == "12 values checked, all exist"
     assert out[0]["rolled"] == 12 and out[0]["state"] == "held"
 
 
 def test_a_value_check_that_failed_keeps_every_member_visible():
-    rows = [_row("value t.c=a", "held", "model", "literal", yours="exists"),
-            _row("value t.c=b", "defect", "model", "literal", yours="matches no rows")]
+    rows = [_row("value t.c=a", "held", "checks", "literal", yours="exists"),
+            _row("value t.c=b", "defect", "checks", "literal", yours="matches no rows")]
     assert len(reconcile._condense(rows)) == 2
 
 
@@ -94,13 +95,13 @@ def test_a_summary_names_the_exception_and_counts_when_there_is_none():
     rows = [_row("values", "held", "data", yours="9 of 10 rows match."),
             _row("columns", "defect", "data", yours=["a", "b"], yours_hi=["b"]),
             _row("tables read", "differs", "sql"), _row("limit", "held", "sql"),
-            _row("12 values checked, all exist", "held", "model", "literal", rolled=12),
-            _row("default filter on orders", "gap", "model", "default_filter")]
+            _row("12 values checked, all exist", "held", "checks", "literal", rolled=12),
+            _row("default filter on orders", "gap", "checks", "default_filter")]
     s = reconcile._summaries(rows, {"label": "different answer", "data": "differs"})
     assert s["data"] == "9 of 10 rows match. Your query returns one more column."
     assert s["sql"] == "The two queries differ in tables read."
     # the roll-up stands for the checks it replaced, so the count is of checks, not of lines
-    assert s["model"] == "12 checks passed. One didn't: default filter on orders."
+    assert s["checks"] == "12 checks passed. One didn't: default filter on orders."
 
 
 def test_a_doubtful_fit_leads_the_sql_summary_because_it_is_the_thing_worth_opening():
@@ -266,3 +267,23 @@ def test_the_fit_reason_is_one_sentence_not_three_fragments():
     said = reconcile._fit_reason(note)
     assert said.startswith("The question asks for the highest rated ELEMENTARY school")
     assert "reword the question or the statement" not in said and said.endswith(".")
+
+
+def test_no_surface_of_the_card_titles_a_section_with_the_bare_word_model():
+    # plain-language.md: the bare word can mean the semantic model, the AI, the prompt examples or
+    # the database, so it "appears only inside a quotation of someone else's text". A section title
+    # is not a quotation. This caught a title I had written as "Model checks".
+    tpl = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-report-template.html").read_text(encoding="utf-8")
+    titles = re.findall(r"section\(item, '[a-z]+', '([^']+)'\)", tpl)
+    assert titles == ["Data", "SQL", "Checks"]
+    for title in titles:
+        assert title.lower() != "model" and not title.lower().startswith("model ")
+
+
+def test_a_section_key_and_its_summary_key_are_the_same_word():
+    # The page asks for summaries[key] with the same key it passes to section(), so a rename that
+    # moved one and not the other would silently blank every summary.
+    tpl = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-report-template.html").read_text(encoding="utf-8")
+    keys = re.findall(r"section\(item, '([a-z]+)'", tpl)
+    rows = [_row("answer", "held", k) for k in keys]
+    assert set(reconcile._summaries(rows, {"label": "match", "data": "matches"})) == set(keys)

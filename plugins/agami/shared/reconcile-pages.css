@@ -192,7 +192,7 @@
         transition: transform .12s ease; }
     .card details.sec[open] > summary::before { transform: rotate(90deg); }
     @media (prefers-reduced-motion: reduce) { .card details.sec > summary::before { transition: none; } }
-    .card details.sec .st { font-weight: 600; flex: none; min-width: 9.5rem; }
+    .card details.sec .st { font-weight: 600; flex: none; min-width: 4.5rem; }
     .card details.sec .ss { color: var(--muted); }
     .card .secbody { padding: 2px 0 12px 20px; display: grid; gap: 10px; }
     /* the five-row sample: the only place the page shows warehouse values */

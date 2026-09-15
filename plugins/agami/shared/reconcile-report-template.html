@@ -280,7 +280,7 @@
       let body = '';
       if (key === 'data') body = grid(item.sample) + diffGrid(item, 'data');
       else if (key === 'sql') body = diffGrid(item, 'sql') + sqlBlock(item);
-      else body = diffGrid(item, 'model') + words(item);
+      else body = diffGrid(item, 'checks') + words(item);
       if (!body) return '';
       return '<details class="sec"><summary><span class="st">' + esc(title) + '</span><span class="ss">' + esc(sum) + '</span></summary>'
         + '<div class="secbody">' + body + '</div></details>';
@@ -335,9 +335,9 @@
         + '<div class="head"><span class="n">' + item.row + '</span><span class="title q">' + esc(item.question) + '</span></div>'
         + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
         + verdict(item)
-        + section(item, 'data', 'The answer')
-        + section(item, 'sql', 'The two queries')
-        + section(item, 'model', 'Model checks')
+        + section(item, 'data', 'Data')
+        + section(item, 'sql', 'SQL')
+        + section(item, 'checks', 'Checks')
         + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
         + controls(item, d) + '</div>';
     }

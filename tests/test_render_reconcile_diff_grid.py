@@ -137,7 +137,7 @@ def test_the_card_after_the_second_read_question_first_folding_checks_example_an
                 result={"data": "partly", "query": "different", "label": "same rows, different columns", "unchecked": 0, "differs_in": ["columns"]}, fix="query", fix_words="fix your query")
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
     for token in ('<span class="title q">\' + esc(item.question) + \'</span>'.replace("\\", ""), "function verdict(item)", '<div class="vl">\' + esc(label) + \'</div>',
-                  "[item.label, item.source].filter(Boolean).join(' · ')", "<details class=\"sec\"".replace("\\", ""), "</summary>'", "section(item, 'data', 'The answer')",
+                  "[item.label, item.source].filter(Boolean).join(' · ')", "<details class=\"sec\"".replace("\\", ""), "</summary>'", "section(item, 'data', 'Data')",
                   "example: { word: 'add an example'", "function prefillFor(item, decision)", "['change', 'fix', 'reword', 'example'].includes(d.decision)",
                   "function suggestionFor(item)", "item.fix === 'examples' && item.keep_allowed ? 'keep'", '"prefill": {"change": "add values declared on x"'):
         assert token in html, token

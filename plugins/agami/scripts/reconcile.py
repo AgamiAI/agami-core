@@ -1916,7 +1916,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         add(_CLAIM_KEYS.get(name, name), state, yours, agami, note=note,
             yours_hi=_only(yours, agami) if state == "differs" else None, agami_hi=_only(agami, yours) if state == "differs" else None)
 
-    section = "model"
+    section = "checks"
     # 3 · every part of the person's statement the ledger graded, with agami's side where a receipt says.
     filters, metrics = _receipt_filters(agami_receipt), _receipt_metrics(agami_receipt)
     for part in ledger_rows:
@@ -1952,7 +1952,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
                 words.append(f"{mention.get('about') or mention.get('source') or 'the semantic model'}: \"{mention['text']}\"")
         # The fit judgment is about the statement against its question, which is the SQL section's
         # subject, not a check of the statement against the semantic model.
-        section = "sql" if fam == "question_fit" else "model"
+        section = "sql" if fam == "question_fit" else "checks"
         add(_part_key(pid), state, yours, agami, note=part.get("note") if state != "held" else None, family=fam)
     return rows, words
 
@@ -2134,7 +2134,7 @@ def _summaries(rows: list[dict], result: dict) -> dict:
     if fit and fit["state"] != "held":
         sql = "Your query might not answer the question. " + sql
 
-    model_rows = of("model")
+    model_rows = of("checks")
     # A rolled-up line stands for the checks it replaced, so the count is of CHECKS, not of lines.
     passed = sum(r.get("rolled", 1) for r in model_rows if r["state"] == "held")
     failed = [r for r in model_rows if r["state"] not in ("held", "noted")]
@@ -2146,7 +2146,7 @@ def _summaries(rows: list[dict], result: dict) -> dict:
     if failed:
         model += f" {_count_word(len(failed)).capitalize()} didn't: {failed[0]['key']}."
 
-    return {"data": data, "sql": sql, "model": model}
+    return {"data": data, "sql": sql, "checks": model}
 
 
 _DEFINITIONAL = {"tables read", "selects", "filters", "date window", "join keys", "grouped by"}
