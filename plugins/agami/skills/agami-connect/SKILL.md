@@ -508,7 +508,7 @@ Options: `Write it now (Other field)` / `Generate one for me (Recommended)` / `S
 - **Generate one for me** → bind `$DATASOURCE_DESCRIPTION = generate`. **Phase 2f** writes it once every table is enriched (see 2f), and the Phase 7 summary shows it as a draft they can edit.
 - **Skip** → leave it empty. Say plainly that `model_deploy` will warn about it, and that an agent picking between several datasources will be guessing from the name.
 
-If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask only whether to keep it.
+If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask `Keep it (Recommended)` / `Replace it` instead. **Keep it** → bind `$DATASOURCE_DESCRIPTION = keep`; nothing is written (re-introspection preserves it). **Replace it** → ask the three options above and bind from that answer.
 
 `chmod 644` whatever you write — these are **non-secret model files** and must stay readable (e.g. by the deploy container / a teammate reading a checked-in copy); never `chmod 600` them (that's for `local/` secrets only). See [`shared/organization-context-format.md`](../../shared/organization-context-format.md) for the content-routing rule (company-wide → root; per-database → the profile; per-column units → the structured model; personal → `USER_MEMORY.md`).
 
@@ -803,9 +803,14 @@ If the user **did** write a narrative in 1.4, leave it untouched. The glossary f
 
 **The one-line datasource description (from 1.4 C).** Act on `$DATASOURCE_DESCRIPTION` now, every onboard:
 - a line the user wrote → it was already written right after 1.7; nothing to do.
-- `generate` → synthesize **ONE line** from the subject-area and table descriptions you just wrote: what this datasource covers and the questions it answers (e.g. *"Invoices, payments, products and margins — use for revenue and profitability questions."*). Ground it in the model, never product memory. Write it:
+- `keep` → nothing to do; the existing description stays.
+- `generate` → synthesize **ONE line** from the subject-area and table descriptions you just wrote: what this datasource covers and the questions it answers (e.g. *"Invoices, payments, products and margins — use for revenue and profitability questions."*). Ground it in the model, never product memory. The line is built from database metadata, which can contain quotes, backticks or `$(…)`, so **never paste it inside a double-quoted argument** — bind it through a quoted heredoc and pass the variable:
   ```bash
-  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "<the line>"
+  DATASOURCE_DESCRIPTION=$(cat <<'AGAMI_DESCRIPTION'
+  <the line>
+  AGAMI_DESCRIPTION
+  )
+  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "$DATASOURCE_DESCRIPTION"
   ```
 - skipped → leave it; `datasource.yaml` keeps whatever description it already had (re-introspection preserves it).
 

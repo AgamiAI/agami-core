@@ -44,7 +44,9 @@ below corresponds to one such version.
   `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
   `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
   model, as it does for the database narrative — and `model_deploy` warns when a datasource is
-  deployed without one.
+  deployed without one. A generated line is passed to the command through a quoted heredoc, never
+  pasted into a shell argument, since database metadata can contain quotes or `$(…)`; a re-onboard
+  can keep an existing description.
 
 ### Fixed
 

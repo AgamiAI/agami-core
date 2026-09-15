@@ -128,10 +128,25 @@ def test_a_named_datasource_is_never_refused_for_omission(local, monkeypatch):
     assert tools._datasources_to_choose_from({"datasource": "acme_erp"}) is None
 
 
+def test_a_single_served_datasource_is_looked_up_once_even_with_a_fallback_set(local, monkeypatch):
+    """With `AGAMI_PROFILE` set, `resolve_profile` never reaches the cache-filling path, so this check
+    has to cache the one-datasource answer itself or every omitted call repeats the listing."""
+    calls = []
+    monkeypatch.setattr(tools, "_served_datasources", lambda org: calls.append(org) or ["acme_crm"])
+    monkeypatch.setenv("AGAMI_PROFILE", "acme_crm")
+
+    assert tools._datasources_to_choose_from({}) is None
+    assert tools._datasources_to_choose_from({}) is None
+    assert len(calls) == 1
+
+
 # --- a table-scope refusal names where the table is declared ---------------------------------------
 
 
 def _scope_refusal_envelope():
+    # The hint reads table names from the gates' own parse; without sqlglot it correctly leaves the
+    # refusal untouched, so these assertions only mean something where the parser is installed.
+    pytest.importorskip("sqlglot")
     refusal = guardrail.refuse(
         guardrail.RULE_TABLE_SCOPE,
         detail="query references table(s) not in the semantic model: invoices",
