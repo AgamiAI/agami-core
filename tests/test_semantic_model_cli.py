@@ -693,6 +693,19 @@ def test_set_terminology_writes_glossary_to_org_yaml(tmp_path):
         "MRR": "monthly recurring revenue", "ARR": "annual recurring revenue"}
 
 
+def test_set_description_writes_one_line_and_reports_json(tmp_path):
+    # the onboarding write path for the line list_datasources routes on: parser, JSON output, exit code.
+    from semantic_model.loader import load_datasource
+    _model(tmp_path)
+    rc, out = _run(["set-description", str(tmp_path), "--description", "Orders and refunds for sales questions."])
+    d = json.loads(out)
+    assert rc == 0 and d["validated"] and d["applied"] == ["description"]
+    assert load_datasource(tmp_path).description == "Orders and refunds for sales questions."
+
+    rc, out = _run(["set-description", str(tmp_path), "--description", "   "])
+    assert rc == 1 and json.loads(out)["errors"] == ["description is empty"]
+
+
 def test_curate_edit_sets_semantic_column_groups(tmp_path):
     # the column-group refinement write path: enrichment overwrites the engine's prefix
     # buckets with named semantic groups via a normal curate edit op.

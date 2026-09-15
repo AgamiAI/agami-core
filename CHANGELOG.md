@@ -12,37 +12,6 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-### Added
-
-- **An organisation can have its own row cap and statement time limit** (#329, engine half). Core
-  stores no such setting: an embedder registers a provider, `(org_id) -> {"max_rows", "timeout_s"}`,
-  through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
-  unusable value (not a positive whole number, or a provider that raises) falls back to
-  `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
-  the log. There is no ceiling. A time limit too large for the platform to arm a timer on (at or
-  above Python's `threading.TIMEOUT_MAX`, counting the supervisor's 60-second slack) is treated as
-  unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` alike.
-  - An evaluation run scores both statements of each case under the named organisation's limits.
-  - `tools.statement_limit_is_usable(key, value)` is the rule a provider's values are held to (a
-    positive whole number, and a timeout the platform can arm), public so a settings screen can
-    refuse at save time what the executor would otherwise decline on every statement.
-  - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
-    child is handed the same two numbers in its environment, so the watchdog, the native bound, the
-    outer bound and the supervisor still derive from one budget on both sides of the fork.
-  - `tools.statement_limits(org_id=None)` reports the limits in force for the current (or a named)
-    organisation; `tools.statement_limit_defaults()` reports the deployment values and the
-    recommended ones (1000 rows, 30 seconds). `tools.pinned_statement_limits(org_id)` lets a direct
-    caller of `execute_guarded` apply an organisation's limits.
-  - The `execute_sql` description states the caller's organisation's numbers, built when tools are
-    listed rather than once at start-up. A client keeps the list for its session, so a changed limit
-    reaches new sessions; an existing session meets it in the refusal, which names the number per call.
-- **`sm set-description`, and onboarding asks for a datasource description** (#327). The one line
-  `list_datasources` shows an agent to route a question by could only be hand-edited into
-  `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
-  `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
-  model, as it does for the database narrative — and `model_deploy` warns when a datasource is
-  deployed without one.
-
 ### Fixed
 
 - **A same-named table in another schema no longer passes as the declared one** (#332). With the
@@ -87,6 +56,56 @@ below corresponds to one such version.
     now refused when the model records the table's schema as `main`: the qualifier is compared as a
     schema. Write the table unqualified, or as `main.orders`.
 
+## [0.8.7] — 2026-09-15
+
+### Added
+
+- **An organisation can have its own row cap and statement time limit** (#329, engine half). Core
+  stores no such setting: an embedder registers a provider, `(org_id) -> {"max_rows", "timeout_s"}`,
+  through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
+  unusable value (not a positive whole number, or a provider that raises) falls back to
+  `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
+  the log. There is no policy ceiling, only what the engines can represent: a time limit whose native
+  setting — the limit plus the executor's 5-second skew — would pass seven days (604,800 seconds,
+  Snowflake's own maximum and the smallest among the supported engines; so 604,795 is the largest
+  usable limit) and a
+  row cap of 2,147,483,647 or more (the drivers fetch one row past the cap, in a 32-bit count) are
+  treated as unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` / `AGAMI_SQL_MAX_ROWS` alike.
+  - An evaluation run scores both statements of each case under the named organisation's limits.
+  - `tools.statement_limit_is_usable(key, value)` is the rule a provider's values are held to (a
+    positive whole number within those two bounds), public so a settings screen can refuse at save
+    time what the executor would otherwise decline on every statement.
+  - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
+    child is handed the same two numbers in its environment, so the watchdog, the native bound, the
+    outer bound and the supervisor still derive from one budget on both sides of the fork.
+  - `tools.statement_limits(org_id=None)` reports the limits in force for the current (or a named)
+    organisation; `tools.statement_limit_defaults()` reports the deployment values and the
+    recommended ones (1000 rows, 30 seconds). `tools.pinned_statement_limits(org_id)` lets a direct
+    caller of `execute_guarded` apply an organisation's limits.
+  - The `execute_sql` description states the caller's organisation's numbers, built when tools are
+    listed rather than once at start-up. A client keeps the list for its session, so a changed limit
+    reaches new sessions; an existing session meets it in the refusal, which names the number per call.
+- **`sm set-description`, and onboarding asks for a datasource description** (#327). The one line
+  `list_datasources` shows an agent to route a question by could only be hand-edited into
+  `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
+  `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
+  model, as it does for the database narrative — and `model_deploy` warns when a datasource is
+  deployed without one. A generated line is passed to the command through a quoted heredoc, never
+  pasted into a shell argument, since database metadata can contain quotes or `$(…)`; a re-onboard
+  can keep an existing description.
+
+### Fixed
+
+- **Follow-ups to per-organisation statement limits** (#334, #338):
+  - A row cap too large for the drivers to fetch (2,147,483,647 or more) and a time limit over seven
+    days now fall back to the deployment value, instead of failing every statement with an
+    `OverflowError` or a native timeout the engine rejects before the query runs.
+  - A provider mapping that raises when read falls back like a provider that raises, instead of
+    escaping the resolver.
+  - With a provider registered, the HTTP server's tool-visibility predicate runs in the request task
+    again, as `build_server` documents; only the descriptions are computed off the event loop.
+  - The `execute_sql` description no longer names "the deployment row ceiling" before stating the
+    caller's own row limit.
 - **A table outside the connection's default schema resolves when the client names it without its
   schema** (#258). A large model is served at the `summary` tier, whose area table lists carried a
   bare name, so the client wrote `FROM orders` and a warehouse keeping it in `sales_data` answered

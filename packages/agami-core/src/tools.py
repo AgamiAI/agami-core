@@ -344,6 +344,10 @@ def _datasources_to_choose_from(args: dict[str, Any]) -> "list[str] | None":
         # keeps, so an omitted call on a single-datasource organization adds no query.
         return None
     served = _served_datasources(org_id)
+    if served is not None and len(served) == 1:
+        # Cache the positive answer here too: with `AGAMI_PROFILE` or an active profile configured,
+        # `resolve_profile` returns before `_sole_served_datasource` can, so nothing else fills it.
+        _SOLE_SERVED[org_id] = served[0]
     if served is None or len(served) < 2:
         return None
     return served
@@ -2083,8 +2087,10 @@ def set_statement_limits_provider(
 
     ``provider(org_id)`` returns ``{"max_rows": int | None, "timeout_s": int | None}`` or ``None``. A
     missing key, a ``None``, or a ``None`` result means "this organisation has no limit of its own" and
-    the deployment's environment value applies. There is no ceiling: an administrator may set either
-    number to any positive whole number. Called by ``mcp_http.create_app`` from
+    the deployment's environment value applies. There is no policy ceiling, only what the engines can
+    represent: either number may be any positive whole number except a row cap of ``2**31 - 1`` or
+    more and a timeout over 604,800 seconds, which fall back like any other unusable value (see
+    ``statement_limit_is_usable``). Called by ``mcp_http.create_app`` from
     ``adapters.statement_limits``; an embedder with no HTTP app may call it directly."""
     global _STATEMENT_LIMITS_PROVIDER
     if provider is not None and not callable(provider):
@@ -2094,19 +2100,17 @@ def set_statement_limits_provider(
     _STATEMENT_LIMITS_PROVIDER = provider
 
 
-_STATEMENT_LIMIT_KEYS = ("max_rows", "timeout_s")
-
-
 def statement_limit_is_usable(key: str, value: Any) -> bool:
     """Whether ``value`` is a limit the executor would enforce for ``key`` (``max_rows`` or
     ``timeout_s``) — the rule the provider's values are held to, exposed so a settings screen can refuse
     at save time what the executor would otherwise decline, with a warning, on every statement.
 
     A positive ``int``, and not a ``bool``: ``True`` reaching the row cap as ``1`` is a storage bug that
-    would look like a setting. There is no ceiling (#329), but a timeout the platform cannot arm is not
-    a setting either — see ``execute_sql._timeout_is_representable`` for how one would disable the
-    abandoned-worker cap. An unknown ``key`` raises ``ValueError``: that is the caller's bug, not a value
-    to decline."""
+    would look like a setting. There is no ceiling (#329), but a number the engines cannot represent is
+    not a setting either: a timeout over seven days (``execute_sql._timeout_is_representable``) and a
+    row cap whose ``cap + 1`` fetch overflows a 32-bit count (``execute_sql._row_cap_is_representable``).
+    The environment values are held to the same checks. An unknown ``key`` raises ``ValueError``: that
+    is the caller's bug, not a value to decline."""
     if key not in _STATEMENT_LIMIT_KEYS:
         raise ValueError(f"unknown statement limit {key!r}; expected one of {_STATEMENT_LIMIT_KEYS}")
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -2115,7 +2119,9 @@ def statement_limit_is_usable(key: str, value: Any) -> bool:
         from execute_sql import _timeout_is_representable
 
         return _timeout_is_representable(value)
-    return True
+    from execute_sql import _row_cap_is_representable
+
+    return _row_cap_is_representable(value)
 
 
 def _provider_limit(org_id: str, key: str, value: Any) -> int | None:
@@ -2155,6 +2161,21 @@ def _effective_statement_limits(org_id: str | None) -> tuple[int, int]:
     org_id = org_id or _current_org_id()
     try:
         supplied = provider(org_id)
+        if supplied is not None and not isinstance(supplied, Mapping):
+            _LOG.warning(
+                "statement limits provider returned %r for org %s, not a mapping; using the "
+                "deployment values.",
+                type(supplied).__name__,
+                org_id,
+            )
+            supplied = None
+        # Read INSIDE the guard, and read once. Any `Mapping` is allowed, so a lazy or custom one can
+        # run the consumer's code on `get` just as the call itself does — and a raise there is the
+        # provider failing, not a bug of ours to let escape the resolver. `is not None` rather than
+        # truthiness, so its `__bool__`/`__len__` is never asked either.
+        values = (
+            {key: supplied.get(key) for key in _STATEMENT_LIMIT_KEYS} if supplied is not None else {}
+        )
     except Exception:
         # The provider is the consumer's code, usually a database read. Failing it must not fail the
         # statement: the deployment's own limits are a safe, known answer, and the log carries why.
@@ -2163,17 +2184,9 @@ def _effective_statement_limits(org_id: str | None) -> tuple[int, int]:
             org_id,
             exc_info=True,
         )
-        supplied = None
-    if supplied is not None and not isinstance(supplied, Mapping):
-        _LOG.warning(
-            "statement limits provider returned %r for org %s, not a mapping; using the deployment "
-            "values.",
-            type(supplied).__name__,
-            org_id,
-        )
-        supplied = None
+        values = {}
     for key in _STATEMENT_LIMIT_KEYS:
-        value = _provider_limit(org_id, key, (supplied or {}).get(key))
+        value = _provider_limit(org_id, key, values.get(key))
         if value is not None:
             limits[key] = value
     return limits["max_rows"], limits["timeout_s"]
@@ -3892,9 +3905,12 @@ TOOLS: dict[str, dict[str, Any]] = {
             "  {status:'refused', refusal:{reason, rule, detail, remediation}, receipt, audit_id} "
             "— OUR decision, so it always names its fix: relay the `remediation`, it says how to "
             "get an answer. SELECT-only is enforced, so DML/DDL/multi-statement arrive here, as "
+            # "The row limit", with no owner and no number: the next sentence states the number that
+            # applies to this caller, and naming "the deployment" here would advertise a second cap
+            # whenever an organisation has its own (#329).
             "do an out-of-scope table or column, a per-statement deadline, and a result larger "
-            "than the deployment row ceiling (refused rather than trimmed, so a partial answer "
-            "never arrives looking whole).\n"
+            "than the row limit (refused rather than trimmed, so a partial answer never arrives "
+            "looking whole).\n"
             # The numbers behind the two limits above (#326); see `_execute_sql_limits_sentence`.
             # Replaced per caller at list-tools time (#329); see `tool_description`.
             + _EXECUTE_SQL_LIMITS_AT_IMPORT

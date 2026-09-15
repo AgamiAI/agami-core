@@ -1544,15 +1544,22 @@ def _pin_statement_limits(max_rows: int, timeout_s: int) -> Token[tuple[int, int
 def _row_cap_from_env() -> int:
     """The DEPLOYMENT row cap: `AGAMI_SQL_MAX_ROWS`, default 1000 when unset. An operator owns their
     availability tradeoff and may set it higher OR lower than 1000; it is NOT a hard 1000 ceiling. A
-    missing/invalid/zero env value falls back to 1000."""
+    missing/invalid/zero/unrepresentable env value falls back to 1000."""
     raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
     # `isdecimal`, not `isdigit`, for the reason `_timeout_s_from_env` gives: `isdigit` admits `²`,
     # which `int()` then refuses. `tools` now resolves this while building its registry, so a raise
     # here would stop the module importing at all rather than failing one call.
     cap = int(raw) if raw.isdecimal() else _DEFAULT_MAX_ROWS
-    if cap <= 0:
+    if cap <= 0 or not _row_cap_is_representable(cap):
         cap = _DEFAULT_MAX_ROWS  # "0" / "00" → the default, never an empty result
     return cap
+
+
+def _row_cap_is_representable(cap: int) -> bool:
+    """Whether the drivers can be asked for this cap. Not a ceiling (#329): every engine fetches
+    `cap + 1` rows in one call (`fetchmany`, psycopg2's `itersize`), and the C drivers hold that count
+    in a signed 32-bit int — past it the fetch raises `OverflowError` after the statement has run."""
+    return cap + 1 <= 2**31 - 1
 
 
 def _resolve_row_cap() -> int:
@@ -1646,9 +1653,14 @@ def _timeout_is_representable(timeout_s: int) -> bool:
     wait all refuse a timeout at or above `threading.TIMEOUT_MAX` with an `OverflowError`. The outer
     bound raises it AFTER its worker has started and BEFORE the abandonment is counted, so an
     unrepresentable budget would not merely fail one call: it would leave `_MAX_ABANDONED_WORKERS`
-    bounding nothing. The largest derived bound is the supervisor's, so that is the one checked, and a
-    value failing it is treated as unusable like any other and falls back to the deployment's."""
-    return timeout_s + _SUPERVISOR_SKEW_S < threading.TIMEOUT_MAX
+    bounding nothing. The engines' native backstops are narrower still: Snowflake's
+    `STATEMENT_TIMEOUT_IN_SECONDS` stops at 604,800 (seven days), the smallest maximum among the
+    engines, and Postgres's `statement_timeout` is an int32 of milliseconds — past either, the native
+    bound fails before the query runs. Seven days is inside every one of those, so it is the one bound
+    checked, and a value past it is treated as unusable like any other and falls back to the
+    deployment's. It is checked on the NATIVE value, which is the budget plus `_NATIVE_BOUND_SKEW_S`,
+    because that is the number the engine receives — so the largest usable budget is 604,795."""
+    return timeout_s + _NATIVE_BOUND_SKEW_S <= 604_800
 
 
 def _timeout_s_from_env() -> int:
@@ -2703,9 +2715,11 @@ def _execute_bounded(
 
     The call runs inside a copy of the CALLER's context, and what that is FOR changed when the
     per-call row cap went (ACE-087). It used to carry ``_max_rows_override`` to ``_resolve_row_cap``
-    inside the worker; that override is gone. It now also carries the call's pinned organisation
-    limits (``_statement_limits``, #329), though nothing in the worker reads them today — every bound
-    is derived on the caller's side. What it chiefly carries is the *caller's* request scope — ``tools._current_org_ctx``, the resolve-once
+    inside the worker; that override is gone. It now carries the call's pinned organisation limits
+    (``_statement_limits``, #329), and that is load-bearing: the built-in executor's engine functions
+    run in this worker and call ``_resolve_timeout_s`` (watchdog, native bound) and
+    ``_resolve_row_cap`` (the fetch window) there, so without the copy they would silently enforce the
+    deployment's limits instead of the organisation's. It also carries the *caller's* request scope — ``tools._current_org_ctx``, the resolve-once
     request cache, the actor and session on the served path — into the one place a consumer's own
     code runs. That is the point of the ``Executor`` seam: a pooled / per-user-RBAC executor picks
     its connection from exactly that context, and a new thread starts with an empty one, so dropping
