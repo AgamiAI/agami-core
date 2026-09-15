@@ -6,8 +6,9 @@ name: CI
 
 on:
   pull_request:
-    # `ready_for_review` so a draft, which runs no tests below, is tested the moment it is marked ready.
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `ready_for_review` so a draft, which runs no tests below, is tested the moment it is marked ready;
+    # `converted_to_draft` so turning a PR back into a draft starts a run that cancels the full one.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
 
@@ -82,6 +83,9 @@ jobs:
     name: lint + test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     needs: changes
+    # Runs even when `changes` failed, so the first step can fail it: a skipped required check counts
+    # as passed, and a broken classifier must never merge a PR whose tests did not run.
+    if: ${{ !cancelled() }}
     # Skipped inside each step rather than by `if:`, for two reasons. A skipped matrix job reports
     # one check under its unexpanded name, and branch protection requires the three
     # `lint + test (py3.x)` names, so the PR could never merge. And the coverage step's condition
@@ -93,6 +97,11 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
+      - name: the change check succeeded
+        if: needs.changes.result != 'success'
+        run: |
+          echo "'what changed' ended ${{ needs.changes.result }}, so nothing here may be skipped"
+          exit 1
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
