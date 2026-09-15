@@ -3500,10 +3500,20 @@ def require_thread_id(registry: dict[str, dict[str, Any]]) -> dict[str, dict[str
         schema = meta.get("inputSchema") or {}
         properties = schema.get("properties") or {}
         required = list(schema.get("required") or ())
-        if "thread_id" not in properties or "thread_id" in required:
+        prop = properties.get("thread_id")
+        if prop is None or ("thread_id" in required and "pattern" in prop):
             out[name] = meta
             continue
-        out[name] = {**meta, "inputSchema": {**schema, "required": [*required, "thread_id"]}}
+        # A blank id satisfies `required` without naming a conversation (#257). A pattern the tool
+        # already declares is kept, so the promotion never widens what it accepts.
+        out[name] = {
+            **meta,
+            "inputSchema": {
+                **schema,
+                "properties": {**properties, "thread_id": {"pattern": r"\S", **prop}},
+                "required": required if "thread_id" in required else [*required, "thread_id"],
+            },
+        }
     return out
 
 
