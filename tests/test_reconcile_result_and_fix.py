@@ -110,7 +110,7 @@ def test_columns_are_compared_by_data_and_a_renamed_column_is_the_same_column(tm
     assert items[1]["result"]["label"] == "same rows, different columns" and items[1]["fix"] == "query"
     assert rows1["columns"]["state"] == "defect" and rows1["columns"]["yours_hi"] == ["planned_ship_date", "delivered_at", "channel"] and rows1["columns"].get("agami_hi") in (None, [])
     assert rows1["columns"]["note"] is None and ["number", "o.number"] in rows1["columns"]["renamed"]
-    assert rows1["values"]["state"] == "held" and rows1["values"]["yours"] == "identical on the 5 paired columns"
+    assert rows1["values"]["state"] == "held" and rows1["values"]["yours"] == "The values match."
     assert items[1]["prefill"]["fix"] == "remove planned_ship_date, delivered_at, channel"
     rows2 = {r["key"]: r for r in items[2]["diff"]}
     assert items[2]["result"]["label"] == "match" and rows2["columns"]["state"] == "held" and rows2["columns"]["renamed"] == [["number", "o.number"], ["status", "o.status"]]

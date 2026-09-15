@@ -91,29 +91,29 @@ def test_a_value_check_that_failed_keeps_every_member_visible():
 
 
 def test_a_summary_names_the_exception_and_counts_when_there_is_none():
-    rows = [_row("values", "held", "data", yours="9 of 10 rows match"),
+    rows = [_row("values", "held", "data", yours="9 of 10 rows match."),
             _row("columns", "defect", "data", yours=["a", "b"], yours_hi=["b"]),
             _row("tables read", "differs", "sql"), _row("limit", "held", "sql"),
             _row("12 values checked, all exist", "held", "model", "literal", rolled=12),
             _row("default filter on orders", "gap", "model", "default_filter")]
     s = reconcile._summaries(rows, {"label": "different answer", "data": "differs"})
-    assert s["data"] == "9 of 10 rows match · 1 column only yours"
-    assert s["sql"] == "1 of 2 differ: tables read"
+    assert s["data"] == "9 of 10 rows match. Your query returns one more column."
+    assert s["sql"] == "The two queries differ in tables read."
     # the roll-up stands for the checks it replaced, so the count is of checks, not of lines
-    assert s["model"] == "12 passed · 1 did not: default filter on orders"
+    assert s["model"] == "12 checks passed. One didn't: default filter on orders."
 
 
 def test_a_doubtful_fit_leads_the_sql_summary_because_it_is_the_thing_worth_opening():
     rows = [_row("answers the question", "open", "sql", "question_fit", yours="doubtful"),
             _row("limit", "differs", "sql")]
     s = reconcile._summaries(rows, {"label": "different answer", "data": "differs"})
-    assert s["sql"].startswith("answers the question: doubtful · ")
+    assert s["sql"].startswith("Your query might not answer the question.")
 
 
 def test_a_row_that_could_not_be_compared_reads_its_label():
     rows = [_row("answer", "open", "data", yours="failed")]
     s = reconcile._summaries(rows, {"label": "different query, answer not compared", "data": "could_not_compare"})
-    assert s["data"] == "different query, answer not compared"
+    assert s["data"] == "The two queries differ, and the answers weren't compared."
 
 
 # --- the sample ----------------------------------------------------------------------------------
@@ -233,8 +233,8 @@ def test_differing_row_counts_never_read_as_a_percentage_of_values():
     # compared", not "nothing matched". A school can sit in both results while this reads 0%.
     rows, _ = reconcile._diff_rows(_table_rec(5, 1), None)
     values = next(r for r in rows if r["key"] == "values")
-    assert values["state"] == "open" and values["yours"] == "not compared row by row"
-    assert values["note"] == "your query returned 5 rows and agami's 1 row, so the two results were not lined up"
+    assert values["state"] == "open" and values["yours"] == "The results weren't compared."
+    assert values["note"] == "Your query returned 5 rows and agami's returned 1 row, so they couldn't be lined up row by row."
     assert "%" not in str(values["yours"])
     # and the sentence says the same thing rather than naming columns
     assert reconcile._sentence(_table_rec(5, 1), rows).startswith("Your query returned 5 rows")

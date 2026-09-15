@@ -1835,28 +1835,28 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         n_rows = result_set.get("golden_row_count")
         if acc is not None:
             same = float(acc) >= 1.0
-            paired_word = f"the {len(pairs)} paired column{'s' if len(pairs) != 1 else ''}"
+            paired_word = "the columns both queries return"
             if same:
                 add("values", "held", "identical", None)
             elif pairs and share is not None:
                 # The comparator says how many rows agree over the paired columns, and which pair
                 # disagrees on how many rows; the card reads those numbers rather than a 0.
                 if float(share) >= 1.0:
-                    add("values", "held", f"identical on {paired_word}", None,
-                        note="a column of yours has no partner; the paired columns match")
+                    add("values", "held", "The values match.", None,
+                        note=f"Compared {paired_word}. Your query returns others that agami's doesn't.")
                 else:
                     if isinstance(n_rows, int) and n_rows > 0:
                         agree = round(float(share) * n_rows)
-                        text = f"{agree} of {n_rows} rows match"
+                        text = f"{agree} of {n_rows} rows match."
                         weak = [f"{a} on {n_rows - round(g * n_rows)} of {n_rows} rows"
                                 for (a, _b), g in zip(pairs, agreement) if isinstance(g, (int, float)) and g < 1.0]
                     else:
-                        text, weak = f"{float(share):.0%} of the rows match", []
+                        text, weak = f"{float(share):.0%} of the rows match.", []
                     add("values", "defect", text, None, note=("differs in " + ", ".join(weak)) if weak else None)
             elif pairs and result_set.get("unmatched_golden_columns"):
                 # An older score file without the share: every pair it reports agreed by construction.
-                add("values", "held", f"identical on {paired_word}", None,
-                    note="a column of yours has no partner; the paired columns match")
+                add("values", "held", "The values match.", None,
+                    note=f"Compared {paired_word}. Your query returns others that agami's doesn't.")
             else:
                 gc, ac_n = result_set.get("golden_row_count"), result_set.get("generated_row_count")
                 if isinstance(gc, int) and isinstance(ac_n, int) and gc != ac_n:
@@ -1864,11 +1864,11 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
                     # was compared. Printing its 0.0 as "0% of the values match" reports an artefact
                     # of the method as a fact about the data, on a row where a school can sit in both
                     # results. Say what actually happened instead.
-                    add("values", "open", "not compared row by row", None,
-                        note=f"your query returned {_rows_word(gc)} and agami's {_rows_word(ac_n)}, "
-                             "so the two results were not lined up")
+                    add("values", "open", "The results weren't compared.", None,
+                        note=f"Your query returned {_rows_word(gc)} and agami's returned {_rows_word(ac_n)}, "
+                             "so they couldn't be lined up row by row.")
                 else:
-                    add("values", "defect", f"{float(acc):.0%} of the values match", None,
+                    add("values", "defect", f"{float(acc):.0%} of the values match.", None,
                         note=_in_our_words(result_set.get("reason")))
     else:
         match = rec.get("match") if rec.get("match") is not None else (scalar or {}).get("match")
@@ -2083,6 +2083,22 @@ def _read_csv(path: Path) -> list[list[str]]:
         return [row for row in csv.reader(fh)]
 
 
+_COUNT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+
+
+def _count_word(n: int) -> str:
+    """Words for nine and under, numerals above, per the Microsoft style guide. Row counts and
+    measured values keep their numerals wherever they are: those are data, not prose."""
+    return _COUNT_WORDS[n] if 0 <= n < len(_COUNT_WORDS) else f"{n:,}"
+
+
+def _and_list(items: list[str]) -> str:
+    """`a`, `a and b`, `a, b, and c`. The serial comma, per the same guide."""
+    if len(items) < 3:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
 def _summaries(rows: list[dict], result: dict) -> dict:
     """One line per section, read while the section is closed.
 
@@ -2098,30 +2114,38 @@ def _summaries(rows: list[dict], result: dict) -> dict:
     values = next((r for r in data_rows if r["key"] in ("values", "answer")), None)
     counts = next((r for r in data_rows if r["key"] == "rows"), None)
     if result.get("data") == "could_not_compare":
-        data = result.get("label") or "could not compare"   # nothing was measured; the label is the whole truth
+        # The label is a chip's worth of words; a summary is a sentence.
+        data = {"same query, answer not compared": "The two queries match, but the answers weren't compared.",
+                "different query, answer not compared": "The two queries differ, and the answers weren't compared.",
+                "could not compare": "The answers weren't compared."}.get(
+            result.get("label") or "", "The answers weren't compared.")
     else:
         data = (values or {}).get("yours") or (counts or {}).get("yours") or result.get("label") or "not compared"
+    data = str(data).rstrip(".") + "."
     extra = next((r for r in data_rows if r["key"] == "columns" and r["state"] != "held"), None)
     if extra and extra.get("yours_hi"):
         n = len(extra["yours_hi"])
-        data += f" · {n} column{'s' if n > 1 else ''} only yours"
+        data += f" Your query returns {_count_word(n)} more column{'s' if n > 1 else ''}."
 
     sql_rows = of("sql")
     differs = [r["key"] for r in sql_rows if r["state"] == "differs"]
     fit = next((r for r in sql_rows if r.get("family") == "question_fit"), None)
-    sql = f"{len(differs)} of {len(sql_rows) - (1 if fit else 0)} differ: " + ", ".join(differs) if differs else "the two queries claim the same things"
+    sql = ("The two queries differ in " + _and_list(differs) + ".") if differs else "The two queries ask for the same things."
     if fit and fit["state"] != "held":
-        sql = f"answers the question: {fit.get('yours') or 'doubtful'} · " + sql
+        sql = "Your query might not answer the question. " + sql
 
     model_rows = of("model")
     # A rolled-up line stands for the checks it replaced, so the count is of CHECKS, not of lines.
     passed = sum(r.get("rolled", 1) for r in model_rows if r["state"] == "held")
     failed = [r for r in model_rows if r["state"] not in ("held", "noted")]
-    model = f"{passed} passed"
+    if not failed:
+        model = {0: "Nothing to check.", 1: "The check passed.", 2: "Both checks passed."}.get(
+            passed, f"All {passed} checks passed.")
+    else:
+        model = f"{passed} check{'' if passed == 1 else 's'} passed."
     if failed:
-        model += f" · {len(failed)} did not: " + failed[0]["key"]
-    elif model_rows:
-        model += " · nothing to fix"
+        model += f" {_count_word(len(failed)).capitalize()} didn't: {failed[0]['key']}."
+
     return {"data": data, "sql": sql, "model": model}
 
 
@@ -2448,6 +2472,14 @@ def _measured_mistakes(rec: dict) -> list[str]:
             if p.get("verdict") == QUERY_DEFECT and _part_family(p.get("part", "")) not in ("runs", "predicates", "date_window")]
 
 
+def _one_sentence(text: Any, cap: bool = True) -> str:
+    """Text as one sentence: capitalised unless it opens with the product's name, and stopped once."""
+    said = str(text).strip().rstrip(".")
+    if cap and said:
+        said = said[0].upper() + said[1:]
+    return said + "."
+
+
 def _sentence(rec: dict, diff: list[dict]) -> str:
     status = rec.get("status")
     red = [r["key"] for r in diff if r["state"] in ("defect", "differs") and r["key"] not in ("answer", "rows", "values")]
@@ -2472,14 +2504,13 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
     scalar = next((r for r in diff if r["key"] == "answer"), None)
     measured = (values or {}).get("yours")          # the comparator's own phrasing, "9 of 10 rows match"
     if measured and " of " in str(measured):
-        return f"{measured}."
+        return _one_sentence(measured)
     if values is not None and values.get("state") == "open" and values.get("note"):
         # Nothing was compared. Saying which columns differ here would imply the values were looked
         # at and found wanting, which is the thing that made this card unreadable.
-        note = values["note"]
-        return f"{note[0].upper()}{note[1:]}."
+        return _one_sentence(values["note"])
     if scalar and scalar.get("note"):               # a number: how far apart the two are
-        return f"{scalar['note']}."                 # left as written: the product's name is lowercase
+        return _one_sentence(scalar["note"], cap=False)   # the product's name is lowercase
     where = [k for k in red + gaps if k in ("columns", "rows")]
     if where:
         return "The two answers differ in " + ", ".join(where) + "."

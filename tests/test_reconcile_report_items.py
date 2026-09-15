@@ -141,7 +141,7 @@ def test_gaps_the_ledger_measured_own_the_change_even_when_the_fit_is_doubtful_a
     assert rows["filters"]["yours"] == ["request_items.approval = 'Requested'", "requests.state = 'Work in Progress'",
                                         "requests.opened ≥ date_trunc(current_date, year) + interval 7 months"]
     assert rows["filters"]["yours_hi"] == ["requests.state = 'Work in Progress'", "requests.opened ≥ date_trunc(current_date, year) + interval 7 months"]
-    assert rows["values"]["yours"] == "50% of the values match" and rows["values"]["agami"] is None
+    assert rows["values"]["yours"] == "50% of the values match." and rows["values"]["agami"] is None
     assert item["sql_yours"].startswith("SELECT r.number") and item["sql_agami"].startswith("SELECT i.request")
     assert [r["key"] for r in item["diff"] if r["key"].startswith("metric")] == []
 
@@ -355,7 +355,7 @@ def _table(row, **score):
 def test_one_differing_cell_reads_as_rows_that_match_and_the_column_that_differs(tmp_path):
     items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [_table(1)]))}
     rows = {r["key"]: r for r in items[1]["diff"]}
-    assert rows["values"]["state"] == "defect" and rows["values"]["yours"] == "9 of 10 rows match"
+    assert rows["values"]["state"] == "defect" and rows["values"]["yours"] == "9 of 10 rows match."
     assert rows["values"]["note"] == "differs in total on 1 of 10 rows"
     assert rows["columns"]["state"] == "held" and rows["columns"]["renamed"] == [["total", "amount"]]
     assert items[1]["result"]["data"] == "differs" and items[1]["result"]["label"] == "different answer"
@@ -370,7 +370,7 @@ def test_paired_columns_agreeing_on_every_row_beside_an_unpaired_one_read_partly
     both["statement_recorded"] = {"columns": ["customer", "total", "channel"], "row_count": 10}
     items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [partly, both]))}
     rows = {r["key"]: r for r in items[1]["diff"]}
-    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical on the 2 paired columns"
+    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "The values match."
     assert items[1]["result"]["data"] == "partly" and items[1]["result"]["label"] == "same rows, different columns"
     assert items[2]["result"]["data"] == "differs"
 
@@ -380,7 +380,7 @@ def test_an_older_score_without_the_share_keeps_the_paired_columns_grace(tmp_pat
     del old["comparison"]["result_set"]["column_agreement"]; del old["comparison"]["result_set"]["paired_row_share"]
     old["statement_recorded"] = {"columns": ["customer", "total", "channel"], "row_count": 10}
     rows = {r["key"]: r for r in reconcile.report_items(_run(tmp_path, [old]))[0]["diff"]}
-    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical on the 2 paired columns"
+    assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "The values match."
 
 
 def test_each_error_cause_names_the_side_that_failed(tmp_path):
