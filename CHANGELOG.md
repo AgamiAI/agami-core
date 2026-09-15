@@ -14,6 +14,19 @@ below corresponds to one such version.
 
 ### Changed
 
+- **A verdict a person reads is a sentence, not a code word.** A row could read `expected_doubtful`,
+  which is the row where the analyst's own query is the thing in doubt, and a check could read
+  `fan_out: SUM(total)`, the one word the skill's own plain-language rule forbids. The tokens stay
+  on the wire, where `rows.jsonl`, the keep gate and the `status` verb are pinned to them; what a
+  person sees now comes from one table in `reconcile.py` and nowhere else. A row reads "same
+  answer", "same answer, but part of your query could not be checked", "different answer",
+  "different answer, and your query has a problem", or "could not compare", so the status says both
+  of the facts it carries: whether the two answers agreed, and whether the analyst's own query
+  checked out. The report page is handed the colour family and the filter-chip words with its items
+  and keeps no glossary of its own, so the card, the chips and the chat cannot drift into calling
+  one row three things. `shared/plain-language.md` points at the table rather than restating it, and
+  a test refuses a status token in any line the skill puts in front of a person.
+
 - **The result comparator pairs a column that mostly agrees instead of calling it missing.** One
   differing cell used to unpair a column: the score fell to 0 with "no generated column carries the
   values of: total" for a column agreeing on nine rows of ten, and every reader keyed on the pairs

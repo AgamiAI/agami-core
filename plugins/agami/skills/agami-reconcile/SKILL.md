@@ -344,10 +344,10 @@ Everything this phase says to the person follows [`shared/plain-language.md`](..
 Reconciled <N> numbers: <M> match (within ±1%), <K> mismatch, <E> error.
 ```
 
-When any row carried a statement, add one more line, counting the two statuses that belong to neither `<M>` nor `<K>`:
+When any row carried a statement, add one more line, counting the two statuses that belong to neither `<M>` nor `<K>`. Say each status in the words `reconcile.py`'s `status_words` gives it and never the status itself: a person reading `expected_doubtful` has to look it up, and that is the row where their own query is the thing in doubt:
 
 ```
-<U> agreed but a part of your statement could not be confirmed (match_unverified); <D> expected values are in doubt because your statement had a defect (expected_doubtful).
+<U> gave the same answer, but part of your query could not be checked; <D> gave a different answer, and your query has a problem in them.
 ```
 
 ### 3a.5 — Every row in four beats
@@ -421,19 +421,19 @@ Only when a row carried a statement, and only for the parts that did not grade `
 ```markdown
 ### Your statements
 
-| Label | Part | Grade | What the ledger found |
+| Label | Checked | Grade | What the ledger found |
 |---|---|---|---|
-| Delivered orders | literal: orders.status = 'Delivered' | query_defect | not one of the values the semantic model lists, and no row holds it; did you mean 'delivered' |
-| Paid revenue     | join: orders-payments              | query_defect | the join is on a different key than the one the semantic model declares |
-| Q3 Revenue       | default_filter: orders             | model_gap    | the semantic model declares this filter and the statement does not apply it |
-| Open items       | values_declared: items.state       | model_gap    | the column holds 6 distinct values and the semantic model lists none of them |
+| Delivered orders | value orders.status = 'Delivered' | a mistake in your query        | not one of the values the semantic model lists, and no row holds it; did you mean 'delivered' |
+| Paid revenue     | join orders to payments           | a mistake in your query        | the join is on a different key than the one the semantic model declares |
+| Q3 Revenue       | default filter on orders          | the semantic model is missing this | the semantic model declares this filter and the statement does not apply it |
+| Open items       | value list for items.state        | the semantic model is missing this | the column holds 6 distinct values and the semantic model lists none of them |
 
 **What couldn't be checked**
-- Q3 Revenue, fan_out: SUM(total): the pre-flight could not bind this aggregate to one table: a column inside the aggregate could not be attributed to one table
-- Orders placed, question_fit: the statement may not answer the question: the question asks how many orders were placed and the statement counts order items; reword the question or the statement and re-run this row
+- Q3 Revenue, double counting in SUM(total): the pre-flight could not bind this aggregate to one table: a column inside the aggregate could not be attributed to one table
+- Orders placed, answers the question: the statement may not answer the question: the question asks how many orders were placed and the statement counts order items; reword the question or the statement and re-run this row
 
 **What this run noticed**
-- Open items, dropped_rows: items-users: 3 of 8345 items rows have no users partner and are dropped by this inner join; counted over the whole table, before the statement's own filters; rows of users with no items partner were not counted
+- Open items, rows the join leaves out, items to users: 3 of 8345 items rows have no users partner and are dropped by this inner join; counted over the whole table, before the statement's own filters; rows of users with no items partner were not counted
 
 **What the semantic model says in words**
 - items.state, column caveat: "open is state NOT LIKE 'Closed%'"
@@ -442,7 +442,7 @@ Only when a row carried a statement, and only for the parts that did not grade `
 - Two of these name different values for items.state. The semantic model disagrees with itself here; which is right is the person's call.
 ```
 
-Say the kinds apart in one sentence each: a `query_defect` is the person's to fix, and nothing about agami changes because of it; a `model_gap` is a place the data proved their statement right where the semantic model is missing or wrong, and a single fix still goes through `/agami-save-correction` (an undeclared value list is a field's `choice_field`, the `field_metadata` route). An `unresolved` part is neither: it says what could not be checked and why, and it sits in its own block so nobody counts it as a defect. Say every one of these in the words of [`shared/plain-language.md`](../../shared/plain-language.md): "the join repeats rows, so the total counts some rows more than once", never "fan-out"; "the table also holds bundles and variants", never "anti-join the child tables". A `noted` part is not a grade at all: a fact the run states and never judges, in the last block. Under all of that, when a row above carries `evidence.prose`, one line per source quoting what the semantic model already says in words about that column or table, and one sentence when two of those lines name different values: the semantic model disagrees with itself, and which is right is the person's call, never the ledger's.
+Say the kinds apart in one sentence each: a `query_defect` is the person's to fix, and nothing about agami changes because of it; a `model_gap` is a place the data proved their statement right where the semantic model is missing or wrong, and a single fix still goes through `/agami-save-correction` (an undeclared value list is a field's `choice_field`, the `field_metadata` route). An `unresolved` part is neither: it says what could not be checked and why, and it sits in its own block so nobody counts it as a defect. Every grade and every part name already has its words in `reconcile.py` (`_STATUS_WORDS`, `_STATE_WORDS`, `_PART_WORDS`, `_PART_KEYS`), which is what the report page renders; use those, so the table in chat and the card on the page call the same thing the same name. Say every one of these in the words of [`shared/plain-language.md`](../../shared/plain-language.md): "the join repeats rows, so the total counts some rows more than once", never "fan-out"; "the table also holds bundles and variants", never "anti-join the child tables". A `noted` part is not a grade at all: a fact the run states and never judges, in the last block. Under all of that, when a row above carries `evidence.prose`, one line per source quoting what the semantic model already says in words about that column or table, and one sentence when two of those lines name different values: the semantic model disagrees with itself, and which is right is the person's call, never the ledger's.
 
 ### 3c — Errors block (if any)
 

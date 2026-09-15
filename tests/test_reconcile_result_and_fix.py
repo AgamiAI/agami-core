@@ -119,8 +119,8 @@ def test_columns_are_compared_by_data_and_a_renamed_column_is_the_same_column(tm
 def test_the_change_text_the_prefill_and_the_fix_come_from_one_source(tmp_path):
     items = _items(tmp_path, [dict(GAPS_AND_GRAIN, row=1), dict(DEFECT, row=2)])
     gaps = items[1]
-    assert gaps["fix"] == "semantic_model" and gaps["change"][0].startswith("The semantic model is missing: values declared on")
-    assert gaps["prefill"]["change"].startswith("add values declared on") and gaps["prefill"]["reword"] == GAPS_AND_GRAIN["question"]
+    assert gaps["fix"] == "semantic_model" and gaps["change"][0].startswith("The semantic model is missing: value list for")
+    assert gaps["prefill"]["change"].startswith("add value list for") and gaps["prefill"]["reword"] == GAPS_AND_GRAIN["question"]
     assert gaps["change"][1].startswith("Also:")  # the doubtful fit rides along as a second line
     defect = items[2]
     assert defect["fix"] == "query" and defect["prefill"]["fix"] == "value orders.status='Delivered'"

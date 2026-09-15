@@ -52,13 +52,20 @@ The ledger's words describe machinery, and a first draft reaches for machinery w
 | model_gap | the semantic model is missing `<what>` or has it wrong |
 | noted | worth knowing; not a problem with your query or the semantic model |
 | scope gate, refused | agami does not expose that table (or column), so it would not run this |
-| expected_doubtful | your own number is in doubt, because `<the mistake>` |
-| match_unverified | the numbers match, but one check on your query could not be confirmed, so the match may be luck |
+| expected_doubtful | different answer, and your query has a problem: `<the mistake>` |
+| match_unverified | same answer, but part of your query could not be checked |
 | claims differ, filter_predicates | the two queries filter differently: yours `<how>`, agami's `<how>` |
 
-Part ids (`fan_out:`, `values_declared:`), file names (`findings.json`) and column keys stay in the
-tables of Phase 3 and in the files, where a reader who wants them can find them. The sentences
-around a table are plain.
+**These words are not a habit, they are a table in code.** `reconcile.py` holds them: `_STATUS_WORDS`
+for a row's status, `_STATE_WORDS` for a grade, `_PART_WORDS` and `_PART_KEYS` for what was checked
+and how it came out. The report page is handed them and writes none of its own, and a test refuses a
+status token anywhere a person can see one. So take the wording from there rather than inventing it
+per sentence: when the chat and the card disagree about what to call one row, the reader stops
+trusting both.
+
+A part id (`fan_out:`, `values_declared:`) never appears in a table a person reads either: the card's
+own label does, "double counting in `<x>`" and "value list for `<x>`". File names (`findings.json`)
+and column keys do stay, in the files and in the paths, where a reader who wants them can find them.
 
 ## Plain words, not figures of speech
 

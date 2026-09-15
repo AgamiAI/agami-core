@@ -76,24 +76,24 @@
   </div>
 
   <script>
-    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, layout: {{LAYOUT_JSON}}, items: {{ITEMS_JSON}} };
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, layout: {{LAYOUT_JSON}}, status: {{STATUS_JSON}}, items: {{ITEMS_JSON}} };
     const decisions = {};   // row -> {decision, words}
-    // Plain words for a status, and the color family each belongs to. Never the ledger's word alone.
-    const STATUS = {
-      match: ['held', 'match'], match_unverified: ['defect', 'match by luck: one part could not be confirmed'],
-      mismatch: ['gap', 'differs'], expected_doubtful: ['defect', 'your number is in doubt'], error: ['noted', 'did not run'],
-    };
+    // The colour family a status belongs to, and the chip words, both handed over by reconcile.py.
+    // No status vocabulary is written on this page: an item carries its own sentence in
+    // `status_words`, so the card, the chips and the chat cannot drift into calling one row three
+    // different things.
+    const STATUS_CLASS = DATA.status.cls;
     const OWNER = { you: 'What to change: your query', model: 'What to change: the semantic model', question: 'What to change: the question',
                     agami: "What to change: agami's answer", keep: 'Keep it', nothing: 'Nothing to change' };
 
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function lines(list) { return (list || []).length ? '<ul>' + list.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''; }
-    function pill(status) { const [cls, words] = STATUS[status] || ['noted', status]; return '<span class="pill ' + cls + '">' + esc(words) + '</span>'; }
+    function pill(item) { return '<span class="pill ' + statusClass(item) + '">' + esc(item.status_words || '') + '</span>'; }
     // The result in two facts, when the items verb gave them: the pill takes the plain-word label and
     // the state color from the data fact; checks that could not run are a tag, not a status.
     const DATA_CLASS = { matches: 'held', partly: 'open', differs: 'defect', could_not_compare: 'noted' };
     function resultPill(item) {
-      if (!item.result || !item.result.label) return pill(item.status);
+      if (!item.result || !item.result.label) return pill(item);
       const cls = item.result.data === 'matches' && item.result.query === 'different' ? 'open' : (DATA_CLASS[item.result.data] || 'noted');
       const n = item.result.unchecked || 0;
       return '<span class="pill ' + cls + '">' + esc(item.result.label) + '</span>'
@@ -143,7 +143,7 @@
     // What is shown. A filter narrows the cards, never the block: decided() reads every row.
     const view = { status: new Set(), owner: new Set(), result: new Set(), q: '' };
     const OWNER_SHORT = { you: 'your query', model: 'the semantic model', question: 'the question', agami: 'agami', keep: 'keep', nothing: 'nothing' };
-    function statusClass(item) { return (STATUS[item.status] || ['noted'])[0]; }
+    function statusClass(item) { return STATUS_CLASS[item.status] || 'noted'; }
     function haystack(item) {
       const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer, item.sentence, item.sql_yours, item.sql_agami]
         .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')))
@@ -164,7 +164,7 @@
     function chips() {
       const counts = {};
       DATA.items.forEach(i => { const cls = statusClass(i); counts[cls] = (counts[cls] || 0) + (passes(i, 'status') ? 1 : 0); });
-      const words = { held: 'match', defect: 'a mistake on your side', gap: 'differs', open: 'could not check', noted: 'did not run' };
+      const words = DATA.status.chips;
       // The result chips filter like every other chip; when the items carry result labels they are
       // the one filter row, and the older status chips step aside.
       const labels = {};
@@ -284,7 +284,7 @@
       const d = decisions[item.row] || {};
       const owner = item.owner || 'nothing';
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item)
         + '<span class="nums">' + nums(item) + '</span></div>'
         + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
         + '<div class="beats">'
@@ -303,7 +303,7 @@
       const d = decisions[item.row] || {};
       const marks = { held: '✓', defect: '✗', open: '?', gap: '!', noted: 'i' };
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status) + '<span class="nums">' + nums(item) + '</span></div>'
+        + '<div class="head"><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item) + '<span class="nums">' + nums(item) + '</span></div>'
         + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
         + '<div class="audit"><div><div class="q">' + esc(item.question) + '</div><div class="steps">'
         + (item.checks || []).map(c => '<div class="step"><span class="dot ' + esc(c.state) + '">' + (marks[c.state] || '·') + '</span><div><div class="s">' + esc(c.step) + '</div><div class="d">' + esc(c.detail || '') + '</div></div></div>').join('')
