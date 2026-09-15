@@ -300,7 +300,64 @@ def test_two_served_datasources_leave_the_active_one_unguessed(env):
     _seed(env, "SALES_DATA")
     _seed(env, "FINANCE_DATA")
     result = json.loads(tools.tool_list_datasources({}))
-    assert result["active_datasource"] == "default"
+    # None, not 'default' (#253): 'default' is a datasource this org does not have, and a name the
+    # caller can read as real is worse than saying none is active.
+    assert result["active_datasource"] is None
+    assert not any(d["is_active"] for d in result["datasources"])
+    tools._sole_served_datasource.cache_clear()
+
+
+def _laptop_config(tmp_path, monkeypatch):
+    """A `.config` left behind by the local CLI, naming a profile no served org has (#253).
+
+    A dev box, or a container with the artifacts dir mounted, can carry one. `conftest` points
+    `CONFIG_PATH` at nothing by default, so the test sets it where the file really is.
+    """
+    import json
+
+    import tools
+
+    path = tmp_path / "laptop" / ".config"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"active_profile": "someones_laptop_profile"}))
+    monkeypatch.setattr(tools, "CONFIG_PATH", path)
+
+
+def test_a_local_config_does_not_outrank_the_sole_served_datasource(env, tmp_path, monkeypatch):
+    """#253. `.config.active_profile` is a local-CLI setting, and it ranked above the datasource
+    the deployment actually serves — so a stray file made every omitted call run against a
+    datasource this org does not have."""
+    import json
+
+    import tools
+
+    tools._sole_served_datasource.cache_clear()
+    _seed(env, "SALES_DATA")
+    _laptop_config(tmp_path, monkeypatch)
+
+    assert tools.resolve_profile() == "SALES_DATA"
+    assert json.loads(tools.tool_list_datasources({}))["active_datasource"] == "SALES_DATA"
+    tools._sole_served_datasource.cache_clear()
+
+
+def test_a_local_config_is_not_reported_active_beside_several_served_datasources(
+    env, tmp_path, monkeypatch
+):
+    """#253, the case both earlier fixes missed: several datasources AND a stray `.config`. A
+    single-datasource fixture cannot catch this, because the sole-datasource step resolves first."""
+    import json
+
+    import tools
+
+    tools._sole_served_datasource.cache_clear()
+    _seed(env, "SALES_DATA")
+    _seed(env, "FINANCE_DATA")
+    _laptop_config(tmp_path, monkeypatch)
+
+    result = json.loads(tools.tool_list_datasources({}))
+
+    assert tools.resolve_profile() != "someones_laptop_profile"
+    assert result["active_datasource"] is None
     assert not any(d["is_active"] for d in result["datasources"])
     tools._sole_served_datasource.cache_clear()
 

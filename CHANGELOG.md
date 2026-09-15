@@ -22,6 +22,14 @@ below corresponds to one such version.
   area into one response, one such file dropped the curated examples for every area. Both reads now
   use UTF-8, and a file that still cannot be read is skipped on its own rather than failing the
   rest. Text already garbled by an earlier `sm` run is not repaired by this; re-save it. (#236)
+- **A served deployment no longer names a datasource the organization does not have.** With no
+  `datasource` named and `AGAMI_PROFILE` unset, the server resolved a profile from
+  `.config.active_profile` — a setting the local CLI writes — before looking at what the deployment
+  actually serves. A leftover `.config` on a dev box or a mounted artifacts directory therefore won:
+  on an organization with one datasource, an omitted call ran against a name from someone's
+  machine, and `list_datasources` reported that name as active. A served deployment now ignores
+  `.config`, and `list_datasources` reports `active_datasource` as `null` rather than `default`
+  when several datasources are served and none is named. The local CLI is unchanged. (#253)
 
 ## [0.8.8] — 2026-09-15
 
