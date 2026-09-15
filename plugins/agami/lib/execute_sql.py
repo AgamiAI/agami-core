@@ -1658,8 +1658,9 @@ def _timeout_is_representable(timeout_s: int) -> bool:
     engines, and Postgres's `statement_timeout` is an int32 of milliseconds — past either, the native
     bound fails before the query runs. Seven days is inside every one of those, so it is the one bound
     checked, and a value past it is treated as unusable like any other and falls back to the
-    deployment's."""
-    return timeout_s <= 604_800
+    deployment's. It is checked on the NATIVE value, which is the budget plus `_NATIVE_BOUND_SKEW_S`,
+    because that is the number the engine receives — so the largest usable budget is 604,795."""
+    return timeout_s + _NATIVE_BOUND_SKEW_S <= 604_800
 
 
 def _timeout_s_from_env() -> int:

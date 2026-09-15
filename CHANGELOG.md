@@ -19,8 +19,10 @@ below corresponds to one such version.
   through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
   unusable value (not a positive whole number, or a provider that raises) falls back to
   `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
-  the log. There is no policy ceiling, only what the engines can represent: a time limit over seven
-  days (604,800 seconds, Snowflake's own maximum and the smallest among the supported engines) and a
+  the log. There is no policy ceiling, only what the engines can represent: a time limit whose native
+  setting — the limit plus the executor's 5-second skew — would pass seven days (604,800 seconds,
+  Snowflake's own maximum and the smallest among the supported engines; so 604,795 is the largest
+  usable limit) and a
   row cap of 2,147,483,647 or more (the drivers fetch one row past the cap, in a 32-bit count) are
   treated as unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` / `AGAMI_SQL_MAX_ROWS` alike.
   - An evaluation run scores both statements of each case under the named organisation's limits.

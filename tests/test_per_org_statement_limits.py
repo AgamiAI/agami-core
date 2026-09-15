@@ -490,7 +490,18 @@ def test_the_watchdog_fires_on_the_pinned_timeout(monkeypatch):
 
 
 _UNREPRESENTABLE = int(threading.TIMEOUT_MAX)
-_LARGEST_ARMABLE = 604_800  # seven days: the smallest native maximum among the engines
+# Seven days is the smallest native maximum among the engines, and the engine receives the budget plus
+# the 5-second native skew, so the largest armable budget is five seconds under it.
+_LARGEST_ARMABLE = 604_800 - execute_sql._NATIVE_BOUND_SKEW_S
+
+
+def test_an_environment_row_cap_the_drivers_cannot_fetch_falls_back(monkeypatch):
+    """The environment is a source of its own, so its boundary is checked on its own path."""
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", str(2**31 - 1))
+    assert execute_sql._row_cap_from_env() == execute_sql._DEFAULT_MAX_ROWS
+
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", str(2**31 - 2))
+    assert execute_sql._row_cap_from_env() == 2**31 - 2
 
 
 def test_a_provider_timeout_the_platform_cannot_arm_falls_back(caplog):

@@ -32,9 +32,10 @@ def test_a_row_cap_the_drivers_cannot_fetch_is_not_usable():
     assert tools.statement_limit_is_usable("max_rows", 2**31 - 1) is False
 
 
-def test_a_timeout_past_seven_days_is_not_usable():
-    assert tools.statement_limit_is_usable("timeout_s", 604_800) is True
-    assert tools.statement_limit_is_usable("timeout_s", 604_801) is False
+def test_a_timeout_whose_native_value_passes_seven_days_is_not_usable():
+    # The engine receives the budget plus the 5-second native skew, so 604,795 is the last usable one.
+    assert tools.statement_limit_is_usable("timeout_s", 604_795) is True
+    assert tools.statement_limit_is_usable("timeout_s", 604_796) is False
 
 
 def test_an_unknown_key_is_the_callers_bug():
@@ -50,7 +51,7 @@ def test_an_unknown_key_is_the_callers_bug():
         ("max_rows", True),
         ("max_rows", 2**31 - 1),
         ("timeout_s", 45),
-        ("timeout_s", 604_801),
+        ("timeout_s", 604_796),
     ],
 )
 def test_the_provider_path_applies_the_same_rule(key, value):
