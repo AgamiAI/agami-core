@@ -113,7 +113,7 @@ def test_the_result_pill_and_the_fix_pill_come_from_the_verbs_two_fields():
                 fix="examples", fix_words="add an example", keep_allowed=True)
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
     for token in ("function resultPill(item)", "'same answer, different query'".replace("'", '"')[1:-1], "check' : ' checks') + ' not run", "const FIX_WORDS = {};",
-                  "examples: item.keep_allowed ? 'keep' : 'example'", 'id="result-chips"', "<b>fix</b>", '"fix": "examples"', '"label": "same answer, different query"'):
+                  "function suggestionFor(item)", "item.fix === 'examples' && item.keep_allowed ? 'keep'", 'id="result-chips"', "<b>fix</b>", '"fix": "examples"', '"label": "same answer, different query"'):
         assert token in html, token
     with pytest.raises(ValueError, match="'result' needs data in"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, result={"data": "maybe", "query": "same", "label": "x"})])
@@ -139,7 +139,7 @@ def test_the_card_after_the_second_read_question_first_folding_checks_example_an
     for token in ('<span class="title q">\' + esc(item.question) + \'</span>'.replace("\\", ""), "function verdict(item)", '<div class="vl">\' + esc(label) + \'</div>',
                   "[item.label, item.source].filter(Boolean).join(' · ')", "<details class=\"sec\"".replace("\\", ""), "</summary>'", "section(item, 'data', 'The answer')",
                   "example: { word: 'add an example'", "function prefillFor(item, decision)", "['change', 'fix', 'reword', 'example'].includes(d.decision)",
-                  "examples: item.keep_allowed ? 'keep' : 'example'", '"prefill": {"change": "add values declared on x"'):
+                  "function suggestionFor(item)", "item.fix === 'examples' && item.keep_allowed ? 'keep'", '"prefill": {"change": "add values declared on x"'):
         assert token in html, token
     # the pinned contract stays
     for token in ("['change', 'fix', 'reword', 'example'].includes(e.target.value)", 'data-field="words"'):
@@ -161,5 +161,7 @@ def test_the_checks_start_closed_and_the_palette_has_one_meaning_per_color():
     css = html[html.index("<style>"):html.index("</style>")]
     assert "--agami:" in css and ".pill.agami { background: var(--agami-bg); color: var(--agami); }" in css
     assert ".dg .v .tok.add { background: var(--agami-bg); color: var(--agami);" in css and "background: var(--agami-bg); color: var(--agami); border-radius: 999px" in css
-    assert '<div class="legend"' in html and 'class="agami">agami</span>' in html
+    # The colour still has its one meaning; what is gone is the standalone key for it, since the
+    # fix chips carry the same colours with words, counts and filtering.
+    assert '<span class="chips result"' in html and '<div class="legend"' not in html
 

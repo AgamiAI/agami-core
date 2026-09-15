@@ -2456,6 +2456,11 @@ def report_items(run_dir: Path) -> list[dict]:
     records, bad = _done_rows(run_dir)
     if bad:
         raise ValueError(f"rows.jsonl has a line that cannot be read ({', '.join(bad)})")
+    # In the order the person gave the rows, not the order the checkpoint happened to write them.
+    # `record` replaces a row by dropping its old line and appending the new one, which is right for
+    # an append log and wrong for a page: a row re-run after a fix would jump to the bottom, and two
+    # renders of one run would not match.
+    records = sorted(records, key=lambda r: (not isinstance(r.get("row"), int), r.get("row") or 0))
     items = []
     for rec in records:
         rec = dict(rec, status=rec.get("status") or "error")

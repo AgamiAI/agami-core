@@ -128,7 +128,8 @@
     .pill.agami { background: var(--agami-bg); color: var(--agami); } .pill.nothing { background: var(--noted-bg); color: var(--noted); }
     @media (max-width: 640px) { .dg { grid-template-columns: 22px 1fr; } .dg .k { grid-column: 2; } .dg .v { grid-column: 2; border-top: 0; padding-top: 0; } .dg .v.yours::before { content: "yours · "; color: var(--muted, #5b6875); font-family: inherit; } .dg .v.agami::before { content: "agami · "; color: var(--muted, #5b6875); font-family: inherit; } .dg .h { display: none; } }
     /* the decisions: each option says what it is and what happens next; the run's suggestion is tagged */
-    .grade.opts { display: grid; gap: 4px; margin-top: 10px; }
+    .grade.opts { display: grid; gap: 4px; margin-top: 10px; border: 0; padding: 0; min-inline-size: 0; }
+    .grade.opts > legend { padding: 0; font-size: var(--t-body); font-weight: 600; margin-bottom: 2px; }
     .grade.opts .opt { display: grid; grid-template-columns: 18px auto minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
     .grade.opts .opt.on { background: var(--code-bg, #f3f5f7); }
     .grade.opts .opt b { font-weight: 600; white-space: nowrap; }

@@ -47,7 +47,6 @@
     <div class="filters" id="result-row" hidden>
       <span class="k">Result</span><span class="chips result" id="result-chips"></span>
     </div>
-    <div class="legend" aria-label="what the colors mean"><span class="held">passed</span><span class="defect">your query</span><span class="gap">the semantic model</span><span class="open">the question, or could not check</span><span class="agami">agami</span><span class="noted">noted</span></div>
     <div class="filters" id="filters">
       <span class="k">Fix</span><span id="owner-chips"></span>
       <span class="k">Find</span><input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
@@ -78,6 +77,14 @@
   <script>
     const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, layout: {{LAYOUT_JSON}}, status: {{STATUS_JSON}}, items: {{ITEMS_JSON}} };
     const decisions = {};   // row -> {decision, words}
+    // Seeded from each row's own suggestion before anything renders, so what the radios show and
+    // what the block carries are the same thing. A person changing one overwrites its seed.
+    function seedDecisions() {
+      (DATA.items || []).forEach(item => {
+        const s = suggestionFor(item);
+        if (s && !decisions[item.row]) decisions[item.row] = { decision: s, words: prefillFor(item, s) };
+      });
+    }
     // The colour family a status belongs to, and the chip words, both handed over by reconcile.py.
     // No status vocabulary is written on this page: an item carries its own sentence in
     // `status_words`, so the card, the chips and the chat cannot drift into calling one row three
@@ -128,15 +135,25 @@
     // What each box starts with, from the run's own words for this row; the person edits or clears it.
     function prefillFor(item, decision) { return ((item.prefill || {})[decision]) || ''; }
     const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
+    const BY_FIX = { query: 'fix', semantic_model: 'change', examples: 'example', question: 'reword', ask_again: 'nothing', none: 'nothing' };
+    // What the run itself concluded, as a decision. Pre-selected below, and still labelled
+    // "suggested", so a reader can see it was chosen for them and change it in one click.
+    function suggestionFor(item) {
+      if (item.fix) return item.fix === 'examples' && item.keep_allowed ? 'keep'
+        : (item.fix === 'none' && item.keep_allowed ? 'keep' : BY_FIX[item.fix]);
+      return (SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null);
+    }
     function controls(item, d) {
       const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'example', 'nothing']);
-      const byFix = { query: 'fix', semantic_model: 'change', examples: item.keep_allowed ? 'keep' : 'example', question: 'reword', ask_again: 'nothing', none: item.keep_allowed ? 'keep' : 'nothing' };
-      const suggested = item.fix ? byFix[item.fix] : ((SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null));
+      const suggested = suggestionFor(item);
       const spec = DECISIONS[d.decision] || {};
-      return '<div class="grade opts">' + choices.map(v =>
+      // A fieldset, not a div: five radios sharing a name are a group, and a group with no legend has
+      // no accessible name, so a screen reader reads five options and never says what they decide.
+      // The legend is the visible title too, which is the one place on the card you act rather than read.
+      return '<fieldset class="grade opts"><legend>What to do</legend>' + choices.map(v =>
           '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
           + '<b>' + esc(DECISIONS[v].word) + (v === suggested ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
-          + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</div>'
+          + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</fieldset>'
         + '<div class="more"' + (['change', 'fix', 'reword', 'example'].includes(d.decision) ? '' : ' hidden') + '>'
         + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
     }
@@ -414,6 +431,7 @@
       try { await navigator.clipboard.writeText(document.getElementById('modal-text').value); status.textContent = '✓ Copied. Paste it back in Claude.'; }
       catch (e) { document.getElementById('modal-text').select(); status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.'; }
     });
+    seedDecisions();
     renderItems();
   </script>
 </body>

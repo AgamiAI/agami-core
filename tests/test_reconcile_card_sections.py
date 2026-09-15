@@ -8,6 +8,7 @@ surface that publishes it rather than trusted from whatever built it.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -175,3 +176,39 @@ def test_a_five_row_sample_reaches_the_page(tmp_path):
     assert '"sample"' in html and "function grid(sample)" in html
     # and the page still refuses result rows everywhere else
     assert "result rows are never rendered" in Path(rr.__file__).read_text(encoding="utf-8")
+
+
+# --- the page is in the person's order, not the checkpoint's ---------------------------------------
+
+
+def test_cards_render_in_row_order_however_the_checkpoint_was_written(tmp_path):
+    # `record` replaces a row by appending a new line, so a row re-run after a fix ends up last in
+    # rows.jsonl. That is right for an append log and wrong for a page.
+    run = tmp_path / "20260915-000000"
+    (run / "rows").mkdir(parents=True)
+    written = [1, 3, 4, 5, 2]
+    (run / "rows.jsonl").write_text("".join(
+        json.dumps({"row": n, "label": f"r{n}", "question": f"q{n}", "status": "match", "match": True,
+                    "recorded": {"columns": ["n"], "rows": [[1]]},
+                    "ledger": {"rows": [], "verdict": "confirmed", "counts": {}}, "ledger_verdict": "confirmed"}) + "\n"
+        for n in written), encoding="utf-8")
+    assert [i["row"] for i in reconcile.report_items(run)] == [1, 2, 3, 4, 5]
+
+
+# --- the decision block ---------------------------------------------------------------------------
+
+
+def test_the_decisions_are_a_named_group_not_five_anonymous_radios():
+    # Five radios sharing a name are a group; a group with no legend has no accessible name, so a
+    # reader is told five options and never what they decide.
+    html = rr.render(title="t", profile="p", run="r", items=[dict(_ITEM, fix="query", owner="you")])
+    assert '<fieldset class="grade opts"><legend>What to do</legend>' in html
+
+
+def test_the_suggestion_is_selected_before_anyone_clicks_and_the_block_carries_it():
+    html = rr.render(title="t", profile="p", run="r", items=[dict(_ITEM, fix="query", owner="you")])
+    # one map, read by the radios and by the seeding, so the page and the pasted-back block agree
+    assert "function suggestionFor(item)" in html
+    assert "function seedDecisions()" in html and "seedDecisions();\n    renderItems();" in html
+    # and it is still labelled, so a reader sees the tool chose it
+    assert "' <span class=\"tag suggested\">suggested</span>'" in html
