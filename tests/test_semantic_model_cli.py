@@ -822,7 +822,7 @@ def _windows_default_encoding(monkeypatch):
 def test_add_example_reads_its_file_as_utf8_whatever_the_platform_default(tmp_path, monkeypatch):
     """#236. An em dash read through the platform default on Windows became `â€”`, and was then
     written back out as perfectly valid UTF-8 — so nothing downstream could tell it was wrong."""
-    question = "Revenue by channel — last quarter"
+    question = "Revenue by channel \u2014 the \u201creal\u201d total"
     ops = tmp_path / "ops.json"
     ops.write_bytes(
         json.dumps([{"question": question, "sql": "SELECT 1"}], ensure_ascii=False).encode("utf-8")
@@ -837,3 +837,5 @@ def test_add_example_reads_its_file_as_utf8_whatever_the_platform_default(tmp_pa
 
     assert rc == 0
     assert [e["question"] for e in list_prompt_examples(root, "sales")] == [question]
+    saved = (root / "prompt_examples" / "sales" / "examples.yaml").read_bytes()
+    assert question.encode("utf-8") in saved
