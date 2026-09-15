@@ -13,7 +13,7 @@
       and nothing go back through the doors that exist. The skill applies each, never this page.
   NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose.
   Renderer fills:
-    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON, LAYOUT_JSON,
+    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON,
     ITEMS_JSON — [{row, label, question, source, status, expected, answer, delta_pct, single_cell,
                   owner, read:[..], how:[..], words:[..], disagreement, change:[..],
                   checks:[{step, state, detail}], todo:[..], report_path, keep_allowed}]
@@ -79,7 +79,7 @@
   </div>
 
   <script>
-    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, layout: {{LAYOUT_JSON}}, status: {{STATUS_JSON}}, items: {{ITEMS_JSON}} };
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, status: {{STATUS_JSON}}, items: {{ITEMS_JSON}} };
     const decisions = {};   // row -> {decision, words}
     const touched = new Set();   // rows the reader actually changed, as opposed to the seeded suggestion
     // Seeded from each row's own suggestion before anything renders, so what the radios show and
@@ -158,7 +158,7 @@
     function statusClass(item) { return STATUS_CLASS[item.status] || 'noted'; }
     function haystack(item) {
       const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer, item.sentence, item.sql_yours, item.sql_agami]
-        .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')))
+        .concat(item.change || [], item.words || [], item.todo || [], Object.values(item.summaries || {}))
         .concat((item.diff || []).flatMap(r => [r.key, r.note].concat(r.yours || [], r.agami || [])));
       return parts.filter(Boolean).join(' ').toLowerCase();
     }
@@ -197,7 +197,7 @@
       const owners = {};
       DATA.items.forEach(i => { const o = i.fix ? fixOf(i) : (i.owner || 'nothing'); owners[o] = (owners[o] || 0) + (passes(i, 'owner') ? 1 : 0); });
       const bar = document.getElementById('filters');
-      bar.hidden = DATA.layout === 'audit' || DATA.items.length < 2;
+      bar.hidden = DATA.items.length < 2;
       document.querySelector('.filters.find').hidden = DATA.items.length < 2;
       bar.classList.toggle('filtering', view.owner.size > 0);
       document.getElementById('owner-chips').innerHTML = Object.entries(owners).map(([o, n]) =>
@@ -331,50 +331,16 @@
         + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
         + controls(item, d) + '</div>';
     }
-    const diffAudit = diffCard;   // one card shape; a single-row run differs only in the page's lede
-    function card(item) {
-      const d = decisions[item.row] || {};
-      const owner = item.owner || 'nothing';
-      return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item)
-        + '<span class="nums">' + nums(item) + '</span></div>'
-        + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
-        + '<div class="beats">'
-        + '<div class="beat b1"><b>1 · What you gave us</b>' + esc(item.question) + lines(item.read) + '</div>'
-        + '<div class="beat b2"><b>2 · What agami did</b>' + (item.answer ? 'Answered <code>' + esc(item.answer) + '</code>' : 'Could not answer this row')
-        + (item.expected ? '; you expected <code>' + esc(item.expected) + '</code>' : '') + '</div>'
-        + '<div class="beat b3"><b>3 · How it got there</b>' + lines(item.how)
-        + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
-        + (item.disagreement ? '<div>' + esc(item.disagreement) + '</div>' : '') + '</div>'
-        + '<div class="beat b4 ' + esc(owner) + '"><b>4 · ' + esc(OWNER[owner] || 'What to change') + '</b>' + lines(item.change) + '</div>'
-        + '</div>'
-        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
-        + controls(item, d) + '</div>';
-    }
-    function audit(item) {
-      const d = decisions[item.row] || {};
-      const marks = { held: '✓', defect: '✗', open: '?', gap: '!', noted: 'i' };
-      return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item) + '<span class="nums">' + nums(item) + '</span></div>'
-        + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
-        + '<div class="audit"><div><div class="q">' + esc(item.question) + '</div><div class="steps">'
-        + (item.checks || []).map(c => '<div class="step"><span class="dot ' + esc(c.state) + '">' + (marks[c.state] || '·') + '</span><div><div class="s">' + esc(c.step) + '</div><div class="d">' + esc(c.detail || '') + '</div></div></div>').join('')
-        + '</div>'
-        + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
-        + (item.disagreement ? '<div class="quote">' + esc(item.disagreement) + '</div>' : '')
-        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '') + '</div>'
-        + '<aside class="rail"><h4>What to do</h4><ol>' + (item.todo || []).map(t => '<li>' + esc(t) + '</li>').join('') + '</ol></aside></div>'
-        + controls(item, d) + '</div>';
-    }
     function renderItems() {
-      document.getElementById('lede').textContent = DATA.layout === 'audit'
-        ? 'One query, with what we found and what we suggest doing about it. Open Data, SQL or Checks to see the working. Change the suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.'
+      // One row or fifty, the card is the same; only the opening sentence knows the difference.
+      document.getElementById('lede').textContent = DATA.items.length === 1
+        ? 'One query, with what we found and what we suggest doing about it. The point is to teach agami to answer it the way you would. Open Data, SQL or Checks to see the working, change the suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.'
         : 'Every row you gave us, with what we found and what we suggest doing about it. The point is to teach agami to answer these questions the way you would, so the colours say who acts: an example or a definition changes what agami writes next time. Open Data, SQL or Checks on any row to see the working, change a suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.';
       chips();
       const shown = visible();
       showing(shown.length);
       const root = document.getElementById('items');
-      root.innerHTML = shown.map(item => item.diff && item.diff.length ? (DATA.layout === 'audit' ? diffAudit(item) : diffCard(item)) : (DATA.layout === 'audit' ? audit(item) : card(item))).join('')
+      root.innerHTML = shown.map(diffCard).join('')
         || '<p class="meta">No row matches this filter. Your decisions on the hidden rows are kept.</p>';
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));

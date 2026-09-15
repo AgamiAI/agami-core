@@ -38,16 +38,18 @@ def test_renders_one_card_per_row_in_four_beats_and_the_block_grammar():
     for text in ("What was total revenue in Q3 2025?", "leaves out the declared filter", "matched the metric revenue",
                  "cancelled orders are excluded from revenue", "add the filter and the numbers meet", "How many orders"):
         assert text in html, text
-    for beat in ("1 · What you gave us", "2 · What agami did", "3 · How it got there", "4 · "):
-        assert beat in html, beat
-    # A batch renders as cards; the fourth column is colored by who acts.
-    assert 'layout: "cards"' in html and "beat b4 ' + esc(owner)" in html
+    for part in ("function verdict(item)", "function section(item, key, title)",
+                 "section(item, 'data', 'Data')", "section(item, 'sql', 'SQL')", "section(item, 'checks', 'Checks')"):
+        assert part in html, part
+    # One card shape, and its bar is coloured by who acts rather than by the outcome.
+    assert "shown.map(diffCard)" in html and "FIX_CLASS[fix] || 'noted'" in html
     for token in ("'profile: '", "'reconcile-run: '", "'decisions:'", "'done'"):
         assert token in html, token
     assert 'profile: "demo"' in html and 'run: "20260912-101500"' in html
-    # An error row has no answer and says so instead of quoting an empty cell.
+    # An error row with nothing else on it still has a verdict: the status in words, which the
+    # renderer fills when the items file did not, so ACE-138's guarantee holds for a typed file too.
     error = rr.render(title="t", profile="p", run="r", items=[{"row": 7, "question": "q", "status": "error"}])
-    assert "Could not answer this row" in error
+    assert '"status_words": "could not compare"' in error
 
 
 def _payload(html: str) -> dict:
@@ -109,17 +111,14 @@ AUDIT = [{"row": 1, "label": "Paid revenue", "question": "What is paid revenue?"
           "words": ["orders, table caveat: cancelled orders are excluded from revenue"]}]
 
 
-def test_one_statement_row_with_checks_renders_as_an_audit_with_a_rail():
-    html = rr.render(title="t", profile="p", run="r", items=AUDIT)
-    assert 'layout: "audit"' in html
-    payload = _payload(html)[1]
-    assert [c["state"] for c in payload["checks"]] == ["held", "defect", "open", "gap", "noted"]
-    assert payload["todo"][0].startswith("Your query:") and payload["owner"] == "you"
-    assert payload["keep_allowed"] is False  # match_unverified is never offered
-    # The same items forced into cards, and a batch forced into an audit, both obey the switch.
-    assert 'layout: "cards"' in rr.render(title="t", profile="p", run="r", items=AUDIT, layout="cards")
-    assert 'layout: "audit"' in rr.render(title="t", profile="p", run="r", items=ITEMS, layout="audit")
-    assert rr.choose_layout(ITEMS) == "cards" and rr.choose_layout(AUDIT) == "audit"
+def test_one_row_and_a_batch_render_the_same_card():
+    # There is no audit layout any more: diffAudit was an alias of diffCard before this removed it,
+    # and the only thing that ever differed was the opening sentence, which counts the rows itself.
+    one, many = rr.render(title="t", profile="p", run="r", items=AUDIT), rr.render(title="t", profile="p", run="r", items=ITEMS)
+    for html in (one, many):
+        assert "shown.map(diffCard)" in html and "DATA.items.length === 1" in html
+        assert "layout" not in html.split("const DATA =")[1].split(";")[0]
+    assert not hasattr(rr, "choose_layout")
 
 
 def test_owner_delta_and_check_states_come_from_closed_sets():
@@ -127,10 +126,9 @@ def test_owner_delta_and_check_states_come_from_closed_sets():
         rr.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "status": "match", "owner": "them"}])
     with pytest.raises(ValueError, match="'delta_pct'"):
         rr.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "status": "match", "delta_pct": "7%"}])
-    with pytest.raises(ValueError, match="each check needs"):
-        rr.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "status": "match", "checks": [{"step": "x", "state": "maybe"}]}])
-    with pytest.raises(ValueError, match="layout must be"):
-        rr.render(title="t", profile="p", run="r", items=ITEMS, layout="table")
+    with pytest.raises(ValueError, match="each diff row needs"):
+        rr.render(title="t", profile="p", run="r",
+                  items=[{"row": 1, "question": "q", "status": "match", "diff": [{"key": "x", "state": "maybe"}]}])
 
 
 # --- ACE-135: several statements in the SQL block -----------------------------------------------
@@ -138,7 +136,7 @@ def test_owner_delta_and_check_states_come_from_closed_sets():
 def test_the_sql_block_lists_every_statement_agami_wrote_and_marks_the_compared_one():
     item = {"row": 1, "question": "How many orders?", "status": "match", "sql_yours": "SELECT COUNT(*) FROM orders",
             "sql_agami": "SELECT COUNT(*) AS n FROM orders", "sql_agami_steps": ["SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders"]}
-    page = rr.render(title="t", profile="demo", run="r", items=[item], layout="cards")
+    page = rr.render(title="t", profile="demo", run="r", items=[item])
     assert "the last is compared" in page and "SELECT status FROM orders LIMIT 5" in page
     import pytest
     with pytest.raises(ValueError, match="sql_agami_steps"):

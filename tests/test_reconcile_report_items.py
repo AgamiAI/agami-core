@@ -104,7 +104,7 @@ def test_an_error_row_and_the_cli(tmp_path, capsys):
     run = _run(tmp_path, [SCALAR_MATCH, ERROR])
     assert reconcile.main(["report-items", "--run-dir", str(run)]) == 0
     printed = json.loads(capsys.readouterr().out)
-    assert printed["items"] == 2 and printed["by_status"] == {"match": 1, "error": 1} and printed["layout"] == "cards"
+    assert printed["items"] == 2 and printed["by_status"] == {"match": 1, "error": 1} and "layout" not in printed
     items = json.loads((run / "report-items.json").read_text())
     err = items[1]
     assert err["diff"][0] == {"key": "answer", "state": "open", "section": "data", "yours": None, "agami": "failed",

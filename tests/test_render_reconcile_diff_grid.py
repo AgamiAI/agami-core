@@ -34,20 +34,9 @@ def test_the_grid_has_one_row_per_check_with_the_category_first_and_the_extra_to
     assert re.search(r"\.dg \{[^}]*grid-template-columns: 22px minmax\(120px, 170px\) minmax\(0, 1fr\) minmax\(0, 1fr\)", css)
     assert "(side === 'yours' ? 'del' : 'add')" in html and "class=\"tok renamed\"" in html
     assert "MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·', differs: '≠' }" in html
-    assert "diffCard(item)" in html and "diffAudit(item)" in html and 'layout: "cards"' in html
+    assert "shown.map(diffCard)" in html
     # The sentence and the semantic model's words ride along; the note shows only off a held row.
     assert "r.note && (r.state !== 'held' || r.key === 'columns')" in html and '<div class="quote"><b>What the semantic model says</b>' in html
-
-
-def test_one_item_with_a_diff_takes_the_audit_layout_and_keeps_the_rail():
-    html = rr.render(title="t", profile="p", run="r", items=[ITEM])
-    assert 'layout: "audit"' in html and "const diffAudit = diffCard;" in html and 'function verdict(item)' in html
-
-
-def test_an_item_without_a_diff_still_renders_the_beats():
-    old = {"row": 1, "question": "q", "status": "match", "owner": "keep", "read": ["a"], "how": ["b"], "change": []}
-    html = rr.render(title="t", profile="p", run="r", items=[old, dict(old, row=2)])
-    assert "beat b4 ' + esc(owner)" in html and "item.diff && item.diff.length ?" in html
 
 
 def test_a_diff_row_is_validated_and_never_carries_result_rows():
@@ -87,13 +76,13 @@ def test_the_second_reviews_findings_on_the_renderer():
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "yours_hi": "channel"}])])
     with pytest.raises(ValueError, match="'note' must be text"):
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "note": 3}])])
-    with pytest.raises(ValueError, match="inside a check"):
-        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, checks=[{"step": "s", "state": "held", "rows": [[1]]}])])
+    with pytest.raises(ValueError, match="inside a diff row"):
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "rows": [[1]]}])])
     with pytest.raises(ValueError, match="share a row number"):
         rr.render(title="t", profile="p", run="r", items=[ITEM, ITEM])
     with pytest.raises(ValueError, match="true or false"):
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, keep_allowed="yes")])
-    html = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, checks=[{"step": "s", "state": "held", "secret": "leak-me"}]), dict(ITEM, row=3)])
+    html = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "secret": "leak-me"}]), dict(ITEM, row=3)])
     assert "leak-me" not in html
     # the verb's keep gate wins over the renderer's two facts
     gated = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, status="match", single_cell=True, keep_allowed=False), dict(ITEM, row=3)])

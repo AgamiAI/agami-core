@@ -31,7 +31,7 @@ def test_the_report_page_filters_by_status_owner_and_word_and_the_block_reads_ev
     html = rr.render(title="t", profile="p", run="r", items=CARDS)
     _assert_bar(html, ("data-owner=", "OWNER_SHORT", "function haystack(item)"))
     # The audit layout is one row: the bar hides itself, and so does any page of one row.
-    assert "bar.hidden = DATA.layout === 'audit' || DATA.items.length < 2" in html
+    assert "bar.hidden = DATA.items.length < 2" in html
     # decided() is what generateDecisions reads, and it walks the decisions, not visible().
     decided = html[html.index("function decided()"):html.index("function renderSummary()")]
     assert "visible()" not in decided and "Object.keys(decisions)" in decided

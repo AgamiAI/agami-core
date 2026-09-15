@@ -310,7 +310,7 @@ def test_the_four_beats_are_also_a_page_and_a_keep_is_never_the_pages_to_grant()
     assert "No decision writes anything this skill does not already write." in story
     assert "The chat keeps 3a, the link and one line of next steps" in story
     assert "one card per row for a batch and a checklist with a rail for a single audited query" in story
-    assert "--layout cards|audit" in story and "report-items --run-dir" in story
+    assert "**Data**, **SQL** and **Checks**" in story and "report-items --run-dir" in story
     assert "Build the report items file with the verb, never by hand" in story
     assert "rewrite only `sentence` and `change`" in story and "never touch `diff`" in story
     assert "When the page cannot be written, the four beats below are said in chat instead" in story

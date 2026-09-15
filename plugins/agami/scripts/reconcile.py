@@ -2934,8 +2934,7 @@ def main(argv: list[str] | None = None) -> int:
         by_status: dict[str, int] = {}
         for item in items:
             by_status[item["status"]] = by_status.get(item["status"], 0) + 1
-        print(json.dumps({"items": len(items), "out": str(out), "by_status": by_status,
-                          "layout": "audit" if len(items) == 1 and items[0]["diff"] else "cards"}, indent=2))
+        print(json.dumps({"items": len(items), "out": str(out), "by_status": by_status}, indent=2))
         return 0
 
     if args.cmd == "next-chunk":
