@@ -535,3 +535,51 @@ def test_fully_qualified_columns_bind_to_their_own_unaliased_table():
     assert (
         _both_paths(f"SELECT staging.orders.amount {join}", org, rt.check_column_scope) is not None
     )
+
+
+def test_a_qualified_dataset_name_with_the_wrong_schema_is_not_found(schema_head):
+    # `invoices` is unique (billing), so the loader alone would serve it for any prefix.
+    assert schema_head(dataset_names=["crm.invoices"])["tables"] == {
+        "crm.invoices": {"error": "not found in scope"}
+    }
+    # A clashing name qualified by neither of its schemas is not found, not "qualify it".
+    assert schema_head(dataset_names=["hr.products"])["tables"] == {
+        "hr.products": {"error": "not found in scope"}
+    }
+
+
+def test_the_aggregation_column_index_drops_a_case_only_clash():
+    org = _org(
+        m.SubjectArea(name="a", tables_defined=[_table("orders", "s1", "amount")]),
+        m.SubjectArea(name="b", tables_defined=[_table("ORDERS", "s2", "raw_payload")]),
+    )
+    idx = rt._column_index(org)
+    assert "orders" not in idx and "ORDERS" not in idx
+
+
+def test_a_qualified_table_scope_advertises_only_its_own_areas_metrics():
+    from types import SimpleNamespace
+
+    import tools
+
+    org = _org(
+        m.SubjectArea(name="billing", tables_defined=[_table("products", "billing")]),
+        m.SubjectArea(name="crm", tables_defined=[_table("products", "crm")]),
+    )
+
+    def metric(*sources):
+        return SimpleNamespace(source_tables=list(sources))
+
+    metrics = {
+        "billing_revenue": (metric("products"), "billing"),
+        "billing_unsourced": (metric(), "billing"),
+        "crm_count": (metric("products"), "crm"),
+        "crm_unsourced": (metric(), "crm"),
+        "cross_area": (metric(), None),
+    }
+    scope = tools.Scope("table", None, ("crm.products",))
+    assert set(tools._scoped_metrics(org, metrics, scope)) == {
+        "crm_count",
+        "crm_unsourced",
+        "cross_area",
+    }

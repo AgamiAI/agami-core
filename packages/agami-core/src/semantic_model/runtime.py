@@ -2483,8 +2483,11 @@ def _column_index(org: Datasource) -> dict[str, dict[str, Column]]:
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             idx.setdefault(t.name, {}).update({c.name: c for c in t.columns})
-            schemas.setdefault(t.name, set()).add(_tkey(t.schema_name) or None)
-    return {name: cols for name, cols in idx.items() if len(schemas[name]) == 1}
+            # Grouped by the FOLDED name, like `_model_table_index`: `s1.orders` and `s2.ORDERS` are
+            # one ambiguous name to the gates, so neither may keep metadata the other's reads could
+            # borrow. The index itself keeps each table's own spelling.
+            schemas.setdefault(_tkey(t.name), set()).add(_tkey(t.schema_name) or None)
+    return {name: cols for name, cols in idx.items() if len(schemas[_tkey(name)]) == 1}
 
 
 def _lookup_column(col: "exp.Column", scope: dict[str, str],

@@ -1294,9 +1294,15 @@ def _resolve_table_picks(org, table_names: list[str], L) -> list[tuple[str, str 
         cands = sorted(defs.get(req, []) + (defs.get(bare, []) if bare != req else []),
                        key=lambda d: d[0])
         table = L._pick_declared([t for _, _, t in cands], requested)
+        # On this surface the prefix IS a schema. The loader resolves a unique bare name whatever
+        # prefix it carries, so `crm.invoices` served `billing.invoices`; a mismatched qualifier is
+        # not found, and so is a qualified request that matched neither side of a clash.
+        qualifier = requested.split(".")[-2].lower() if "." in requested else None
+        if table is not None and qualifier is not None and (table.schema_name or "").lower() != qualifier:
+            table = None
         if table is None:
-            error = ("declared in more than one schema; name it as schema.table" if cands
-                     else "not found in scope")
+            error = ("declared in more than one schema; name it as schema.table"
+                     if cands and qualifier is None else "not found in scope")
             picks.append((requested, None, None, error))
             continue
         area = next(a for _, a, t in cands if t is table)
@@ -1445,15 +1451,31 @@ def _scoped_metrics(
     if scope.level == "area":
         return {k: (m, a) for k, (m, a) in metrics.items() if a is None or a == scope.area}
 
+    from semantic_model import loader as L
+
     wanted = {_bare_name(t) for t in scope.tables}
-    owning = {a for a in _areas_owning(org, wanted) if a}
+    # A qualified request that resolves pins its bare name to the areas of THAT table (defining it, or
+    # referencing it with the same schema). Reduced to the bare name alone, `crm.products` also pulled
+    # in the metrics of billing's `products`. Bare and unresolved requests keep the bare-name rule.
+    pinned: dict[str, set[str]] = {}
+    picks = _resolve_table_picks(org, list(scope.tables), L)
+    for requested, (_key, _area, table, _error) in zip(scope.tables, picks):
+        if table is not None and "." in requested:
+            pinned.setdefault(_bare_name(requested), set()).update(
+                sa.name for sa in org.subject_areas if _in_area(org, sa.name, requested, table)
+            )
+    owning = {a for a in _areas_owning(org, wanted - set(pinned)) if a}
+    owning.update(*pinned.values())
     out: dict[str, tuple[Any, str | None]] = {}
     for key, (m, area) in metrics.items():
         if area is None:  # the cross-area bucket
             out[key] = (m, area)
             continue
         srcs = m.source_tables or []
-        if any(_bare_name(s) in wanted for s in srcs) or (not srcs and area in owning):
+        if any(
+            _bare_name(s) in wanted and (_bare_name(s) not in pinned or area in pinned[_bare_name(s)])
+            for s in srcs
+        ) or (not srcs and area in owning):
             out[key] = (m, area)
     return out
 
