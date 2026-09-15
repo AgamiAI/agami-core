@@ -6,21 +6,106 @@ name: CI
 
 on:
   pull_request:
+    # `ready_for_review` so a draft, which runs no tests below, is tested the moment it is marked ready;
+    # `converted_to_draft` so turning a PR back into a draft starts a run that cancels the full one.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
 
 permissions:
   contents: read
 
+# A push to a PR cancels that PR's run still in progress: its result would describe a commit nobody
+# will merge. Pushes to main are keyed by commit and never cancelled, so every merge keeps its run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Whether this run has code to test, decided once. Two cases do not:
+  #   * a draft, because the review that happens on a draft usually means another push;
+  #   * a release PR, which changes only the version strings and the changelog, so its code is
+  #     exactly what main already tested when the last PR merged.
+  # The version check runs on every run, since it is the one thing a release PR can get wrong.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.classify.outputs.tests }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: release versions agree
+        run: |
+          python3 - <<'PY'
+          import json, sys, tomllib
+          market = json.load(open(".claude-plugin/marketplace.json"))
+          found = {"marketplace metadata": market["metadata"]["version"]}
+          found.update({f"marketplace plugin {p['name']}": p["version"] for p in market["plugins"]})
+          found["plugin.json"] = json.load(open("plugins/agami/.claude-plugin/plugin.json"))["version"]
+          with open("packages/agami-core/pyproject.toml", "rb") as f:
+              found["pyproject.toml"] = tomllib.load(f)["project"]["version"]
+          if len(set(found.values())) != 1:
+              sys.exit(f"release versions disagree: {found}")
+          print("release versions agree:", found["pyproject.toml"])
+          PY
+
+      - id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then echo tests=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$DRAFT" = true ]; then
+            echo "draft: nothing is tested until it is marked ready for review"
+            echo tests=false >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          versioned=".claude-plugin/marketplace.json plugins/agami/.claude-plugin/plugin.json packages/agami-core/pyproject.toml"
+          release='^(CHANGELOG\.md|\.claude-plugin/marketplace\.json|plugins/agami/\.claude-plugin/plugin\.json|packages/agami-core/pyproject\.toml)$'
+          files="$(git diff --name-only "$BASE...$HEAD")"
+          other="$(printf '%s\n' "$files" | grep -vE '^$' | grep -vE "$release" || true)"
+          # shellcheck disable=SC2086 # $versioned is a list of paths
+          nonversion="$(git diff -U0 "$BASE...$HEAD" -- $versioned | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) ' \
+            | grep -vE '^[-+][[:space:]]*("version":|version = )' || true)"
+          # shellcheck disable=SC2086
+          bumped="$(git diff -U0 "$BASE...$HEAD" -- $versioned | grep -E '^[-+][[:space:]]*("version":|version = )' || true)"
+          # A version line must actually change: a changelog-only PR is not a release, and one that
+          # forgot its bump should not be waved through as one.
+          tests=true
+          if [ -n "$files" ] && [ -z "$other" ] && [ -z "$nonversion" ] && [ -n "$bumped" ]; then
+            tests=false
+            echo "release-only: version strings and the changelog, on code main already tested"
+          fi
+          echo "tests=$tests"; printf '%s\n' "$files"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+
   lint-and-test:
     name: lint + test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    needs: changes
+    # Runs even when `changes` failed, so the first step can fail it: a skipped required check counts
+    # as passed, and a broken classifier must never merge a PR whose tests did not run.
+    if: ${{ !cancelled() }}
+    # Skipped inside each step rather than by `if:`, for two reasons. A skipped matrix job reports
+    # one check under its unexpanded name, and branch protection requires the three
+    # `lint + test (py3.x)` names, so the PR could never merge. And the coverage step's condition
+    # must stay the single-version match `tests/e2e/test_suite_integrity.py` holds it to.
+    env:
+      TESTS: ${{ needs.changes.outputs.tests }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
+      - name: the change check succeeded
+        if: needs.changes.result != 'success'
+        run: |
+          echo "'what changed' ended ${{ needs.changes.result }}, so nothing here may be skipped"
+          exit 1
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
@@ -29,13 +114,17 @@ jobs:
       # Lint + import sorting — blocking. Rules come from pyproject.toml.
       # packages/ holds the agami-core library.
       - name: ruff check
-        run: uvx ruff@0.15.19 check plugins packages tests dev.py dev
+        run: |
+          [ "$TESTS" = true ] || { echo "draft or release-only; see the 'what changed' job"; exit 0; }
+          uvx ruff@0.15.19 check plugins packages tests dev.py dev
 
       # Format check is informational for now: the tree has a large unformatted
       # backlog (~74 files). Flip `continue-on-error` off after a dedicated
       # `ruff format` pass makes the tree clean.
       - name: ruff format --check (informational)
-        run: uvx ruff@0.15.19 format --check plugins packages tests dev.py dev
+        run: |
+          [ "$TESTS" = true ] || exit 0
+          uvx ruff@0.15.19 format --check plugins packages tests dev.py dev
         continue-on-error: true
 
       # Coverage is ENFORCED, not just reported. Measured 2026-07-29 at 85.66% on every leg of this
@@ -59,22 +148,24 @@ jobs:
       # whole suite; they just don't trace it. Nothing is deselected on any leg.
       - name: pytest
         if: matrix.python-version != '3.12'
-        run: >-
-          uvx --python ${{ matrix.python-version }}
-          --with pytest --with pytest-xdist
-          --with-editable "packages/agami-core[model,server]"
-          pytest tests/ -q -n auto
+        run: |
+          [ "$TESTS" = true ] || exit 0
+          uvx --python ${{ matrix.python-version }} \
+            --with pytest --with pytest-xdist \
+            --with-editable "packages/agami-core[model,server]" \
+            pytest tests/ -q -n auto
 
       - name: pytest --cov
         if: matrix.python-version == '3.12'
         env:
           COVERAGE_CORE: sysmon
-        run: >-
-          uvx --python ${{ matrix.python-version }}
-          --with pytest --with pytest-cov --with pytest-xdist
-          --with-editable "packages/agami-core[model,server]"
-          pytest tests/ -q -n auto --cov=plugins --cov=packages/agami-core/src --cov-report=term-missing
-          --cov-fail-under=85
+        run: |
+          [ "$TESTS" = true ] || exit 0
+          uvx --python ${{ matrix.python-version }} \
+            --with pytest --with pytest-cov --with pytest-xdist \
+            --with-editable "packages/agami-core[model,server]" \
+            pytest tests/ -q -n auto --cov=plugins --cov=packages/agami-core/src --cov-report=term-missing \
+            --cov-fail-under=85
 
   # The safety corpus gets its own required checks rather than riding inside `lint-and-test`.
   # Two reasons, and the second is why the spec exists:
@@ -95,6 +186,8 @@ jobs:
   safety-corpus-file-path:
     name: safety corpus (file path, no database)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     env:
       # This job's own declaration that it must RUN its half, and it needs a name of its own: the
       # DB sentinel below would demand a Postgres this job deliberately does not have. It turns a
@@ -125,6 +218,8 @@ jobs:
   safety-corpus-db-path:
     name: safety corpus (DB path, Postgres in Docker)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     env:
       # The same values `tests/integration/docker-compose.yml` uses, so one invocation works in both
       # places. The password belongs to a throwaway container that exists for the length of this job
