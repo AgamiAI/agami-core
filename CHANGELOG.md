@@ -76,7 +76,8 @@ below corresponds to one such version.
     subject area and keyed `schema.name` when the name clashes (e.g. `billing.products` and
     `crm.products`). `dataset_names` accepts `schema.table`, which is how a caller picks one of them;
     a bare name still works for a unique table, and a bare clashing name returns an error asking for
-    the qualified form.
+    the qualified form. Table names are compared ignoring case, as the scope gates compare them, and
+    `area` with `dataset_names` is checked against the table each name resolves to.
   - The validator reports an error when two tables with the same name are defined in one subject
     area; the model store keys tables by area and name, so such a model cannot be stored faithfully.
     The same name in different areas is allowed. `agami-connect` never produces this, but on a model
