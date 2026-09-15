@@ -71,8 +71,12 @@ jobs:
           # shellcheck disable=SC2086 # $versioned is a list of paths
           nonversion="$(git diff -U0 "$BASE...$HEAD" -- $versioned | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) ' \
             | grep -vE '^[-+][[:space:]]*("version":|version = )' || true)"
+          # shellcheck disable=SC2086
+          bumped="$(git diff -U0 "$BASE...$HEAD" -- $versioned | grep -E '^[-+][[:space:]]*("version":|version = )' || true)"
+          # A version line must actually change: a changelog-only PR is not a release, and one that
+          # forgot its bump should not be waved through as one.
           tests=true
-          if [ -n "$files" ] && [ -z "$other" ] && [ -z "$nonversion" ]; then
+          if [ -n "$files" ] && [ -z "$other" ] && [ -z "$nonversion" ] && [ -n "$bumped" ]; then
             tests=false
             echo "release-only: version strings and the changelog, on code main already tested"
           fi
