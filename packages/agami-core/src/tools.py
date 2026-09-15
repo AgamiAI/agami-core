@@ -344,6 +344,10 @@ def _datasources_to_choose_from(args: dict[str, Any]) -> "list[str] | None":
         # keeps, so an omitted call on a single-datasource organization adds no query.
         return None
     served = _served_datasources(org_id)
+    if served is not None and len(served) == 1:
+        # Cache the positive answer here too: with `AGAMI_PROFILE` or an active profile configured,
+        # `resolve_profile` returns before `_sole_served_datasource` can, so nothing else fills it.
+        _SOLE_SERVED[org_id] = served[0]
     if served is None or len(served) < 2:
         return None
     return served
