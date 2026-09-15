@@ -168,6 +168,10 @@ _CTE_ESCAPES = {
         "WITH RECURSIVE secret AS "
         "(SELECT id FROM secret UNION ALL SELECT id + 1 FROM secret WHERE id < 0) SELECT id FROM secret"
     ),
+    "recursive_middle_arm": (
+        "WITH RECURSIVE secret AS (SELECT 1 AS id UNION ALL SELECT id FROM secret "
+        "UNION ALL SELECT id + 1 FROM secret WHERE id < 3) SELECT id FROM secret"
+    ),
     "quoted_cte_unquoted_reference": 'WITH "secret" AS (SELECT id FROM orders) SELECT id FROM secret',
     "unquoted_cte_quoted_reference": 'WITH secret AS (SELECT id FROM orders) SELECT id FROM "SECRET"',
 }
@@ -231,6 +235,20 @@ def test_fully_qualified_columns_bind_to_their_own_unaliased_table():
     assert (
         _both_paths(f"SELECT staging.orders.amount {join}", org, rt.check_column_scope) is not None
     )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT (SELECT sales_data.orders.raw_payload FROM staging.orders LIMIT 1) FROM sales_data.orders",
+        "SELECT amount FROM sales_data.orders WHERE EXISTS "
+        "(SELECT 1 FROM staging.orders WHERE sales_data.orders.raw_payload = 777)",
+    ],
+)
+def test_a_correlated_schema_qualified_column_binds_to_the_outer_table(sql):
+    # The inner `staging.orders` shares the bare name, but the engine reads the outer table's column.
+    refusal = _both_paths(sql, _clash_org(), rt.check_column_scope)
+    assert refusal is not None and "orders.raw_payload" in refusal.detail
 
 
 def test_column_scope_binds_an_outer_table_an_inner_with_shadows_by_name():

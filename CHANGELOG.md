@@ -22,7 +22,7 @@ below corresponds to one such version.
   scope checks a column against the schema actually read, not every same-named table.
 - **A CTE name no longer hides a physical table its `WITH` does not enclose.** CTE references are
   resolved per reference: a body sees earlier siblings and enclosing `WITH`s, its own name only in
-  the recursive arms of a `WITH RECURSIVE … UNION`, a schema-qualified name is never a CTE, and a
+  the last arm of a `WITH RECURSIVE … UNION` (its recursive term), a schema-qualified name is never a CTE, and a
   quoted name binds only a quoted reference spelled exactly the same.
 - The validator warns when one table name is declared under two or more schemas: lookups and schema
   serving still treat such names by bare name, so queries must use the qualified form.

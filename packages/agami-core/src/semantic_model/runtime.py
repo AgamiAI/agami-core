@@ -1338,16 +1338,14 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
                 name = _identifier_key(alias.this) if isinstance(alias, exp.TableAlias) else None
                 body = cte.this
                 if recursive and name is not None and isinstance(body, exp.Union):
-                    # Left-deep: `A UNION ALL B UNION ALL C` is Union(Union(A, B), C). Every
-                    # right-hand arm is the recursive term and sees the name; the leftmost leaf is
-                    # the anchor and does not, nor do the union's own modifiers.
+                    # Left-deep: `A UNION ALL B UNION ALL C` is Union(Union(A, B), C). Only the
+                    # outermost right arm is the recursive term and sees the name; DuckDB reads a
+                    # self-reference in B as the physical table, so everything left of it, and the
+                    # union's own modifiers, is checked as the anchor.
                     push_children(cte, inner, ("this",))
-                    arm = body
-                    while isinstance(arm, exp.Union):
-                        stack.append((arm.expression, inner + (name,)))
-                        push_children(arm, inner, ("this", "expression"))
-                        arm = arm.this
-                    stack.append((arm, inner))
+                    stack.append((body.expression, inner + (name,)))
+                    stack.append((body.this, inner))
+                    push_children(body, inner, ("this", "expression"))
                 else:
                     stack.append((cte, inner))
                 if name is not None:
@@ -1692,9 +1690,11 @@ def check_column_scope(sql: str, org: Datasource,
             # a correlated ref sees ancestor aliases; an inner alias shadows an outer.
             quals = ([f"{col.db}.{col.table}".lower()] if col.db else []) + [col.table.lower()]
             phys = None
-            for s in chain:
-                scope_aliases = alias_by_select.get(id(s), {})
-                phys = next((scope_aliases[q] for q in quals if q in scope_aliases), None)
+            # Each spelling across the whole chain before the next: an inner `staging.orders` must
+            # not capture `sales_data.orders.col`, which the engine resolves to the outer table.
+            for q in quals:
+                phys = next((alias_by_select[id(s)][q] for s in chain
+                             if q in alias_by_select.get(id(s), {})), None)
                 if phys is not None:
                     break
             if phys is None:
