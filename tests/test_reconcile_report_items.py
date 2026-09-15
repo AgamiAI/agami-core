@@ -87,7 +87,7 @@ def test_a_table_that_differs_in_columns_names_the_extra_columns_and_blames_the_
     assert item["owner"] == "you" and item["single_cell"] is False and item["expected"] == "21 rows"
     assert item["change"] == ["Your query returns columns the question did not ask for: planned_ship_date, delivered_at, channel. Remove them, or name them in the question."]
     assert rows["values"]["state"] == "held" and rows["values"]["yours"] == "identical"
-    assert item["sentence"].startswith("The two answers do not match. What differs: columns")
+    assert item["sentence"] == "The two answers differ in columns."
 
 
 def test_a_mistake_in_the_query_is_the_persons_and_the_near_miss_is_said(tmp_path):
@@ -107,7 +107,8 @@ def test_an_error_row_and_the_cli(tmp_path, capsys):
     assert printed["items"] == 2 and printed["by_status"] == {"match": 1, "error": 1} and printed["layout"] == "cards"
     items = json.loads((run / "report-items.json").read_text())
     err = items[1]
-    assert err["diff"][0] == {"key": "answer", "state": "open", "yours": None, "agami": "failed", "note": "Could not extract a single scalar from the result."}
+    assert err["diff"][0] == {"key": "answer", "state": "open", "section": "data", "yours": None, "agami": "failed",
+                              "note": "Could not extract a single scalar from the result."}
     assert err["owner"] == "agami" and err["question"] == "Which category sold the most?"
     (run / "rows.jsonl").unlink()
     assert reconcile.main(["report-items", "--run-dir", str(run)]) == 4
@@ -199,9 +200,9 @@ def test_owner_branches_a_number_only_mismatch_differing_tables_and_open_parts(t
     open_only = dict(SCALAR_MATCH, row=3, status="match_unverified", ledger={"rows": [_part("runs", "confirmed"), _part("join:orders-payments", "unresolved", note="could not probe"),
                      _part("question_fit", "confirmed", {"fit": "plausible"})], "verdict": "unresolved", "counts": {}}, claims=None)
     items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [number_only, tables_differ, open_only]))}
-    assert items[1]["owner"] == "question" and items[1]["sentence"] == "The two answers do not match, and no check explains why."
+    assert items[1]["owner"] == "question" and items[1]["sentence"] == "agami is -10.0% from your number."
     assert items[1]["diff"][0]["note"] == "agami is -10.0% from your number" and items[1]["diff"][0]["yours_hi"] == ["100"]
-    assert items[2]["fix"] == "examples" and items[2]["owner"] == "agami" and items[2]["sentence"] == "The two answers do not match. What differs: tables read."
+    assert items[2]["fix"] == "examples" and items[2]["owner"] == "agami" and items[2]["sentence"] == "50% of the values match."
     assert items[3]["owner"] == "nothing" and items[3]["change"] == ["Nothing to change. Some checks could not run against the database, so this row is not offered as an example."]
     assert items[3]["sentence"] == "The numbers match, but these checks could not be confirmed: join orders to payments."
 
@@ -246,7 +247,8 @@ def test_the_remaining_row_shapes_a_failed_statement_a_wide_delta_and_the_join_f
     rows = {r["key"]: r for r in item["diff"]}
     assert rows["answer"]["yours"] == "failed" and rows["answer"]["agami"] == "12" and rows["answer"]["state"] == "defect"
     assert rows["answer"]["note"] == "agami is +450.0% from your number"  # delta_pct is a fraction; always shown as a percent
-    assert rows["date window"] == {"key": "date window", "state": "open", "yours": "could not read", "agami": "could not read",
+    assert rows["date window"] == {"key": "date window", "state": "open", "section": "sql", "yours": "could not read",
+                                   "agami": "could not read",
                                    "note": "the window could not be read from one of the two queries"}
     assert rows["one row per key, orders to payments"]["yours"] == "one row per key on orders"
     assert rows["rows dropped by join orders to payments"]["yours"] == "12 of 4,000 orders rows" and rows["rows dropped by join orders to payments"]["state"] == "noted"

@@ -26,7 +26,7 @@ ITEM = {"row": 2, "label": "Orders since June", "question": "List all orders pla
 
 def test_the_grid_has_one_row_per_check_with_the_category_first_and_the_extra_token_highlighted():
     html = rr.render(title="t", profile="p", run="r", items=[ITEM, dict(ITEM, row=3)])
-    assert "function diffGrid(item)" in html and 'class="dg"' in html
+    assert "function diffGrid(item, section)" in html and 'class="dg"' in html
     # The header names the four columns in this order: mark, what was checked, yours, agami.
     assert '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>' in html
     # One grid, four tracks: the alignment is structural, not two stacks side by side.
@@ -36,12 +36,12 @@ def test_the_grid_has_one_row_per_check_with_the_category_first_and_the_extra_to
     assert "MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·', differs: '≠' }" in html
     assert "diffCard(item)" in html and "diffAudit(item)" in html and 'layout: "cards"' in html
     # The sentence and the semantic model's words ride along; the note shows only off a held row.
-    assert "r.note && (r.state !== 'held' || r.key === 'columns')" in html and '<details class="words"><summary>The semantic model says</summary>' in html
+    assert "r.note && (r.state !== 'held' || r.key === 'columns')" in html and '<div class="quote"><b>What the semantic model says</b>' in html
 
 
 def test_one_item_with_a_diff_takes_the_audit_layout_and_keeps_the_rail():
     html = rr.render(title="t", profile="p", run="r", items=[ITEM])
-    assert 'layout: "audit"' in html and "function diffAudit(item)" in html and '<div class="rail"><b>What to do</b>' in html
+    assert 'layout: "audit"' in html and "const diffAudit = diffCard;" in html and 'function verdict(item)' in html
 
 
 def test_an_item_without_a_diff_still_renders_the_beats():
@@ -75,7 +75,7 @@ def test_each_decision_says_what_it_is_and_what_happens_and_the_box_asks_for_the
 def test_the_two_statements_sit_collapsed_under_the_grid():
     item = dict(ITEM, sql_yours="SELECT number FROM requests", sql_agami="SELECT request FROM request_items")
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
-    assert "function sqlBlock(item)" in html and '<details class="sql"><summary>The two SQL statements</summary>' in html
+    assert "function sqlBlock(item)" in html and 'function section(item, key, title)' in html
     assert "SELECT number FROM requests" in html and "SELECT request FROM request_items" in html
     with pytest.raises(ValueError, match="statement's text"):
         rr.render(title="t", profile="p", run="r", items=[dict(item, sql_yours=["no"])])
@@ -136,8 +136,8 @@ def test_the_card_after_the_second_read_question_first_folding_checks_example_an
     item = dict(ITEM, prefill={"change": "add values declared on x", "fix": "remove channel", "reword": "List all orders placed from June this year.", "example": ""},
                 result={"data": "partly", "query": "different", "label": "same rows, different columns", "unchecked": 0, "differs_in": ["columns"]}, fix="query", fix_words="fix your query")
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
-    for token in ('<span class="title q">\' + esc(item.question) + \'</span>'.replace("\\", ""), "<span class=\"state\">' + resultPill(item)".replace("\\", ""),
-                  "[item.label, item.source].filter(Boolean).join(' · ')", "<details class=\"checks\"".replace("\\", ""), "'</summary>'", "Checks: ' + passed + ' passed",
+    for token in ('<span class="title q">\' + esc(item.question) + \'</span>'.replace("\\", ""), "function verdict(item)", '<div class="vl">\' + esc(label) + \'</div>',
+                  "[item.label, item.source].filter(Boolean).join(' · ')", "<details class=\"sec\"".replace("\\", ""), "</summary>'", "section(item, 'data', 'The answer')",
                   "example: { word: 'add an example'", "function prefillFor(item, decision)", "['change', 'fix', 'reword', 'example'].includes(d.decision)",
                   "examples: item.keep_allowed ? 'keep' : 'example'", '"prefill": {"change": "add values declared on x"'):
         assert token in html, token
@@ -157,7 +157,7 @@ def test_list_cells_read_like_a_diff():
 
 def test_the_checks_start_closed_and_the_palette_has_one_meaning_per_color():
     html = rr.render(title="t", profile="p", run="r", items=[ITEM, dict(ITEM, row=3)])
-    assert "'<details class=\"checks\"><summary>Checks: '" in html and "(open ? ' open' : '')" not in html
+    assert "'<details class=\"sec\"><summary>" in html and "(open ? ' open' : '')" not in html
     css = html[html.index("<style>"):html.index("</style>")]
     assert "--agami:" in css and ".pill.agami { background: var(--agami-bg); color: var(--agami); }" in css
     assert ".dg .v .tok.add { background: var(--agami-bg); color: var(--agami);" in css and "background: var(--agami-bg); color: var(--agami); border-radius: 999px" in css

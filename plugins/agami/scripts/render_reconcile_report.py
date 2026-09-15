@@ -30,6 +30,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "reconcile-report-template.html"
@@ -41,9 +42,9 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "status_words", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill")
+           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill", "summaries", "sample")
 _LISTS = ("read", "how", "words", "change", "todo")
-_DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
+_DIFF_KEYS = ("key", "state", "section", "family", "rolled", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
@@ -55,6 +56,35 @@ _QUERY_RESULTS = {"same", "different", "not_comparable"}
 _FIXES = {"query", "semantic_model", "examples", "question", "ask_again", "none"}
 
 
+_SAMPLE_ROWS = 5
+
+
+def _validate_sample(sample: Any, idx: int) -> None:
+    """The one place this page may carry warehouse values, and the cap is enforced here.
+
+    Everything else on the card is display text built by the items verb. A sample is different: it is
+    rows of real data, so the bound is checked at the surface that publishes them rather than trusted
+    from whatever produced them. A page is a file that travels; five rows is a sample and five hundred
+    is an export.
+    """
+    if sample is None:
+        return
+    if not isinstance(sample, dict):
+        raise ValueError(f"item {idx}: 'sample' must be an object")
+    rows = sample.get("rows")
+    if not isinstance(rows, list) or len(rows) > _SAMPLE_ROWS:
+        raise ValueError(f"item {idx}: 'sample.rows' is at most {_SAMPLE_ROWS} rows; got "
+                         f"{len(rows) if isinstance(rows, list) else type(rows).__name__}")
+    pairs = sample.get("pairs")
+    if not isinstance(pairs, list) or not all(isinstance(p, list) and len(p) == 2 for p in pairs):
+        raise ValueError(f"item {idx}: 'sample.pairs' must be a list of two-name pairs")
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("yours"), list):
+            raise ValueError(f"item {idx}: every 'sample.rows' entry needs a 'yours' list")
+        if row.get("agami") is not None and not isinstance(row["agami"], list):
+            raise ValueError(f"item {idx}: 'sample.rows[].agami' is a list or null")
+
+
 def _validate_item(item: dict, idx: int) -> None:
     if not isinstance(item, dict):
         raise ValueError(f"item {idx}: must be an object")
@@ -64,6 +94,7 @@ def _validate_item(item: dict, idx: int) -> None:
         raise ValueError(f"item {idx}: 'question' (string) is required")
     if "rows" in item or "recorded" in item:
         raise ValueError(f"item {idx}: result rows are never rendered; pass 'answer' as display text")
+    _validate_sample(item.get("sample"), idx)
     if item.get("status") not in _STATUSES:
         raise ValueError(f"item {idx}: 'status' must be one of {sorted(_STATUSES)}")
     for key in ("label", "source", "expected", "answer", "disagreement", "report_path"):

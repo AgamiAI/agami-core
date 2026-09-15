@@ -220,18 +220,63 @@
       }
       return '<div class="' + cls + '">' + ((hi || []).includes(v) ? '<span class="hi">' + esc(v) + '</span>' : esc(v)) + '</div>';
     }
-    function diffGrid(item) {
-      const rows = item.diff || [];
-      const passed = rows.filter(r => r.state === 'held').length;
-      const open = rows.length - passed;
-      return '<details class="checks"><summary>Checks: ' + passed + ' passed' + (open ? ', ' + open + ' did not' : '') + '</summary>'
-        + '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
+    // One section's rows only. A row carries its own section from the items verb, so the page never
+    // guesses from a label: "value list for x" and "values" are one prefix apart and mean different things.
+    function diffGrid(item, section) {
+      const rows = (item.diff || []).filter(r => !section || r.section === section);
+      if (!rows.length) return '';
+      return '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
         + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
         + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'
             + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
             + cell(r.yours, r.yours_hi, 'yours', r.state, r.renamed) + cell(r.agami, r.agami_hi, 'agami', r.state, r.renamed)
             + (r.note && (r.state !== 'held' || r.key === 'columns') ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
-        + '</div></details>';
+        + '</div>';
+    }
+    // Five rows of the two results, side by side, differing rows first. The only place the page
+    // shows warehouse values, and never more than five.
+    function grid(sample) {
+      if (!sample || !sample.rows.length) return '';
+      const head = sample.pairs.map(pr => '<th>' + esc(pr[0] === pr[1] ? pr[0] : pr[0] + ' / ' + pr[1]) + '</th>').join('');
+      const body = sample.rows.map(r => {
+        const y = '<tr class="y' + (r.same ? '' : ' differs') + '"><th>yours</th>'
+          + r.yours.map((v, i) => '<td class="' + (r.same || !r.agami || v === r.agami[i] ? '' : 'differs') + '">' + esc(v) + '</td>').join('') + '</tr>';
+        const a = r.agami ? '<tr class="a' + (r.same ? '' : ' differs') + '"><th>agami</th>'
+          + r.agami.map((v, i) => '<td class="' + (r.same || v === r.yours[i] ? '' : 'differs') + '">' + esc(v) + '</td>').join('') + '</tr>' : '';
+        return y + a;
+      }).join('');
+      const notes = [sample.shown + ' of ' + sample.total + ' rows'];
+      if (!sample.aligned) notes.push('the two results returned different row counts, so these are not aligned; agami\'s are not shown beside yours');
+      if (sample.by_name) notes.push('columns paired by name');
+      if (sample.only_yours.length) notes.push('only yours: ' + sample.only_yours.join(', '));
+      if (sample.only_agami.length) notes.push('only agami: ' + sample.only_agami.join(', '));
+      return '<div class="grid-wrap"><table class="sample"><thead><tr><th></th>' + head + '</tr></thead><tbody>'
+        + body + '</tbody></table><p class="gnote">' + esc(notes.join(' · ')) + '</p></div>';
+    }
+    // The three sections, all closed at rest. Each summary names the exception when there is one and
+    // a count when there is not, so most cards need no opening at all.
+    function section(item, key, title) {
+      const sum = (item.summaries || {})[key] || '';
+      let body = '';
+      if (key === 'data') body = grid(item.sample) + diffGrid(item, 'data');
+      else if (key === 'sql') body = diffGrid(item, 'sql') + sqlBlock(item);
+      else body = diffGrid(item, 'model') + words(item);
+      if (!body) return '';
+      return '<details class="sec"><summary><span class="st">' + esc(title) + '</span><span class="ss">' + esc(sum) + '</span></summary>'
+        + '<div class="secbody">' + body + '</div></details>';
+    }
+    // The verdict, and the one thing to do about it. Everything else on the card is behind a
+    // disclosure, so these two are what a reader sees on fifty rows in a row.
+    function verdict(item) {
+      const r = item.result || {};
+      const cls = r.data === 'matches' && r.query === 'different' ? 'open' : (DATA_CLASS[r.data] || 'noted');
+      const fix = fixOf(item);
+      const label = r.label || item.status_words || '';
+      return '<div class="verdict ' + esc(cls) + '"><div class="vl">' + esc(label) + '</div>'
+        + (item.sentence ? '<p class="vs">' + esc(item.sentence) + '</p>' : '')
+        + '<div class="vact"><span class="pill ' + esc(item.fix ? FIX_CLASS[fix] : (item.owner || 'nothing')) + '">'
+        + esc(item.fix ? (item.fix_words || FIX_WORDS[fix] || fix) : (OWNER_SHORT[item.owner || 'nothing'] || '')) + '</span>'
+        + '<span class="vchange">' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div></div>';
     }
     // The two statements, collapsed: the person's own SQL shown to its author, and agami's, which
     // the receipt already shows. Never a result row.
@@ -245,13 +290,18 @@
           + steps.map((s, i) => '<div class="step"><small>' + (i + 1) + (i === steps.length - 1 ? ' · compared' : '') + '</small><pre>' + esc(s) + '</pre></div>').join('')
           + '</div>'
         : '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div>';
-      return '<details class="sql"><summary>The two SQL statements</summary><div class="sql2">'
+      return '<div class="sql2">'
         + '<div><b>yours</b><pre>' + esc(item.sql_yours || '(none)') + '</pre></div>'
-        + agami + '</div></details>';
+        + agami + '</div>';
     }
+    // The semantic model's own words, beside the checks they belong to and capped: ninety-one quotes
+    // on one row is not evidence, it is a wall.
     function words(item) {
-      return (item.words || []).length
-        ? '<details class="words"><summary>The semantic model says</summary><ul>' + item.words.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul></details>' : '';
+      const w = (item.words || []).slice(0, 3);
+      return w.length ? '<div class="quote"><b>What the semantic model says</b><ul>'
+        + w.map(x => '<li>' + esc(x) + '</li>').join('')
+        + ((item.words || []).length > 3 ? '<li class="more">and ' + ((item.words || []).length - 3) + ' more, in mentions.json</li>' : '')
+        + '</ul></div>' : '';
     }
     function action(item, d) {
       const fix = fixOf(item);
@@ -262,24 +312,16 @@
     function diffCard(item) {
       const d = decisions[item.row] || {};
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title q">' + esc(item.question) + '</span><span class="state">' + resultPill(item) + '</span></div>'
+        + '<div class="head"><span class="n">' + item.row + '</span><span class="title q">' + esc(item.question) + '</span></div>'
         + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
-        + diffGrid(item)
-        + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '')
-        + sqlBlock(item) + words(item) + action(item, d)
+        + verdict(item)
+        + section(item, 'data', 'The answer')
+        + section(item, 'sql', 'The two queries')
+        + section(item, 'model', 'Model checks')
         + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
         + controls(item, d) + '</div>';
     }
-    function diffAudit(item) {
-      const d = decisions[item.row] || {};
-      return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title q">' + esc(item.question) + '</span><span class="state">' + resultPill(item) + '</span></div>'
-        + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
-        + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + sqlBlock(item) + words(item) + '</div>'
-        + '<div class="rail"><b>What to do</b>' + lines(item.todo && item.todo.length ? item.todo : item.change) + action(item, d) + '</div></div>'
-        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
-        + controls(item, d) + '</div>';
-    }
+    const diffAudit = diffCard;   // one card shape; a single-row run differs only in the page's lede
     function card(item) {
       const d = decisions[item.row] || {};
       const owner = item.owner || 'nothing';

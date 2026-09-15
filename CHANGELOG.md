@@ -14,6 +14,24 @@ below corresponds to one such version.
 
 ### Changed
 
+- **The reconcile card shows a verdict and what to do, and nothing else until asked.** Sandeep ran
+  five statements against a real warehouse and the card buried the answer: the verdict sat as plain
+  text between two panels, the same conclusion was written four times in four registers, and a check
+  saying "the column holds more than 25 distinct values" had the same weight as one that found a
+  mistake. A card is now the question, one verdict carrying the measurement behind it ("9 of 10 rows
+  match"), the one thing to do about it, and three closed sections: the answer, the two queries, and
+  the model checks. Each section carries a one-line summary that names the exception when there is
+  one and a count when there is not, so most cards need no opening and every card is the same height
+  at rest. Opening the answer shows up to five rows of the two results side by side, differing rows
+  first, read from the run's own CSVs at render time so the checkpoint still carries no result row
+  and the renderer enforces the five-row cap rather than trusting its producer. Three kinds of line
+  that were true and useless are gone: a wide column having no declared value list (the default state
+  of every free-text column, and reported even for a query pinned to one city, because the probe
+  reads the whole column), a join that dropped nothing, and twelve near-identical value checks that
+  now roll into one counted line. Anything that did not pass is kept whole and in place. The pages
+  also went from eleven font sizes, including 12.5 and 13.5, to five plus one for data, where
+  monospace now means "this came from the warehouse, or it is a statement".
+
 - **A verdict a person reads is a sentence, not a code word.** A row could read `expected_doubtful`,
   which is the row where the analyst's own query is the thing in doubt, and a check could read
   `fan_out: SUM(total)`, the one word the skill's own plain-language rule forbids. The tokens stay
