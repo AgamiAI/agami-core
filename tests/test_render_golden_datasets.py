@@ -569,7 +569,7 @@ def test_the_dialect_comes_from_the_model_rather_than_a_default(artifacts):
 
 
 def test_metrics_are_reported_apart_from_the_tables(artifacts):
-    """A metric is not one of the seven claims a statement is read into, so it is matched by name
+    """A metric is not one of the eight claims a statement is read into, so it is matched by name
     against the statement text — weaker evidence than a table claim, kept under its own key so the
     tab cannot present the two as the same thing."""
     coverage = _payload(_rendered(artifacts))["coverage"]

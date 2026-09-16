@@ -195,7 +195,7 @@ def _coverage(manifest: dict, datasets: list) -> dict[str, Any]:
     nothing, which is the false comfort this tab exists to remove.
 
     Tables and metrics are two different strengths of evidence and are kept under separate keys for
-    that reason. A table is one of the seven claims a statement is read into, so "this answer key
+    that reason. A table is one of the eight claims a statement is read into, so "this answer key
     reads `orders`" is a fact about the statement. A metric is not one of those seven, so it is
     matched by name against the statement's text — a weaker signal, and the page says so.
     """

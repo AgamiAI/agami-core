@@ -4,7 +4,7 @@
 skill decides meaning and talks to the person; everything deterministic about the statement lives in
 the CLI, and these are those parts:
 
-* `claims`          - where two statements differ, in the seven claims `golden_claims` already reads
+* `claims`          - where two statements differ, in the eight claims `golden_claims` already reads
 * `compare-results` - whether two result sets say the same thing, through the golden comparator
 * `join-probes`     - for every join the statement wrote: the receipt's own status for it, whether the
                       written key matches the declared one, and the probe SQL that would show whether
@@ -176,6 +176,23 @@ def test_compare_results_scores_one_when_the_two_tables_say_the_same_thing(tmp_p
     # CSV wire lost the types and the reader puts them back before the comparator sees the cells.
     assert rc == 0 and d["status"] == "scored" and d["accuracy"] == 1.0, d
     assert d["order_sensitive"] is False
+
+
+def test_compare_results_unordered_compares_the_rows_as_a_set_whatever_the_statement_ordered(tmp_path):
+    """Reconcile never compares row order: the ordering claim says whether the two statements sort
+    the same way. `--unordered` says so to the comparator, whatever ORDER BY the statement wrote."""
+    _model(tmp_path)
+    g = _write(tmp_path, "g.csv", "region,total\nEU,4.2\nUS,10\n")
+    a = _write(tmp_path, "a.csv", "region,total\nUS,10\nEU,4.2\n")
+    s = _write(tmp_path, "s.sql", "SELECT region, SUM(total) AS total FROM orders GROUP BY region ORDER BY total DESC")
+    rc, out = _run(["compare-results", str(tmp_path), "--golden-csv", g, "--generated-csv", a,
+                    "--match", "values", "--golden-sql-file", s])
+    assert rc == 0 and json.loads(out)["accuracy"] == 0.0
+    rc, out = _run(["compare-results", str(tmp_path), "--golden-csv", g, "--generated-csv", a,
+                    "--match", "values", "--golden-sql-file", s, "--unordered"])
+    d = json.loads(out)
+    assert rc == 0 and d["accuracy"] == 1.0 and d["order_sensitive"] is False
+    assert d["notes"] == ["row order was not compared"]
 
 
 def test_compare_results_defaults_to_the_comparators_own_level_and_scores_zero_on_a_difference(tmp_path):
