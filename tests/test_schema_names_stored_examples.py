@@ -129,6 +129,7 @@ def test_the_surface_names_the_pointer_and_keeps_the_calls_independent(monkeypat
     # question plainly belonging to one subject area ranked against every area's library.
     assert "as `query`" in tools.TOOLS["get_prompt_examples"]["description"]
     assert "leave `area` out" not in tools.TOOLS["get_prompt_examples"]["description"]
+    assert "leave `area` out" not in tools._EXAMPLES_REMINDER
     for hosted in (True, False):
         for var in ("AGAMI_DB_URL", "APP_DATABASE_URL"):
             monkeypatch.delenv(var, raising=False)
@@ -138,6 +139,9 @@ def test_the_surface_names_the_pointer_and_keeps_the_calls_independent(monkeypat
         assert "`prompt_examples`" in text
         # The fallback does not undo the decision to issue both grounding calls in one turn.
         assert "INDEPENDENT" in text
+        # Pinned on every surface a client can read the steer from, not just the one it was
+        # written on: the instructions here, the reminder above, and the tool description.
+        assert "leave `area` out" not in text
 
 
 def test_a_served_schema_call_carries_the_pointer(tmp_path, monkeypatch):

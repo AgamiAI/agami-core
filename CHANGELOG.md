@@ -19,8 +19,12 @@ below corresponds to one such version.
   a served deployment no client passed an `area` at all, so a question that plainly belongs to one
   subject area was ranked against every area's library. All three copies of the sentence are gone
   (the server instructions, the tool description, and the reminder stamped onto a schema response).
-  What a call does is unchanged: an `area` still returns that area's examples plus the cross-area
-  bucket, and omitting it still searches the whole library.
+  What a call does is unchanged: an `area` still returns that area's examples, plus the cross-area
+  bucket on a served deployment, and omitting it still searches the whole library.
+- **The `area` parameter now describes both serving paths.** It said "cross-area examples still
+  included", which is true of a served deployment and false of the local file path, where no
+  cross-area bucket exists on disk and an `area` returns that area alone. One schema described one
+  path, so a local caller was promised examples that path cannot return.
 
 ## [0.9.0] — 2026-09-16
 

@@ -118,7 +118,7 @@ _HOSTED_PREAMBLE = (
 # get_prompt_examples' job, and the schema response stays the model.
 _EXAMPLES_REMINDER = (
     "Call get_prompt_examples with the user's question as `query` before writing SQL, unless you "
-    "already have for this question."
+    "have already called it for this question."
 )
 
 _SHARED_INSTRUCTIONS = (
@@ -3734,7 +3734,11 @@ TOOLS: dict[str, dict[str, Any]] = {
                     # is false, so no compliant client could ever send it and the branch was dead
                     # on every call. By step 3 of the documented flow the agent has already chosen
                     # a subject area, so it knows what to pass.
-                    "description": "Narrow to one subject area (cross-area examples still included).",
+                    "description": (
+                        "Narrow to one subject area. A served deployment returns that area "
+                        "plus the cross-area examples; the local file path has no cross-area "
+                        "bucket on disk, so it returns that area alone."
+                    ),
                 },
                 "top_k": {
                     "type": "integer",
