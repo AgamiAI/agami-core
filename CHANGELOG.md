@@ -12,6 +12,205 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **`python -m execute_sql --batch` runs a plan of statements in one process.** Every statement paid
+  an interpreter start, a full semantic-model load (twice) and a connect, about sixteen seconds for
+  a query of a tenth of a second, and reconcile's statement check issues about ten per row. The
+  batch door takes a JSON list of `{id, sql | sql_file, out, area?}`, resolves the semantic model once (a
+  per-process memo keyed by the model files' count and newest mtime, never caching an absent
+  model; the hosted path is unchanged), keeps the connection open across the items on Postgres,
+  Redshift, Supabase and SQLite (dropped after a statement that broke it), and still runs every
+  item through the guard on its own; each CSV, each `<out>.run.json` and a manifest are written by
+  the door. Reconcile's statement check runs a row's probes this way on the `execute_sql` tier.
+  (ACE-137)
+
+- **The reconcile report is built by code from the run directory, never typed.** `reconcile.py
+  record --run-dir --row` assembles the row record from the row's files and appends it to the
+  checkpoint (replacing an earlier record for the row; a question-only row nobody graded is
+  refused, since it waits for the grading page). `render_reconcile_report.py --run-dir` builds the
+  items itself, takes from the session a words file with `sentence` and `change` only (any other
+  field is refused), writes `report-items.json` beside the page, stamps the page with the digest
+  of the items it rendered, and prints the three lines the skill says. `reconcile.py check-run`
+  refuses to let Phase 3 speak while a row's files are missing or the page's stamp is not the
+  current items' digest. The skill's 2c writes `diff.json`, 2b writes `agami-run.json`, and 2d and
+  3a.5 name the verbs. (ACE-136)
+
+- **Agami's answer may be several statements, and the reconcile page shows every one.** The cold
+  client's reply was read as one string under `sql`; a list, or several statements in one string,
+  lost everything but the first object or read as unreadable. The generator now keeps every
+  statement in order (`statements`), answers with the last, and the prompt says so; the ask door
+  writes `statements` beside `sql`; the row record carries `agami_statements`; the report card's
+  SQL block lists them numbered with the last marked "compared", and the rows check notes that
+  agami ran N queries. Only the last is run and graded. (ACE-135)
+
+- **An eighth claim, `outputs`, says what a statement selects.** `sm claims` and the golden run
+  compared tables, filters, date window, group keys, join keys, ordering and limit, and never the
+  projection, so two statements selecting different expressions could still read as the same
+  query. The new claim reads each output expression with its alias peeled (`total` and
+  `o.amount_total` over one `SUM(orders.amount)` agree; `SUM` against `AVG` differs; `SELECT *` is the
+  one key `*`). It reports and never gates. Every reader that counted seven now counts eight.
+  (ACE-131)
+
+- **`sm compare-results --unordered`** compares the rows as a set whatever ORDER BY either statement
+  wrote, for a caller whose ordering is a claim of its own (reconcile's 2e, in ACE-134). The
+  comparator's `compare_result_sets` takes the same as `ordered=False`; the golden run is unchanged.
+  (ACE-131)
+
+- **Four `sm` verbs that grade a statement a person supplied, part by part.** `agami-reconcile` is
+  learning to take a trusted query as evidence rather than as the answer, and these are the
+  deterministic checks it will lean on. `sm claims` reports where two statements differ, in the seven
+  claims the golden runner already compares. `sm compare-results` says whether two result CSVs say the
+  same thing, through the golden comparator, so a table-shaped answer is judged the way an answer key
+  is. `sm join-probes` names, for every join a statement wrote, whether the semantic model declares a
+  relationship between those tables and whether the written key matches the declared one, and emits
+  the overlap and cardinality probes that would show whether the keys really resolve. `sm filter-values
+  plan` names, for every value typed into a filter, the column it binds to, whether the semantic
+  model's list of values holds it, and the probes that would settle it; `sm filter-values judge` reads
+  the probe results back and grades each value `confirmed`, `model_gap`, `query_defect` or
+  `unresolved`. None of the four runs SQL: the skill runs every probe through the same execution tier
+  a question takes. Joins are classified with the receipt's own flags, so a CTE that shadows a
+  declared table, a `USING`, a comma join, or a declared `on:` this layer cannot read all come back
+  as open states and never as a settled claim about a key nobody read. A probe that came back empty
+  is graded as a probe that failed, never as a column that holds nothing. A near miss is a case and
+  whitespace fold only, an empty list of values reads as not yet decoded rather than as no legal
+  values, a column marked sensitive is never probed for a value, and a value carrying a backslash or
+  a control character is never sent to the warehouse, because engines quote it differently. The
+  overlap probe is the one introspection already trusts, now shared as `introspect.overlap_sql` and
+  bounded to its 50-row sample on every engine through the new `Dialect.limited`, where it used to
+  be bounded only where the row-limit keyword was `LIMIT`. (ACE-114)
+
+- **`reconcile.py` reads any input a person brings, and grades a supplied statement part by part.**
+  Three new verbs beside `parse`, `diff` and `band`, which are unchanged. `intake` reads the four
+  shapes the reconcile skill will accept, a list of questions, questions with the SQL the person
+  trusts, labels with numbers, and labels with numbers and the SQL behind each tile, into one row
+  shape with the question, the statement and the expected value, any of which may be missing. A CSV
+  whose third column is SQL now yields a statement instead of a label with SQL glued onto it; a
+  statement whose label matches a tile joins that tile's row. `ledger` grades every part of a
+  supplied statement from the files the skill wrote beside it: what happened when it ran, what
+  `sm prepare` and `sm receipt` said, what `sm join-probes` and `sm filter-values judge` reported, and
+  the probe CSVs the execution tier returned. Four grades, and only measurement earns `model_gap`; a
+  join that could not be graded leaves the fan-out check on its aggregate `unresolved`, said out
+  loud. `findings` writes a run's findings, the person's own defects listed apart, and every row's
+  ledger. Three shared references describe the row, the ledger and how a supplied statement is run
+  the way the AI's own SQL runs. Nothing here runs SQL or writes to the semantic model. (ACE-115)
+
+- **`agami-reconcile` takes the evidence a person brings and grades their SQL part by part.** Four
+  input shapes, detected and never asked for: a dashboard screenshot, a table of numbers, SQL the
+  person trusts (alone, beside a question, or as the third column behind each tile), and a list of
+  questions with no answers. A supplied statement runs on the road agami's own SQL runs, with the
+  same guards, and every part of it is graded before anything is compared: a scope refusal is a
+  finding about the semantic model rather than a crash, a miscased value or a join on the wrong key
+  is the person's defect, and a part nobody could check says so. Two new row statuses keep a lucky
+  match out of the keep-offer (`match_unverified`) and keep a doubtful expected value out of the
+  mismatch count (`expected_doubtful`); `reconcile.py status` applies the rules. Tables are compared
+  through the golden comparator and the two statements' differences are named by claim. The run
+  writes its findings and the person's defects under `local/reconcile/<ts>/`. The skill still never
+  writes to the semantic model; a single fix goes through `agami-save-correction`, which now grades a
+  pasted statement with the same ledger. The plan-mode refusal no longer assumes a CSV path.
+  (ACE-116)
+
+- **A grading page for a list of questions.** When a person brings questions and no answers, agami
+  answers each one and there is nothing to compare against, so the person grades. One page lists
+  every question with the AI's answer as one cell or a shape, the receipt's signals, and right,
+  wrong or unsure, with a box for the right SQL or for words; one block comes back. A right answer
+  becomes the expected value. A wrong answer with SQL is graded like any statement the person
+  supplies. A wrong answer with words becomes a finding carrying them. Unsure changes nothing.
+  `render_reconcile_grades.py` and `parse_reconcile_grades.py` follow the model explorer's
+  paste-back pattern; the page never renders a result row, and a grade decides nothing on its own.
+  An end-to-end test walks the flawed-inputs chain over the sample store: the wrong join key, the
+  miscased value, the omitted required filter, the clean count. (ACE-117)
+- `sm mentions` quotes every description, caveat, glossary line, narrative paragraph and prompt
+  example that mentions a table or column a statement reads, and the reconcile ledger puts those
+  words beside every part that fell short, with a flag when two of them name different values for
+  one column. Quoted, never graded. (ACE-119)
+- Reconcile Phase 1.5g reads a person's question beside their statement and writes
+  `question_fit.json`; the ledger's `question_fit` part withholds a doubtful row from the keep-offer,
+  and a fit that was never checked is an open part rather than a silent pass. (ACE-120)
+- `shared/plain-language.md` says how reconcile talks to the person in Phase 3: four actors and no
+  fifth, the thing and never the mechanism, one idea per sentence, the semantic model quoted when it
+  decided something. Phase 3 points at it. (ACE-121)
+- Reconcile's Phase 3 tells every row in four beats, in the reader's order: how we read and checked
+  the input, what agami did with the question and answered, how it got there, and what to change or
+  keep. The tables and the offer keep their text. The ledger runs once per row, after the
+  comparison. (ACE-122)
+- One reconcile report page per run, on the plugin's theme, tells every row in the four beats and
+  takes the person's decisions back as one pasted block; a keep is offered only where the run said
+  match, and every decision goes through a door that already exists. (ACE-123)
+- Reconcile takes input the way connect does: an options prompt for the four shapes, a template CSV
+  the person fills with a hand-off, and an intake page that shows what was read before anything
+  runs, with one block back applied by a parser. The grading, intake and report pages share one
+  stylesheet and the same four beats. (ACE-124)
+- Reconcile works five rows at a time: `reconcile.py next-chunk` reads the run's checkpoint
+  (rows.jsonl) and hands back the next rows, so a long run resumes and no row runs twice; the
+  report, intake and grading pages filter by status, owner, shape or a word. (ACE-125)
+- The reconcile report card is a diff grid built by code: `reconcile.py report-items` templates one row
+  per check from the run's files, the check named first, yours and agami as values with the differing
+  tokens highlighted, the sides aligned by construction; one sentence and one action per card. (ACE-126)
+- The reconcile report card carries two facts read by code: the result (does the data match; are the two
+  queries the same) as the pill, and the fix (your query, the semantic model, the examples, the question,
+  agami again, nothing) as the action. A query written differently is a noted fact, no longer a blocker
+  on a matching answer. (ACE-127)
+- The reconcile card after a second read: the question is the title, columns are compared by the data
+  they carry (the compare-results score names `column_pairs` and `unmatched_generated_columns`), a bare
+  column reads as its table's column in the claims reader, the change text and the decision boxes derive
+  from the one fix, an `example` decision joins the block, the checks panel folds. (ACE-128)
+- Reconcile asks agami cold: `run_golden_eval.py --ask` answers one question and `--ask-file` a chunk of
+  them with the golden run's own generator and context, fetching the context once and spawning the
+  client per question several at a time; Phase 2b never writes agami's SQL in the reconcile session, and
+  a missing client is an error row, never the session's own statement. (ACE-129)
+- From the first test of the grid: a plain column in a list query is no longer graded as a missing
+  metric (the receipt's output items say whether they aggregate); a date window written against the
+  clock (`date_trunc('year', current_date) + interval`) resolves and compares against another such
+  window; the claim keys read as words on the page; the owner order is your query, then the semantic
+  model, then the question, with the change text naming the gaps or the extra columns; the two SQL
+  statements sit collapsed under the grid. (ACE-126)
+
+### Changed
+
+- **The reconcile card shows a verdict and what to do, and nothing else until asked.** Five
+  statements run against a real warehouse found the card burying the answer: the verdict sat as plain
+  text between two panels, the same conclusion was written four times in four registers, and a check
+  saying "the column holds more than 25 distinct values" had the same weight as one that found a
+  mistake. A card is now the question, one verdict carrying the measurement behind it ("9 of 10 rows
+  match"), the one thing to do about it, and three closed sections: the answer, the two queries, and
+  the model checks. Each section carries a one-line summary that names the exception when there is
+  one and a count when there is not, so most cards need no opening and every card is the same height
+  at rest. Opening the answer shows up to five rows of the two results side by side, differing rows
+  first, read from the run's own CSVs at render time so the checkpoint still carries no result row
+  and the renderer enforces the five-row cap rather than trusting its producer. Three kinds of line
+  that were true and useless are gone: a wide column having no declared value list (the default state
+  of every free-text column, and reported even for a query pinned to one city, because the probe
+  reads the whole column), a join that dropped nothing, and twelve near-identical value checks that
+  now roll into one counted line. Anything that did not pass is kept whole and in place. The pages
+  also went from eleven font sizes, including 12.5 and 13.5, to five plus one for data, where
+  monospace now means "this came from the warehouse, or it is a statement".
+
+- **A verdict a person reads is a sentence, not a code word.** A row could read `expected_doubtful`,
+  which is the row where the analyst's own query is the thing in doubt, and a check could read
+  `fan_out: SUM(total)`, the one word the skill's own plain-language rule forbids. The tokens stay
+  on the wire, where `rows.jsonl`, the keep gate and the `status` verb are pinned to them; what a
+  person sees now comes from one table in `reconcile.py` and nowhere else. A row reads "same
+  answer", "same answer, but part of your query could not be checked", "different answer",
+  "different answer, and your query has a problem", or "could not compare", so the status says both
+  of the facts it carries: whether the two answers agreed, and whether the analyst's own query
+  checked out. The report page is handed the colour family and the filter-chip words with its items
+  and keeps no glossary of its own, so the card, the chips and the chat cannot drift into calling
+  one row three things. `shared/plain-language.md` points at the table rather than restating it, and
+  a test refuses a status token in any line the skill puts in front of a person.
+
+- **The result comparator pairs a column that mostly agrees instead of calling it missing.** One
+  differing cell used to unpair a column: the score fell to 0 with "no generated column carries the
+  values of: total" for a column agreeing on nine rows of ten, and every reader keyed on the pairs
+  saw an empty list. Columns still pair on whole-vector equality first; what is left pairs by name
+  when the two sides spell one (the qualifier and case dropped), or by the highest share of agreeing
+  rows when more than half agree. The score then counts rows ("9 of the answer key's 10 rows
+  matched") and carries `column_agreement` beside `column_pairs` and `paired_row_share` over the
+  paired columns. An item still passes at exactly 1.0; a golden column with no partner at all still
+  scores 0 with its name. Three pins moved with it: a same-named column of another type, a null
+  against an empty string, and one differing row now read as a pair that disagrees, not a column
+  that is absent. (ACE-131)
+
 ### Fixed
 
 - **Text past plain ASCII survives `sm` on Windows.** Five `sm` commands — `set-terminology`,
@@ -22,6 +221,47 @@ below corresponds to one such version.
   area into one response, one such file dropped the curated examples for every area. Both reads now
   use UTF-8, and a file that still cannot be read is skipped on its own rather than failing the
   rest. Text already garbled by an earlier `sm` run is not repaired by this; re-save it. (#236)
+
+- **The reconcile card reads how many rows agree, names the side that failed, and still says what
+  the two queries are when the data could not be compared.** One differing cell used to print "0% of
+  the values match" for a column that was there; the values row now reads the comparator's share
+  ("9 of 10 rows match, differs in total on 1 of 10 rows"), and "same rows, different columns" needs
+  the paired columns to agree on every row. Every error row said "agami's query failed" although the
+  cause was often the person's statement, two empty results or a bare question; the card now reads
+  the cause from the row's files ("This row could not be compared: your query did not run: …"),
+  offers agami again only when agami failed, and sends a question-only row to the grading page. The
+  result pill reads "could not compare", or "same query, answer not compared" and "different query,
+  answer not compared" when the claims could be read, the new `outputs` claim ("selects") included.
+  Phase 2e passes `--unordered`, so a different sort is a different query and never a different
+  answer. (ACE-134)
+
+- **A join on the key the model declares one-to-one is no longer reported as a fan trap because a
+  second edge exists between the same two tables.** The fan and chasm pre-flight matched a declared
+  edge to a join by table pair and never read the columns the join wrote, so a subclass view joined
+  to its base table on its id fanned whenever the model also declared a many-to-one between the pair
+  on another key, and the same receipt's joins section, which does read the key, called the join
+  one-to-one. The pre-flight now keeps only the edges whose declared columns the written join
+  matches; a join on a key the model does not declare, or two tables in scope with no join between
+  them, keep every edge and today's verdict. (ACE-133)
+
+- **A database failure nobody could read is no longer reported as a syntax error.** Every engine
+  raises its execution failure with the same exit code, and the classifier read that code back as
+  `syntax` whenever none of its rules matched the message, so a connection dropping mid-statement
+  ("server closed the connection unexpectedly", "SSL SYSCALL error: EOF detected") told agami-query to
+  regenerate a correct statement twice and told reconcile that the person's statement was wrong. The
+  wire-drop messages now read `network` (stop, no retry), and an execution failure no rule reads is
+  `other`, never `syntax`. The connection reference's exit-code line now matches the code. (ACE-132)
+
+- **A filter value the warehouse spells differently is no longer graded as a mistake in your query.**
+  The value grader compared the literal your statement wrote, as text, against the column's distinct
+  values, as the CSV rendered them, and returned a defect on a miss before it read the existence
+  count it had already run. `WHERE is_active = 1` over a column whose values render as `True` and
+  `False` graded "not a value the column holds" while its own probe had counted thousands of rows
+  with it, and the reconcile report told the person their working query was wrong. The count now
+  decides: a value missing from the list but matched by the statement's own predicate is confirmed,
+  with a note that the spelling check did not decide and, when the list spells it another way, what
+  that spelling is. The grade stays a defect when the count was zero, or when the probe did not run
+  (the note says which). (ACE-130)
 
 ## [0.8.8] — 2026-09-15
 
@@ -178,49 +418,6 @@ below corresponds to one such version.
   question as `query` and leave `area` out unless sure, because an `area` drops every other
   area's examples, however well they match.
 
-- **The reconcile card shows a verdict and what to do, and nothing else until asked.** Five
-  statements run against a real warehouse found the card burying the answer: the verdict sat as plain
-  text between two panels, the same conclusion was written four times in four registers, and a check
-  saying "the column holds more than 25 distinct values" had the same weight as one that found a
-  mistake. A card is now the question, one verdict carrying the measurement behind it ("9 of 10 rows
-  match"), the one thing to do about it, and three closed sections: the answer, the two queries, and
-  the model checks. Each section carries a one-line summary that names the exception when there is
-  one and a count when there is not, so most cards need no opening and every card is the same height
-  at rest. Opening the answer shows up to five rows of the two results side by side, differing rows
-  first, read from the run's own CSVs at render time so the checkpoint still carries no result row
-  and the renderer enforces the five-row cap rather than trusting its producer. Three kinds of line
-  that were true and useless are gone: a wide column having no declared value list (the default state
-  of every free-text column, and reported even for a query pinned to one city, because the probe
-  reads the whole column), a join that dropped nothing, and twelve near-identical value checks that
-  now roll into one counted line. Anything that did not pass is kept whole and in place. The pages
-  also went from eleven font sizes, including 12.5 and 13.5, to five plus one for data, where
-  monospace now means "this came from the warehouse, or it is a statement".
-
-- **A verdict a person reads is a sentence, not a code word.** A row could read `expected_doubtful`,
-  which is the row where the analyst's own query is the thing in doubt, and a check could read
-  `fan_out: SUM(total)`, the one word the skill's own plain-language rule forbids. The tokens stay
-  on the wire, where `rows.jsonl`, the keep gate and the `status` verb are pinned to them; what a
-  person sees now comes from one table in `reconcile.py` and nowhere else. A row reads "same
-  answer", "same answer, but part of your query could not be checked", "different answer",
-  "different answer, and your query has a problem", or "could not compare", so the status says both
-  of the facts it carries: whether the two answers agreed, and whether the analyst's own query
-  checked out. The report page is handed the colour family and the filter-chip words with its items
-  and keeps no glossary of its own, so the card, the chips and the chat cannot drift into calling
-  one row three things. `shared/plain-language.md` points at the table rather than restating it, and
-  a test refuses a status token in any line the skill puts in front of a person.
-
-- **The result comparator pairs a column that mostly agrees instead of calling it missing.** One
-  differing cell used to unpair a column: the score fell to 0 with "no generated column carries the
-  values of: total" for a column agreeing on nine rows of ten, and every reader keyed on the pairs
-  saw an empty list. Columns still pair on whole-vector equality first; what is left pairs by name
-  when the two sides spell one (the qualifier and case dropped), or by the highest share of agreeing
-  rows when more than half agree. The score then counts rows ("9 of the answer key's 10 rows
-  matched") and carries `column_agreement` beside `column_pairs` and `paired_row_share` over the
-  paired columns. An item still passes at exactly 1.0; a golden column with no partner at all still
-  scores 0 with its name. Three pins moved with it: a same-named column of another type, a null
-  against an empty string, and one differing row now read as a pair that disagrees, not a column
-  that is absent. (ACE-131)
-
 - **A golden run pays for the model's description once, not once per question.** Every question
   starts its own client, and every one re-sent the whole model — about 35k tokens on a 22-area
   profile — in a prompt that could not be reused, because it began with the client's own system
@@ -242,201 +439,7 @@ below corresponds to one such version.
   so a lower level is the next large saving. The level is recorded in the run's JSON and artifact,
   because a score measured at one level says nothing about another.
 
-### Added
-
-- **`python -m execute_sql --batch` runs a plan of statements in one process.** Every statement paid
-  an interpreter start, a full semantic-model load (twice) and a connect, about sixteen seconds for
-  a query of a tenth of a second, and reconcile's statement check issues about ten per row. The
-  batch door takes a JSON list of `{id, sql | sql_file, out, area?}`, resolves the semantic model once (a
-  per-process memo keyed by the model files' count and newest mtime, never caching an absent
-  model; the hosted path is unchanged), keeps the connection open across the items on Postgres,
-  Redshift, Supabase and SQLite (dropped after a statement that broke it), and still runs every
-  item through the guard on its own; each CSV, each `<out>.run.json` and a manifest are written by
-  the door. Reconcile's statement check runs a row's probes this way on the `execute_sql` tier.
-  (ACE-137)
-
-- **The reconcile report is built by code from the run directory, never typed.** `reconcile.py
-  record --run-dir --row` assembles the row record from the row's files and appends it to the
-  checkpoint (replacing an earlier record for the row; a question-only row nobody graded is
-  refused, since it waits for the grading page). `render_reconcile_report.py --run-dir` builds the
-  items itself, takes from the session a words file with `sentence` and `change` only (any other
-  field is refused), writes `report-items.json` beside the page, stamps the page with the digest
-  of the items it rendered, and prints the three lines the skill says. `reconcile.py check-run`
-  refuses to let Phase 3 speak while a row's files are missing or the page's stamp is not the
-  current items' digest. The skill's 2c writes `diff.json`, 2b writes `agami-run.json`, and 2d and
-  3a.5 name the verbs. (ACE-136)
-
-- **Agami's answer may be several statements, and the reconcile page shows every one.** The cold
-  client's reply was read as one string under `sql`; a list, or several statements in one string,
-  lost everything but the first object or read as unreadable. The generator now keeps every
-  statement in order (`statements`), answers with the last, and the prompt says so; the ask door
-  writes `statements` beside `sql`; the row record carries `agami_statements`; the report card's
-  SQL block lists them numbered with the last marked "compared", and the rows check notes that
-  agami ran N queries. Only the last is run and graded. (ACE-135)
-
-- **An eighth claim, `outputs`, says what a statement selects.** `sm claims` and the golden run
-  compared tables, filters, date window, group keys, join keys, ordering and limit, and never the
-  projection, so two statements selecting different expressions could still read as the same
-  query. The new claim reads each output expression with its alias peeled (`total` and
-  `o.amount_total` over one `SUM(orders.amount)` agree; `SUM` against `AVG` differs; `SELECT *` is the
-  one key `*`). It reports and never gates. Every reader that counted seven now counts eight.
-  (ACE-131)
-- **`sm compare-results --unordered`** compares the rows as a set whatever ORDER BY either statement
-  wrote, for a caller whose ordering is a claim of its own (reconcile's 2e, in ACE-134). The
-  comparator's `compare_result_sets` takes the same as `ordered=False`; the golden run is unchanged.
-  (ACE-131)
-
-- **Four `sm` verbs that grade a statement a person supplied, part by part.** `agami-reconcile` is
-  learning to take a trusted query as evidence rather than as the answer, and these are the
-  deterministic checks it will lean on. `sm claims` reports where two statements differ, in the seven
-  claims the golden runner already compares. `sm compare-results` says whether two result CSVs say the
-  same thing, through the golden comparator, so a table-shaped answer is judged the way an answer key
-  is. `sm join-probes` names, for every join a statement wrote, whether the semantic model declares a
-  relationship between those tables and whether the written key matches the declared one, and emits
-  the overlap and cardinality probes that would show whether the keys really resolve. `sm filter-values
-  plan` names, for every value typed into a filter, the column it binds to, whether the semantic
-  model's list of values holds it, and the probes that would settle it; `sm filter-values judge` reads
-  the probe results back and grades each value `confirmed`, `model_gap`, `query_defect` or
-  `unresolved`. None of the four runs SQL: the skill runs every probe through the same execution tier
-  a question takes. Joins are classified with the receipt's own flags, so a CTE that shadows a
-  declared table, a `USING`, a comma join, or a declared `on:` this layer cannot read all come back
-  as open states and never as a settled claim about a key nobody read. A probe that came back empty
-  is graded as a probe that failed, never as a column that holds nothing. A near miss is a case and
-  whitespace fold only, an empty list of values reads as not yet decoded rather than as no legal
-  values, a column marked sensitive is never probed for a value, and a value carrying a backslash or
-  a control character is never sent to the warehouse, because engines quote it differently. The
-  overlap probe is the one introspection already trusts, now shared as `introspect.overlap_sql` and
-  bounded to its 50-row sample on every engine through the new `Dialect.limited`, where it used to
-  be bounded only where the row-limit keyword was `LIMIT`. (ACE-114)
-
-- **`reconcile.py` reads any input a person brings, and grades a supplied statement part by part.**
-  Three new verbs beside `parse`, `diff` and `band`, which are unchanged. `intake` reads the four
-  shapes the reconcile skill will accept, a list of questions, questions with the SQL the person
-  trusts, labels with numbers, and labels with numbers and the SQL behind each tile, into one row
-  shape with the question, the statement and the expected value, any of which may be missing. A CSV
-  whose third column is SQL now yields a statement instead of a label with SQL glued onto it; a
-  statement whose label matches a tile joins that tile's row. `ledger` grades every part of a
-  supplied statement from the files the skill wrote beside it: what happened when it ran, what
-  `sm prepare` and `sm receipt` said, what `sm join-probes` and `sm filter-values judge` reported, and
-  the probe CSVs the execution tier returned. Four grades, and only measurement earns `model_gap`; a
-  join that could not be graded leaves the fan-out check on its aggregate `unresolved`, said out
-  loud. `findings` writes a run's findings, the person's own defects listed apart, and every row's
-  ledger. Three shared references describe the row, the ledger and how a supplied statement is run
-  the way the AI's own SQL runs. Nothing here runs SQL or writes to the semantic model. (ACE-115)
-
-- **`agami-reconcile` takes the evidence a person brings and grades their SQL part by part.** Four
-  input shapes, detected and never asked for: a dashboard screenshot, a table of numbers, SQL the
-  person trusts (alone, beside a question, or as the third column behind each tile), and a list of
-  questions with no answers. A supplied statement runs on the road agami's own SQL runs, with the
-  same guards, and every part of it is graded before anything is compared: a scope refusal is a
-  finding about the semantic model rather than a crash, a miscased value or a join on the wrong key
-  is the person's defect, and a part nobody could check says so. Two new row statuses keep a lucky
-  match out of the keep-offer (`match_unverified`) and keep a doubtful expected value out of the
-  mismatch count (`expected_doubtful`); `reconcile.py status` applies the rules. Tables are compared
-  through the golden comparator and the two statements' differences are named by claim. The run
-  writes its findings and the person's defects under `local/reconcile/<ts>/`. The skill still never
-  writes to the semantic model; a single fix goes through `agami-save-correction`, which now grades a
-  pasted statement with the same ledger. The plan-mode refusal no longer assumes a CSV path.
-  (ACE-116)
-
-- **A grading page for a list of questions.** When a person brings questions and no answers, agami
-  answers each one and there is nothing to compare against, so the person grades. One page lists
-  every question with the AI's answer as one cell or a shape, the receipt's signals, and right,
-  wrong or unsure, with a box for the right SQL or for words; one block comes back. A right answer
-  becomes the expected value. A wrong answer with SQL is graded like any statement the person
-  supplies. A wrong answer with words becomes a finding carrying them. Unsure changes nothing.
-  `render_reconcile_grades.py` and `parse_reconcile_grades.py` follow the model explorer's
-  paste-back pattern; the page never renders a result row, and a grade decides nothing on its own.
-  An end-to-end test walks the flawed-inputs chain over the sample store: the wrong join key, the
-  miscased value, the omitted required filter, the clean count. (ACE-117)
-- `sm mentions` quotes every description, caveat, glossary line, narrative paragraph and prompt
-  example that mentions a table or column a statement reads, and the reconcile ledger puts those
-  words beside every part that fell short, with a flag when two of them name different values for
-  one column. Quoted, never graded. (ACE-119)
-- Reconcile Phase 1.5g reads a person's question beside their statement and writes
-  `question_fit.json`; the ledger's `question_fit` part withholds a doubtful row from the keep-offer,
-  and a fit that was never checked is an open part rather than a silent pass. (ACE-120)
-- `shared/plain-language.md` says how reconcile talks to the person in Phase 3: four actors and no
-  fifth, the thing and never the mechanism, one idea per sentence, the semantic model quoted when it
-  decided something. Phase 3 points at it. (ACE-121)
-- Reconcile's Phase 3 tells every row in four beats, in the reader's order: how we read and checked
-  the input, what agami did with the question and answered, how it got there, and what to change or
-  keep. The tables and the offer keep their text. The ledger runs once per row, after the
-  comparison. (ACE-122)
-- One reconcile report page per run, on the plugin's theme, tells every row in the four beats and
-  takes the person's decisions back as one pasted block; a keep is offered only where the run said
-  match, and every decision goes through a door that already exists. (ACE-123)
-- Reconcile takes input the way connect does: an options prompt for the four shapes, a template CSV
-  the person fills with a hand-off, and an intake page that shows what was read before anything
-  runs, with one block back applied by a parser. The grading, intake and report pages share one
-  stylesheet and the same four beats. (ACE-124)
-- Reconcile works five rows at a time: `reconcile.py next-chunk` reads the run's checkpoint
-  (rows.jsonl) and hands back the next rows, so a long run resumes and no row runs twice; the
-  report, intake and grading pages filter by status, owner, shape or a word. (ACE-125)
-- The reconcile report card is a diff grid built by code: `reconcile.py report-items` templates one row
-  per check from the run's files, the check named first, yours and agami as values with the differing
-  tokens highlighted, the sides aligned by construction; one sentence and one action per card. (ACE-126)
-- The reconcile report card carries two facts read by code: the result (does the data match; are the two
-  queries the same) as the pill, and the fix (your query, the semantic model, the examples, the question,
-  agami again, nothing) as the action. A query written differently is a noted fact, no longer a blocker
-  on a matching answer. (ACE-127)
-- The reconcile card after a second read: the question is the title, columns are compared by the data
-  they carry (the compare-results score names `column_pairs` and `unmatched_generated_columns`), a bare
-  column reads as its table's column in the claims reader, the change text and the decision boxes derive
-  from the one fix, an `example` decision joins the block, the checks panel folds. (ACE-128)
-- Reconcile asks agami cold: `run_golden_eval.py --ask` answers one question and `--ask-file` a chunk of
-  them with the golden run's own generator and context, fetching the context once and spawning the
-  client per question several at a time; Phase 2b never writes agami's SQL in the reconcile session, and
-  a missing client is an error row, never the session's own statement. (ACE-129)
-- From the first test of the grid: a plain column in a list query is no longer graded as a missing
-  metric (the receipt's output items say whether they aggregate); a date window written against the
-  clock (`date_trunc('year', current_date) + interval`) resolves and compares against another such
-  window; the claim keys read as words on the page; the owner order is your query, then the semantic
-  model, then the question, with the change text naming the gaps or the extra columns; the two SQL
-  statements sit collapsed under the grid. (ACE-126)
-
 ### Fixed
-
-- **The reconcile card reads how many rows agree, names the side that failed, and still says what
-  the two queries are when the data could not be compared.** One differing cell used to print "0% of
-  the values match" for a column that was there; the values row now reads the comparator's share
-  ("9 of 10 rows match, differs in total on 1 of 10 rows"), and "same rows, different columns" needs
-  the paired columns to agree on every row. Every error row said "agami's query failed" although the
-  cause was often the person's statement, two empty results or a bare question; the card now reads
-  the cause from the row's files ("This row could not be compared: your query did not run: …"),
-  offers agami again only when agami failed, and sends a question-only row to the grading page. The
-  result pill reads "could not compare", or "same query, answer not compared" and "different query,
-  answer not compared" when the claims could be read, the new `outputs` claim ("selects") included.
-  Phase 2e passes `--unordered`, so a different sort is a different query and never a different
-  answer. (ACE-134)
-
-- **A join on the key the model declares one-to-one is no longer reported as a fan trap because a
-  second edge exists between the same two tables.** The fan and chasm pre-flight matched a declared
-  edge to a join by table pair and never read the columns the join wrote, so a subclass view joined
-  to its base table on its id fanned whenever the model also declared a many-to-one between the pair
-  on another key, and the same receipt's joins section, which does read the key, called the join
-  one-to-one. The pre-flight now keeps only the edges whose declared columns the written join
-  matches; a join on a key the model does not declare, or two tables in scope with no join between
-  them, keep every edge and today's verdict. (ACE-133)
-
-- **A database failure nobody could read is no longer reported as a syntax error.** Every engine
-  raises its execution failure with the same exit code, and the classifier read that code back as
-  `syntax` whenever none of its rules matched the message, so a connection dropping mid-statement
-  ("server closed the connection unexpectedly", "SSL SYSCALL error: EOF detected") told agami-query to
-  regenerate a correct statement twice and told reconcile that the person's statement was wrong. The
-  wire-drop messages now read `network` (stop, no retry), and an execution failure no rule reads is
-  `other`, never `syntax`. The connection reference's exit-code line now matches the code. (ACE-132)
-
-- **A filter value the warehouse spells differently is no longer graded as a mistake in your query.**
-  The value grader compared the literal your statement wrote, as text, against the column's distinct
-  values, as the CSV rendered them, and returned a defect on a miss before it read the existence
-  count it had already run. `WHERE is_active = 1` over a column whose values render as `True` and
-  `False` graded "not a value the column holds" while its own probe had counted thousands of rows
-  with it, and the reconcile report told the person their working query was wrong. The count now
-  decides: a value missing from the list but matched by the statement's own predicate is confirmed,
-  with a note that the spelling check did not decide and, when the list spells it another way, what
-  that spelling is. The grade stays a defect when the count was zero, or when the probe did not run
-  (the note says which). (ACE-130)
 
 - **A chain of joins is no longer reported as a chasm trap.** The aggregates section flagged two
   measures as inflating each other through a shared dimension whenever the model declared both of
