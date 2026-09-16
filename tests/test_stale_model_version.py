@@ -168,10 +168,23 @@ def test_a_mutation_is_still_refused_as_a_mutation(served):
     assert body["refusal"]["rule"] == guardrail.RULE_READ_ONLY
 
 
-def test_nothing_recorded_means_nothing_to_be_stale_against(served):
-    # A served deployment that has never been through a versioned deploy must stay usable.
+def test_nothing_recorded_means_nothing_to_be_stale_against(served, monkeypatch):
+    # A served deployment that has never been through a versioned deploy must stay usable. The store
+    # is migrated first, so this is "no row" and not "no table" — the lookup failing is a different
+    # path, which the next test covers.
+    store = Store.from_env()
+    store.run_migrations()
+    store.close()
+    assert tools._resolve_model_version("demo") is None
     with pytest.raises(_Reached):
         _run()
+
+
+def test_an_unreadable_version_is_logged_not_silent(served, caplog):
+    # No migrations: the store opens and the query fails. The check stands aside, and says so.
+    with caplog.at_level("WARNING", logger=tools.__name__):
+        assert tools._resolve_model_version("demo") is None
+    assert "model_version unavailable" in caplog.text
 
 
 def test_the_local_path_never_refuses_on_version(served, monkeypatch):
@@ -192,3 +205,11 @@ def test_execute_sql_declares_the_version_without_requiring_it():
     schema = tools.TOOLS["execute_sql"]["inputSchema"]
     assert "model_version" in schema["properties"]
     assert "model_version" not in schema.get("required", [])
+
+
+def test_a_store_that_will_not_open_is_logged_not_raised(served, monkeypatch, caplog):
+    # The audit gate owns refusing on an unusable store; the version lookup only stands aside.
+    monkeypatch.setenv("AGAMI_DB_URL", "mysql://your-cluster.example/agami")
+    with caplog.at_level("WARNING", logger=tools.__name__):
+        assert tools._resolve_model_version("demo") is None
+    assert "model_version unavailable" in caplog.text

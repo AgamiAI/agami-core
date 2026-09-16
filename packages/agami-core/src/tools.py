@@ -609,16 +609,21 @@ def _resolve_model_version(profile: str) -> str | None:
     # Opening the store is inside the "unavailable" promise too: a misconfigured URL used to raise
     # from here, which was harmless while only the receipt asked. The stale-model check (#364) asks
     # before the audit gate, and that gate is what owns telling the caller the store is unusable.
+    #
+    # Logged, because an unreadable version also stands the stale-model check aside, and a store
+    # that opens but cannot answer (a missing table, a lost grant) passes the audit gate.
     try:
         store = Store.from_env()
-    except Exception:
+    except Exception as e:
+        _LOG.warning("model_version unavailable for %r: %s", profile, type(e).__name__)
         return None
     if store is not None:
         from model_store import newest_model_version
 
         try:
             return newest_model_version(store, profile, org_id=_current_org_id())
-        except Exception:
+        except Exception as e:
+            _LOG.warning("model_version unavailable for %r: %s", profile, type(e).__name__)
             return None
         finally:
             store.close()

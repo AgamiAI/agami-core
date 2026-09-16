@@ -402,10 +402,26 @@ def build_db_path(tmp_path: Path, monkeypatch) -> SimpleNamespace:
 # ---------------------------------------------------------------------------
 
 
+def execute_args(sql: str, profile: str = PROFILE) -> dict:
+    """The `execute_sql` arguments a well-behaved client sends: the statement, the datasource, and
+    the `model_version` get_datasource_schema would have handed it (#364).
+
+    Without the version every call on the DB path is refused as `stale_model` before any gate this
+    corpus exists to test is reached. Read fresh here rather than through a schema call, because the
+    routes are about the statement, not the schema tool. Omitted when nothing is recorded, as a client
+    would have nothing to send — and a `null` would fail the transports' schema validation.
+    """
+    args = {"sql": sql, "datasource": profile}
+    version = tools._resolve_model_version(profile)
+    if version is not None:
+        args["model_version"] = version
+    return args
+
+
 def route_in_process(sql: str, profile: str = PROFILE) -> dict:
     """`execute_guarded` runs in THIS process and the gate's own object reaches the serializer."""
     tools.set_injected_executor(execute_sql.BUILTIN_EXECUTOR)
-    return json.loads(tools.tool_execute_sql({"sql": sql, "datasource": profile}))
+    return json.loads(tools.tool_execute_sql(execute_args(sql, profile)))
 
 
 def stdio_child_env() -> dict:
@@ -446,7 +462,7 @@ def route_stdio(sql: str, profile: str = PROFILE) -> dict:
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "execute_sql", "arguments": {"sql": sql, "datasource": profile}},
+            "params": {"name": "execute_sql", "arguments": execute_args(sql, profile)},
         },
     ]
     proc = subprocess.run(
@@ -509,7 +525,7 @@ def route_http(sql: str, profile: str = PROFILE) -> dict:
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": "execute_sql", "arguments": {"sql": sql, "datasource": profile}},
+                "params": {"name": "execute_sql", "arguments": execute_args(sql, profile)},
             },
         )
     assert resp.status_code == 200, resp.text
