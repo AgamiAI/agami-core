@@ -238,6 +238,32 @@ below corresponds to one such version.
   ledger. Three shared references describe the row, the ledger and how a supplied statement is run
   the way the AI's own SQL runs. Nothing here runs SQL or writes to the semantic model. (ACE-115)
 
+- **`agami-reconcile` takes the evidence a person brings and grades their SQL part by part.** Four
+  input shapes, detected and never asked for: a dashboard screenshot, a table of numbers, SQL the
+  person trusts (alone, beside a question, or as the third column behind each tile), and a list of
+  questions with no answers. A supplied statement runs on the road agami's own SQL runs, with the
+  same guards, and every part of it is graded before anything is compared: a scope refusal is a
+  finding about the semantic model rather than a crash, a miscased value or a join on the wrong key
+  is the person's defect, and a part nobody could check says so. Two new row statuses keep a lucky
+  match out of the keep-offer (`match_unverified`) and keep a doubtful expected value out of the
+  mismatch count (`expected_doubtful`); `reconcile.py status` applies the rules. Tables are compared
+  through the golden comparator and the two statements' differences are named by claim. The run
+  writes its findings and the person's defects under `local/reconcile/<ts>/`. The skill still never
+  writes to the semantic model; a single fix goes through `agami-save-correction`, which now grades a
+  pasted statement with the same ledger. The plan-mode refusal no longer assumes a CSV path.
+  (ACE-116)
+
+- **A grading page for a list of questions.** When a person brings questions and no answers, agami
+  answers each one and there is nothing to compare against, so the person grades. One page lists
+  every question with the AI's answer as one cell or a shape, the receipt's signals, and right,
+  wrong or unsure, with a box for the right SQL or for words; one block comes back. A right answer
+  becomes the expected value. A wrong answer with SQL is graded like any statement the person
+  supplies. A wrong answer with words becomes a finding carrying them. Unsure changes nothing.
+  `render_reconcile_grades.py` and `parse_reconcile_grades.py` follow the model explorer's
+  paste-back pattern; the page never renders a result row, and a grade decides nothing on its own.
+  An end-to-end test walks the flawed-inputs chain over the sample store: the wrong join key, the
+  miscased value, the omitted required filter, the clean count. (ACE-117)
+
 ### Fixed
 
 - **A chain of joins is no longer reported as a chasm trap.** The aggregates section flagged two

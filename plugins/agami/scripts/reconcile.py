@@ -855,7 +855,13 @@ def _joins_named(label: str, join_rows: list[dict]) -> list[str]:
     return out
 
 
-def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict | None = None) -> list[dict]:
+def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict | None = None,
+                      no_joins_written: bool = False) -> list[dict]:
+    """`no_joins_written` is settled by `sm join-probes` having read the statement and counted zero
+    joins written: a statement that writes no join has nothing that can multiply its aggregates,
+    however the pre-flight labelled them, so an `undetermined` there is confirmed rather than left
+    open. A verb that could not read the statement settles nothing. `probes` is the same file, read
+    for the sibling rule: every join written brings in one row at most."""
     if prepare is None:
         return []
     if prepare.get("unchecked"):
@@ -897,6 +903,9 @@ def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict 
         elif agg.get("status") == "not_multiplied":
             rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
                               note="no join multiplies the rows behind this aggregate"))
+        elif no_joins_written:
+            rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
+                              note="the statement writes no join, so nothing multiplies this aggregate"))
         elif one_row_joins:
             rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=[row["part"] for row in join_parts],
                               evidence={"joins": [row["part"] for row in join_parts]},
@@ -1024,9 +1033,20 @@ def _grade_literals(judge: dict | None) -> list[dict]:
     return rows
 
 
+_CLAIM_PARTS = frozenset({"predicates", "date_window"})
+
+
 def _grade_claims(claims: dict | None) -> list[dict]:
     rows: list[dict] = []
     wanted = {"filter_predicates": "predicates", "date_window": "date_window"}
+    unreadable = (claims or {}).get("unreadable")
+    both_readable = isinstance(unreadable, dict) and not any(unreadable.values())
+    # `sm claims` counts, per side, the conjuncts that speak of time. Two zeros beside a window that
+    # reads `unknown` mean neither statement filtered on a date. A window written in a shape the
+    # resolver does not fold also reads `unknown`, with a count above zero, and stays open.
+    temporal = (claims or {}).get("temporal_predicates") or {}
+    no_date_filter_anywhere = (both_readable and temporal.get("sql_file") == 0
+                               and temporal.get("against_sql_file") == 0)
     for claim in (claims or {}).get("claims", []):
         part = wanted.get(claim.get("name"))
         if part is None:
@@ -1038,6 +1058,14 @@ def _grade_claims(claims: dict | None) -> list[dict]:
         elif claim.get("status") == "differs":
             rows.append(_part(part, UNRESOLVED, evidence=evidence,
                               note="the two statements differ here; which is right is not decided by this comparison"))
+        elif (part == "date_window" and no_date_filter_anywhere
+              and claim.get("generated") is None and claim.get("golden") is None):
+            rows.append(_part(part, CONFIRMED, evidence={**evidence, "temporal_predicates": temporal},
+                              note="neither statement writes a date filter"))
+        elif part == "date_window" and both_readable:
+            rows.append(_part(part, UNRESOLVED, evidence={**evidence, "temporal_predicates": temporal},
+                              note="a date filter was written in a shape the claims reader does not fold, "
+                                   "so the two windows could not be compared"))
         else:
             rows.append(_part(part, UNRESOLVED, evidence=evidence,
                               note="this claim could not be read on one side"))
@@ -1076,7 +1104,9 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
         claims, _why = _usable(claims, "claims")
     join_rows = _grade_joins(probes, row_dir)
     rows.extend(join_rows)
-    rows.extend(_grade_aggregates(prepare, join_rows, probes))
+    rows.extend(_grade_aggregates(prepare, join_rows, probes,
+                                  no_joins_written=(probes is not None and probes.get("unreadable") is None
+                                                    and probes.get("joins_written") == 0)))
     rows.extend(_grade_filters(receipt))
     rows.extend(_grade_metrics(receipt, prepare))
     rows.extend(_grade_literals(judge))
@@ -1159,15 +1189,30 @@ def findings(run_dir: Path) -> dict:
                                           "note": part["note"], "ledger": part["evidence"]})
                 if record.get("words"):
                     entry["words"] = record["words"]
-        # An example is offered only when the person's statement held on EVERY part. A part left
-        # open, or a row that was never graded at all, is not a statement that held.
-        clean = bool(parts) and all(p["verdict"] in (CONFIRMED, NOTED) for p in parts)
+        # An example is offered only when the person's statement held on EVERY part of its own. A
+        # part left open, or a row that was never graded at all, is not a statement that held. The
+        # two claim parts compare the person's statement with agami's; they describe the difference
+        # an example records, so they are its evidence and not its bar. A noted part is a fact, not a
+        # grade, and bars nothing.
+        own = [p for p in parts if p["part"] not in _CLAIM_PARTS]
+        clean = bool(own) and all(p["verdict"] in (CONFIRMED, NOTED) for p in own)
         if record.get("status") == "mismatch" and clean and record.get("question"):
             key = f"example:{_fold(record['question'])}"
             entry = grouped.setdefault(key, {"key": key, "kind": "example", "evidence": []})
             entry["evidence"].append({**evidence_base, "part": None,
                                       "note": "the statement held on every part and the AI's answer differed",
                                       "ledger": {}})
+        # A person graded the answer wrong and said why, with no statement to grade. The receipt
+        # could not say what was wrong, so the finding carries their words and nothing else.
+        person_grade = (record.get("provenance") or {}).get("graded")
+        if (person_grade == "wrong" and record.get("words") and not record.get("statement")
+                and record.get("question")):
+            key = f"description:{_fold(record['question'])}"
+            entry = grouped.setdefault(key, {"key": key, "kind": "description", "evidence": []})
+            entry["evidence"].append({**evidence_base, "part": None,
+                                      "note": "the person graded the answer wrong; their words say why",
+                                      "ledger": {}})
+            entry["words"] = record["words"]
     result = {
         "findings": sorted(grouped.values(), key=lambda f: f["key"]),
         "query_defects": sorted(defects, key=lambda d: (d["row"], d["part"])),
@@ -1179,6 +1224,31 @@ def findings(run_dir: Path) -> dict:
     (run_dir / "query_defects.json").write_text(json.dumps(result["query_defects"], indent=2), encoding="utf-8")
     (run_dir / "ledger.json").write_text(json.dumps(ledgers, indent=2), encoding="utf-8")
     return result
+
+
+# --- Row status -----------------------------------------------------------
+
+MATCH = "match"
+MATCH_UNVERIFIED = "match_unverified"
+MISMATCH = "mismatch"
+EXPECTED_DOUBTFUL = "expected_doubtful"
+ERROR = "error"
+
+
+def row_status(match: bool | None, ledger_verdict: str | None) -> str:
+    """The status a row gets, from the number comparison and the weakest grade on the person's
+    statement. Applied by code so the skill never decides it by feel.
+
+    A match with a part not confirmed is `match_unverified`: two wrong statements agree easily, and
+    Phase 3e must never see it. A difference beside a defect in the person's statement is
+    `expected_doubtful`: the expected value itself is in doubt, so the row is kept out of the
+    mismatch tally rather than counted against the AI.
+    """
+    if match is None:
+        return ERROR
+    if match:
+        return MATCH if ledger_verdict in (None, CONFIRMED) else MATCH_UNVERIFIED
+    return EXPECTED_DOUBTFUL if ledger_verdict == QUERY_DEFECT else MISMATCH
 
 
 # --- CLI ------------------------------------------------------------------
@@ -1217,7 +1287,20 @@ def main(argv: list[str] | None = None) -> int:
     p_findings = sub.add_parser("findings", help="Write a run's findings, defects and ledgers beside its rows.jsonl.")
     p_findings.add_argument("--run-dir", required=True, dest="run_dir")
 
+    p_status = sub.add_parser("status", help="The status a row gets, from the number comparison and the ledger's verdict.")
+    p_status.add_argument("--match", required=True, choices=["true", "false", "none"],
+                          help="reconcile.py diff's match, or none when the row could not run")
+    p_status.add_argument("--ledger-verdict", default="none", dest="ledger_verdict",
+                          choices=[CONFIRMED, MODEL_GAP, QUERY_DEFECT, UNRESOLVED, "none"],
+                          help="the ledger's verdict, or none for a row with no statement")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "status":
+        match = None if args.match == "none" else args.match == "true"
+        verdict = None if args.ledger_verdict == "none" else args.ledger_verdict
+        print(json.dumps({"status": row_status(match, verdict)}))
+        return 0
 
     if args.cmd == "ledger":
         row_dir = Path(args.row_dir).expanduser()
