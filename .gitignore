@@ -61,3 +61,8 @@ htmlcov/
 
 # Generated UI previews (regenerate with dev/render_previews.py)
 previews/
+
+# `python -m build` (and `pyproject-build`) leave an intermediate tree beside the package it builds,
+# whatever `--outdir` says. Untracked and unignored, it is one `git add -A` away from a commit: a
+# release PR that should be five lines picked up 81 files and 36k insertions this way.
+packages/*/build/
