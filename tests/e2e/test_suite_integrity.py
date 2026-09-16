@@ -33,6 +33,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -308,6 +309,27 @@ def test_this_file_runs_inside_the_required_job():
 
     assert "continue-on-error" not in job
     assert any("pytest tests/" in command for command in _run_commands(job)), job
+
+
+def test_exactly_one_leg_enforces_the_coverage_floor():
+    """The floor is gated to one matrix leg (#296), which makes it one `if:` away from gating none.
+
+    Flip the 3.12 step's condition, or rename a version in the matrix without renaming it here, and
+    every leg still runs the suite and goes green while no leg checks coverage at all. So: exactly
+    one step carries `--cov-fail-under`, and the version its condition names is one the matrix runs.
+    The value of the floor is deliberately not asserted — it is meant to ratchet.
+    """
+    job = _workflow()["jobs"][LINT_AND_TEST]
+    floored = [step for step in _steps(job) if "--cov-fail-under" in step.get("run", "")]
+    assert len(floored) == 1, [step.get("name") for step in floored]
+
+    condition = floored[0].get("if")
+    if condition is None:
+        return  # an ungated step runs on every leg, which enforces the floor more, not less
+    match = re.fullmatch(r"\s*matrix\.python-version\s*==\s*'([^']+)'\s*", condition)
+    assert match, f"the floor's condition is no longer a single-version match: {condition!r}"
+    versions = [str(v) for v in job["strategy"]["matrix"]["python-version"]]
+    assert match.group(1) in versions, (match.group(1), versions)
 
 
 def test_the_stdio_child_imports_the_checkout_under_test():

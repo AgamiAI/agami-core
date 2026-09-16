@@ -249,6 +249,13 @@ def test_the_budget_has_exactly_one_configuration_surface():
     # Written when an executor can name its statement, never read to compute a bound, and cleared at
     # the entry to every call beside the two above. Like them it cannot cross the fork, and like them
     # it does not need to — the column is null on that surface by the same construction.
+    #
+    # `_statement_limits` (#329) is the eighth, and unlike every one above it IS a budget input: an
+    # organisation's own row cap and deadline, outranking the environment. It is allowed through on
+    # `_pass_posture`'s terms, which are the only terms that answer this test's hazard: it is resolved
+    # once per call before any bound is derived, and `tools._pass_child_env` writes both numbers into
+    # the child's `AGAMI_SQL_*` keys, so the fork carries it explicitly instead of losing it.
+    # `tests/test_per_org_statement_limits.py` drives that across a real process boundary.
     context_vars -= {
         "_last_error_detail",
         "_guard_model",
@@ -257,6 +264,7 @@ def test_the_budget_has_exactly_one_configuration_surface():
         "_pass_posture",
         "_last_executing_identity",
         "_last_warehouse_query_id",
+        "_statement_limits",
     }
     assert context_vars == set(), (
         "a second, higher-precedence configuration surface for the budget cannot cross the fork; "
@@ -1293,7 +1301,14 @@ def test_the_supervisor_bound_is_derived_from_the_statement_budget(warehouse, mo
     # A subset rather than equality: the pinned key matches the environment whenever the environment
     # already spells the same posture, which is the ordinary case and the case this suite runs in. The
     # property being defended is that NOTHING ELSE differs.
-    assert differing <= {"AGAMI_GOVERNANCE_ENFORCED"}, differing
+    #
+    # #329 adds the two budget keys, and they are the opposite of a disturbance: they are written so
+    # the child reaches the budget this side resolved (an organisation's own limit, when it has one).
+    # They may differ from `os.environ` only in SPELLING an unset or unusable value as the number it
+    # resolves to — asserted by value, so a child handed any other budget still fails here.
+    assert differing <= {"AGAMI_GOVERNANCE_ENFORCED", "AGAMI_SQL_MAX_ROWS", "AGAMI_SQL_TIMEOUT_S"}, differing
+    assert child_env["AGAMI_SQL_TIMEOUT_S"] == "300"
+    assert child_env["AGAMI_SQL_MAX_ROWS"] == str(execute_sql._row_cap_from_env())
 
 
 def test_the_supervisors_verdict_is_unchanged(warehouse, monkeypatch):
