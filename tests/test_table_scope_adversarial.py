@@ -128,9 +128,10 @@ def test_postgres_quoted_identifier_refused():
 
 
 def test_schema_qualification_does_not_evade():
-    # Matching is on the bare table name, so prefixing a schema does not create a new name.
+    # Prefixing a schema does not create a new name. Matching is on (schema, name) since #332, so
+    # the echo is the reference as the caller qualified it.
     _assert_tables_refused(
-        rt.check_table_scope("SELECT id FROM private.secret", _scope_org()), "secret")
+        rt.check_table_scope("SELECT id FROM private.secret", _scope_org()), "private.secret")
 
 
 def test_every_undeclared_table_is_named_not_just_the_first():

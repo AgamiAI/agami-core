@@ -693,6 +693,19 @@ def test_set_terminology_writes_glossary_to_org_yaml(tmp_path):
         "MRR": "monthly recurring revenue", "ARR": "annual recurring revenue"}
 
 
+def test_set_description_writes_one_line_and_reports_json(tmp_path):
+    # the onboarding write path for the line list_datasources routes on: parser, JSON output, exit code.
+    from semantic_model.loader import load_datasource
+    _model(tmp_path)
+    rc, out = _run(["set-description", str(tmp_path), "--description", "Orders and refunds for sales questions."])
+    d = json.loads(out)
+    assert rc == 0 and d["validated"] and d["applied"] == ["description"]
+    assert load_datasource(tmp_path).description == "Orders and refunds for sales questions."
+
+    rc, out = _run(["set-description", str(tmp_path), "--description", "   "])
+    assert rc == 1 and json.loads(out)["errors"] == ["description is empty"]
+
+
 def test_curate_edit_sets_semantic_column_groups(tmp_path):
     # the column-group refinement write path: enrichment overwrites the engine's prefix
     # buckets with named semantic groups via a normal curate edit op.
@@ -788,3 +801,41 @@ def test_curate_auto_stamps_missing_at(tmp_path):
     assert json.loads(out)["validated"] is True
     mm = yaml.safe_load((tmp_path / "subject_areas" / "s" / "metrics" / "order_count.yaml").read_text())
     assert mm["review_state"] == "approved" and mm["signed_off_at"]  # non-null, auto-stamped
+
+
+def _windows_default_encoding(monkeypatch):
+    """Make an `open()` that names no encoding decode as cp1252, which is what Windows does.
+
+    macOS and Linux default to UTF-8, so without this the bug in #236 cannot show up on the
+    machines the suite runs on. Calls that pass `encoding=` are untouched.
+    """
+    real = io.open
+
+    def opener(file, mode="r", buffering=-1, encoding=None, *args, **kwargs):
+        if "b" not in mode and encoding is None:
+            encoding = "cp1252"
+        return real(file, mode, buffering, encoding, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", opener)
+
+
+def test_add_example_reads_its_file_as_utf8_whatever_the_platform_default(tmp_path, monkeypatch):
+    """#236. An em dash read through the platform default on Windows became `â€”`, and was then
+    written back out as perfectly valid UTF-8 — so nothing downstream could tell it was wrong."""
+    question = "Revenue by channel \u2014 the \u201creal\u201d total"
+    ops = tmp_path / "ops.json"
+    ops.write_bytes(
+        json.dumps([{"question": question, "sql": "SELECT 1"}], ensure_ascii=False).encode("utf-8")
+    )
+    root = tmp_path / "model"
+
+    _windows_default_encoding(monkeypatch)
+    rc, _ = _run(["add-example", str(root), "--area", "sales", "--file", str(ops)])
+    monkeypatch.undo()
+
+    from semantic_model.loader import list_prompt_examples
+
+    assert rc == 0
+    assert [e["question"] for e in list_prompt_examples(root, "sales")] == [question]
+    saved = (root / "prompt_examples" / "sales" / "examples.yaml").read_bytes()
+    assert question.encode("utf-8") in saved

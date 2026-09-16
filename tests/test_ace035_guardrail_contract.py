@@ -226,7 +226,12 @@ CONTRACT_RULES = frozenset({
 # Envelope. ACE-094 deleted those branches and the rule went with them, so every rule this module
 # declares is now one the contract names. Anything appearing here again is a rule someone
 # invented, which is the drift this test exists to catch.
-LOCAL_ADDITIONS: frozenset[str] = frozenset()
+#
+# One now, named rather than inherited: `datasource_required` (#327), the refusal for an omitted
+# `datasource` on an organization serving several. It is a routing decision made before any statement
+# or model is consulted, which the contract's list predates. It belongs in the contract; until it is
+# transcribed there, it is declared here so the drift this test guards against stays visible.
+LOCAL_ADDITIONS: frozenset[str] = frozenset({"datasource_required"})
 
 
 def _declared_rules() -> set[str]:

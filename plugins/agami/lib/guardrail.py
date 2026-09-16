@@ -97,9 +97,17 @@ RULE_ENGINE_MISMATCH = "engine_mismatch"
 # gate that produces it fills `REASON_FOR_RULE` in a reviewed diff (the contract already says that
 # entry is `undetermined`, so that is a one-line change, not a decision to re-litigate).
 RULE_UNSCOPABLE = "unscopable"
+# The call named no `datasource` and the organization serves more than one (#327). Before this, the
+# omission fell through to a fallback (an env var, an active profile) and the statement ran against
+# whichever datasource that picked — which is how SQL written for one datasource reached another and
+# was refused as out of scope with advice to add a table the model already declared elsewhere.
+# Deciding it needs no statement and no model, so it is a PRE_MODEL rule; a deployment-shaped rule
+# like `model_unavailable`, not a finding about the statement. Declared locally: the guardrail
+# contract's rule list does not name it yet (see `LOCAL_ADDITIONS` in its contract test).
+RULE_DATASOURCE_REQUIRED = "datasource_required"
 
 PRE_MODEL_RULES: frozenset[str] = frozenset(
-    {RULE_READ_ONLY, RULE_RECON, RULE_AUDIT_UNAVAILABLE}
+    {RULE_READ_ONLY, RULE_RECON, RULE_AUDIT_UNAVAILABLE, RULE_DATASOURCE_REQUIRED}
 )
 """The rules decided BEFORE any semantic model is consulted, and the home for the next one.
 
@@ -149,6 +157,9 @@ REASON_FOR_RULE: dict[str, RefusalReason] = {
     # to another, so whichever grammar was used, one of them was wrong.
     RULE_UNSCOPABLE: "undetermined",
     RULE_ENGINE_MISMATCH: "undetermined",
+    # We did not determine anything about the statement: which datasource it is FOR is unknown, so
+    # neither safety nor scope could be asked. The same argument as `model_unavailable`.
+    RULE_DATASOURCE_REQUIRED: "undetermined",
 }
 
 
