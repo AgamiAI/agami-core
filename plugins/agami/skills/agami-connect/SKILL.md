@@ -498,6 +498,18 @@ Then confirm both landed: `<artifacts_dir>/organization.yaml` now shows `name:`/
 
 `Yes` → write to the **per-profile** `<artifacts_dir>/<profile>/datasource.md` under `# About this database` (this datasource's narrative only). `Skip` → leave it absent; Phase 2f writes a short per-database starter from the enriched model.
 
+**C. One-line datasource description — ask on EVERY onboard.** This is a different thing from B's narrative: it is the single line `list_datasources` shows an agent so it can pick the right datasource for a question, and an organization with several datasources refuses a query that names none. A datasource with no description routes on its name alone. **AskUserQuestion**:
+> In one line, what does **this database** hold, and when would someone query it? (e.g. *"Invoices, payments, products and margins — use for revenue and profitability questions."*)
+
+Options: `Write it now (Other field)` / `Generate one for me (Recommended)` / `Skip`.
+
+**Nothing is written at this step** — `datasource.yaml` does not exist until introspection (1.7) creates it. Bind the answer and act on it after 1.7:
+- **Write it now** → bind `$DATASOURCE_DESCRIPTION` to their line. Right after 1.7 succeeds, write it: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "$DATASOURCE_DESCRIPTION"`.
+- **Generate one for me** → bind `$DATASOURCE_DESCRIPTION = generate`. **Phase 2f** writes it once every table is enriched (see 2f), and the Phase 7 summary shows it as a draft they can edit.
+- **Skip** → leave it empty. Say plainly that `model_deploy` will warn about it, and that an agent picking between several datasources will be guessing from the name.
+
+If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask `Keep it (Recommended)` / `Replace it` instead. **Keep it** → bind `$DATASOURCE_DESCRIPTION = keep`; nothing is written (re-introspection preserves it). **Replace it** → ask the three options above and bind from that answer.
+
 `chmod 644` whatever you write — these are **non-secret model files** and must stay readable (e.g. by the deploy container / a teammate reading a checked-in copy); never `chmod 600` them (that's for `local/` secrets only). See [`shared/organization-context-format.md`](../../shared/organization-context-format.md) for the content-routing rule (company-wide → root; per-database → the profile; per-column units → the structured model; personal → `USER_MEMORY.md`).
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
@@ -789,6 +801,19 @@ chmod 644 "$ROOT/datasource.md"   # non-secret model file — must stay readable
 
 If the user **did** write a narrative in 1.4, leave it untouched. The glossary from `set-terminology` (2b) needs no re-render — it's surfaced automatically by `org-context`. Mention in the Phase 7 summary that the glossary + summary are auto-derived and the narrative is theirs to edit.
 
+**The one-line datasource description (from 1.4 C).** Act on `$DATASOURCE_DESCRIPTION` now, every onboard:
+- a line the user wrote → it was already written right after 1.7; nothing to do.
+- `keep` → nothing to do; the existing description stays.
+- `generate` → synthesize **ONE line** from the subject-area and table descriptions you just wrote: what this datasource covers and the questions it answers (e.g. *"Invoices, payments, products and margins — use for revenue and profitability questions."*). Ground it in the model, never product memory. The line is built from database metadata, which can contain quotes, backticks or `$(…)`, so **never paste it inside a double-quoted argument** — bind it through a quoted heredoc and pass the variable:
+  ```bash
+  DATASOURCE_DESCRIPTION=$(cat <<'AGAMI_DESCRIPTION'
+  <the line>
+  AGAMI_DESCRIPTION
+  )
+  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-description "$ROOT" --description "$DATASOURCE_DESCRIPTION"
+  ```
+- skipped → leave it; `datasource.yaml` keeps whatever description it already had (re-introspection preserves it).
+
 ---
 
 ## Phase 3: Review the subject-area split
@@ -958,6 +983,8 @@ agami-connect just ran. Here's what we found:
   that use them and self-approve as you query.
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
+
+After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
 Then **AskUserQuestion**: `Open the review queue` (→ `/agami-model review` — sign off the pending metrics/entities) / `Browse the full model` (→ `/agami-model` — explore + exclude tables/columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
 

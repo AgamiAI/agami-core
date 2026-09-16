@@ -222,6 +222,32 @@ def model_table_counts(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, int
     return {r["datasource"]: int(r["n"]) for r in rows}
 
 
+def datasources_declaring(
+    store: Store, names: list[str], org_id: str = DEFAULT_ORG
+) -> dict[str, list[str]]:
+    """`{bare table name (lowercased): [datasource, ...]}` for the org's served models that declare
+    each of `names`, in ONE query (#327).
+
+    For a table-scope refusal on the wrong datasource: the refused tables are usually declared — just
+    in another of the same organization's datasources — and saying which one turns a guess into one
+    certain retry. Scoped to `org_id` by construction, so it can never name another tenant's
+    datasource. Matching is case-folded, as the scope gate folds unquoted identifiers. A name no
+    served model declares is simply absent from the result."""
+    wanted = sorted({n.lower() for n in names if n})
+    if not wanted:
+        return {}
+    marks = ", ".join("?" for _ in wanted)
+    rows = store.query(
+        f"SELECT DISTINCT datasource, lower(name) AS name FROM model_table "
+        f"WHERE org_id = ? AND lower(name) IN ({marks}) ORDER BY datasource",
+        (org_id, *wanted),
+    )
+    found: dict[str, list[str]] = {}
+    for r in rows:
+        found.setdefault(r["name"], []).append(r["datasource"])
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Memory (datasource.md / USER_MEMORY.md) + model_version — served from the DB too, so a DB-only
 # deploy reads NO files at runtime (get_datasource_schema's domain context + the receipt's version
@@ -426,6 +452,16 @@ def write_examples(
     store.commit()
 
 
+def count_examples(store: Store, datasource: str, org_id: str = DEFAULT_ORG) -> int:
+    """How many examples this org holds for `datasource`, across every area — the number
+    `get_datasource_schema` reports so a client knows fetching them is worth a call (#301)."""
+    rows = store.query(
+        "SELECT COUNT(*) AS n FROM prompt_example WHERE org_id = ? AND datasource = ?",
+        (org_id, datasource),
+    )
+    return int(rows[0]["n"]) if rows else 0
+
+
 def select_examples(
     store: Store,
     datasource: str,
@@ -559,8 +595,8 @@ class DbActivitySink:
             "INSERT INTO tool_calls (id, ts, org_id, actor, tool_name, datasource, sql, row_count, "
             "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
             "correlation_id, refusal_detail, refusal_remediation, audit_id, basis, "
-            "conversation_id, client_model) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "conversation_id, client_model, datasource_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -600,6 +636,9 @@ class DbActivitySink:
                 # The model the client says it is running (ACE-113). `getattr`-guarded like the five
                 # above, so an embedder on an older record shape writes NULL rather than raising.
                 getattr(record, "client_model", None),
+                # Whether the client named `datasource` or the server resolved it (025, #328).
+                # `getattr`-guarded like the six above.
+                getattr(record, "datasource_source", None),
             ),
         )
         self._store.commit()
@@ -619,7 +658,7 @@ _TOOL_CALL_COLS = (
     # Selected as well as inserted, which is the half that is easy to miss: this list is narrower
     # than the INSERT (`org_id` and `audit_id` are written and never read), so a column added to one
     # and not the other is recorded faithfully and reaches no reader at all.
-    "client_model"
+    "client_model, datasource_source"
 )
 
 

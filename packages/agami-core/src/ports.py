@@ -22,9 +22,9 @@ consumer needs.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     # Only for type-checkers — kept out of the runtime import graph so the Protocols (and a
@@ -166,3 +166,11 @@ class Adapters:
     # only — it filters the one shared registry and never adds or reshapes a tool. See
     # `mcp_http.build_server` for where it is applied (both list AND call, deliberately).
     tool_visibility: Callable[[str], bool] | None = None
+    # `statement_limits(org_id) -> {"max_rows": int | None, "timeout_s": int | None} | None` supplies an
+    # organisation's own row cap and statement deadline (#329). None (the default) is today's
+    # behaviour: every organisation gets `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`. Core stores no
+    # such setting — the consumer owns the storage and the admin screen, core only asks — and a
+    # missing, None or unusable value falls back to the environment. See
+    # `tools.set_statement_limits_provider` for the contract and `tools.pinned_statement_limits` for how
+    # one call's answer is held identical on both sides of the fork.
+    statement_limits: Callable[[str], Mapping[str, Any] | None] | None = None
