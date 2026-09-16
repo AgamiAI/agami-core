@@ -24,13 +24,13 @@ def _run(tmp_path: Path) -> Path:
     (run / "rows").mkdir(parents=True)
     (run / "intake.json").write_text(json.dumps({"rows": [
         {"row": 1, "label": "Orders", "question": "How many orders?", "statement": "SELECT COUNT(*) AS n FROM orders",
-         "expected": None, "provenance": {"shape": "b", "source": "the sheet", "file": "plan.csv", "line": 2, "graded": None}},
+         "expected": None, "provenance": {"shape": "b", "source": "the sheet", "file": "plan.csv", "line": 2}},
         {"row": 2, "label": None, "question": "Which region sells most?", "statement": None, "expected": None,
-         "provenance": {"shape": "a", "source": None, "file": "questions.txt", "line": 1, "graded": None}},
+         "provenance": {"shape": "a", "source": None, "file": "questions.txt", "line": 1}},
         {"row": 3, "label": "Revenue", "question": "What is revenue?", "statement": None, "expected": 10.0,
-         "provenance": {"shape": "c", "source": "the dashboard", "file": "tiles.csv", "line": 3, "graded": None}},
+         "provenance": {"shape": "c", "source": "the dashboard", "file": "tiles.csv", "line": 3}},
         {"row": 4, "label": "By region", "question": "Orders by region?", "statement": "SELECT region, COUNT(*) FROM orders GROUP BY region",
-         "expected": None, "provenance": {"shape": "b", "source": None, "file": "plan.csv", "line": 5, "graded": None}},
+         "expected": None, "provenance": {"shape": "b", "source": None, "file": "plan.csv", "line": 5}},
     ]}))
     return run
 

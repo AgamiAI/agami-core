@@ -215,7 +215,7 @@ def record(store: dict, n: int, question: str, statement: str | None, expected, 
                                       ledger["verdict"] if ledger else None)
     rec = {"row": n, "label": question, "question": question, "statement": statement,
            "expected": expected, "status": status, "ledger_verdict": ledger["verdict"] if ledger else None,
-           "provenance": {"shape": "b" if statement else "a", "graded": None}, **extra}
+           "provenance": {"shape": "b" if statement else "a"}, **extra}
     with (store["run"] / "rows.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec) + "\n")
     return rec

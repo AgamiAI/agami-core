@@ -2819,11 +2819,13 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         error = f"agami's statement did not run: {error}" if detail else error
     elif exp is None and statement is None:
         # A question on its own: the person supplied no statement and no number, so there is nothing
-        # of theirs to compare against and NO file on disk can change that. This test comes before
-        # the comparison files are read, not after: Phase 2.5 writes agami's own query as
-        # `statement.sql` so the ledger can grade it, which means `statement.csv` holds agami's own
-        # result. Reading a score built from it compared agami against agami, returned accuracy 1.0,
-        # and the card said "the two answers match row for row" on a row with one answer.
+        # of theirs to compare against and NO file on disk can change that. `comparison.json` and
+        # `diff.json` are already loaded above; what this branch's position decides is that neither
+        # is ever allowed to set `match` here. Phase 2.5 writes agami's own query as `statement.sql`
+        # so the ledger can grade it, which means `statement.csv` holds agami's own result, so a
+        # score built from it compared agami against agami and returned accuracy 1.0. With this
+        # branch below them the row recorded `match`, and the card said "the two answers match row
+        # for row" about one answer.
         pass
     elif isinstance(score, dict) and score.get("status") in ("scored", "unscored", "error"):
         comparison = {"result_set": score}
