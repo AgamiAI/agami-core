@@ -986,6 +986,10 @@ def _no_client(monkeypatch, home):
     monkeypatch.setattr(gr.shutil, "which", lambda name: None)
     monkeypatch.delenv(gr._CLIENT_ENV, raising=False)
     monkeypatch.setenv("HOME", str(home))
+    # Two of the fallbacks are absolute, and `HOME` does not move them. Left in place, "no client"
+    # is only true on a machine that happens not to have one: the resolver walks past the empty tmp
+    # home and finds /opt/homebrew/bin/claude, so this helper never simulated what it names.
+    monkeypatch.setattr(gr, "_CLIENT_FALLBACKS", tuple(c for c in gr._CLIENT_FALLBACKS if c.startswith("~")))
     gr._client.cache_clear()
 
 

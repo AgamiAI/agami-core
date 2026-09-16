@@ -152,7 +152,7 @@ def deployment_org_id(artifacts_dir: str | Path) -> str | None:
     A deployment is ONE tenant even with several datasource profiles, so the minted id is shared across
     every profile's ``datasource.yaml``. Resolving by scanning the artifacts dir (rather than one 'active'
     profile) means the deploy stamp and the serve resolver agree even when ``AGAMI_PROFILE`` is unset and
-    the real model lives under a named profile (e.g. ``northpeak_salesforce``, not ``default``). Read-only;
+    the real model lives under a named profile (e.g. ``acme_salesforce``, not ``default``). Read-only;
     never raises. Profiles are expected to agree; the first (sorted) is returned deterministically."""
     root = Path(artifacts_dir)
     if not root.is_dir():
