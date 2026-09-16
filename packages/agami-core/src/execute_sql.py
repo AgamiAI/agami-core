@@ -330,7 +330,7 @@ def _classify_db_error(text: str, code: int) -> FailureKind:
     of labels, and the caller receives `_ERROR_MESSAGES[kind]` rather than anything the database
     said. The raw text is captured server-side only.
 
-    Order matters and two positions are load-bearing:
+    Order matters and three positions are load-bearing:
 
     * **Cancellation is checked early and lands on `other`.** Every cancellation signature was ceded
       to ACE-038, whose rule is that a deadline is classified from a signal rather than a string.
@@ -340,6 +340,13 @@ def _classify_db_error(text: str, code: int) -> FailureKind:
       unattributable server-side cancellation is honestly `other`.
     * **`table_not_found` precedes `syntax`**, because Snowflake prefixes an unknown object with
       "SQL compilation error" and would otherwise be read as a syntax error.
+    * **An execution failure no arm reads is `other`, never `syntax`.** Every engine raises its
+      execution failure with code 5, and the fallback used to read the code back through
+      `EXIT_TO_FAILURE_KIND`, so a message none of the needles matched ("server closed the connection
+      unexpectedly", "SSL SYSCALL error: EOF detected") came out as `syntax`: the skill then
+      regenerated a correct statement twice, and reconcile graded the person's statement a defect
+      for a wire blip. Not knowing is `other`. The code prior still stands for the other codes,
+      whose meaning is the raise site's and not the message's (ACE-132).
 
     `"timed out"` is deliberately NOT a `network` needle. A driver-level connect or login timeout is
     what the executor already reports as `auth` (exit 4) and stays there; adding the needle would
@@ -406,7 +413,20 @@ def _classify_db_error(text: str, code: int) -> FailureKind:
         "no such file or directory",
     ):
         return "dsn"
-    if has("connection refused", "connection reset", "could not connect", "wrong_version_number"):
+    if has(
+        "connection refused",
+        "connection reset",
+        "could not connect",
+        "wrong_version_number",
+        # The wire dropping mid-statement, as psycopg2 and the Postgres family spell it. None of
+        # these names the statement, and the caller's right move is to stop, not to regenerate.
+        "server closed the connection",
+        "ssl syscall error",
+        "ssl connection has been closed",
+        "terminating connection",
+        "eof detected",
+        "broken pipe",
+    ):
         return "network"
     if has(
         "password authentication failed",
@@ -418,6 +438,9 @@ def _classify_db_error(text: str, code: int) -> FailureKind:
         "login failed",
     ):
         return "auth"
+    if code == 5:
+        # See the docstring: an unread execution failure is not evidence of a syntax error.
+        return "other"
     return EXIT_TO_FAILURE_KIND.get(code, "other")
 
 

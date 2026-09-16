@@ -335,6 +335,14 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A database failure nobody could read is no longer reported as a syntax error.** Every engine
+  raises its execution failure with the same exit code, and the classifier read that code back as
+  `syntax` whenever none of its rules matched the message, so a connection dropping mid-statement
+  ("server closed the connection unexpectedly", "SSL SYSCALL error: EOF detected") told agami-query to
+  regenerate a correct statement twice and told reconcile that the person's statement was wrong. The
+  wire-drop messages now read `network` (stop, no retry), and an execution failure no rule reads is
+  `other`, never `syntax`. The connection reference's exit-code line now matches the code. (ACE-132)
+
 - **A filter value the warehouse spells differently is no longer graded as a mistake in your query.**
   The value grader compared the literal your statement wrote, as text, against the column's distinct
   values, as the CSV rendered them, and returned a defect on a miss before it read the existence

@@ -52,7 +52,7 @@ python3 execute_sql.py [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE
 - **Output is RFC-4180 CSV on stdout, always.** No `--format` flag exists; don't pass one.
 - **Either** `--sql 'SELECT 1'` (string) **or** `--sql-file /tmp/q.sql` (path). Positional SQL is rejected.
 - `--profile` overrides `AGAMI_PROFILE`. If neither is set, defaults to `active_profile` from `<artifacts_dir>/local/.config`.
-- Exit codes: `0` (success), `2` (config/usage), `3` (connect error), `4` (execution error), `5` (driver missing).
+- Exit codes: `0` (success), `1` (refused by a guard, one JSON object on stderr), `2` (config/usage), `3` (driver missing), `4` (connect or credentials), `5` (a syntax error the database named), `6` (a failure nothing classified), `7` (column not found), `8` (table not found), `9` (permission), `10` (network). The table in `execute_sql.py`'s docstring is the contract.
 
 For Snowflake-specific liveness checks where `SELECT CURRENT_VERSION()` reads better than `SELECT 1`, just substitute the SQL — same flag shape. **Never** add flags not listed above.
 
