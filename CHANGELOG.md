@@ -14,6 +14,17 @@ below corresponds to one such version.
 
 ### Added
 
+- **A resumed conversation can no longer query a model that has since changed (#364).** A client
+  keeps `get_datasource_schema` and `get_prompt_examples` output as text in its context, so a user
+  who returned to an old conversation after the model was edited, or after an older version was put
+  back, got SQL written against the model as it used to be. Both tools now return `model_version`,
+  and on a hosted deployment `execute_sql` takes it back: a missing or different version is refused
+  on the new rule `stale_model`, whose remediation names the live version and says to fetch the
+  schema and examples again. The comparison is equality, so putting an older version back is caught
+  the same way as deploying a new one. The property is optional in the tool's input schema on
+  purpose — a required one fails validation before the handler runs, with no fix named. A
+  deployment with no recorded version, and the local path, never refuse on it.
+
 - **The instructions say which columns may be queried, and what a scope refusal means.** Neither
   rule was stated anywhere a client reads before writing SQL. "Only columns declared on the model's
   tables may be queried" existed solely inside the refusal a statement received for breaking it, so
@@ -35,6 +46,16 @@ below corresponds to one such version.
   keyed on what was read would tell that agent every column it needs is out of scope.
 
 ### Fixed
+
+- **A self-hosted server could report an old model version as the live one (#364).** Each deploy
+  added a version row and never removed the previous ones, wrote them without a date, and the
+  lookup picked the "newest" by that date. With every date blank, the live version was whichever
+  hash sorted last; on Postgres, which sorts blanks first, a single undated row also outranked every
+  dated one. The trust receipt's `model_version` came from that lookup. The table now holds one
+  row per datasource, replaced and dated on every write (a restore included), and the lookup sorts
+  any undated row left from before last, on both engines. A deploy also records the hash of the
+  files it deploys rather than the newest snapshot's name, so an edit without a new snapshot is a
+  new version, and a model that was never snapshotted no longer deploys as the constant `deployed`.
 
 - **A reconcile card showed nothing in its SQL section when agami's query failed.** The row record
   dropped agami's statement whenever the row's status was `error`, so the one row where reading the

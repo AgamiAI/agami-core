@@ -110,6 +110,10 @@ _HOSTED_PREAMBLE = (
     "side; these tools provide the deployment's semantic model + curated examples, and execute "
     "SQL on the server against the configured warehouse — query text and result rows leave your "
     "machine and are recorded in this deployment's activity log.\n"
+    # #364. Hosted only, because only the hosted path enforces it.
+    "The model can change between your calls. get_datasource_schema returns a `model_version`; "
+    "pass it on every execute_sql. A `stale_model` refusal means the schema and examples you hold "
+    "are out of date, even from earlier in this conversation: fetch both again and rewrite.\n"
 )
 # What a `get_datasource_schema` response tells a client when the datasource has stored examples
 # (#301). The only instruction to call get_prompt_examples lived in the instructions above, which a
@@ -602,13 +606,24 @@ def _resolve_model_version(profile: str) -> str | None:
     something to wrap and so a caller that genuinely wants a fresh read has one to call."""
     from store import Store
 
-    store = Store.from_env()
+    # Opening the store is inside the "unavailable" promise too: a misconfigured URL used to raise
+    # from here, which was harmless while only the receipt asked. The stale-model check (#364) asks
+    # before the audit gate, and that gate is what owns telling the caller the store is unusable.
+    #
+    # Logged, because an unreadable version also stands the stale-model check aside, and a store
+    # that opens but cannot answer (a missing table, a lost grant) passes the audit gate.
+    try:
+        store = Store.from_env()
+    except Exception as e:
+        _LOG.warning("model_version unavailable for %r: %s", profile, type(e).__name__)
+        return None
     if store is not None:
         from model_store import newest_model_version
 
         try:
             return newest_model_version(store, profile, org_id=_current_org_id())
-        except Exception:
+        except Exception as e:
+            _LOG.warning("model_version unavailable for %r: %s", profile, type(e).__name__)
             return None
         finally:
             store.close()
@@ -618,6 +633,48 @@ def _resolve_model_version(profile: str) -> str | None:
         return SN.newest_version(resolve_artifacts_dir() / profile)
     except Exception:
         return None
+
+
+def _stale_model_refusal(args: dict[str, Any], profile: str) -> Refusal | None:
+    """Refuse a statement written against a model this datasource no longer serves (#364).
+
+    A client holds `get_datasource_schema` and `get_prompt_examples` output as text in its context,
+    and a conversation resumed after the model changed, or after an older version was put back,
+    still writes SQL from that text. The only thing the server controls is whether it runs, so the
+    call carries the `model_version` those responses returned and a mismatch is refused with the
+    live version named. EQUALITY, never ordering: putting an older version back is the same event as
+    deploying a new one. A call with no version is refused too, because every conversation from
+    before this check is exactly the one that never received one.
+
+    Served deployments only. Locally the version is the newest snapshot's name while the model is
+    read from the files as they are now, so a match there would not mean the context is current.
+    Nor when no version is recorded: there is then nothing to be stale against, and refusing would
+    take the tool out of service on a deployment that has not been through a versioned deploy."""
+    from execute_sql import _hosted
+
+    if not _hosted():
+        return None
+    live = _model_version(profile)
+    if live is None:
+        return None
+    sent = args.get("model_version")
+    if sent == live:
+        return None
+    from guardrail import RULE_STALE_MODEL, refuse
+
+    detail = (
+        "this call carried no model_version, so it may have been written against an older model"
+        if not sent
+        else "this statement was written against a model version this datasource no longer serves"
+    )
+    return refuse(
+        RULE_STALE_MODEL,
+        detail=detail,
+        remediation=f"The live model version for {profile!r} is {live}. Call get_datasource_schema "
+        "and get_prompt_examples for it again, rewrite the statement from what they return, and "
+        f"pass model_version={live!r} on execute_sql. Do not reuse schema, columns or examples from "
+        "earlier in this conversation.",
+    )
 
 
 # The org id for the current request's tool calls (ACE-045). The HTTP server sets this per request from
@@ -1489,6 +1546,16 @@ def _schema_payload(
 
 
 def tool_get_datasource_schema(args: dict[str, Any]) -> str:
+    """`_tool_get_datasource_schema` inside the per-request resolve-once scope, so the version this
+    response reports and the one `get_cached_org` loads the model under are a single read (#364)."""
+    cache_token = begin_request_cache()
+    try:
+        return _tool_get_datasource_schema(args)
+    finally:
+        end_request_cache(cache_token)
+
+
+def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     """Return the semantic model for a datasource, **sized to fit the client's context**.
 
     **Scope is what the caller DECLARES**, and nothing inside it is hidden. `area="<name>"` narrows
@@ -1512,6 +1579,10 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         if choose is not None:
             return choose
     profile = _resolve_call_datasource(args)
+    # Read BEFORE the model loads. A deploy landing between the two reads then pairs new content
+    # with the old version, and the client's next execute_sql is refused and re-fetches; the other
+    # order would pair old content with the new version and let it run (#364).
+    model_version = _model_version(profile)
     try:
         org = get_cached_org(profile)
     except FileNotFoundError as e:
@@ -1697,6 +1768,8 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # The boundary the never-hide guarantee is relative to. A guarantee stated against a scope is
     # only honest if the reader can see which scope they got.
     result["scope"] = {"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
+    # What execute_sql must be sent back on a hosted deployment (#364).
+    result["model_version"] = model_version
 
     parts = [json.dumps(result, indent=2, default=str)]
     # Domain context = the human's datasource.md narrative + the model-DERIVED summary
@@ -1752,6 +1825,9 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     if store is not None:
         from model_store import select_examples
 
+        # Before the examples are read, for the reason `get_datasource_schema` gives.
+        model_version = _model_version(profile)
+
         # honour an explicit top_k=0 (caller wants none); only default when absent/None
         top_k = args.get("top_k")
         top_k = 10 if top_k is None else int(top_k)
@@ -1767,7 +1843,14 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
         finally:
             store.close()
         return json.dumps(
-            {"datasource": profile, "examples": examples, "count": len(examples)},
+            {
+                "datasource": profile,
+                "examples": examples,
+                "count": len(examples),
+                # Examples are part of the versioned tree, so a changed example is a new version
+                # and this is the same value get_datasource_schema reports (#364).
+                "model_version": model_version,
+            },
             indent=2,
             default=str,
         )
@@ -2780,6 +2863,19 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
         # the pre-model one for the same reason: `read_only` is in `PRE_MODEL_RULES`, so there is
         # nothing a model could have been asked about this statement, and asking one anyway would put
         # a fresh unpooled database round-trip on the cheapest outcome an attacker can trigger at will.
+        return _emit(
+            _envelope("refused", refusal=refusal, receipt=_refusal_receipt(profile, sql, refusal)),
+            sql=sql,
+            execution_ms=None,
+            profile=profile,
+            args=args,
+        )
+
+    # After read-only, so a mutation is still refused for what it is whatever version it carried;
+    # before either execution path, so a statement written from a stale schema never reaches the
+    # warehouse (#364). The version read here is the one the receipt pins later in this request.
+    refusal = _stale_model_refusal(args, profile)
+    if refusal is not None:
         return _emit(
             _envelope("refused", refusal=refusal, receipt=_refusal_receipt(profile, sql, refusal)),
             sql=sql,
@@ -3868,12 +3964,27 @@ TOOLS: dict[str, dict[str, Any]] = {
             "question — whether the arithmetic is meaningful at all — and a number can be "
             "un-multiplied and still meaningless.\n"
             "OPTIONALLY send `basis` — the choices behind this query, each with why. Recorded for "
-            "the admin activity log beside the statement; never checked against your SQL."
+            "the admin activity log beside the statement; never checked against your SQL.\n"
+            # #364. Stated here as well as in the refusal, so a client passes it before it is refused.
+            "On a hosted deployment, ALWAYS send `model_version` — the value the "
+            "get_datasource_schema response you wrote this statement from carried. A statement "
+            "with a different one, or none, is refused on rule `stale_model`: the model changed "
+            "since you read it, so fetch the schema and examples again and rewrite before retrying."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "sql": {"type": "string", "description": "One SELECT or WITH...SELECT statement."},
+                # Optional in the schema on purpose (#364): a required property that is missing fails
+                # validation before the handler runs, with a message that names no fix. The handler
+                # refuses the omission instead, and its refusal says what to fetch.
+                "model_version": {
+                    "type": "string",
+                    "description": (
+                        "The `model_version` from the get_datasource_schema response this statement "
+                        "was written from. Required on a hosted deployment."
+                    ),
+                },
                 "datasource": {
                     "type": "string",
                     "description": (
