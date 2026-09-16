@@ -60,7 +60,7 @@ def test_four_shapes_are_detected_and_never_asked_for():
     phase_0 = _between(SKILL, "## Phase 0: Preflight", "## Phase 1:")
     assert "accept any of four shapes, or a mix" in phase_0
     assert "**statement branch**" in phase_0 and "**questions branch**" in phase_0
-    assert "welcoming all four" in phase_0
+    assert "the four shapes as options" in phase_0
     phase_1 = _between(SKILL, "## Phase 1:", "## Phase 1.5:")
     for heading in ("### Statement branch", "### Questions branch", "### 1n — Normalize"):
         assert heading in phase_1, heading
@@ -179,6 +179,23 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
     assert "never proves anything about the semantic model" in fit
     assert "question_fit:" in statements and "reword the question or the statement and re-run this row" in statements
     assert "For every statement row, write `question_fit.json`" in PHASE_1_5
+
+
+def test_reconcile_takes_input_the_way_connect_does():
+    """Nothing given: an options prompt with the four shapes, the rarer inputs named in the prompt. A CSV
+    with nothing to hand: a template file written and a hand-off that ends the turn. Rows read: an
+    intake page shown before anything runs, one block back, applied by a parser and never by hand."""
+    preflight = SKILL.split("## Phase 0: Preflight", 1)[1].split("## Phase 1: Extract", 1)[0]
+    assert "**AskUserQuestion**, the four shapes as options" in preflight
+    for label in ("`A screenshot of the dashboard`", "`A CSV or an export`", "`The SQL you trust`", "`A list of questions`"):
+        assert label in preflight, label
+    assert "reconcile.example.csv" in preflight and "label,value,sql,question" in preflight
+    assert "**End the turn.**" in preflight and "never guessed at" in preflight
+    intake = _between(SKILL, "### 1n — Normalize", "## Phase 1.5")
+    assert "render_reconcile_intake.py" in intake and "--intake-file" in intake
+    assert "parse_reconcile_intake.py" in intake and "--rows-file" in intake
+    assert "**end the turn**" in intake and "never hand-edit the rows" in intake
+    assert 'a per-row "is this the question?" in chat is never asked' in intake
     assert "only for a statement that came alone" in PHASE_1_5
     assert "| `question_fit` |" in REFERENCES["part-ledger.md"]
     assert "question_fit.json" in REFERENCES["statement-check.md"] and "question_fit" in REFERENCES["evidence-row.md"]
