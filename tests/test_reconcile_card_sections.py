@@ -1,8 +1,8 @@
 """The card is a verdict, one thing to do, and three closed sections.
 
-Sandeep ran five statements against a real warehouse and the card buried the answer. What is pinned
-here is what the redesign owes him: a row knows which section it belongs to, a line nobody can act on
-is gone, a summary names the exception when there is one, and the five-row sample is bounded at the
+Five statements run against a real warehouse found the card burying the answer. What is pinned
+here is what the redesign owes that run: a row knows which section it belongs to, a line nobody can
+act on is gone, a summary names the exception when there is one, and the five-row sample is bounded at the
 surface that publishes it rather than trusted from whatever built it.
 """
 
@@ -304,3 +304,17 @@ def test_only_the_verdict_is_set_at_the_largest_size():
     css = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-pages.css").read_text(encoding="utf-8")
     assert css.count("font-size: var(--t-verdict)") == 1
     assert ".card .vl { font-size: var(--t-verdict)" in css
+
+
+def test_a_diff_row_the_page_cannot_place_fails_the_render():
+    """The page renders a row into the section it names, so a row naming none is rendered nowhere.
+    A check that ran and then silently disappeared is worse than one that fails loudly: the card
+    reads as though it never ran at all. An older items file is caught here rather than displayed."""
+    ok = dict(_ITEM, diff=[{"key": "answers the question", "state": "held", "section": "sql"}])
+    rr._validate_item(ok, 0)
+    for bad in (None, "", "model", "Checks"):
+        row = {"key": "answers the question", "state": "held"}
+        if bad is not None:
+            row["section"] = bad
+        with pytest.raises(ValueError, match="needs a 'section'"):
+            rr._validate_item(dict(_ITEM, diff=[row]), 0)

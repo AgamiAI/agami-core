@@ -54,10 +54,10 @@ def _run(html: str) -> None:
 def test_the_report_page_loads_with_result_and_fix_items():
     items = [{"row": 1, "question": "How many orders?", "status": "match", "owner": "keep", "keep_allowed": True,
               "result": {"data": "matches", "query": "same", "label": "match", "unchecked": 0, "differs_in": []}, "fix": "none", "fix_words": "nothing to fix",
-              "diff": [{"key": "answer", "state": "held", "yours": "10", "agami": "10", "note": None}], "sentence": "The numbers match.", "sql_yours": "SELECT 1", "sql_agami": "SELECT 1"},
+              "diff": [{"key": "answer", "state": "held", "section": "data", "yours": "10", "agami": "10", "note": None}], "sentence": "The numbers match.", "sql_yours": "SELECT 1", "sql_agami": "SELECT 1"},
              {"row": 2, "question": "What was revenue?", "status": "mismatch", "owner": "model",
               "result": {"data": "differs", "query": "different", "label": "different answer", "unchecked": 1, "differs_in": ["filters"]}, "fix": "semantic_model", "fix_words": "fix the semantic model",
-              "diff": [{"key": "filters", "state": "defect", "yours": ["a = 1"], "agami": ["b = 2"], "yours_hi": ["a = 1"], "agami_hi": ["b = 2"], "note": "differ"}], "words": ["orders: \"a caveat\""]}]
+              "diff": [{"key": "filters", "state": "defect", "section": "sql", "yours": ["a = 1"], "agami": ["b = 2"], "yours_hi": ["a = 1"], "agami_hi": ["b = 2"], "note": "differ"}], "words": ["orders: \"a caveat\""]}]
     _run(rr.render(title="t", profile="p", run="r", items=items))
     _run(rr.render(title="t", profile="p", run="r", items=items[:1]))  # the audit layout
     # an older items file: beats, no result or fix

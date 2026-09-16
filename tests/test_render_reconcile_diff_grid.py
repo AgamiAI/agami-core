@@ -17,9 +17,9 @@ import render_reconcile_report as rr  # noqa: E402
 
 ITEM = {"row": 2, "label": "Orders since June", "question": "List all orders placed from June this year.", "source": "your validation sheet, plan.csv:3",
         "status": "mismatch", "expected": "21 rows", "answer": "21 rows", "single_cell": False, "owner": "question",
-        "diff": [{"key": "rows", "state": "held", "yours": "21 rows", "agami": "21 rows", "note": None},
-                 {"key": "columns", "state": "defect", "yours": ["number", "channel"], "agami": ["number"], "yours_hi": ["channel"], "note": "scores on columns"},
-                 {"key": "date window", "state": "open", "yours": "date_trunc('year', current_date)", "agami": "placed_at ≥ 2025-06-01", "note": "not folded"}],
+        "diff": [{"key": "rows", "state": "held", "yours": "21 rows", "agami": "21 rows", "note": None, "section": "checks"},
+                 {"key": "columns", "state": "defect", "yours": ["number", "channel"], "agami": ["number"], "yours_hi": ["channel"], "note": "scores on columns", "section": "checks"},
+                 {"key": "date window", "state": "open", "yours": "date_trunc('year', current_date)", "agami": "placed_at ≥ 2025-06-01", "note": "not folded", "section": "checks"}],
         "sentence": "The two answers differ; the parts that differ: columns.", "words": ['orders: "shipped_at is the anchor."'],
         "change": ["Name the columns you want back."], "todo": ["The question: reword it."], "report_path": "rows/2/receipt.html"}
 
@@ -43,9 +43,9 @@ def test_a_diff_row_is_validated_and_never_carries_result_rows():
     with pytest.raises(ValueError, match="diff row needs a 'key'"):
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"state": "held"}])])
     with pytest.raises(ValueError, match="text or a list of tokens"):
-        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "yours": 3}])])
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "yours": 3, "section": "checks"}])])
     with pytest.raises(ValueError, match="never rendered"):
-        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "rows": [[1]]}])])
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "rows": [[1]], "section": "checks"}])])
     with pytest.raises(ValueError, match="'sentence' must be text"):
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, sentence=["no"])])
 
@@ -73,16 +73,16 @@ def test_the_two_statements_sit_collapsed_under_the_grid():
 def test_the_second_reviews_findings_on_the_renderer():
     # highlights and notes are typed; checks never carry rows; rows are unique; keep_allowed is the verb's word
     with pytest.raises(ValueError, match="tokens to highlight"):
-        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "yours_hi": "channel"}])])
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "yours_hi": "channel", "section": "checks"}])])
     with pytest.raises(ValueError, match="'note' must be text"):
-        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "note": 3}])])
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "note": 3, "section": "checks"}])])
     with pytest.raises(ValueError, match="inside a diff row"):
-        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "rows": [[1]]}])])
+        rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "rows": [[1]], "section": "checks"}])])
     with pytest.raises(ValueError, match="share a row number"):
         rr.render(title="t", profile="p", run="r", items=[ITEM, ITEM])
     with pytest.raises(ValueError, match="true or false"):
         rr.render(title="t", profile="p", run="r", items=[dict(ITEM, keep_allowed="yes")])
-    html = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "secret": "leak-me"}]), dict(ITEM, row=3)])
+    html = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, diff=[{"key": "k", "state": "held", "secret": "leak-me", "section": "checks"}]), dict(ITEM, row=3)])
     assert "leak-me" not in html
     # the verb's keep gate wins over the renderer's two facts
     gated = rr.render(title="t", profile="p", run="r", items=[dict(ITEM, status="match", single_cell=True, keep_allowed=False), dict(ITEM, row=3)])
@@ -138,12 +138,12 @@ def test_the_card_after_the_second_read_question_first_folding_checks_example_an
 
 
 def test_list_cells_read_like_a_diff():
-    item = dict(ITEM, diff=[{"key": "columns", "state": "defect", "yours": ["number", "channel"], "agami": ["o.number", "region"], "yours_hi": ["channel"], "agami_hi": ["region"], "renamed": [["number", "o.number"]]}])
+    item = dict(ITEM, diff=[{"key": "columns", "state": "defect", "yours": ["number", "channel"], "agami": ["o.number", "region"], "yours_hi": ["channel"], "agami_hi": ["region"], "renamed": [["number", "o.number"]], "section": "checks"}])
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
     for token in ("(state === 'differs' ? 'diff' : (side === 'yours' ? 'del' : 'add'))", "class=\"tok renamed\" title=\"same values as '", '"renamed": [["number", "o.number"]]'):
         assert token.replace("\\", "") in html, token
     with pytest.raises(ValueError, match="name pairs"):
-        rr.render(title="t", profile="p", run="r", items=[dict(item, diff=[{"key": "columns", "state": "held", "renamed": ["number"]}])])
+        rr.render(title="t", profile="p", run="r", items=[dict(item, diff=[{"key": "columns", "state": "held", "renamed": ["number"], "section": "checks"}])])
 
 
 def test_the_checks_start_closed_and_the_palette_has_one_meaning_per_color():

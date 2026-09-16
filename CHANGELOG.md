@@ -14,8 +14,8 @@ below corresponds to one such version.
 
 ### Changed
 
-- **The reconcile card shows a verdict and what to do, and nothing else until asked.** Sandeep ran
-  five statements against a real warehouse and the card buried the answer: the verdict sat as plain
+- **The reconcile card shows a verdict and what to do, and nothing else until asked.** Five
+  statements run against a real warehouse found the card burying the answer: the verdict sat as plain
   text between two panels, the same conclusion was written four times in four registers, and a check
   saying "the column holds more than 25 distinct values" had the same weight as one that found a
   mistake. A card is now the question, one verdict carrying the measurement behind it ("9 of 10 rows
