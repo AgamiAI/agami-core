@@ -290,6 +290,10 @@ below corresponds to one such version.
 - The reconcile report card is a diff grid built by code: `reconcile.py report-items` templates one row
   per check from the run's files, the check named first, yours and agami as values with the differing
   tokens highlighted, the sides aligned by construction; one sentence and one action per card. (ACE-126)
+- The reconcile report card carries two facts read by code: the result (does the data match; are the two
+  queries the same) as the pill, and the fix (your query, the semantic model, the examples, the question,
+  agami again, nothing) as the action. A query written differently is a noted fact, no longer a blocker
+  on a matching answer. (ACE-127)
 - From the first test of the grid: a plain column in a list query is no longer graded as a missing
   metric (the receipt's output items say whether they aggregate); a date window written against the
   clock (`date_trunc('year', current_date) + interval`) resolves and compares against another such

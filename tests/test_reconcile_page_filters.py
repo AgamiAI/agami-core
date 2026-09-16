@@ -61,3 +61,9 @@ def test_grading_a_card_updates_it_in_place_so_a_filter_does_not_hide_the_boxes(
     body = html[html.index("function onGrade(e)"):html.index("function onText(e)")]
     assert "renderItems()" not in body and "chips();" in body and "hidden = e.target.value !== 'wrong'" in body
 
+
+def test_each_filter_row_on_the_report_page_is_labelled():
+    html = rr.render(title="t", profile="p", run="r", items=CARDS)
+    for token in ('<span class="k">Result</span>', '<span class="k">Fix</span>', '<span class="k">Find</span>', '>Clear filters</button>', 'id="result-row"'):
+        assert token in html, token
+
