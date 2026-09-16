@@ -30,6 +30,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "reconcile-report-template.html"
@@ -41,18 +42,51 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "status_words", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill")
+           "owner", "read", "how", "words", "disagreement", "change", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill", "summaries", "sample")
 _LISTS = ("read", "how", "words", "change", "todo")
-_DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
+_DIFF_KEYS = ("key", "state", "section", "family", "rolled", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
 _OWNERS = {"you", "model", "question", "agami", "keep", "nothing"}
+# The three the card renders. A diff row belongs to exactly one of them.
+_SECTIONS = frozenset({"data", "sql", "checks"})
 _CHECK_STATES = {"held", "defect", "open", "gap", "noted", "differs"}
-_LAYOUTS = ("auto", "cards", "audit")
 _DATA_RESULTS = {"matches", "partly", "differs", "could_not_compare"}
 _QUERY_RESULTS = {"same", "different", "not_comparable"}
 _FIXES = {"query", "semantic_model", "examples", "question", "ask_again", "none"}
+
+
+_SAMPLE_ROWS = 5
+
+
+def _validate_sample(sample: Any, idx: int) -> None:
+    """The one place this page may carry warehouse values, and the cap is enforced here.
+
+    Everything else on the card is display text built by the items verb. A sample is different: it is
+    rows of real data, so the bound is checked at the surface that publishes them rather than trusted
+    from whatever produced them. A page is a file that travels; five rows is a sample and five hundred
+    is an export.
+    """
+    if sample is None:
+        return
+    if not isinstance(sample, dict):
+        raise ValueError(f"item {idx}: 'sample' must be an object")
+    rows = sample.get("rows")
+    if not isinstance(rows, list) or len(rows) > _SAMPLE_ROWS:
+        raise ValueError(f"item {idx}: 'sample.rows' is at most {_SAMPLE_ROWS} rows; got "
+                         f"{len(rows) if isinstance(rows, list) else type(rows).__name__}")
+    pairs = sample.get("pairs")
+    if not isinstance(pairs, list) or not all(isinstance(p, list) and len(p) == 2 for p in pairs):
+        raise ValueError(f"item {idx}: 'sample.pairs' must be a list of two-name pairs")
+    other = sample.get("agami_rows")
+    if other is not None and (not isinstance(other, list) or len(other) > _SAMPLE_ROWS):
+        raise ValueError(f"item {idx}: 'sample.agami_rows' is at most {_SAMPLE_ROWS} rows")
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("yours"), list):
+            raise ValueError(f"item {idx}: every 'sample.rows' entry needs a 'yours' list")
+        if row.get("agami") is not None and not isinstance(row["agami"], list):
+            raise ValueError(f"item {idx}: 'sample.rows[].agami' is a list or null")
 
 
 def _validate_item(item: dict, idx: int) -> None:
@@ -64,6 +98,7 @@ def _validate_item(item: dict, idx: int) -> None:
         raise ValueError(f"item {idx}: 'question' (string) is required")
     if "rows" in item or "recorded" in item:
         raise ValueError(f"item {idx}: result rows are never rendered; pass 'answer' as display text")
+    _validate_sample(item.get("sample"), idx)
     if item.get("status") not in _STATUSES:
         raise ValueError(f"item {idx}: 'status' must be one of {sorted(_STATUSES)}")
     for key in ("label", "source", "expected", "answer", "disagreement", "report_path"):
@@ -80,16 +115,14 @@ def _validate_item(item: dict, idx: int) -> None:
         raise ValueError(f"item {idx}: 'owner' must be one of {sorted(_OWNERS)}")
     if item.get("delta_pct") is not None and not isinstance(item["delta_pct"], (int, float)):
         raise ValueError(f"item {idx}: 'delta_pct' must be a number")
-    for check in item.get("checks", []) or []:
-        if (not isinstance(check, dict) or not isinstance(check.get("step"), str)
-                or check.get("state") not in _CHECK_STATES):
-            raise ValueError(f"item {idx}: each check needs a 'step' and a 'state' in {sorted(_CHECK_STATES)}")
-    for check in item.get("checks", []) or []:
-        if "rows" in check or "recorded" in check:
-            raise ValueError(f"item {idx}: result rows are never rendered, not even inside a check")
     for row in item.get("diff", []) or []:
         if (not isinstance(row, dict) or not isinstance(row.get("key"), str) or row.get("state") not in _CHECK_STATES):
             raise ValueError(f"item {idx}: each diff row needs a 'key' and a 'state' in {sorted(_CHECK_STATES)}")
+        # The page renders a row into the section it names, so a row naming none is rendered nowhere:
+        # it would leave the card reading as though that check never ran. Fail here instead.
+        if row.get("section") not in _SECTIONS:
+            raise ValueError(f"item {idx}: diff row {row['key']!r} needs a 'section' in {sorted(_SECTIONS)}; "
+                             "a row the page cannot place is a check that silently disappears")
         for side in ("yours", "agami"):
             v = row.get(side)
             if v is not None and not isinstance(v, str) and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
@@ -130,17 +163,7 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-def choose_layout(items: list[dict], layout: str = "auto") -> str:
-    """`audit` for one row that carries checks (a single trusted query, read part by part), `cards`
-    for anything else. A person can force either."""
-    if layout != "auto":
-        return layout
-    return "audit" if len(items) == 1 and (items[0].get("checks") or items[0].get("diff")) else "cards"
-
-
-def render(*, title: str, profile: str, run: str, items: list[dict], layout: str = "auto") -> str:
-    if layout not in _LAYOUTS:
-        raise ValueError(f"layout must be one of {_LAYOUTS}")
+def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
     for i, item in enumerate(items):
         _validate_item(item, i)
     rows_seen = [item["row"] for item in items]
@@ -150,12 +173,13 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
     for item in projected:
         if item.get("diff"):
             item["diff"] = [{k: row.get(k) for k in _DIFF_KEYS if k in row} for row in item["diff"]]
-        if item.get("checks"):
-            item["checks"] = [{k: c.get(k) for k in ("step", "state", "detail", "note") if k in c} for c in item["checks"]]
     for item in projected:
+        # ACE-138's guarantee is that every row a person reads has its status in words. report-items
+        # fills it; a hand-written items file need not, and the verdict would then be blank.
+        if not item.get("status_words"):
+            item["status_words"] = _reconcile().status_words(item.get("status"))
         for key in _LISTS:
             item.setdefault(key, [])
-        item.setdefault("checks", [])
         for key in ("label", "source", "expected", "answer", "disagreement", "report_path", "owner", "delta_pct"):
             item.setdefault(key, None)
         # The one rule the page enforces about decisions: keep is offered where the run said match
@@ -170,13 +194,13 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {
         "REPORT_TITLE": html.escape(title),
-        "GENERATED_AT": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        # A date a person reads, in their own day, not an ISO string in UTC.
+        "GENERATED_AT": datetime.datetime.now().strftime("%d %B %Y at %H:%M"),
         "PROFILE": html.escape(profile or ""),
         "RUN": html.escape(run or ""),
         "PROFILE_JSON": _script_json(profile or ""),
         "RUN_JSON": _script_json(run or ""),
         "ITEMS_JSON": _script_json(projected),
-        "LAYOUT_JSON": _script_json(choose_layout(projected, layout)),
         # The status legend (colour family + chip words) comes from the one table in reconcile.py,
         # so the page writes no status vocabulary of its own. Same door the items come through.
         "STATUS_JSON": _script_json(_reconcile().status_legend()),
@@ -206,8 +230,6 @@ def main(argv=None) -> int:
                    help='with --run-dir: {"<row>": {"sentence": "...", "change": ["..."]}}, the only two fields the session writes')
     source.add_argument("--items-file", dest="items_file",
                    help="JSON array of {row, label, question, source, status, expected, answer, read, how, words, disagreement, change, report_path}")
-    p.add_argument("--layout", choices=list(_LAYOUTS), default="auto",
-                   help="cards for a batch, audit for one statement read part by part; auto picks from the items")
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
 
@@ -232,7 +254,7 @@ def main(argv=None) -> int:
             sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
             return 1
     try:
-        page = render(title=args.title, profile=args.profile, run=run, items=items, layout=args.layout)
+        page = render(title=args.title, profile=args.profile, run=run, items=items)
     except ValueError as exc:
         sys.stderr.write(f"render_reconcile_report: {exc}\n")
         return 1

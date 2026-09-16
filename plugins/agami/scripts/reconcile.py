@@ -1572,6 +1572,37 @@ def _fmt(value: Any) -> str | None:
     return str(value)
 
 
+def _fit_reason(note: Any) -> str | None:
+    """The fit note as one sentence: the ledger's lead-in and its trailing instruction stripped."""
+    if not isinstance(note, str) or not note.strip():
+        return None
+    text = note.split(":", 1)[1].strip() if note.startswith("the statement may not answer the question:") else note.strip()
+    text = text.split("; reword the question")[0].strip().rstrip(".;")
+    return (text[0].upper() + text[1:] + ".") if text else None
+
+
+def _rows_word(n: int) -> str:
+    """`1 row`, `5 rows`. One place, so no card says "1 rows"."""
+    return f"{n:,} {'row' if n == 1 else 'rows'}"
+
+
+def _in_our_words(reason: Any) -> str | None:
+    """The comparator's reason in this page's vocabulary.
+
+    `comparator.py` serves the golden run first, where the two sides are an answer key and a
+    generated result. On a reconcile card they are the analyst's query and agami's, and a reader who
+    never wrote an answer key cannot place the words. Same rule as the status words: the machinery
+    keeps its terms, the page does not show them.
+    """
+    if not isinstance(reason, str) or not reason:
+        return None
+    for their, ours in (("the answer key's", "your query's"), ("the answer key", "your query"),
+                        ("the generated result", "agami's result"), ("the generated statement", "agami's query"),
+                        ("generated", "agami's")):
+        reason = reason.replace(their, ours)
+    return reason
+
+
 def _recorded_display(recorded: Any, row_count: int | None = None) -> tuple[str | None, bool]:
     """What a recorded result looks like on the page: one cell as text, or 'N rows'. Never a row."""
     if not isinstance(recorded, dict):
@@ -1584,7 +1615,7 @@ def _recorded_display(recorded: Any, row_count: int | None = None) -> tuple[str 
         n = len(rows)
     if n is None:
         return None, False
-    return f"{n:,} rows", False
+    return f"{n:,} {'row' if n == 1 else 'rows'}", False
 
 
 def _part_family(part: str) -> str:
@@ -1729,9 +1760,18 @@ def _agami_steps(rec: dict) -> list[str]:
 def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     rows: list[dict] = []
     words: list[str] = []
+    # Which of the card's three sections a row belongs to. A reader asks three questions in order:
+    # did we get the same answer, how did the two queries differ, and is my query sound against the
+    # semantic model. The page groups by this rather than guessing from the label, because "value
+    # list for x" and "values" are one prefix apart and mean different things. Reassigned before each
+    # block below; `add` reads it at call time.
+    section = "data"
 
-    def add(key, state, yours=None, agami=None, note=None, yours_hi=None, agami_hi=None):
-        row = {"key": key, "state": state, "yours": yours, "agami": agami, "note": note or None}
+    def add(key, state, yours=None, agami=None, note=None, yours_hi=None, agami_hi=None, family=None):
+        row = {"key": key, "state": state, "yours": yours, "agami": agami, "note": note or None,
+               "section": section}
+        if family:
+            row["family"] = family
         if yours_hi:
             row["yours_hi"] = yours_hi
         if agami_hi:
@@ -1795,30 +1835,41 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         n_rows = result_set.get("golden_row_count")
         if acc is not None:
             same = float(acc) >= 1.0
-            paired_word = f"the {len(pairs)} paired column{'s' if len(pairs) != 1 else ''}"
+            paired_word = "the columns both queries return"
             if same:
                 add("values", "held", "identical", None)
             elif pairs and share is not None:
                 # The comparator says how many rows agree over the paired columns, and which pair
                 # disagrees on how many rows; the card reads those numbers rather than a 0.
                 if float(share) >= 1.0:
-                    add("values", "held", f"identical on {paired_word}", None,
-                        note="a column of yours has no partner; the paired columns match")
+                    add("values", "held", "The values match.", None,
+                        note=f"Compared {paired_word}. Your query returns others that agami's doesn't.")
                 else:
                     if isinstance(n_rows, int) and n_rows > 0:
                         agree = round(float(share) * n_rows)
-                        text = f"{agree} of {n_rows} rows match"
+                        text = f"{agree} of {n_rows} rows match."
                         weak = [f"{a} on {n_rows - round(g * n_rows)} of {n_rows} rows"
                                 for (a, _b), g in zip(pairs, agreement) if isinstance(g, (int, float)) and g < 1.0]
                     else:
-                        text, weak = f"{float(share):.0%} of the rows match", []
+                        text, weak = f"{float(share):.0%} of the rows match.", []
                     add("values", "defect", text, None, note=("differs in " + ", ".join(weak)) if weak else None)
             elif pairs and result_set.get("unmatched_golden_columns"):
                 # An older score file without the share: every pair it reports agreed by construction.
-                add("values", "held", f"identical on {paired_word}", None,
-                    note="a column of yours has no partner; the paired columns match")
+                add("values", "held", "The values match.", None,
+                    note=f"Compared {paired_word}. Your query returns others that agami's doesn't.")
             else:
-                add("values", "defect", f"{float(acc):.0%} of the values match", None, note=result_set.get("reason"))
+                gc, ac_n = result_set.get("golden_row_count"), result_set.get("generated_row_count")
+                if isinstance(gc, int) and isinstance(ac_n, int) and gc != ac_n:
+                    # The comparator decides on the row counts BEFORE it pairs anything, so no value
+                    # was compared. Printing its 0.0 as "0% of the values match" reports an artefact
+                    # of the method as a fact about the data, on a row where a school can sit in both
+                    # results. Say what actually happened instead.
+                    add("values", "open", "The results weren't compared.", None,
+                        note=f"Your query returned {_rows_word(gc)} and agami's returned {_rows_word(ac_n)}, "
+                             "so they couldn't be lined up row by row.")
+                else:
+                    add("values", "defect", f"{float(acc):.0%} of the values match.", None,
+                        note=_in_our_words(result_set.get("reason")))
     else:
         match = rec.get("match") if rec.get("match") is not None else (scalar or {}).get("match")
         if rec.get("status") == "error":
@@ -1837,6 +1888,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
             yours_hi=[yours_text] if state == "defect" and yours_text else None,
             agami_hi=[agami_text] if state == "defect" and agami_text else None)
 
+    section = "sql"
     # 2 · what the two statements claim, side by side. The person's statement is the golden side.
     claims = rec.get("claims") or {}
     claim_list = (claims.get("claims") or []) if isinstance(claims, dict) else []
@@ -1864,6 +1916,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         add(_CLAIM_KEYS.get(name, name), state, yours, agami, note=note,
             yours_hi=_only(yours, agami) if state == "differs" else None, agami_hi=_only(agami, yours) if state == "differs" else None)
 
+    section = "checks"
     # 3 · every part of the person's statement the ledger graded, with agami's side where a receipt says.
     filters, metrics = _receipt_filters(agami_receipt), _receipt_metrics(agami_receipt)
     for part in ledger_rows:
@@ -1897,8 +1950,206 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         for mention in ev.get("prose") or []:
             if isinstance(mention, dict) and mention.get("text"):
                 words.append(f"{mention.get('about') or mention.get('source') or 'the semantic model'}: \"{mention['text']}\"")
-        add(_part_key(pid), state, yours, agami, note=part.get("note") if state != "held" else None)
+        # The fit judgment is about the statement against its question, which is the SQL section's
+        # subject, not a check of the statement against the semantic model.
+        section = "sql" if fam == "question_fit" else "checks"
+        add(_part_key(pid), state, yours, agami, note=part.get("note") if state != "held" else None, family=fam)
     return rows, words
+
+
+
+def _condense(rows: list[dict]) -> list[dict]:
+    """Drop what a reader cannot act on, and count what repeats.
+
+    Three rules, each removing a line that is true and useless. A wide column having no declared
+    value list is the DEFAULT state of every free-text column, not a finding: the probe reads the
+    whole column (`SELECT DISTINCT city ... LIMIT 26`) and ignores the statement's own filters, so a
+    query pinned to one city still reported "more than 25 distinct values". A join that dropped
+    nothing is a sentence about nothing. And twelve `value x = y · exists` rows say one thing twelve
+    times. Anything that did not pass is kept, whole and in place: the point is to make the
+    exceptions visible, not to hide them under a count.
+    """
+    out: list[dict] = []
+    for family, group in _by_family(rows):
+        if family == "values_declared":
+            kept = [r for r in group if r["state"] != "noted"]
+            held = [r for r in kept if r["state"] == "held"]
+            out.extend(r for r in kept if r["state"] != "held")
+            if held:
+                out.append(_rollup(held, f"{len(held)} value list{'s' if len(held) > 1 else ''} declared"))
+        elif family == "dropped_rows":
+            out.extend(r for r in group if not _dropped_nothing(r))
+        elif family == "literal" and group and all(r["state"] == "held" for r in group) and len(group) > 1:
+            out.append(_rollup(group, f"{len(group)} values checked, all exist"))
+        else:
+            out.extend(group)
+    return out
+
+
+def _by_family(rows: list[dict]) -> list[tuple[str | None, list[dict]]]:
+    """The rows in their original order, with each family's members gathered at its first sighting."""
+    order: list[str | None] = []
+    groups: dict[str | None, list[dict]] = {}
+    for row in rows:
+        fam = row.get("family")
+        key = fam if fam in _CONDENSED else id(row)  # an uncondensed row is its own group
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(row)
+    return [(k if isinstance(k, str) else None, groups[k]) for k in order]
+
+
+_CONDENSED = {"values_declared", "dropped_rows", "literal"}
+
+
+def _rollup(group: list[dict], words: str) -> dict:
+    """One row standing for several that all passed. It carries the count and nothing else: a reader
+    who wants the members opens the section, where they are listed."""
+    first = dict(group[0])
+    first.update(key=words, state="held", yours=None, agami=None, note=None, rolled=len(group))
+    first.pop("yours_hi", None)
+    first.pop("agami_hi", None)
+    return first
+
+
+def _dropped_nothing(row: dict) -> bool:
+    """A dropped-rows line that says no row was dropped. True of most joins, and worth no line."""
+    return bool(row.get("yours")) and str(row["yours"]).startswith("0 of ")
+
+
+def result_set_for_sample(rec: dict) -> dict:
+    """The table comparison from a row record, or an empty dict for a scalar row."""
+    comparison = rec.get("comparison")
+    if isinstance(comparison, dict) and isinstance(comparison.get("result_set"), dict):
+        return comparison["result_set"]
+    return {}
+
+
+def _sample(row_dir: Path, score: Any, limit: int = 5) -> dict | None:
+    """Up to five rows of the two results, side by side, read from the run's own CSVs.
+
+    The CSVs are on disk already, so nothing here travels through `rows.jsonl` or the row record:
+    the checkpoint stays free of result rows and only the page shows them. Columns are paired by the
+    comparator, which pairs on VALUES, so a renamed column is the same column. Rows are aligned by
+    position, which is honest only when both sides returned the same count and is reported as
+    unaligned when they did not; a real row identity is the grain work, not this.
+
+    Differing rows come first. Five arbitrary rows answer nothing; five rows chosen because they
+    disagree are the sample a reader wants.
+    """
+    yours, agami = _read_csv(row_dir / "statement.csv"), _read_csv(row_dir / "actual.csv")
+    if not yours or not agami:
+        return None
+    pairs = [p for p in ((score or {}).get("column_pairs") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
+    if not pairs:
+        # The comparator returns no pairs at all when the row counts differ: it decides that before
+        # pairing anything. That is exactly the case a reader wants to look at, so fall back to
+        # identical names. Named pairing is weaker than pairing on values and the page says so.
+        pairs = [(c, c) for c in yours[0] if c in set(agami[0])]
+        if not pairs:
+            return None
+        by_name = True
+    else:
+        by_name = False
+    yi = {c: i for i, c in enumerate(yours[0])}
+    ai = {c: i for i, c in enumerate(agami[0])}
+    pairs = [(a, b) for a, b in pairs if a in yi and b in ai]
+    if not pairs:
+        return None
+    ybody, abody = yours[1:], agami[1:]
+    aligned = len(ybody) == len(abody)
+    out = []
+    for n in range(min(len(ybody), len(abody)) if aligned else min(len(ybody), limit)):
+        y = [ybody[n][yi[a]] if yi[a] < len(ybody[n]) else "" for a, _ in pairs]
+        g = [abody[n][ai[b]] if ai[b] < len(abody[n]) else "" for _, b in pairs] if aligned else None
+        out.append({"yours": y, "agami": g, "same": g is not None and y == g})
+    out.sort(key=lambda r: r["same"])  # the rows that disagree first; False sorts before True
+    # When the counts differ the rows cannot sit beside each other, but agami still answered, and a
+    # grid showing five rows all labelled "yours" reads as though it did not. Carry its rows too.
+    agami_rows = None if aligned else [[r[ai[b]] if ai[b] < len(r) else "" for _, b in pairs] for r in abody[:limit]]
+    return {"pairs": [list(p) for p in pairs], "rows": out[:limit], "shown": min(len(out), limit),
+            "agami_rows": agami_rows, "agami_total": len(abody),
+            "total": len(ybody), "aligned": aligned, "by_name": by_name,
+            "only_yours": [c for c in yours[0] if c not in {a for a, _ in pairs}],
+            "only_agami": [c for c in agami[0] if c not in {b for _, b in pairs}]}
+
+
+def _read_csv(path: Path) -> list[list[str]]:
+    """A result CSV as rows of text. Empty when the file is absent or the statement never ran."""
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    with path.open(newline="", encoding="utf-8") as fh:
+        return [row for row in csv.reader(fh)]
+
+
+_COUNT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+
+
+def _count_word(n: int) -> str:
+    """Words for nine and under, numerals above, per the Microsoft style guide. Row counts and
+    measured values keep their numerals wherever they are: those are data, not prose."""
+    return _COUNT_WORDS[n] if 0 <= n < len(_COUNT_WORDS) else f"{n:,}"
+
+
+def _and_list(items: list[str]) -> str:
+    """`a`, `a and b`, `a, b, and c`. The serial comma, per the same guide."""
+    if len(items) < 3:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+def _summaries(rows: list[dict], result: dict) -> dict:
+    """One line per section, read while the section is closed.
+
+    The rule every one of them follows: name the exception when there is one, a count when there is
+    not. "20 passed" tells a reader to move on; "1 problem in your query" tells them where to click.
+    """
+    def of(section):
+        return [r for r in rows if r.get("section") == section]
+
+    # The verdict above already gives the label; this line adds the measurement behind it, because
+    # "9 of 10 rows match" is what turns a verdict into something a reader can weigh.
+    data_rows = of("data")
+    values = next((r for r in data_rows if r["key"] in ("values", "answer")), None)
+    counts = next((r for r in data_rows if r["key"] == "rows"), None)
+    if result.get("data") == "could_not_compare":
+        # The label is a chip's worth of words; a summary is a sentence.
+        data = {"same query, answer not compared": "The two queries match, but the answers weren't compared.",
+                "different query, answer not compared": "The two queries differ, and the answers weren't compared.",
+                "could not compare": "The answers weren't compared."}.get(
+            result.get("label") or "", "The answers weren't compared.")
+    else:
+        data = (values or {}).get("yours") or (counts or {}).get("yours") or result.get("label") or "not compared"
+    data = str(data).rstrip(".") + "."
+    extra = next((r for r in data_rows if r["key"] == "columns" and r["state"] != "held"), None)
+    if extra and extra.get("yours_hi"):
+        n = len(extra["yours_hi"])
+        data += f" Your query returns {_count_word(n)} more column{'s' if n > 1 else ''}."
+
+    sql_rows = of("sql")
+    differs = [r["key"] for r in sql_rows if r["state"] == "differs"]
+    fit = next((r for r in sql_rows if r.get("family") == "question_fit"), None)
+    sql = ("The two queries differ in " + _and_list(differs) + ".") if differs else "The two queries ask for the same things."
+    if fit and fit["state"] != "held":
+        sql = "Your query might not answer the question. " + sql
+
+    model_rows = of("checks")
+    # A rolled-up line stands for the checks it replaced, so the count is of CHECKS, not of lines.
+    passed = sum(r.get("rolled", 1) for r in model_rows if r["state"] == "held")
+    failed = [r for r in model_rows if r["state"] not in ("held", "noted")]
+    if not failed:
+        model = {0: "Nothing to check.", 1: "The check passed.", 2: "Both checks passed."}.get(
+            passed, f"All {passed} checks passed.")
+    else:
+        model = f"{passed} check{'' if passed == 1 else 's'} passed."
+    if failed:
+        model += f" {_count_word(len(failed)).capitalize()} didn't: {failed[0]['key']}."
+    unrun = int(result.get("unchecked") or 0)
+    if unrun:
+        model += f" {_count_word(unrun).capitalize()} couldn't be run."
+
+    return {"data": data, "sql": sql, "checks": model}
 
 
 _DEFINITIONAL = {"tables read", "selects", "filters", "date window", "join keys", "grouped by"}
@@ -2114,8 +2365,12 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
     elif fix == "examples":
         change, todo = list(_FIX_CHANGE["examples"][0]), list(_FIX_CHANGE["examples"][1])
     elif fix == "question":
-        reason = (fit or {}).get("note") or ""
-        change = [("Reword the question, or change your query, so they ask the same thing. " + reason).strip()]
+        # The fit note already says what does not line up, in a full sentence. Prefixing a generic
+        # instruction and suffixing the todo produced three fragments joined by a semicolon, starting
+        # mid-sentence in lower case. Say the finding, then the one instruction.
+        reason = _fit_reason((fit or {}).get("note"))
+        change = [reason or "The question and your query do not ask the same thing.",
+                  "Reword the question, or change your query, so they ask the same thing."]
         todo = ["The question: reword it and re-run."]
     elif fix == "ask_again":
         if cause == "agami_failed":
@@ -2220,6 +2475,14 @@ def _measured_mistakes(rec: dict) -> list[str]:
             if p.get("verdict") == QUERY_DEFECT and _part_family(p.get("part", "")) not in ("runs", "predicates", "date_window")]
 
 
+def _one_sentence(text: Any, cap: bool = True) -> str:
+    """Text as one sentence: capitalised unless it opens with the product's name, and stopped once."""
+    said = str(text).strip().rstrip(".")
+    if cap and said:
+        said = said[0].upper() + said[1:]
+    return said + "."
+
+
 def _sentence(rec: dict, diff: list[dict]) -> str:
     status = rec.get("status")
     red = [r["key"] for r in diff if r["state"] in ("defect", "differs") and r["key"] not in ("answer", "rows", "values")]
@@ -2237,8 +2500,24 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
         error = _first_line(rec.get("error"))
         with_error = cause in ("agami_failed", "yours_failed", "unknown") and error
         return f"This row could not be compared: {_ERROR_LEAD[cause]}{': ' + error if with_error else ''}."
-    where = red + gaps
-    return f"The two answers do not match. What differs: {', '.join(where)}." if where else "The two answers do not match, and no check explains why."
+    # What the two QUERIES differ in is the SQL section's summary; repeating it here made the card
+    # say one thing twice and, on a row whose paired columns all agreed, contradict itself. This
+    # sentence says what happened to the ANSWER, and leaves the queries to their own section.
+    values = next((r for r in diff if r["key"] == "values"), None)
+    scalar = next((r for r in diff if r["key"] == "answer"), None)
+    measured = (values or {}).get("yours")          # the comparator's own phrasing, "9 of 10 rows match"
+    if measured and " of " in str(measured):
+        return _one_sentence(measured)
+    if values is not None and values.get("state") == "open" and values.get("note"):
+        # Nothing was compared. Saying which columns differ here would imply the values were looked
+        # at and found wanting, which is the thing that made this card unreadable.
+        return _one_sentence(values["note"])
+    if scalar and scalar.get("note"):               # a number: how far apart the two are
+        return _one_sentence(scalar["note"], cap=False)   # the product's name is lowercase
+    where = [k for k in red + gaps if k in ("columns", "rows")]
+    if where:
+        return "The two answers differ in " + ", ".join(where) + "."
+    return "The two answers do not match, and no check explains why."
 
 
 def resume(reconcile_dir: Path) -> dict | None:
@@ -2266,6 +2545,11 @@ def report_items(run_dir: Path) -> list[dict]:
     records, bad = _done_rows(run_dir)
     if bad:
         raise ValueError(f"rows.jsonl has a line that cannot be read ({', '.join(bad)})")
+    # In the order the person gave the rows, not the order the checkpoint happened to write them.
+    # `record` replaces a row by dropping its old line and appending the new one, which is right for
+    # an append log and wrong for a page: a row re-run after a fix would jump to the bottom, and two
+    # renders of one run would not match.
+    records = sorted(records, key=lambda r: (not isinstance(r.get("row"), int), r.get("row") or 0))
     items = []
     for rec in records:
         rec = dict(rec, status=rec.get("status") or "error")
@@ -2300,6 +2584,11 @@ def report_items(run_dir: Path) -> list[dict]:
         cols_row = next((r for r in diff if r["key"] == "columns"), None)
         if cols_row and cols_row.get("agami_hi") and not cols_row.get("yours_hi"):
             clause = ((clause + " ") if clause else "") + f"agami also returned: {', '.join(cols_row['agami_hi'])}."
+        # Every verdict above read the full diff; what follows is display only. Condensing first
+        # would let a rolled-up line change a result, which is the one thing it must never do.
+        diff = _condense(diff)
+        summaries = _summaries(diff, result)
+        sample = _sample(run_dir / "rows" / str(n), result_set_for_sample(rec))
         prov = rec.get("provenance") or {}
         shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
         source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
@@ -2324,6 +2613,7 @@ def report_items(run_dir: Path) -> list[dict]:
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
             "sql_agami_steps": _agami_steps(rec),
+            "summaries": summaries, "sample": sample,
             "report_path": rec.get("report_path"),
         })
     return items
@@ -2437,7 +2727,7 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         raise RecordError(f"row {row} has nothing to compare against; grade agami's answer on the grading page "
                           "(Phase 2.5) before writing its record")
     else:
-        error = ("the result is not one number and no table comparison was written; run compare-results (Phase 2e)"
+        error = ("the two results are tables, and they were not compared"
                  if exp is None or actual is None else "the two values could not be compared")
     status = row_status(match, ledger_verdict)
     is_error = status == ERROR
@@ -2644,8 +2934,7 @@ def main(argv: list[str] | None = None) -> int:
         by_status: dict[str, int] = {}
         for item in items:
             by_status[item["status"]] = by_status.get(item["status"], 0) + 1
-        print(json.dumps({"items": len(items), "out": str(out), "by_status": by_status,
-                          "layout": "audit" if len(items) == 1 and items[0]["diff"] else "cards"}, indent=2))
+        print(json.dumps({"items": len(items), "out": str(out), "by_status": by_status}, indent=2))
         return 0
 
     if args.cmd == "next-chunk":

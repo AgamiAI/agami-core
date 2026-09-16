@@ -13,7 +13,7 @@
       and nothing go back through the doors that exist. The skill applies each, never this page.
   NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose.
   Renderer fills:
-    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON, LAYOUT_JSON,
+    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON,
     ITEMS_JSON — [{row, label, question, source, status, expected, answer, delta_pct, single_cell,
                   owner, read:[..], how:[..], words:[..], disagreement, change:[..],
                   checks:[{step, state, detail}], todo:[..], report_path, keep_allowed}]
@@ -47,9 +47,12 @@
     <div class="filters" id="result-row" hidden>
       <span class="k">Result</span><span class="chips result" id="result-chips"></span>
     </div>
-    <div class="legend" aria-label="what the colors mean"><span class="held">passed</span><span class="defect">your query</span><span class="gap">the semantic model</span><span class="open">the question, or could not check</span><span class="agami">agami</span><span class="noted">noted</span></div>
     <div class="filters" id="filters">
       <span class="k">Fix</span><span id="owner-chips"></span>
+    </div>
+    <!-- Find is a different act from filtering by facet: one narrows by a value the page computed,
+         the other by whatever the reader remembers. Its own row, under the two facet rows. -->
+    <div class="filters find">
       <span class="k">Find</span><input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
       <button type="button" id="clear" class="linkish">Clear filters</button>
       <span class="showing" id="showing"></span>
@@ -76,8 +79,17 @@
   </div>
 
   <script>
-    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, layout: {{LAYOUT_JSON}}, status: {{STATUS_JSON}}, items: {{ITEMS_JSON}} };
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, status: {{STATUS_JSON}}, items: {{ITEMS_JSON}} };
     const decisions = {};   // row -> {decision, words}
+    const touched = new Set();   // rows the reader actually changed, as opposed to the seeded suggestion
+    // Seeded from each row's own suggestion before anything renders, so what the radios show and
+    // what the block carries are the same thing. A person changing one overwrites its seed.
+    function seedDecisions() {
+      (DATA.items || []).forEach(item => {
+        const s = suggestionFor(item);
+        if (s && !decisions[item.row]) decisions[item.row] = { decision: s, words: prefillFor(item, s) };
+      });
+    }
     // The colour family a status belongs to, and the chip words, both handed over by reconcile.py.
     // No status vocabulary is written on this page: an item carries its own sentence in
     // `status_words`, so the card, the chips and the chat cannot drift into calling one row three
@@ -89,16 +101,6 @@
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function lines(list) { return (list || []).length ? '<ul>' + list.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''; }
     function pill(item) { return '<span class="pill ' + statusClass(item) + '">' + esc(item.status_words || '') + '</span>'; }
-    // The result in two facts, when the items verb gave them: the pill takes the plain-word label and
-    // the state color from the data fact; checks that could not run are a tag, not a status.
-    const DATA_CLASS = { matches: 'held', partly: 'open', differs: 'defect', could_not_compare: 'noted' };
-    function resultPill(item) {
-      if (!item.result || !item.result.label) return pill(item);
-      const cls = item.result.data === 'matches' && item.result.query === 'different' ? 'open' : (DATA_CLASS[item.result.data] || 'noted');
-      const n = item.result.unchecked || 0;
-      return '<span class="pill ' + cls + '">' + esc(item.result.label) + '</span>'
-        + (n ? '<span class="tag unchecked">' + n + (n === 1 ? ' check' : ' checks') + ' not run</span>' : '');
-    }
     // The fix words come from the items themselves (report-items writes fix_words); one home for six strings.
     const FIX_WORDS = {};
     DATA.items.forEach(i => { if (i.fix && i.fix_words) FIX_WORDS[i.fix] = i.fix_words; });
@@ -117,7 +119,7 @@
       keep: { word: 'keep', what: 'Keep this row as a worked example or a test. Offered only where the numbers matched and every check passed.' },
       change: { word: 'change the semantic model', what: 'A definition is wrong or missing in the semantic model. Your words go to /agami-save-correction.',
                 prompt: 'What should the semantic model say?', ph: 'e.g. cancelled orders count toward the order count' },
-      fix: { word: 'fix my query', what: 'The mistake is in your SQL. You fix it and run this row again.',
+      fix: { word: 'fix your query', what: 'The mistake is in your SQL. You fix it and run this row again.',
              prompt: 'What you will fix, in a few words (optional)', ph: 'e.g. the status value is lower-case delivered' },
       reword: { word: 'reword the question', what: 'The question was read differently from what you meant. Ask it in other words.',
                 prompt: 'The question, in the words you mean', ph: 'e.g. How many orders were placed in Q3 2025, cancelled ones included?' },
@@ -128,15 +130,25 @@
     // What each box starts with, from the run's own words for this row; the person edits or clears it.
     function prefillFor(item, decision) { return ((item.prefill || {})[decision]) || ''; }
     const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
+    const BY_FIX = { query: 'fix', semantic_model: 'change', examples: 'example', question: 'reword', ask_again: 'nothing', none: 'nothing' };
+    // What the run itself concluded, as a decision. Pre-selected below, and still labelled
+    // "suggested", so a reader can see it was chosen for them and change it in one click.
+    function suggestionFor(item) {
+      if (item.fix) return item.fix === 'examples' && item.keep_allowed ? 'keep'
+        : (item.fix === 'none' && item.keep_allowed ? 'keep' : BY_FIX[item.fix]);
+      return (SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null);
+    }
     function controls(item, d) {
       const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'example', 'nothing']);
-      const byFix = { query: 'fix', semantic_model: 'change', examples: item.keep_allowed ? 'keep' : 'example', question: 'reword', ask_again: 'nothing', none: item.keep_allowed ? 'keep' : 'nothing' };
-      const suggested = item.fix ? byFix[item.fix] : ((SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null));
+      const suggested = suggestionFor(item);
       const spec = DECISIONS[d.decision] || {};
-      return '<div class="grade opts">' + choices.map(v =>
+      // A fieldset, not a div: five radios sharing a name are a group, and a group with no legend has
+      // no accessible name, so a screen reader reads five options and never says what they decide.
+      // The legend is the visible title too, which is the one place on the card you act rather than read.
+      return '<fieldset class="grade opts"><legend>What to do</legend>' + choices.map(v =>
           '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
           + '<b>' + esc(DECISIONS[v].word) + (v === suggested ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
-          + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</div>'
+          + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</fieldset>'
         + '<div class="more"' + (['change', 'fix', 'reword', 'example'].includes(d.decision) ? '' : ' hidden') + '>'
         + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
     }
@@ -146,7 +158,7 @@
     function statusClass(item) { return STATUS_CLASS[item.status] || 'noted'; }
     function haystack(item) {
       const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer, item.sentence, item.sql_yours, item.sql_agami]
-        .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')))
+        .concat(item.change || [], item.words || [], item.todo || [], Object.values(item.summaries || {}))
         .concat((item.diff || []).flatMap(r => [r.key, r.note].concat(r.yours || [], r.agami || [])));
       return parts.filter(Boolean).join(' ').toLowerCase();
     }
@@ -168,14 +180,11 @@
       // The result chips filter like every other chip; when the items carry result labels they are
       // the one filter row, and the older status chips step aside.
       const labels = {};
-      const RESULT_CLASS = { 'match': 'held', 'same answer, different query': 'open', 'same rows, different columns': 'open',
-                             'different answer': 'defect', 'same query, different answer': 'defect', 'could not compare': 'noted',
-                             'same query, answer not compared': 'open', 'different query, answer not compared': 'defect' };
       DATA.items.forEach(i => { if (i.result && i.result.label) labels[i.result.label] = (labels[i.result.label] || 0) + (passes(i, 'result') ? 1 : 0); });
       const results = document.getElementById('result-chips');
       results.classList.toggle('filtering', view.result.size > 0);
       results.innerHTML = Object.entries(labels).map(([label, n]) =>
-        '<button type="button" class="chip ' + (RESULT_CLASS[label] || 'noted') + (view.result.has(label) ? ' on' : '') + (n ? '' : ' zero') + '" data-result="' + esc(label) + '" aria-pressed="' + view.result.has(label) + '"><b>' + n + '</b><span>' + esc(label) + '</span></button>').join('');
+        '<button type="button" class="chip plain' + (view.result.has(label) ? ' on' : '') + (n ? '' : ' zero') + '" data-result="' + esc(label) + '" aria-pressed="' + view.result.has(label) + '"><span>' + esc(label) + '</span><b>' + n + '</b></button>').join('');
       results.querySelectorAll('[data-result]').forEach(el => el.addEventListener('click', () => { toggle(view.result, el.dataset.result); renderItems(); }));
       // `root` (the status chips) is declared further down in this function; reach it by id here.
       document.getElementById('chips').hidden = Object.keys(labels).length > 0;
@@ -183,15 +192,16 @@
       const root = document.getElementById('chips');
       root.classList.toggle('filtering', view.status.size > 0);
       root.innerHTML = Object.entries(counts).map(([cls, n]) =>
-        '<button type="button" class="chip ' + cls + (view.status.has(cls) ? ' on' : '') + (n ? '' : ' zero') + '" data-filter="' + cls + '" aria-pressed="' + view.status.has(cls) + '"><b>' + n + '</b><span>' + esc(words[cls] || cls) + '</span></button>').join('');
+        '<button type="button" class="chip ' + cls + (view.status.has(cls) ? ' on' : '') + (n ? '' : ' zero') + '" data-filter="' + cls + '" aria-pressed="' + view.status.has(cls) + '"><span>' + esc(words[cls] || cls) + '</span><b>' + n + '</b></button>').join('');
       root.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { toggle(view.status, el.dataset.filter); renderItems(); }));
       const owners = {};
       DATA.items.forEach(i => { const o = i.fix ? fixOf(i) : (i.owner || 'nothing'); owners[o] = (owners[o] || 0) + (passes(i, 'owner') ? 1 : 0); });
       const bar = document.getElementById('filters');
-      bar.hidden = DATA.layout === 'audit' || DATA.items.length < 2;
+      bar.hidden = DATA.items.length < 2;
+      document.querySelector('.filters.find').hidden = DATA.items.length < 2;
       bar.classList.toggle('filtering', view.owner.size > 0);
       document.getElementById('owner-chips').innerHTML = Object.entries(owners).map(([o, n]) =>
-        '<button type="button" class="pill ' + esc(FIX_CLASS[o] || o) + (view.owner.has(o) ? ' on' : '') + (n ? '' : ' zero') + '" data-owner="' + esc(o) + '" aria-pressed="' + view.owner.has(o) + '">' + n + ' · ' + esc(FIX_WORDS[o] || OWNER_SHORT[o] || o) + '</button>').join(' ');
+        '<button type="button" class="pill ' + esc(FIX_CLASS[o] || o) + (view.owner.has(o) ? ' on' : '') + (n ? '' : ' zero') + '" data-owner="' + esc(o) + '" aria-pressed="' + view.owner.has(o) + '">' + esc(FIX_WORDS[o] || OWNER_SHORT[o] || o) + ' <b>' + n + '</b></button>').join(' ');
       document.getElementById('owner-chips').querySelectorAll('[data-owner]').forEach(el => el.addEventListener('click', () => { toggle(view.owner, el.dataset.owner); renderItems(); }));
     }
     function toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
@@ -220,18 +230,69 @@
       }
       return '<div class="' + cls + '">' + ((hi || []).includes(v) ? '<span class="hi">' + esc(v) + '</span>' : esc(v)) + '</div>';
     }
-    function diffGrid(item) {
-      const rows = item.diff || [];
-      const passed = rows.filter(r => r.state === 'held').length;
-      const open = rows.length - passed;
-      return '<details class="checks"><summary>Checks: ' + passed + ' passed' + (open ? ', ' + open + ' did not' : '') + '</summary>'
-        + '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
+    // One section's rows only. A row carries its own section from the items verb, so the page never
+    // guesses from a label: "value list for x" and "values" are one prefix apart and mean different things.
+    function diffGrid(item, section) {
+      const rows = (item.diff || []).filter(r => !section || r.section === section);
+      if (!rows.length) return '';
+      return '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
         + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
         + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'
             + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
             + cell(r.yours, r.yours_hi, 'yours', r.state, r.renamed) + cell(r.agami, r.agami_hi, 'agami', r.state, r.renamed)
             + (r.note && (r.state !== 'held' || r.key === 'columns') ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
-        + '</div></details>';
+        + '</div>';
+    }
+    // Five rows of the two results, side by side, differing rows first. The only place the page
+    // shows warehouse values, and never more than five.
+    function grid(sample) {
+      if (!sample || !sample.rows.length) return '';
+      const head = sample.pairs.map(pr => '<th>' + esc(pr[0] === pr[1] ? pr[0] : pr[0] + ' / ' + pr[1]) + '</th>').join('');
+      const body = sample.rows.map(r => {
+        const y = '<tr class="y' + (r.same ? '' : ' differs') + '"><th>yours</th>'
+          + r.yours.map((v, i) => '<td class="' + (r.same || !r.agami || v === r.agami[i] ? '' : 'differs') + '">' + esc(v) + '</td>').join('') + '</tr>';
+        const a = r.agami ? '<tr class="a' + (r.same ? '' : ' differs') + '"><th>agami</th>'
+          + r.agami.map((v, i) => '<td class="' + (r.same || v === r.yours[i] ? '' : 'differs') + '">' + esc(v) + '</td>').join('') + '</tr>' : '';
+        return y + a;
+      }).join('');
+      const extra = (sample.agami_rows || []).map(r => '<tr class="a"><th>agami</th>'
+        + r.map(v => '<td>' + esc(v) + '</td>').join('') + '</tr>').join('');
+      const notes = [sample.shown + ' of ' + sample.total + (sample.total === 1 ? ' row' : ' rows') + ' from yours'];
+      if (!sample.aligned) notes.push('the two returned different row counts, so they are listed rather than lined up'
+        + (sample.agami_rows ? ' (' + sample.agami_rows.length + ' of ' + sample.agami_total + (sample.agami_total === 1 ? ' row' : ' rows') + ' from agami)' : ''));
+      if (sample.by_name) notes.push('columns paired by name');
+      if (sample.only_yours.length) notes.push('only yours: ' + sample.only_yours.join(', '));
+      if (sample.only_agami.length) notes.push('only agami: ' + sample.only_agami.join(', '));
+      return '<div class="grid-wrap"><table class="sample"><thead><tr><th></th>' + head + '</tr></thead><tbody>'
+        + body + extra + '</tbody></table><p class="gnote">' + esc(notes.join(' · ')) + '</p></div>';
+    }
+    // The three sections, all closed at rest. Each summary names the exception when there is one and
+    // a count when there is not, so most cards need no opening at all.
+    function section(item, key, title) {
+      const sum = (item.summaries || {})[key] || '';
+      let body = '';
+      if (key === 'data') body = grid(item.sample) + diffGrid(item, 'data');
+      else if (key === 'sql') body = diffGrid(item, 'sql') + sqlBlock(item);
+      else body = diffGrid(item, 'checks') + words(item);
+      if (!body) return '';
+      return '<details class="sec"><summary><span class="st">' + esc(title) + '</span><span class="ss">' + esc(sum) + '</span></summary>'
+        + '<div class="secbody">' + body + '</div></details>';
+    }
+    // The verdict, and the one thing to do about it. Everything else on the card is behind a
+    // disclosure, so these two are what a reader sees on fifty rows in a row.
+    function verdict(item) {
+      const r = item.result || {};
+      // The bar takes the FIX's colour, not the outcome's. Colour on this page answers one question,
+      // "who has to act", and an outcome is not an owner: a different answer can be agami's to learn
+      // from or the question's to reword, and the words already say which.
+      const fix = fixOf(item);
+      const cls = FIX_CLASS[fix] || 'noted';
+      const label = r.label || item.status_words || '';
+      return '<div class="verdict ' + esc(cls) + '"><div class="vl">' + esc(label) + '</div>'
+        + (item.sentence ? '<p class="vs">' + esc(item.sentence) + '</p>' : '')
+        + '<div class="vact"><span class="pill ' + esc(item.fix ? FIX_CLASS[fix] : (item.owner || 'nothing')) + '">'
+        + esc(item.fix ? (item.fix_words || FIX_WORDS[fix] || fix) : (OWNER_SHORT[item.owner || 'nothing'] || '')) + '</span>'
+        + '<span class="vchange">' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div></div>';
     }
     // The two statements, collapsed: the person's own SQL shown to its author, and agami's, which
     // the receipt already shows. Never a result row.
@@ -245,84 +306,41 @@
           + steps.map((s, i) => '<div class="step"><small>' + (i + 1) + (i === steps.length - 1 ? ' · compared' : '') + '</small><pre>' + esc(s) + '</pre></div>').join('')
           + '</div>'
         : '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div>';
-      return '<details class="sql"><summary>The two SQL statements</summary><div class="sql2">'
+      return '<div class="sql2">'
         + '<div><b>yours</b><pre>' + esc(item.sql_yours || '(none)') + '</pre></div>'
-        + agami + '</div></details>';
+        + agami + '</div>';
     }
+    // The semantic model's own words, beside the checks they belong to and capped: ninety-one quotes
+    // on one row is not evidence, it is a wall.
     function words(item) {
-      return (item.words || []).length
-        ? '<details class="words"><summary>The semantic model says</summary><ul>' + item.words.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul></details>' : '';
-    }
-    function action(item, d) {
-      const fix = fixOf(item);
-      const owner = item.owner || 'nothing';
-      const words = item.fix ? (item.fix_words || FIX_WORDS[fix] || fix) : (OWNER_SHORT[owner] || owner);
-      return '<div class="act"><b>fix</b><span class="pill ' + esc(item.fix ? FIX_CLASS[fix] : owner) + '">' + esc(words) + '</span><span>' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div>';
+      const w = (item.words || []).slice(0, 3);
+      return w.length ? '<div class="quote"><b>What the semantic model says</b><ul>'
+        + w.map(x => '<li>' + esc(x) + '</li>').join('')
+        + ((item.words || []).length > 3 ? '<li class="more">and ' + ((item.words || []).length - 3) + ' more, in mentions.json</li>' : '')
+        + '</ul></div>' : '';
     }
     function diffCard(item) {
       const d = decisions[item.row] || {};
       return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title q">' + esc(item.question) + '</span><span class="state">' + resultPill(item) + '</span></div>'
+        + '<div class="head"><span class="n">' + item.row + '</span><span class="title q">' + esc(item.question) + '</span></div>'
         + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
-        + diffGrid(item)
-        + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '')
-        + sqlBlock(item) + words(item) + action(item, d)
+        + verdict(item)
+        + section(item, 'data', 'Data')
+        + section(item, 'sql', 'SQL')
+        + section(item, 'checks', 'Checks')
         + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
-        + controls(item, d) + '</div>';
-    }
-    function diffAudit(item) {
-      const d = decisions[item.row] || {};
-      return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title q">' + esc(item.question) + '</span><span class="state">' + resultPill(item) + '</span></div>'
-        + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
-        + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + sqlBlock(item) + words(item) + '</div>'
-        + '<div class="rail"><b>What to do</b>' + lines(item.todo && item.todo.length ? item.todo : item.change) + action(item, d) + '</div></div>'
-        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
-        + controls(item, d) + '</div>';
-    }
-    function card(item) {
-      const d = decisions[item.row] || {};
-      const owner = item.owner || 'nothing';
-      return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item)
-        + '<span class="nums">' + nums(item) + '</span></div>'
-        + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
-        + '<div class="beats">'
-        + '<div class="beat b1"><b>1 · What you gave us</b>' + esc(item.question) + lines(item.read) + '</div>'
-        + '<div class="beat b2"><b>2 · What agami did</b>' + (item.answer ? 'Answered <code>' + esc(item.answer) + '</code>' : 'Could not answer this row')
-        + (item.expected ? '; you expected <code>' + esc(item.expected) + '</code>' : '') + '</div>'
-        + '<div class="beat b3"><b>3 · How it got there</b>' + lines(item.how)
-        + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
-        + (item.disagreement ? '<div>' + esc(item.disagreement) + '</div>' : '') + '</div>'
-        + '<div class="beat b4 ' + esc(owner) + '"><b>4 · ' + esc(OWNER[owner] || 'What to change') + '</b>' + lines(item.change) + '</div>'
-        + '</div>'
-        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
-        + controls(item, d) + '</div>';
-    }
-    function audit(item) {
-      const d = decisions[item.row] || {};
-      const marks = { held: '✓', defect: '✗', open: '?', gap: '!', noted: 'i' };
-      return '<div class="card" data-row="' + item.row + '">'
-        + '<div class="head"><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item) + '<span class="nums">' + nums(item) + '</span></div>'
-        + (item.source ? '<div class="src">' + esc(item.source) + '</div>' : '')
-        + '<div class="audit"><div><div class="q">' + esc(item.question) + '</div><div class="steps">'
-        + (item.checks || []).map(c => '<div class="step"><span class="dot ' + esc(c.state) + '">' + (marks[c.state] || '·') + '</span><div><div class="s">' + esc(c.step) + '</div><div class="d">' + esc(c.detail || '') + '</div></div></div>').join('')
-        + '</div>'
-        + ((item.words || []).length ? '<div class="quote">The semantic model says:' + lines(item.words) + '</div>' : '')
-        + (item.disagreement ? '<div class="quote">' + esc(item.disagreement) + '</div>' : '')
-        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '') + '</div>'
-        + '<aside class="rail"><h4>What to do</h4><ol>' + (item.todo || []).map(t => '<li>' + esc(t) + '</li>').join('') + '</ol></aside></div>'
         + controls(item, d) + '</div>';
     }
     function renderItems() {
-      document.getElementById('lede').textContent = DATA.layout === 'audit'
-        ? 'One query, checked line by line. On the right: what to do about it. Decide below, generate the block, and paste it back into Claude. Nothing changes until you do.'
-        : 'Every row you gave us. Each check is one line: what was checked, your value, agami\'s value, with the differences highlighted. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do. "Keep" is only offered where the numbers matched and every check passed.';
+      // One row or fifty, the card is the same; only the opening sentence knows the difference.
+      document.getElementById('lede').textContent = DATA.items.length === 1
+        ? 'One query, with what we found and what we suggest doing about it. The point is to teach agami to answer it the way you would. Open Data, SQL or Checks to see the working, change the suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.'
+        : 'Every row you gave us, with what we found and what we suggest doing about it. The point is to teach agami to answer these questions the way you would, so the colours say who acts: an example or a definition changes what agami writes next time. Open Data, SQL or Checks on any row to see the working, change a suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.';
       chips();
       const shown = visible();
       showing(shown.length);
       const root = document.getElementById('items');
-      root.innerHTML = shown.map(item => item.diff && item.diff.length ? (DATA.layout === 'audit' ? diffAudit(item) : diffCard(item)) : (DATA.layout === 'audit' ? audit(item) : card(item))).join('')
+      root.innerHTML = shown.map(diffCard).join('')
         || '<p class="meta">No row matches this filter. Your decisions on the hidden rows are kept.</p>';
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
@@ -334,6 +352,7 @@
       const prior = decisions[row] || {};
       // A box the person has not typed in starts with the run's words for the new decision.
       const untouched = !prior.words || prior.words === prefillFor(item, prior.decision);
+      touched.add(row);
       decisions[row] = Object.assign(prior, { decision: e.target.value, words: untouched ? prefillFor(item, e.target.value) : prior.words });
       const more = card.querySelector('.more'); const spec = DECISIONS[e.target.value] || {};
       more.hidden = !['change', 'fix', 'reword', 'example'].includes(e.target.value);
@@ -343,7 +362,7 @@
       card.querySelectorAll('.opt').forEach(el => el.classList.toggle('on', el.querySelector('input').value === e.target.value));
       renderSummary();
     }
-    function onText(e) { const row = Number(e.target.closest('.card').dataset.row); decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value }); }
+    function onText(e) { const row = Number(e.target.closest('.card').dataset.row); touched.add(row); decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value }); }
     function decided() {
       return Object.keys(decisions).filter(r => decisions[r].decision).map(r => {
         const d = decisions[r]; const out = { row: Number(r), decision: d.decision };
@@ -354,7 +373,12 @@
     function renderSummary() {
       const n = decided().length;
       document.getElementById('btn-generate').disabled = n === 0;
-      document.getElementById('summary').textContent = n ? n + ' of ' + DATA.items.length + ' decided. Nothing is applied until you paste the block into Claude.' : 'Nothing decided yet.';
+      // Every row arrives with a suggestion selected, so counting them as decisions would credit the
+      // reader with choices they have not made. Count only what they changed.
+      const mine = Object.keys(decisions).filter(r => touched.has(Number(r))).length;
+      document.getElementById('summary').textContent = mine
+        ? mine + ' of ' + DATA.items.length + ' changed by you. Nothing is applied until you paste the block into Claude.'
+        : DATA.items.length + ' rows, each with a suggestion. Change any you disagree with, or paste the block as it stands.';
     }
     // The block Claude reads back: profile first, then the run, then the decisions under a bare
     // header with the array on its own line, and done last: the grading page's format, unchanged.
@@ -372,6 +396,7 @@
       try { await navigator.clipboard.writeText(document.getElementById('modal-text').value); status.textContent = '✓ Copied. Paste it back in Claude.'; }
       catch (e) { document.getElementById('modal-text').select(); status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.'; }
     });
+    seedDecisions();
     renderItems();
   </script>
 </body>

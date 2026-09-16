@@ -89,7 +89,7 @@ def test_a_doubtful_fit_is_the_questions_fix_even_when_the_answer_matches(tmp_pa
     doubtful["claims"] = _claims(("tables", "differs", ["orders", "payments"], ["orders"]))
     item = reconcile.report_items(_run(tmp_path, [doubtful]))[0]
     assert item["result"]["label"] == "same answer, different query" and item["fix"] == "question" and item["keep_allowed"] is False
-    assert item["change"][0].startswith("Reword the question, or change your query, so they ask the same thing.")
+    assert item["change"][-1] == "Reword the question, or change your query, so they ask the same thing."
 
 
 def test_columns_are_compared_by_data_and_a_renamed_column_is_the_same_column(tmp_path):
@@ -110,7 +110,7 @@ def test_columns_are_compared_by_data_and_a_renamed_column_is_the_same_column(tm
     assert items[1]["result"]["label"] == "same rows, different columns" and items[1]["fix"] == "query"
     assert rows1["columns"]["state"] == "defect" and rows1["columns"]["yours_hi"] == ["planned_ship_date", "delivered_at", "channel"] and rows1["columns"].get("agami_hi") in (None, [])
     assert rows1["columns"]["note"] is None and ["number", "o.number"] in rows1["columns"]["renamed"]
-    assert rows1["values"]["state"] == "held" and rows1["values"]["yours"] == "identical on the 5 paired columns"
+    assert rows1["values"]["state"] == "held" and rows1["values"]["yours"] == "The values match."
     assert items[1]["prefill"]["fix"] == "remove planned_ship_date, delivered_at, channel"
     rows2 = {r["key"]: r for r in items[2]["diff"]}
     assert items[2]["result"]["label"] == "match" and rows2["columns"]["state"] == "held" and rows2["columns"]["renamed"] == [["number", "o.number"], ["status", "o.status"]]
