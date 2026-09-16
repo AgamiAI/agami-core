@@ -274,6 +274,40 @@ def test_a_statement_that_failed_still_reaches_the_card(tmp_path):
     assert (item["answer"], item["delta_pct"], item["sample"]) == (None, None, None)
 
 
+def test_a_note_about_several_statements_claims_no_comparison_on_an_error_row(tmp_path):
+    """`_agami_steps` feeds a note on the rows row as well as the card's step markers, and that note
+    said "the last one's result is compared". Nothing was compared on an error row, and error rows
+    can carry several statements now, so the claim had to go with the marker it matched."""
+    run = tmp_path / "20260913-101500"
+    (run / "rows").mkdir(parents=True)
+    (run / "intake.json").write_text(json.dumps({"rows": [
+        {"row": 1, "label": "By category", "question": "Which category sold the most?",
+         "statement": "SELECT category, SUM(amount) FROM sales GROUP BY category", "expected": None,
+         "provenance": {"shape": "b", "file": "plan.csv", "line": 1}},
+    ]}))
+    row_dir = run / "rows" / "1"
+    row_dir.mkdir(parents=True, exist_ok=True)
+    steps = ["SELECT DISTINCT category FROM sales", "SELECT category, SUM(amount) FROM sales GROUP BY category"]
+    (row_dir / "agami-answer.json").write_text(json.dumps({"sql": steps[-1], "statements": steps, "error": None}))
+    (row_dir / "actual.csv").write_text("category,total\nbooks,5\n")
+    (row_dir / "statement.csv").write_text("category,total\nbooks,5\n")
+    # A comparison that declined to score: the row is an error, and a result set still exists, which
+    # is the shape that reaches the rows row.
+    (row_dir / "comparison.json").write_text(json.dumps(
+        {"status": "error", "accuracy": None, "reason": "the two results could not be aligned",
+         "unmatched_golden_columns": [], "column_pairs": [], "golden_row_count": 1,
+         "generated_row_count": 1, "order_sensitive": False, "column_agreement": [], "paired_row_share": None}))
+    (row_dir / "ledger.json").write_text(json.dumps(
+        {"rows": [_part("runs", "confirmed")], "verdict": "confirmed", "counts": {}}))
+
+    rec = reconcile.record(run, 1)
+    assert rec["status"] == "error" and rec["agami_statements"] == steps
+    item = reconcile.report_items(run)[0]
+    notes = [r.get("note") for r in item["diff"] if r.get("note")]
+    assert "agami ran 2 queries" in notes
+    assert not any("is compared" in n for n in notes), notes
+
+
 def test_the_remaining_row_shapes_a_failed_statement_a_wide_delta_and_the_join_facts(tmp_path):
     failed = {"row": 1, "label": "Refunds", "question": "How many refunds?", "expected": None, "actual": 12.0, "delta_pct": 4.5, "match": False, "status": "expected_doubtful",
               "recorded": None, "statement": "SELECT COUNT(*) FROM refundz", "statement_recorded": None, "provenance": {"shape": "b"},

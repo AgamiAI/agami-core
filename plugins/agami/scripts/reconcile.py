@@ -1832,7 +1832,15 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     if runs and runs["verdict"] != CONFIRMED:
         yours_text = _PART_WORDS["runs"].get(_STATE[runs["verdict"]], yours_text)
     steps = _agami_steps(rec)
-    steps_note = f"agami ran {len(steps)} queries; the last one's result is compared" if steps else None
+    # "the last one's result is compared" is true only where a comparison happened, and an error row
+    # can carry statements now. The answer row below never showed this on such a row (the row's own
+    # error text precedes it), but the rows row takes it unguarded, so the claim is dropped here
+    # rather than at each use. Same correction the card's step marker needed.
+    steps_note = (
+        None if not steps
+        else f"agami ran {len(steps)} queries"
+        + ("; the last one's result is compared" if rec.get("status") != ERROR else "")
+    )
     if result_set:
         same_rows = result_set.get("golden_row_count") == result_set.get("generated_row_count")
         add("rows", "held" if same_rows else "defect", yours_text, agami_text, note=steps_note)
