@@ -242,7 +242,7 @@ Per row:
   "match":        true | false,
   "status":       "match" | "match_unverified" | "mismatch" | "expected_doubtful" | "error" | "ungraded",
   "report_path":  "<artifacts_dir>/local/charts/<profile>/<ts>.html",  // the full chart report for this query
-  "sql":          "<the statement that produced actual, or null on an error row>",
+  "sql":          "<the statement agami wrote, kept even when it failed; null only when none was written>",
   "recorded":     {"columns": ["<column name>"], "rows": [[<value>]]},  // what the query actually returned
   "error":        "<message if status=error, else null>",
   "provenance":   {"shape": "a|b|c|d", "source": "<the person's words>", "file": "...", "line": 2},
@@ -276,7 +276,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|non
 
 `sql` is the statement captured in Phase 2b, written down verbatim. `recorded` is the result it returned, shaped as `columns` + `rows` — the same two keys the golden-dataset receipt uses — so whoever picks this row up later forwards it as-is instead of rebuilding it from a number and guessing at a column name.
 
-**On a `status: "error"` row both `sql` and `recorded` are `null`.** There is no statement to keep: either none was generated, or the one that was didn't produce a scalar anyone read. An error row therefore carries nothing a later reader could mistake for a verified answer.
+**On a `status: "error"` row `recorded` is `null` and the statement is kept.** An error row carries nothing a later reader could mistake for a verified ANSWER, which is what `actual`, `recorded` and `delta_pct` are; a statement that failed cannot be mistaken for one that answered, because the row's own error sentence says it did not, and reading it is how a person tells a semantic model declaring a column the warehouse lacks from a query agami wrote wrong. `sql` is `null` only when agami wrote no statement at all.
 
 **Build the record with the verb, never by hand:**
 
@@ -491,7 +491,7 @@ Two adjustments, and both are about not splitting something too small to split:
 
 Someone who presses enter without reading gets the right outcome; someone who reads it learns the distinction by watching it happen, which is the only way anybody will. The override is one line — "let me choose" — and not twelve prompts.
 
-**Only rows whose `status` is `match` are offered.** That is the run's own tolerance — `reconcile.diff` decided it back in Phase 2c, and it is the only notion of agreement this skill has, so nothing here re-judges a number. One predicate drops `mismatch` and `error` together, and with them the `missing_expected` and `missing_actual` rows — those are `reconcile.diff`'s own reasons rather than a row status, and a row that could not be diffed never reached `match` either. **A row with no statement is never offered**: an error row carries `sql: null` (Phase 2d), so there is nothing to replay and nothing worth promoting.
+**Only rows whose `status` is `match` are offered.** That is the run's own tolerance — `reconcile.diff` decided it back in Phase 2c, and it is the only notion of agreement this skill has, so nothing here re-judges a number. One predicate drops `mismatch` and `error` together, and with them the `missing_expected` and `missing_actual` rows — those are `reconcile.diff`'s own reasons rather than a row status, and a row that could not be diffed never reached `match` either. **A row with no statement is never offered**: an error row never reached a verified answer, so there is nothing worth promoting even though its statement is on the record (Phase 2d).
 
 **Only a single-cell result is offered.** A row whose `recorded` carries more than one column has no single number to band, and a `bounded` item over a wider result is scored on its row count alone — it would pass forever without ever checking the number it was promoted for.
 

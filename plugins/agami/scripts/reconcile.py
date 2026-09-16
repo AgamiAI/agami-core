@@ -2863,7 +2863,7 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         "receipt_path": str(row_dir / "receipt.json") if (row_dir / "receipt.json").exists() else None,
         "ledger": ledger, "ledger_verdict": ledger_verdict, "comparison": comparison, "claims": claims,
         "finding_keys": [],
-        "agami_statements": [] if len(statements) < 2 else statements,
+        "agami_statements": [] if not sql or len(statements) < 2 else statements,
     }
     if delta is not None:
         rec["delta"] = delta

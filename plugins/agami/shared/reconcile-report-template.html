@@ -330,9 +330,13 @@
       // agami may have written several statements to answer; every one is shown in order and the
       // last, the one whose result was compared, is marked.
       const steps = Array.isArray(item.sql_agami_steps) && item.sql_agami_steps.length > 1 ? item.sql_agami_steps : null;
+      // "the last is compared" is only true where a comparison happened. An error row can carry
+      // statements now, and on that row nothing was compared: the card's own verdict says the query
+      // failed, so a step marked "compared" beside it claims a result that does not exist.
+      const compared = item.status !== 'error';
       const agami = steps
-        ? '<div><b>agami</b> <small>(' + steps.length + ' statements; the last is compared)</small>'
-          + steps.map((s, i) => '<div class="step"><small>' + (i + 1) + (i === steps.length - 1 ? ' · compared' : '') + '</small><pre>' + esc(s) + '</pre></div>').join('')
+        ? '<div><b>agami</b> <small>(' + steps.length + ' statements' + (compared ? '; the last is compared' : '') + ')</small>'
+          + steps.map((s, i) => '<div class="step"><small>' + (i + 1) + (compared && i === steps.length - 1 ? ' · compared' : '') + '</small><pre>' + esc(s) + '</pre></div>').join('')
           + '</div>'
         : '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div>';
       // A pane reading "(none)" is a placeholder shown as content. A row with one query shows it.

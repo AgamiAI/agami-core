@@ -246,13 +246,32 @@ def test_the_checkpoint_reader_and_the_cli_error_paths(tmp_path, capsys):
 def test_a_statement_that_failed_still_reaches_the_card(tmp_path):
     """The SQL section was empty on every error row, because the record dropped agami's statement
     whenever the row errored. That is the one row where reading the statement is the entire
-    diagnosis: a column the semantic model declares and the warehouse does not looks identical, from
-    the card, to agami writing a name that was never there."""
-    failed = {**ERROR, "row": 1, "sql": "SELECT category, SUM(amount) FROM sales GROUP BY category",
-              "error": "agami's statement did not run: no such column: amount", "recorded": None}
-    item = reconcile.report_items(_run(tmp_path, [failed]))[0]
-    assert item["status"] == "error"
-    assert item["sql_agami"] == "SELECT category, SUM(amount) FROM sales GROUP BY category"
+    diagnosis: a column the semantic model declares and the warehouse does not looks identical,
+    from the card, to agami writing a name that was never there.
+
+    Built through `record()` rather than from a hand-written row, because the rule being tested
+    lives there: a test that writes the record itself passes against the code it is meant to catch.
+    """
+    run = tmp_path / "20260913-101500"
+    (run / "rows").mkdir(parents=True)
+    (run / "intake.json").write_text(json.dumps({"rows": [
+        {"row": 1, "label": "By category", "question": "Which category sold the most?",
+         "statement": None, "expected": 5.0, "provenance": {"shape": "c", "file": "tiles.csv", "line": 1}},
+    ]}))
+    row_dir = run / "rows" / "1"
+    row_dir.mkdir(parents=True, exist_ok=True)
+    steps = ["SELECT DISTINCT category FROM sales", "SELECT category, SUM(amount) FROM sales GROUP BY category"]
+    (row_dir / "agami-answer.json").write_text(json.dumps({"sql": steps[-1], "statements": steps, "error": None}))
+    (row_dir / "agami-run.json").write_text(json.dumps(
+        {"status": "failed", "kind": "column_not_found", "detail": "no such column: amount"}))
+
+    rec = reconcile.record(run, 1)
+    assert rec["status"] == "error"
+    item = reconcile.report_items(run)[0]
+    assert item["sql_agami"] == steps[-1]
+    assert item["sql_agami_steps"] == steps  # the half the changelog claims and nothing covered
+    # And still nothing anyone could mistake for a verified answer.
+    assert (item["answer"], item["delta_pct"], item["sample"]) == (None, None, None)
 
 
 def test_the_remaining_row_shapes_a_failed_statement_a_wide_delta_and_the_join_facts(tmp_path):

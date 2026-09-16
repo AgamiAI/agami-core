@@ -24,7 +24,10 @@ below corresponds to one such version.
   one that answered because the row's own error sentence says it did not. A multi-statement answer
   keeps all of its statements for the same reason. `check-run`'s demand for a result file is now on
   rows that answered rather than on rows that hold a statement, since a query that never ran has no
-  result file to point at.
+  result file to point at. Two smaller consequences, both deliberate: a card showing several
+  statements for an error row no longer marks the last one "compared", because on that row nothing
+  was; and a row whose comparison failed while agami's query ran now reads "the run's files do not
+  say why" rather than "agami's query failed", which is what the files actually support.
 
 ### Changed
 
