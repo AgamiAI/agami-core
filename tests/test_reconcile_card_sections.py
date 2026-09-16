@@ -361,3 +361,13 @@ def test_a_lone_sql_pane_wraps_and_scrolls_inside_its_own_box():
     assert ".sql1 b, .sql2 b {" in css
     # The grid is the two-pane layout's alone; the shared margin is not.
     assert ".sql2 { display: grid;" in css and ".sql1, .sql2 { margin-top: 6px; }" in css
+
+
+def test_the_cards_text_blocks_all_end_at_the_same_edge():
+    """ACE-150. Three different reading measures (lede 72ch, verdict sentence 68ch, its action 60ch)
+    inside one 1040px column left each block stranded at its own width, which reads as three
+    accidents rather than one decision. These are short instructions, so the column is the measure."""
+    css = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-pages.css").read_text(encoding="utf-8")
+    # `.wrap` is the only place a width is capped; no prose block sets one of its own.
+    caps = re.findall(r"^\s*(\.[\w.-]+) \{[^}]*max-width:", css, re.M)
+    assert caps == [".wrap"], caps

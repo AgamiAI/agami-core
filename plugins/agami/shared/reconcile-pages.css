@@ -28,7 +28,10 @@
     h1 { font-size: var(--t-page); margin: 0; }
     h2 { font-size: var(--t-title); margin: 0; }
     .meta { font-size: var(--t-micro); color: var(--muted, #5b6875); }
-    .lede { max-width: 72ch; font-size: var(--t-title); color: var(--muted, #5b6875); margin: 18px 0 8px; }
+    /* The lede is an instruction read once, not prose read at length, and a 72ch measure left it
+       ending 350px short of the card below it, which reads as a layout slip rather than a measure.
+       It spans the same column as everything else; `balance` keeps its two lines even. */
+    .lede { font-size: var(--t-title); color: var(--muted, #5b6875); margin: 18px 0 8px; text-wrap: balance; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--t-data); font-variant-numeric: tabular-nums; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--t-data); background: var(--code-bg, #eef1f4); padding: 1px 5px; border-radius: 4px; }
     .pill { display: inline-block; font-size: var(--t-micro); font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
@@ -196,9 +199,13 @@
     .card .verdict.held { border-color: var(--held); } .card .verdict.defect { border-color: var(--defect); }
     .card .verdict.gap { border-color: var(--gap); } .card .verdict.open { border-color: var(--open); }
     .card .vl { font-size: var(--t-verdict); line-height: 1.25; font-weight: 600; letter-spacing: -0.01em; }
-    .card .vs { margin: 4px 0 0; font-size: var(--t-body); line-height: 1.5; max-width: 68ch; color: var(--fg); }
+    /* Every text block on the card ends at the same edge as the rows below it. Three different
+       measures (72ch, 68ch, 60ch) inside one 1040px column left each block stranded at its own
+       width, which reads as three accidents rather than one decision; these sentences are short
+       instructions, so the column itself is the measure. */
+    .card .vs { margin: 4px 0 0; font-size: var(--t-body); line-height: 1.5; color: var(--fg); }
     .card .vact { display: flex; gap: 8px; align-items: baseline; margin-top: 8px; flex-wrap: wrap; }
-    .card .vchange { font-size: var(--t-body); color: var(--muted); max-width: 60ch; }
+    .card .vchange { font-size: var(--t-body); color: var(--muted); }
     .card details.sec { border-top: 1px solid var(--border); }
     .card details.sec > summary { display: flex; gap: 10px; align-items: baseline; padding: 7px 0;
         cursor: pointer; list-style: none; font-size: var(--t-body); }
