@@ -212,6 +212,17 @@ below corresponds to one such version.
 
 ### Added
 
+- **`python -m execute_sql --batch` runs a plan of statements in one process.** Every statement paid
+  an interpreter start, a full semantic-model load (twice) and a connect, about sixteen seconds for
+  a query of a tenth of a second, and reconcile's statement check issues about ten per row. The
+  batch door takes a JSON list of `{id, sql | sql_file, out, area?}`, resolves the semantic model once (a
+  per-process memo keyed by the model files' count and newest mtime, never caching an absent
+  model; the hosted path is unchanged), keeps the connection open across the items on Postgres,
+  Redshift, Supabase and SQLite (dropped after a statement that broke it), and still runs every
+  item through the guard on its own; each CSV, each `<out>.run.json` and a manifest are written by
+  the door. Reconcile's statement check runs a row's probes this way on the `execute_sql` tier.
+  (ACE-137)
+
 - **The reconcile report is built by code from the run directory, never typed.** `reconcile.py
   record --run-dir --row` assembles the row record from the row's files and appends it to the
   checkpoint (replacing an earlier record for the row; a question-only row nobody graded is

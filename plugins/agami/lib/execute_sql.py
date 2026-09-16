@@ -737,8 +737,9 @@ def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
     except ImportError:
         raise ExecutorError("psycopg2 not installed. Run: pip install psycopg2-binary", code=3)
     _require(creds, "host", "port", "user", "password", "database")
+    key = ("postgres", creds["host"], creds["port"], creds["user"], creds["database"], creds.get("sslmode", "prefer"))
     try:
-        conn = psycopg2.connect(
+        conn, shared = _shared_connection(key, lambda: psycopg2.connect(
             host=creds["host"],
             port=int(creds["port"]),
             user=creds["user"],
@@ -746,12 +747,13 @@ def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
             dbname=creds["database"],
             sslmode=creds.get("sslmode", "prefer"),
             connect_timeout=10,
-        )
+        ))
     except Exception as e:
         raise ExecutorError(f"Postgres connect failed: {e}", code=4)
     timeout_s = _resolve_timeout_s()
     # Bound outside the try so the `finally` can close it whether or not the declare got that far.
     cur = None
+    ok = False
     try:
         # `with conn` is the TRANSACTION, not the connection: leaving it by an exception rolls back,
         # which is why it stays even though the cursor no longer lives inside a `with` of its own.
@@ -796,6 +798,7 @@ def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
                     raise
             if expired.is_set():
                 raise _ResourceLimit(_OUTLIVED_BUDGET)
+        ok = True
     except _ResourceLimit:
         raise
     except Exception as e:
@@ -816,11 +819,10 @@ def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
         # And the connection close is guarded for the same reason, one line down: an exception raised
         # inside a `finally` REPLACES the one propagating through it, so an unguarded close here would
         # destroy the marker the `except _ResourceLimit: raise` above just re-raised — and the caller
-        # would read a bound we imposed as an unclassified server break.
-        try:
-            conn.close()
-        except Exception:
-            pass
+        # would read a bound we imposed as an unclassified server break. In batch mode the connection
+        # stays open for the next statement unless this one broke it; `with conn` has already ended
+        # the transaction, so the next `SET LOCAL` runs on a fresh one.
+        _release_connection(key, conn, shared, broken=not ok)
     return result
 
 
@@ -1085,13 +1087,18 @@ def _run_sqlite(creds: dict[str, str], sql: str) -> ExecResult:
     import sqlite3  # always available in stdlib
     _require(creds, "path")
     path = os.path.expanduser(creds["path"])
+    key = ("sqlite", path)
     try:
-        conn = sqlite3.connect(path)
+        # `check_same_thread=False` because every statement runs on its own bounded thread
+        # (`_execute_bounded`), so a connection a batch keeps open is used from a different thread
+        # each time, one statement at a time.
+        conn, shared = _shared_connection(key, lambda: sqlite3.connect(path, check_same_thread=False))
     except Exception as e:
         raise ExecutorError(f"SQLite connect failed: {e}", code=4)
     # Resolved ONCE for the call, so the budget the watchdog enforces and the number the refusal
     # quotes cannot be two different values.
     timeout_s = _resolve_timeout_s()
+    ok = False
     try:
         cur = conn.cursor()
         # The deadline covers the FETCH as well as the execute. `_collect_cursor` pulls `cap + 1`
@@ -1116,6 +1123,7 @@ def _run_sqlite(creds: dict[str, str], sql: str) -> ExecResult:
         # past it.
         if expired.is_set():
             raise _ResourceLimit(_OUTLIVED_BUDGET)
+        ok = True
     except _ResourceLimit:
         # Ahead of the catch-all below on purpose: our own marker must reach `execute_guarded`
         # intact. Wrapped in an `ExecutorError` it would become a `failed`/`syntax` envelope, which
@@ -1126,11 +1134,8 @@ def _run_sqlite(creds: dict[str, str], sql: str) -> ExecResult:
     finally:
         # Guarded like every other engine's: an exception raised inside a `finally` REPLACES the one
         # propagating through it, so an unguarded close would silently convert the refusal above into
-        # an unclassified failure.
-        try:
-            conn.close()
-        except Exception:
-            pass
+        # an unclassified failure. In batch mode the connection stays open unless this statement broke it.
+        _release_connection(key, conn, shared, broken=not ok)
     return result
 
 
@@ -2204,11 +2209,81 @@ def _resolve_guard_model(profile: str):
 
     root = _disk_model_root(profile)
     if root is not None:
+        # Memoized for the process (ACE-137). Resolving the model is a walk and a parse of every
+        # YAML under the root, seven to ten seconds on a real profile, and it ran twice per statement
+        # (here and in `_engine_mismatch`) with nothing kept. The key carries a token that changes
+        # when any YAML under the root changes, so an edited model is read again on the next call;
+        # `None` is never cached, so a model that is absent now is looked for again next time. The
+        # hosted path above is not memoized: its version token belongs to the store (ACE-028).
+        key = (profile, str(root), _disk_model_token(root))
+        with _MODEL_MEMO_LOCK:
+            hit = _MODEL_MEMO.get(key)
+        if hit is not None:
+            return hit
         try:
-            return L.load_datasource(root)
+            org = L.load_datasource(root)
         except Exception:
-            pass  # unparseable/absent on disk -> None (hosted then fails closed)
+            return None  # unparseable/absent on disk -> None (hosted then fails closed)
+        with _MODEL_MEMO_LOCK:
+            if len(_MODEL_MEMO) >= _MODEL_MEMO_SIZE:
+                _MODEL_MEMO.clear()
+            _MODEL_MEMO[key] = org
+        return org
     return None
+
+
+# The resolved model per (profile, root, token); see `_resolve_guard_model`. Small on purpose: one
+# process serves one profile in the common case, and a served process changing profiles a hundred
+# times is not this cache's problem.
+_MODEL_MEMO: dict[tuple, Any] = {}
+_MODEL_MEMO_LOCK = threading.Lock()
+_MODEL_MEMO_SIZE = 8
+
+
+def _disk_model_token(root: Path) -> tuple[int, int]:
+    """Changes when any YAML under the model root changes: the file count and the newest mtime."""
+    stamps = [path.stat().st_mtime_ns for path in root.rglob("*.yaml")]
+    return (len(stamps), max(stamps) if stamps else 0)
+
+
+# The connections a batch keeps open across its statements, keyed by engine and endpoint; None
+# outside batch mode, where every statement connects and closes as it always has (ACE-137).
+_BATCH_CONNECTIONS: dict[tuple, Any] | None = None
+
+
+def _shared_connection(key: tuple, open_connection: "Callable[[], Any]") -> tuple[Any, bool]:
+    """In batch mode, the process's one open connection for `key`, opened on first use and kept;
+    otherwise a fresh connection the caller closes. The second value says which."""
+    if _BATCH_CONNECTIONS is None:
+        return open_connection(), False
+    conn = _BATCH_CONNECTIONS.get(key)
+    if conn is None:
+        conn = open_connection()
+        _BATCH_CONNECTIONS[key] = conn
+    return conn, True
+
+
+def _release_connection(key: tuple, conn: Any, shared: bool, *, broken: bool) -> None:
+    """Close a fresh connection; keep a shared one for the next statement unless this one broke it
+    (an error or a cancel leaves the wire in a state the next statement should not inherit)."""
+    if shared and not broken:
+        return
+    if shared and _BATCH_CONNECTIONS is not None:
+        _BATCH_CONNECTIONS.pop(key, None)
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _close_batch_connections() -> None:
+    global _BATCH_CONNECTIONS
+    for conn in list((_BATCH_CONNECTIONS or {}).values()):
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _BATCH_CONNECTIONS = None
 
 
 def _write_refusal(refusal: Refusal) -> None:
@@ -3064,6 +3139,11 @@ def main() -> int:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--sql", help="SQL statement (use --sql-file for SQL with special characters)")
     src.add_argument("--sql-file", help="Path to a file containing one SQL statement")
+    src.add_argument("--batch", help="Path to a JSON plan: a list of {id, sql | sql_file, out, area?}. Every item "
+                                     "goes through the same guard; its CSV goes to `out`, its outcome to `<out>.run.json` "
+                                     "and to the manifest; the semantic model is resolved once and the connection kept open.")
+    p.add_argument("--manifest", default=None,
+                   help="With --batch: where to write the manifest (default: beside the plan, `<plan>.manifest.json`).")
     p.add_argument("--area", default=None,
                    help="Subject area for the semantic-model safety pass (pre-flight + scope + PII).")
     p.add_argument("--no-safety", action="store_true",
@@ -3090,12 +3170,16 @@ def main() -> int:
     _LOG.addHandler(logging.NullHandler())
     _LOG.propagate = False
 
+    profile = args.profile or _resolve_default_profile()
+    if args.batch:
+        return _batch_main(Path(os.path.expanduser(args.batch)), profile, default_area=args.area,
+                          no_safety=args.no_safety,
+                          manifest_path=Path(os.path.expanduser(args.manifest)) if args.manifest else None)
+
     if args.sql_file:
         sql = Path(os.path.expanduser(args.sql_file)).read_text()
     else:
         sql = args.sql
-
-    profile = args.profile or _resolve_default_profile()
 
     # Route through the single guarded envelope with the built-in executor: guard -> model-safety ->
     # resolve -> connect-and-run, returning ONE Envelope the switch below renders to the subprocess
@@ -3123,6 +3207,88 @@ def main() -> int:
         return FAILURE_KIND_TO_EXIT.get(env.failure.kind, _DEFAULT_FAILURE_EXIT)
     _emit_result_csv(env.data)
     return 0
+
+
+def _batch_run_json_path(out: Path) -> Path:
+    """`<name>.run.json` beside a probe's CSV, the record `statement-check.md` asks for: the CSV's
+    name with one `.csv` taken off."""
+    name = out.name[:-4] if out.name.lower().endswith(".csv") else out.name
+    return out.with_name(name + ".run.json")
+
+
+def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_safety: bool,
+               manifest_path: Path | None) -> int:
+    """Run a plan of statements in one process: the semantic model resolved once, the connection kept open,
+    and EVERY item through `execute_guarded` on its own, so nothing is vetted once for many and
+    every refusal is recorded. Reconcile's Phase 1.5 runs a row's statement check and its probes
+    this way (ACE-137): about ten statements that paid an interpreter start, a semantic-model load and a
+    connect each, for a query of a tenth of a second.
+
+    Per item: `out` gets the CSV (empty when the item was refused or failed, which is how the
+    ledger reads a probe that did not run), `<out>.run.json` gets the outcome in `run.json`'s shape,
+    and the manifest lists every item. Exit 0 when every item ran; otherwise the exit code the
+    single-statement door would have given the first item that did not.
+    """
+    global _BATCH_CONNECTIONS
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"--batch: cannot read the plan: {exc}\n")
+        return 2
+    if not isinstance(plan, list) or not all(isinstance(item, dict) for item in plan):
+        sys.stderr.write("--batch: the plan must be a JSON list of objects\n")
+        return 2
+    for n, item in enumerate(plan, 1):
+        if not item.get("out"):
+            sys.stderr.write(f"--batch: item {n} has no `out`\n")
+            return 2
+        if not (item.get("sql") or item.get("sql_file")):
+            sys.stderr.write(f"--batch: item {n} has neither `sql` nor `sql_file`\n")
+            return 2
+    items: list[dict[str, Any]] = []
+    first_bad = 0
+    _BATCH_CONNECTIONS = {}
+    try:
+        for n, item in enumerate(plan, 1):
+            ident = str(item.get("id") or n)
+            out = Path(os.path.expanduser(str(item["out"])))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                sql = item["sql"] if item.get("sql") else Path(os.path.expanduser(item["sql_file"])).read_text(encoding="utf-8")
+            except OSError as exc:
+                run = {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"the statement file could not be read: {exc.strerror or exc}"}
+                out.write_text("")
+            else:
+                env = execute_guarded(sql, profile, item.get("area") or default_area, executor=BUILTIN_EXECUTOR,
+                                      no_safety=no_safety)
+                if env.status == "ok":
+                    with out.open("w", newline="", encoding="utf-8") as fh:
+                        if env.data.columns:
+                            writer = csv.writer(fh)
+                            writer.writerow(env.data.columns)
+                            for row in env.data.rows:
+                                writer.writerow(row)
+                    run = {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None, "rows": len(env.data.rows)}
+                elif env.status == "refused":
+                    out.write_text("")
+                    run = {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
+                           "detail": getattr(env.refusal, "reason", None)}
+                else:
+                    out.write_text("")
+                    run = {"status": "failed", "exit": FAILURE_KIND_TO_EXIT.get(env.failure.kind, _DEFAULT_FAILURE_EXIT),
+                           "kind": env.failure.kind, "rule": None, "detail": env.failure.message}
+            _batch_run_json_path(out).write_text(json.dumps(run), encoding="utf-8")
+            items.append({"id": ident, "out": str(out), **run})
+            if run["status"] != "ok" and not first_bad:
+                first_bad = int(run["exit"])
+    finally:
+        _close_batch_connections()
+    manifest = {"profile": profile, "total": len(items), "ok": sum(1 for i in items if i["status"] == "ok"), "items": items}
+    target = manifest_path or plan_path.with_name(plan_path.name + ".manifest.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(json.dumps(manifest))
+    return 0 if first_bad == 0 else first_bad
 
 
 if __name__ == "__main__":
