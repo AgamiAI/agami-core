@@ -1680,6 +1680,13 @@ def _receipt_metrics(receipt: Any) -> dict[str, str]:
     return out
 
 
+def _agami_steps(rec: dict) -> list[str]:
+    """Every statement agami wrote for this row when there was more than one, in order, the last
+    being the one run and compared; empty for the usual single statement."""
+    steps = [s for s in (rec.get("agami_statements") or []) if isinstance(s, str) and s.strip()]
+    return steps if len(steps) > 1 else []
+
+
 def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     rows: list[dict] = []
     words: list[str] = []
@@ -1711,9 +1718,11 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     runs = parts.get("runs")
     if runs and runs["verdict"] != CONFIRMED:
         yours_text = _PART_WORDS["runs"].get(_STATE[runs["verdict"]], yours_text)
+    steps = _agami_steps(rec)
+    steps_note = f"agami ran {len(steps)} queries; the last one's result is compared" if steps else None
     if result_set:
         same_rows = result_set.get("golden_row_count") == result_set.get("generated_row_count")
-        add("rows", "held" if same_rows else "defect", yours_text, agami_text)
+        add("rows", "held" if same_rows else "defect", yours_text, agami_text, note=steps_note)
         yc = list(((rec.get("statement_recorded") or {}).get("columns")) or [])
         ac = list(((rec.get("recorded") or {}).get("columns")) or [])
         pairs = [tuple(p) for p in (result_set.get("column_pairs") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
@@ -1785,7 +1794,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         note = None
         if state == "defect" and isinstance(delta, (int, float)) and not isinstance(delta, bool):
             note = f"agami is {delta * 100:+.1f}% from your number"  # `delta_pct` is a signed fraction (2d)
-        add("answer", state, yours_text, agami_text, note=note or rec.get("error"),
+        add("answer", state, yours_text, agami_text, note=note or rec.get("error") or steps_note,
             yours_hi=[yours_text] if state == "defect" and yours_text else None,
             agami_hi=[agami_text] if state == "defect" and agami_text else None)
 
@@ -2272,6 +2281,7 @@ def report_items(run_dir: Path) -> list[dict]:
             "sentence": _sentence(rec, diff) + (" " + clause if clause else ""),
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
+            "sql_agami_steps": _agami_steps(rec),
             "report_path": rec.get("report_path"),
         })
     return items

@@ -237,9 +237,17 @@
     // the receipt already shows. Never a result row.
     function sqlBlock(item) {
       if (!item.sql_yours && !item.sql_agami) return '';
+      // agami may have written several statements to answer; every one is shown in order and the
+      // last, the one whose result was compared, is marked.
+      const steps = Array.isArray(item.sql_agami_steps) && item.sql_agami_steps.length > 1 ? item.sql_agami_steps : null;
+      const agami = steps
+        ? '<div><b>agami</b> <small>(' + steps.length + ' statements; the last is compared)</small>'
+          + steps.map((s, i) => '<div class="step"><small>' + (i + 1) + (i === steps.length - 1 ? ' · compared' : '') + '</small><pre>' + esc(s) + '</pre></div>').join('')
+          + '</div>'
+        : '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div>';
       return '<details class="sql"><summary>The two SQL statements</summary><div class="sql2">'
         + '<div><b>yours</b><pre>' + esc(item.sql_yours || '(none)') + '</pre></div>'
-        + '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div></div></details>';
+        + agami + '</div></details>';
     }
     function words(item) {
       return (item.words || []).length

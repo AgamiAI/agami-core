@@ -423,3 +423,15 @@ def test_the_two_statements_still_say_what_they_are_when_the_data_could_not_be_c
     assert selects["state"] == "differs" and selects["yours"] == ["sum(orders.amount)"] and selects["agami"] == ["avg(orders.amount)"]
     # A structural match never makes the row keepable: the gate is the data's.
     assert items[1]["keep_allowed"] is False and items[1]["status"] == "error"
+
+
+# --- ACE-135: agami's several statements on the card ---------------------------------------------
+
+def test_several_agami_statements_are_listed_and_the_rows_check_says_which_one_was_compared(tmp_path):
+    several = dict(SCALAR_MATCH, row=1, agami_statements=["SELECT status FROM orders LIMIT 5", SCALAR_MATCH.get("sql") or "SELECT SUM(amount) FROM orders"])
+    one = dict(SCALAR_MATCH, row=2, agami_statements=[SCALAR_MATCH.get("sql") or "SELECT SUM(amount) FROM orders"])
+    items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [several, one]))}
+    assert items[1]["sql_agami_steps"] == several["agami_statements"]
+    answer = next(r for r in items[1]["diff"] if r["key"] == "answer")
+    assert answer["note"] == "agami ran 2 queries; the last one's result is compared"
+    assert items[2]["sql_agami_steps"] == [] and next(r for r in items[2]["diff"] if r["key"] == "answer")["note"] is None

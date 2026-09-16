@@ -187,11 +187,11 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/run_golden_eval.py" --profile <profile> \
   --ask-file /tmp/agami-reconcile-chunk-<ts>.json --out-dir "<artifacts_dir>/local/reconcile/<ts>/rows" --parallel 4
 ```
 
-`--ask-file` takes `next-chunk`'s output as it is (its `chunk`), fetches the model context once for the batch, spawns the operator's own client per question with every tool off, no MCP servers and no settings, several at a time, gives each the same context the golden run gives (the schema from the product's own tool, what the datasource means, the ranked prompt examples), and writes `rows/<n>/agami-answer.json` per row as `{row, question, sql, error}`. What is reused across the chunk is what does not depend on the question; the session itself is never reused, because a fresh one is the thing being measured. One question at a time is `--ask "<question>" --out rows/<n>/agami-answer.json`. Per row, exit `0` for the batch, or a `sql` in the row's file, carries a statement: write it verbatim to `rows/<n>/agami.sql`, run it through the profile's tier exactly as 1.5b runs yours (stdout to `rows/<n>/actual.csv`), then `sm receipt --sql-file rows/<n>/agami.sql` and the chart report, as agami-query Phase 3 does. A row whose file has no `sql` carries one of the generator's four fixed sentences as its `error` (the client could not be started, timed out, exited without answering, or answered without a statement); the batch exits `3` when any row is like that. That row is `error` with the sentence as its `error`. **Never write agami's SQL yourself, and never retry with your own wording**; a row with no cold answer is an error row, and that is the finding. Exit `2` means the profile's context could not be built: stop the run and say so.
+`--ask-file` takes `next-chunk`'s output as it is (its `chunk`), fetches the model context once for the batch, spawns the operator's own client per question with every tool off, no MCP servers and no settings, several at a time, gives each the same context the golden run gives (the schema from the product's own tool, what the datasource means, the ranked prompt examples), and writes `rows/<n>/agami-answer.json` per row as `{row, question, sql, statements, error}`: `statements` is every statement the client wrote, in order, and `sql` is the last of them, the one whose result answers the question. What is reused across the chunk is what does not depend on the question; the session itself is never reused, because a fresh one is the thing being measured. One question at a time is `--ask "<question>" --out rows/<n>/agami-answer.json`. Per row, exit `0` for the batch, or a `sql` in the row's file, carries a statement: write it verbatim to `rows/<n>/agami.sql` (only `sql`; when `statements` has more than one, keep them all in the row record's `agami_statements` for the page and never run the earlier ones: the read-only rule refuses anything but a SELECT, so an earlier statement can only be a look at the data), run it through the profile's tier exactly as 1.5b runs yours (stdout to `rows/<n>/actual.csv`), then `sm receipt --sql-file rows/<n>/agami.sql` and the chart report, as agami-query Phase 3 does. A row whose file has no `sql` carries one of the generator's four fixed sentences as its `error` (the client could not be started, timed out, exited without answering, or answered without a statement); the batch exits `3` when any row is like that. That row is `error` with the sentence as its `error`. **Never write agami's SQL yourself, and never retry with your own wording**; a row with no cold answer is an error row, and that is the finding. Exit `2` means the profile's context could not be built: stop the run and say so.
 
 Capture, per row:
 
-- The generated SQL, verbatim, from `agami-answer.json`
+- The generated SQL, verbatim, from `agami-answer.json` (its `sql`; and its `statements` when the client wrote several)
 - The result (one cell, or the columns and a row count)
 - The full chart-template HTML report (so the user can drill in for mismatches)
 - The trust receipt (with confidence, signed-off-by, etc.)
@@ -264,7 +264,8 @@ Per row:
   "comparison":   {"scalar": <the diff>} | {"result_set": <the compare-results score>} | null,
   "claims":       <the sm claims diff between the two statements, or null>,
   "finding_keys": ["<keys of the findings this row contributed to>"],
-  "words":        "<what the person wrote beside a wrong grade in Phase 2.5, or null>"
+  "words":        "<what the person wrote beside a wrong grade in Phase 2.5, or null>",
+  "agami_statements": ["<every statement the client wrote, in order; sql is the last>"]  // only when there were several, else []
 }
 ```
 

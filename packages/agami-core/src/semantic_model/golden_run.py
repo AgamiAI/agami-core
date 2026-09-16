@@ -110,6 +110,10 @@ class GeneratedSql:
 
     sql: str
     error: Optional[str]
+    # Every statement the generator wrote, in order, when it wrote more than one; `sql` is the last
+    # of them, the one whose result answers the question. Empty when the generator did not say (an
+    # injected generator built before this field existed), which readers treat as `(sql,)`.
+    statements: tuple[str, ...] = ()
 
 
 class SqlGenerator(Protocol):
@@ -637,6 +641,7 @@ _QUESTION_PROMPT = """\
 {question}
 
 Reply with a single JSON object and no other text: {{"sql": "<one SELECT statement>"}}
+If answering takes more than one query, put them in order in a list under sql; the last must be the statement whose result answers the question.
 """
 
 
@@ -730,6 +735,54 @@ def _first_json_object(text: str) -> Optional[dict[str, Any]]:
                     return None
                 return value if isinstance(value, dict) else None
     return None
+
+
+def _split_statements(text: str) -> list[str]:
+    """The top-level statements in a reply string: split on `;` outside quotes and comments, each
+    piece stripped, empty pieces dropped. Text splitting and nothing else: no statement is parsed and
+    regenerated here (ACE-093), so what comes out is what the model wrote, cut at its semicolons."""
+    pieces: list[str] = []
+    buf: list[str] = []
+    quote: Optional[str] = None
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                if i + 1 < n and text[i + 1] == quote:  # a doubled quote inside the literal
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if text.startswith("--", i):
+            j = text.find("\n", i)
+            j = n if j == -1 else j
+            buf.append(text[i:j])
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            buf.append(text[i:j])
+            i = j
+            continue
+        if ch == ";":
+            pieces.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    pieces.append("".join(buf))
+    return [piece.strip() for piece in pieces if piece.strip()]
 
 
 def _child_env() -> dict[str, str]:
@@ -855,10 +908,21 @@ def _spawn(prompt: str, argv: list[str], timeout_s: float, *, system_prompt: str
     if completed.returncode != 0:
         return GeneratedSql(sql="", error=_GENERATION_EXITED)
     answer = _first_json_object(completed.stdout)
-    sql = answer.get("sql") if answer else None
-    if not isinstance(sql, str) or not sql.strip():
+    raw = answer.get("sql") if answer else None
+    # One statement, or several: a list under `sql`, or one string cut at its top-level semicolons.
+    # Every statement is kept in order and the LAST is the answer, which is what the prompt asked
+    # for; a list carrying anything that is not a statement is unreadable as a whole.
+    if isinstance(raw, list):
+        statements = [item.strip() for item in raw if isinstance(item, str) and item.strip()]
+        if len(statements) != len(raw):
+            statements = []
+    elif isinstance(raw, str) and raw.strip():
+        statements = _split_statements(raw)
+    else:
+        statements = []
+    if not statements:
         return GeneratedSql(sql="", error=_GENERATION_UNREADABLE)
-    return GeneratedSql(sql=sql.strip(), error=None)
+    return GeneratedSql(sql=statements[-1], error=None, statements=tuple(statements))
 
 
 __all__ = [

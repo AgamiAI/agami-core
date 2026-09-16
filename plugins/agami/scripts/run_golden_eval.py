@@ -1042,13 +1042,20 @@ def _ask(args: argparse.Namespace) -> int:
     generator = GENERATOR(lambda question: _model_context(cached, question), timeout_s=args.timeout_s, **_effort(args))
     generated = generator.generate(args.ask, tools.resolved_org_id(), args.profile)
     sql = generated.sql.strip() if generated.sql else ""
-    payload = {"question": args.ask, "sql": sql or None, "error": generated.error}
+    payload = {"question": args.ask, "sql": sql or None, "statements": _statements(generated, sql), "error": generated.error}
     if args.out:
         out = Path(args.out).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))
     return 0 if sql and generated.error is None else _NO_STATEMENT
+
+
+def _statements(generated: Any, sql: str) -> list[str]:
+    """Every statement the client wrote, in order, `sql` last; a generator that did not say gives
+    the one statement it answered with."""
+    statements = [s for s in (getattr(generated, "statements", None) or ()) if isinstance(s, str) and s.strip()]
+    return statements or ([sql] if sql else [])
 
 
 def _questions_from_file(path: Path) -> list[dict[str, Any]]:
@@ -1092,10 +1099,11 @@ def _ask_many(args: argparse.Namespace) -> int:
 
     def one(q: dict[str, Any]) -> dict[str, Any]:
         if not q["question"]:
-            return {"row": q["row"], "question": None, "sql": None, "error": "the row carries no question"}
+            return {"row": q["row"], "question": None, "sql": None, "statements": [], "error": "the row carries no question"}
         generated = generator.generate(q["question"], org, args.profile)
         sql = generated.sql.strip() if generated.sql else ""
-        return {"row": q["row"], "question": q["question"], "sql": sql or None, "error": generated.error}
+        return {"row": q["row"], "question": q["question"], "sql": sql or None,
+                "statements": _statements(generated, sql), "error": generated.error}
 
     from concurrent.futures import ThreadPoolExecutor
     workers = max(1, min(args.parallel, len(questions)))
