@@ -474,3 +474,102 @@ def test_an_undetermined_aggregate_says_which_blindness_it_hit(org):
     assert "names no column" in count["reason"]
     items = _items(org, "SELECT SUM(o.total) FROM orders o")
     assert [(i["status"], i["reason"]) for i in items] == [(rt.NOT_MULTIPLIED, None)]
+
+
+# --- ACE-133: the pre-flight resolves the edge the join wrote --------------------------------------
+
+import yaml  # noqa: E402
+
+
+def _write_two_edge_model(root: Path) -> None:
+    """A base table and its subclass view, joined by TWO declared edges: the identity edge on `id`
+    (`one_to_one`) and a sibling many-to-one on `parent_id` (many premium rows can point at one
+    widget). Which edge the statement traverses is written in its ON, and only that edge can say
+    whether the join multiplies the base table's rows."""
+    (root / "subject_areas" / AREA / "tables").mkdir(parents=True)
+    (root / "datasource.yaml").write_text(
+        yaml.safe_dump({"datasource": "Widgets", "version": 1,
+                        "storage_connections": [{"name": "c", "storage_type": "SQLite"}],
+                        "subject_areas": [f"subject_areas/{AREA}"]})
+    )
+    (root / "subject_areas" / AREA / "subject_area.yaml").write_text(
+        yaml.safe_dump({
+            "name": AREA,
+            "tables": [{"storage_connection": "c", "schema": "public", "table": t}
+                       for t in ("widget", "widget_premium_v")],
+        })
+    )
+
+    def _table(name, columns):
+        (root / "subject_areas" / AREA / "tables" / f"{name}.yaml").write_text(
+            yaml.safe_dump({"name": name, "schema": "public", "storage_connection": "c",
+                            "grain": ["id"], "description": name, "columns": columns})
+        )
+
+    _table("widget", [
+        {"name": "id", "type": "integer", "primary_key": True},
+        {"name": "amount", "type": "decimal", "aggregation": "additive"},
+    ])
+    _table("widget_premium_v", [
+        {"name": "id", "type": "integer", "primary_key": True},
+        {"name": "parent_id", "type": "integer"},
+        {"name": "tier", "type": "string"},
+    ])
+    edge = {"from_schema": "public", "to_schema": "public", "confidence": "confirmed",
+            "review_state": "approved", "signed_off_by": "you@example.com",
+            "signed_off_role": "data_owner", "signed_off_at": "2026-01-01T00:00:00Z"}
+    (root / "subject_areas" / AREA / "relationships.yaml").write_text(
+        yaml.safe_dump({"relationships": [
+            # The sibling edge FIRST, so a fix that only reordered the list could not pass.
+            dict(edge, from_table="widget_premium_v", from_column="parent_id",
+                 to_table="widget", to_column="id", relationship="many_to_one"),
+            dict(edge, from_table="widget_premium_v", from_column="id",
+                 to_table="widget", to_column="id", relationship="one_to_one"),
+        ]})
+    )
+
+
+@pytest.fixture()
+def two_edge_org(tmp_path):
+    root = tmp_path / "widgets"
+    root.mkdir(parents=True)
+    _write_two_edge_model(root)
+    return L.load_datasource(root)
+
+
+IDENTITY_JOIN = "SELECT SUM(w.amount) FROM widget w JOIN widget_premium_v p ON p.id = w.id"
+SIBLING_JOIN = "SELECT SUM(w.amount) FROM widget w JOIN widget_premium_v p ON p.parent_id = w.id"
+UNDECLARED_KEY_JOIN = "SELECT SUM(w.amount) FROM widget w JOIN widget_premium_v p ON p.tier = w.id"
+
+
+def test_a_join_on_the_identity_edge_does_not_fan_when_a_sibling_edge_also_exists(two_edge_org):
+    """Found in testing: a subclass view joined to its base table on the key the semantic model
+    declares one-to-one was reported as a fan trap, because the pre-flight collected every
+    multiplying edge between the two tables and never read which key the join wrote. The written key
+    names the edge."""
+    receipt = rt.assemble_receipt(two_edge_org, IDENTITY_JOIN)
+    (item,) = receipt["aggregates"]["items"]
+    assert item["status"] == rt.NOT_MULTIPLIED and item["findings"] == [], item
+    # And the two sections of one receipt agree about the same join.
+    (join,) = receipt["joins"]["items"]
+    assert join["status"] == rt.DECLARED and join["cardinality"] == "one_to_one"
+
+
+def test_a_join_on_the_sibling_edge_still_fans(two_edge_org):
+    (item,) = _items(two_edge_org, SIBLING_JOIN)
+    assert item["status"] == rt.MULTIPLIED
+    assert [f["risk"] for f in item["findings"]] == ["fan_trap"]
+    assert item["joins"] == ["widget (1) <- widget_premium_v (N)"]
+
+
+def test_a_join_on_a_key_the_model_does_not_declare_keeps_the_conservative_verdict(two_edge_org):
+    """The written key matches no declared edge, so nothing says which edge the statement meant;
+    every edge between the pair still counts and the finding stands, as it did before."""
+    (item,) = _items(two_edge_org, UNDECLARED_KEY_JOIN)
+    assert item["status"] == rt.MULTIPLIED
+
+
+def test_two_tables_in_scope_without_a_join_between_them_keep_every_edge(two_edge_org):
+    """A cross join writes no key at all, so the pair-level rule stands and the sibling edge fans."""
+    (item,) = _items(two_edge_org, "SELECT SUM(w.amount) FROM widget w CROSS JOIN widget_premium_v p")
+    assert item["status"] == rt.MULTIPLIED
