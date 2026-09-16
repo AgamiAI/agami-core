@@ -347,7 +347,7 @@ Reconciled <N> numbers: <M> match (within ±1%), <K> mismatch, <E> error.
 When any row carried a statement, add one more line, counting the two statuses that belong to neither `<M>` nor `<K>`. Say each status in the words `reconcile.py`'s `status_words` gives it and never the status itself: a person reading `expected_doubtful` has to look it up, and that is the row where their own query is the thing in doubt:
 
 ```
-<U> gave the same answer, but part of your query could not be checked; <D> gave a different answer, and your query has a problem in them.
+<U> gave the same answer, but part of your query could not be checked; <D> gave a different answer, and your query has a problem.
 ```
 
 ### 3a.5 — Every row in four beats
