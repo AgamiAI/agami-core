@@ -110,6 +110,11 @@ jobs:
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           python-version: ${{ matrix.python-version }}
+          # Every step below exits 0 when TESTS is not true, so a draft or release-only PR installs
+          # nothing — and `setup-uv`'s post-job step then FAILS the whole job saving a cache that was
+          # never created ("Cache path ... does not exist on disk"). The skip is the point of these
+          # PRs; caching nothing is not worth failing them over.
+          enable-cache: ${{ needs.changes.outputs.tests == 'true' }}
 
       # Lint + import sorting — blocking. Rules come from pyproject.toml.
       # packages/ holds the agami-core library.
