@@ -124,7 +124,11 @@ def test_the_served_count_is_this_datasource_and_this_org_only(tmp_path, monkeyp
 def test_the_surface_names_the_pointer_and_keeps_the_calls_independent(monkeypatch):
     assert "prompt_examples" in inspect.getsource(tools.tool_get_datasource_schema)
     assert "`prompt_examples`" in tools.TOOLS["get_datasource_schema"]["description"]
-    assert "leave `area` out" in tools.TOOLS["get_prompt_examples"]["description"]
+    # The description names `query` and says nothing against `area`. A steer to leave `area`
+    # out read as "never send one", and on a served deployment no client sent one at all, so a
+    # question plainly belonging to one subject area ranked against every area's library.
+    assert "as `query`" in tools.TOOLS["get_prompt_examples"]["description"]
+    assert "leave `area` out" not in tools.TOOLS["get_prompt_examples"]["description"]
     for hosted in (True, False):
         for var in ("AGAMI_DB_URL", "APP_DATABASE_URL"):
             monkeypatch.delenv(var, raising=False)
