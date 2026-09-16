@@ -49,6 +49,8 @@ _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "erro
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
 _OWNERS = {"you", "model", "question", "agami", "keep", "nothing"}
+# The three the card renders. A diff row belongs to exactly one of them.
+_SECTIONS = frozenset({"data", "sql", "checks"})
 _CHECK_STATES = {"held", "defect", "open", "gap", "noted", "differs"}
 _DATA_RESULTS = {"matches", "partly", "differs", "could_not_compare", "not_graded"}
 _QUERY_RESULTS = {"same", "different", "not_comparable"}
@@ -116,6 +118,11 @@ def _validate_item(item: dict, idx: int) -> None:
     for row in item.get("diff", []) or []:
         if (not isinstance(row, dict) or not isinstance(row.get("key"), str) or row.get("state") not in _CHECK_STATES):
             raise ValueError(f"item {idx}: each diff row needs a 'key' and a 'state' in {sorted(_CHECK_STATES)}")
+        # The page renders a row into the section it names, so a row naming none is rendered nowhere:
+        # it would leave the card reading as though that check never ran. Fail here instead.
+        if row.get("section") not in _SECTIONS:
+            raise ValueError(f"item {idx}: diff row {row['key']!r} needs a 'section' in {sorted(_SECTIONS)}; "
+                             "a row the page cannot place is a check that silently disappears")
         for side in ("yours", "agami"):
             v = row.get(side)
             if v is not None and not isinstance(v, str) and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
