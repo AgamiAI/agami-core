@@ -51,7 +51,9 @@ would make a crashed verb read as a clean statement.
 ## The row directory
 
 The skill writes one directory per row, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`, with fixed
-filenames, and `reconcile.py ledger --row-dir <dir> [--with-claims]` reads them. The verb is idempotent
+filenames, and `reconcile.py ledger --row-dir <dir> [--with-claims]` reads them, once per row after the
+two statements have been compared (with `--with-claims`) or once without it when there is nothing to
+compare against. The verb is idempotent
 and writes `ledger.json` beside the inputs.
 
 | File | Written by | Holds |

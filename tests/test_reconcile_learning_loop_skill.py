@@ -242,3 +242,30 @@ def test_no_bare_the_model_in_the_new_prose_or_the_references():
     assert not BARE_MODEL.search(NEW_PROSE), BARE_MODEL.search(NEW_PROSE).group(0)
     for name, text in REFERENCES.items():
         assert not BARE_MODEL.search(text), (name, BARE_MODEL.search(text).group(0))
+
+
+def test_phase_three_is_told_in_four_beats_and_the_ledger_runs_once():
+    """The beats lead and the pinned sections follow: the opener names the four beats and where each
+    comes from, 3a.5 sits between 3a and 3b, beat 4 has both halves and keep is 3e's one offer. The
+    ledger runs once per row, in 2e, and every reference says so."""
+    opening = SKILL.split("## Phase 3: Present", 1)[1].split("### 3a — Summary line first", 1)[0]
+    assert "**Tell every row in four beats, in the reader's order.**" in opening
+    for beat in ("**how we read your input and how we checked it**", "**what agami did with the question and what it answered**",
+                 "**how agami got there**", "**what to change so the output matches, on whichever side the evidence points**",
+                 "**what to keep**"):
+        assert beat in opening, beat
+    assert "keep is Phase 3e's offer, made once for the batch and never per row" in opening
+    assert SKILL.index("### 3a — Summary line first") < SKILL.index("### 3a.5 — Every row in four beats") \
+        < SKILL.index("### 3b — Mismatches")
+    story = _between(SKILL, "### 3a.5 — Every row in four beats", "### 3b — Mismatches")
+    for line in ("1. What you gave us:", "2. What agami did:", "3. How it got there:", "4. What to change:", "4. Keep it:"):
+        assert line in story, line
+    assert "Beat 4 never asks anything per row" in story
+    assert SKILL.split("### 3e — Offer promotion", 1)[1].lstrip().startswith("This is beat 4's keep half, made once for the batch.")
+    # One ledger run per row.
+    assert "**Run it once per row, in Phase 2e, after the comparison**" in PHASE_1_5
+    compare = _between(SKILL, "### 2e", "### 2f")
+    assert "**This is the row's one ledger run.**" in compare and "Never run it twice." in compare
+    assert "once per row and after the comparison" in REFERENCES["statement-check.md"]
+    assert "and again with `--with-claims`" not in REFERENCES["statement-check.md"]
+    assert "once per row after the" in REFERENCES["part-ledger.md"]
