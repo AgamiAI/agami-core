@@ -12,6 +12,20 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reconcile card showed nothing in its SQL section when agami's query failed.** The row record
+  dropped agami's statement whenever the row's status was `error`, so the one row where reading the
+  statement is the entire diagnosis was the one row that did not show it: a semantic model declaring
+  a column the warehouse does not have looks identical, from the card, to agami writing a name that
+  was never there. The rule it came from is kept and narrowed to what it was actually protecting.
+  An error row still carries no RESULT anyone could mistake for a verified answer (`actual`,
+  `recorded` and `delta_pct` stay null), and now carries the statement, which cannot be mistaken for
+  one that answered because the row's own error sentence says it did not. A multi-statement answer
+  keeps all of its statements for the same reason. `check-run`'s demand for a result file is now on
+  rows that answered rather than on rows that hold a statement, since a query that never ran has no
+  result file to point at.
+
 ### Changed
 
 - **`get_prompt_examples` no longer tells a client to leave `area` out.** The steer landed in 0.9.0

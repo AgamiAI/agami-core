@@ -104,6 +104,8 @@ def test_an_agami_failure_is_an_error_row_with_nothing_mistakable_for_an_answer(
     _files(run, 1, agami_answer__json=json.dumps({"sql": None, "statements": [], "error": "the generator exited without answering"}),
            statement__csv="n\n42\n", ledger__json=json.dumps(LEDGER_OK))
     rec = reconcile.record(run, 1)
+    # `sql` is null because agami wrote none, not because the row errored. A statement that exists
+    # is kept even on an error row; the case below is the one that says so.
     assert rec["status"] == "error" and rec["sql"] is None and rec["recorded"] is None and rec["actual"] is None
     assert rec["error"] == "the generator exited without answering" and rec["expected"] == 42.0
 
@@ -114,6 +116,11 @@ def test_a_statement_agami_wrote_but_did_not_run_names_the_run_file(tmp_path):
            agami_run__json=json.dumps({"status": "failed", "kind": "network", "detail": "The database was unreachable."}))
     rec = reconcile.record(run, 1)
     assert rec["status"] == "error" and rec["error"] == "agami's statement did not run: The database was unreachable."
+    # The statement is kept and the result is not, which is the whole of the 2d rule. Reading what
+    # failed is how a person tells a model declaring a column the warehouse lacks from a query agami
+    # wrote wrong, and stripping it left the card's SQL section empty on exactly those rows.
+    assert rec["sql"] == "SELECT 1"
+    assert rec["recorded"] is None and rec["actual"] is None
 
 
 def test_a_missing_answer_file_is_refused_by_name(tmp_path, capsys):

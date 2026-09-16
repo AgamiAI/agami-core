@@ -2270,8 +2270,9 @@ def _error_cause(rec: dict) -> str | None:
     for part in ("runs", "scope"):
         if part in by_part and by_part[part].get("verdict") != CONFIRMED:
             return "yours_failed"
-    # Read before the statement: an error row carries `sql` and `recorded` as null whatever the cause
-    # (the 2d rule), so a comparison that declined to score is the fact that says both ran and were empty.
+    # Read before the statement: an error row carries `recorded` as null whatever the cause (the 2d
+    # rule), so a comparison that declined to score is the fact that says both ran and were empty.
+    # `sql` is no longer that signal, being kept on an error row now so the card can show what failed.
     score = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
     if score and score.get("status") == "unscored":
         return "nothing_to_compare"
@@ -2848,16 +2849,21 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         "row": row, "label": base.get("label"), "question": base.get("question"),
         "expected": exp, "actual": None if is_error else actual, "delta_pct": None if is_error else delta_pct,
         "match": match, "status": status, "report_path": report_path,
-        # The 2d rule: an error row carries neither a statement nor a result anyone could mistake for
-        # a verified answer.
-        "sql": None if is_error else sql, "recorded": None if is_error else recorded,
+        # The 2d rule: an error row carries no RESULT anyone could mistake for a verified answer.
+        # The statement is kept, and the difference between the two is the whole point. A result
+        # implies the query ran; a statement that failed cannot be mistaken for one that answered,
+        # because the row's own error sentence says it did not. Reading it is how a person tells a
+        # semantic model declaring a column the warehouse does not have from a query agami wrote
+        # wrong, and dropping it left the SQL section of a failed row empty, which is exactly where
+        # that reading would have happened.
+        "sql": sql, "recorded": None if is_error else recorded,
         "error": error,
         "provenance": provenance, "statement": statement, "statement_recorded": statement_recorded,
         "statement_receipt_path": str(row_dir / "statement-receipt.json") if (row_dir / "statement-receipt.json").exists() else None,
         "receipt_path": str(row_dir / "receipt.json") if (row_dir / "receipt.json").exists() else None,
         "ledger": ledger, "ledger_verdict": ledger_verdict, "comparison": comparison, "claims": claims,
         "finding_keys": [],
-        "agami_statements": [] if is_error or len(statements) < 2 else statements,
+        "agami_statements": [] if len(statements) < 2 else statements,
     }
     if delta is not None:
         rec["delta"] = delta
@@ -2903,7 +2909,9 @@ def check_run(run_dir: Path) -> dict:
             problems.append(f"rows/{n}/agami-answer.json is missing")
         if rec.get("statement") and not (row_dir / "ledger.json").exists():
             problems.append(f"rows/{n}/ledger.json is missing for a statement row")
-        if rec.get("sql") and not (row_dir / "actual.csv").exists():
+        # An error row keeps agami's statement now, and a statement that did not run has no result
+        # file to point at. The row is complete without one, so the demand is on rows that answered.
+        if rec.get("sql") and rec.get("status") != ERROR and not (row_dir / "actual.csv").exists():
             problems.append(f"rows/{n}/actual.csv is missing although the record carries agami's statement")
     page = run_dir / "report.html"
     if not page.exists():

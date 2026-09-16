@@ -243,6 +243,18 @@ def test_the_checkpoint_reader_and_the_cli_error_paths(tmp_path, capsys):
     assert "cannot be read" in capsys.readouterr().err
 
 
+def test_a_statement_that_failed_still_reaches_the_card(tmp_path):
+    """The SQL section was empty on every error row, because the record dropped agami's statement
+    whenever the row errored. That is the one row where reading the statement is the entire
+    diagnosis: a column the semantic model declares and the warehouse does not looks identical, from
+    the card, to agami writing a name that was never there."""
+    failed = {**ERROR, "row": 1, "sql": "SELECT category, SUM(amount) FROM sales GROUP BY category",
+              "error": "agami's statement did not run: no such column: amount", "recorded": None}
+    item = reconcile.report_items(_run(tmp_path, [failed]))[0]
+    assert item["status"] == "error"
+    assert item["sql_agami"] == "SELECT category, SUM(amount) FROM sales GROUP BY category"
+
+
 def test_the_remaining_row_shapes_a_failed_statement_a_wide_delta_and_the_join_facts(tmp_path):
     failed = {"row": 1, "label": "Refunds", "question": "How many refunds?", "expected": None, "actual": 12.0, "delta_pct": 4.5, "match": False, "status": "expected_doubtful",
               "recorded": None, "statement": "SELECT COUNT(*) FROM refundz", "statement_recorded": None, "provenance": {"shape": "b"},
