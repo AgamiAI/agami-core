@@ -1484,7 +1484,7 @@ def next_chunk(run_dir: Path, size: int = CHUNK_SIZE) -> dict:
 _STATE = {CONFIRMED: "held", QUERY_DEFECT: "defect", MODEL_GAP: "gap", UNRESOLVED: "open", NOTED: "noted"}
 _STATE_WORDS = {"held": "passed", "defect": "a mistake in your query", "gap": "a gap in the semantic model",
                 "open": "could not check", "noted": "noticed", "differs": "the two queries differ"}
-_CLAIM_KEYS = {"tables": "tables read", "filter_predicates": "filters", "date_window": "date window",
+_CLAIM_KEYS = {"tables": "tables read", "outputs": "selects", "filter_predicates": "filters", "date_window": "date window",
                "group_keys": "grouped by", "join_keys": "join keys", "ordering": "ordered by", "limit": "limit"}
 # The words a ledger part's grade takes on the page, by part family and grade. Every cell on the
 # page comes from this table, the run's files, or the receipt; none is written by hand.
@@ -1742,13 +1742,33 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
             if renamed:
                 rows[-1]["renamed"] = [[a, b] for a, b in pairs if a != b]
         acc = result_set.get("accuracy")
+        share = result_set.get("paired_row_share")
+        agreement = list(result_set.get("column_agreement") or [])
+        n_rows = result_set.get("golden_row_count")
         if acc is not None:
             same = float(acc) >= 1.0
+            paired_word = f"the {len(pairs)} paired column{'s' if len(pairs) != 1 else ''}"
             if same:
-                add("values", "held", "identical, row for row", None)
+                add("values", "held", "identical", None)
+            elif pairs and share is not None:
+                # The comparator says how many rows agree over the paired columns, and which pair
+                # disagrees on how many rows; the card reads those numbers rather than a 0.
+                if float(share) >= 1.0:
+                    add("values", "held", f"identical on {paired_word}", None,
+                        note="a column of yours has no partner; the paired columns match")
+                else:
+                    if isinstance(n_rows, int) and n_rows > 0:
+                        agree = round(float(share) * n_rows)
+                        text = f"{agree} of {n_rows} rows match"
+                        weak = [f"{a} on {n_rows - round(g * n_rows)} of {n_rows} rows"
+                                for (a, _b), g in zip(pairs, agreement) if isinstance(g, (int, float)) and g < 1.0]
+                    else:
+                        text, weak = f"{float(share):.0%} of the rows match", []
+                    add("values", "defect", text, None, note=("differs in " + ", ".join(weak)) if weak else None)
             elif pairs and result_set.get("unmatched_golden_columns"):
-                add("values", "held", f"identical on the {len(pairs)} paired column{'s' if len(pairs) != 1 else ''}", None,
-                    note="the score is 0 only because a column of yours has no partner; the paired columns match")
+                # An older score file without the share: every pair it reports agreed by construction.
+                add("values", "held", f"identical on {paired_word}", None,
+                    note="a column of yours has no partner; the paired columns match")
             else:
                 add("values", "defect", f"{float(acc):.0%} of the values match", None, note=result_set.get("reason"))
     else:
@@ -1824,7 +1844,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
             yours = f"{_fmt(ev.get('dropped'))} of {_fmt(ev.get('total'))} {ev.get('left')} rows"
         elif fam == "question_fit" and ev.get("fit"):
             yours = {"plausible": "yes", "doubtful": "doubtful", "no_question": "no question given"}.get(ev["fit"], ev["fit"])
-        elif fam == "literal" and ev.get("near_miss"):
+        elif fam == "literal" and ev.get("near_miss") and state == "defect":
             yours = f"matches no rows; the data spells it {ev['near_miss']}"
         for mention in ev.get("prose") or []:
             if isinstance(mention, dict) and mention.get("text"):
@@ -1833,7 +1853,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     return rows, words
 
 
-_DEFINITIONAL = {"tables read", "filters", "date window", "join keys", "grouped by"}
+_DEFINITIONAL = {"tables read", "selects", "filters", "date window", "join keys", "grouped by"}
 _RESULT_LABEL = {
     ("matches", "same"): "match", ("matches", "different"): "same answer, different query",
     ("matches", "not_comparable"): "match",
@@ -1845,6 +1865,41 @@ _RESULT_LABEL = {
 _FIX_WORDS = {"query": "fix your query", "semantic_model": "fix the semantic model", "examples": "add an example",
               "question": "reword the question", "ask_again": "ask agami again", "none": "nothing to fix"}
 _FIX_OWNER = {"query": "you", "semantic_model": "model", "examples": "agami", "question": "question", "ask_again": "agami", "none": "nothing"}
+
+
+_ERROR_LEAD = {
+    "agami_failed": "agami's query failed",
+    "yours_failed": "your query did not run",
+    "nothing_to_compare": "both queries returned no rows, so there is nothing to compare",
+    "no_ground_truth": "there is nothing to compare against; agami's answer is graded on the grading page",
+    "unknown": "the run's files do not say why",
+}
+
+
+def _first_line(text: Any) -> str:
+    """The first line of an error, the only line a card shows."""
+    return str(text).strip().splitlines()[0].strip() if text else ""
+
+
+def _error_cause(rec: dict) -> str | None:
+    """Why an `error` row could not be compared, read from the row's files and never assumed: the
+    person's statement did not run (or was refused), agami wrote no statement or its run failed,
+    both results were empty, the row has nothing to compare against, or the files do not say."""
+    if (rec.get("status") or "error") != "error":
+        return None
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    by_part = {p.get("part"): p for p in parts}
+    for part in ("runs", "scope"):
+        if part in by_part and by_part[part].get("verdict") != CONFIRMED:
+            return "yours_failed"
+    if not rec.get("sql") or (rec.get("recorded") is None and rec.get("actual") is None and rec.get("error")):
+        return "agami_failed"
+    score = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
+    if score and score.get("status") == "unscored":
+        return "nothing_to_compare"
+    if not rec.get("statement") and rec.get("expected") is None:
+        return "no_ground_truth"
+    return "unknown"
 
 
 def _result(rec: dict, diff: list[dict]) -> dict:
@@ -1879,7 +1934,7 @@ def _result(rec: dict, diff: list[dict]) -> dict:
         if by_name.get(name) == "unknown" and part_verdicts.get(part) == CONFIRMED:
             by_name[name] = "agrees"
     statuses = list(by_name.values())
-    definitional_unknown = any(by_name.get(n) == "unknown" for n in ("tables", "filter_predicates", "date_window", "join_keys", "group_keys"))
+    definitional_unknown = any(by_name.get(n) == "unknown" for n in ("tables", "outputs", "filter_predicates", "date_window", "join_keys", "group_keys"))
     if (not claims or all(st == "unknown" for st in statuses)) and not columns_differ:
         query = "not_comparable"
     elif any(st == "differs" for st in statuses) or columns_differ:
@@ -1894,7 +1949,11 @@ def _result(rec: dict, diff: list[dict]) -> dict:
     # A check counts once: a claim the ledger carries as a part is counted as that part.
     graded_claims = {"date_window", "filter_predicates"} if part_verdicts else set()
     unchecked = sum(1 for p in parts if p.get("verdict") == UNRESOLVED) + sum(1 for n, st in by_name.items() if st == "unknown" and n not in graded_claims)
-    label = "could not run" if data == "could_not_compare" else _RESULT_LABEL[(data, query)]
+    if data == "could_not_compare":
+        # The data could not be compared; the two statements still say what they are.
+        label = {"same": "same query, answer not compared", "different": "different query, answer not compared"}.get(query, "could not compare")
+    else:
+        label = _RESULT_LABEL[(data, query)]
     differing = sorted(r["key"] for r in diff
                        if (r["state"] in ("defect", "differs") or (r["key"] == "columns" and r["state"] == "noted"))
                        and r["key"] in _DEFINITIONAL | {"ordered by", "limit", "columns"})
@@ -1913,6 +1972,11 @@ def _values_agree_on_shared_columns(rec: dict) -> bool:
     if acc is not None and float(acc) >= 1.0:
         return True  # agami returned everything you did, and more
     pairs = score.get("column_pairs") or []
+    share = score.get("paired_row_share")
+    if pairs and share is not None:
+        # The comparator says whether the paired columns agree on every row; before it did, every
+        # pair it reported agreed by construction.
+        return float(share) >= 1.0 and bool(score.get("unmatched_golden_columns") or score.get("unmatched_generated_columns"))
     if pairs:
         return bool(score.get("unmatched_golden_columns") or score.get("unmatched_generated_columns"))
     # an older score file without pairs: fall back to the matched share of the columns
@@ -1932,6 +1996,11 @@ def _fix(rec: dict, diff: list[dict], result: dict) -> str:
     fit = next((p for p in parts if p.get("part") == "question_fit"), None)
     cols = next((r for r in diff if r["key"] == "columns"), None)
     if (rec.get("status") or "error") == "error":
+        cause = _error_cause(rec)
+        if cause == "yours_failed":
+            return "semantic_model" if any(p.get("verdict") == MODEL_GAP for p in parts) else "query"
+        if cause in ("nothing_to_compare", "no_ground_truth"):
+            return "none"
         return "ask_again"
     if rec.get("status") == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
         return "query"
@@ -1971,7 +2040,12 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
     extra = list((cols or {}).get("yours_hi") or [])
     mistakes = _measured_mistakes(rec)
     prefill = {"change": "", "fix": "", "reword": rec.get("question") or "", "example": ""}
-    if fix == "query":
+    cause = _error_cause(rec)
+    if fix == "query" and cause == "yours_failed":
+        error = _first_line(rec.get("error"))
+        change = [f"Your query did not run{': ' + error if error else ''}. Fix it, then run this row again."]
+        todo = ["Your query: fix it so it runs, then re-run."]
+    elif fix == "query":
         if mistakes:
             change = [f"Fix your query: {', '.join(mistakes)}. Then run this row again."]
             prefill["fix"] = "; ".join(mistakes)
@@ -1994,10 +2068,19 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
         change = [("Reword the question, or change your query, so they ask the same thing. " + reason).strip()]
         todo = ["The question: reword it and re-run."]
     elif fix == "ask_again":
-        if rec.get("status") == "error":
+        if cause == "agami_failed":
             change, todo = list(_OWNER_CHANGE["agami"][0]), list(_OWNER_CHANGE["agami"][1])
+        elif cause == "unknown":
+            change = ["Run this row again; it could not be compared and the run's files do not say why."]
+            todo = ["Run the row again."]
         else:
             change, todo = list(_FIX_CHANGE["ask_again"][0]), list(_FIX_CHANGE["ask_again"][1])
+    elif fix == "none" and cause == "nothing_to_compare":
+        change = ["Both queries returned no rows, so there is nothing to compare. Widen the date window or the filters in your query, then run this row again."]
+        todo = ["Your query: widen the window or the filters, then re-run."]
+    elif fix == "none" and cause == "no_ground_truth":
+        change = ["Grade agami's answer on the grading page; there is nothing to compare it against."]
+        todo = ["Grade the answer on the grading page."]
     else:
         change, todo = list(_OWNER_CHANGE["keep"][0]), list(_OWNER_CHANGE["keep"][1])
     if fit and fit.get("verdict") != CONFIRMED and fit.get("note") and fix != "question":
@@ -2022,14 +2105,17 @@ def _owner(rec: dict, diff: list[dict]) -> str:
         fit_ok = (fit is not None and fit.get("verdict") == CONFIRMED) if needs_fit else (fit is None or fit.get("verdict") == CONFIRMED)
         return "keep" if one_cell and fit_ok else "nothing"
     if status == "error":
-        return "agami"
+        cause = _error_cause(rec)
+        if cause == "yours_failed":
+            return "model" if any(p.get("verdict") == MODEL_GAP for p in parts) else "you"
+        return "nothing" if cause in ("nothing_to_compare", "no_ground_truth") else "agami"
     if status == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
         return "you"
     if any(p.get("verdict") == MODEL_GAP for p in parts):
         return "model"
     cols = next((r for r in diff if r["key"] == "columns"), None)
     extra_yours = bool(cols and cols.get("yours_hi"))
-    if (extra_yours or differing & {"ordered by", "limit"}) and not (differing & {"tables read", "filters", "join keys", "grouped by", "values", "rows"}):
+    if (extra_yours or differing & {"ordered by", "limit"}) and not (differing & {"tables read", "selects", "filters", "join keys", "grouped by", "values", "rows"}):
         # The two answers hold the same rows and differ in what the person's query returns or how
         # it orders them: that is the query to change, not a definition and not the question.
         return "you"
@@ -2097,7 +2183,10 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
     if status == "expected_doubtful":
         return f"Your query has a mistake ({', '.join(mistakes or red) or 'see the red rows'}), so the number you expected is doubtful."
     if status == "error":
-        return f"agami's query failed{': ' + rec['error'] if rec.get('error') else ''}."
+        cause = _error_cause(rec) or "unknown"
+        error = _first_line(rec.get("error"))
+        with_error = cause in ("agami_failed", "yours_failed", "unknown") and error
+        return f"This row could not be compared: {_ERROR_LEAD[cause]}{': ' + error if with_error else ''}."
     where = red + gaps
     return f"The two answers do not match. What differs: {', '.join(where)}." if where else "The two answers do not match, and no check explains why."
 
@@ -2150,8 +2239,9 @@ def report_items(run_dir: Path) -> list[dict]:
         keep_ok = legacy_owner == "keep"
         owner = "keep" if (keep_ok and fix in ("none", "examples")) else _FIX_OWNER[fix]
         change, todo, prefill = _change_for_fix(fix, rec, diff)
-        if fix == "none" and not keep_ok:
-            # nothing to fix, and not kept either: say why in the words the status gives
+        if fix == "none" and not keep_ok and (rec.get("status") or "error") != "error":
+            # nothing to fix, and not kept either: say why in the words the status gives. An error
+            # row with nothing to fix already says its cause (nothing to compare, or no ground truth).
             change, todo = _change("nothing", rec, diff)
         if result["data"] == "matches" and result["query"] == "different":
             clause = ("The two queries differ in: " + ", ".join(result["differs_in"]) + ("; the match may not hold on other data." if set(result["differs_in"]) & _DEFINITIONAL else "; a cosmetic difference."))
