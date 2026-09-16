@@ -38,12 +38,32 @@ import sys
 from pathlib import Path
 
 _KEYS = {"profile", "reconcile-run", "decisions"}
-_DECISIONS = frozenset({"keep", "change", "fix", "reword", "nothing"})
-_WITH_WORDS = frozenset({"change", "fix", "reword"})
+_DECISIONS = frozenset({"keep", "change", "fix", "reword", "example", "nothing"})
+_WITH_WORDS = frozenset({"change", "fix", "reword", "example"})
 _FIELDS = ("row", "decision", "words")
 _DROPPED_KINDS = frozenset({"unknown_decision", "decision_missing_row", "row_decided_twice",
                             "decision_not_an_object", "keep_not_offered", "words_ignored_on_keep",
-                            "words_ignored_on_nothing", "words_not_text"})
+                            "words_ignored_on_nothing", "words_not_text", "example_not_offered"})
+
+
+def example_blocked_rows(run_dir: Path) -> set[int]:
+    """Rows whose ledger holds a part the data proved wrong: a statement with a mistake in it is never
+    offered as a prompt example, whatever the page suggested. Read from each row's ledger.json."""
+    blocked: set[int] = set()
+    rows_dir = run_dir / "rows"
+    if not rows_dir.is_dir():
+        return blocked
+    for row_dir in rows_dir.iterdir():
+        ledger = row_dir / "ledger.json"
+        if not row_dir.name.isdigit() or not ledger.exists():
+            continue
+        try:
+            parts = json.loads(ledger.read_text(encoding="utf-8")).get("rows", [])
+        except (OSError, ValueError):
+            continue
+        if any(isinstance(p, dict) and p.get("verdict") == "query_defect" for p in parts):
+            blocked.add(int(row_dir.name))
+    return blocked
 
 
 def keepable_rows(run_dir: Path) -> set[int]:
@@ -81,7 +101,7 @@ def keepable_rows(run_dir: Path) -> set[int]:
     return keep
 
 
-def _key_of(line: str):
+def _key_of(line: str) -> str | None:
     low = line.strip().lower()
     for k in _KEYS:
         if low.startswith(k + ":") or low == k + ":":
@@ -112,7 +132,8 @@ def _sections(text: str) -> tuple[dict, list[str]]:
     return out, repeated
 
 
-def parse(text: str, keepable: set[int] | None = None, run: str | None = None) -> tuple[dict, list, dict | None]:
+def parse(text: str, keepable: set[int] | None = None, run: str | None = None,
+          example_blocked: set[int] | None = None) -> tuple[dict, list, dict | None]:
     sec, repeated = _sections(text)
     anomalies: list = [{"kind": "key_repeated", "detail": key} for key in repeated]
     needs: dict | None = None
@@ -156,6 +177,9 @@ def parse(text: str, keepable: set[int] | None = None, run: str | None = None) -
         if row in seen:
             anomalies.append({"kind": "row_decided_twice", "row": row})
             continue
+        if decision == "example" and row in (example_blocked or set()):
+            anomalies.append({"kind": "example_not_offered", "row": row})
+            continue  # dropped like a keep the run did not offer; _DROPPED_KINDS carries the kind
         if decision == "keep" and row not in (keepable or set()):
             # The offer's predicate belongs to the ledger: a keep the run's own files do not
             # allow is not the person's to grant from a page.
@@ -200,7 +224,7 @@ def main(argv=None) -> int:
         print(json.dumps({"ok": False, "data": None, "anomalies": [{"kind": "bad_argument", "detail": str(exc)}],
                           "needs_judgment": {"kind": "bad_argument", "ask": "the block file could not be read"}}, indent=2))
         return 2
-    data, anomalies, needs = parse(text, keepable_rows(run_dir), run=run_dir.name)
+    data, anomalies, needs = parse(text, keepable_rows(run_dir), run=run_dir.name, example_blocked=example_blocked_rows(run_dir))
     print(json.dumps({"ok": needs is None, "data": data, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
     return 0
 

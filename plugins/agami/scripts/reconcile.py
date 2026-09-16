@@ -438,11 +438,16 @@ def _rows_from_json(items: Any, *, file: str, source: str | None) -> tuple[list[
     return rows, skipped
 
 
+_MAX_INTAKE_BYTES = 20 * 1024 * 1024
+
+
 def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[dict]]:
     """One file's rows and the lines it could not use. The extension decides how lines are cut:
     `.json` is a list, `.sql` is statements split on `;`, `.txt` and `.md` are one question per
     line, and everything else is CSV."""
     file = path.name
+    if path.stat().st_size > _MAX_INTAKE_BYTES:
+        raise ValueError(f"{file} is {path.stat().st_size // (1024 * 1024)} MB; the intake reads files up to {_MAX_INTAKE_BYTES // (1024 * 1024)} MB. Export fewer rows, or split the file.")
     text = path.read_text(encoding="utf-8")
     suffix = path.suffix.lower()
     if suffix == ".json":
@@ -1394,7 +1399,7 @@ def row_status(match: bool | None, ledger_verdict: str | None) -> str:
 
 
 # --------------------------------------------------------------------------------------------
-# next-chunk: the run works five rows at a time, and rows.jsonl is its checkpoint
+# next-chunk: the run works five rows at a time, and rows.jsonl is its checkpoint.
 # --------------------------------------------------------------------------------------------
 
 CHUNK_SIZE = 5
@@ -1473,12 +1478,12 @@ def next_chunk(run_dir: Path, size: int = CHUNK_SIZE) -> dict:
 
 
 # --------------------------------------------------------------------------------------------
-# report-items: the report page's items, templated from what the run wrote, never written by hand
+# report-items: the report page's items, templated from what the run wrote, never written by hand.
 # --------------------------------------------------------------------------------------------
 
 _STATE = {CONFIRMED: "held", QUERY_DEFECT: "defect", MODEL_GAP: "gap", UNRESOLVED: "open", NOTED: "noted"}
 _STATE_WORDS = {"held": "passed", "defect": "a mistake in your query", "gap": "a gap in the semantic model",
-                "open": "could not check", "noted": "noticed"}
+                "open": "could not check", "noted": "noticed", "differs": "the two queries differ"}
 _CLAIM_KEYS = {"tables": "tables read", "filter_predicates": "filters", "date_window": "date window",
                "group_keys": "grouped by", "join_keys": "join keys", "ordering": "ordered by", "limit": "limit"}
 # The words a ledger part's grade takes on the page, by part family and grade. Every cell on the
@@ -1711,22 +1716,41 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         add("rows", "held" if same_rows else "defect", yours_text, agami_text)
         yc = list(((rec.get("statement_recorded") or {}).get("columns")) or [])
         ac = list(((rec.get("recorded") or {}).get("columns")) or [])
+        pairs = [tuple(p) for p in (result_set.get("column_pairs") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
         if yc or ac:
-            only_yours, only_agami = _only(yc, ac), _only(ac, yc)
+            values_compared = same_rows and (bool(pairs) or bool(result_set.get("unmatched_golden_columns")))
+            if values_compared:
+                # Columns are compared by the values they carry, never by name: the comparator says
+                # which of yours paired with which of agami's, and a renamed column is the same column.
+                only_yours = [c for c in (result_set.get("unmatched_golden_columns") or []) if c in yc]
+                only_agami = list(result_set.get("unmatched_generated_columns") or [])
+                renamed = [f"{a} → {b}" for a, b in pairs if a != b]
+            else:
+                # No values comparison ran (the row counts differ, or an older score file): names are
+                # all there is. Identical names are one column set; the rows check carries the counts.
+                only_yours, only_agami, renamed = _only(yc, ac), _only(ac, yc), []
             if not only_yours and not only_agami:
                 col_state = "held"
             elif only_yours:
                 col_state = "defect"
             else:
                 col_state = "noted"  # agami returned more than asked; nothing of yours is missing
-            add("columns", col_state, yc, ac, yours_hi=only_yours, agami_hi=only_agami,
-                note=(f"the comparison scores on columns; {len(result_set.get('unmatched_golden_columns') or [])} unmatched scored 0"
-                      if result_set.get("unmatched_golden_columns") else (f"agami returned columns your query did not: {', '.join(only_agami)}" if col_state == "noted" else None)))
+            # No sentence: the tokens carry the difference the way a diff does. A column only yours
+            # has reads as removed, one only agami's as added, and a pair with two names is marked in
+            # place so the reader sees they hold the same values.
+            add("columns", col_state, yc, ac, yours_hi=only_yours, agami_hi=only_agami)
+            if renamed:
+                rows[-1]["renamed"] = [[a, b] for a, b in pairs if a != b]
         acc = result_set.get("accuracy")
         if acc is not None:
             same = float(acc) >= 1.0
-            add("values", "held" if same else "defect", "identical, row for row" if same else f"{float(acc):.0%} of the values match",
-                None, note=None if same else result_set.get("reason"))
+            if same:
+                add("values", "held", "identical, row for row", None)
+            elif pairs and result_set.get("unmatched_golden_columns"):
+                add("values", "held", f"identical on the {len(pairs)} paired column{'s' if len(pairs) != 1 else ''}", None,
+                    note="the score is 0 only because a column of yours has no partner; the paired columns match")
+            else:
+                add("values", "defect", f"{float(acc):.0%} of the values match", None, note=result_set.get("reason"))
     else:
         match = rec.get("match") if rec.get("match") is not None else (scalar or {}).get("match")
         if rec.get("status") == "error":
@@ -1757,15 +1781,20 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         status = claim.get("status")
         if yours is None and agami is None and status in ("agrees", "same"):
             continue
-        state = "held" if status in ("agrees", "same") else "defect" if status == "differs" else "open"
+        state = "held" if status in ("agrees", "same") else "differs" if status == "differs" else "open"
         note = None
-        if name == "date_window" and state == "open":
-            part = parts.get("date_window") or {}
-            note = part.get("note") or "the window could not be read from one of the two queries"
+        graded = parts.get({"date_window": "date_window", "filter_predicates": "predicates"}.get(name, ""))
+        if state == "open" and graded and graded.get("verdict") == CONFIRMED:
+            # The ledger read this claim with more context (no date filter anywhere, say) and confirmed it.
+            state, note = "held", None
+            if name == "date_window":
+                yours, agami = yours or "no date filter", agami or "no date filter"
+        elif name == "date_window" and state == "open":
+            note = (graded or {}).get("note") or "the window could not be read from one of the two queries"
             yours = yours or "could not read"
             agami = agami or "could not read"
         add(_CLAIM_KEYS.get(name, name), state, yours, agami, note=note,
-            yours_hi=_only(yours, agami) if state == "defect" else None, agami_hi=_only(agami, yours) if state == "defect" else None)
+            yours_hi=_only(yours, agami) if state == "differs" else None, agami_hi=_only(agami, yours) if state == "differs" else None)
 
     # 3 · every part of the person's statement the ledger graded, with agami's side where a receipt says.
     filters, metrics = _receipt_filters(agami_receipt), _receipt_metrics(agami_receipt)
@@ -1830,8 +1859,8 @@ def _result(rec: dict, diff: list[dict]) -> dict:
         cols = rows.get("columns"); values = rows.get("values")
         same_rows = rows["rows"]["state"] == "held"
         values_ok = values is None or values["state"] == "held"
-        if same_rows and values_ok and (cols is None or cols["state"] == "held"):
-            data = "matches"
+        if same_rows and values_ok and (cols is None or cols["state"] in ("held", "noted")):
+            data = "matches"  # a column only agami returned is noticed, not a difference in the answer
         elif same_rows and cols is not None and cols["state"] != "held" and _values_agree_on_shared_columns(rec):
             data = "partly"
         else:
@@ -1842,36 +1871,55 @@ def _result(rec: dict, diff: list[dict]) -> dict:
     claims = ((rec.get("claims") or {}).get("claims") or []) if isinstance(rec.get("claims"), dict) else []
     statuses = [c.get("status") for c in claims]
     columns_differ = "columns" in rows and rows["columns"]["state"] != "held"
+    by_name = {c.get("name"): c.get("status") for c in claims}
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    part_verdicts = {p.get("part"): p.get("verdict") for p in parts}
+    # A claim the ledger graded confirmed (no date filter anywhere, say) is not unknown for this purpose.
+    for name, part in (("date_window", "date_window"), ("filter_predicates", "predicates")):
+        if by_name.get(name) == "unknown" and part_verdicts.get(part) == CONFIRMED:
+            by_name[name] = "agrees"
+    statuses = list(by_name.values())
+    definitional_unknown = any(by_name.get(n) == "unknown" for n in ("tables", "filter_predicates", "date_window", "join_keys", "group_keys"))
     if (not claims or all(st == "unknown" for st in statuses)) and not columns_differ:
         query = "not_comparable"
     elif any(st == "differs" for st in statuses) or columns_differ:
         # The seven claims do not cover the projection; two queries that return different columns
         # are different queries even when every claim agrees.
         query = "different"
+    elif definitional_unknown:
+        # Nothing differs, but a claim that decides sameness could not be read: sameness is not established.
+        query = "not_comparable"
     else:
         query = "same"
-    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
-    unchecked = sum(1 for p in parts if p.get("verdict") == UNRESOLVED) + sum(1 for st in statuses if st == "unknown")
+    # A check counts once: a claim the ledger carries as a part is counted as that part.
+    graded_claims = {"date_window", "filter_predicates"} if part_verdicts else set()
+    unchecked = sum(1 for p in parts if p.get("verdict") == UNRESOLVED) + sum(1 for n, st in by_name.items() if st == "unknown" and n not in graded_claims)
     label = "could not run" if data == "could_not_compare" else _RESULT_LABEL[(data, query)]
     differing = sorted(r["key"] for r in diff
-                       if (r["state"] == "defect" or (r["key"] == "columns" and r["state"] == "noted"))
+                       if (r["state"] in ("defect", "differs") or (r["key"] == "columns" and r["state"] == "noted"))
                        and r["key"] in _DEFINITIONAL | {"ordered by", "limit", "columns"})
     return {"data": data, "query": query, "label": label, "unchecked": unchecked, "differs_in": differing}
 
 
 def _values_agree_on_shared_columns(rec: dict) -> bool:
-    """A table compare whose only difference is the column set: every golden column the generated side
-    carries matched by value, so the score is exactly the matched share."""
+    """A table compare whose only difference is the column set. The comparator pairs columns by their
+    values, so every pair it reports agrees by construction; the answer is partly the same when at
+    least one pair exists beside a column of yours with no partner or a column of agami's with none.
+    The score itself is 0.0 whenever any column of yours is unpaired, so it cannot be the test."""
     score = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
     if not score:
         return False
+    acc = score.get("accuracy")
+    if acc is not None and float(acc) >= 1.0:
+        return True  # agami returned everything you did, and more
+    pairs = score.get("column_pairs") or []
+    if pairs:
+        return bool(score.get("unmatched_golden_columns") or score.get("unmatched_generated_columns"))
+    # an older score file without pairs: fall back to the matched share of the columns
     cols = list(((rec.get("statement_recorded") or {}).get("columns")) or [])
     unmatched = list(score.get("unmatched_golden_columns") or [])
-    acc = score.get("accuracy")
     if acc is None or not cols:
         return False
-    if float(acc) >= 1.0:
-        return True  # agami returned everything you did, and more
     matched = len(cols) - len(unmatched)
     return matched > 0 and abs(float(acc) - matched / len(cols)) < 1e-6
 
@@ -1913,13 +1961,57 @@ _FIX_CHANGE = {
 }
 
 
+def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], list[str], dict]:
+    """The card's change text, its to-do and the words each decision box starts with, all from the one
+    fix. The three used to come from three places and could disagree on one card."""
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    fit = next((p for p in parts if p.get("part") == "question_fit"), None)
+    gaps = [r["key"] for r in diff if r["state"] == "gap"]
+    cols = next((r for r in diff if r["key"] == "columns"), None)
+    extra = list((cols or {}).get("yours_hi") or [])
+    mistakes = _measured_mistakes(rec)
+    prefill = {"change": "", "fix": "", "reword": rec.get("question") or "", "example": ""}
+    if fix == "query":
+        if mistakes:
+            change = [f"Fix your query: {', '.join(mistakes)}. Then run this row again."]
+            prefill["fix"] = "; ".join(mistakes)
+        elif extra:
+            change = [f"Your query returns columns the question did not ask for: {', '.join(extra)}. Remove them, or name them in the question."]
+            prefill["fix"] = "remove " + ", ".join(extra)
+            prefill["reword"] = (rec.get("question") or "").rstrip(".?") + f", with {', '.join(extra)}?"
+        else:
+            change = ["Fix your query where the marks are red, then run this row again."]
+        todo = ["Your query: fix the red rows, then re-run."]
+    elif fix == "semantic_model":
+        change = [f"The semantic model is missing: {', '.join(gaps)}. Add them through /agami-save-correction." if gaps
+                  else "Decide which definition your team means. A change to the semantic model goes through /agami-save-correction."]
+        todo = [f"The semantic model: {', '.join(gaps)}." if gaps else "The semantic model: decide the definition."]
+        prefill["change"] = ("add " + ", ".join(gaps)) if gaps else ""
+    elif fix == "examples":
+        change, todo = list(_FIX_CHANGE["examples"][0]), list(_FIX_CHANGE["examples"][1])
+    elif fix == "question":
+        reason = (fit or {}).get("note") or ""
+        change = [("Reword the question, or change your query, so they ask the same thing. " + reason).strip()]
+        todo = ["The question: reword it and re-run."]
+    elif fix == "ask_again":
+        if rec.get("status") == "error":
+            change, todo = list(_OWNER_CHANGE["agami"][0]), list(_OWNER_CHANGE["agami"][1])
+        else:
+            change, todo = list(_FIX_CHANGE["ask_again"][0]), list(_FIX_CHANGE["ask_again"][1])
+    else:
+        change, todo = list(_OWNER_CHANGE["keep"][0]), list(_OWNER_CHANGE["keep"][1])
+    if fit and fit.get("verdict") != CONFIRMED and fit.get("note") and fix != "question":
+        change.append(f"Also: {fit['note']}")
+    return change, todo, prefill
+
+
 def _owner(rec: dict, diff: list[dict]) -> str:
     """Who acts, from the evidence, in this order: a mistake in the query is the person's; a gap the
     ledger measured is the semantic model's; a question read differently is the question's."""
     status = rec.get("status")
     parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
     fit = next((p for p in parts if p.get("part") == "question_fit"), None)
-    differing = {r["key"] for r in diff if r["state"] == "defect"}
+    differing = {r["key"] for r in diff if r["state"] in ("defect", "differs")}
     if status == "match":
         # The keep-offer (Phase 3e, and the page's keep gate) is made only for a one-cell answer whose
         # statement, if any, answers its question; a matched table or a doubtful fit is not offered.
@@ -1994,7 +2086,7 @@ def _measured_mistakes(rec: dict) -> list[str]:
 
 def _sentence(rec: dict, diff: list[dict]) -> str:
     status = rec.get("status")
-    red = [r["key"] for r in diff if r["state"] == "defect" and r["key"] not in ("answer", "rows", "values")]
+    red = [r["key"] for r in diff if r["state"] in ("defect", "differs") and r["key"] not in ("answer", "rows", "values")]
     mistakes = _measured_mistakes(rec)
     open_ = [r["key"] for r in diff if r["state"] == "open"]
     gaps = [r["key"] for r in diff if r["state"] == "gap"]
@@ -2018,8 +2110,12 @@ def resume(reconcile_dir: Path) -> dict | None:
     for run_dir in candidates:
         try:
             state = next_chunk(run_dir)
-        except (json.JSONDecodeError, ValueError):
-            continue
+        except json.JSONDecodeError:
+            continue  # an intake.json that is not JSON is not a run to resume
+        except ValueError as exc:
+            # A corrupt checkpoint is refused, never skipped: skipping would resume an older run and
+            # leave this one's row to be run twice later.
+            raise ValueError(f"{run_dir}: {exc}") from exc
         if not state["complete"]:
             return {"run_dir": str(run_dir), "finished": state["finished"], "remaining": state["remaining"],
                     "chunk_rows": state["chunk_rows"], "progress": state["progress"]}
@@ -2034,6 +2130,9 @@ def report_items(run_dir: Path) -> list[dict]:
     items = []
     for rec in records:
         rec = dict(rec, status=rec.get("status") or "error")
+        if isinstance(rec.get("error"), str):
+            # The page shows the classifier's one line, never a driver's message with a host or a table in it.
+            rec["error"] = rec["error"].strip().splitlines()[0][:200] if rec["error"].strip() else None
         n = rec.get("row")
         row_dir = run_dir / "rows" / str(n)
         agami_receipt = None
@@ -2049,18 +2148,18 @@ def report_items(run_dir: Path) -> list[dict]:
         legacy_owner = _owner(rec, diff)
         # keep is the fix "nothing" on a row the keep gate accepts; the page's keep offer is that
         keep_ok = legacy_owner == "keep"
-        owner = "keep" if (fix == "none" and keep_ok) else _FIX_OWNER[fix]
-        change, todo = _change(owner if owner != "agami" else legacy_owner, rec, diff)
-        if fix in _FIX_CHANGE:
-            change, todo = list(_FIX_CHANGE[fix][0]), list(_FIX_CHANGE[fix][1])
-            if fix == "ask_again" and rec.get("status") == "error":
-                change, todo = list(_OWNER_CHANGE["agami"][0]), list(_OWNER_CHANGE["agami"][1])
-        if fix == "none" and not keep_ok and rec.get("status") == "match":
+        owner = "keep" if (keep_ok and fix in ("none", "examples")) else _FIX_OWNER[fix]
+        change, todo, prefill = _change_for_fix(fix, rec, diff)
+        if fix == "none" and not keep_ok:
+            # nothing to fix, and not kept either: say why in the words the status gives
             change, todo = _change("nothing", rec, diff)
         if result["data"] == "matches" and result["query"] == "different":
             clause = ("The two queries differ in: " + ", ".join(result["differs_in"]) + ("; the match may not hold on other data." if set(result["differs_in"]) & _DEFINITIONAL else "; a cosmetic difference."))
         else:
             clause = None
+        cols_row = next((r for r in diff if r["key"] == "columns"), None)
+        if cols_row and cols_row.get("agami_hi") and not cols_row.get("yours_hi"):
+            clause = ((clause + " ") if clause else "") + f"agami also returned: {', '.join(cols_row['agami_hi'])}."
         prov = rec.get("provenance") or {}
         shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
         source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
@@ -2078,8 +2177,8 @@ def report_items(run_dir: Path) -> list[dict]:
             "source": source or None, "status": rec.get("status") or "error",
             "expected": expected, "answer": answer,
             "delta_pct": (round(delta * 100, 1) if isinstance(delta, (int, float)) and not isinstance(delta, bool) else None),
-            "single_cell": bool(single), "owner": owner, "keep_allowed": owner == "keep", "diff": diff,
-            "result": result, "fix": fix, "fix_words": _FIX_WORDS[fix],
+            "single_cell": bool(single), "owner": owner, "keep_allowed": keep_ok, "diff": diff,
+            "result": result, "fix": fix, "fix_words": _FIX_WORDS[fix], "prefill": prefill,
             "sentence": _sentence(rec, diff) + (" " + clause if clause else ""),
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
@@ -2153,7 +2252,11 @@ def main(argv: list[str] | None = None) -> int:
         if not root.is_dir():
             print(f"reconcile resume: directory not found: {root}", file=sys.stderr)
             return 2
-        found = resume(root)
+        try:
+            found = resume(root)
+        except ValueError as exc:
+            print(f"reconcile resume: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps(found, indent=2))
         # Exit 4, "nothing to do": every run under the directory is complete, or there is none.
         return 0 if found else 4
@@ -2245,10 +2348,11 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             print(f"reconcile intake: file not found: {', '.join(missing)}", file=sys.stderr)
             return 2
+        csv.field_size_limit(sys.maxsize)  # a long SQL cell is a row, not an error
         try:
             result = intake(paths, source=args.source)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            print(f"reconcile intake: could not read the input: {exc}", file=sys.stderr)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, csv.Error, RecursionError) as exc:
+            print(f"reconcile intake: could not read the input: {str(exc).splitlines()[0][:300]}", file=sys.stderr)
             return 2
         if not result["rows"]:
             # Exit 4, "nothing to do", kept apart from 2 so the skill can say which happened:

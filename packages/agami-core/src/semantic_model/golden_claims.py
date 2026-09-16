@@ -235,6 +235,12 @@ def _rendered(node: "exp.Expression", aliases: dict[str, str], depth: int) -> st
     if isinstance(node, exp.Column):
         qualifier = node.table
         if not qualifier:
+            # An unqualified column in a SELECT that reads exactly one table belongs to that table,
+            # so `opened` and `r.opened` are one key; with two tables in scope it stays bare, since
+            # guessing an owner would make two different columns one key.
+            tables = {rt._tkey(rt._bare(t)) for t in aliases.values()}
+            if len(tables) == 1:
+                return f"{next(iter(tables))}.{node.name.lower()}"
             return node.name.lower()
         # The schema and catalog parts are dropped with the alias: `sales.orders.region` and
         # `orders.region` name one column, and `_bare` has already stripped the schema off the
@@ -464,7 +470,10 @@ def _unit_name(node: "exp.Expression | None") -> Optional[str]:
     return _RELATIVE_UNITS.get(str(text).strip().strip("'\"").lower())
 
 
-def _relative_bound(node: "exp.Expression | None") -> Optional[str]:
+_MAX_RELATIVE_DEPTH = 8
+
+
+def _relative_bound(node: "exp.Expression | None", depth: int = _MAX_RELATIVE_DEPTH) -> Optional[str]:
     """The bound a node spells RELATIVE to the run date, as words: `today`, `start of this year`,
     `start of this year + 7 month`, `today - 30 day`. None for any other shape.
 
@@ -474,36 +483,38 @@ def _relative_bound(node: "exp.Expression | None") -> Optional[str]:
     date it computed would be a bound neither statement wrote. It is compared only against another
     relative bound (`_window_status`), never against a literal date.
     """
-    if node is None:
+    if node is None or depth <= 0:
+        # A relative bound deeper than a handful of steps is not a window anyone wrote; past the
+        # budget it reads None, so `read_claims` keeps its promise never to raise on a pathological tree.
         return None
     if isinstance(node, exp.Paren):
-        return _relative_bound(node.this)
+        return _relative_bound(node.this, depth - 1)
     if isinstance(node, exp.Cast):
-        return _relative_bound(node.this)
+        return _relative_bound(node.this, depth - 1)
     if isinstance(node, exp.CurrentDate):
         return "today"
     if isinstance(node, exp.CurrentTimestamp) or (isinstance(node, exp.Anonymous) and str(node.this).lower() in ("now", "getdate", "sysdate", "current_timestamp")):
         return "now"
     if isinstance(node, (exp.DateTrunc, exp.TimestampTrunc)):
-        inner = _relative_bound(node.this if isinstance(node, exp.TimestampTrunc) else node.args.get("this"))
+        inner = _relative_bound(node.this if isinstance(node, exp.TimestampTrunc) else node.args.get("this"), depth - 1)
         unit = _unit_name(node.args.get("unit"))
         if isinstance(node, exp.DateTrunc):
             # sqlglot's DateTrunc holds the unit in `unit` and the value in `this`; some dialects
             # parse the argument order the other way round, so both are tried.
-            inner = _relative_bound(node.this) or _relative_bound(node.args.get("unit"))
+            inner = _relative_bound(node.this, depth - 1) or _relative_bound(node.args.get("unit"), depth - 1)
             unit = _unit_name(node.args.get("unit")) or _unit_name(node.this)
         if inner in ("today", "now") and unit:
             return f"start of this {unit}"
         return None
     if isinstance(node, (exp.Add, exp.Sub)):
-        base = _relative_bound(node.this)
+        base = _relative_bound(node.this, depth - 1)
         step = _interval_words(node.expression)
         if base and step:
             return _step(base, isinstance(node, exp.Add), *step)
         return None
     date_add_types = tuple(t for t in (exp.DateAdd, getattr(exp, "TsOrDsAdd", None)) if t is not None)
     if isinstance(node, date_add_types + (exp.DateSub,)):
-        base = _relative_bound(node.this)
+        base = _relative_bound(node.this, depth - 1)
         n = node.expression
         unit = _unit_name(node.args.get("unit"))
         count: Optional[int] = None

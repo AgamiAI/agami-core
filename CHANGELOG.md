@@ -294,6 +294,10 @@ below corresponds to one such version.
   queries the same) as the pill, and the fix (your query, the semantic model, the examples, the question,
   agami again, nothing) as the action. A query written differently is a noted fact, no longer a blocker
   on a matching answer. (ACE-127)
+- The reconcile card after a second read: the question is the title, columns are compared by the data
+  they carry (the compare-results score names `column_pairs` and `unmatched_generated_columns`), a bare
+  column reads as its table's column in the claims reader, the change text and the decision boxes derive
+  from the one fix, an `example` decision joins the block, the checks panel folds. (ACE-128)
 - From the first test of the grid: a plain column in a list query is no longer graded as a missing
   metric (the receipt's output items say whether they aggregate); a date window written against the
   clock (`date_trunc('year', current_date) + interval`) resolves and compares against another such

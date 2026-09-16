@@ -30,7 +30,7 @@ from pathlib import Path
 _KEYS = {"profile", "reconcile-run", "intake"}
 
 
-def _key_of(line: str):
+def _key_of(line: str) -> str | None:
     low = line.strip().lower()
     for k in _KEYS:
         if low.startswith(k + ":") or low == k + ":":
@@ -144,8 +144,15 @@ def main(argv=None) -> int:
         print(json.dumps({"ok": False, "data": None, "anomalies": [{"kind": "bad_argument", "detail": str(exc)}],
                           "needs_judgment": {"kind": "bad_argument", "ask": "pass the rows file `reconcile.py intake` wrote and the pasted block"}}, indent=2))
         return 2
+    if not isinstance(intake, dict) or not isinstance(intake.get("rows"), list):
+        print(json.dumps({"ok": False, "data": None, "anomalies": [{"kind": "bad_argument", "detail": "the rows file is not the output of `reconcile.py intake`"}],
+                          "needs_judgment": {"kind": "bad_argument", "ask": "pass the rows file `reconcile.py intake` wrote (an object with a `rows` list)"}}, indent=2))
+        return 2
     known = {r.get("row", n) for n, r in enumerate(intake.get("rows", []), 1)}
-    data, anomalies, needs = parse(text, known, run=args.run)
+    # The block must name the run it is applied to. When --run is not given, the run is the folder
+    # --out lands in, so a block from another run can never be applied by leaving the flag off.
+    run = args.run or (Path(args.out).expanduser().resolve().parent.name if args.out else None)
+    data, anomalies, needs = parse(text, known, run=run)
     counts = None
     if needs is None:
         applied, counts = apply(intake, data["decisions"])
