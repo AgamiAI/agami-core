@@ -24,14 +24,16 @@ rule each caller has to remember.
 
 Usage:
 
-    python3 golden_author.py parse  --csv /path/to/question-bank.csv
+    python3 golden_author.py parse  --file /path/to/question-bank.csv
+    python3 golden_author.py parse  --file /path/to/question-bank.xlsx --sheet Questions
     python3 golden_author.py import --profile main --dataset orders --rows /path/to/parsed.json
     python3 golden_author.py save   --profile main --dataset orders --item /path/to/item.json
 
 Stdout is always one JSON document; every refusal and every warning goes to stderr with the prefix
-below, so a caller can parse the one and strip the other. The parse door is stdlib only, plus
-`reconcile.parse_value` for the expected-value column; the write doors go through AH-100's models,
-which is what the guarded import below is for.
+below, so a caller can parse the one and strip the other. The parse door is stdlib only — `_xlsx`
+reads a workbook with `zipfile` and `ElementTree` — plus `reconcile.parse_value` for the
+expected-value column; the write doors go through AH-100's models, which is what the guarded import
+below is for.
 """
 
 from __future__ import annotations
@@ -58,8 +60,10 @@ import _agami_lib  # noqa: E402
 
 _agami_lib.ensure_importable()
 
-# A sibling script and stdlib-only, so it is imported plainly: it has none of the dependencies the
-# guard below exists for.
+# Sibling scripts and stdlib-only, so they are imported plainly: they have none of the dependencies
+# the guard below exists for. `_xlsx` reads a workbook for the parse door; `reconcile` normalizes
+# the expected-value column.
+import _xlsx
 import reconcile
 
 try:
@@ -217,18 +221,55 @@ def _slug(query: str) -> str:
     return head.strip("-")
 
 
-def _columns(header: list[str]) -> dict[str, int]:
+def _columns(header: list[str], mapping: Optional[dict[str, str]] = None) -> dict[str, int]:
     """Which column holds which field, by index.
 
-    First match wins: a sheet with two columns folding to the same alias is one column and one
-    duplicate, and the person put the real one first.
+    A field the person mapped with `--column` is read from that column and from no alias, because
+    the mapping is their answer to which column they meant. Otherwise first match wins: a sheet with
+    two columns folding to the same alias is one column and one duplicate, and the person put the
+    real one first.
     """
+    mapping = mapping or {}
     found: dict[str, int] = {}
     for index, cell in enumerate(header):
         folded = _fold(cell)
-        for field, aliases in _ALIASES.items():
-            if folded in aliases and field not in found:
+        for field, named in mapping.items():
+            if folded == _fold(named) and field not in found:
                 found[field] = index
+        for field, aliases in _ALIASES.items():
+            if field not in mapping and folded in aliases and field not in found:
+                found[field] = index
+    return found
+
+
+# The words a header has to contain to be ASKED about — never to be read. Exact matching stays the
+# only way a column is read, so this cannot misread one; what it prevents is the opposite loss, a
+# `Warehouse SQL` column carrying every statement in the sheet that the import drops without a word.
+_LOOK_ALIKE_WORDS: dict[str, frozenset[str]] = {
+    "query": frozenset({"question", "questions", "prompt", "ask"}),
+    "id": frozenset({"id", "key"}),
+    "expected_value": frozenset({"expected", "answer"}),
+    "sql": frozenset({"sql", "statement"}),
+    "tags": frozenset({"tag", "tags", "label", "labels"}),
+}
+
+
+def _unrecognized(header: list[str], columns: dict[str, int]) -> list[dict[str, str]]:
+    """Every unread column whose header names a field the sheet has not supplied, in sheet order.
+
+    Only fields still missing: once `sql` is read from a column, another header saying SQL is a note
+    about it, and asking about it would train the person to wave the question through.
+    """
+    used = set(columns.values())
+    found = []
+    for index, cell in enumerate(header):
+        if index in used or not cell.strip():
+            continue
+        words = set(re.findall(r"[a-z0-9]+", _fold(cell)))
+        for field, candidates in _LOOK_ALIKE_WORDS.items():
+            if field not in columns and words & candidates:
+                found.append({"column": cell.strip(), "could_be": field})
+                break
     return found
 
 
@@ -243,25 +284,74 @@ def _cell(row: list[str], index: Optional[int]) -> str:
     return row[index].strip()
 
 
-def _read_rows(path: str) -> list[list[str]]:
-    """The CSV as rows, blank lines included.
+# How far down a WORKBOOK the header is looked for. A workbook often opens with a title, a date or a
+# note above the table. Twenty rows covers a title block without reading so far into the data that a
+# question which happens to read "question" could be taken for the header — and the rows above the
+# header are reported, never silently dropped.
+_HEADER_SCAN_ROWS = 20
+
+
+def _read_rows(path: str, sheet: Optional[str] = None) -> tuple[Optional[str], list[list[str]]]:
+    """The file as rows, blank lines included, and the sheet they came from (None for a CSV).
 
     Blank rows are kept because `skipped` reports a row number a person uses to find the row in
     their own sheet, and dropping anything ahead of the numbering makes every number after it
     point at the wrong line.
+
+    A workbook is read by `_xlsx`, one named sheet at a time, into the same rows a CSV yields.
+    Everything after this function is one parse for both, so there is still exactly one place a
+    column can be misread.
     """
+    suffix = Path(path).suffix.lower()
+    if suffix == ".xlsx":
+        return _xlsx.read_sheet(str(Path(path).expanduser()), sheet)
+    if suffix == ".xls":
+        raise _xlsx.WorkbookError(
+            "this is Excel's older binary .xls format, which cannot be read here — save it as "
+            ".xlsx (or CSV) from Excel and re-invoke"
+        )
     with Path(path).expanduser().open(newline="", encoding="utf-8-sig") as handle:
-        return list(csv.reader(handle))
+        return None, list(csv.reader(handle))
 
 
-def _parse_rows(header: list[str], body: list[list[str]]) -> dict[str, Any]:
+def _header_index(
+    rows: list[list[str]], *, workbook: bool, mapping: Optional[dict[str, str]] = None
+) -> Optional[int]:
+    """Which row is the header, or None when no row can be.
+
+    In a workbook it is the first row, within `_HEADER_SCAN_ROWS`, that names a question column — by
+    the same exact alias match `_columns` applies to any header, never a guess. A workbook often
+    opens with a title block, and `_parse` reports every row above the header rather than dropping
+    it unsaid.
+
+    In a CSV it is the first row with anything in it, as it always was. A CSV has no title block to
+    scan past, and scanning one would turn a headerless bank whose second question happens to read
+    "question" into a bank whose first question silently vanished.
+    """
+    if workbook:
+        for index, row in enumerate(rows[:_HEADER_SCAN_ROWS]):
+            if "query" in _columns(row, mapping):
+                return index
+        return None
+    for index, row in enumerate(rows):
+        if any(cell.strip() for cell in row):
+            return index if "query" in _columns(row, mapping) else None
+    return None
+
+
+def _parse_rows(
+    header: list[str],
+    body: list[list[str]],
+    first_row: int = 2,
+    mapping: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
     """The rows and the skips, in sheet order.
 
     Every row is accounted for in exactly one of the two lists. A sheet that comes back shorter
     than it went in, with nothing said about the difference, is how an import quietly loses a
     question nobody notices is missing.
     """
-    columns = _columns(header)
+    columns = _columns(header, mapping)
     rows: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     # Derived ids only. An explicit id that repeats is a real duplicate in the person's own sheet
@@ -269,11 +359,11 @@ def _parse_rows(header: list[str], body: list[list[str]]) -> dict[str, Any]:
     # here would turn a clash they need to see into two rows that both look fine.
     derived: dict[str, int] = {}
 
-    # From 2, not 1: `body` is everything after the header, and a header is mandatory, so the
-    # first data row is the sheet's second line. Numbering from 1 here would report a number one
-    # short of the row a person opens, which is worse than no number at all — they look at a line
-    # that holds a perfectly good question and cannot see what was wrong with it.
-    for number, row in enumerate(body, start=2):
+    # `first_row` is the sheet's own number for the row after the header — 2 when the header is the
+    # first line, later when a title sits above it. Numbering from anything else would report a
+    # number that is not the row a person opens, which is worse than no number at all: they look at
+    # a line holding a perfectly good question and cannot see what was wrong with it.
+    for number, row in enumerate(body, start=first_row):
         query = _cell(row, columns.get("query"))
         if not query:
             skipped.append({"row": number, "reason": "empty question"})
@@ -306,11 +396,14 @@ def _parse_rows(header: list[str], body: list[list[str]]) -> dict[str, Any]:
         "columns": header,
         "rows": rows,
         "skipped": skipped,
+        "unrecognized": _unrecognized(header, columns),
         "summary": {"parsed": len(rows), "skipped": len(skipped)},
     }
 
 
-def _parse(path: str) -> Optional[dict[str, Any]]:
+def _parse(
+    path: str, sheet: Optional[str] = None, mapping: Optional[dict[str, str]] = None
+) -> Optional[dict[str, Any]]:
     """The whole parse, or None having said on stderr why there is not one.
 
     Both refusals are the same event: no column can be identified as the question. Never a fallback
@@ -319,17 +412,30 @@ def _parse(path: str) -> Optional[dict[str, Any]]:
     the cells it actually read, because that list is the whole of what the person needs to rename a
     column and re-invoke.
 
-    An alias match decides whether row 0 is the header, and `_looks_like_header` only chooses which
+    An alias match decides which row is the header, and `_looks_like_header` only chooses which
     sentence to refuse with. That ordering is deliberate: the alias set is exact, so a cell folding
     to `question` is a header and nothing else, whereas reconcile's heuristic reads the SECOND cell
     and answers `False` for a one-column sheet — which is the shape a question bank most often has.
+    The header may sit below a title block, within `_HEADER_SCAN_ROWS`; a refusal still quotes the
+    first row with anything in it, because that is the line the person sees at the top of the sheet.
+
+    A workbook that cannot be used — several sheets and none named, a name that is no sheet, a file
+    that is not a workbook — is refused with `_xlsx`'s own sentence, which lists the sheets.
     """
-    all_rows = _read_rows(path)
-    if not all_rows:
+    try:
+        sheet_name, all_rows = _read_rows(path, sheet)
+    except _xlsx.WorkbookError as exc:
+        _stop(str(exc))
+        return None
+    if sheet is not None and sheet_name is None:
+        _warn("--sheet only applies to a workbook; this CSV holds one table and it was read")
+    filled = [row for row in all_rows if any(cell.strip() for cell in row)]
+    if not filled:
         _stop("this file is empty — the sheet needs a header row naming its question column")
         return None
-    header = all_rows[0]
-    if "query" not in _columns(header):
+    header_index = _header_index(all_rows, workbook=sheet_name is not None, mapping=mapping)
+    if header_index is None:
+        header = filled[0]
         cells = ", ".join(repr(cell.strip()) for cell in header)
         if reconcile._looks_like_header(header):
             _stop(
@@ -342,7 +448,43 @@ def _parse(path: str) -> Optional[dict[str, Any]]:
                 f"first row reads: {cells}. Add a header naming one column 'question'"
             )
         return None
-    payload = _parse_rows(header, all_rows[1:])
+    header = all_rows[header_index]
+    folded = {_fold(cell) for cell in header}
+    for field, named in (mapping or {}).items():
+        # A mapping onto a column that isn't there would parse as if the field were simply absent —
+        # the statements the person just said were in the sheet, dropped after they said so.
+        if _fold(named) not in folded:
+            cells = ", ".join(repr(cell.strip()) for cell in header if cell.strip())
+            _stop(
+                f"--column maps {field!r} to {named!r}, which is not a column here. Columns found: {cells}"
+            )
+            return None
+    payload = _parse_rows(
+        header, all_rows[header_index + 1 :], first_row=header_index + 2, mapping=mapping
+    )
+    # Which row the header was found on, and which sheet, so the confirmation table can say what was
+    # read — a workbook with the wrong tab named parses cleanly and is only caught by a person
+    # seeing its name.
+    payload["header_row"] = header_index + 1
+    if sheet_name is not None:
+        payload["sheet"] = sheet_name
+        # Every row above the header that had anything in it — usually a title. Not read, and said,
+        # because a row the parse passes over without a word is a question somebody can lose.
+        payload["above_header"] = [
+            {"row": index + 1, "text": next(cell.strip() for cell in row if cell.strip())[:120]}
+            for index, row in enumerate(all_rows[:header_index])
+            if any(cell.strip() for cell in row)
+        ]
+        if payload["above_header"]:
+            _warn(
+                f"{len(payload['above_header'])} row(s) above the header on row "
+                f"{header_index + 1} were not read — see `above_header` in the payload"
+            )
+    for column in payload["unrecognized"]:
+        _warn(
+            f"the column {column['column']!r} was not read but looks like `{column['could_be']}` — "
+            f'if it is, re-run with --column {column["could_be"]}="{column["column"]}"'
+        )
     if payload["skipped"]:
         # The counts are in the payload, but a person reading a terminal sees the summary line, and
         # a skip they never notice is a question missing from their dataset.
@@ -711,8 +853,14 @@ def _nearest_example(profile: str, question: str) -> Optional[dict]:
             # partial ranking can only under-report a departure, never invent one.
             break
         ranked = _sm_json(
-            "examples", str(root), "--area", str(name),
-            "--query", question, "--top-k", str(_CONVENTION_TOP_K),
+            "examples",
+            str(root),
+            "--area",
+            str(name),
+            "--query",
+            question,
+            "--top-k",
+            str(_CONVENTION_TOP_K),
             timeout_s=remaining,
         )
         # `high_confidence` is the CLI's own answer to "does this library cover this question",
@@ -1061,6 +1209,33 @@ def _add_write_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--description", help="the dataset's description")
 
 
+def _mapping(values: Sequence[str]) -> Optional[dict[str, str]]:
+    """`--column FIELD=HEADER` values as a field-to-header map, or None having said why not.
+
+    The map is the person's own answer to "is this the column you meant?" — it is never inferred —
+    so a value that is not plainly one known field and one header is refused rather than applied in
+    part.
+    """
+    mapping: dict[str, str] = {}
+    for value in values:
+        field, separator, header = value.partition("=")
+        field, header = field.strip().lower(), header.strip()
+        if not separator or not field or not header:
+            _stop(f'--column takes FIELD=HEADER, like --column sql="Warehouse SQL" — got {value!r}')
+            return None
+        if field not in _ALIASES:
+            _stop(
+                f"--column names {field!r}, which is not a field this import reads — one of: "
+                f"{', '.join(_ALIASES)}"
+            )
+            return None
+        if field in mapping:
+            _stop(f"--column maps {field!r} twice — name one column for it")
+            return None
+        mapping[field] = header
+    return mapping
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Run the verb the arguments name.
 
@@ -1068,7 +1243,10 @@ def _dispatch(args: argparse.Namespace) -> int:
     so that nothing else can invent one.
     """
     if args.cmd == "parse":
-        payload = _parse(args.csv)
+        mapping = _mapping(args.column)
+        if mapping is None:
+            return _CANNOT_START
+        payload = _parse(args.source, args.sheet, mapping)
         if payload is None:
             return _CANNOT_START
         print(json.dumps(payload, indent=2))
@@ -1106,8 +1284,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Author golden-dataset items from a spreadsheet.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    parse_cmd = sub.add_parser("parse", help="Read a question-bank CSV and print what it holds.")
-    parse_cmd.add_argument("--csv", required=True, help="the question bank to read")
+    parse_cmd = sub.add_parser(
+        "parse", help="Read a question bank — a CSV or an .xlsx sheet — and print what it holds."
+    )
+    # `--csv` stays as a second spelling of the same flag: every caller written before a workbook
+    # could be read passes it, and a CSV it names is still read exactly as before.
+    parse_cmd.add_argument(
+        "--file", "--csv", dest="source", required=True, help="the question bank to read"
+    )
+    parse_cmd.add_argument(
+        "--sheet",
+        help="for a workbook, the sheet holding the questions; required when it has more than one",
+    )
+    parse_cmd.add_argument(
+        "--column",
+        action="append",
+        default=[],
+        metavar="FIELD=HEADER",
+        help="read HEADER as FIELD (query, id, expected_value, sql, tags) — only on the person's say-so",
+    )
 
     import_cmd = sub.add_parser("import", help="Write confirmed parse rows as unverified items.")
     import_cmd.add_argument("--rows", required=True, help="the confirmed `parse` payload")

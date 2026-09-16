@@ -456,6 +456,43 @@ def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) ->
     return res
 
 
+def set_datasource_description(root: str | Path, description: str) -> "ApplyResult":
+    """Write the datasource's one-line `description` onto datasource.yaml (#327).
+
+    It is the line `list_datasources` shows an agent to route a question by — distinct from the
+    `datasource.md` narrative, which is context read after the datasource is chosen. Validated and
+    committed like `set_key_terminology`, with the prior file restored on a validation failure. Only
+    the first line is kept and it is stripped: a routing label that spans paragraphs stops being one."""
+    root = Path(root)
+    res = ApplyResult()
+    dsp = root / "datasource.yaml"
+    if not dsp.exists():
+        res.errors.append(f"no datasource.yaml at {dsp}")
+        return res
+    line = (description or "").strip().splitlines()[0].strip() if (description or "").strip() else ""
+    if not line:
+        res.errors.append("description is empty")
+        return res
+    prior = dsp.read_text(encoding="utf-8")
+    odoc = _load(dsp) or {}
+    odoc["description"] = line
+    _dump(dsp, odoc)
+    try:
+        vres = V.validate(load_datasource(root, include_rejected=True), cache=_VALIDATION_CACHE)
+        res.validated = vres.ok
+        if not vres.ok:
+            res.errors = vres.errors
+            dsp.write_text(prior, encoding="utf-8")
+            return res
+    except Exception as e:
+        res.errors.append(f"validation failed to run: {e}")
+        dsp.write_text(prior, encoding="utf-8")
+        return res
+    res.applied = ["description"]
+    res.committed = _git_commit(root, "datasource description")
+    return res
+
+
 _VALID_OPS = {"approve", "reject", "exclude", "include", "edit"}
 # exclude == reject; include == set unreviewed + clear sign-off (model-explorer verbs)
 

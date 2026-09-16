@@ -25,8 +25,8 @@ ignore = ["E402", "E702", "E731", "E741", "F841"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # No --cov in addopts on purpose: a bare `pytest` then works without pytest-cov installed
-# (IDE runners, quick local runs). The CI gate and `dev.py cover` pass --cov explicitly;
-# a --cov-fail-under floor will be added once the baseline is locked.
+# (IDE runners, quick local runs). The CI gate and `dev.py cover` pass --cov explicitly, and the
+# --cov-fail-under floor lives only on CI's py3.12 leg (.github/workflows/ci.yml).
 markers = [
   # Applied by the safety corpus's parametrizers, and counted by tests/e2e/conftest.py — both at
   # collection and again at session end, against a constant per marker. Registered so an unknown-mark
