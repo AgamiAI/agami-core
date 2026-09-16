@@ -729,10 +729,23 @@ def _judge_one(lit: dict[str, Any], column: dict[str, Any], results_dir: Path) -
         if literal in distinct:
             out["verdict"] = CONFIRMED
             out["note"] = "the value is one the column holds"
+        elif exists_n is not None and exists_n > 0:
+            # The list is text the CSV rendered and the literal is text the statement wrote, and one
+            # value can carry two spellings (`1` against `True`, `1.0` against `1`). The existence
+            # probe ran the statement's own predicate and counted rows: that is the measurement, so
+            # it decides, and the list only says how the column spells the value. `near_miss` stays
+            # empty on purpose: the report page prints "matches no rows; the data spells it …" from
+            # that field alone, and a confirmed value must not carry half of a defect.
+            out["verdict"] = CONFIRMED
+            spelt = _near_miss(distinct, literal)
+            out["note"] = (f"matches {exists_n} rows; the column's distinct values are spelled "
+                           "differently from the literal, so the spelling check did not decide"
+                           + (f"; the column spells it {spelt!r}" if spelt else ""))
         else:
             out["verdict"] = QUERY_DEFECT
             out["near_miss"] = _near_miss(distinct, literal)
-            out["note"] = "not a value the column holds"
+            out["note"] = "not a value the column holds" + (
+                "" if exists_n == 0 else "; the existence probe did not run" + probe_failed)
         return _with_suggestion(_graded_against_warehouse(out))
 
     if exists_n is not None:
