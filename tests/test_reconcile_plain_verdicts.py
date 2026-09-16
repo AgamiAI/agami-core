@@ -29,7 +29,7 @@ TOKENS = ("match_unverified", "expected_doubtful", "query_defect", "model_gap", 
 
 def test_every_status_has_a_sentence_and_no_sentence_is_a_token():
     assert set(reconcile._STATUS_WORDS) == {reconcile.MATCH, reconcile.MATCH_UNVERIFIED, reconcile.MISMATCH,
-                                            reconcile.EXPECTED_DOUBTFUL, reconcile.ERROR}
+                                            reconcile.EXPECTED_DOUBTFUL, reconcile.ERROR, reconcile.UNGRADED}
     for token, words in reconcile._STATUS_WORDS.items():
         assert "_" not in words, (token, words)
         assert token not in words, (token, words)

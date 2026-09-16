@@ -26,12 +26,18 @@ ITEM = {"row": 2, "label": "Orders since June", "question": "List all orders pla
 
 def test_the_grid_has_one_row_per_check_with_the_category_first_and_the_extra_token_highlighted():
     html = rr.render(title="t", profile="p", run="r", items=[ITEM, dict(ITEM, row=3)])
-    assert "function diffGrid(item, section)" in html and 'class="dg"' in html
+    assert "function diffGrid(item, section)" in html and "'<div class=\"dg' + (one ? ' one-query' : '')" in html
     # The header names the four columns in this order: mark, what was checked, yours, agami.
     assert '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>' in html
+    # And three when one query was written: a "yours" column on a row where the person wrote no SQL
+    # files agami's own facts under their name and leaves the other column empty on every row.
+    assert '<div class="h"></div><div class="h">checked</div><div class="h">agami’s query</div>' in html
     # One grid, four tracks: the alignment is structural, not two stacks side by side.
     css = html[html.index("<style>"):html.index("</style>")]
-    assert re.search(r"\.dg \{[^}]*grid-template-columns: 22px minmax\(120px, 170px\) minmax\(0, 1fr\) minmax\(0, 1fr\)", css)
+    # The key column is wide enough for its own labels: at 170px "enrollment.academic_year" wrapped
+    # as "academic_ye / ar", which is a column too narrow rather than a word that needed breaking.
+    assert re.search(r"\.dg \{[^}]*grid-template-columns: 22px minmax\(140px, 230px\) minmax\(0, 1fr\) minmax\(0, 1fr\)", css)
+    assert re.search(r"\.dg\.one-query \{ grid-template-columns: 22px minmax\(140px, 230px\) minmax\(0, 1fr\)", css)
     assert "(side === 'yours' ? 'del' : 'add')" in html and "class=\"tok renamed\"" in html
     assert "MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·', differs: '≠' }" in html
     assert "shown.map(diffCard)" in html
@@ -89,7 +95,9 @@ def test_the_second_reviews_findings_on_the_renderer():
     assert '"keep_allowed": false' in gated
     # the search box reads the grid, the sentence and the SQL; the key column wraps
     assert "(item.diff || []).flatMap(r => [r.key, r.note].concat(r.yours || [], r.agami || []))" in html and "item.sentence, item.sql_yours, item.sql_agami" in html
-    assert re.search(r"\.dg \.k \{[^}]*overflow-wrap: anywhere", html)
+    # `break-word`, not `anywhere`: the latter splits at any character, so a label that fits on two
+    # lines still came apart mid-token.
+    assert re.search(r"\.dg \.k \{[^}]*overflow-wrap: break-word", html)
     # every CSS variable the page uses is defined by the theme or the shared sheet
     css = html[html.index("<style>"):html.index("</style>")]
     assert set(re.findall(r"var\((--[a-z0-9-]+)", css)) - set(re.findall(r"(--[a-z0-9-]+)\s*:", css)) == set()
@@ -119,7 +127,7 @@ def test_the_result_chips_filter_and_replace_the_status_chips_when_labels_exist(
     item = dict(ITEM, result={"data": "differs", "query": "different", "label": "different answer", "unchecked": 0, "differs_in": ["columns"]}, fix="query", fix_words="fix your query")
     html = rr.render(title="t", profile="p", run="r", items=[item, dict(item, row=3)])
     for token in ("view.result.has((item.result || {}).label || '')", 'data-result="\' + esc(label) + \'"'.replace("\\", ""), "toggle(view.result, el.dataset.result)",
-                  "document.getElementById('result-row').hidden = Object.keys(labels).length === 0;", "view.result.clear();"):
+                  "document.getElementById('result-row').hidden = facets === 0 || DATA.items.length < 2;", "view.result.clear();"):
         assert token in html, token
 
 

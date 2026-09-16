@@ -115,16 +115,22 @@ def test_a_statement_agami_wrote_but_did_not_run_names_the_run_file(tmp_path):
     assert rec["status"] == "error" and rec["error"] == "agami's statement did not run: The database was unreachable."
 
 
-def test_a_missing_answer_file_and_an_ungraded_question_row_are_refused_by_name(tmp_path, capsys):
+def test_a_missing_answer_file_is_refused_by_name(tmp_path, capsys):
     run = _run(tmp_path)
     assert reconcile.main(["record", "--run-dir", str(run), "--row", "1"]) == 2
     assert "rows/1/agami-answer.json is missing" in capsys.readouterr().err
+
+
+def test_a_question_only_row_records_ungraded_and_takes_no_expected_value_from_the_run(tmp_path):
+    """agami answered and nothing in the run can say whether the answer is right, so the row waits
+    for a person rather than reading as an error. Its `expected` stays empty on purpose: agami's own
+    result becoming the expected value would compare agami against agami and always match."""
+    run = _run(tmp_path)
     _files(run, 2, agami_answer__json=json.dumps({"sql": "SELECT region FROM orders", "error": None}), actual__csv="region\nEU\n")
-    assert reconcile.main(["record", "--run-dir", str(run), "--row", "2"]) == 2
-    assert "grading page" in capsys.readouterr().err and not (run / "rows.jsonl").exists()
-    # The grade coming back is the answer the page gave.
-    rec = reconcile.record(run, 2, expected=7.0, graded="right")
-    assert rec["provenance"]["graded"] == "right" and rec["expected"] == 7.0 and rec["status"] == "error"  # the cell is text, not a number
+    rec = reconcile.record(run, 2)
+    assert rec["status"] == reconcile.UNGRADED
+    assert rec["expected"] is None and rec["statement"] is None and rec["error"] is None
+    assert rec["sql"] == "SELECT region FROM orders"
 
 
 def test_a_row_run_again_replaces_its_record_and_leaves_the_others(tmp_path):

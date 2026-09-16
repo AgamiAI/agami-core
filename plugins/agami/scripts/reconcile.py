@@ -1144,8 +1144,13 @@ def _part_subjects(part: str) -> list[str]:
             return [part[len(prefix):].split("=", 1)[0].lower()]
     if part.startswith("default_filter:"):
         # The receipt spells the table as the statement wrote it, schema and all; the mentions verb
-        # keys tables bare, so `main.orders` must read as `orders` or its caveats never attach.
-        return [part[len("default_filter:"):].split(":", 1)[0].lower().split(".")[-1]]
+        # keys tables bare, so `main.orders` must read as `orders` or its caveats never attach. The
+        # filter's own column is the subject worth quoting: a declared filter is about one column,
+        # and the table's description is what got quoted instead.
+        table, _, expr = part[len("default_filter:"):].partition(":")
+        table = table.lower().split(".")[-1]
+        column = re.match(r"\s*(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)", expr.lower())
+        return [f"{table}.{column.group(1)}"] if column else [table]
     for prefix in ("join:", "join_key:", "cardinality:", "dropped_rows:"):
         if part.startswith(prefix):
             label = part[len(prefix):].split("#", 1)[0]
@@ -1189,13 +1194,17 @@ def _attach_prose(rows: list[dict], mentions: dict | None) -> None:
         subjects = _part_subjects(row["part"])
         if not subjects:
             continue
+        # The words about the part's OWN subject, and no substitute. A part about a column used to
+        # fall back to its table, so a check on one missing filter was answered with three
+        # paragraphs describing the dataset: on-subject, and evidence about nothing. A part with no
+        # words of its own now shows none, and the section does not render for that row.
         prose: list[dict] = []
         for subject in subjects:
             prose.extend(by_about.get(subject, []))
-            if "." in subject:
-                prose.extend(by_about.get(subject.split(".", 1)[0], []))
         if prose:
-            row["evidence"]["prose"] = prose[:20]
+            # The page shows three. Keeping twenty here only grows an "and 34 more" line that tells a
+            # reader the row has evidence it is not being shown.
+            row["evidence"]["prose"] = prose[:3]
         flagged = [flags[subject] for subject in subjects if subject in flags]
         if flagged:
             row["evidence"]["prose_flags"] = flagged
@@ -1346,15 +1355,15 @@ def findings(run_dir: Path) -> dict:
             entry["evidence"].append({**evidence_base, "part": None,
                                       "note": "every check on the statement passed and agami's answer differed",
                                       "ledger": {}})
-        # A person graded the answer wrong and said why, with no statement to grade. The receipt
-        # could not say what was wrong, so the finding carries their words and nothing else.
-        person_grade = (record.get("provenance") or {}).get("graded")
-        if (person_grade == "wrong" and record.get("words") and not record.get("statement")
+        # A person said in words what was wrong with an answer nothing here could grade, and had no
+        # statement to offer instead. The receipt could not say what was wrong, so the finding
+        # carries their words and nothing else.
+        if (record.get("status") == UNGRADED and record.get("words") and not record.get("statement")
                 and record.get("question")):
             key = f"description:{_fold(record['question'])}"
             entry = grouped.setdefault(key, {"key": key, "kind": "description", "evidence": []})
             entry["evidence"].append({**evidence_base, "part": None,
-                                      "note": "the person graded the answer wrong; their words say why",
+                                      "note": "the person said this answer is wrong; their words say why",
                                       "ledger": {}})
             entry["words"] = record["words"]
     result = {
@@ -1377,6 +1386,10 @@ MATCH_UNVERIFIED = "match_unverified"
 MISMATCH = "mismatch"
 EXPECTED_DOUBTFUL = "expected_doubtful"
 ERROR = "error"
+# A question with no statement and no number behind it. agami answered; whether the answer is right
+# is a person's call, and until they make it the row is not an error, not a match and not a mismatch.
+# It used to be written as `error`, which said the run broke when nothing had.
+UNGRADED = "ungraded"
 
 # The words a status takes wherever a person reads one. The token stays on the wire, because
 # `rows.jsonl`, the keep gate and the `status` verb's choices are pinned to it and churning that
@@ -1391,6 +1404,7 @@ _STATUS_WORDS = {
     MISMATCH: "different answer",
     EXPECTED_DOUBTFUL: "different answer, and your query has a problem",
     ERROR: "could not compare",
+    UNGRADED: "not graded yet",
 }
 
 
@@ -1401,9 +1415,11 @@ _STATUS_WORDS = {
 # renders what it is given and keeps no glossary, so the card, the chips and the chat cannot drift
 # into calling one row three things.
 _STATUS_CLASS = {MATCH: "held", MATCH_UNVERIFIED: "defect", MISMATCH: "gap",
-                 EXPECTED_DOUBTFUL: "defect", ERROR: "noted"}
+                 EXPECTED_DOUBTFUL: "defect", ERROR: "noted", UNGRADED: "ask"}
+# `ask` takes the same grey as `noted` and keeps its own name and words: nothing is claimed about
+# the row either way, but "could not compare" and "your call" are not the same thing to read.
 _STATUS_CHIP_WORDS = {"held": "same answer", "defect": "your query needs a look", "gap": "different answer",
-                      "open": "could not check", "noted": "could not compare"}
+                      "open": "could not check", "noted": "could not compare", "ask": "your call"}
 
 
 def status_words(status: str | None) -> str:
@@ -1523,6 +1539,17 @@ def next_chunk(run_dir: Path, size: int = CHUNK_SIZE) -> dict:
 _STATE = {CONFIRMED: "held", QUERY_DEFECT: "defect", MODEL_GAP: "gap", UNRESOLVED: "open", NOTED: "noted"}
 _STATE_WORDS = {"held": "passed", "defect": "a mistake in your query", "gap": "a gap in the semantic model",
                 "open": "could not check", "noted": "noticed", "differs": "the two queries differ"}
+# The same words when the query the ledger graded is agami's. Only the two that name a writer change:
+# a gap in the semantic model is a gap whoever tripped on it.
+_STATE_WORDS_AGAMI = dict(_STATE_WORDS, defect="a mistake in agami's query")
+
+
+def _ledger_is_agamis(rec: dict) -> bool:
+    """Whose query the ledger graded. The run grades the query the row carries: the person's
+    statement when there is one, agami's own when there is not. So a row with a ledger and no
+    statement was graded on agami's query, and every word about a check names agami, not the
+    person, who wrote nothing here to be wrong about."""
+    return bool(rec.get("ledger")) and not rec.get("statement")
 _CLAIM_KEYS = {"tables": "tables read", "outputs": "selects", "filter_predicates": "filters", "date_window": "date window",
                "group_keys": "grouped by", "join_keys": "join keys", "ordering": "ordered by", "limit": "limit"}
 # The words a ledger part's grade takes on the page, by part family and grade. Every cell on the
@@ -1758,6 +1785,11 @@ def _agami_steps(rec: dict) -> list[str]:
 
 
 def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
+    # Whether one query was written or two, decided once. With one there is no second side to name
+    # anywhere: no answer-against-answer row, no "agami" column beside it, and a failing check names
+    # agami rather than the person, who wrote nothing here to be wrong about.
+    one_query = _ledger_is_agamis(rec) or (rec.get("status") == UNGRADED and not rec.get("statement"))
+    state_words = _STATE_WORDS_AGAMI if one_query else _STATE_WORDS
     rows: list[dict] = []
     words: list[str] = []
     # Which of the card's three sections a row belongs to. A reader asks three questions in order:
@@ -1884,9 +1916,13 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         note = None
         if state == "defect" and isinstance(delta, (int, float)) and not isinstance(delta, bool):
             note = f"agami is {delta * 100:+.1f}% from your number"  # `delta_pct` is a signed fraction (2d)
-        add("answer", state, yours_text, agami_text, note=note or rec.get("error") or steps_note,
-            yours_hi=[yours_text] if state == "defect" and yours_text else None,
-            agami_hi=[agami_text] if state == "defect" and agami_text else None)
+        # An "answer" row compares two answers. With one query there is no comparison to report, and
+        # the section already says what agami returned and shows five of the rows: a third telling,
+        # marked "could not check", reads as a failure where nothing failed.
+        if not one_query:
+            add("answer", state, yours_text, agami_text, note=note or rec.get("error") or steps_note,
+                yours_hi=[yours_text] if state == "defect" and yours_text else None,
+                agami_hi=[agami_text] if state == "defect" and agami_text else None)
 
     section = "sql"
     # 2 · what the two statements claim, side by side. The person's statement is the golden side.
@@ -1917,7 +1953,9 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
             yours_hi=_only(yours, agami) if state == "differs" else None, agami_hi=_only(agami, yours) if state == "differs" else None)
 
     section = "checks"
-    # 3 · every part of the person's statement the ledger graded, with agami's side where a receipt says.
+    # 3 · every part of the statement the ledger graded, with agami's side where a receipt says. When
+    # the statement graded IS agami's, reading its own receipt back into the agami column prints the
+    # same word twice and reads as two sides agreeing.
     filters, metrics = _receipt_filters(agami_receipt), _receipt_metrics(agami_receipt)
     for part in ledger_rows:
         pid = part.get("part", "")
@@ -1928,7 +1966,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
             continue
         state = _STATE.get(part.get("verdict"), "open")
         ev = part.get("evidence") or {}
-        yours = _PART_WORDS.get(fam, {}).get(state, _STATE_WORDS[state])
+        yours = _PART_WORDS.get(fam, {}).get(state, state_words[state])
         agami = None
         if fam == "default_filter":
             t, _, expr = pid.split(":", 1)[1].partition(":")
@@ -1953,7 +1991,8 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
         # The fit judgment is about the statement against its question, which is the SQL section's
         # subject, not a check of the statement against the semantic model.
         section = "sql" if fam == "question_fit" else "checks"
-        add(_part_key(pid), state, yours, agami, note=part.get("note") if state != "held" else None, family=fam)
+        add(_part_key(pid), state, yours, None if one_query else agami,
+            note=part.get("note") if state != "held" else None, family=fam)
     return rows, words
 
 
@@ -1964,10 +2003,15 @@ def _condense(rows: list[dict]) -> list[dict]:
     Three rules, each removing a line that is true and useless. A wide column having no declared
     value list is the DEFAULT state of every free-text column, not a finding: the probe reads the
     whole column (`SELECT DISTINCT city ... LIMIT 26`) and ignores the statement's own filters, so a
-    query pinned to one city still reported "more than 25 distinct values". A join that dropped
-    nothing is a sentence about nothing. And twelve `value x = y · exists` rows say one thing twelve
-    times. Anything that did not pass is kept, whole and in place: the point is to make the
-    exceptions visible, not to hide them under a count.
+    query pinned to one city still reported "more than 25 distinct values". Twelve
+    `value x = y · exists` rows say one thing twelve times. And a dropped-rows count earns no line at
+    all: it is counted over the whole table BEFORE the statement's own filters, so a query pinned to
+    one city and one year reports that most of the table has no partner, which is arithmetic about
+    the warehouse rather than anything about this query. It stays in `ledger.json` as a fact the run
+    states; it is not something a person can act on, so it is not on the card.
+
+    Anything that did not pass is kept, whole and in place: the point is to make the exceptions
+    visible, not to hide them under a count.
     """
     out: list[dict] = []
     for family, group in _by_family(rows):
@@ -1978,7 +2022,7 @@ def _condense(rows: list[dict]) -> list[dict]:
             if held:
                 out.append(_rollup(held, f"{len(held)} value list{'s' if len(held) > 1 else ''} declared"))
         elif family == "dropped_rows":
-            out.extend(r for r in group if not _dropped_nothing(r))
+            continue
         elif family == "literal" and group and all(r["state"] == "held" for r in group) and len(group) > 1:
             out.append(_rollup(group, f"{len(group)} values checked, all exist"))
         else:
@@ -2013,11 +2057,6 @@ def _rollup(group: list[dict], words: str) -> dict:
     return first
 
 
-def _dropped_nothing(row: dict) -> bool:
-    """A dropped-rows line that says no row was dropped. True of most joins, and worth no line."""
-    return bool(row.get("yours")) and str(row["yours"]).startswith("0 of ")
-
-
 def result_set_for_sample(rec: dict) -> dict:
     """The table comparison from a row record, or an empty dict for a scalar row."""
     comparison = rec.get("comparison")
@@ -2026,7 +2065,7 @@ def result_set_for_sample(rec: dict) -> dict:
     return {}
 
 
-def _sample(row_dir: Path, score: Any, limit: int = 5) -> dict | None:
+def _sample(row_dir: Path, score: Any, limit: int = 5, *, one_sided: bool = False) -> dict | None:
     """Up to five rows of the two results, side by side, read from the run's own CSVs.
 
     The CSVs are on disk already, so nothing here travels through `rows.jsonl` or the row record:
@@ -2039,8 +2078,19 @@ def _sample(row_dir: Path, score: Any, limit: int = 5) -> dict | None:
     disagree are the sample a reader wants.
     """
     yours, agami = _read_csv(row_dir / "statement.csv"), _read_csv(row_dir / "actual.csv")
-    if not yours or not agami:
+    if not agami:
         return None
+    if one_sided:
+        # The statement under test is agami's own, so `statement.csv` is agami's result under
+        # another name. Two columns of the same numbers is not a comparison, and showing one as
+        # yours would credit the person with a query they did not write.
+        yours = []
+    if not yours:
+        # A question on its own: only agami answered, and its rows are the whole of what there is to
+        # look at. The section exists to show the answer, so one side is not a reason to show nothing.
+        return {"pairs": [[c, c] for c in agami[0]], "rows": [], "shown": 0, "total": 0,
+                "agami_rows": [r for r in agami[1:limit + 1]], "agami_total": len(agami) - 1,
+                "aligned": False, "by_name": False, "only_yours": [], "only_agami": []}
     pairs = [p for p in ((score or {}).get("column_pairs") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
     if not pairs:
         # The comparator returns no pairs at all when the row counts differ: it decides that before
@@ -2099,7 +2149,7 @@ def _and_list(items: list[str]) -> str:
     return ", ".join(items[:-1]) + ", and " + items[-1]
 
 
-def _summaries(rows: list[dict], result: dict) -> dict:
+def _summaries(rows: list[dict], result: dict, rec: dict | None = None) -> dict:
     """One line per section, read while the section is closed.
 
     The rule every one of them follows: name the exception when there is one, a count when there is
@@ -2113,7 +2163,16 @@ def _summaries(rows: list[dict], result: dict) -> dict:
     data_rows = of("data")
     values = next((r for r in data_rows if r["key"] in ("values", "answer")), None)
     counts = next((r for r in data_rows if r["key"] == "rows"), None)
-    if result.get("data") == "could_not_compare":
+    not_graded = result.get("data") == "not_graded"
+    if not_graded:
+        # What agami returned, read from the record rather than from a diff row: with one query
+        # there is no row comparing two answers, and this line is where the count belongs.
+        answered = next((r for r in data_rows if r["key"] in ("answer", "rows")), None)
+        said = (answered or {}).get("agami")
+        if not said and rec is not None:
+            said, _single = _recorded_display(rec.get("recorded"), None)
+        data = f"agami answered: {said}" if said else "agami answered this one"
+    elif result.get("data") == "could_not_compare":
         # The label is a chip's worth of words; a summary is a sentence.
         data = {"same query, answer not compared": "The two queries match, but the answers weren't compared.",
                 "different query, answer not compared": "The two queries differ, and the answers weren't compared.",
@@ -2123,23 +2182,32 @@ def _summaries(rows: list[dict], result: dict) -> dict:
         data = (values or {}).get("yours") or (counts or {}).get("yours") or result.get("label") or "not compared"
     data = str(data).rstrip(".") + "."
     extra = next((r for r in data_rows if r["key"] == "columns" and r["state"] != "held"), None)
-    if extra and extra.get("yours_hi"):
+    if extra and extra.get("yours_hi") and not not_graded:
         n = len(extra["yours_hi"])
         data += f" Your query returns {_count_word(n)} more column{'s' if n > 1 else ''}."
 
     sql_rows = of("sql")
     differs = [r["key"] for r in sql_rows if r["state"] == "differs"]
     fit = next((r for r in sql_rows if r.get("family") == "question_fit"), None)
-    sql = ("The two queries differ in " + _and_list(differs) + ".") if differs else "The two queries ask for the same things."
+    # The product's name stays lowercase at the head of a sentence, so this lead-in is written with
+    # its own capitalisation rather than upper-cased from a variable.
+    whose = "agami's query" if not_graded else "Your query"
+    if not_graded:
+        sql = "Only agami wrote a query for this row."
+    else:
+        sql = ("The two queries differ in " + _and_list(differs) + ".") if differs else "The two queries ask for the same things."
     if fit and fit["state"] != "held":
-        sql = "Your query might not answer the question. " + sql
+        sql = f"{whose} might not answer the question. " + sql
 
     model_rows = of("checks")
     # A rolled-up line stands for the checks it replaced, so the count is of CHECKS, not of lines.
     passed = sum(r.get("rolled", 1) for r in model_rows if r["state"] == "held")
     failed = [r for r in model_rows if r["state"] not in ("held", "noted")]
     if not failed:
-        model = {0: "Nothing to check.", 1: "The check passed.", 2: "Both checks passed."}.get(
+        # Zero checks on a row nobody graded is not a clean row: nothing was checked, and the line
+        # says which of the two it is rather than letting a silence read as a pass.
+        nothing = "agami's query wasn't checked." if not_graded else "Nothing to check."
+        model = {0: nothing, 1: "The check passed.", 2: "Both checks passed."}.get(
             passed, f"All {passed} checks passed.")
     else:
         model = f"{passed} check{'' if passed == 1 else 's'} passed."
@@ -2161,16 +2229,20 @@ _RESULT_LABEL = {
     ("differs", "same"): "same query, different answer", ("differs", "different"): "different answer",
     ("differs", "not_comparable"): "different answer",
 }
-_FIX_WORDS = {"query": "fix your query", "semantic_model": "fix the semantic model", "examples": "add an example",
+# The action's name, never the verdict's. "not graded yet" as both put the same three words on the
+# card twice, once at 20px and once beside the very sentence explaining them.
+_FIX_WORDS = {"ungraded": "your call", "query": "fix your query", "semantic_model": "fix the semantic model", "examples": "add an example",
               "question": "reword the question", "ask_again": "ask agami again", "none": "nothing to fix"}
-_FIX_OWNER = {"query": "you", "semantic_model": "model", "examples": "agami", "question": "question", "ask_again": "agami", "none": "nothing"}
+_FIX_OWNER = {"ungraded": "nothing", "query": "you", "semantic_model": "model", "examples": "agami", "question": "question", "ask_again": "agami", "none": "nothing"}
 
+
+_NOT_GRADED = {"data": "not_graded", "query": "not_comparable", "label": "not graded yet",
+               "unchecked": 0, "differs_in": []}
 
 _ERROR_LEAD = {
     "agami_failed": "agami's query failed",
     "yours_failed": "your query did not run",
     "nothing_to_compare": "both queries returned no rows, so there is nothing to compare",
-    "no_ground_truth": "there is nothing to compare against; agami's answer is graded on the grading page",
     "unknown": "the run's files do not say why",
 }
 
@@ -2198,12 +2270,13 @@ def _error_cause(rec: dict) -> str | None:
         return "nothing_to_compare"
     if not rec.get("sql") or (rec.get("recorded") is None and rec.get("actual") is None and rec.get("error")):
         return "agami_failed"
-    if not rec.get("statement") and rec.get("expected") is None:
-        return "no_ground_truth"
     return "unknown"
 
 
 def _result(rec: dict, diff: list[dict]) -> dict:
+    if rec.get("status") == UNGRADED:
+        return dict(_NOT_GRADED)   # nothing was compared, so there is no verdict until a person gives one
+
     """The result in two facts read by code: whether the data matches, and whether the two queries are
     the same. `label` is the plain-word pill; `unchecked` counts the checks on your query that could
     not run, shown as a tag rather than a status of their own."""
@@ -2290,6 +2363,11 @@ def _values_agree_on_shared_columns(rec: dict) -> bool:
 
 
 def _fix(rec: dict, diff: list[dict], result: dict) -> str:
+    if rec.get("status") == UNGRADED:
+        # The same vocabulary as every other row, supplied by the person instead of computed. Until
+        # they choose, the card says so rather than suggesting an action nothing has established.
+        return "ungraded"
+
     """What to change, in this order: the query the ledger proved wrong, the gap the ledger measured,
     the examples when agami wrote a different query with nothing wrong behind it, the question when it
     was read differently, agami again when it failed, nothing when both facts match."""
@@ -2300,7 +2378,7 @@ def _fix(rec: dict, diff: list[dict], result: dict) -> str:
         cause = _error_cause(rec)
         if cause == "yours_failed":
             return "semantic_model" if any(p.get("verdict") == MODEL_GAP for p in parts) else "query"
-        if cause in ("nothing_to_compare", "no_ground_truth"):
+        if cause == "nothing_to_compare":
             return "none"
         return "ask_again"
     if rec.get("status") == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
@@ -2380,12 +2458,15 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
             todo = ["Run the row again."]
         else:
             change, todo = list(_FIX_CHANGE["ask_again"][0]), list(_FIX_CHANGE["ask_again"][1])
+    elif fix == "ungraded":
+        # The action on this row is the person's decision, so the text points at it rather than
+        # naming a change nothing measured. What the checks did find is already in the verdict.
+        change = ["Read agami's answer and the query behind it, then say what to do below.",
+                  "If the answer is right, add an example so agami writes it this way next time."]
+        todo = ["Decide whether agami's answer is right."]
     elif fix == "none" and cause == "nothing_to_compare":
         change = ["Both queries returned no rows, so there is nothing to compare. Widen the date window or the filters in your query, then run this row again."]
         todo = ["Your query: widen the window or the filters, then re-run."]
-    elif fix == "none" and cause == "no_ground_truth":
-        change = ["Grade agami's answer on the grading page; there is nothing to compare it against."]
-        todo = ["Grade the answer on the grading page."]
     else:
         change, todo = list(_OWNER_CHANGE["keep"][0]), list(_OWNER_CHANGE["keep"][1])
     if fit and fit.get("verdict") != CONFIRMED and fit.get("note") and fix != "question":
@@ -2413,7 +2494,7 @@ def _owner(rec: dict, diff: list[dict]) -> str:
         cause = _error_cause(rec)
         if cause == "yours_failed":
             return "model" if any(p.get("verdict") == MODEL_GAP for p in parts) else "you"
-        return "nothing" if cause in ("nothing_to_compare", "no_ground_truth") else "agami"
+        return "nothing" if cause == "nothing_to_compare" else "agami"
     if status == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
         return "you"
     if any(p.get("verdict") == MODEL_GAP for p in parts):
@@ -2485,6 +2566,17 @@ def _one_sentence(text: Any, cap: bool = True) -> str:
 
 def _sentence(rec: dict, diff: list[dict]) -> str:
     status = rec.get("status")
+    if status == UNGRADED:
+        # The person decides what measurement cannot: whether this answer is right. What measurement
+        # CAN say about the query behind it belongs in the same breath, so the call is an informed one.
+        said = "agami answered this one. Whether the answer is right is your call."
+        checks = [r for r in diff if r.get("section") == "checks"]
+        short = [r["key"] for r in checks if r["state"] not in ("held", "noted")]
+        if short:
+            return said + f" The checks on agami's query didn't all pass: {_and_list(short)}."
+        if checks:
+            return said + " Every check on agami's query passed."
+        return said
     red = [r["key"] for r in diff if r["state"] in ("defect", "differs") and r["key"] not in ("answer", "rows", "values")]
     mistakes = _measured_mistakes(rec)
     open_ = [r["key"] for r in diff if r["state"] == "open"]
@@ -2587,8 +2679,8 @@ def report_items(run_dir: Path) -> list[dict]:
         # Every verdict above read the full diff; what follows is display only. Condensing first
         # would let a rolled-up line change a result, which is the one thing it must never do.
         diff = _condense(diff)
-        summaries = _summaries(diff, result)
-        sample = _sample(run_dir / "rows" / str(n), result_set_for_sample(rec))
+        summaries = _summaries(diff, result, rec)
+        sample = _sample(run_dir / "rows" / str(n), result_set_for_sample(rec), one_sided=_ledger_is_agamis(rec))
         prov = rec.get("provenance") or {}
         shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
         source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
@@ -2609,6 +2701,9 @@ def report_items(run_dir: Path) -> list[dict]:
             "delta_pct": (round(delta * 100, 1) if isinstance(delta, (int, float)) and not isinstance(delta, bool) else None),
             "single_cell": bool(single), "owner": owner, "keep_allowed": keep_ok, "diff": diff,
             "result": result, "fix": fix, "fix_words": _FIX_WORDS[fix], "prefill": prefill,
+            # Whether one query was written or two. The page's grid is two value columns, "yours"
+            # beside "agami"; with one query there is no second side to put anywhere, and no "yours".
+            "one_query": _ledger_is_agamis(rec) or (rec.get("status") == UNGRADED and not rec.get("statement")),
             "sentence": _sentence(rec, diff) + (" " + clause if clause else ""),
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
@@ -2659,16 +2754,17 @@ def _optional_json(path: Path) -> Any:
     return _load_json(path) if path.exists() else None
 
 
-def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str | None = None,
-           expected: Any = None, graded: str | None = None) -> dict:
+def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str | None = None) -> dict:
     """The row record Phase 2d writes, built from the row directory's files and appended to
     `rows.jsonl` (replacing an earlier record for the same row). Nothing in it is typed by the
     session: the question and the statement come from `intake.json`, agami's statement from
     `agami-answer.json`, the two results from their CSVs (one cell, or the shape), the comparison from
     `diff.json` or `comparison.json`, the grades from `ledger.json`, the claims from `claims.json`.
 
-    A question-only row that nobody has graded yet is refused: it waits for the grading page (Phase
-    2.5) and is never written as `error`. `expected` and `graded` are that page's answer coming back.
+    A question-only row is recorded `ungraded`: agami answered and nothing here can say whether the
+    answer is right, so the row waits for a person on the report page (Phase 2.5) and is never
+    written as `error`. Its expected value never comes from the run: a value the run supplied would
+    be agami's own answer coming back as its own answer key.
     """
     intake = _load_json(run_dir / "intake.json")
     rows = intake.get("rows") if isinstance(intake, dict) else intake
@@ -2691,7 +2787,7 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
     recorded, actual_cell = _csv_shape(row_dir / "actual.csv")
     statement = base.get("statement") or None
     statement_recorded, statement_cell = _csv_shape(row_dir / "statement.csv") if statement else (None, None)
-    exp = expected if expected is not None else base.get("expected")
+    exp = base.get("expected")
     if exp is None and statement and isinstance(statement_cell, (int, float)) and not isinstance(statement_cell, bool):
         exp = float(statement_cell)  # Phase 1.5f: the statement's own result is the expected value
     ledger = _optional_json(row_dir / "ledger.json")
@@ -2724,16 +2820,14 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         comparison = {"scalar": scalar}
         match, delta, delta_pct = scalar["match"], scalar["delta"], scalar["delta_pct"]
     elif exp is None and statement is None:
-        raise RecordError(f"row {row} has nothing to compare against; grade agami's answer on the grading page "
-                          "(Phase 2.5) before writing its record")
+        pass   # a question on its own: agami answered, and the person grades it on the report
     else:
         error = ("the two results are tables, and they were not compared"
                  if exp is None or actual is None else "the two values could not be compared")
-    status = row_status(match, ledger_verdict)
+    status = UNGRADED if (match is None and error is None and exp is None and statement is None) \
+        else row_status(match, ledger_verdict)
     is_error = status == ERROR
     provenance = dict(base.get("provenance") or {})
-    if graded:
-        provenance["graded"] = graded
     rec = {
         "row": row, "label": base.get("label"), "question": base.get("question"),
         "expected": exp, "actual": None if is_error else actual, "delta_pct": None if is_error else delta_pct,
@@ -2857,8 +2951,6 @@ def main(argv: list[str] | None = None) -> int:
     p_record.add_argument("--row", required=True, type=int)
     p_record.add_argument("--tolerance", default="0.01", help="the scalar diff's tolerance when no diff.json was written")
     p_record.add_argument("--report-path", default=None, dest="report_path", help="the chart report for agami's statement, when there is one")
-    p_record.add_argument("--expected", default=None, help="the grading page's answer for a question-only row (Phase 2.5, a right grade)")
-    p_record.add_argument("--graded", default=None, choices=["right", "wrong", "unsure"], help="the grade the person gave on the grading page")
 
     p_check = sub.add_parser("check-run", help="Whether the run directory and its report page agree; exit 4 with the list when not.")
     p_check.add_argument("--run-dir", required=True, dest="run_dir")
@@ -2900,8 +2992,7 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = Path(args.run_dir).expanduser()
         try:
             rec = record(run_dir, args.row, tolerance=parse_value(args.tolerance) or 0.01,
-                         report_path=args.report_path, expected=parse_value(args.expected) if args.expected is not None else None,
-                         graded=args.graded)
+                         report_path=args.report_path)
         except RecordError as exc:
             print(f"reconcile record: {exc}", file=sys.stderr)
             return 2

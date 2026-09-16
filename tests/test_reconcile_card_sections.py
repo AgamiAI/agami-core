@@ -68,11 +68,15 @@ def test_a_value_list_that_is_actually_missing_is_kept():
     assert len(reconcile._condense(rows)) == 1
 
 
-def test_a_join_that_dropped_nothing_earns_no_line_and_one_that_dropped_rows_does():
+def test_a_dropped_rows_count_earns_no_line_whatever_it_counted():
+    """ACE-150. The count is taken over the whole table BEFORE the statement's own filters, so a
+    query pinned to one city and one year reports that most of the table has no partner. That is
+    arithmetic about the warehouse, not a fact about this query, and nobody can act on it. It stays
+    in `ledger.json`, where the run states it; it is not on the card."""
     nothing = [_row("rows dropped by join a to b", "noted", "checks", "dropped_rows", yours="0 of 4,000 a rows")]
     some = [_row("rows dropped by join a to b", "noted", "checks", "dropped_rows", yours="63,931 of 269,158 a rows")]
     assert reconcile._condense(nothing) == []
-    assert len(reconcile._condense(some)) == 1
+    assert reconcile._condense(some) == []
 
 
 def test_twelve_value_checks_that_all_passed_become_one_counted_line():
@@ -304,3 +308,56 @@ def test_only_the_verdict_is_set_at_the_largest_size():
     css = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-pages.css").read_text(encoding="utf-8")
     assert css.count("font-size: var(--t-verdict)") == 1
     assert ".card .vl { font-size: var(--t-verdict)" in css
+
+
+def test_one_type_scale_reaches_every_page_that_shares_the_css():
+    """ACE-150. The scale lives in the shared CSS so the report and the intake page cannot drift
+    apart, and it only holds if no page sets a size of its own and nothing falls back to the
+    browser's 16px default. `h2` and `body` were both off the scale by omission."""
+    shared = REPO_ROOT / "plugins" / "agami" / "shared"
+    css = (shared / "reconcile-pages.css").read_text(encoding="utf-8")
+
+    tokens = set(re.findall(r"--t-([a-z]+):", css))
+    assert tokens == {"micro", "body", "title", "verdict", "page", "data"}
+    # Every size the CSS sets is one of those tokens; a literal px would be a seventh size.
+    for declared in re.findall(r"font-size:\s*([^;]+);", css):
+        assert declared.strip().startswith("var(--t-"), declared
+
+    # The base size and the two headings are set, so nothing inherits 16px by accident.
+    assert "body { margin: 0; font-size: var(--t-body);" in css
+    assert "h1 { font-size: var(--t-page); margin: 0; }" in css
+    assert "h2 { font-size: var(--t-title); margin: 0; }" in css
+
+    # Neither page carries a size of its own: the scale is the CSS's to change, in one place.
+    for name in ("reconcile-report-template.html", "reconcile-intake-template.html"):
+        assert "font-size" not in (shared / name).read_text(encoding="utf-8"), name
+
+
+def test_one_query_written_means_one_value_column_and_one_sql_pane():
+    """ACE-150. The grid's two value columns are "yours" beside "agami". On a row where only agami
+    wrote a query there is no "yours": filing agami's own facts under that heading told a reader
+    their SQL answered the question when they wrote none, and left a dead column on every row."""
+    tpl = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-report-template.html").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-pages.css").read_text(encoding="utf-8")
+    assert "const one = !!item.one_query;" in tpl
+    assert '<div class="h">agami’s query</div>' in tpl
+    assert ".dg.one-query { grid-template-columns: 22px minmax(140px, 230px) minmax(0, 1fr); }" in css
+    # The value shown is the graded side, whichever field carried it.
+    assert "cell(one ? (r.yours ?? r.agami) : r.yours" in tpl
+    # A SQL pane reading "(none)" is a placeholder shown as content; one query renders one pane.
+    assert "if (!item.sql_yours) return '<div class=\"sql1\">' + agami + '</div>';" in tpl
+    assert "esc(item.sql_yours || '(none)')" not in tpl
+
+
+def test_a_lone_sql_pane_wraps_and_scrolls_inside_its_own_box():
+    """ACE-150. Every pane rule was scoped to `.sql2`, so the one-pane layout got the browser's
+    `white-space: pre` and one long statement widened the PAGE to 3172px instead of scrolling in its
+    own box. Both layouts share the pane's styling."""
+    css = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-pages.css").read_text(encoding="utf-8")
+    pane = re.search(r"\.sql1 pre, \.sql2 pre \{([^}]*)\}", css)
+    assert pane, "the two layouts must share one pane rule"
+    for prop in ("white-space: pre-wrap", "overflow-wrap: anywhere", "max-height: 260px", "overflow: auto"):
+        assert prop in pane.group(1), prop
+    assert ".sql1 b, .sql2 b {" in css
+    # The grid is the two-pane layout's alone; the shared margin is not.
+    assert ".sql2 { display: grid;" in css and ".sql1, .sql2 { margin-top: 6px; }" in css

@@ -10,13 +10,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-import render_reconcile_grades as rg  # noqa: E402
 import render_reconcile_intake as ri  # noqa: E402
 import render_reconcile_report as rr  # noqa: E402
 
 CARDS = [{"row": 1, "question": "How many orders were placed?", "status": "match", "owner": "keep"},
          {"row": 2, "question": "What was total revenue?", "status": "mismatch", "owner": "model", "read": ["Your SQL counts cancelled orders."]}]
-GRADES = [{"row": 1, "question": "What is the refund rate?", "answer": "3.1%"}, {"row": 2, "question": "How many customers?", "answer": "412"}]
 INTAKE = [{"row": 1, "shape": "a", "question": "q1"}, {"row": 2, "shape": "c", "label": "Orders", "expected": "12"}]
 
 COMMON = ('id="filters"', 'id="q"', 'id="showing"', 'id="clear"', "data-filter=", "function visible()", "'Showing ' +")
@@ -38,28 +36,12 @@ def test_the_report_page_filters_by_status_owner_and_word_and_the_block_reads_ev
     assert "Your decisions on the hidden rows are kept." in html
 
 
-def test_the_grading_page_filters_by_grade_state_and_word_and_keeps_its_pinned_tokens():
-    html = rg.render(title="t", profile="p", run="r", items=GRADES)
-    _assert_bar(html, ("GRADE_WORDS", "ungraded"))
-    for token in ("['right', 'wrong', 'unsure']", 'type="radio"', 'data-field="sql"', 'data-field="words"', "hidden = e.target.value !== 'wrong'"):
-        assert token in html, token
-    graded = html[html.index("function graded()"):html.index("function renderSummary()")]
-    assert "visible()" not in graded
-    assert "document.getElementById('filters').hidden = DATA.items.length < 2" in html
-
-
 def test_the_intake_page_filters_by_shape_and_word_and_the_block_reads_every_row():
     html = ri.render(title="t", profile="p", run="r", items=INTAKE)
     _assert_bar(html)
     decided = html[html.index("function decided()"):html.index("function renderSummary()")]
     assert "visible()" not in decided and "DATA.items.map" in decided
     assert "Your edits on the hidden rows are kept." in html
-
-
-def test_grading_a_card_updates_it_in_place_so_a_filter_does_not_hide_the_boxes():
-    html = rg.render(title="t", profile="p", run="r", items=GRADES)
-    body = html[html.index("function onGrade(e)"):html.index("function onText(e)")]
-    assert "renderItems()" not in body and "chips();" in body and "hidden = e.target.value !== 'wrong'" in body
 
 
 def test_each_filter_row_on_the_report_page_is_labelled():

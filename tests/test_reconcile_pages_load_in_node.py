@@ -16,7 +16,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-import render_reconcile_grades as rg  # noqa: E402
 import render_reconcile_intake as ri  # noqa: E402
 import render_reconcile_report as rr  # noqa: E402
 
@@ -66,7 +65,6 @@ def test_the_report_page_loads_with_result_and_fix_items():
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
-def test_the_grading_and_intake_pages_load():
-    _run(rg.render(title="t", profile="p", run="r", items=[{"row": 1, "question": "q", "answer": "3.1%", "signals": ["joined a to b"]}, {"row": 2, "question": "q2", "answer": "4"}]))
+def test_the_intake_page_loads():
     _run(ri.render(title="t", profile="p", run="r", items=[{"row": 1, "shape": "a", "question": "q", "file": "f.txt", "line": 1},
                                                             {"row": 2, "shape": "d", "label": "Revenue", "expected": "$4.2M", "has_statement": True, "statement_preview": "SELECT 1"}]))

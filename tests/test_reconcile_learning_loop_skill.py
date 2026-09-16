@@ -330,8 +330,10 @@ def test_the_run_works_five_rows_at_a_time_and_resumes_from_its_checkpoint():
     assert '--out "<artifacts_dir>/local/reconcile/<ts>/intake.json"' in intake
     beats = _between(SKILL, "### 3a.5", "### 3b")
     assert "Render it after every chunk" in beats and "never what the block sends" in beats
-    grading = _between(SKILL, "### 2.5 —", "## Phase 3")
-    assert "filters by grade state" in grading
+    # The questions branch ends on the same page every other row does, so there is no second page
+    # with filters of its own to pin here.
+    questions = _between(SKILL, "### 2.5 —", "## Phase 3")
+    assert "Report it on the reconciliation report" in questions
 
 
 def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_through_intake():

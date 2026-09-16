@@ -60,6 +60,13 @@ DEFECT = {"row": 3, "label": "Delivered share", "question": "What share of order
 ERROR = {"row": 4, "label": None, "question": "Which category sold the most?", "expected": None, "actual": None, "status": "error", "error": "Could not extract a single scalar from the result.",
          "provenance": {"shape": "a", "file": "questions.txt", "line": 1}}
 
+# The questions branch: agami answered, nobody supplied a statement or a number, and the run has
+# nothing that could decide whether the answer is right.
+UNGRADED_ROW = {"row": 1, "label": None, "question": None, "expected": None, "actual": None, "match": None,
+                "status": "ungraded", "error": None, "statement": None, "sql": None, "recorded": None,
+                "ledger": None, "ledger_verdict": None, "comparison": None,
+                "provenance": {"shape": "a", "file": "questions.txt", "line": 1}}
+
 
 def test_a_scalar_match_becomes_held_rows_a_keep_owner_and_a_one_line_sentence(tmp_path):
     items = reconcile.report_items(_run(tmp_path, [SCALAR_MATCH]))
@@ -252,7 +259,8 @@ def test_the_remaining_row_shapes_a_failed_statement_a_wide_delta_and_the_join_f
                                    "agami": "could not read",
                                    "note": "the window could not be read from one of the two queries"}
     assert rows["one row per key, orders to payments"]["yours"] == "one row per key on orders"
-    assert rows["rows dropped by join orders to payments"]["yours"] == "12 of 4,000 orders rows" and rows["rows dropped by join orders to payments"]["state"] == "noted"
+    # The dropped-rows count is graded in the ledger and never reaches the card (ACE-150).
+    assert not any(k.startswith("rows dropped by join") for k in rows)
     assert item["delta_pct"] == 450.0 and item["owner"] == "you"
 
 
@@ -393,22 +401,19 @@ def test_each_error_cause_names_the_side_that_failed(tmp_path):
                  statement_recorded={"columns": ["n"], "row_count": 0}, error=None,
                  comparison={"result_set": {"status": "unscored", "accuracy": None, "reason": "both result sets are empty, so the comparison would check no value",
                                             "golden_row_count": 0, "generated_row_count": 0}})
-    question_only = dict(ERROR, row=5, sql="SELECT ...", recorded={"columns": ["n"], "rows": [[3]]}, error=None)
     unknown = dict(ERROR, row=6, statement="SELECT ...", sql="SELECT ...", recorded={"columns": ["n"], "rows": [[3]]}, error="boom\nmore")
-    items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [yours, scope, agami, empty, question_only, unknown]))}
+    items = {i["row"]: i for i in reconcile.report_items(_run(tmp_path, [yours, scope, agami, empty, unknown]))}
     got = {r: (i["fix"], i["owner"], i["sentence"]) for r, i in items.items()}
     assert got == {
         1: ("query", "you", "This row could not be compared: your query did not run: relation orders_v does not exist."),
         2: ("semantic_model", "model", "This row could not be compared: your query did not run: refused: table_scope."),
         3: ("ask_again", "agami", "This row could not be compared: agami's query failed: the generator's answer did not carry a statement this run could read."),
         4: ("none", "nothing", "This row could not be compared: both queries returned no rows, so there is nothing to compare."),
-        5: ("none", "nothing", "This row could not be compared: there is nothing to compare against; agami's answer is graded on the grading page."),
         6: ("ask_again", "agami", "This row could not be compared: the run's files do not say why: boom."),
     }
     assert items[1]["change"][0] == "Your query did not run: relation orders_v does not exist. Fix it, then run this row again."
     assert items[3]["change"][0].startswith("Ask the question again in other words; agami's query failed")
     assert items[4]["change"][0].startswith("Both queries returned no rows")
-    assert items[5]["change"][0].startswith("Grade agami's answer on the grading page")
     assert items[6]["change"][0].startswith("Run this row again")
     assert all(i["result"]["label"] == "could not compare" for i in items.values())
 
@@ -438,3 +443,33 @@ def test_several_agami_statements_are_listed_and_the_rows_check_says_which_one_w
     answer = next(r for r in items[1]["diff"] if r["key"] == "answer")
     assert answer["note"] == "agami ran 2 queries; the last one's result is compared"
     assert items[2]["sql_agami_steps"] == [] and next(r for r in items[2]["diff"] if r["key"] == "answer")["note"] is None
+
+
+def test_a_question_only_row_shows_agamis_answer_its_query_and_the_checks_on_it(tmp_path):
+    """ACE-150. The person is being asked whether agami's answer is right, so the card has to show
+    the answer, the query behind it, and what the checks made of that query. A ledger on a row with
+    no statement of the person's graded agami's query, and the words follow from that."""
+    row = dict(UNGRADED_ROW, row=1, question="Which regions do we sell to?", sql="SELECT region FROM orders",
+               recorded={"columns": ["region"], "row_count": 3},
+               ledger={"rows": [_part("runs", "confirmed", note="the statement ran"),
+                                _part("join:orders-customers", "confirmed", note="the declared key"),
+                                _part("default_filter:orders:status", "model_gap", note="declared and not applied")],
+                       "verdict": "model_gap", "counts": {}})
+    run = _run(tmp_path, [row])
+    (run / "rows" / "1").mkdir(parents=True, exist_ok=True)
+    (run / "rows" / "1" / "actual.csv").write_text("region\nEU\nUS\nAPAC\n", encoding="utf-8")
+    item = reconcile.report_items(run)[0]
+
+    assert item["result"]["label"] == "not graded yet" and item["fix"] == "ungraded"
+    assert item["sentence"].startswith("agami answered this one. Whether the answer is right is your call.")
+    assert "The checks on agami's query didn't all pass" in item["sentence"]
+    assert item["summaries"]["sql"] == "Only agami wrote a query for this row."
+    assert "check" in item["summaries"]["checks"] and "Nothing of yours" not in item["summaries"]["checks"]
+    # The Data section shows agami's rows: one side, capped, with nothing of the person's beside it.
+    assert item["sample"]["agami_rows"] == [["EU"], ["US"], ["APAC"]]
+    assert item["sample"]["agami_total"] == 3 and item["sample"]["rows"] == [] and item["sample"]["total"] == 0
+    # The action is the person's decision, never a change nothing measured.
+    assert item["todo"] == ["Decide whether agami's answer is right."]
+    # One query means one side: reading agami's own receipt into the agami column would print the
+    # same word twice and read as two sides agreeing with each other.
+    assert all(r.get("agami") is None for r in item["diff"] if r.get("section") == "checks")

@@ -50,7 +50,7 @@ Same checks as agami-query / agami-connect:
    | `A screenshot of the dashboard` | Metabase, Power BI, Tableau, Looker, a spreadsheet: whatever you have. I read the tiles and confirm what I read with you before anything runs. |
    | `A CSV or an export` | Two columns, label and value, or the template I can write for you (label, value, sql, question). |
    | `The SQL you trust` | One or more statements, pasted or in a `.sql` file. Each is graded part by part before anything is compared. |
-   | `A list of questions` | One per line. Agami answers each and you grade the answers on one page. |
+   | `A list of questions` | One per line. Agami answers each, the run checks the query behind each answer, and you decide on the report page. |
 
    **When they pick the CSV and have nothing to hand, write the template and hand off**, the way connect writes `credentials.example`: with the Write tool, `<artifacts_dir>/local/reconcile/inbox/reconcile.example.csv`:
    ```
@@ -95,7 +95,7 @@ If the SQL was pasted, write it to `/tmp/agami-reconcile-<ts>.sql` with the Writ
 
 ### Questions branch — a list of questions and no answers
 
-Write the lines to `/tmp/agami-reconcile-<ts>.txt` with the Write tool, one question per line. These rows carry no expected value: Phase 2 asks agami each question, and until the person grades the answers there is nothing to compare against. Say so up front: *"No answers to compare with, so I'll ask agami each one and you grade what comes back."*
+Write the lines to `/tmp/agami-reconcile-<ts>.txt` with the Write tool, one question per line. These rows carry no expected value: Phase 2 asks agami each question, and until the person grades the answers there is nothing to compare against. Say so up front: *"No answers to compare with, so I'll ask agami each one, check the query behind each answer, and you decide from there."*
 
 ### 1n — Normalize every input into evidence rows
 
@@ -110,7 +110,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" intake --file <path> [--file <
 
 Create the run directory `<artifacts_dir>/local/reconcile/<ts>/`, and `rows/<n>/` under it for every row that carries a statement.
 
-**Show what was read before anything runs, and hand off**, the way `agami-connect` shows the prune page before it introspects. The intake page lists every row: the question we will ask agami (read from a label, and editable), the number expected, whether SQL came with it, and which file and line it came from. The person fixes a question we read wrong or unticks a row, generates the block, and pastes it back. It is the same design language and the same paste-back grammar as the report and grading pages.
+**Show what was read before anything runs, and hand off**, the way `agami-connect` shows the prune page before it introspects. The intake page lists every row: the question we will ask agami (read from a label, and editable), the number expected, whether SQL came with it, and which file and line it came from. The person fixes a question we read wrong or unticks a row, generates the block, and pastes it back. It is the same design language and the same paste-back grammar as the report page.
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_intake.py" --title "What we read · <profile>" \
@@ -200,29 +200,18 @@ The SQL you capture here is the one that lands in the row record (Phase 2d) — 
 
 If the SQL fails OR the result isn't a single scalar (e.g., the LLM-generated question returned a multi-row table), capture an error: `Could not extract a single scalar from the result.` These rows show up as `error` status in the report. One case is different: a row that carries the person's `statement` may legitimately return a table. Keep `recorded` as `{"columns": [...], "rows": []}` for it (the columns, never the rows), write the result CSV to `rows/<n>/actual.csv`, and let Phase 2e compare it as a table.
 
-### 2.5 — Grade the answers when there is nothing to compare against
+### 2.5 — Check agami's query when there is nothing to compare against
 
-Only for rows that carry a question and neither a statement nor an expected value (the questions branch). Agami has answered each one in 2b and there is no number to diff against, so the person grades. **One page, one block back. Never one prompt per answer**: a thirty-question list is not thirty interruptions, and the pattern across answers is the thing a question list is for. The page filters by grade state and by a word in the question; a filter narrows what is shown, never what the block sends.
+Only for rows that carry a question and neither a statement nor an expected value (the questions branch). Agami has answered each one in 2b and there is no number to diff against. **Two things are true of such a row, and the phase does one each.** Whether the answer is right is the person's call, because nothing here can measure it. Whether the query behind it holds up against the semantic model is not a matter of opinion, and this phase measures it.
 
-1. **Build the items file** with the Write tool, one entry per graded row: `{"row": <n>, "question": "...", "answer": "<the one recorded cell, or 'a table of N rows, columns a, b'>", "signals": ["<one line per receipt fact worth knowing: an unreviewed join or metric, an AI-written description the answer leaned on, a fan-out finding>"], "report_path": "<the receipt>"}`. Never a result row: the answer is one cell or a shape.
-2. **Render and open the page:**
-   ```bash
-   python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_grades.py" --title "Grade agami's answers · <profile>" \
-     --profile <profile> --run <ts> --items-file /tmp/agami-reconcile-grade-items-<ts>.json \
-     --out "<artifacts_dir>/local/reconcile/<ts>/grade.html"
-   ```
-   Then: *"I answered these <N> questions but had nothing to check them against. Open the page, mark each right, wrong or unsure, and paste the block back."* End the turn.
-3. **Read the block back** when it arrives (first line `profile:`, then `reconcile-run:`, then `grades:` and one JSON array, then `done`):
-   ```bash
-   python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_grades.py" --block-file /tmp/agami-reconcile-grades-<ts>.txt
-   ```
-   A `needs_judgment` means the block did not parse, or a grade in it could not be applied as written (a misspelt grade, a row graded twice, SQL beside a `right`): ask for it again, apply nothing. Read the `anomalies`: a `sql_ignored_on_right` or a `sql_not_a_statement` is worth one sentence back.
-4. **Apply each grade, and say which happened:**
-   - **`right`** → the answer becomes the row's `expected`; set `provenance.graded` to `right`, run Phase 2c's diff (it matches by construction), and the row can reach Phase 3e like any other agreeing row.
-   - **`wrong` with `sql`** → the SQL is a statement the person supplies, graded like any other: write it to a new row directory and take that row through Phase 1.5, then 2e. A correction typed in frustration is no more ground truth than a query pasted at the start. When words came with the SQL, the SQL is what gets graded: the words ride on the new row as `words` for context, and the original row keeps only `provenance.graded: wrong`, so no finding of kind `description` is written for a row that also has a statement.
-   - **`wrong` with `words`** → set `provenance.graded` to `wrong` and keep the words on the row record as `words`; Phase 2f writes a finding of kind `description` carrying them, because the receipt could not say what was wrong and only the person's words can.
-   - **`unsure`** → set `provenance.graded` to `unsure`. Nothing else happens.
-   A row the person did not grade stays as it was and is reported as ungraded in Phase 3.
+1. **Grade agami's query, part by part.** Take agami's statement from 2b through **Phase 1.5** exactly as a supplied statement goes through it, writing it as `statement.sql` in `rows/<n>/`: the files name the statement under test, whoever wrote it. Three differences, and only three:
+   - **1.5f does not apply.** Agami's own result never becomes `expected`. A row whose expected value came from the query being graded compares agami against agami, proves nothing, and reads on the page as a match. This is the never-ground-truth rule at its sharpest: the side being checked cannot supply the answer key.
+   - **1.5e runs without `--with-claims`.** Claims compare two statements and there is only one.
+   - **1.5g still runs**, and it is the most useful check on the page: whether agami's query answers the question asked is exactly what the person is about to judge.
+   A row where agami's run failed has no query to check; it skips this phase and says so.
+2. **A grade that falls short names agami, not the person.** `query_defect` on this row means agami wrote a query with a mistake in it, which the person fixes by teaching agami, not by editing anything of their own; `model_gap` is a gap in the semantic model whoever tripped on it. The card's words follow from the ledger and the row having no statement, so nothing here is written by hand.
+3. **Report it on the reconciliation report**, the one page every path ends on (3a.5). The row's status is `ungraded`: its verdict says agami answered and the call is the person's, and carries what the checks found so the call is an informed one. The card's three sections are the same three: **Data** shows up to five of agami's rows, because an answer nobody can see cannot be judged; **SQL** shows agami's query, and says it is the only one written for this row; **Checks** is the ledger just run. The decisions are the same six, and the person chooses `example` when agami's answer is right (it sends agami's query for this question to `/agami-save-correction`, so agami writes it that way again), `change` when a definition is wrong, `fix` or `reword` when the query or the question needs work, and `nothing` to leave the row as it is.
+
 
 ### 2c — Diff
 

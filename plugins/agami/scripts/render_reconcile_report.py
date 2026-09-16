@@ -4,10 +4,10 @@ Reconcile report page renderer.
 
 One page per run, one card per row, told in the four beats Phase 3 tells them in: what you gave us
 and how we checked it; what agami did with the question and what it answered; how it got there;
-what to change or keep. Built from the same theme, logos and paste-back grammar as the grading page
+what to change or keep. Built from the same theme, logos and paste-back grammar as the intake page
 and the model explorer, so a run is shown the way the semantic model is shown. Stdlib only.
 
-Two rules, the grading page's own: never a result row (one cell or a shape), and no control decides
+Two rules: a result row appears only in the Data section's sample, and no control decides
 anything on its own. A "keep" is the person's yes to Phase 3e's offer for that row and is offered
 only where the run scored the row `match`; every other decision goes back through the door that
 already exists (save-correction for a definition, the person for a fix or a reword).
@@ -42,17 +42,17 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "status_words", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill", "summaries", "sample")
+           "owner", "read", "how", "words", "disagreement", "change", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill", "summaries", "sample", "one_query")
 _LISTS = ("read", "how", "words", "change", "todo")
 _DIFF_KEYS = ("key", "state", "section", "family", "rolled", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
-_STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
+_STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error", "ungraded"}
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
 _OWNERS = {"you", "model", "question", "agami", "keep", "nothing"}
 _CHECK_STATES = {"held", "defect", "open", "gap", "noted", "differs"}
-_DATA_RESULTS = {"matches", "partly", "differs", "could_not_compare"}
+_DATA_RESULTS = {"matches", "partly", "differs", "could_not_compare", "not_graded"}
 _QUERY_RESULTS = {"same", "different", "not_comparable"}
-_FIXES = {"query", "semantic_model", "examples", "question", "ask_again", "none"}
+_FIXES = {"query", "semantic_model", "examples", "question", "ask_again", "none", "ungraded"}
 
 
 _SAMPLE_ROWS = 5

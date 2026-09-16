@@ -1,6 +1,6 @@
 /* agami · the reconcile pages' shared design language: pills, chips, cards in four beats, the audit
    checklist and its rail, the decision controls, the footer and the paste-back modal. Read by
-   render_reconcile_report.py, render_reconcile_grades.py and render_reconcile_intake.py into the
+   render_reconcile_report.py and render_reconcile_intake.py into the
    PAGE_CSS placeholder, after the plugin's theme.css, so every page a run renders looks like one
    product. One palette, one meaning per color, on every pill, mark, chip and diff token:
      green  (--held)   passed, match, keep
@@ -17,13 +17,16 @@
             --gap: #6b4fbb; --gap-bg: #ece7fa; --noted: #6b7684; --noted-bg: #eceff3; --agami: #1d5fb4; --agami-bg: #e4edfb; }
     @media (prefers-color-scheme: dark) { :root { --held: #5cc48f; --held-bg: #173325; --open: #e0a94a; --open-bg: #3a2e14; --defect: #f08a82; --defect-bg: #3d1c19;
             --gap: #b39cf2; --gap-bg: #2b2342; --noted: #a2adb9; --noted-bg: #252c35; --agami: #7fb0f0; --agami-bg: #16273d; } }
-    body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--bg, #f7f7f8); color: var(--fg, #17212b); }
+    /* Body carries the scale's base size so nothing falls back to the browser's 16px: a container
+       that sets no size of its own is then on the scale rather than off it by accident. */
+    body { margin: 0; font-size: var(--t-body); font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--bg, #f7f7f8); color: var(--fg, #17212b); }
     .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 96px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border, #d9dde3); }
     .logo svg { display: block; height: 26px; width: auto; }
     .logo-light-mode { display: inline-block; } .logo-dark-mode { display: none; }
     @media (prefers-color-scheme: dark) { .logo-light-mode { display: none; } .logo-dark-mode { display: inline-block; } }
     h1 { font-size: var(--t-page); margin: 0; }
+    h2 { font-size: var(--t-title); margin: 0; }
     .meta { font-size: var(--t-micro); color: var(--muted, #5b6875); }
     .lede { max-width: 72ch; font-size: var(--t-title); color: var(--muted, #5b6875); margin: 18px 0 8px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--t-data); font-variant-numeric: tabular-nums; }
@@ -31,13 +34,13 @@
     .pill { display: inline-block; font-size: var(--t-micro); font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
     .pill.held { color: var(--held); background: var(--held-bg); } .pill.open { color: var(--open); background: var(--open-bg); }
     .pill.defect { color: var(--defect); background: var(--defect-bg); } .pill.gap { color: var(--gap); background: var(--gap-bg); }
-    .pill.noted { color: var(--noted); background: var(--noted-bg); }
+    .pill.noted, .pill.ask { color: var(--noted); background: var(--noted-bg); }
     .chips { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0 6px; }
     .chip { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--bg-elev, #fff); border: 1px solid var(--border, #d9dde3); }
     .chip b { font-size: var(--t-body); font-weight: 600; color: var(--muted, #5b6875); font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 4px; }
     .chip span { font-size: var(--t-body); }
     .chip.plain span { color: var(--fg, #17212b); }
-    .chip.held span { color: var(--held); } .chip.open span { color: var(--open); } .chip.defect span { color: var(--defect); } .chip.gap span { color: var(--gap); } .chip.noted span { color: var(--noted); }
+    .chip.held span { color: var(--held); } .chip.open span { color: var(--open); } .chip.defect span { color: var(--defect); } .chip.gap span { color: var(--gap); } .chip.noted span, .chip.ask span { color: var(--noted); }
     .pill b { font-weight: 700; font-variant-numeric: tabular-nums; opacity: 0.75; }
     /* cards */
     .card { background: var(--bg-elev, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 14px 16px; margin: 12px 0; }
@@ -69,7 +72,7 @@
     .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border, #d9dde3); font-size: var(--t-body); }
     .step:last-child { border-bottom: 0; }
     .dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: var(--t-micro); font-weight: 700; color: #fff; margin-top: 1px; }
-    .dot.held { background: var(--held); } .dot.defect { background: var(--defect); } .dot.open { background: var(--open); } .dot.gap { background: var(--gap); } .dot.noted { background: var(--noted); }
+    .dot.held { background: var(--held); } .dot.defect { background: var(--defect); } .dot.open { background: var(--open); } .dot.gap { background: var(--gap); } .dot.noted, .dot.ask { background: var(--noted); }
     .step .s { font-weight: 600; } .step .d { color: var(--muted, #5b6875); }
     .rail { background: var(--bg-elev, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 12px 14px; align-self: start; }
     .rail h4 { margin: 0 0 8px; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted, #5b6875); }
@@ -106,11 +109,16 @@
     .filters .k { font-size: var(--t-micro); letter-spacing: 0.04em; text-transform: uppercase; }
     /* the diff grid: mark | what was checked | yours | agami. One grid row per check, so a tall cell on
        one side never pushes the other side out of line; the differing tokens are highlighted in place */
-    .dg { display: grid; grid-template-columns: 22px minmax(120px, 170px) minmax(0, 1fr) minmax(0, 1fr); margin-top: 10px; font-size: var(--t-body); }
+    .dg { display: grid; grid-template-columns: 22px minmax(140px, 230px) minmax(0, 1fr) minmax(0, 1fr); margin-top: 10px; font-size: var(--t-body); }
+    /* One query written, so one value column: the second would be empty on every row. */
+    .dg.one-query { grid-template-columns: 22px minmax(140px, 230px) minmax(0, 1fr); }
     .dg > div { padding: 6px 8px; border-top: 1px solid var(--border, #d9dde3); min-width: 0; }
     .dg .h { border-top: 0; padding-bottom: 2px; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); font-weight: 600; }
     .dg .m { font-family: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Roboto Mono", "Liberation Mono", monospace; font-weight: 700; text-align: center; padding-left: 0; padding-right: 0; }
-    .dg .k { color: var(--muted, #5b6875); overflow-wrap: anywhere; }
+    /* `anywhere` breaks at any character, so a column wide enough for the label still split it as
+       "academic_ye / ar". `break-word` wraps at a space first and only splits a token that cannot
+       fit on a line of its own. */
+    .dg .k { color: var(--muted, #5b6875); overflow-wrap: break-word; }
     .dg .v { font-family: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Roboto Mono", "Liberation Mono", monospace; font-size: var(--t-body); overflow-wrap: anywhere; }
     .dg .v .tok + .tok::before { content: ", "; color: var(--muted, #5b6875); }
     .dg .v .hi { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 2px; font-weight: 600; }
@@ -129,7 +137,7 @@
     .pill.you { background: var(--defect-bg); color: var(--defect); } .pill.model { background: var(--gap-bg); color: var(--gap); }
     .pill.question { background: var(--open-bg); color: var(--open); } .pill.keep { background: var(--held-bg); color: var(--held); }
     .pill.agami { background: var(--agami-bg); color: var(--agami); } .pill.nothing { background: var(--noted-bg); color: var(--noted); }
-    @media (max-width: 640px) { .dg { grid-template-columns: 22px 1fr; } .dg .k { grid-column: 2; } .dg .v { grid-column: 2; border-top: 0; padding-top: 0; } .dg .v.yours::before { content: "yours · "; color: var(--muted, #5b6875); font-family: inherit; } .dg .v.agami::before { content: "agami · "; color: var(--muted, #5b6875); font-family: inherit; } .dg .h { display: none; } }
+    @media (max-width: 640px) { .dg, .dg.one-query { grid-template-columns: 22px 1fr; } .dg .k { grid-column: 2; } .dg .v { grid-column: 2; border-top: 0; padding-top: 0; } .dg .v.yours::before { content: "yours · "; color: var(--muted, #5b6875); font-family: inherit; } .dg.one-query .v.agami::before { content: none; } .dg .v.agami::before { content: "agami · "; color: var(--muted, #5b6875); font-family: inherit; } .dg .h { display: none; } }
     /* the decisions: each option says what it is and what happens next; the run's suggestion is tagged */
     .grade.opts { display: grid; gap: 4px; margin-top: 10px; border: 0; padding: 0; min-inline-size: 0; }
     .grade.opts > legend { padding: 0; font-size: var(--t-body); font-weight: 600; margin-bottom: 2px; }
@@ -143,9 +151,13 @@
     /* the two statements, collapsed under the grid */
     details.sql { margin-top: 8px; font-size: var(--t-body); }
     details.sql summary { cursor: pointer; color: var(--accent, #1d5fb4); font-weight: 600; }
-    .sql2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 6px; }
-    .sql2 b { display: block; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); margin-bottom: 4px; }
-    .sql2 pre { margin: 0; padding: 8px 10px; background: var(--code-bg, #f3f5f7); border: 1px solid var(--border, #d9dde3); border-radius: 6px; font-size: var(--t-micro); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+    /* One pane or two: the statement's own styling is the same either way. Scoping these to .sql2
+       left a lone pane with the browser's `white-space: pre`, and one long statement widened the
+       page itself rather than scrolling inside its own box. */
+    .sql1, .sql2 { margin-top: 6px; }
+    .sql2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+    .sql1 b, .sql2 b { display: block; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); margin-bottom: 4px; }
+    .sql1 pre, .sql2 pre { margin: 0; padding: 8px 10px; background: var(--code-bg, #f3f5f7); border: 1px solid var(--border, #d9dde3); border-radius: 6px; font-size: var(--t-micro); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
     @media (max-width: 640px) { .sql2 { grid-template-columns: 1fr; } }
     /* the result pill's companion tag, and the result count row */
     .tag.unchecked { font-size: var(--t-micro); font-weight: 600; background: var(--open-bg); color: var(--open); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; white-space: nowrap; }
@@ -170,7 +182,7 @@
     .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 2px 0 10px; font-size: var(--t-micro); color: var(--muted, #5b6875); }
     .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: var(--noted); }
     .legend .held::before { background: var(--held); } .legend .defect::before { background: var(--defect); } .legend .gap::before { background: var(--gap); }
-    .legend .open::before { background: var(--open); } .legend .agami::before { background: var(--agami); } .legend .noted::before { background: var(--noted); }
+    .legend .open::before { background: var(--open); } .legend .agami::before { background: var(--agami); } .legend .noted::before, .legend .ask::before { background: var(--noted); }
     /* a claim that differs between the two queries: amber, its own mark, the differing tokens marked without blame */
     .dg .differs.v .tok.diff { background: var(--open-bg); color: var(--open); font-weight: 600; padding: 0 4px; border-radius: 4px; }
     .dg .differs.k { color: var(--open); }
