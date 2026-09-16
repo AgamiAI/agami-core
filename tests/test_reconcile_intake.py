@@ -135,8 +135,7 @@ def test_provenance_names_the_file_the_line_and_the_persons_words(tmp_path):
     (row,) = d["rows"]
     assert row["provenance"] == {
         "shape": "c", "source": "the finance dashboard", "file": "tiles.csv", "line": 2,
-        "graded": None,
-    }
+            }
 
 
 # --- what is skipped or refused ----------------------------------------------

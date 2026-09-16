@@ -34,8 +34,9 @@ def test_the_grid_has_one_row_per_check_with_the_category_first_and_the_extra_to
     assert '<div class="h"></div><div class="h">checked</div><div class="h">agami’s query</div>' in html
     # One grid, four tracks: the alignment is structural, not two stacks side by side.
     css = html[html.index("<style>"):html.index("</style>")]
-    # The key column is wide enough for its own labels: at 170px "enrollment.academic_year" wrapped
-    # as "academic_ye / ar", which is a column too narrow rather than a word that needed breaking.
+    # The key column is wide enough for its own labels: at 170px "value list for
+    # customers.signup_month" wrapped mid-token, which is a column too narrow rather than a word
+    # that needed breaking.
     assert re.search(r"\.dg \{[^}]*grid-template-columns: 22px minmax\(140px, 230px\) minmax\(0, 1fr\) minmax\(0, 1fr\)", css)
     assert re.search(r"\.dg\.one-query \{ grid-template-columns: 22px minmax\(140px, 230px\) minmax\(0, 1fr\)", css)
     assert "(side === 'yours' ? 'del' : 'add')" in html and "class=\"tok renamed\"" in html

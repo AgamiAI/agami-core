@@ -133,6 +133,8 @@ def _validate_item(item: dict, idx: int) -> None:
             raise ValueError(f"item {idx}: result rows are never rendered, not even inside a diff row")
     if item.get("keep_allowed") is not None and not isinstance(item["keep_allowed"], bool):
         raise ValueError(f"item {idx}: 'keep_allowed' must be true or false")
+    if item.get("one_query") is not None and not isinstance(item["one_query"], bool):
+        raise ValueError(f"item {idx}: 'one_query' must be true or false")
     result = item.get("result")
     if result is not None:
         if (not isinstance(result, dict) or result.get("data") not in _DATA_RESULTS or result.get("query") not in _QUERY_RESULTS

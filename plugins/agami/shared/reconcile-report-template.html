@@ -2,21 +2,24 @@
 <!--
   agami · reconcile report page — used by the agami-reconcile skill via
   scripts/render_reconcile_report.py.
-  Two layouts, chosen by the renderer from the items: CARDS for a batch of rows (one card per row,
-  the four beats as four columns, the fourth colored by who acts), and AUDIT for a single statement
-  row (the checks in the order they ran, pass / fail / open marks, and a rail of what to do). Same
-  theme, logos and paste-back grammar as the intake page and the model explorer.
+  One layout: a card per row, carrying the question, one verdict, one thing to do, and three
+  sections closed at rest (Data, SQL, Checks). A row where only agami wrote a query renders one
+  value column instead of two, because there is no second side to name. Same theme, logos and
+  paste-back grammar as the intake page and the model explorer.
   Two rules this page keeps, both asserted by tests/test_render_reconcile_report.py:
-    * NO result rows. One recorded cell, or the shape of a table, never the rows themselves.
+    * Result rows only as the Data section's sample, at most five, capped by the renderer itself in
+      _validate_sample rather than trusted from whatever built them. Everywhere else it is one
+      recorded cell or the shape of a table, never the rows.
     * A control decides nothing on its own. "keep" is the person's yes to Phase 3e's offer for that
       row and is offered only where the run scored the row match with one cell; change, fix, reword
       and nothing go back through the doors that exist. The skill applies each, never this page.
   NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose.
   Renderer fills:
     REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON,
-    ITEMS_JSON — [{row, label, question, source, status, expected, answer, delta_pct, single_cell,
-                  owner, read:[..], how:[..], words:[..], disagreement, change:[..],
-                  checks:[{step, state, detail}], todo:[..], report_path, keep_allowed}]
+    ITEMS_JSON — [{row, label, question, source, status, status_words, expected, answer, delta_pct,
+                  single_cell, owner, one_query, result, fix, fix_words, prefill, summaries, sample,
+                  diff:[{key, state, section, family, yours, agami, note}], sentence, words:[..],
+                  change:[..], todo:[..], sql_yours, sql_agami, report_path, keep_allowed}]
     AGAMI_LOGO_DARK_TEXT, AGAMI_LOGO_LIGHT_TEXT, THEME_CSS
 -->
 <html lang="en">
@@ -104,7 +107,9 @@
     // The fix words come from the items themselves (report-items writes fix_words); one home for six strings.
     const FIX_WORDS = {};
     DATA.items.forEach(i => { if (i.fix && i.fix_words) FIX_WORDS[i.fix] = i.fix_words; });
-    const FIX_CLASS = { query: 'you', semantic_model: 'model', examples: 'agami', question: 'question', ask_again: 'agami', none: 'keep' };
+    // The display mirror of reconcile.py's _FIX_OWNER: one entry per fix, or the pill renders with
+    // no colour family at all. A test asserts the two stay in step.
+    const FIX_CLASS = { ungraded: 'nothing', query: 'you', semantic_model: 'model', examples: 'agami', question: 'question', ask_again: 'agami', none: 'keep' };
     function fixOf(item) { return item.fix || ({ you: 'query', model: 'semantic_model', question: 'question', agami: 'ask_again', keep: 'none', nothing: 'none' }[item.owner || 'nothing']); }
     function nums(item) {
       const parts = [];

@@ -75,7 +75,7 @@
     .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border, #d9dde3); font-size: var(--t-body); }
     .step:last-child { border-bottom: 0; }
     .dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: var(--t-micro); font-weight: 700; color: #fff; margin-top: 1px; }
-    .dot.held { background: var(--held); } .dot.defect { background: var(--defect); } .dot.open { background: var(--open); } .dot.gap { background: var(--gap); } .dot.noted, .dot.ask { background: var(--noted); }
+    .dot.held { background: var(--held); } .dot.defect { background: var(--defect); } .dot.open { background: var(--open); } .dot.gap { background: var(--gap); } .dot.noted { background: var(--noted); }
     .step .s { font-weight: 600; } .step .d { color: var(--muted, #5b6875); }
     .rail { background: var(--bg-elev, #fff); border: 1px solid var(--border, #d9dde3); border-radius: 8px; padding: 12px 14px; align-self: start; }
     .rail h4 { margin: 0 0 8px; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted, #5b6875); }
@@ -119,7 +119,7 @@
     .dg .h { border-top: 0; padding-bottom: 2px; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); font-weight: 600; }
     .dg .m { font-family: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Roboto Mono", "Liberation Mono", monospace; font-weight: 700; text-align: center; padding-left: 0; padding-right: 0; }
     /* `anywhere` breaks at any character, so a column wide enough for the label still split it as
-       "academic_ye / ar". `break-word` wraps at a space first and only splits a token that cannot
+       "signup_mon / th". `break-word` wraps at a space first and only splits a token that cannot
        fit on a line of its own. */
     .dg .k { color: var(--muted, #5b6875); overflow-wrap: break-word; }
     .dg .v { font-family: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Roboto Mono", "Liberation Mono", monospace; font-size: var(--t-body); overflow-wrap: anywhere; }
@@ -185,7 +185,7 @@
     .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 2px 0 10px; font-size: var(--t-micro); color: var(--muted, #5b6875); }
     .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: var(--noted); }
     .legend .held::before { background: var(--held); } .legend .defect::before { background: var(--defect); } .legend .gap::before { background: var(--gap); }
-    .legend .open::before { background: var(--open); } .legend .agami::before { background: var(--agami); } .legend .noted::before, .legend .ask::before { background: var(--noted); }
+    .legend .open::before { background: var(--open); } .legend .agami::before { background: var(--agami); } .legend .noted::before { background: var(--noted); }
     /* a claim that differs between the two queries: amber, its own mark, the differing tokens marked without blame */
     .dg .differs.v .tok.diff { background: var(--open-bg); color: var(--open); font-weight: 600; padding: 0 4px; border-radius: 4px; }
     .dg .differs.k { color: var(--open); }

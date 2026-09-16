@@ -1057,3 +1057,18 @@ def test_without_a_pre_flight_an_unmatched_aggregate_stays_open():
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, None)] == [("metric:total", "unresolved")]
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, {"error": "empty_file"})] == [("metric:total", "unresolved")]
 
+
+
+def test_a_filter_expression_that_does_not_open_with_a_column_falls_back_to_its_table():
+    """ACE-150. A declared filter is about one column, so that column is the subject worth quoting.
+    Taking the first identifier made `NOT is_test` read as the column `not` and `lower(status)` as
+    the column `lower` — subjects that match nothing in the mentions index, so the part silently
+    lost both its quoted prose and the note that two descriptions disagree about it."""
+    def subjects(expr):
+        return reconcile._part_subjects(f"default_filter:main.orders:{expr}")
+
+    assert subjects("is_deleted = false") == ["orders.is_deleted"]
+    assert subjects("o.status != 'cancelled'") == ["orders.status"]
+    assert subjects("deleted_at IS NULL") == ["orders.deleted_at"]
+    for expr in ("NOT is_test", "lower(status) = 'open'", "COALESCE(x,0) > 0", "CASE WHEN a THEN b END"):
+        assert subjects(expr) == ["orders"], expr

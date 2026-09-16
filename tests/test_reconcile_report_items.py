@@ -473,3 +473,37 @@ def test_a_question_only_row_shows_agamis_answer_its_query_and_the_checks_on_it(
     # One query means one side: reading agami's own receipt into the agami column would print the
     # same word twice and read as two sides agreeing with each other.
     assert all(r.get("agami") is None for r in item["diff"] if r.get("section") == "checks")
+
+
+def test_a_one_query_row_carries_no_answer_row_and_no_agami_column(tmp_path):
+    """ACE-150. An "answer" row compares two answers; with one query the Data section already says
+    what agami returned and shows five of the rows, and a third telling marked "could not check"
+    read as a failure where nothing failed. Nor may a check carry an agami side: that side is read
+    back from agami's OWN receipt, so it printed the same word twice as two sides agreeing."""
+    row = dict(UNGRADED_ROW, row=1, question="Which regions do we sell to?", sql="SELECT region FROM orders",
+               recorded={"columns": ["region"], "row_count": 3},
+               ledger={"rows": [_part("default_filter:orders:status", "model_gap", note="declared and not applied")],
+                       "verdict": "model_gap", "counts": {}})
+    run = _run(tmp_path, [row])
+    (run / "rows" / "1").mkdir(parents=True, exist_ok=True)
+    (run / "rows" / "1" / "actual.csv").write_text("region\nEU\nUS\nAPAC\n", encoding="utf-8")
+    item = reconcile.report_items(run)[0]
+
+    assert item["one_query"] is True
+    assert not any(r["key"] == "answer" for r in item["diff"])
+    assert all(r.get("agami") is None for r in item["diff"] if r.get("section") == "checks")
+    # The count the removed row used to carry still reaches the reader, from the record.
+    assert item["summaries"]["data"] == "agami answered: 3 rows."
+
+
+def test_a_failed_statement_of_the_persons_gets_no_grid_of_agamis_rows_alone(tmp_path):
+    """The one-sided sample fired on "no statement.csv", which is also true of a row whose statement
+    was refused or failed. Listing agami's rows alone there, under a heading the person reads as
+    theirs, is worse than showing no grid: they wrote a query, and it is not what they are seeing."""
+    failed = dict(ERROR, row=1, statement="SELECT * FROM orders_v", error="relation orders_v does not exist",
+                  sql="SELECT region FROM orders", recorded={"columns": ["region"], "row_count": 3})
+    run = _run(tmp_path, [failed])
+    (run / "rows" / "1").mkdir(parents=True, exist_ok=True)
+    (run / "rows" / "1" / "actual.csv").write_text("region\nEU\nUS\nAPAC\n", encoding="utf-8")
+    item = reconcile.report_items(run)[0]
+    assert item["one_query"] is False and item["sample"] is None

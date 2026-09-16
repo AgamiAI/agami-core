@@ -350,8 +350,7 @@ def test_6_three_bare_questions_are_checked_and_decided_on_the_report_page(store
     # No statement of the person's on any of the three, so every row records ungraded and none of
     # them takes its expected value from the run: agami's own answer is never its own answer key.
     for n in answers:
-        rec = record(store, n, answers[n][0], None, None, None, None,
-                     **({"words": decisions[8]["words"]} if n == 8 else {}))
+        rec = record(store, n, answers[n][0], None, None, None, None)
         assert rec["status"] == reconcile.UNGRADED, rec
         assert rec["expected"] is None
 
@@ -363,9 +362,10 @@ def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(store):
     assert len([k for k in keys if k.startswith("filter:orders:")]) == 1, keys
     # Row 4's statement held on every part and agami answered differently: a worked example.
     assert "example:what is our total revenue?" in keys, keys
-    assert "description:what is the refund rate?" in keys
-    words = next(f for f in out["findings"] if f["kind"] == "description")
-    assert words["words"] == "the refund rate should divide refunds by payments"
+    # No `description` finding: its only writer was Phase 2.5's grading step, deleted with the
+    # grading page (ACE-150). A person's words about a wrong answer now go straight to
+    # /agami-save-correction through the report page's `change` decision, which is the live door.
+    assert not any(f["kind"] == "description" for f in out["findings"]), keys
     defects = {(d["row"], d["part"]) for d in out["query_defects"]}
     assert (1, "join:orders-payments") in defects
     assert (2, "literal:orders.status=Delivered") in defects

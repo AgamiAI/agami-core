@@ -66,7 +66,6 @@ def example_blocked_rows(run_dir: Path) -> set[int]:
     return blocked
 
 
-
 def keepable_rows(run_dir: Path) -> set[int]:
     """The rows Phase 3e may offer, read from the run's own files: status `match`, one recorded cell,
     and, for a row that carries both a question and a statement, a `question_fit` part in its ledger.

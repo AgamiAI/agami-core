@@ -101,7 +101,7 @@ def test_a_summary_names_the_exception_and_counts_when_there_is_none():
             _row("tables read", "differs", "sql"), _row("limit", "held", "sql"),
             _row("12 values checked, all exist", "held", "checks", "literal", rolled=12),
             _row("default filter on orders", "gap", "checks", "default_filter")]
-    s = reconcile._summaries(rows, {"label": "different answer", "data": "differs"})
+    s = reconcile._summaries(rows, {"label": "different answer", "data": "differs"}, {})
     assert s["data"] == "9 of 10 rows match. Your query returns one more column."
     assert s["sql"] == "The two queries differ in tables read."
     # the roll-up stands for the checks it replaced, so the count is of checks, not of lines
@@ -111,13 +111,13 @@ def test_a_summary_names_the_exception_and_counts_when_there_is_none():
 def test_a_doubtful_fit_leads_the_sql_summary_because_it_is_the_thing_worth_opening():
     rows = [_row("answers the question", "open", "sql", "question_fit", yours="doubtful"),
             _row("limit", "differs", "sql")]
-    s = reconcile._summaries(rows, {"label": "different answer", "data": "differs"})
+    s = reconcile._summaries(rows, {"label": "different answer", "data": "differs"}, {})
     assert s["sql"].startswith("Your query might not answer the question.")
 
 
 def test_a_row_that_could_not_be_compared_reads_its_label():
     rows = [_row("answer", "open", "data", yours="failed")]
-    s = reconcile._summaries(rows, {"label": "different query, answer not compared", "data": "could_not_compare"})
+    s = reconcile._summaries(rows, {"label": "different query, answer not compared", "data": "could_not_compare"}, {})
     assert s["data"] == "The two queries differ, and the answers weren't compared."
 
 
@@ -165,6 +165,14 @@ def test_the_renderer_refuses_more_than_five_rows_whatever_built_them():
     six = {"pairs": [["a", "a"]], "rows": [{"yours": ["x"], "agami": ["x"], "same": True} for _ in range(6)]}
     with pytest.raises(ValueError, match="at most 5 rows"):
         rr._validate_item(dict(_ITEM, sample=six), 0)
+    # On a one-query row `rows` is always empty and every value rides in `agami_rows`, so the cap
+    # has to hold there too or the branch this card depends on publishes a whole result set.
+    solo = {"pairs": [["a", "a"]], "rows": [], "agami_rows": [["x"] for _ in range(6)], "agami_total": 6}
+    with pytest.raises(ValueError, match="at most 5 rows"):
+        rr._validate_item(dict(_ITEM, sample=solo), 0)
+    # And one type-checked field per field: `one_query` is the page's only new one.
+    with pytest.raises(ValueError, match="'one_query' must be true or false"):
+        rr._validate_item(dict(_ITEM, one_query="yes"), 0)
 
 
 def test_the_renderer_refuses_a_sample_that_is_not_the_shape_it_expects():
@@ -290,7 +298,7 @@ def test_a_section_key_and_its_summary_key_are_the_same_word():
     tpl = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-report-template.html").read_text(encoding="utf-8")
     keys = re.findall(r"section\(item, '([a-z]+)'", tpl)
     rows = [_row("answer", "held", k) for k in keys]
-    assert set(reconcile._summaries(rows, {"label": "match", "data": "matches"})) == set(keys)
+    assert set(reconcile._summaries(rows, {"label": "match", "data": "matches"}, {})) == set(keys)
 
 
 def test_a_filter_chip_reads_label_first_then_its_count():
@@ -371,3 +379,34 @@ def test_the_cards_text_blocks_all_end_at_the_same_edge():
     # `.wrap` is the only place a width is capped; no prose block sets one of its own.
     caps = re.findall(r"^\s*(\.[\w.-]+) \{[^}]*max-width:", css, re.M)
     assert caps == [".wrap"], caps
+
+
+def test_one_query_is_decided_in_one_place_and_survives_a_row_with_no_ledger_yet():
+    """The predicate was computed three times from two definitions, and the narrow one let a card
+    drop its second column while the sample still built two sides. One definition, and it holds
+    before Phase 2.5 has run: a question-only row has one query whether or not it has been graded."""
+    ungraded_no_ledger = {"status": "ungraded", "statement": None, "ledger": None}
+    graded = {"status": "ungraded", "statement": None, "ledger": {"rows": [], "verdict": "confirmed"}}
+    two_sided = {"status": "mismatch", "statement": "SELECT 1", "ledger": {"rows": [], "verdict": "confirmed"}}
+    assert reconcile._one_query(ungraded_no_ledger) is True
+    assert reconcile._one_query(graded) is True
+    assert reconcile._one_query(two_sided) is False
+
+
+def test_a_failing_check_on_agamis_query_names_agami_not_the_person():
+    """`query_defect` on a row the person wrote nothing for means agami wrote the mistake. The two
+    words that name a writer swap; a gap in the semantic model is a gap whoever tripped on it."""
+    assert reconcile._STATE_WORDS["defect"] == "a mistake in your query"
+    assert reconcile._STATE_WORDS_AGAMI["defect"] == "a mistake in agami's query"
+    unchanged = set(reconcile._STATE_WORDS) - {"defect"}
+    assert all(reconcile._STATE_WORDS_AGAMI[k] == reconcile._STATE_WORDS[k] for k in unchanged)
+    assert reconcile._STATE_WORDS_AGAMI["gap"] == "a gap in the semantic model"
+
+
+def test_every_fix_the_items_verb_can_emit_has_a_colour_family_on_the_page():
+    """`FIX_CLASS` in the template is the display mirror of `_FIX_OWNER`; when only one side gained
+    the new fix, the action pill rendered as `class="pill "` with no family at all."""
+    tpl = (REPO_ROOT / "plugins" / "agami" / "shared" / "reconcile-report-template.html").read_text(encoding="utf-8")
+    declared = re.search(r"const FIX_CLASS = \{([^}]*)\}", tpl).group(1)
+    for fix in reconcile._FIX_WORDS:
+        assert re.search(rf"\b{re.escape(fix)}:", declared), f"FIX_CLASS has no entry for {fix!r}"

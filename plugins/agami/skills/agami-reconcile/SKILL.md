@@ -210,7 +210,7 @@ Only for rows that carry a question and neither a statement nor an expected valu
    - **1.5g still runs**, and it is the most useful check on the page: whether agami's query answers the question asked is exactly what the person is about to judge.
    A row where agami's run failed has no query to check; it skips this phase and says so.
 2. **A grade that falls short names agami, not the person.** `query_defect` on this row means agami wrote a query with a mistake in it, which the person fixes by teaching agami, not by editing anything of their own; `model_gap` is a gap in the semantic model whoever tripped on it. The card's words follow from the ledger and the row having no statement, so nothing here is written by hand.
-3. **Report it on the reconciliation report**, the one page every path ends on (3a.5). The row's status is `ungraded`: its verdict says agami answered and the call is the person's, and carries what the checks found so the call is an informed one. The card's three sections are the same three: **Data** shows up to five of agami's rows, because an answer nobody can see cannot be judged; **SQL** shows agami's query, and says it is the only one written for this row; **Checks** is the ledger just run. The decisions are the same six, and the person chooses `example` when agami's answer is right (it sends agami's query for this question to `/agami-save-correction`, so agami writes it that way again), `change` when a definition is wrong, `fix` or `reword` when the query or the question needs work, and `nothing` to leave the row as it is.
+3. **Report it on the reconciliation report**, the one page every path ends on (3a.5). The row's status is `ungraded`: its verdict says agami answered and the call is the person's, and carries what the checks found so the call is an informed one. The card's three sections are the same three: **Data** shows up to five of agami's rows, because an answer nobody can see cannot be judged; **SQL** shows agami's query, and says it is the only one written for this row; **Checks** is the ledger just run. The decisions are the same six, and the person chooses `example` when agami's answer is right (it sends agami's query for this question to `/agami-save-correction`, so agami writes it that way again), `change` when a definition is wrong, `reword` when the question was read differently, and `nothing` to leave the row as it is. `fix` is not offered here: it means "fix your query", and on this row the person wrote none.
 
 
 ### 2c — Diff
@@ -240,12 +240,12 @@ Per row:
   "actual":       <number or null if errored>,
   "delta_pct":    <signed fraction or null>,
   "match":        true | false,
-  "status":       "match" | "match_unverified" | "mismatch" | "expected_doubtful" | "error",
+  "status":       "match" | "match_unverified" | "mismatch" | "expected_doubtful" | "error" | "ungraded",
   "report_path":  "<artifacts_dir>/local/charts/<profile>/<ts>.html",  // the full chart report for this query
   "sql":          "<the statement that produced actual, or null on an error row>",
   "recorded":     {"columns": ["<column name>"], "rows": [[<value>]]},  // what the query actually returned
   "error":        "<message if status=error, else null>",
-  "provenance":   {"shape": "a|b|c|d", "source": "<the person's words>", "file": "...", "line": 2, "graded": null},
+  "provenance":   {"shape": "a|b|c|d", "source": "<the person's words>", "file": "...", "line": 2},
   "statement":    "<the person's SQL, verbatim, or null>",
   "statement_recorded":     {"columns": ["..."], "rows": [[<one cell>]]} | {"columns": ["..."], "row_count": 12} | null,
   "statement_receipt_path": "<rows/<n>/statement-receipt.json, or null>",
@@ -255,12 +255,11 @@ Per row:
   "comparison":   {"scalar": <the diff>} | {"result_set": <the compare-results score>} | null,
   "claims":       <the sm claims diff between the two statements, or null>,
   "finding_keys": ["<keys of the findings this row contributed to>"],
-  "words":        "<what the person wrote beside a wrong grade in Phase 2.5, or null>",
   "agami_statements": ["<every statement the client wrote, in order; sql is the last>"]  // only when there were several, else []
 }
 ```
 
-The keys from `provenance` down are appended after `error` and every earlier key keeps its meaning; a reader that only knows the older shape keeps working. `status` gains two values beside the three it had. Their rules, applied by code and never by feel:
+The keys from `provenance` down are appended after `error` and every earlier key keeps its meaning; a reader that only knows the older shape keeps working. `status` gains three values beside the three it had. Their rules, applied by code and never by feel:
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|none> --ledger-verdict <verdict|none>
@@ -273,6 +272,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|non
 | `mismatch` | the numbers differ and the person's statement has no `query_defect`, so agami is the likelier culprit |
 | `expected_doubtful` | the numbers differ and the person's statement has a `query_defect`, so the expected value itself is in doubt. Kept out of the mismatch tally |
 | `error` | the row could not run |
+| `ungraded` | agami answered and there was nothing to compare against: no statement of the person's and no number. Nothing failed and nothing has been decided, so the row waits for a person on the report page (Phase 2.5). Its expected value never comes from the run |
 
 `sql` is the statement captured in Phase 2b, written down verbatim. `recorded` is the result it returned, shaped as `columns` + `rows` — the same two keys the golden-dataset receipt uses — so whoever picks this row up later forwards it as-is instead of rebuilding it from a number and guessing at a column name.
 
@@ -284,7 +284,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|non
 python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" record --run-dir "<artifacts_dir>/local/reconcile/<ts>" --row <n> [--tolerance 0.01] [--report-path <path>]
 ```
 
-It reads the row directory (`intake.json` for the label, the question, your statement and the number you gave; `agami-answer.json`, `agami-run.json` and `actual.csv` for agami's side; `statement.csv`, `diff.json` or `comparison.json`, `claims.json` and `ledger.json`) and appends the record above to `rows.jsonl`, replacing an earlier record for the same row. Exit `2` names the file it needs and cannot find: fix the run, never type the record. A question-only row nobody has graded yet is refused, because it waits for Phase 2.5 and is never written as `error`; the grade comes back through `--expected <value> --graded right`. The keys are additive — a reader that only knows the older shape keeps working.
+It reads the row directory (`intake.json` for the label, the question, your statement and the number you gave; `agami-answer.json`, `agami-run.json` and `actual.csv` for agami's side; `statement.csv`, `diff.json` or `comparison.json`, `claims.json` and `ledger.json`) and appends the record above to `rows.jsonl`, replacing an earlier record for the same row. Exit `2` names the file it needs and cannot find: fix the run, never type the record. A question-only row is recorded `ungraded` rather than refused or written as `error`: nothing failed, and it waits for a person on the report page. Its `expected` stays empty on purpose, and the verb takes no argument that could fill it: a value the run supplied would be agami's own answer coming back as its own answer key. The keys are additive — a reader that only knows the older shape keeps working.
 
 ### 2e — Compare, as a number or as a table, and name the part that differs
 
@@ -377,7 +377,7 @@ Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap
    ```bash
    python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_report.py" --block-file /tmp/agami-reconcile-decisions-<ts>.txt --run-dir "<artifacts_dir>/local/reconcile/<ts>"
    ```
-   A `needs_judgment` means the block did not parse, came from another run, or carries a decision that could not be applied as written (a keep the run does not allow, words beside a keep, a misspelt decision): ask for it again, apply nothing. Then, per decision: **`keep`** is the person's yes to Phase 3e's offer for that row, applied through 3e's own doors and its own rules (the split, the band, one call per row); **`change`** takes the finding and the person's words to `/agami-save-correction`, one definition at a time; **`example`** takes the person's statement and its question to `/agami-save-correction` as a prompt example, with the words as its note, so agami writes the query their way next time (the same door 3e's keep uses for an example, without 3e's split); **`fix`** and **`reword`** come back to the person as the next thing to do, with the row's beat 4 repeated; **`nothing`** changes nothing. No decision writes anything this skill does not already write.
+   A `needs_judgment` means the block did not parse, came from another run, or carries a decision that could not be applied as written (a keep the run does not allow, words beside a keep, a misspelt decision): ask for it again, apply nothing. Then, per decision: **`keep`** is the person's yes to Phase 3e's offer for that row, applied through 3e's own doors and its own rules (the split, the band, one call per row); **`change`** takes the finding and the person's words to `/agami-save-correction`, one definition at a time; **`example`** takes a statement and its question to `/agami-save-correction` as a prompt example, with the words as its note, so agami writes the query that way next time (the same door 3e's keep uses for an example, without 3e's split). **Which statement, on which row:** the person's when they supplied one; on a question-only row there is none, and the person choosing `example` there is saying agami's own query is right, so agami's is what gets sent; **`fix`** and **`reword`** come back to the person as the next thing to do, with the row's beat 4 repeated; **`nothing`** changes nothing. No decision writes anything this skill does not already write.
 
 ### 3b — Mismatches table (lead with what didn't match)
 

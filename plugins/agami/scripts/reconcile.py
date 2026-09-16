@@ -331,7 +331,7 @@ def _new_row(*, file: str, line: int, source: str | None, label: str | None = No
         "statement": statement.strip().rstrip(";").strip() if statement else None,
         "expected": parse_value(raw_value) if raw_value is not None else None,
         "raw_value": raw_value if raw_value not in (None, "") else None,
-        "provenance": {"shape": None, "source": source, "file": file, "line": line, "graded": None},
+        "provenance": {"shape": None, "source": source, "file": file, "line": line},
     }
     row["provenance"]["shape"] = _row_shape(row)
     return row
@@ -1136,6 +1136,10 @@ def _grade_claims(claims: dict | None) -> list[dict]:
     return rows
 
 
+# Words an expression can open with that are never the column it filters.
+_SQL_LEADING_WORDS = frozenset({"not", "case", "exists", "any", "all", "distinct", "null", "true", "false"})
+
+
 def _part_subjects(part: str) -> list[str]:
     """The table or `table.column` a part is about, as the mentions verb keys them; empty for a part
     that names neither (a run, an aggregate, a claim)."""
@@ -1149,8 +1153,15 @@ def _part_subjects(part: str) -> list[str]:
         # and the table's description is what got quoted instead.
         table, _, expr = part[len("default_filter:"):].partition(":")
         table = table.lower().split(".")[-1]
-        column = re.match(r"\s*(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)", expr.lower())
-        return [f"{table}.{column.group(1)}"] if column else [table]
+        # The first identifier is the column only when the expression opens with a plain column
+        # reference. `NOT is_test` opens with a keyword and `lower(status) = 'x'` with a function,
+        # and taking either as the column produced a subject (`orders.not`, `orders.lower`) that
+        # matches nothing at all, so the part lost its quoted prose AND the flag note that two
+        # descriptions disagree. Fall back to the table rather than invent a column.
+        column = re.match(r"\s*(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)\s*(?![\w(])", expr.lower())
+        if not column or column.group(1) in _SQL_LEADING_WORDS:
+            return [table]
+        return [f"{table}.{column.group(1)}"]
     for prefix in ("join:", "join_key:", "cardinality:", "dropped_rows:"):
         if part.startswith(prefix):
             label = part[len(prefix):].split("#", 1)[0]
@@ -1334,8 +1345,6 @@ def findings(run_dir: Path) -> dict:
                 entry = grouped.setdefault(key, {"key": key, "kind": part.get("kind"), "evidence": []})
                 entry["evidence"].append({**evidence_base, "part": part["part"],
                                           "note": part["note"], "ledger": part["evidence"]})
-                if record.get("words"):
-                    entry["words"] = record["words"]
         # An example is offered only when the person's statement held on EVERY part of its own. A
         # part left open, or a row that was never graded at all, is not a statement that held. The
         # two claim parts compare the person's statement with agami's; they describe the difference
@@ -1355,17 +1364,6 @@ def findings(run_dir: Path) -> dict:
             entry["evidence"].append({**evidence_base, "part": None,
                                       "note": "every check on the statement passed and agami's answer differed",
                                       "ledger": {}})
-        # A person said in words what was wrong with an answer nothing here could grade, and had no
-        # statement to offer instead. The receipt could not say what was wrong, so the finding
-        # carries their words and nothing else.
-        if (record.get("status") == UNGRADED and record.get("words") and not record.get("statement")
-                and record.get("question")):
-            key = f"description:{_fold(record['question'])}"
-            entry = grouped.setdefault(key, {"key": key, "kind": "description", "evidence": []})
-            entry["evidence"].append({**evidence_base, "part": None,
-                                      "note": "the person said this answer is wrong; their words say why",
-                                      "ledger": {}})
-            entry["words"] = record["words"]
     result = {
         "findings": sorted(grouped.values(), key=lambda f: f["key"]),
         "query_defects": sorted(defects, key=lambda d: (d["row"], d["part"])),
@@ -1544,12 +1542,16 @@ _STATE_WORDS = {"held": "passed", "defect": "a mistake in your query", "gap": "a
 _STATE_WORDS_AGAMI = dict(_STATE_WORDS, defect="a mistake in agami's query")
 
 
-def _ledger_is_agamis(rec: dict) -> bool:
-    """Whose query the ledger graded. The run grades the query the row carries: the person's
-    statement when there is one, agami's own when there is not. So a row with a ledger and no
-    statement was graded on agami's query, and every word about a check names agami, not the
-    person, who wrote nothing here to be wrong about."""
-    return bool(rec.get("ledger")) and not rec.get("statement")
+def _one_query(rec: dict) -> bool:
+    """Whether one query was written for this row, or two.
+
+    The run grades the query the row carries: the person's statement when there is one, agami's own
+    when there is not. So a row with no statement of the person's has one query, whether or not its
+    ledger has been run yet, and nothing on the card may name a second side: no "yours" column, no
+    answer-against-answer row, and a failing check names agami rather than the person, who wrote
+    nothing here to be wrong about.
+    """
+    return not rec.get("statement") and bool(rec.get("ledger") or rec.get("status") == UNGRADED)
 _CLAIM_KEYS = {"tables": "tables read", "outputs": "selects", "filter_predicates": "filters", "date_window": "date window",
                "group_keys": "grouped by", "join_keys": "join keys", "ordering": "ordered by", "limit": "limit"}
 # The words a ledger part's grade takes on the page, by part family and grade. Every cell on the
@@ -1788,7 +1790,7 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     # Whether one query was written or two, decided once. With one there is no second side to name
     # anywhere: no answer-against-answer row, no "agami" column beside it, and a failing check names
     # agami rather than the person, who wrote nothing here to be wrong about.
-    one_query = _ledger_is_agamis(rec) or (rec.get("status") == UNGRADED and not rec.get("statement"))
+    one_query = _one_query(rec)
     state_words = _STATE_WORDS_AGAMI if one_query else _STATE_WORDS
     rows: list[dict] = []
     words: list[str] = []
@@ -2085,6 +2087,11 @@ def _sample(row_dir: Path, score: Any, limit: int = 5, *, one_sided: bool = Fals
         # another name. Two columns of the same numbers is not a comparison, and showing one as
         # yours would credit the person with a query they did not write.
         yours = []
+    elif not yours:
+        # The person wrote a statement and it produced no result: a failed run, a refusal. That is
+        # not a one-sided answer, and listing agami's rows alone under a heading the person will
+        # read as theirs is worse than showing no grid.
+        return None
     if not yours:
         # A question on its own: only agami answered, and its rows are the whole of what there is to
         # look at. The section exists to show the answer, so one side is not a reason to show nothing.
@@ -2149,7 +2156,7 @@ def _and_list(items: list[str]) -> str:
     return ", ".join(items[:-1]) + ", and " + items[-1]
 
 
-def _summaries(rows: list[dict], result: dict, rec: dict | None = None) -> dict:
+def _summaries(rows: list[dict], result: dict, rec: dict) -> dict:
     """One line per section, read while the section is closed.
 
     The rule every one of them follows: name the exception when there is one, a count when there is
@@ -2169,7 +2176,7 @@ def _summaries(rows: list[dict], result: dict, rec: dict | None = None) -> dict:
         # there is no row comparing two answers, and this line is where the count belongs.
         answered = next((r for r in data_rows if r["key"] in ("answer", "rows")), None)
         said = (answered or {}).get("agami")
-        if not said and rec is not None:
+        if not said:
             said, _single = _recorded_display(rec.get("recorded"), None)
         data = f"agami answered: {said}" if said else "agami answered this one"
     elif result.get("data") == "could_not_compare":
@@ -2274,12 +2281,12 @@ def _error_cause(rec: dict) -> str | None:
 
 
 def _result(rec: dict, diff: list[dict]) -> dict:
-    if rec.get("status") == UNGRADED:
-        return dict(_NOT_GRADED)   # nothing was compared, so there is no verdict until a person gives one
-
     """The result in two facts read by code: whether the data matches, and whether the two queries are
     the same. `label` is the plain-word pill; `unchecked` counts the checks on your query that could
     not run, shown as a tag rather than a status of their own."""
+    if rec.get("status") == UNGRADED:
+        return dict(_NOT_GRADED)   # nothing was compared, so there is no verdict until a person gives one
+
     rows = {r["key"]: r for r in diff}
     status = rec.get("status") or "error"
     if status == "error" or (rows.get("answer") or {}).get("state") == "open" and "rows" not in rows:
@@ -2363,14 +2370,14 @@ def _values_agree_on_shared_columns(rec: dict) -> bool:
 
 
 def _fix(rec: dict, diff: list[dict], result: dict) -> str:
+    """What to change, in this order: the query the ledger proved wrong, the gap the ledger measured,
+    the examples when agami wrote a different query with nothing wrong behind it, the question when it
+    was read differently, agami again when it failed, nothing when both facts match."""
     if rec.get("status") == UNGRADED:
         # The same vocabulary as every other row, supplied by the person instead of computed. Until
         # they choose, the card says so rather than suggesting an action nothing has established.
         return "ungraded"
 
-    """What to change, in this order: the query the ledger proved wrong, the gap the ledger measured,
-    the examples when agami wrote a different query with nothing wrong behind it, the question when it
-    was read differently, agami again when it failed, nothing when both facts match."""
     parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
     fit = next((p for p in parts if p.get("part") == "question_fit"), None)
     cols = next((r for r in diff if r["key"] == "columns"), None)
@@ -2657,6 +2664,7 @@ def report_items(run_dir: Path) -> list[dict]:
                 break
         if agami_receipt is None and str(rec.get("receipt_path") or "").endswith(".json") and Path(rec["receipt_path"]).exists():
             agami_receipt = _load_json(Path(rec["receipt_path"]))
+        one_query = _one_query(rec)
         diff, words = _diff_rows(rec, agami_receipt)
         result = _result(rec, diff)
         fix = _fix(rec, diff, result)
@@ -2680,7 +2688,7 @@ def report_items(run_dir: Path) -> list[dict]:
         # would let a rolled-up line change a result, which is the one thing it must never do.
         diff = _condense(diff)
         summaries = _summaries(diff, result, rec)
-        sample = _sample(run_dir / "rows" / str(n), result_set_for_sample(rec), one_sided=_ledger_is_agamis(rec))
+        sample = _sample(run_dir / "rows" / str(n), result_set_for_sample(rec), one_sided=one_query)
         prov = rec.get("provenance") or {}
         shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
         source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
@@ -2703,7 +2711,7 @@ def report_items(run_dir: Path) -> list[dict]:
             "result": result, "fix": fix, "fix_words": _FIX_WORDS[fix], "prefill": prefill,
             # Whether one query was written or two. The page's grid is two value columns, "yours"
             # beside "agami"; with one query there is no second side to put anywhere, and no "yours".
-            "one_query": _ledger_is_agamis(rec) or (rec.get("status") == UNGRADED and not rec.get("statement")),
+            "one_query": one_query,
             "sentence": _sentence(rec, diff) + (" " + clause if clause else ""),
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
@@ -2809,6 +2817,14 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         detail = agami_run if isinstance(agami_run, dict) else {}
         error = detail.get("detail") or detail.get("kind") or detail.get("status") or "agami's statement was not run, or its result was not recorded"
         error = f"agami's statement did not run: {error}" if detail else error
+    elif exp is None and statement is None:
+        # A question on its own: the person supplied no statement and no number, so there is nothing
+        # of theirs to compare against and NO file on disk can change that. This test comes before
+        # the comparison files are read, not after: Phase 2.5 writes agami's own query as
+        # `statement.sql` so the ledger can grade it, which means `statement.csv` holds agami's own
+        # result. Reading a score built from it compared agami against agami, returned accuracy 1.0,
+        # and the card said "the two answers match row for row" on a row with one answer.
+        pass
     elif isinstance(score, dict) and score.get("status") in ("scored", "unscored", "error"):
         comparison = {"result_set": score}
         match = (score.get("accuracy") == 1.0) if score.get("status") == "scored" else None
@@ -2819,8 +2835,6 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         scalar = diff(float(exp), float(actual), tolerance=tolerance)
         comparison = {"scalar": scalar}
         match, delta, delta_pct = scalar["match"], scalar["delta"], scalar["delta_pct"]
-    elif exp is None and statement is None:
-        pass   # a question on its own: agami answered, and the person grades it on the report
     else:
         error = ("the two results are tables, and they were not compared"
                  if exp is None or actual is None else "the two values could not be compared")
@@ -2840,7 +2854,7 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         "statement_receipt_path": str(row_dir / "statement-receipt.json") if (row_dir / "statement-receipt.json").exists() else None,
         "receipt_path": str(row_dir / "receipt.json") if (row_dir / "receipt.json").exists() else None,
         "ledger": ledger, "ledger_verdict": ledger_verdict, "comparison": comparison, "claims": claims,
-        "finding_keys": [], "words": None,
+        "finding_keys": [],
         "agami_statements": [] if is_error or len(statements) < 2 else statements,
     }
     if delta is not None:

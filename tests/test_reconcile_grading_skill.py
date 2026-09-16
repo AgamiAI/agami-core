@@ -60,10 +60,14 @@ def test_the_data_section_shows_the_answer_being_judged():
     assert "an answer nobody can see cannot be judged" in PHASE
 
 
-def test_the_decisions_are_the_same_six():
+def test_the_decisions_are_the_same_six_and_fix_is_withheld_with_a_reason():
+    """`fix` means "fix your query", and on this row the person wrote none, so the page does not
+    offer it (`const mine = Boolean(item.sql_yours)`). The phase has to say so rather than listing
+    an option a reader will not find."""
     assert "The decisions are the same six" in PHASE
-    for word in ("`example`", "`change`", "`fix`", "`reword`", "`nothing`"):
+    for word in ("`example`", "`change`", "`reword`", "`nothing`"):
         assert word in PHASE
+    assert "`fix` is not offered here" in PHASE and "the person wrote none" in PHASE
 
 
 def test_no_bare_the_model_in_the_phase():
