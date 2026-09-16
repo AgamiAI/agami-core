@@ -130,6 +130,16 @@ _SHARED_INSTRUCTIONS = (
     "verbatim. (3) execute_sql (the safety pass runs inside it; "
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
+    "Columns: write the statement from the columns the schema returned for those tables, and "
+    "nothing else. A plausible name is not a declared one, and a column you did not read in a "
+    "get_datasource_schema response is out of scope however obvious it looks beside the ones "
+    "that are there.\n"
+    "A scope refusal is a repair, not a dead end. `status:'refused'` on rule `column_scope` or "
+    "`table_scope` is the same mistake as the database's `column_not_found` and takes the same "
+    "fix: re-read what that table declares, rewrite with declared names, and retry. Relay the "
+    "refusal's `remediation` only when no declared column can answer the question, and then say "
+    "which column the model does not carry, in the user's own words rather than as an "
+    "instruction to go and edit the model.\n"
     "Steps 1 and 2 are INDEPENDENT: get_datasource_schema and get_prompt_examples share no state "
     "and neither reads the other's answer, so issue them in the same turn with the same question "
     "text. Never serialize what is independent — and when a question spans several datasources, "
@@ -3768,7 +3778,9 @@ TOOLS: dict[str, dict[str, Any]] = {
             "already formatted, so never retype a figure out of `rows` by hand.\n"
             "  {status:'refused', refusal:{reason, rule, detail, remediation}, receipt, audit_id} "
             "— OUR decision, so it always names its fix: relay the `remediation`, it says how to "
-            "get an answer. SELECT-only is enforced, so DML/DDL/multi-statement arrive here, as "
+            "get an answer. On `column_scope` or `table_scope` the schema you already hold "
+            "usually repairs it: rewrite with declared names and retry before relaying. "
+            "SELECT-only is enforced, so DML/DDL/multi-statement arrive here, as "
             # "The row limit", with no owner and no number: the next sentence states the number that
             # applies to this caller, and naming "the deployment" here would advertise a second cap
             # whenever an organisation has its own (#329).

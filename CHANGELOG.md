@@ -12,6 +12,21 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The instructions say which columns may be queried, and what a scope refusal means.** Neither
+  rule was stated anywhere a client reads before writing SQL. "Only columns declared on the model's
+  tables may be queried" existed solely inside the refusal a statement received for breaking it, so
+  an agent learned the rule by being refused: on one deployment, five refusals in a row were
+  plausible names that the model simply does not declare. And the two failure channels taught
+  opposite lessons for one mistake. A column the DATABASE lacks is documented as repairable
+  ("correct the statement and retry SILENTLY"); a column the MODEL does not declare said only to
+  relay the refusal's `remediation`, which reads as a dead end and hands the user an instruction to
+  go and edit the semantic model. Both now say the same thing: the schema the agent already holds
+  is enough, so rewrite with declared names and retry, and relay the remediation only when no
+  declared column can answer the question. Stated on both surfaces, the server instructions and
+  `execute_sql`'s own description, so they cannot drift apart.
+
 ### Changed
 
 - **`get_prompt_examples` no longer tells a client to leave `area` out.** The steer landed in 0.9.0

@@ -216,6 +216,29 @@ def test_the_two_grounding_calls_are_declared_independent(monkeypatch):
         assert "Never serialize what is independent" in text, f"{label}: stated too weakly"
 
 
+def test_the_instructions_say_which_columns_may_be_queried(monkeypatch):
+    """The rule existed only in the refusal a statement got for breaking it, so an agent learned it
+    by being refused. Five refusals on one deployment were plausible-but-undeclared names, which is
+    the shape of a rule nobody was told: the names were reasonable, they were just not in the
+    model."""
+    for label, text in _instruction_variants(monkeypatch).items():
+        assert "Columns:" in text, f"{label}: no rule about which columns may be queried"
+        assert "columns the schema returned" in text, f"{label}: does not name the source of truth"
+        assert "plausible name is not a declared one" in text, f"{label}: states it too weakly"
+
+
+def test_a_scope_refusal_is_documented_as_repairable(monkeypatch):
+    """The two channels taught opposite lessons for one mistake. A column the DATABASE lacks said
+    "correct the statement and retry SILENTLY"; a column the MODEL does not declare said relay the
+    remediation, which reads as a dead end and hands the user an instruction to go and edit the
+    model. Same error, same repair, and the agent already holds the schema that makes it."""
+    described = tools.TOOLS["execute_sql"]["description"]
+    assert "rewrite with declared names and retry before relaying" in described
+    for label, text in _instruction_variants(monkeypatch).items():
+        assert "column_scope" in text, f"{label}: the refusal rule is never named"
+        assert "repair, not a dead end" in text, f"{label}: the refusal still reads as terminal"
+
+
 def test_the_surface_admits_it_cannot_save_a_correction(monkeypatch):
     """Absence and omission are indistinguishable to a reader. There is no save-a-correction tool
     here on purpose — that is a skill operation — but an agent told nothing about it will claim to
