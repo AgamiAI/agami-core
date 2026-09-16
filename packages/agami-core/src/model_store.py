@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -314,14 +315,24 @@ def write_model_version(
     created_at: str | None = None,
     org_id: str = DEFAULT_ORG,
 ) -> None:
-    """Record a model version (the snapshot content hash the receipt pins). Idempotent per version."""
+    """Record the version now being served for a datasource (the content hash the receipt pins).
+
+    **The table holds one row per datasource: the live one.** Every other row for the datasource is
+    removed first. Appending instead left "which version is live" to an ORDER BY over `created_at`,
+    and a deploy that replaces the served rows wholesale, or a restore of an older version, is only
+    ever described by the last version written. A client that pins a version compares it with this
+    row by equality (#364).
+
+    Dated even when the caller passes no time, so no row is ambiguous to a reader that orders by
+    date."""
+    stamp = created_at or datetime.now(timezone.utc).isoformat(timespec="microseconds")
     store.execute(
-        "DELETE FROM model_version WHERE org_id = ? AND datasource = ? AND version = ?",
-        (org_id, datasource, version),
+        "DELETE FROM model_version WHERE org_id = ? AND datasource = ?",
+        (org_id, datasource),
     )
     store.execute(
         "INSERT INTO model_version (org_id, datasource, version, created_at) VALUES (?, ?, ?, ?)",
-        (org_id, datasource, version, created_at),
+        (org_id, datasource, version, stamp),
     )
     store.commit()
 
@@ -372,10 +383,15 @@ def load_organization_record(store: Store, org_id: str = DEFAULT_ORG) -> OrgReco
 
 
 def newest_model_version(store: Store, datasource: str, org_id: str = DEFAULT_ORG) -> str | None:
-    """The newest recorded version for a datasource (what the receipt pins), or None."""
+    """The live version for a datasource (what the receipt pins), or None.
+
+    One row per datasource since #364, but a database written before then can hold several, most of
+    them undated. Undated rows sort LAST explicitly: `DESC` alone puts NULLs first on Postgres and
+    last on SQLite, so one old undated row would otherwise outrank every dated one in production.
+    The next deploy removes the extras."""
     rows = store.query(
         "SELECT version FROM model_version WHERE org_id = ? AND datasource = ? "
-        "ORDER BY created_at DESC, version DESC",
+        "ORDER BY created_at IS NULL, created_at DESC, version DESC",
         (org_id, datasource),
     )
     return rows[0]["version"] if rows else None

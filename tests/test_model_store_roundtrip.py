@@ -317,6 +317,44 @@ def test_memory_and_model_version_round_trip():
     s.close()
 
 
+def test_writing_a_version_replaces_the_datasources_other_rows():
+    # #364: putting an older version back is the case that matters — the live row is whatever was
+    # written last, never whichever version sorts newest.
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    model_store.write_model_version(s, "main", "aaaa11112222")
+    model_store.write_model_version(s, "main", "bbbb33334444")
+    model_store.write_model_version(s, "main", "aaaa11112222")
+    model_store.write_model_version(s, "other", "cccc55556666")
+    model_store.write_model_version(s, "main", "dddd77778888", org_id="another-org")
+    main = s.query("SELECT version, created_at FROM model_version WHERE datasource = 'main' "
+                   "AND org_id = 'local'")
+    assert [r["version"] for r in main] == ["aaaa11112222"]
+    assert main[0]["created_at"]  # dated even though no caller passed a time
+    assert model_store.newest_model_version(s, "main") == "aaaa11112222"
+    assert model_store.newest_model_version(s, "other") == "cccc55556666"
+    assert model_store.newest_model_version(s, "main", org_id="another-org") == "dddd77778888"
+    s.close()
+
+
+def test_an_undated_row_left_by_an_older_writer_never_outranks_a_dated_one():
+    # Rows written before #364 are undated and can sit beside a dated one until the next deploy.
+    # `DESC` alone orders NULLs differently on SQLite and Postgres; the reader must not depend on it.
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    s.execute(
+        "INSERT INTO model_version (org_id, datasource, version, created_at) VALUES (?, ?, ?, ?)",
+        ("local", "main", "ffff00000000", None),
+    )
+    s.execute(
+        "INSERT INTO model_version (org_id, datasource, version, created_at) VALUES (?, ?, ?, ?)",
+        ("local", "main", "1111aaaabbbb", "2026-09-16T00:00:00.000000+00:00"),
+    )
+    s.commit()
+    assert model_store.newest_model_version(s, "main") == "1111aaaabbbb"
+    s.close()
+
+
 def test_tools_serve_memory_and_version_from_db_no_files(tmp_path, monkeypatch):
     # The spec's "no tool reads a file at runtime": domain context + the receipt version pin come
     # from the DB, with NO artifacts dir on disk.

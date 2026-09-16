@@ -122,7 +122,7 @@ def test_the_served_count_is_this_datasource_and_this_org_only(tmp_path, monkeyp
 
 
 def test_the_surface_names_the_pointer_and_keeps_the_calls_independent(monkeypatch):
-    assert "prompt_examples" in inspect.getsource(tools.tool_get_datasource_schema)
+    assert "prompt_examples" in inspect.getsource(tools._tool_get_datasource_schema)
     assert "`prompt_examples`" in tools.TOOLS["get_datasource_schema"]["description"]
     # The description names `query` and says nothing against `area`. A steer to leave `area`
     # out read as "never send one", and on a served deployment no client sent one at all, so a
