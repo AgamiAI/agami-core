@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import sys
@@ -1901,11 +1902,13 @@ def _error_cause(rec: dict) -> str | None:
     for part in ("runs", "scope"):
         if part in by_part and by_part[part].get("verdict") != CONFIRMED:
             return "yours_failed"
-    if not rec.get("sql") or (rec.get("recorded") is None and rec.get("actual") is None and rec.get("error")):
-        return "agami_failed"
+    # Read before the statement: an error row carries `sql` and `recorded` as null whatever the cause
+    # (the 2d rule), so a comparison that declined to score is the fact that says both ran and were empty.
     score = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
     if score and score.get("status") == "unscored":
         return "nothing_to_compare"
+    if not rec.get("sql") or (rec.get("recorded") is None and rec.get("actual") is None and rec.get("error")):
+        return "agami_failed"
     if not rec.get("statement") and rec.get("expected") is None:
         return "no_ground_truth"
     return "unknown"
@@ -2286,6 +2289,198 @@ def report_items(run_dir: Path) -> list[dict]:
         })
     return items
 
+class RecordError(Exception):
+    """A row record could not be built from the row directory: the message names what is missing."""
+
+
+STAMP_NAME = "agami-reconcile-report"
+_STAMP_RE = re.compile(r'<meta name="' + STAMP_NAME + r'" content="render_reconcile_report\.py (?P<run>\S+) (?P<digest>[0-9a-f]{12})">')
+
+
+def items_digest(items: list[dict]) -> str:
+    """Twelve hex characters over the items a page was rendered from, so the page can say which
+    items it shows and `check-run` can tell a stale page from a current one."""
+    return hashlib.sha256(json.dumps(items, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+
+
+def stamp_for(run: str, items: list[dict]) -> str:
+    return f'<meta name="{STAMP_NAME}" content="render_reconcile_report.py {run} {items_digest(items)}">'
+
+
+def _csv_shape(path: Path) -> tuple[dict | None, Any]:
+    """A result CSV as the record carries it: one cell as `{"columns", "rows": [[cell]]}`, anything
+    else as `{"columns", "row_count"}`. Never result rows beyond one cell. The second value is that one
+    cell, as a number when it reads as one."""
+    if not path.exists():
+        return None, None
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = [row for row in csv.reader(fh)]
+    if not rows:
+        return {"columns": [], "row_count": 0}, None
+    columns, data = rows[0], [r for r in rows[1:] if any(cell.strip() for cell in r)]
+    if len(data) == 1 and len(data[0]) == 1:
+        cell = data[0][0]
+        value = parse_value(cell)
+        kept = value if value is not None else cell
+        return {"columns": columns, "rows": [[kept]]}, kept
+    return {"columns": columns, "row_count": len(data)}, None
+
+
+def _optional_json(path: Path) -> Any:
+    return _load_json(path) if path.exists() else None
+
+
+def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str | None = None,
+           expected: Any = None, graded: str | None = None) -> dict:
+    """The row record Phase 2d writes, built from the row directory's files and appended to
+    `rows.jsonl` (replacing an earlier record for the same row). Nothing in it is typed by the
+    session: the question and the statement come from `intake.json`, agami's statement from
+    `agami-answer.json`, the two results from their CSVs (one cell, or the shape), the comparison from
+    `diff.json` or `comparison.json`, the grades from `ledger.json`, the claims from `claims.json`.
+
+    A question-only row that nobody has graded yet is refused: it waits for the grading page (Phase
+    2.5) and is never written as `error`. `expected` and `graded` are that page's answer coming back.
+    """
+    intake = _load_json(run_dir / "intake.json")
+    rows = intake.get("rows") if isinstance(intake, dict) else intake
+    if not isinstance(rows, list):
+        raise RecordError(f"{run_dir / 'intake.json'} is missing or holds no list of rows")
+    base = None
+    for n, candidate in enumerate(rows, 1):
+        if isinstance(candidate, dict) and int(candidate.get("row", n)) == row:
+            base = candidate
+            break
+    if base is None:
+        raise RecordError(f"row {row} is not in intake.json")
+    row_dir = run_dir / "rows" / str(row)
+    answer = _optional_json(row_dir / "agami-answer.json")
+    if not isinstance(answer, dict) or answer.get("error") in ("empty_file", "unreadable_json"):
+        raise RecordError(f"rows/{row}/agami-answer.json is missing or unreadable; ask agami (Phase 2b) first")
+    sql = answer.get("sql") if isinstance(answer.get("sql"), str) and answer["sql"].strip() else None
+    statements = [st for st in (answer.get("statements") or []) if isinstance(st, str) and st.strip()]
+    agami_run = _optional_json(row_dir / "agami-run.json")
+    recorded, actual_cell = _csv_shape(row_dir / "actual.csv")
+    statement = base.get("statement") or None
+    statement_recorded, statement_cell = _csv_shape(row_dir / "statement.csv") if statement else (None, None)
+    exp = expected if expected is not None else base.get("expected")
+    if exp is None and statement and isinstance(statement_cell, (int, float)) and not isinstance(statement_cell, bool):
+        exp = float(statement_cell)  # Phase 1.5f: the statement's own result is the expected value
+    ledger = _optional_json(row_dir / "ledger.json")
+    ledger = ledger if isinstance(ledger, dict) and not ledger.get("error") else None
+    ledger_verdict = ledger.get("verdict") if ledger else None
+    claims = _optional_json(row_dir / "claims.json")
+    claims = claims if isinstance(claims, dict) and not claims.get("error") else None
+    score = _optional_json(row_dir / "comparison.json")
+    diff_file = _optional_json(row_dir / "diff.json")
+    actual = actual_cell if isinstance(actual_cell, (int, float)) and not isinstance(actual_cell, bool) else None
+
+    error: str | None = None
+    comparison: dict | None = None
+    match: bool | None = None
+    delta = delta_pct = None
+    if sql is None:
+        error = answer.get("error") or "agami wrote no statement"
+    elif recorded is None:
+        detail = agami_run if isinstance(agami_run, dict) else {}
+        error = detail.get("detail") or detail.get("kind") or detail.get("status") or "agami's statement was not run, or its result was not recorded"
+        error = f"agami's statement did not run: {error}" if detail else error
+    elif isinstance(score, dict) and score.get("status") in ("scored", "unscored", "error"):
+        comparison = {"result_set": score}
+        match = (score.get("accuracy") == 1.0) if score.get("status") == "scored" else None
+    elif isinstance(diff_file, dict) and "match" in diff_file:
+        comparison = {"scalar": diff_file}
+        match, delta, delta_pct = diff_file.get("match"), diff_file.get("delta"), diff_file.get("delta_pct")
+    elif exp is not None and actual is not None and isinstance(exp, (int, float)) and not isinstance(exp, bool):
+        scalar = diff(float(exp), float(actual), tolerance=tolerance)
+        comparison = {"scalar": scalar}
+        match, delta, delta_pct = scalar["match"], scalar["delta"], scalar["delta_pct"]
+    elif exp is None and statement is None:
+        raise RecordError(f"row {row} has nothing to compare against; grade agami's answer on the grading page "
+                          "(Phase 2.5) before writing its record")
+    else:
+        error = ("the result is not one number and no table comparison was written; run compare-results (Phase 2e)"
+                 if exp is None or actual is None else "the two values could not be compared")
+    status = row_status(match, ledger_verdict)
+    is_error = status == ERROR
+    provenance = dict(base.get("provenance") or {})
+    if graded:
+        provenance["graded"] = graded
+    rec = {
+        "row": row, "label": base.get("label"), "question": base.get("question"),
+        "expected": exp, "actual": None if is_error else actual, "delta_pct": None if is_error else delta_pct,
+        "match": match, "status": status, "report_path": report_path,
+        # The 2d rule: an error row carries neither a statement nor a result anyone could mistake for
+        # a verified answer.
+        "sql": None if is_error else sql, "recorded": None if is_error else recorded,
+        "error": error,
+        "provenance": provenance, "statement": statement, "statement_recorded": statement_recorded,
+        "statement_receipt_path": str(row_dir / "statement-receipt.json") if (row_dir / "statement-receipt.json").exists() else None,
+        "receipt_path": str(row_dir / "receipt.json") if (row_dir / "receipt.json").exists() else None,
+        "ledger": ledger, "ledger_verdict": ledger_verdict, "comparison": comparison, "claims": claims,
+        "finding_keys": [], "words": None,
+        "agami_statements": [] if is_error or len(statements) < 2 else statements,
+    }
+    if delta is not None:
+        rec["delta"] = delta
+    path = run_dir / "rows.jsonl"
+    kept: list[str] = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                old = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line)  # next-chunk refuses it; not this verb's to drop
+                continue
+            old_row = old.get("row") if isinstance(old, dict) else None
+            if isinstance(old_row, str) and old_row.strip().isdigit():
+                old_row = int(old_row)
+            if old_row != row:
+                kept.append(line)
+    path.write_text("".join(line + "\n" for line in kept) + json.dumps(rec) + "\n", encoding="utf-8")
+    return rec
+
+
+def check_run(run_dir: Path) -> dict:
+    """Whether the run directory and its page agree: every row in the checkpoint is a row of the
+    intake and has the files its record names, `report.html` exists, and its stamp is the digest of
+    the items the run's files build now. Exit 4 with the list when anything is off."""
+    problems: list[str] = []
+    intake = _optional_json(run_dir / "intake.json")
+    rows = intake.get("rows") if isinstance(intake, dict) else intake
+    if not isinstance(rows, list):
+        problems.append("intake.json is missing or holds no list of rows")
+        rows = []
+    intake_ids = {int(r.get("row", n)) for n, r in enumerate(rows, 1) if isinstance(r, dict)}
+    records, bad = _done_rows(run_dir)
+    problems.extend(f"rows.jsonl: {line} cannot be read" for line in bad)
+    for rec in records:
+        n = rec.get("row")
+        if n not in intake_ids:
+            problems.append(f"rows.jsonl: row {n} is not in intake.json")
+        row_dir = run_dir / "rows" / str(n)
+        if not (row_dir / "agami-answer.json").exists():
+            problems.append(f"rows/{n}/agami-answer.json is missing")
+        if rec.get("statement") and not (row_dir / "ledger.json").exists():
+            problems.append(f"rows/{n}/ledger.json is missing for a statement row")
+        if rec.get("sql") and not (row_dir / "actual.csv").exists():
+            problems.append(f"rows/{n}/actual.csv is missing although the record carries agami's statement")
+    page = run_dir / "report.html"
+    if not page.exists():
+        problems.append("report.html is missing; render it")
+    elif records:
+        m = _STAMP_RE.search(page.read_text(encoding="utf-8", errors="replace"))
+        current = items_digest(report_items(run_dir))
+        if not m:
+            problems.append("report.html carries no render stamp; it was not written by render_reconcile_report.py")
+        elif m.group("digest") != current:
+            problems.append(f"report.html was rendered from other items (stamp {m.group('digest')}, current {current}); render it again")
+    if records and not (run_dir / "report-items.json").exists():
+        problems.append("report-items.json is missing; render the page from the run directory")
+    return {"ok": not problems, "rows": len(records), "problems": problems}
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Reconciliation helper for agami-reconcile.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2328,6 +2523,17 @@ def main(argv: list[str] | None = None) -> int:
     p_resume = sub.add_parser("resume", help="The newest run under a reconcile directory that still has rows to run.")
     p_resume.add_argument("--reconcile-dir", required=True, dest="reconcile_dir", help="<artifacts_dir>/local/reconcile")
 
+    p_record = sub.add_parser("record", help="Build one row's record (Phase 2d) from its row directory and append it to rows.jsonl.")
+    p_record.add_argument("--run-dir", required=True, dest="run_dir")
+    p_record.add_argument("--row", required=True, type=int)
+    p_record.add_argument("--tolerance", default="0.01", help="the scalar diff's tolerance when no diff.json was written")
+    p_record.add_argument("--report-path", default=None, dest="report_path", help="the chart report for agami's statement, when there is one")
+    p_record.add_argument("--expected", default=None, help="the grading page's answer for a question-only row (Phase 2.5, a right grade)")
+    p_record.add_argument("--graded", default=None, choices=["right", "wrong", "unsure"], help="the grade the person gave on the grading page")
+
+    p_check = sub.add_parser("check-run", help="Whether the run directory and its report page agree; exit 4 with the list when not.")
+    p_check.add_argument("--run-dir", required=True, dest="run_dir")
+
     p_items = sub.add_parser("report-items", help="Build the report page's items from a run's rows.jsonl, ledgers, comparisons and receipts.")
     p_items.add_argument("--run-dir", required=True, dest="run_dir")
     p_items.add_argument("--out", default=None, help="where the items file goes (default <run-dir>/report-items.json)")
@@ -2361,6 +2567,25 @@ def main(argv: list[str] | None = None) -> int:
         # Exit 4, "nothing to do": every run under the directory is complete, or there is none.
         return 0 if found else 4
 
+    if args.cmd == "record":
+        run_dir = Path(args.run_dir).expanduser()
+        try:
+            rec = record(run_dir, args.row, tolerance=parse_value(args.tolerance) or 0.01,
+                         report_path=args.report_path, expected=parse_value(args.expected) if args.expected is not None else None,
+                         graded=args.graded)
+        except RecordError as exc:
+            print(f"reconcile record: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(rec, indent=2))
+        return 0
+    if args.cmd == "check-run":
+        run_dir = Path(args.run_dir).expanduser()
+        if not run_dir.is_dir():
+            print(f"reconcile check-run: run directory not found: {run_dir}", file=sys.stderr)
+            return 2
+        result = check_run(run_dir)
+        print(json.dumps(result, indent=2))
+        return 0 if result["ok"] else 4
     if args.cmd == "report-items":
         run_dir = Path(args.run_dir).expanduser()
         if not run_dir.is_dir():

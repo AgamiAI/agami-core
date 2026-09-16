@@ -75,7 +75,11 @@ and writes `ledger.json` beside the inputs.
 | `question_fit.json` | the skill, Phase 1.5g | `{"fit": "plausible" \| "doubtful" \| "no_question", "reason": "<one sentence, or null>"}`: whether the statement plausibly answers the question it came with, decided by reading |
 | `mentions.json` | `sm mentions --sql-file` | every description, caveat, glossary line, narrative paragraph and prompt example that mentions a table or column the statement reads, with a `values_named_differ` flag when two mentions about one column name different quoted values. Optional: absent, the ledger grades as before |
 | `receipt.json` | `sm receipt` | the receipt of the AI's statement |
+| `agami-answer.json`, `agami.sql`, `agami-run.json`, `actual.csv` | `run_golden_eval.py --ask-file`, the skill, the tier | agami's answer (`sql`, `statements`, `error`), its statement verbatim, its run's exit in `run.json`'s shape, its result |
+| `diff.json`, `comparison.json` | `reconcile.py diff`, `sm compare-results` | the number comparison, or the table comparison, whichever the row took |
 | `ledger.json` | `reconcile.py ledger` | the graded parts |
+
+The row record itself (`rows.jsonl`, one line per row) is written by `reconcile.py record` from these files and by nothing else; `reconcile.py check-run` says whether the run directory and the report page agree.
 
 **The semantic model's words ride on the parts that fell short.** When `mentions.json` is present,
 every part that is not `confirmed` or `noted` and names a table or column (`literal:`,

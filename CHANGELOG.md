@@ -212,6 +212,17 @@ below corresponds to one such version.
 
 ### Added
 
+- **The reconcile report is built by code from the run directory, never typed.** `reconcile.py
+  record --run-dir --row` assembles the row record from the row's files and appends it to the
+  checkpoint (replacing an earlier record for the row; a question-only row nobody graded is
+  refused, since it waits for the grading page). `render_reconcile_report.py --run-dir` builds the
+  items itself, takes from the session a words file with `sentence` and `change` only (any other
+  field is refused), writes `report-items.json` beside the page, stamps the page with the digest
+  of the items it rendered, and prints the three lines the skill says. `reconcile.py check-run`
+  refuses to let Phase 3 speak while a row's files are missing or the page's stamp is not the
+  current items' digest. The skill's 2c writes `diff.json`, 2b writes `agami-run.json`, and 2d and
+  3a.5 name the verbs. (ACE-136)
+
 - **Agami's answer may be several statements, and the reconcile page shows every one.** The cold
   client's reply was read as one string under `sql`; a list, or several statements in one string,
   lost everything but the first object or read as unreadable. The generator now keeps every
