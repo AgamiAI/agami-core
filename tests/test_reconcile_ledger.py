@@ -84,6 +84,7 @@ def _complete(row_dir: Path) -> None:
     _write(row_dir, "statement-receipt.json", _receipt())
     _write(row_dir, "join-probes.json", _no_joins())
     _write(row_dir, "filter-values.judge.json", _no_literals())
+    _write(row_dir, "question_fit.json", {"fit": "plausible", "reason": None})
 
 
 def _join_probe(a: str, ac: str, b: str, bc: str, *, declared_between: bool, matches: bool,
@@ -145,7 +146,7 @@ def test_a_statement_that_ran_clean_is_confirmed_on_every_part(tmp_path):
     assert _parts(result)["metric:total"]["evidence"] == {"metric": "revenue"}
     assert result["verdict"] == "confirmed"
     assert {row["verdict"] for row in result["rows"]} == {"confirmed"}
-    assert set(_parts(result)) == {"runs", "scope", "fan_out:SUM(total)", "aggregation:SUM(total)",
+    assert set(_parts(result)) == {"runs", "scope", "question_fit", "fan_out:SUM(total)", "aggregation:SUM(total)",
                                    "default_filter:orders:orders.deleted_at IS NULL", "metric:total"}
 
 
@@ -572,7 +573,7 @@ def test_a_run_that_failed_expects_no_later_files(tmp_path):
 def test_a_complete_clean_row_has_no_open_part(tmp_path):
     _complete(tmp_path)
     result = ledger(tmp_path)
-    assert result["verdict"] == "confirmed" and set(_parts(result)) == {"runs", "scope"}
+    assert result["verdict"] == "confirmed" and set(_parts(result)) == {"runs", "scope", "question_fit"}
 
 
 def test_an_output_column_the_receipt_could_not_settle_is_open_not_a_gap(tmp_path):
@@ -966,3 +967,53 @@ def test_words_that_could_not_be_read_are_noted_not_silently_missing(tmp_path):
     assert "prose:*" not in _parts(ledger(tmp_path))
     (tmp_path / "mentions.json").unlink()
     assert "prose:*" not in _parts(ledger(tmp_path))
+# --- question fit: the one part graded by reading -----------------------------------------------
+
+
+def test_a_plausible_fit_is_confirmed_and_says_it_was_read_not_measured(tmp_path):
+    _complete(tmp_path)
+    row = _parts(ledger(tmp_path))["question_fit"]
+    assert row["verdict"] == "confirmed" and "by reading" in row["note"]
+
+
+def test_a_doubtful_fit_holds_the_row_open_with_the_reason(tmp_path):
+    _complete(tmp_path)
+    _write(tmp_path, "question_fit.json", {"fit": "doubtful",
+                                           "reason": "the question asks about orders and the statement counts items"})
+    result = ledger(tmp_path)
+    row = _parts(result)["question_fit"]
+    assert row["verdict"] == "unresolved" and "counts items" in row["note"] and "re-run this row" in row["note"]
+    assert result["verdict"] == "unresolved"
+    # Which is what keeps a matching number away from the keep-offer.
+    assert reconcile.row_status(True, result["verdict"]) == "match_unverified"
+
+
+def test_a_statement_that_came_with_no_question_has_no_fit_to_grade(tmp_path):
+    _complete(tmp_path)
+    _write(tmp_path, "question_fit.json", {"fit": "no_question", "reason": None})
+    assert "question_fit" not in _parts(ledger(tmp_path))
+
+
+def test_a_fit_that_was_never_checked_is_an_open_part_after_a_successful_run_only(tmp_path):
+    _complete(tmp_path)
+    (tmp_path / "question_fit.json").unlink()
+    row = _parts(ledger(tmp_path))["question_fit"]
+    assert row["verdict"] == "unresolved" and "was not checked" in row["note"]
+    _write(tmp_path, "question_fit.json", {"fit": "maybe"})
+    assert _parts(ledger(tmp_path))["question_fit"]["verdict"] == "unresolved"
+    failed = tmp_path / "failed"
+    _write(failed, "run.json", {"status": "failed", "rule": None, "kind": "timeout", "detail": None})
+    assert "question_fit" not in _parts(ledger(failed))
+
+
+def test_a_no_question_fit_against_a_row_that_carries_a_question_is_never_an_example(tmp_path):
+    """`no_question` removes the part; declared against a row that carries a question it is a
+    contradiction, and the findings verb refuses to treat the row as a statement that held."""
+    run = _run_dir(tmp_path, [{"row": 1, "question": "How many orders?", "statement": "s", "expected": 1,
+                               "status": "mismatch"}])
+    d = run / "rows" / "1"
+    _complete(d)
+    _write(d, "question_fit.json", {"fit": "no_question", "reason": None})
+    assert findings(run)["findings"] == []
+    _write(d, "question_fit.json", {"fit": "plausible", "reason": None})
+    assert [f["kind"] for f in findings(run)["findings"]] == ["example"]
