@@ -107,6 +107,9 @@ _SECTION_ORDER = ("failure", "error", "unscored", "unconfirmed", "pass")
 # preflight refused" and "the run produced no verdict": to a pipeline those are the same event —
 # nothing was judged — and a second code for it would only be a second thing to configure.
 _FAILED = 1
+# `--ask` produced no statement: the generator's fixed sentence says why, and a caller treats the row
+# as an error rather than writing a statement of its own.
+_NO_STATEMENT = 3
 _CANNOT_START = 2
 
 # Marks the lines a caller is meant to strip — the refusals and the warnings, this helper talking
@@ -1023,6 +1026,92 @@ def _summary_line(result: GoldenRunResult, summary: dict[str, Any]) -> str:
     )
 
 
+def _ask(args: argparse.Namespace) -> int:
+    """One question, answered the way a golden-run item is: the same context assembly, the same client
+    with every tool off, the same fixed sentences on failure. The reconcile skill calls this for
+    agami's side so the SQL it grades is what a fresh session writes, never what a session holding the
+    person's own statement would write."""
+    if not args.ask.strip():
+        _stop("--ask needs the question's text")
+        return _CANNOT_START
+    try:
+        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
+    except SmFailed as exc:
+        _stop(f"cannot build the model context for profile {args.profile!r} — {exc}")
+        return _CANNOT_START
+    generator = GENERATOR(lambda question: _model_context(cached, question), timeout_s=args.timeout_s, **_effort(args))
+    generated = generator.generate(args.ask, tools.resolved_org_id(), args.profile)
+    sql = generated.sql.strip() if generated.sql else ""
+    payload = {"question": args.ask, "sql": sql or None, "error": generated.error}
+    if args.out:
+        out = Path(args.out).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(json.dumps(payload, indent=2))
+    return 0 if sql and generated.error is None else _NO_STATEMENT
+
+
+def _questions_from_file(path: Path) -> list[dict[str, Any]]:
+    """`[{row, question}, ...]`, from a bare list or from `reconcile.py next-chunk`'s output (its
+    `chunk`) or an intake file (its `rows`). A row without a question is skipped and named."""
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    rows = loaded
+    if isinstance(loaded, dict):
+        rows = loaded.get("chunk") if isinstance(loaded.get("chunk"), list) else loaded.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("the questions file holds no list of rows")
+    out: list[dict[str, Any]] = []
+    for n, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise ValueError(f"row {n} is not an object")
+        question = row.get("question")
+        out.append({"row": row.get("row", n), "question": question.strip() if isinstance(question, str) else None})
+    return out
+
+
+def _ask_many(args: argparse.Namespace) -> int:
+    """Every question in a file, answered cold, in one process. What is reused across the questions is
+    what does not depend on them: the model context is fetched once, and one generator serves the
+    batch. What is not reused is the client: each question still gets its own fresh session with every
+    tool off, because that is the thing being measured. Several sessions run at once."""
+    try:
+        questions = _questions_from_file(Path(args.ask_file).expanduser())
+    except (OSError, ValueError) as exc:
+        _stop(f"cannot read the questions file: {exc}")
+        return _CANNOT_START
+    if not questions:
+        _stop("the questions file holds no rows")
+        return _CANNOT_START
+    try:
+        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
+    except SmFailed as exc:
+        _stop(f"cannot build the model context for profile {args.profile!r} — {exc}")
+        return _CANNOT_START
+    generator = GENERATOR(lambda question: _model_context(cached, question), timeout_s=args.timeout_s, **_effort(args))
+    org = tools.resolved_org_id()
+
+    def one(q: dict[str, Any]) -> dict[str, Any]:
+        if not q["question"]:
+            return {"row": q["row"], "question": None, "sql": None, "error": "the row carries no question"}
+        generated = generator.generate(q["question"], org, args.profile)
+        sql = generated.sql.strip() if generated.sql else ""
+        return {"row": q["row"], "question": q["question"], "sql": sql or None, "error": generated.error}
+
+    from concurrent.futures import ThreadPoolExecutor
+    workers = max(1, min(args.parallel, len(questions)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        answers = list(pool.map(one, questions))  # in the questions' order, whatever finished first
+    if args.out_dir:
+        base = Path(args.out_dir).expanduser()
+        for answer in answers:
+            target = base / str(answer["row"]) / "agami-answer.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(answer, indent=2), encoding="utf-8")
+    missing = sum(1 for a in answers if not a["sql"])
+    print(json.dumps({"asked": len(answers), "answered": len(answers) - missing, "parallel": workers, "answers": answers}, indent=2))
+    return 0 if missing == 0 else _NO_STATEMENT
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Run a golden dataset and score every case.")
     parser.add_argument("--profile", required=True, help="the semantic-model profile to run")
@@ -1066,7 +1155,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         "much cheaper. The level is recorded with the run, because a score measured at one level "
         "says nothing about another",
     )
+    parser.add_argument(
+        "--ask",
+        help="answer this one question cold, with the golden run's generator and context, and print "
+        "{question, sql, error}; the reconcile skill's way of asking agami without its own context in play",
+    )
+    parser.add_argument("--out", help="with --ask, also write the answer to this file")
+    parser.add_argument(
+        "--ask-file",
+        help="a JSON list of {row, question} (or `reconcile.py next-chunk`'s output) answered cold in one "
+        "process: the context is fetched once, the client is spawned per question, several at a time",
+    )
+    parser.add_argument("--out-dir", help="with --ask-file, write each answer to <out-dir>/<row>/agami-answer.json")
+    parser.add_argument("--parallel", type=int, default=4, help="with --ask-file, how many clients to spawn at once")
     args = parser.parse_args(argv)
+    if args.ask is not None or args.ask_file is not None:
+        if args.dataset or args.list or args.tag or args.rerun_failures:
+            _stop("--ask and --ask-file answer questions; they take no dataset, tag or list")
+            return _CANNOT_START
+        if args.ask is not None and args.ask_file is not None:
+            _stop("pass --ask or --ask-file, not both")
+            return _CANNOT_START
+        return _ask(args) if args.ask is not None else _ask_many(args)
 
     if args.list:
         print(json.dumps(_list_payload(args.profile), indent=2))

@@ -353,3 +353,13 @@ def test_the_example_decision_has_a_route():
     story = _between(SKILL, "### 3a.5", "### 3b")
     assert "**`example`** takes the person's statement and its question to `/agami-save-correction` as a prompt example" in story
 
+
+def test_agamis_answer_comes_from_a_cold_client_never_from_the_session():
+    phase_2b = _between(SKILL, "### 2b", "### 2.5")
+    assert "--ask-file /tmp/agami-reconcile-chunk-<ts>.json" in phase_2b and "--parallel 4" in phase_2b and "--out rows/<n>/agami-answer.json" in phase_2b
+    assert "fetches the model context once for the batch" in phase_2b and "the session itself is never reused" in phase_2b
+    assert "**Agami's answer comes from a cold client, never from this session.**" in phase_2b
+    assert "**Never write agami's SQL yourself, and never retry with your own wording**" in phase_2b
+    assert "four fixed sentences" in phase_2b and "the batch exits `3` when any row is like that" in phase_2b
+    assert "Invoke the same SQL-generation + execution path agami-query uses" not in phase_2b
+
