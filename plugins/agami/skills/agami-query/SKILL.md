@@ -153,6 +153,7 @@ Route any error through [`shared/db_error_classifier.md`](../../shared/db_error_
 
 - `auth` / `dsn` → credentials may have rotated; point at `<artifacts_dir>/local/credentials`.
 - `network` → check VPN / DB endpoint reachability.
+- `sign_in_required` → the person's own sign-in expired; relay the message (sign in again, new conversation).
 - `driver_missing` → fall through to the next available method.
 
 If the cached method doesn't work, re-run tool detection per [`agami-connect/SKILL.md → Phase 0a.5`](../agami-connect/SKILL.md#0a5--tool-detection).

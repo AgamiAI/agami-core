@@ -27,6 +27,7 @@ Credentials live in `<artifacts_dir>/local/credentials` (per-profile `[section]`
 | `column_not_found` | psycopg2 `UndefinedColumn`; mysql `1054` `Unknown column`; snowflake `Invalid identifier`; BigQuery `Name <x> not found`; sqlite `no such column`; SF `INVALID_FIELD` | If the missing column **is** in the local semantic model YAML: `"Your model references <col> but it's no longer in the live database — schema drift. Re-introspect with /agami-connect to sync."` Otherwise: `"Generated SQL referenced a column that doesn't exist. Re-run the query — it'll auto-retry with corrected SQL."` |
 | `table_not_found` | psycopg2 `UndefinedTable`; mysql `1146` `Table doesn't exist`; snowflake `Object <x> does not exist`; BigQuery `Table <x> not found`; sqlite `no such table` | If the missing table **is** in the local semantic model: `"Your model references <table> but it's no longer in the live database — schema drift. Re-introspect with /agami-connect to sync."` Otherwise: `"Generated SQL referenced a table that doesn't exist in this datasource. Re-run the query."` |
 | `syntax` | psycopg2 `SyntaxError` (DB-side); mysql `1064` `You have an error in your SQL syntax`; snowflake `compilation error`; sqlite `near "X": syntax error`. Only a message that names a syntax error: an execution failure no rule reads is `other`, never `syntax` | `"SQL syntax error from the generator. Re-run the query — auto-retry usually fixes generator slips."` |
+| `sign_in_required` | Never from driver text. Only exit code 11, raised by an injected executor that connects as the asking person when that person's own credential is missing or cannot be renewed | `"Your sign-in has expired or is missing. Sign in again (reconnect the connector), then start a new conversation."` |
 | `other` | anything else, including an execution-time driver message no rule above reads (no exit-code prior turns it into `syntax`) | `"<original error message>. For deeper per-datasource troubleshooting see the connection reference (plugins/agami/shared/connection-reference.md) and docs/troubleshooting.md."` |
 
 **There is no `timeout` row, deliberately.** It used to detect psycopg2 `QueryCanceled`, MySQL 2013,
@@ -97,7 +98,8 @@ preserved so the query log captures the original.
 ## Where this is consumed
 
 - **`agami-query`** — wraps each connection method's SQL call. On `auth` / `dsn` / `network` /
-  `driver_missing` / `permission`, surface the remediation and stop. On `column_not_found` /
+  `driver_missing` / `permission`, surface the remediation and stop. On `sign_in_required`, relay the
+  message and stop — nothing is broken. On `column_not_found` /
   `table_not_found`, run the drift-match step and emit the appropriate message. On `syntax` / `timeout`,
   the query path's auto-retry fires; the classifier just labels the failure.
 - **`agami-connect`** — when an introspection query fails, classify it and surface the one-line
