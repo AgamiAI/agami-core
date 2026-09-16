@@ -320,7 +320,7 @@ def test_refuse_rejects_a_rule_with_no_pinned_reason():
 # --- failure kinds ----------------------------------------------------------
 
 
-def test_failure_kinds_are_exactly_the_contract_ten():
+def test_failure_kinds_are_exactly_the_contract_eleven():
     """Contract §3's list, verbatim. `permission` is in it and is NOT the `read_only` rule: §1's
     `read_only` is our verdict that we blocked a write, `permission` is the database refusing a read
     to the connection's role. Declared here though nothing produces it yet, so ACE-039 fills a member
@@ -333,6 +333,7 @@ def test_failure_kinds_are_exactly_the_contract_ten():
         "network",
         "other",
         "permission",
+        "sign_in_required",
         "syntax",
         "table_not_found",
         "timeout",

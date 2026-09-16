@@ -217,13 +217,20 @@ FailureKind = Literal[
     "dsn",
     "driver_missing",
     "timeout",
+    "sign_in_required",
     "other",
 ]
-"""Ten classified operational errors declared, six produced.
+"""Eleven classified operational errors declared, six produced by the built-in executor.
 
 Produced today: `dsn`, `driver_missing`, `auth` and `syntax` from the executor's classified exit
 codes, `other` from its catch-all, and `timeout` from the subprocess supervisor at the tool edge —
 the bound that kills a forked executor which never returned.
+
+**`sign_in_required` is produced only by an injected executor** that connects as the person asking
+(a per-user credential exchange, for instance). It means the person's own credential is missing or
+could no longer be renewed, so the fix is theirs: sign in again. It is not `auth`, whose fix is an
+operator's re-credential, and reporting it as `auth` made a client tell a person the warehouse was
+broken when a fresh sign-in was all it took.
 
 **`timeout` is a failure, not a refusal, and whose decision it was is not the test on its own.** The
 supervisor bound is ours, but it cannot attribute the kill to the STATEMENT: the child may have hung

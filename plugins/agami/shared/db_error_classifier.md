@@ -82,7 +82,7 @@ The classifier returns:
   # raw error is already in front of the user and a remediation is worth giving, while
   # `execute_sql`'s failure crosses the LLM boundary and carries `{kind, message}` with no
   # remediation and no value text. Detection rules are shared; presentation is per-surface.
-  "kind": "auth | dsn | network | driver_missing | permission | column_not_found | table_not_found | syntax | timeout | other",
+  "kind": "auth | dsn | network | driver_missing | permission | column_not_found | table_not_found | syntax | timeout | sign_in_required | other",
   "remediation": "<one-line user-facing remediation message>",
   "raw_message": "<original exception message, truncated to 500 chars>",
   "drift_match": True | False,    # set only on column_not_found / table_not_found
