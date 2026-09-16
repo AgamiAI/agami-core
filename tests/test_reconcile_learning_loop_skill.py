@@ -269,3 +269,17 @@ def test_phase_three_is_told_in_four_beats_and_the_ledger_runs_once():
     assert "once per row and after the comparison" in REFERENCES["statement-check.md"]
     assert "and again with `--with-claims`" not in REFERENCES["statement-check.md"]
     assert "once per row after the" in REFERENCES["part-ledger.md"]
+
+
+def test_the_four_beats_are_also_a_page_and_a_keep_is_never_the_pages_to_grant():
+    story = _between(SKILL, "### 3a.5 — Every row in four beats", "### 3b — Mismatches")
+    assert "render_reconcile_report.py" in story and "parse_reconcile_report.py" in story
+    assert "--run-dir" in story and "--match-rows" not in story
+    assert "offers `keep` only on rows whose status is `match` with a single recorded cell" in story
+    assert "never from anything typed" in story
+    assert "the offer's predicate is the ledger's and never the page's" in story
+    assert "No decision writes anything this skill does not already write." in story
+    assert "The chat keeps 3a, the link and one line of next steps" in story
+    assert "one card per row for a batch and a checklist with a rail for a single audited query" in story
+    assert "--layout cards|audit" in story and '"checks": [{"step"' in story and '"todo": [' in story
+    assert "When the page cannot be written, the four beats below are said in chat instead" in story
