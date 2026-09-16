@@ -266,6 +266,8 @@ It writes `findings.json` (one entry per place the semantic model was shown to b
 
 ## Phase 3: Present
 
+Everything this phase says to the person follows [`shared/plain-language.md`](../../shared/plain-language.md): name who did what (you and your query, agami and its answer, the semantic model and its caveats, filters, joins and metrics, the prompt examples, and the data), and never write the word "model" on its own, because it can mean the semantic model, the AI, the prompt examples or the database and a reader cannot tell which; name the thing and never the mechanism; one idea per sentence, cause then effect then the one action; quote a caveat when it decided something. The part ids and file names stay in the tables below and in the files. The sentences around them are plain, and the AI never speaks of itself steering, front-running or deciding the answer.
+
 ### 3a — Summary line first
 
 ```
@@ -330,7 +332,7 @@ Only when a row carried a statement, and only for the parts that did not grade `
 - Two of these name different values for items.state. The semantic model disagrees with itself here; which is right is the person's call.
 ```
 
-Say the kinds apart in one sentence each: a `query_defect` is the person's to fix, and nothing about agami changes because of it; a `model_gap` is a place the data proved their statement right where the semantic model is missing or wrong, and a single fix still goes through `/agami-save-correction` (an undeclared value list is a field's `choice_field`, the `field_metadata` route). An `unresolved` part is neither: it says what could not be checked and why, and it sits in its own block so nobody counts it as a defect. A `noted` part is not a grade at all: a fact the run states and never judges, in the last block. Under all of that, when a row above carries `evidence.prose`, one line per source quoting what the semantic model already says in words about that column or table, and one sentence when two of those lines name different values: the semantic model disagrees with itself, and which is right is the person's call, never the ledger's.
+Say the kinds apart in one sentence each: a `query_defect` is the person's to fix, and nothing about agami changes because of it; a `model_gap` is a place the data proved their statement right where the semantic model is missing or wrong, and a single fix still goes through `/agami-save-correction` (an undeclared value list is a field's `choice_field`, the `field_metadata` route). An `unresolved` part is neither: it says what could not be checked and why, and it sits in its own block so nobody counts it as a defect. Say every one of these in the words of [`shared/plain-language.md`](../../shared/plain-language.md): "the join repeats rows, so the total counts some rows more than once", never "fan-out"; "the table also holds bundles and variants", never "anti-join the child tables". A `noted` part is not a grade at all: a fact the run states and never judges, in the last block. Under all of that, when a row above carries `evidence.prose`, one line per source quoting what the semantic model already says in words about that column or table, and one sentence when two of those lines name different values: the semantic model disagrees with itself, and which is right is the person's call, never the ledger's.
 
 ### 3c — Errors block (if any)
 
