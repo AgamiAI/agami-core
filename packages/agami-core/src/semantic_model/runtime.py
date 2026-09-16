@@ -3149,6 +3149,11 @@ def assemble_receipt(
             # sensitive-column flag as a metric verdict.
             "kind": "output",
             "column": oc.key,
+            # Whether the projection aggregates (SUM, COUNT, AVG, ...). A plain column in a list
+            # query computes nothing a metric could define, so a reader that grades "matches no
+            # metric" reads this first and says nothing about such a column.
+            "aggregate": bool(oc.expr is not None and any(
+                agg.find_ancestor(exp.Window) is None for agg in oc.expr.find_all(exp.AggFunc))),
             # The same scope label `tables` and `joins` carry, from the same composer, so a reader
             # can join the three sections on it for a column that appears in more than one.
             "scope": oc.scope,

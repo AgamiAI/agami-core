@@ -54,3 +54,10 @@ def test_the_intake_page_filters_by_shape_and_word_and_the_block_reads_every_row
     decided = html[html.index("function decided()"):html.index("function renderSummary()")]
     assert "visible()" not in decided and "DATA.items.map" in decided
     assert "Your edits on the hidden rows are kept." in html
+
+
+def test_grading_a_card_updates_it_in_place_so_a_filter_does_not_hide_the_boxes():
+    html = rg.render(title="t", profile="p", run="r", items=GRADES)
+    body = html[html.index("function onGrade(e)"):html.index("function onText(e)")]
+    assert "renderItems()" not in body and "chips();" in body and "hidden = e.target.value !== 'wrong'" in body
+

@@ -46,7 +46,7 @@
     <div class="chips" id="chips"></div>
     <div class="filters" id="filters">
       <span class="k">Show</span><span id="owner-chips"></span>
-      <input type="search" id="q" placeholder="a word in the question, label or beats" aria-label="narrow the rows by a word">
+      <input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
       <button type="button" id="clear" class="linkish">Show all</button>
       <span class="showing" id="showing"></span>
     </div>
@@ -92,20 +92,38 @@
       if (item.delta_pct !== null && item.delta_pct !== undefined) parts.push((item.delta_pct > 0 ? '+' : '') + item.delta_pct + '%');
       return esc(parts.join(' · '));
     }
+    // The five decisions, each saying what it is and what happens next. The values are the block's
+    // contract (keep | change | fix | reword | nothing) and do not change; the words around them do.
+    const DECISIONS = {
+      keep: { word: 'keep', what: 'Keep this row as a worked example or a test. Offered only where the numbers matched and every check passed.' },
+      change: { word: 'change the semantic model', what: 'A definition is wrong or missing in the semantic model. Your words go to /agami-save-correction.',
+                prompt: 'What should the semantic model say?', ph: 'e.g. cancelled orders count toward the order count' },
+      fix: { word: 'fix my query', what: 'The mistake is in your SQL. You fix it and run this row again.',
+             prompt: 'What you will fix, in a few words (optional)', ph: 'e.g. the status value is lower-case delivered' },
+      reword: { word: 'reword the question', what: 'The question was read differently from what you meant. Ask it in other words.',
+                prompt: 'The question, in the words you mean', ph: 'e.g. How many orders were placed in Q3 2025, cancelled ones included?' },
+      nothing: { word: 'nothing', what: 'Leave this row as it is.' },
+    };
+    const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
     function controls(item, d) {
       const choices = (item.keep_allowed ? ['keep'] : []).concat(['change', 'fix', 'reword', 'nothing']);
-      return '<div class="grade">' + choices.map(v =>
-          '<label><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '> ' + v + '</label>').join('') + '</div>'
+      const suggested = (SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null);
+      const spec = DECISIONS[d.decision] || {};
+      return '<div class="grade opts">' + choices.map(v =>
+          '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
+          + '<b>' + esc(DECISIONS[v].word) + (v === suggested ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
+          + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</div>'
         + '<div class="more"' + (['change', 'fix', 'reword'].includes(d.decision) ? '' : ' hidden') + '>'
-        + '<label>Say what should change, in words<textarea data-field="words" placeholder="e.g. revenue should net refunds">' + esc(d.words || '') + '</textarea></label></div>';
+        + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
     }
     // What is shown. A filter narrows the cards, never the block: decided() reads every row.
     const view = { status: new Set(), owner: new Set(), q: '' };
     const OWNER_SHORT = { you: 'your query', model: 'the semantic model', question: 'the question', agami: 'agami', keep: 'keep', nothing: 'nothing' };
     function statusClass(item) { return (STATUS[item.status] || ['noted'])[0]; }
     function haystack(item) {
-      const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer]
-        .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')));
+      const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer, item.sentence, item.sql_yours, item.sql_agami]
+        .concat(item.read || [], item.how || [], item.change || [], item.words || [], item.todo || [], (item.checks || []).map(c => c.step + ' ' + (c.note || c.detail || '')))
+        .concat((item.diff || []).flatMap(r => [r.key, r.note].concat(r.yours || [], r.agami || [])));
       return parts.filter(Boolean).join(' ').toLowerCase();
     }
     function visible() {
@@ -137,9 +155,68 @@
       const filtered = view.status.size || view.owner.size || view.q.trim();
       document.getElementById('showing').textContent = filtered ? 'Showing ' + n + ' of ' + DATA.items.length + ' rows' : 'All ' + DATA.items.length + ' rows';
     }
+    // The diff grid: one grid row per check, mark | what was checked | yours | agami, so a tall cell on
+    // one side never pushes the other out of line. Differing tokens are highlighted in place.
+    const MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·' };
+    const MARK_WORDS = { held: 'passed', defect: 'does not match', open: 'could not check', gap: 'gap in the semantic model', noted: 'noted' };
+    function cell(v, hi, side, state) {
+      const cls = 'v ' + side + ' ' + state + (Array.isArray(v) || !(hi || []).length ? '' : ' whole');
+      if (v == null) return '<div class="' + cls + '"></div>';
+      if (Array.isArray(v)) return '<div class="' + cls + '">' + v.map(tok => '<span class="tok' + ((hi || []).includes(tok) ? ' hi' : '') + '">' + esc(tok) + '</span>').join('') + '</div>';
+      return '<div class="' + cls + '">' + ((hi || []).includes(v) ? '<span class="hi">' + esc(v) + '</span>' : esc(v)) + '</div>';
+    }
+    function diffGrid(item) {
+      const rows = item.diff || [];
+      return '<div class="dg" role="table" aria-label="what was checked, yours beside agami">'
+        + '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>'
+        + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'
+            + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
+            + cell(r.yours, r.yours_hi, 'yours', r.state) + cell(r.agami, r.agami_hi, 'agami', r.state)
+            + (r.note && r.state !== 'held' ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
+        + '</div>';
+    }
+    // The two statements, collapsed: the person's own SQL shown to its author, and agami's, which
+    // the receipt already shows. Never a result row.
+    function sqlBlock(item) {
+      if (!item.sql_yours && !item.sql_agami) return '';
+      return '<details class="sql"><summary>The two SQL statements</summary><div class="sql2">'
+        + '<div><b>yours</b><pre>' + esc(item.sql_yours || '(none)') + '</pre></div>'
+        + '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div></div></details>';
+    }
+    function words(item) {
+      return (item.words || []).length
+        ? '<details class="words"><summary>The semantic model says</summary><ul>' + item.words.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul></details>' : '';
+    }
+    function action(item, d) {
+      const owner = item.owner || 'nothing';
+      return '<div class="act"><b>change</b><span class="pill ' + esc(owner) + '">' + esc(OWNER_SHORT[owner] || owner) + '</span><span>' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div>';
+    }
+    function diffCard(item) {
+      const d = decisions[item.row] || {};
+      return '<div class="card" data-row="' + item.row + '">'
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
+        + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
+        + diffGrid(item)
+        + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '')
+        + sqlBlock(item) + words(item) + action(item, d)
+        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+        + controls(item, d) + '</div>';
+    }
+    function diffAudit(item) {
+      const d = decisions[item.row] || {};
+      return '<div class="card" data-row="' + item.row + '">'
+        + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
+        + (item.source ? '<span class="src">' + esc(item.source) + '</span>' : '') + '</div>'
+        + (item.label ? '<div class="src">' + esc(item.question) + '</div>' : '')
+        + '<div class="audit"><div>' + diffGrid(item) + (item.sentence ? '<div class="sentence">' + esc(item.sentence) + '</div>' : '') + sqlBlock(item) + words(item) + '</div>'
+        + '<div class="rail"><b>What to do</b>' + lines(item.todo && item.todo.length ? item.todo : item.change) + action(item, d) + '</div></div>'
+        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+        + controls(item, d) + '</div>';
+    }
     function card(item) {
       const d = decisions[item.row] || {};
-      const owner = item.owner || (item.status === 'match' ? 'keep' : 'nothing');
+      const owner = item.owner || 'nothing';
       return '<div class="card" data-row="' + item.row + '">'
         + '<div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question) + '</span>' + pill(item.status)
         + '<span class="nums">' + nums(item) + '</span></div>'
@@ -173,13 +250,13 @@
     }
     function renderItems() {
       document.getElementById('lede').textContent = DATA.layout === 'audit'
-        ? 'One query, checked part by part in the order the checks ran. The rail on the right is what to do about it. Decide below, generate the block, and paste it back into Claude; nothing changes until you do.'
-        : 'Every row you gave us, in four beats: what we read and checked, what agami did with the question and answered, how it got there, and what to change or keep. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do, and "keep" is only offered where the numbers agreed and every part held.';
+        ? 'One query, checked line by line. On the right: what to do about it. Decide below, generate the block, and paste it back into Claude. Nothing changes until you do.'
+        : 'Every row you gave us. Each check is one line: what was checked, your value, agami\'s value, with the differences highlighted. Decide per row, generate the block, and paste it back into Claude. Nothing changes until you do. "Keep" is only offered where the numbers matched and every check passed.';
       chips();
       const shown = visible();
       showing(shown.length);
       const root = document.getElementById('items');
-      root.innerHTML = shown.map(item => DATA.layout === 'audit' ? audit(item) : card(item)).join('')
+      root.innerHTML = shown.map(item => item.diff && item.diff.length ? (DATA.layout === 'audit' ? diffAudit(item) : diffCard(item)) : (DATA.layout === 'audit' ? audit(item) : card(item))).join('')
         || '<p class="meta">No row matches this filter. Your decisions on the hidden rows are kept.</p>';
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
@@ -188,7 +265,11 @@
     function onDecide(e) {
       const card = e.target.closest('.card'); const row = Number(card.dataset.row);
       decisions[row] = Object.assign(decisions[row] || {}, { decision: e.target.value });
-      card.querySelector('.more').hidden = !['change', 'fix', 'reword'].includes(e.target.value);
+      const more = card.querySelector('.more'); const spec = DECISIONS[e.target.value] || {};
+      more.hidden = !['change', 'fix', 'reword'].includes(e.target.value);
+      more.querySelector('.p').textContent = spec.prompt || 'Say it in words';
+      more.querySelector('textarea').placeholder = spec.ph || '';
+      card.querySelectorAll('.opt').forEach(el => el.classList.toggle('on', el.querySelector('input').value === e.target.value));
       renderSummary();
     }
     function onText(e) { const row = Number(e.target.closest('.card').dataset.row); decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value }); }

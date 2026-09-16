@@ -41,8 +41,9 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path")
+           "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "keep_allowed")
 _LISTS = ("read", "how", "words", "change", "todo")
+_DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error"}
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
@@ -77,6 +78,31 @@ def _validate_item(item: dict, idx: int) -> None:
         if (not isinstance(check, dict) or not isinstance(check.get("step"), str)
                 or check.get("state") not in _CHECK_STATES):
             raise ValueError(f"item {idx}: each check needs a 'step' and a 'state' in {sorted(_CHECK_STATES)}")
+    for check in item.get("checks", []) or []:
+        if "rows" in check or "recorded" in check:
+            raise ValueError(f"item {idx}: result rows are never rendered, not even inside a check")
+    for row in item.get("diff", []) or []:
+        if (not isinstance(row, dict) or not isinstance(row.get("key"), str) or row.get("state") not in _CHECK_STATES):
+            raise ValueError(f"item {idx}: each diff row needs a 'key' and a 'state' in {sorted(_CHECK_STATES)}")
+        for side in ("yours", "agami"):
+            v = row.get(side)
+            if v is not None and not isinstance(v, str) and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+                raise ValueError(f"item {idx}: diff '{side}' must be text or a list of tokens")
+        for hi in ("yours_hi", "agami_hi"):
+            v = row.get(hi)
+            if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+                raise ValueError(f"item {idx}: diff '{hi}' must be a list of the tokens to highlight")
+        if row.get("note") is not None and not isinstance(row["note"], str):
+            raise ValueError(f"item {idx}: diff 'note' must be text")
+        if "rows" in row or "recorded" in row:
+            raise ValueError(f"item {idx}: result rows are never rendered, not even inside a diff row")
+    if item.get("keep_allowed") is not None and not isinstance(item["keep_allowed"], bool):
+        raise ValueError(f"item {idx}: 'keep_allowed' must be true or false")
+    if item.get("sentence") is not None and not isinstance(item["sentence"], str):
+        raise ValueError(f"item {idx}: 'sentence' must be text")
+    for key in ("sql_yours", "sql_agami"):
+        if item.get(key) is not None and not isinstance(item[key], str):
+            raise ValueError(f"item {idx}: '{key}' must be the statement's text")
 
 
 def _read(path: Path) -> str:
@@ -88,7 +114,7 @@ def choose_layout(items: list[dict], layout: str = "auto") -> str:
     for anything else. A person can force either."""
     if layout != "auto":
         return layout
-    return "audit" if len(items) == 1 and items[0].get("checks") else "cards"
+    return "audit" if len(items) == 1 and (items[0].get("checks") or items[0].get("diff")) else "cards"
 
 
 def render(*, title: str, profile: str, run: str, items: list[dict], layout: str = "auto") -> str:
@@ -96,7 +122,15 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
         raise ValueError(f"layout must be one of {_LAYOUTS}")
     for i, item in enumerate(items):
         _validate_item(item, i)
+    rows_seen = [item["row"] for item in items]
+    if len(set(rows_seen)) != len(rows_seen):
+        raise ValueError("two items share a row number; decisions are keyed by row, so each must be unique")
     projected = [{k: item.get(k) for k in _FIELDS if k in item} for item in items]
+    for item in projected:
+        if item.get("diff"):
+            item["diff"] = [{k: row.get(k) for k in _DIFF_KEYS if k in row} for row in item["diff"]]
+        if item.get("checks"):
+            item["checks"] = [{k: c.get(k) for k in ("step", "state", "detail", "note") if k in c} for c in item["checks"]]
     for item in projected:
         for key in _LISTS:
             item.setdefault(key, [])
@@ -106,7 +140,12 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
         # The one rule the page enforces about decisions: keep is offered where the run said match
         # AND the answer is one cell, which is Phase 3e's own predicate; a table row can match and
         # still never be offered.
-        item["keep_allowed"] = item["status"] == "match" and item.get("single_cell") is True
+        # The keep-offer is Phase 3e's: report-items applies the parser's own gate (one cell, a confirmed fit
+        # where a question and a statement both exist); an older items file falls back to the two facts.
+        if isinstance(item.get("keep_allowed"), bool):
+            pass
+        else:
+            item["keep_allowed"] = item["status"] == "match" and item.get("single_cell") is True
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {
         "REPORT_TITLE": html.escape(title),

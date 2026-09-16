@@ -41,7 +41,7 @@ The ledger's words describe machinery, and a first draft reaches for machinery w
 | The ledger, or a first draft, says | Say instead |
 |---|---|
 | fan-out, multiplied, fan trap | the join repeats rows, so the total counts some rows more than once |
-| chasm trap | two joins meet through a shared table and multiply each other |
+| chasm trap | two joins connect through a shared table and multiply each other |
 | anti-join, child views, child tables | leave out the rows that also appear in `<the other table>`; or: the table also holds `<the other kinds of row>` |
 | predicate, conjunct | filter |
 | literal | the value you typed |
@@ -53,12 +53,26 @@ The ledger's words describe machinery, and a first draft reaches for machinery w
 | noted | worth knowing; not a problem with your query or the semantic model |
 | scope gate, refused | agami does not expose that table (or column), so it would not run this |
 | expected_doubtful | your own number is in doubt, because `<the mistake>` |
-| match_unverified | the numbers agree, but one part of your query could not be confirmed, so the agreement may be luck |
+| match_unverified | the numbers match, but one check on your query could not be confirmed, so the match may be luck |
 | claims differ, filter_predicates | the two queries filter differently: yours `<how>`, agami's `<how>` |
 
 Part ids (`fan_out:`, `values_declared:`), file names (`findings.json`) and column keys stay in the
 tables of Phase 3 and in the files, where a reader who wants them can find them. The sentences
 around a table are plain.
+
+## Plain words, not figures of speech
+
+Say the ordinary thing. A figure of speech reads well once and then costs a second read; a page of
+fifty rows cannot afford it. On a page, a grade word is the plainest word for the fact.
+
+| Instead of | Write |
+|---|---|
+| the two answers meet | the two answers match |
+| the numbers agree | the numbers match |
+| every part held; held | every check passed; passed |
+| nothing multiplies | no row is counted twice |
+| the evidence points to | the mistake is in |
+| the story, the beats (on a page) | the checks, the rows |
 
 ## One idea per sentence, in the order the reader needs
 

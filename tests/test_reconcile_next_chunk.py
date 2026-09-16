@@ -83,3 +83,37 @@ def test_a_run_without_intake_is_refused_with_the_way_to_seed_it(tmp_path, capsy
     assert reconcile.main(["next-chunk", "--run-dir", str(run)]) == 2
     assert "--rows-file" in capsys.readouterr().err
     assert reconcile.main(["next-chunk", "--run-dir", str(tmp_path / "missing")]) == 2
+
+
+def test_a_row_dropped_on_the_intake_page_never_renumbers_the_others(tmp_path):
+    """Row numbers are given once, at intake; the intake page's block drops row 1; the run then works
+    rows 2 and 3 under the numbers the page showed."""
+    import parse_reconcile_intake as pi
+    f = tmp_path / "q.txt"
+    f.write_text("What is the refund rate?\nHow many orders?\nWhich category sold most?\n")
+    intake = reconcile.intake([f], source=None)
+    assert [r["row"] for r in intake["rows"]] == [1, 2, 3]
+    applied, counts = pi.apply(intake, [{"row": 1, "keep": False}])
+    assert counts == {"kept": 2, "dropped": 1, "edited": 0} and [r["row"] for r in applied["rows"]] == [2, 3]
+    run = tmp_path / "run"; run.mkdir()
+    (run / "intake.json").write_text(json.dumps(applied))
+    assert reconcile.next_chunk(run)["chunk_rows"] == [2, 3]
+
+
+def test_resume_finds_the_newest_run_with_rows_left(tmp_path, capsys):
+    root = tmp_path / "reconcile"; root.mkdir()
+    assert reconcile.main(["resume", "--reconcile-dir", str(root)]) == 4  # nothing to resume
+    assert json.loads(capsys.readouterr().out) is None
+    old = _run_dir(root, 3, done=[(1, "match"), (2, "match"), (3, "match")])
+    new = root / "20260914-090000"; new.mkdir()
+    (new / "intake.json").write_text((old / "intake.json").read_text())
+    (new / "rows.jsonl").write_text(json.dumps({"row": 1, "status": "mismatch"}) + "\n")
+    assert reconcile.main(["resume", "--reconcile-dir", str(root)]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["run_dir"].endswith("20260914-090000") and found["remaining"] == 2 and found["chunk_rows"] == [2, 3] and found["progress"] == {"mismatch": 1}
+    broken = root / "20260915-090000"; broken.mkdir()
+    (broken / "intake.json").write_text("{not json")
+    assert reconcile.main(["resume", "--reconcile-dir", str(root)]) == 0  # a run that cannot be read is passed over
+    assert json.loads(capsys.readouterr().out)["run_dir"].endswith("20260914-090000")
+    assert reconcile.main(["resume", "--reconcile-dir", str(tmp_path / "nope")]) == 2
+

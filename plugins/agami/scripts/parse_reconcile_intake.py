@@ -151,7 +151,8 @@ def main(argv=None) -> int:
         applied, counts = apply(intake, data["decisions"])
         Path(args.out or args.rows_file).write_text(json.dumps(applied, indent=2), encoding="utf-8")
     print(json.dumps({"ok": needs is None, "data": {**data, **(counts or {})}, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
-    return 0
+    # A refused block exits 1, the way the connect skill's prune parser does, so a shell chain stops.
+    return 0 if needs is None else 1
 
 
 if __name__ == "__main__":

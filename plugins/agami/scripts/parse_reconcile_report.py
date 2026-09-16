@@ -43,7 +43,7 @@ _WITH_WORDS = frozenset({"change", "fix", "reword"})
 _FIELDS = ("row", "decision", "words")
 _DROPPED_KINDS = frozenset({"unknown_decision", "decision_missing_row", "row_decided_twice",
                             "decision_not_an_object", "keep_not_offered", "words_ignored_on_keep",
-                            "words_ignored_on_nothing"})
+                            "words_ignored_on_nothing", "words_not_text"})
 
 
 def keepable_rows(run_dir: Path) -> set[int]:
@@ -167,6 +167,7 @@ def parse(text: str, keepable: set[int] | None = None, run: str | None = None) -
         if words is not None:
             if not isinstance(words, str):
                 anomalies.append({"kind": "words_not_text", "row": row})
+                continue  # dropped, like every other decision that cannot be applied as written
             elif decision not in _WITH_WORDS and words.strip():
                 # A keep or a nothing carries no instruction; words riding beside one are the hand
                 # edit this parser exists to catch, as the grading page's parser treats SQL on a right.
