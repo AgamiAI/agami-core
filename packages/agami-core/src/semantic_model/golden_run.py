@@ -44,6 +44,7 @@ the whole of the route to the artifacts pointer, the dataset and the answer key 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -307,6 +308,21 @@ def run_golden_dataset(
     )
 
 
+def _org_statement_limits(org: str) -> contextlib.AbstractContextManager:
+    """`tools.pinned_statement_limits(org)`, imported at the call rather than at module load.
+
+    The provider registry lives in `tools`, the serving layer, and this module sits below it: `tools`
+    reaches `semantic_model` only lazily, so a lazy import here closes no cycle, but a module-level one
+    would make loading the evaluation runner load the whole tool registry. Where `tools` cannot be
+    imported at all, no provider can have been registered either, so the deployment's limits — what
+    an unpinned call already enforces — are the right answer and not a degraded one."""
+    try:
+        from tools import pinned_statement_limits
+    except ImportError:
+        return contextlib.nullcontext()
+    return pinned_statement_limits(org)
+
+
 def _run_item(
     item: GoldenItem,
     generated: GeneratedSql,
@@ -329,15 +345,20 @@ def _run_item(
         )
 
     golden_sql = item.expected.sql or ""
-    score = _score(
-        item,
-        generated.sql,
-        golden_sql,
-        profile=profile,
-        org=org,
-        executor=executor,
-        dialect=dialect,
-    )
+    # Scored under THIS org's statement limits (#329), not the deployment's: an evaluation that runs
+    # against looser or tighter limits than the org's own questions do would score a statement the
+    # org could never have run, or refuse one it could. Both statements of the item share one pin, so
+    # the answer key and the generated statement are held to the same budget.
+    with _org_statement_limits(org):
+        score = _score(
+            item,
+            generated.sql,
+            golden_sql,
+            profile=profile,
+            org=org,
+            executor=executor,
+            dialect=dialect,
+        )
     # After the score, and on EVERY item that produced a statement — an answer key is not the
     # condition. The diff is what turns "the rows disagree" into a reason, and one of its two gates
     # reads the generated statement alone: `must_filter` is the DATASET's requirement rather than a

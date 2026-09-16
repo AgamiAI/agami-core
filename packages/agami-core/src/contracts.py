@@ -122,6 +122,9 @@ class SubjectAreaTable(_Contract):
     """One table named on an area summary: enough to decide whether to ask for its full context."""
 
     name: str
+    # The schema the table lives in, when the model knows it (#258). A client writing SQL from this
+    # listing needs it to qualify `FROM`; null for engines or models without one.
+    schema_: str | None = Field(default=None, alias="schema")
     description: str | None = None
 
 
@@ -162,6 +165,12 @@ class DatasourceSchemaResult(_Contract):
     # ridden in on `extra="allow"` — never-hide is stated relative to a scope, so the scope has to
     # be part of the contract for the guarantee to be checkable by a consumer.
     scope: dict[str, Any] | None = None
+    # `{"stored", "next"}` when the datasource has stored examples, absent when it has none (#301).
+    # Declared for the same reason as `scope`: a client acts on it, so it belongs in the contract.
+    prompt_examples: dict[str, Any] | None = None
+    # What this datasource's engine rejects and what to write instead, when the engine has known gaps
+    # (#325); absent otherwise. Declared because the client is told to follow it.
+    dialect_rules: str | None = None
     # Pass 2 (dataset_names): per-table context + relationships/metrics from get_table_context.
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None
@@ -346,4 +355,7 @@ class ToolCallRecord(_Contract):
     # against, and one written down here would refuse a model that shipped after it. NULL on every
     # call that did not send one, which is the ordinary case.
     client_model: str | None = None
+    # Where `datasource` came from (025, #328): 'explicit' when the client sent it, 'resolved' when
+    # the server chose it because the client sent none. NULL for a tool about no single datasource.
+    datasource_source: str | None = None
     org_id: str = "local"  # the tenant this call ran for; defaults to the single-tenant org
