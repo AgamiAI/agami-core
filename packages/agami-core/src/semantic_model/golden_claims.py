@@ -398,6 +398,46 @@ def _temporal_bounds(
     return column, [(side, value, inclusive)]
 
 
+_TEMPORAL_NODE_TYPES = tuple(
+    t for t in (getattr(exp, name, None) for name in (
+        "CurrentDate", "CurrentTimestamp", "CurrentTime", "Interval", "DateTrunc", "TimestampTrunc",
+        "DateAdd", "DateSub", "DateDiff", "TsOrDsToDate", "StrToDate", "StrToTime", "DateStrToDate",
+        "TimeStrToDate", "Extract", "Year", "Month", "Day", "Date", "Timestamp", "UnixToTime",
+    )) if t is not None
+)
+_TEMPORAL_CAST_TYPES = {"DATE", "DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMPLTZ", "TIMESTAMPNTZ", "TIME"}
+
+
+def count_temporal_predicates(sql: str, *, dialect: str) -> Optional[int]:
+    """How many of the statement's filtering conjuncts speak of time. None when it cannot be read.
+
+    A conjunct speaks of time when `_temporal_bounds` reads it, or when it carries an ISO date
+    literal, a date or time function, an INTERVAL, or a cast to a temporal type. The count is
+    deliberately generous: zero is the only value a caller may lean on, and it says the statement
+    wrote no date filter in any spelling this module recognises. That is what separates a
+    `date_window` that reads `unknown` because neither statement filtered on a date (nothing to
+    disagree about) from one that reads `unknown` because a window was written in a shape the
+    resolver does not fold (still open).
+    """
+    tree, _why = rt._parse_reporting(sql, dialect=dialect)
+    if tree is None or not isinstance(tree, exp.Select):
+        return None
+    select = rt._fold_unquoted_identifiers(tree)
+    return sum(1 for conjunct in rt._filtering_conjuncts(select)
+               if _temporal_bounds(conjunct) is not None or _speaks_of_time(conjunct))
+
+
+def _speaks_of_time(node: "exp.Expression") -> bool:
+    if _TEMPORAL_NODE_TYPES and any(True for _ in node.find_all(*_TEMPORAL_NODE_TYPES)):
+        return True
+    for cast in node.find_all(exp.Cast, exp.TryCast):
+        to = cast.args.get("to")
+        kind = getattr(getattr(to, "this", None), "value", None) or str(getattr(to, "this", ""))
+        if str(kind).upper() in _TEMPORAL_CAST_TYPES:
+            return True
+    return any(lit.is_string and _ISO_DATE.match(lit.this) for lit in node.find_all(exp.Literal))
+
+
 def _date_literal(node: "exp.Expression | None") -> Optional[str]:
     """The ISO date a node spells, as written — None when it spells anything else.
 

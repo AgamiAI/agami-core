@@ -184,6 +184,11 @@ def test_the_output_columns_carry_the_metric_they_compute(org):
                if i["kind"] == "output" and i["status"] == rt.MATCHED]
     assert [i["name"] for i in matched] == ["revenue"]
     assert matched[0]["review_state"] == "unreviewed"
+    # And which tables the metric is defined over, so a reader can tell a match on the table the
+    # statement reads from a match by shape alone on another table's `SUM(amount)`.
+    assert matched[0]["source_tables"] == ["orders"]
+    assert all(i["source_tables"] is None for i in section["items"]
+               if i["kind"] == "output" and i["status"] != rt.MATCHED)
     # And it names WHICH value it is about, which is the whole of what this replaced could not say.
     assert matched[0]["column"]
 
@@ -631,7 +636,7 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
         frozenset({"kind", "column"}),
         frozenset({"kind", "column", "scope", "status", "name", "area", "definition_prose",
                    "expression", "confidence", "origin", "review_state", "signed_off_by",
-                   "signed_off_role", "signed_off_at"}),
+                   "signed_off_role", "signed_off_at", "source_tables"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {
         frozenset({"ref", "alias", "qname", "declared", "rows", "rows_as_of", "freshness",
