@@ -39,6 +39,7 @@ from tools import (
     bootstrap_paths,
     server_instructions,
     server_version,
+    tool_description,
 )
 
 # MCP negotiates a protocol version during `initialize`: the client names the version it wants and
@@ -80,7 +81,12 @@ def _handle_initialize(req_id: Any, params: dict[str, Any]) -> None:
 def _handle_tools_list(req_id: Any) -> None:
     _result(req_id, {
         "tools": [
-            {"name": name, "description": meta["description"], "inputSchema": meta["inputSchema"]}
+            # Per caller, as the HTTP server does it (#329), so the two servers state the same numbers.
+            {
+                "name": name,
+                "description": tool_description(name, meta["description"]),
+                "inputSchema": meta["inputSchema"],
+            }
             for name, meta in TOOLS.items()
         ]
     })
