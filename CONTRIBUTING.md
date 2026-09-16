@@ -58,8 +58,11 @@ The suite imports the `agami-core` library, so install it editable with its `[mo
 without a database). `uvx` wires it up for the run:
 
 ```bash
-uvx --with pytest-cov --with-editable "packages/agami-core[model,server]" pytest tests/ -q
+uvx --with pytest-cov --with pytest-xdist --with-editable "packages/agami-core[model,server]" pytest tests/ -q -n auto
 ```
+
+`-n auto` runs one worker per core, the way CI does. A test that passes alone and fails under it is
+sharing state with another test — fix the sharing rather than dropping the flag.
 
 The privacy test (`tests/test_privacy_no_network.py`) is a contract: no shipped script may make a
 network call — adding a network-egress primitive fails the build.
@@ -71,8 +74,8 @@ no test exercises) — the quickest way to confirm a change is tested, regardles
 Under the hood that's:
 
 ```bash
-uvx --with pytest-cov --with-editable "packages/agami-core[model,server]" \
-  pytest tests/ -q --cov=plugins --cov=packages/agami-core/src --cov-report=xml
+uvx --with pytest-cov --with pytest-xdist --with-editable "packages/agami-core[model,server]" \
+  pytest tests/ -q -n auto --cov=plugins --cov=packages/agami-core/src --cov-report=xml
 uvx diff-cover coverage.xml --compare-branch=origin/main
 ```
 
