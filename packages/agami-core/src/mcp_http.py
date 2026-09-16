@@ -51,6 +51,7 @@ from tools import (
     TOOLS,
     _current_org_ctx,
     bootstrap_paths,
+    has_statement_limits_provider,
     record_tool_call,
     require_thread_id,
     reset_typed_outcome,
@@ -58,7 +59,9 @@ from tools import (
     server_instructions,
     server_version,
     set_injected_executor,
+    set_statement_limits_provider,
     thread_id_is_required,
+    tool_description,
     typed_outcome_overrides,
 )
 
@@ -482,13 +485,32 @@ def build_server(
         instructions = f"{instructions}\n{extra_instructions}"
     server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
+    def _described(names: list[str]) -> list:
+        return [
+            # `tool_description` states execute_sql's limits for THIS caller's organisation (#329).
+            # That is core describing its own tool per request, not the subtractive-only hook above
+            # reshaping one: a consumer's description passes through it untouched.
+            mt.Tool(
+                name=name,
+                description=tool_description(name, registry[name]["description"]),
+                inputSchema=registry[name]["inputSchema"],
+            )
+            for name in names
+        ]
+
     @server.list_tools()
     async def _list_tools() -> list:
-        return [
-            mt.Tool(name=name, description=meta["description"], inputSchema=meta["inputSchema"])
-            for name, meta in registry.items()
-            if _visible(name)
-        ]
+        # The visibility predicate runs HERE, in the request task, before any hop: that is the context
+        # its contract promises a consumer, who may read request-task state from it. Only the
+        # descriptions go off the loop, for ACE-048's reason: the limits provider is the consumer's
+        # code and usually a database read, and on the loop one slow read would stall every in-flight
+        # request. `run_blocking` copies the request context, so the organisation is still set in the
+        # worker. Without a provider nothing here blocks, so the hop would be a thread per listing for
+        # nothing.
+        names = [name for name in registry if _visible(name)]
+        if not has_statement_limits_provider():
+            return _described(names)
+        return await run_blocking(_described, names)
 
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict) -> list:
@@ -635,6 +657,10 @@ def create_app(
     # AH-012: register the composition-root executor (None = the default subprocess path). Behind the
     # shared guard in `tool_execute_sql`; a hosted consumer injects a pooled/RBAC/tunnel executor here.
     set_injected_executor(adapters.executor)
+    # #329: register the per-organisation statement-limits provider the same way, and unconditionally
+    # for the same reason — the adapters are the composition root, so an app built without one must not
+    # inherit a provider an earlier app in the same process installed.
+    set_statement_limits_provider(getattr(adapters, "statement_limits", None))
     # Validate consumer-supplied tools up front so a malformed entry fails at construction with a
     # clear error, not later as a KeyError/500 inside tools/list or tools/call.
     for tool_name, meta in (extra_tools or {}).items():

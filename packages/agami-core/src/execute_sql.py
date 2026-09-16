@@ -74,7 +74,7 @@ import threading
 import urllib.parse
 import uuid
 from collections.abc import Callable, Iterator
-from contextvars import ContextVar, copy_context
+from contextvars import ContextVar, Token, copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -768,6 +768,14 @@ def _run_postgres(creds: dict[str, str], sql: str) -> ExecResult:
                     "SET LOCAL statement_timeout = %s",
                     ((timeout_s + _NATIVE_BOUND_SKEW_S) * 1000,),  # the setting is in milliseconds
                 )
+            # The model's schemas, so a table named without its schema still resolves (#258). Same
+            # transaction and same reason for `SET LOCAL` as the timeout above: it cannot outlive this
+            # statement or reach a pooled connection's next user. Present only when
+            # `execute_guarded` found an unambiguous set; see `_search_path_schemas`.
+            schemas = creds.get(_SEARCH_PATH_KEY)
+            if schemas:
+                with conn.cursor() as path_cur:
+                    path_cur.execute(_search_path_statement(schemas))
             # A server-side (named) cursor so the row cap bounds TRANSFER, not just what we write:
             # psycopg2's default client-side cursor buffers the ENTIRE result before we can fetchmany,
             # so a runaway result would still be pulled whole. The named cursor streams from the
@@ -1529,22 +1537,68 @@ def _pin_model_pass_posture() -> bool:
     return value
 
 
-def _resolve_row_cap() -> int:
-    """Effective result-row cap. `AGAMI_SQL_MAX_ROWS` is the operator-configurable DEPLOYMENT cap
-    (default 1000 when unset) — an operator owns their availability tradeoff and may set it higher OR
-    lower than 1000; it is NOT a hard 1000 ceiling. A missing/invalid/zero env value falls back to
-    1000.
+# The effective (row cap, timeout seconds) for THIS call, when the caller's organisation has its own
+# (#329). Absent means "the deployment's environment", which is every call that did not come through
+# a pinning entry point. Both numbers in one value rather than two ContextVars, so a reader can never
+# see one organisation's row cap beside another's deadline.
+#
+# This is a second, higher-precedence input to the budget, which is exactly the hazard
+# `_resolve_timeout_s` used to rule out by having no such thing: a value that outranks the environment
+# in the parent and is invisible to a forked child would let the supervisor bound the parent derives
+# sit below the budget the child enforces. It is allowed now on the same terms `_pass_posture` was:
+# it is resolved ONCE per call, before any bound is derived, and `tools._pass_child_env` writes both
+# numbers into the child's `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, so the child re-resolves the
+# identical budget from its environment. The fork carries it explicitly; it is never lost across it.
+#
+# The values held here are already validated positive ints — the provider that supplies them lives in
+# `tools`, which does the checking, so nothing here needs to re-parse them.
+_statement_limits: ContextVar[tuple[int, int] | None] = ContextVar(
+    "_statement_limits", default=None
+)
 
-    The operator is the only voice here. A per-call override used to be able to lower it, and it went
-    with the trim (ACE-087): the one thing a caller might know better than the deployment — that it
-    wants MORE rows — is the thing a lowering-only override structurally could not express, and a
-    caller that wants 200 rows says so in the statement, where the intent is legible to everything
-    downstream."""
+
+def _pin_statement_limits(max_rows: int, timeout_s: int) -> Token[tuple[int, int] | None]:
+    """Fix this call's effective budget. Returns the token the caller must reset with, in a
+    `finally`: the pin is request-scoped, and one left behind on a reused worker would hand the next
+    organisation's call this one's limits."""
+    return _statement_limits.set((max_rows, timeout_s))
+
+
+def _row_cap_from_env() -> int:
+    """The DEPLOYMENT row cap: `AGAMI_SQL_MAX_ROWS`, default 1000 when unset. An operator owns their
+    availability tradeoff and may set it higher OR lower than 1000; it is NOT a hard 1000 ceiling. A
+    missing/invalid/zero/unrepresentable env value falls back to 1000."""
     raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
-    cap = int(raw) if raw.isdigit() else _DEFAULT_MAX_ROWS
-    if cap <= 0:
+    # `isdecimal`, not `isdigit`, for the reason `_timeout_s_from_env` gives: `isdigit` admits `²`,
+    # which `int()` then refuses. `tools` now resolves this while building its registry, so a raise
+    # here would stop the module importing at all rather than failing one call.
+    cap = int(raw) if raw.isdecimal() else _DEFAULT_MAX_ROWS
+    if cap <= 0 or not _row_cap_is_representable(cap):
         cap = _DEFAULT_MAX_ROWS  # "0" / "00" → the default, never an empty result
     return cap
+
+
+def _row_cap_is_representable(cap: int) -> bool:
+    """Whether the drivers can be asked for this cap. Not a ceiling (#329): every engine fetches
+    `cap + 1` rows in one call (`fetchmany`, psycopg2's `itersize`), and the C drivers hold that count
+    in a signed 32-bit int — past it the fetch raises `OverflowError` after the statement has run."""
+    return cap + 1 <= 2**31 - 1
+
+
+def _resolve_row_cap() -> int:
+    """Effective result-row cap for THIS call: the organisation's own when a call pinned one
+    (`_statement_limits`, #329), otherwise the deployment's (`_row_cap_from_env`).
+
+    No per-CALL override exists, and that is unchanged. One used to be able to lower the cap, and it
+    went with the trim (ACE-087): the one thing a caller might know better than the deployment — that
+    it wants MORE rows — is the thing a lowering-only override structurally could not express, and a
+    caller that wants 200 rows says so in the statement, where the intent is legible to everything
+    downstream. What the pin carries is an administrator's setting for the organisation, resolved
+    before the call and not chosen by it."""
+    pinned = _statement_limits.get()
+    if pinned is not None:
+        return pinned[0]
+    return _row_cap_from_env()
 
 
 _DEFAULT_TIMEOUT_S = 30  # wall-clock seconds one statement may run before the watchdog cancels it
@@ -1593,18 +1647,52 @@ _abandoned_workers = 0
 
 
 def _resolve_timeout_s() -> int:
-    """Effective per-statement timeout, in whole seconds. `AGAMI_SQL_TIMEOUT_S` is the
-    operator-configurable DEPLOYMENT budget (default 30 when unset) — an operator owns their
-    availability tradeoff and may set it higher OR lower than 30. A missing or non-positive value
-    falls back to the default.
+    """Effective per-statement timeout for THIS call, in whole seconds: the organisation's own when
+    a call pinned one (`_statement_limits`, #329), otherwise the deployment's (`_timeout_s_from_env`).
+    Every bound in the ordered family — watchdog, native skew, outer bound, supervisor — reads this,
+    so they all derive from the one effective budget.
 
-    **The environment is the ONLY source, deliberately.** A request-scoped override would outrank it
-    in the parent and be invisible to a forked child, which re-resolves from `os.environ` alone — so
-    the supervisor bound the parent derives could sit BELOW the budget the child actually enforces
-    and fire first, inverting the ordered family the whole design rests on. One source, readable on
-    both sides of the fork, makes that inversion unrepresentable rather than merely unlikely.
+    **Two sources, and one budget on both sides of the fork.** The environment used to be the ONLY
+    source, deliberately: a request-scoped override would outrank it in the parent and be invisible to
+    a forked child, which re-resolves from `os.environ` alone — so the supervisor bound the parent
+    derives could sit BELOW the budget the child actually enforces and fire first, inverting the
+    ordered family the whole design rests on. A per-organisation limit needs exactly such an override,
+    so the hazard is now closed by construction instead of by absence: the pin is set once per call,
+    before the supervisor bound is derived, and `tools._pass_child_env` writes the pinned numbers into
+    the child's environment, where this same resolver (with no pin of its own) reads them back. The
+    parent and the child therefore reach the identical number, which is the property the old rule
+    existed to guarantee."""
+    pinned = _statement_limits.get()
+    if pinned is not None:
+        return pinned[1]
+    return _timeout_s_from_env()
 
-    Unlike `_resolve_row_cap`, a value that is PRESENT and does not survive to become the budget is
+
+def _timeout_is_representable(timeout_s: int) -> bool:
+    """Whether every bound derived from `timeout_s` can actually be armed.
+
+    Not a ceiling — there is deliberately none (#329) — but a statement of what the platform can
+    express. `threading.Timer` (the watchdog), `Thread.join` (the outer bound) and the supervisor's
+    wait all refuse a timeout at or above `threading.TIMEOUT_MAX` with an `OverflowError`. The outer
+    bound raises it AFTER its worker has started and BEFORE the abandonment is counted, so an
+    unrepresentable budget would not merely fail one call: it would leave `_MAX_ABANDONED_WORKERS`
+    bounding nothing. The engines' native backstops are narrower still: Snowflake's
+    `STATEMENT_TIMEOUT_IN_SECONDS` stops at 604,800 (seven days), the smallest maximum among the
+    engines, and Postgres's `statement_timeout` is an int32 of milliseconds — past either, the native
+    bound fails before the query runs. Seven days is inside every one of those, so it is the one bound
+    checked, and a value past it is treated as unusable like any other and falls back to the
+    deployment's. It is checked on the NATIVE value, which is the budget plus `_NATIVE_BOUND_SKEW_S`,
+    because that is the number the engine receives — so the largest usable budget is 604,795."""
+    return timeout_s + _NATIVE_BOUND_SKEW_S <= 604_800
+
+
+def _timeout_s_from_env() -> int:
+    """The DEPLOYMENT per-statement timeout: `AGAMI_SQL_TIMEOUT_S`, default 30 when unset. An operator
+    owns their availability tradeoff and may set it higher OR lower than 30. A missing or non-positive
+    value falls back to the default. It is also what an organisation with no limit of its own gets,
+    and what a forked child reads the pinned budget back from.
+
+    Unlike `_row_cap_from_env`, a value that is PRESENT and does not survive to become the budget is
     logged at warning before the fallback. That covers `45.5` and `30s`, which cannot be read at all,
     and equally `-5` and `0`, which can be read and are then declined: an operator who wrote either
     asked for something specific, and a deployment quietly running 30 instead is exactly the
@@ -1617,7 +1705,8 @@ def _resolve_timeout_s() -> int:
     # a misconfigured deployment into a ValueError raised out of this resolver, at a call site (the
     # fork path's supervisor bound) that sits outside any handler.
     written = int(raw) if digits.isdecimal() else None
-    timeout_s = written if written is not None and written > 0 else _DEFAULT_TIMEOUT_S
+    usable = written is not None and written > 0 and _timeout_is_representable(written)
+    timeout_s = written if usable else _DEFAULT_TIMEOUT_S
     if raw and timeout_s != written:
         _LOG.warning(
             "AGAMI_SQL_TIMEOUT_S=%r is not a usable whole number of seconds; falling back to %ds.",
@@ -1723,8 +1812,9 @@ def _resource_limit_refusal(exc: _ResourceLimit | None) -> Refusal:
     invariant that survives is one rule with one emit site, not one sentence.
 
     The budget is re-resolved rather than carried: nothing between the engine call and here can
-    change the environment the resolvers read, so both `_resolve_timeout_s` and `_resolve_row_cap`
-    return the same number the bound itself used. The configured number belongs in the detail — it
+    change what the resolvers read — the call's pinned organisation limits, or the environment when
+    none were pinned (and, in a forked child, the environment its parent wrote the pin into) — so
+    both `_resolve_timeout_s` and `_resolve_row_cap` return the same number the bound itself used. The configured number belongs in the detail — it
     is a deployment setting, not a data value, and a bound the caller cannot see is one it cannot
     plan around.
     """
@@ -2016,6 +2106,61 @@ def _disk_model_root(profile: str) -> Path | None:
     """
     root = Path(os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")) / profile
     return root if (root / "datasource.yaml").exists() else None
+
+
+# Where `execute_guarded` hands the model's schemas to the Postgres-wire engines (#258). A credentials
+# key rather than a new executor argument: `Executor.execute` is a published seam, and an injected
+# executor that does not know the key simply never reads it. Underscored so it cannot collide with a
+# real credential field.
+_SEARCH_PATH_KEY = "_agami_search_path"
+
+# Engines that read `_SEARCH_PATH_KEY` — the ones `_builtin_execute` sends through `_run_postgres`.
+_SEARCH_PATH_ENGINES = frozenset({"postgres", "redshift", "supabase"})
+
+
+def _search_path_schemas(org: Any) -> list[str]:
+    """The schema for `SET LOCAL search_path` (#258): `[schema]` when EVERY table in the model declares
+    that one schema and it is not `public`, else `[]`.
+
+    The client was served bare table names and wrote `FROM orders`, which cannot resolve when the
+    table lives in `sales_data`; setting the path lets that statement run as written. The path puts
+    `sales_data` ahead of the connection's defaults, so it is only safe when no declared table relies
+    on those defaults — otherwise a bare name meant for that table can resolve to a same-named
+    `sales_data` relation the model does not declare, silently, under a receipt naming the model's
+    table. The model cannot see the warehouse catalog to rule that out, so it is refused structurally:
+    - two or more schemas: `finance` first would capture a bare `orders` meant for `sales_data`;
+    - any table with no schema: it resolves through the defaults, which the path now outranks;
+    - a table in `public`: `public` stays on the path but AFTER the chosen schema, so it is outranked
+      the same way — and a model entirely in `public` needs no path at all.
+    Each of those keeps today's behaviour (the statement fails and names the relation). A schema name
+    with a control character gets no path either — a NUL makes the driver raise on every statement."""
+    if org is None:
+        return []
+    schemas: set[str | None] = set()
+    for area in getattr(org, "subject_areas", None) or []:
+        for table in getattr(area, "tables_defined", None) or []:
+            schemas.add(getattr(table, "schema_name", None) or None)
+    if len(schemas) != 1:
+        return []
+    (schema,) = schemas
+    if schema is None or schema == "public" or any(ord(ch) < 32 for ch in schema):
+        return []
+    return [schema]
+
+
+def _quote_ident(name: str) -> str:
+    """A Postgres identifier, double-quoted with embedded quotes doubled. Schema names come from the
+    operator's model, but they are still spliced into SQL, so they are quoted rather than trusted."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _search_path_statement(schemas: list[str]) -> str:
+    """`SET LOCAL search_path` for the model's schemas, with `public` kept on the end so an
+    unqualified reference to a table there still resolves as it did before."""
+    path = [_quote_ident(s) for s in schemas]
+    if "public" not in schemas:
+        path.append("public")
+    return "SET LOCAL search_path TO " + ", ".join(path)
 
 
 def _resolve_guard_model(profile: str):
@@ -2593,8 +2738,11 @@ def _execute_bounded(
 
     The call runs inside a copy of the CALLER's context, and what that is FOR changed when the
     per-call row cap went (ACE-087). It used to carry ``_max_rows_override`` to ``_resolve_row_cap``
-    inside the worker; the cap is the deployment's environment now and needs no carrier. What it
-    still carries is the *caller's* request scope — ``tools._current_org_ctx``, the resolve-once
+    inside the worker; that override is gone. It now carries the call's pinned organisation limits
+    (``_statement_limits``, #329), and that is load-bearing: the built-in executor's engine functions
+    run in this worker and call ``_resolve_timeout_s`` (watchdog, native bound) and
+    ``_resolve_row_cap`` (the fetch window) there, so without the copy they would silently enforce the
+    deployment's limits instead of the organisation's. It also carries the *caller's* request scope — ``tools._current_org_ctx``, the resolve-once
     request cache, the actor and session on the served path — into the one place a consumer's own
     code runs. That is the point of the ``Executor`` seam: a pooled / per-user-RBAC executor picks
     its connection from exactly that context, and a new thread starts with an empty one, so dropping
@@ -2699,8 +2847,9 @@ def execute_guarded(
 
     ``_load_credentials`` sits INSIDE the try deliberately, so a bad profile / missing DSN becomes a
     ``failed``/``dsn`` Envelope carrying its detailed message rather than escaping as an exception
-    the two callers would each have to translate. The row cap is the deployment's alone
-    (``AGAMI_SQL_MAX_ROWS``); no caller can lower it for one call."""
+    the two callers would each have to translate. The row cap is the organisation's
+    limit when the caller pinned one (``tools.pinned_statement_limits``) and the deployment's
+    ``AGAMI_SQL_MAX_ROWS`` otherwise; no caller can change it for one statement."""
     # Clear before anything can set it, so a detail from a PREVIOUS call in this context can never
     # be attributed to this one. The recorder reads it unconditionally; a stale value would put the
     # wrong error text on a row that succeeded.
@@ -2806,6 +2955,13 @@ def execute_guarded(
             if mismatch is not None:
                 return _envelope("refused", refusal=mismatch,
                                  receipt=_refusal_receipt(mismatch, received_sql, profile))
+        # The model's schema for the Postgres-wire engines, so a bare table name resolves (#258). From
+        # the model the pass above already resolved and published, never a second load: that is a
+        # full DB or disk read per query, and on a deployment with the pass off there is no model in
+        # hand to read, so nothing is set there and a bare name fails exactly as before.
+        schemas = _search_path_schemas(_guard_model.get())
+        if schemas and str(creds.get("type", "")).lower() in _SEARCH_PATH_ENGINES:
+            creds = {**creds, _SEARCH_PATH_KEY: schemas}
         # Bounded at the CHOKEPOINT, so the limit reaches every executor rather than only the
         # built-in one whose engines carry the inner watchdog. See `_execute_bounded` for the
         # mechanism and for the leaked worker it costs on expiry.

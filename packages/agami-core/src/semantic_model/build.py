@@ -518,6 +518,25 @@ def ensure_org_id(out: Path, existing: Optional[str] = None, *, dry_run: bool = 
     return org_record.ensure_org_record(out.parent).org_id
 
 
+def _previous_description(out: Path) -> str:
+    """The `description` already in `out/datasource.yaml`, or "" when there is none (#327).
+
+    Read the same way `ensure_org_id` reads the previous file's id, and for the same reason: a
+    re-introspect rebuilds the model from the database, which knows nothing a human wrote. An
+    unreadable file keeps today's behaviour (no description) rather than failing the write."""
+    import yaml
+
+    path = out / "datasource.yaml"
+    if not path.exists():
+        return ""
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 - a malformed previous file must not block writing a new one
+        return ""
+    value = doc.get("description") if isinstance(doc, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
 def write_tree(
     org: Datasource,
     out: Path,
@@ -547,7 +566,10 @@ def write_tree(
         "org_id": org_id,
         "datasource": org.datasource,
         "version": org.version,
-        "description": org.description,
+        # The introspector builds a Datasource with no description, so writing `org.description` as-is
+        # wiped the one line an agent routes a question by on every re-introspect (#327). Keep the
+        # previous file's line unless the caller supplies a new one.
+        "description": org.description or _previous_description(out),
         "fiscal_year_start_month": org.fiscal_year_start_month,
         "storage_connections": [
             {"name": sc.name, "ref": f"datasources/{sc.name}/storage.yaml"}

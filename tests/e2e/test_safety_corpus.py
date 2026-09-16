@@ -184,11 +184,15 @@ def test_every_receipt_section_says_something_on_some_governed_vector(file_path)
 #     accident: it fires when the model's declared `storage_type` disagrees with the engine the
 #     credentials connect to, which every harness build is careful to keep in step — so provoking it
 #     means building a deliberately mismatched model, which no test does.
+#   * `datasource_required` (#327) is decided from the call, not the statement: an omitted
+#     `datasource` on an organization serving more than one. Every vector here names its datasource
+#     on one fixture. Covered by `tests/test_datasource_routing.py`.
 _RULES_NO_VECTOR_CAN_PRODUCE = frozenset(
     {
         guardrail.RULE_MODEL_UNAVAILABLE,
         guardrail.RULE_AUDIT_UNAVAILABLE,
         guardrail.RULE_ENGINE_MISMATCH,
+        guardrail.RULE_DATASOURCE_REQUIRED,
     }
 )
 

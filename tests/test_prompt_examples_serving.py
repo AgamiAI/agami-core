@@ -175,3 +175,34 @@ def test_a_whitespace_only_area_is_no_scope_not_an_empty_scope(local_library):
     not as "an area named nothing", which would match no directory and return the empty note."""
     out = tools.tool_get_prompt_examples({"datasource": local_library, "area": "   "})
     assert "subject area: sales" in out and "subject area: assets" in out
+
+
+def test_an_example_is_read_as_utf8_whatever_the_platform_default(
+    local_library, tmp_path, monkeypatch
+):
+    """#236. `Path.read_text()` with no encoding decodes as cp1252 on Windows, turning an em dash
+    into `â€”` on the way to the agent."""
+    import io
+
+    path = tmp_path / "main" / "prompt_examples" / "sales" / "examples.yaml"
+    path.write_bytes("- question: revenue — by month\n  sql: SELECT 1\n".encode("utf-8"))
+    real = io.text_encoding
+    monkeypatch.setattr(
+        io, "text_encoding", lambda enc, stacklevel=2: "cp1252" if enc is None else real(enc)
+    )
+
+    out = tools.tool_get_prompt_examples({"datasource": local_library, "area": "sales"})
+
+    assert "revenue — by month" in out
+
+
+def test_one_undecodable_area_does_not_take_down_the_others(local_library, tmp_path):
+    """#236. The loop reads every area into one response, so a decode error in one file used to
+    escape and fail the whole call — dropping the few-shot step for areas that were fine."""
+    bad = tmp_path / "main" / "prompt_examples" / "assets" / "examples.yaml"
+    bad.write_bytes(b"- question: \xff\n  sql: SELECT 1\n")
+
+    out = tools.tool_get_prompt_examples({"datasource": local_library})
+
+    assert "subject area: sales" in out
+    assert "subject area: assets" not in out

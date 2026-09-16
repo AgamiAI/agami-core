@@ -166,7 +166,8 @@ wrong thing.
 Two supported ways in, and both land the same shape.
 
 **`/agami-save-golden` is the skill that writes these.** It has two doors: a
-question bank (a CSV, or a table pasted into chat) imports as items, after the
+question bank (a CSV, one sheet of an Excel `.xlsx` workbook, or a table pasted
+into chat) imports as items, after the
 parsed rows have been shown and agreed to — a row with no statement lands
 `sql_confirmed: false` (a question with nothing yet to check), and a row that
 already carries a statement lands `sql_confirmed: true` with `confirmed_by`

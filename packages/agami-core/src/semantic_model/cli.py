@@ -510,7 +510,7 @@ def cmd_set_terminology(args) -> int:
     `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
     default (layers over a human's edits); --replace overwrites. Validated + committed."""
     from . import curate
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         terms = json.load(fh)
     if isinstance(terms, dict) and "key_terminology" in terms:
         terms = terms["key_terminology"]
@@ -520,9 +520,20 @@ def cmd_set_terminology(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_set_description(args) -> int:
+    """Write the datasource's one-line description onto datasource.yaml — the line an agent routes a
+    question by (#327). Onboarding calls this with the user's line or one generated from the enriched
+    model. Validated + committed."""
+    from . import curate
+    res = curate.set_datasource_description(args.root, args.description)
+    _print_json({"applied": res.applied, "validated": res.validated,
+                 "committed": res.committed, "errors": res.errors})
+    return 0 if res.validated else 1
+
+
 def cmd_curate(args) -> int:
     from . import curate
-    with open(args.ops_file) as fh:
+    with open(args.ops_file, encoding="utf-8") as fh:
         ops = json.load(fh)
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
@@ -556,7 +567,7 @@ def cmd_approve_queue(args) -> int:
 
 def cmd_add(args) -> int:
     from . import curate
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         items = json.load(fh)
     if isinstance(items, dict):
         items = items.get(args.kind + "s", items.get("items", []))
@@ -568,7 +579,7 @@ def cmd_add(args) -> int:
 
 def cmd_add_example(args) -> int:
     from . import curate
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         items = json.load(fh)
     if isinstance(items, dict):
         items = items.get("examples", items.get("items", []))
@@ -843,7 +854,7 @@ def cmd_seed_examples(args) -> int:
         if block is not None:
             _print_json(block)
             return 2
-    with open(args.file) as fh:
+    with open(args.file, encoding="utf-8") as fh:
         cands = json.load(fh)
     if isinstance(cands, dict):
         cands = cands.get("examples", cands.get("items", []))
@@ -1424,6 +1435,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", required=True, help="JSON object {term: definition, ...} (or {key_terminology: {...}})")
     sp.add_argument("--replace", action="store_true", help="replace the glossary instead of merging over it")
     sp.set_defaults(func=cmd_set_terminology)
+
+    sp = sub.add_parser("set-description", help="write the datasource's one-line description onto datasource.yaml (what list_datasources routes on)")
+    sp.add_argument("root")
+    sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
+    sp.set_defaults(func=cmd_set_description)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
     sp.add_argument("root")
