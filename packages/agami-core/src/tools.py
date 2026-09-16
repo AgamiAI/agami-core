@@ -118,7 +118,7 @@ _HOSTED_PREAMBLE = (
 # get_prompt_examples' job, and the schema response stays the model.
 _EXAMPLES_REMINDER = (
     "Call get_prompt_examples with the user's question as `query` before writing SQL, unless you "
-    "already have for this question. Leave `area` out unless you are sure of it."
+    "have already called it for this question."
 )
 
 _SHARED_INSTRUCTIONS = (
@@ -126,9 +126,8 @@ _SHARED_INSTRUCTIONS = (
     "touches (it sizes itself — pass `area` or `dataset_names` to SCOPE it, `query` to rank "
     "metrics; a `dataset_names` call also returns those tables' joins and metrics, so it is what "
     "you need to write the SQL). (2) Examples-first — call get_prompt_examples with the user's "
-    "question as `query` and mirror the closest match; leave `area` out unless you are sure of "
-    "it, because it drops every other area's examples, however well they match. Use "
-    "metric `calculation`/`binding` verbatim. (3) execute_sql (the safety pass runs inside it; "
+    "question as `query` and mirror the closest match; use metric `calculation`/`binding` "
+    "verbatim. (3) execute_sql (the safety pass runs inside it; "
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
     "Steps 1 and 2 are INDEPENDENT: get_datasource_schema and get_prompt_examples share no state "
@@ -3710,9 +3709,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Use before generating SQL to ground dialect and house style; match on the question, "
             "then reuse the tagged tables/columns/SQL. On a served deployment each example carries "
             "a stable `id` — cite it as a basis ref on execute_sql to say which one you followed. "
-            "Pass the user's question as `query`, and leave `area` out unless you are sure of it: "
-            "an `area` drops every other area's examples (cross-area ones stay), however well "
-            "they match."
+            "Pass the user's question as `query`."
         ),
         "inputSchema": {
             "type": "object",
@@ -3737,7 +3734,11 @@ TOOLS: dict[str, dict[str, Any]] = {
                     # is false, so no compliant client could ever send it and the branch was dead
                     # on every call. By step 3 of the documented flow the agent has already chosen
                     # a subject area, so it knows what to pass.
-                    "description": "Narrow to one subject area (cross-area examples still included).",
+                    "description": (
+                        "Narrow to one subject area. A served deployment returns that area "
+                        "plus the cross-area examples; the local file path has no cross-area "
+                        "bucket on disk, so it returns that area alone."
+                    ),
                 },
                 "top_k": {
                     "type": "integer",
