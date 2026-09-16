@@ -621,6 +621,32 @@ def _first_number(rows, key: str) -> float | None:
         return None
 
 
+def _grade_question_fit(fit: Any, ran: bool) -> list[dict]:
+    """The one part graded by reading rather than measuring: the skill's Phase 1.5g judgment of
+    whether the statement answers the question it came with, written to `question_fit.json`. It can
+    withhold a row from the keep-offer and never proves anything about the semantic model. Expected
+    for every statement row after a run that succeeded, so a check that was never made is an open
+    part and not a silent pass."""
+    got, why = _usable(fit, "fit")
+    if got is None:
+        if not ran:
+            return []
+        return [_part("question_fit", UNRESOLVED, evidence={"file": "question_fit.json", "problem": why},
+                      note=f"question_fit.json {why}, so the fit of the statement to its question was not checked")]
+    word, reason = got.get("fit"), got.get("reason")
+    if word == "no_question":
+        return []
+    if word == "plausible":
+        return [_part("question_fit", CONFIRMED, evidence={"fit": word, "reason": reason},
+                      note="the statement plausibly answers the question, by reading; a judgment, not a measurement")]
+    if word == "doubtful":
+        return [_part("question_fit", UNRESOLVED, evidence={"fit": word, "reason": reason},
+                      note=f"the statement may not answer the question: {reason or 'no reason was given'}; "
+                           "reword the question or the statement and re-run this row")]
+    return [_part("question_fit", UNRESOLVED, evidence={"fit": word},
+                  note=f"question_fit.json carries an unknown fit {word!r}, so the fit was not checked")]
+
+
 def _grade_run(run: dict | None) -> list[dict]:
     if run is None:
         return [_part("runs", UNRESOLVED, note="no run record was found for the statement")]
@@ -1072,6 +1098,72 @@ def _grade_claims(claims: dict | None) -> list[dict]:
     return rows
 
 
+def _part_subjects(part: str) -> list[str]:
+    """The table or `table.column` a part is about, as the mentions verb keys them; empty for a part
+    that names neither (a run, an aggregate, a claim)."""
+    for prefix in ("literal:", "values_declared:"):
+        if part.startswith(prefix):
+            return [part[len(prefix):].split("=", 1)[0].lower()]
+    if part.startswith("default_filter:"):
+        # The receipt spells the table as the statement wrote it, schema and all; the mentions verb
+        # keys tables bare, so `main.orders` must read as `orders` or its caveats never attach.
+        return [part[len("default_filter:"):].split(":", 1)[0].lower().split(".")[-1]]
+    for prefix in ("join:", "join_key:", "cardinality:", "dropped_rows:"):
+        if part.startswith(prefix):
+            label = part[len(prefix):].split("#", 1)[0]
+            return [name for name in label.split("-", 1) if name and name != "*"]
+    return []
+
+
+def _prose_status(mentions: Any) -> list[dict]:
+    """One `noted` part when the semantic model's words were asked for and could not be read, in
+    whole or in part, so "no prose exists" and "the verb failed" stay tellable apart. Nothing when
+    the file is absent (the step was not run) or clean."""
+    if mentions is None:
+        return []
+    if not isinstance(mentions, dict) or mentions.get("error") or mentions.get("unreadable"):
+        why = (mentions.get("error") or mentions.get("unreadable")) if isinstance(mentions, dict) else "not a JSON object"
+        return [_part("prose:*", NOTED, evidence={"problem": why},
+                      note=f"the semantic model's words could not be read ({why}); nothing about them is claimed")]
+    skipped = mentions.get("skipped") or []
+    if skipped:
+        return [_part("prose:*", NOTED, evidence={"skipped": skipped[:20]},
+                      note=f"{len(skipped)} prose source(s) could not be read and are not quoted: "
+                           + ", ".join(sorted({str(s.get('where')) for s in skipped}))[:300])]
+    return []
+
+
+def _attach_prose(rows: list[dict], mentions: dict | None) -> None:
+    """Put the semantic model's own words beside every part that fell short: the descriptions,
+    caveats, glossary lines and examples that mention its table or column, from `sm mentions`.
+    Never a grade; a person reads them. A part that is confirmed or noted gets none, so a clean
+    row's ledger does not grow a copy of the semantic model's prose."""
+    if not isinstance(mentions, dict) or not isinstance(mentions.get("mentions"), list) or not mentions["mentions"]:
+        return
+    by_about: dict[str, list[dict]] = {}
+    for mention in mentions["mentions"]:
+        if isinstance(mention, dict) and mention.get("about"):
+            by_about.setdefault(mention["about"], []).append(mention)
+    flags = {flag.get("about"): flag for flag in (mentions.get("flags") or []) if isinstance(flag, dict)}
+    for row in rows:
+        if row["verdict"] in (CONFIRMED, NOTED):
+            continue
+        subjects = _part_subjects(row["part"])
+        if not subjects:
+            continue
+        prose: list[dict] = []
+        for subject in subjects:
+            prose.extend(by_about.get(subject, []))
+            if "." in subject:
+                prose.extend(by_about.get(subject.split(".", 1)[0], []))
+        if prose:
+            row["evidence"]["prose"] = prose[:20]
+        flagged = [flags[subject] for subject in subjects if subject in flags]
+        if flagged:
+            row["evidence"]["prose_flags"] = flagged
+            row["note"] += "; two descriptions in the semantic model name different values for this column, read both"
+
+
 def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     """Every part of the statement in `row_dir`, graded, and the verdict the weakest part decides."""
     row_dir = Path(row_dir)
@@ -1081,8 +1173,13 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     probes = _load_json(row_dir / "join-probes.json")
     judge = _load_json(row_dir / "filter-values.judge.json")
     claims = _load_json(row_dir / "claims.json") if with_claims else None
+    # Optional: the semantic model's own words about what the statement reads. Absent, the ledger
+    # grades exactly as it would have; present, they ride on the parts that fell short.
+    mentions = _load_json(row_dir / "mentions.json")
+    fit = _load_json(row_dir / "question_fit.json")
 
     rows = _grade_run(run)
+    rows.extend(_grade_question_fit(fit, isinstance(run, dict) and run.get("status") == "ok"))
     # After a run that succeeded, every input the later steps write is expected. One that is absent,
     # empty, or an error object is a part of the statement that was NOT checked, said as such: the
     # alternative, grading only what is there, makes a crashed verb read as a clean statement.
@@ -1111,6 +1208,9 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     rows.extend(_grade_metrics(receipt, prepare))
     rows.extend(_grade_literals(judge))
     rows.extend(_grade_claims(claims))
+
+    rows.extend(_prose_status(mentions))
+    _attach_prose(rows, mentions if isinstance(mentions, dict) and not mentions.get("error") else None)
 
     counts = {v: 0 for v in _VERDICT_RANK}
     for row in rows:
@@ -1196,6 +1296,12 @@ def findings(run_dir: Path) -> dict:
         # grade, and bars nothing.
         own = [p for p in parts if p["part"] not in _CLAIM_PARTS]
         clean = bool(own) and all(p["verdict"] in (CONFIRMED, NOTED) for p in own)
+        # A `no_question` fit removes the `question_fit` part; against a row that carries a
+        # question, that is a contradiction and not a pass. The cross-check lives here because
+        # this is where the row record and the ledger meet.
+        if record.get("question") and record.get("statement") and graded is not None \
+                and not any(p["part"] == "question_fit" for p in parts):
+            clean = False
         if record.get("status") == "mismatch" and clean and record.get("question"):
             key = f"example:{_fold(record['question'])}"
             entry = grouped.setdefault(key, {"key": key, "kind": "example", "evidence": []})

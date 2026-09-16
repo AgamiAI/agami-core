@@ -84,6 +84,7 @@ def _complete(row_dir: Path) -> None:
     _write(row_dir, "statement-receipt.json", _receipt())
     _write(row_dir, "join-probes.json", _no_joins())
     _write(row_dir, "filter-values.judge.json", _no_literals())
+    _write(row_dir, "question_fit.json", {"fit": "plausible", "reason": None})
 
 
 def _join_probe(a: str, ac: str, b: str, bc: str, *, declared_between: bool, matches: bool,
@@ -145,7 +146,7 @@ def test_a_statement_that_ran_clean_is_confirmed_on_every_part(tmp_path):
     assert _parts(result)["metric:total"]["evidence"] == {"metric": "revenue"}
     assert result["verdict"] == "confirmed"
     assert {row["verdict"] for row in result["rows"]} == {"confirmed"}
-    assert set(_parts(result)) == {"runs", "scope", "fan_out:SUM(total)", "aggregation:SUM(total)",
+    assert set(_parts(result)) == {"runs", "scope", "question_fit", "fan_out:SUM(total)", "aggregation:SUM(total)",
                                    "default_filter:orders:orders.deleted_at IS NULL", "metric:total"}
 
 
@@ -572,7 +573,7 @@ def test_a_run_that_failed_expects_no_later_files(tmp_path):
 def test_a_complete_clean_row_has_no_open_part(tmp_path):
     _complete(tmp_path)
     result = ledger(tmp_path)
-    assert result["verdict"] == "confirmed" and set(_parts(result)) == {"runs", "scope"}
+    assert result["verdict"] == "confirmed" and set(_parts(result)) == {"runs", "scope", "question_fit"}
 
 
 def test_an_output_column_the_receipt_could_not_settle_is_open_not_a_gap(tmp_path):
@@ -885,3 +886,134 @@ def test_a_metric_over_several_tables_is_confirmed_when_the_statement_reads_one_
     _write(tmp_path, "statement-receipt.json", _receipt(
         tables=[_table("orders")], columns=[_output("revenue", "matched", source_tables=["orders", "customers"])]))
     assert _parts(ledger(tmp_path))["metric:revenue"]["verdict"] == "confirmed"
+# --- prose evidence: the semantic model's words ride on the parts that fell short -------------
+
+
+def _mentions_file() -> dict:
+    return {"subjects": ["orders", "orders.status"], "dropped": 0, "unreadable": None, "dialect": "sqlite",
+            "mentions": [
+                {"about": "orders", "source": "table.caveat", "where": "orders",
+                 "text": "open orders are status NOT LIKE 'closed%'"},
+                {"about": "orders.status", "source": "column.caveat", "where": "orders.status",
+                 "text": "pending fulfillment is status IN ('pending', 'paid')"},
+                {"about": "customers", "source": "table.description", "where": "customers", "text": "cu"}],
+            "flags": [{"about": "orders.status", "kind": "values_named_differ",
+                       "sources": ["orders", "orders.status"], "values": [["closed%"], ["paid", "pending"]]}]}
+
+
+def test_the_models_words_ride_on_a_part_that_fell_short_and_not_on_a_confirmed_one(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "filter-values.judge.json", _judged("query_defect"))
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("orders", [{"expr": "orders.deleted_at IS NULL", "status": "applied"}])]))
+    _write(tmp_path, "mentions.json", _mentions_file())
+    parts = _parts(ledger(tmp_path))
+    lit = parts["literal:orders.status=Paid"]
+    assert [m["source"] for m in lit["evidence"]["prose"]] == ["column.caveat", "table.caveat"]
+    assert lit["evidence"]["prose_flags"][0]["kind"] == "values_named_differ"
+    assert "two descriptions in the semantic model name different values" in lit["note"]
+    assert "prose" not in parts["default_filter:orders:orders.deleted_at IS NULL"]["evidence"]
+    assert "prose" not in parts["runs"]["evidence"]
+
+
+def test_a_row_without_mentions_grades_exactly_as_before(tmp_path):
+    _ran_ok(tmp_path)
+    _write(tmp_path, "filter-values.judge.json", _judged("query_defect"))
+    before = ledger(tmp_path)
+    # A clean file with nothing to say changes nothing; a zero-byte one adds only the note that
+    # the words could not be read, and every grade stays exactly as it was.
+    _write(tmp_path, "mentions.json", {"mentions": [], "flags": [], "subjects": [], "dropped": 0, "unreadable": None})
+    assert ledger(tmp_path) == before
+    _write(tmp_path, "mentions.json", "")
+    after = ledger(tmp_path)
+    assert [r for r in after["rows"] if r["part"] != "prose:*"] == before["rows"]
+    assert after["verdict"] == before["verdict"]
+
+
+def test_prose_reaches_the_findings_file(tmp_path):
+    run = _run_dir(tmp_path, [{"row": 1, "question": "q", "statement": "s", "expected": 1, "status": "mismatch"}])
+    d = run / "rows" / "1"
+    _ran_ok(d)
+    _write(d, "filter-values.judge.json", {"literals": [], "unreadable": None, "columns": {
+        "orders.status": {"table": "orders", "column": "status", "declared": "absent", "sensitive": False,
+                          "distinct": "listed", "observed_count": 4}}})
+    _write(d, "mentions.json", _mentions_file())
+    (finding,) = findings(run)["findings"]
+    assert finding["key"] == "description:orders.status"
+    assert [m["about"] for m in finding["evidence"][0]["ledger"]["prose"]] == ["orders.status", "orders"]
+
+
+def test_a_qualified_default_filter_still_receives_the_models_words(tmp_path):
+    """The receipt spells the table as the statement wrote it, schema and all; the mentions verb keys
+    tables bare. Without the fold the caveat never reached the one part where it matters most."""
+    _ran_ok(tmp_path)
+    _write(tmp_path, "statement-receipt.json", _receipt(
+        tables=[_table("main.orders", [{"expr": "o.status != 'cancelled'", "status": "omitted"}])]))
+    _write(tmp_path, "mentions.json", _mentions_file())
+    row = _parts(ledger(tmp_path))["default_filter:main.orders:o.status != 'cancelled'"]
+    assert [m["source"] for m in row["evidence"]["prose"]] == ["table.caveat"]
+
+
+def test_words_that_could_not_be_read_are_noted_not_silently_missing(tmp_path):
+    _complete(tmp_path)
+    _write(tmp_path, "mentions.json", "")
+    row = _parts(ledger(tmp_path))["prose:*"]
+    assert row["verdict"] == "noted" and "could not be read" in row["note"]
+    _write(tmp_path, "mentions.json", {**_mentions_file(), "skipped": [{"source": "datasource.md", "where": "datasource.md", "reason": "UnicodeDecodeError"}]})
+    row = _parts(ledger(tmp_path))["prose:*"]
+    assert row["verdict"] == "noted" and "datasource.md" in row["note"]
+    # A clean file, or no file, adds no part.
+    _write(tmp_path, "mentions.json", _mentions_file())
+    assert "prose:*" not in _parts(ledger(tmp_path))
+    (tmp_path / "mentions.json").unlink()
+    assert "prose:*" not in _parts(ledger(tmp_path))
+# --- question fit: the one part graded by reading -----------------------------------------------
+
+
+def test_a_plausible_fit_is_confirmed_and_says_it_was_read_not_measured(tmp_path):
+    _complete(tmp_path)
+    row = _parts(ledger(tmp_path))["question_fit"]
+    assert row["verdict"] == "confirmed" and "by reading" in row["note"]
+
+
+def test_a_doubtful_fit_holds_the_row_open_with_the_reason(tmp_path):
+    _complete(tmp_path)
+    _write(tmp_path, "question_fit.json", {"fit": "doubtful",
+                                           "reason": "the question asks about orders and the statement counts items"})
+    result = ledger(tmp_path)
+    row = _parts(result)["question_fit"]
+    assert row["verdict"] == "unresolved" and "counts items" in row["note"] and "re-run this row" in row["note"]
+    assert result["verdict"] == "unresolved"
+    # Which is what keeps a matching number away from the keep-offer.
+    assert reconcile.row_status(True, result["verdict"]) == "match_unverified"
+
+
+def test_a_statement_that_came_with_no_question_has_no_fit_to_grade(tmp_path):
+    _complete(tmp_path)
+    _write(tmp_path, "question_fit.json", {"fit": "no_question", "reason": None})
+    assert "question_fit" not in _parts(ledger(tmp_path))
+
+
+def test_a_fit_that_was_never_checked_is_an_open_part_after_a_successful_run_only(tmp_path):
+    _complete(tmp_path)
+    (tmp_path / "question_fit.json").unlink()
+    row = _parts(ledger(tmp_path))["question_fit"]
+    assert row["verdict"] == "unresolved" and "was not checked" in row["note"]
+    _write(tmp_path, "question_fit.json", {"fit": "maybe"})
+    assert _parts(ledger(tmp_path))["question_fit"]["verdict"] == "unresolved"
+    failed = tmp_path / "failed"
+    _write(failed, "run.json", {"status": "failed", "rule": None, "kind": "timeout", "detail": None})
+    assert "question_fit" not in _parts(ledger(failed))
+
+
+def test_a_no_question_fit_against_a_row_that_carries_a_question_is_never_an_example(tmp_path):
+    """`no_question` removes the part; declared against a row that carries a question it is a
+    contradiction, and the findings verb refuses to treat the row as a statement that held."""
+    run = _run_dir(tmp_path, [{"row": 1, "question": "How many orders?", "statement": "s", "expected": 1,
+                               "status": "mismatch"}])
+    d = run / "rows" / "1"
+    _complete(d)
+    _write(d, "question_fit.json", {"fit": "no_question", "reason": None})
+    assert findings(run)["findings"] == []
+    _write(d, "question_fit.json", {"fit": "plausible", "reason": None})
+    assert [f["kind"] for f in findings(run)["findings"]] == ["example"]

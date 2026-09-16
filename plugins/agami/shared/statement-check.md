@@ -37,7 +37,10 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    `network` and `permission` stop the whole run, as Phase 3b stops it; write the `kind` and its
    `remediation` and move on.
 7. **`sm receipt`** whenever the statement parsed: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" receipt
-   "$ROOT" --sql-file statement.sql > statement-receipt.json`.
+   "$ROOT" --sql-file statement.sql > statement-receipt.json`. Beside it, `bash
+   "$AGAMI_PLUGIN_ROOT/scripts/sm" mentions "$ROOT" --sql-file statement.sql > mentions.json`: the
+   semantic model's own words (descriptions, caveats, glossary, narrative, prompt examples) about every
+   table and column the statement reads, for the ledger to put beside a part that falls short.
 8. **Probes** go through step 4 only, each written to its own `.sql` file first and passed by path,
    each result to its own CSV named as `part-ledger.md` lists:
    `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" join-probes "$ROOT" --sql-file statement.sql >
@@ -60,6 +63,13 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
    directory itself: `run.json` for the statement and `<probe>.run.json` for every probe, each with
    its exit, rule and kind, so every execution and every refusal in this phase is written down. The
    AI's own run logs as `agami-query` Phase 5 always has.
+
+10. **Does the statement answer the question?** For every statement row, write `question_fit.json`;
+   when the row carries a question, read the two side by side first: `{"fit": "plausible" | "doubtful" | "no_question",
+   "reason": "<one sentence, or null>"}`. Doubtful when the grain differs, the measure differs, a
+   filter is present the question never asked for or absent when it did, or the time window differs.
+   `no_question` for a statement that came alone. This is the one step here that judges by reading;
+   the ledger turns a doubtful fit into an open part, and a missing file into one too.
 
 Then `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir .` grades what was found,
 and again with `--with-claims` once `sm claims` has compared the two statements.

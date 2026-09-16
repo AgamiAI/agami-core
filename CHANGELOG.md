@@ -263,6 +263,13 @@ below corresponds to one such version.
   paste-back pattern; the page never renders a result row, and a grade decides nothing on its own.
   An end-to-end test walks the flawed-inputs chain over the sample store: the wrong join key, the
   miscased value, the omitted required filter, the clean count. (ACE-117)
+- `sm mentions` quotes every description, caveat, glossary line, narrative paragraph and prompt
+  example that mentions a table or column a statement reads, and the reconcile ledger puts those
+  words beside every part that fell short, with a flag when two of them name different values for
+  one column. Quoted, never graded. (ACE-119)
+- Reconcile Phase 1.5g reads a person's question beside their statement and writes
+  `question_fit.json`; the ledger's `question_fit` part withholds a doubtful row from the keep-offer,
+  and a fit that was never checked is an open part rather than a silent pass. (ACE-120)
 
 ### Fixed
 
