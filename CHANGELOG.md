@@ -22,10 +22,17 @@ below corresponds to one such version.
   opposite lessons for one mistake. A column the DATABASE lacks is documented as repairable
   ("correct the statement and retry SILENTLY"); a column the MODEL does not declare said only to
   relay the refusal's `remediation`, which reads as a dead end and hands the user an instruction to
-  go and edit the semantic model. Both now say the same thing: the schema the agent already holds
-  is enough, so rewrite with declared names and retry, and relay the remediation only when no
-  declared column can answer the question. Stated on both surfaces, the server instructions and
-  `execute_sql`'s own description, so they cannot drift apart.
+  go and edit the semantic model. Both now say the same thing, and say which fix belongs to which
+  rule rather than stating one default and hedging it: on a scope refusal the schema the agent
+  already holds is usually enough, so rewrite with declared names and retry, and on every other
+  rule the remediation is the fix. Two cases a rewrite does not repair are named, because getting
+  either wrong is worse than the refusal: a table name matching more than one schema is declared
+  twice and is repaired by qualifying it, not renaming it; and a column left out of the model ON
+  PURPOSE is how an author makes one unreadable, and arrives as the same refusal as a typo, so
+  answering with the nearest declared column instead answers a different question than the one
+  asked. The columns rule is keyed to the table's own entry rather than to the response as a
+  whole, since a response sized down to `summary` or `index` carries no columns at all and a rule
+  keyed on what was read would tell that agent every column it needs is out of scope.
 
 ### Changed
 

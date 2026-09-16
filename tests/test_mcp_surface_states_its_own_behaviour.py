@@ -225,6 +225,14 @@ def test_the_instructions_say_which_columns_may_be_queried(monkeypatch):
         assert "Columns:" in text, f"{label}: no rule about which columns may be queried"
         assert "columns the schema returned" in text, f"{label}: does not name the source of truth"
         assert "plausible name is not a declared one" in text, f"{label}: states it too weakly"
+        # The rule is about the table's own entry, not about the response as a whole: a response
+        # sized down to `summary` or `index` carries no columns, and a rule keyed on "did you read
+        # it" would tell that agent every column it needs is out of scope. The sizes are derived
+        # so a renamed mode breaks this rather than leaving the escape hatch naming nothing.
+        for mode in tools._SCHEMA_MODE_DOWNGRADE:
+            if mode != "full":
+                assert f"`{mode}`" in text, f"{label}: the no-columns case for {mode} is unstated"
+        assert "dataset_names" in text, f"{label}: names no way to get the columns"
 
 
 def test_a_scope_refusal_is_documented_as_repairable(monkeypatch):
@@ -233,10 +241,30 @@ def test_a_scope_refusal_is_documented_as_repairable(monkeypatch):
     remediation, which reads as a dead end and hands the user an instruction to go and edit the
     model. Same error, same repair, and the agent already holds the schema that makes it."""
     described = tools.TOOLS["execute_sql"]["description"]
-    assert "rewrite with declared names and retry before relaying" in described
+    assert "rewrite with declared names and retry" in described
+    # Whose fix it is has to be stated per rule class. "It always names its fix: relay the
+    # remediation" as an unconditional opener, with the repair as a later qualifier, resolves to
+    # the opener: an absolute followed by a hedge is read as the absolute.
+    assert "always names its fix: relay" not in described, "the old blanket default is back"
     for label, text in _instruction_variants(monkeypatch).items():
-        assert "column_scope" in text, f"{label}: the refusal rule is never named"
+        # Derived from the rule constants: rename one and this says the guidance names a rule that
+        # no longer exists, which a literal would not.
+        assert guardrail.RULE_COLUMN_SCOPE in text, f"{label}: the column rule is never named"
+        assert guardrail.RULE_TABLE_SCOPE in text, f"{label}: the table rule is never named"
         assert "repair, not a dead end" in text, f"{label}: the refusal still reads as terminal"
+
+
+def test_the_two_scope_refusals_that_a_rewrite_does_not_repair_are_named(monkeypatch):
+    """`table_scope` refuses ambiguity as well as absence: a name declared in two schemas is
+    declared twice, so "rewrite with declared names" repairs nothing and the agent retries the same
+    bare name. And `check_column_scope` treats a column the author excluded exactly like one that
+    was hallucinated, byte for byte, because the refusal is echo-only. Told a refusal is repairable
+    and given no warning, an agent substitutes the nearest declared column and answers a different
+    question than the one asked, which is worse than refusing."""
+    for label, text in _instruction_variants(monkeypatch).items():
+        assert "schema.table" in text, f"{label}: an ambiguous table name has no stated repair"
+        assert "ON PURPOSE" in text, f"{label}: a deliberately undeclared column reads as a typo"
+        assert "near-neighbour" in text, f"{label}: nothing forbids answering with a proxy column"
 
 
 def test_the_surface_admits_it_cannot_save_a_correction(monkeypatch):
