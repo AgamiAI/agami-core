@@ -1378,6 +1378,44 @@ MISMATCH = "mismatch"
 EXPECTED_DOUBTFUL = "expected_doubtful"
 ERROR = "error"
 
+# The words a status takes wherever a person reads one. The token stays on the wire, because
+# `rows.jsonl`, the keep gate and the `status` verb's choices are pinned to it and churning that
+# would be risk without a reader benefit; what a person sees is always the sentence. A status is two
+# facts, so the five read as a 2x2 plus the case where nothing could be compared: did the two answers
+# agree, and did the person's own query check out. `expected_doubtful` is the reason this table
+# exists: it is the row where the analyst's own query is the thing in doubt, the most delicate claim
+# the tool makes, and a reader who has to look the word up will not trust it.
+_STATUS_WORDS = {
+    MATCH: "same answer",
+    MATCH_UNVERIFIED: "same answer, but part of your query could not be checked",
+    MISMATCH: "different answer",
+    EXPECTED_DOUBTFUL: "different answer, and your query has a problem",
+    ERROR: "could not compare",
+}
+
+
+# The colour family a status takes on the page, and the words the filter chips use. The chips group
+# by family, so two statuses share one: a row whose query has a proven problem and a row a check
+# could not reach both land on "your query needs a look", which is the honest thing they have in
+# common. A coarser vocabulary than _STATUS_WORDS, and it lives here for the same reason: the page
+# renders what it is given and keeps no glossary, so the card, the chips and the chat cannot drift
+# into calling one row three things.
+_STATUS_CLASS = {MATCH: "held", MATCH_UNVERIFIED: "defect", MISMATCH: "gap",
+                 EXPECTED_DOUBTFUL: "defect", ERROR: "noted"}
+_STATUS_CHIP_WORDS = {"held": "same answer", "defect": "your query needs a look", "gap": "different answer",
+                      "open": "could not check", "noted": "could not compare"}
+
+
+def status_words(status: str | None) -> str:
+    """The sentence for a status. Unknown statuses read as the plainest true thing, never the token."""
+    return _STATUS_WORDS.get(status or "", "could not compare")
+
+
+def status_legend() -> dict:
+    """What a page needs to show a status: its colour family and the chip words. Shipped with the
+    page so nothing is written into a template twice."""
+    return {"cls": dict(_STATUS_CLASS), "chips": dict(_STATUS_CHIP_WORDS)}
+
 
 def row_status(match: bool | None, ledger_verdict: str | None) -> str:
     """The status a row gets, from the number comparison and the weakest grade on the person's
@@ -1506,8 +1544,8 @@ _PART_WORDS = {
     "runs": {"held": "ran", "defect": "failed", "gap": "refused", "open": "not run"},
 }
 _PART_KEYS = {"join": "join {a} to {b}", "join_key": "join key {a} to {b}", "cardinality": "one row per key, {a} to {b}",
-              "fan_out": "fan-out on {x}", "aggregation": "aggregation {x}", "default_filter": "default filter on {t}",
-              "metric": "metric {x}", "literal": "value {x}", "values_declared": "values declared on {x}",
+              "fan_out": "double counting in {x}", "aggregation": "aggregation {x}", "default_filter": "default filter on {t}",
+              "metric": "metric {x}", "literal": "value {x}", "values_declared": "value list for {x}",
               "dropped_rows": "rows dropped by join {a} to {b}", "question_fit": "answers the question",
               "prose": "caveats read", "scope": "scope", "runs": "ran"}
 _OWNER_CHANGE = {
@@ -2277,6 +2315,7 @@ def report_items(run_dir: Path) -> list[dict]:
         items.append({
             "row": n, "label": rec.get("label"), "question": rec.get("question") or rec.get("label") or f"row {n}",
             "source": source or None, "status": rec.get("status") or "error",
+            "status_words": status_words(rec.get("status")),
             "expected": expected, "answer": answer,
             "delta_pct": (round(delta * 100, 1) if isinstance(delta, (int, float)) and not isinstance(delta, bool) else None),
             "single_cell": bool(single), "owner": owner, "keep_allowed": keep_ok, "diff": diff,

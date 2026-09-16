@@ -40,7 +40,7 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
-_FIELDS = ("row", "label", "question", "source", "status", "expected", "answer", "delta_pct", "single_cell",
+_FIELDS = ("row", "label", "question", "source", "status", "status_words", "expected", "answer", "delta_pct", "single_cell",
            "owner", "read", "how", "words", "disagreement", "change", "checks", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill")
 _LISTS = ("read", "how", "words", "change", "todo")
 _DIFF_KEYS = ("key", "state", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
@@ -177,6 +177,9 @@ def render(*, title: str, profile: str, run: str, items: list[dict], layout: str
         "RUN_JSON": _script_json(run or ""),
         "ITEMS_JSON": _script_json(projected),
         "LAYOUT_JSON": _script_json(choose_layout(projected, layout)),
+        # The status legend (colour family + chip words) comes from the one table in reconcile.py,
+        # so the page writes no status vocabulary of its own. Same door the items come through.
+        "STATUS_JSON": _script_json(_reconcile().status_legend()),
         "AGAMI_LOGO_DARK_TEXT": _read(LOGO_DARK_PATH),
         "AGAMI_LOGO_LIGHT_TEXT": _read(LOGO_LIGHT_PATH),
         "THEME_CSS": _read(THEME_PATH),

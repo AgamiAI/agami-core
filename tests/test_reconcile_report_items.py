@@ -135,7 +135,7 @@ def test_gaps_the_ledger_measured_own_the_change_even_when_the_fit_is_doubtful_a
     item = reconcile.report_items(_run(tmp_path, [GAPS_AND_GRAIN]))[0]
     rows = {r["key"]: r for r in item["diff"]}
     assert item["owner"] == "model"
-    assert item["change"] == ["The semantic model is missing: values declared on requests.state, values declared on request_items.approval. Add them through /agami-save-correction.",
+    assert item["change"] == ["The semantic model is missing: value list for requests.state, value list for request_items.approval. Add them through /agami-save-correction.",
                               "Also: the statement restricts the parent request to one state, a narrower notion of open than the question's"]
     assert rows["filters"]["yours"] == ["request_items.approval = 'Requested'", "requests.state = 'Work in Progress'",
                                         "requests.opened ≥ date_trunc(current_date, year) + interval 7 months"]
