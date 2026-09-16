@@ -119,7 +119,7 @@ def test_the_run_never_touches_the_persons_statement_before_grading():
 
 
 def test_the_row_record_gains_its_keys_after_error_and_its_two_statuses():
-    assert ('"status":       "match" | "match_unverified" | "mismatch" | "expected_doubtful" | "error",'
+    assert ('"status":       "match" | "match_unverified" | "mismatch" | "expected_doubtful" | "error" | "ungraded",'
             in RECORD)
     error_at = RECORD.index('"error":')
     for key in ("provenance", "statement", "statement_recorded", "statement_receipt_path", "receipt_path",
@@ -330,8 +330,10 @@ def test_the_run_works_five_rows_at_a_time_and_resumes_from_its_checkpoint():
     assert '--out "<artifacts_dir>/local/reconcile/<ts>/intake.json"' in intake
     beats = _between(SKILL, "### 3a.5", "### 3b")
     assert "Render it after every chunk" in beats and "never what the block sends" in beats
-    grading = _between(SKILL, "### 2.5 —", "## Phase 3")
-    assert "filters by grade state" in grading
+    # The questions branch ends on the same page every other row does, so there is no second page
+    # with filters of its own to pin here.
+    questions = _between(SKILL, "### 2.5 —", "## Phase 3")
+    assert "Report it on the reconciliation report" in questions
 
 
 def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_through_intake():
@@ -344,7 +346,10 @@ def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_t
     assert "Never write `report.html`, `report-items.json` or `rows.jsonl` with the Write tool" in story
     record = _between(SKILL, "### 2d", "### 2e")
     assert 'record --run-dir "<artifacts_dir>/local/reconcile/<ts>" --row <n>' in record and "never by hand" in record
-    assert "never written as `error`" in record and "/tmp/agami-reconcile-results" not in record
+    # A question-only row is recorded `ungraded`, not refused and not written as `error`, and the
+    # verb takes no argument that could fill its expected value from the run (ACE-150).
+    assert "recorded `ungraded` rather than refused or written as `error`" in record
+    assert "its own answer key" in record and "/tmp/agami-reconcile-results" not in record
     diff = _between(SKILL, "### 2c", "### 2d")
     assert "> rows/<n>/diff.json" in diff
     ask = _between(SKILL, "### 2b", "### 2c")
@@ -374,7 +379,10 @@ def test_the_items_file_carries_the_result_and_the_fix():
 
 def test_the_example_decision_has_a_route():
     story = _between(SKILL, "### 3a.5", "### 3b")
-    assert "**`example`** takes the person's statement and its question to `/agami-save-correction` as a prompt example" in story
+    assert "**`example`** takes a statement and its question to `/agami-save-correction` as a prompt example" in story
+    # And the step says WHICH statement: on a question-only row the person supplied none, and
+    # choosing `example` there means agami's own query is the one to keep.
+    assert "on a question-only row there is none" in story and "agami's is what gets sent" in story
 
 
 def test_agamis_answer_comes_from_a_cold_client_never_from_the_session():

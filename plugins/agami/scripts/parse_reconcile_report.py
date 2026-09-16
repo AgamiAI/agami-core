@@ -194,7 +194,7 @@ def parse(text: str, keepable: set[int] | None = None, run: str | None = None,
                 continue  # dropped, like every other decision that cannot be applied as written
             elif decision not in _WITH_WORDS and words.strip():
                 # A keep or a nothing carries no instruction; words riding beside one are the hand
-                # edit this parser exists to catch, as the grading page's parser treats SQL on a right.
+                # edit this parser exists to catch.
                 anomalies.append({"kind": f"words_ignored_on_{decision}", "row": row})
             elif words.strip():
                 out["words"] = words.strip()
@@ -224,7 +224,8 @@ def main(argv=None) -> int:
         print(json.dumps({"ok": False, "data": None, "anomalies": [{"kind": "bad_argument", "detail": str(exc)}],
                           "needs_judgment": {"kind": "bad_argument", "ask": "the block file could not be read"}}, indent=2))
         return 2
-    data, anomalies, needs = parse(text, keepable_rows(run_dir), run=run_dir.name, example_blocked=example_blocked_rows(run_dir))
+    data, anomalies, needs = parse(text, keepable_rows(run_dir), run=run_dir.name,
+                                   example_blocked=example_blocked_rows(run_dir))
     print(json.dumps({"ok": needs is None, "data": data, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
     return 0
 

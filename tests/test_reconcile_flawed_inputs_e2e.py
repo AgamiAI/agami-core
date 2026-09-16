@@ -39,9 +39,8 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SAMPLE))
 
 import build_sample  # noqa: E402
-import parse_reconcile_grades  # noqa: E402
+import parse_reconcile_report  # noqa: E402
 import reconcile  # noqa: E402
-import render_reconcile_grades  # noqa: E402
 from semantic_model import cli  # noqa: E402
 
 AREA = "agami-example"
@@ -207,11 +206,16 @@ def compare(store: dict, n: int, expected: float | None, actual: float | None,
 
 def record(store: dict, n: int, question: str, statement: str | None, expected, diff: dict | None,
            ledger: dict | None, **extra) -> dict:
-    status = reconcile.row_status(diff["match"] if diff else None,
-                                  ledger["verdict"] if ledger else None)
+    # The same rule `reconcile.record` applies: nothing compared, nothing failed and no statement of
+    # the person's is a row waiting on a person, not an error.
+    if diff is None and expected is None and statement is None and not extra.get("error"):
+        status = reconcile.UNGRADED
+    else:
+        status = reconcile.row_status(diff["match"] if diff else None,
+                                      ledger["verdict"] if ledger else None)
     rec = {"row": n, "label": question, "question": question, "statement": statement,
            "expected": expected, "status": status, "ledger_verdict": ledger["verdict"] if ledger else None,
-           "provenance": {"shape": "b" if statement else "a", "graded": None}, **extra}
+           "provenance": {"shape": "b" if statement else "a"}, **extra}
     with (store["run"] / "rows.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec) + "\n")
     return rec
@@ -320,43 +324,35 @@ def test_5_a_clean_count_matches_and_may_be_kept(store):
     assert rec["status"] == "match"
 
 
-def test_6_three_bare_questions_are_graded_on_one_page_and_the_grades_re_enter(store, tmp_path):
+def test_6_three_bare_questions_are_checked_and_decided_on_the_report_page(store, tmp_path):
+    """The questions branch. Nothing here can say whether an answer is right, so the row records
+    `ungraded` and a person decides on the same report page every other row lands on. What CAN be
+    measured, the query agami wrote, is measured; what cannot is asked."""
     answers = {
         6: ("How many orders come from the web channel?",
             "SELECT COUNT(*) AS orders FROM orders o WHERE o.channel = 'web' AND o.status != 'cancelled'"),
         7: ("How many customers do we have?", "SELECT COUNT(*) AS customers FROM customers"),
         8: ("What is the refund rate?", "SELECT 0.5 AS refund_rate"),
     }
-    items = []
-    for n, (question, agami_sql) in answers.items():
-        actual = ask_agami(store, n, agami_sql)
-        items.append({"row": n, "question": question, "answer": str(actual), "signals": []})
-    items_file = tmp_path / "items.json"
-    items_file.write_text(json.dumps(items))
-    out = tmp_path / "grade.html"
-    assert render_reconcile_grades.main(["--title", "Grade agami's answers · demo", "--profile", "demo",
-                                          "--run", "e2e", "--items-file", str(items_file), "--out", str(out)]) == 0
-    assert "How many customers do we have?" in out.read_text()
+    for n, (_question, agami_sql) in answers.items():
+        ask_agami(store, n, agami_sql)
 
-    block = ("profile: demo\nreconcile-run: e2e\ngrades:\n"
-             + json.dumps([{"row": 6, "grade": "right"},
-                           {"row": 7, "grade": "unsure"},
-                           {"row": 8, "grade": "wrong", "words": "the refund rate should divide refunds by payments"}])
+    block = ("profile: demo\nreconcile-run: e2e\ndecisions:\n"
+             + json.dumps([{"row": 6, "decision": "example"},
+                           {"row": 7, "decision": "nothing"},
+                           {"row": 8, "decision": "change", "words": "the refund rate should divide refunds by payments"}])
              + "\ndone\n")
-    data, anomalies, needs = parse_reconcile_grades.parse(block)
+    data, anomalies, needs = parse_reconcile_report.parse(block, run="e2e")
     assert needs is None and anomalies == []
-    grades = {g["row"]: g for g in data["grades"]}
+    decisions = {d["row"]: d for d in data["decisions"]}
+    assert decisions[6]["decision"] == "example" and decisions[7]["decision"] == "nothing"
 
-    # right: the answer becomes the expected value and the row matches by construction.
-    actual = scalar((store["run"] / "rows" / "6" / "actual.csv").read_text())
-    rec = record(store, 6, answers[6][0], None, actual, reconcile.diff(actual, actual), None)
-    rec["provenance"]["graded"] = "right"
-    assert rec["status"] == "match"
-    # unsure: nothing happens.
-    assert grades[7]["grade"] == "unsure"
-    # wrong with words: a finding carrying the words, and no statement to grade.
-    record(store, 8, answers[8][0], None, None, None, None, words=grades[8]["words"],
-           provenance={"shape": "a", "graded": "wrong"})
+    # No statement of the person's on any of the three, so every row records ungraded and none of
+    # them takes its expected value from the run: agami's own answer is never its own answer key.
+    for n in answers:
+        rec = record(store, n, answers[n][0], None, None, None, None)
+        assert rec["status"] == reconcile.UNGRADED, rec
+        assert rec["expected"] is None
 
 
 def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(store):
@@ -366,9 +362,10 @@ def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(store):
     assert len([k for k in keys if k.startswith("filter:orders:")]) == 1, keys
     # Row 4's statement held on every part and agami answered differently: a worked example.
     assert "example:what is our total revenue?" in keys, keys
-    assert "description:what is the refund rate?" in keys
-    words = next(f for f in out["findings"] if f["kind"] == "description")
-    assert words["words"] == "the refund rate should divide refunds by payments"
+    # No `description` finding: its only writer was Phase 2.5's grading step, deleted with the
+    # grading page (ACE-150). A person's words about a wrong answer now go straight to
+    # /agami-save-correction through the report page's `change` decision, which is the live door.
+    assert not any(f["kind"] == "description" for f in out["findings"]), keys
     defects = {(d["row"], d["part"]) for d in out["query_defects"]}
     assert (1, "join:orders-payments") in defects
     assert (2, "literal:orders.status=Delivered") in defects

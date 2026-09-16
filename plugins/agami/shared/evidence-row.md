@@ -14,13 +14,12 @@ Any input reduces to rows of three optional fields plus where it came from:
 ```json
 {"label": "Q3 Revenue", "question": null, "statement": "SELECT SUM(total) FROM orders WHERE q = 3",
  "expected": 4200000.0, "raw_value": "$4.2M",
- "provenance": {"shape": "d", "source": "the finance dashboard", "file": "tiles.csv", "line": 2,
-                "graded": null}}
+ "provenance": {"shape": "d", "source": "the finance dashboard", "file": "tiles.csv", "line": 2}}
 ```
 
 | Shape | What the person handed over | `question` | `statement` | `expected` |
 |---|---|---|---|---|
-| **a** | a list of questions | given | none | none, until the person grades the AI's answer |
+| **a** | a list of questions | given | none | none, and none is ever produced: agami answers, the run checks the query behind that answer, and whether the answer is right is the person's call on the report page |
 | **b** | questions with the SQL they trust | given, or derived from the statement and confirmed | given | produced by running the statement |
 | **c** | a dashboard screenshot, or a label-and-number table | a label, turned into a question and confirmed | none | read by code, confirmed by the person |
 | **d** | a screenshot or table with the SQL behind each tile | a label | given | read by code, and checked against the statement's own result |

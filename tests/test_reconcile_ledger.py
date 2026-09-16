@@ -909,7 +909,10 @@ def test_the_models_words_ride_on_a_part_that_fell_short_and_not_on_a_confirmed_
     _write(tmp_path, "mentions.json", _mentions_file())
     parts = _parts(ledger(tmp_path))
     lit = parts["literal:orders.status=Paid"]
-    assert [m["source"] for m in lit["evidence"]["prose"]] == ["column.caveat", "table.caveat"]
+    # The column's own caveat, and not its table's (ACE-150). A check on one value answered with the
+    # table's description is on-subject and says nothing: on a real model that was twenty paragraphs
+    # about the dataset under a check about one missing filter.
+    assert [m["source"] for m in lit["evidence"]["prose"]] == ["column.caveat"]
     assert lit["evidence"]["prose_flags"][0]["kind"] == "values_named_differ"
     assert "two descriptions in the semantic model name different values" in lit["note"]
     assert "prose" not in parts["default_filter:orders:orders.deleted_at IS NULL"]["evidence"]
@@ -940,18 +943,21 @@ def test_prose_reaches_the_findings_file(tmp_path):
     _write(d, "mentions.json", _mentions_file())
     (finding,) = findings(run)["findings"]
     assert finding["key"] == "description:orders.status"
-    assert [m["about"] for m in finding["evidence"][0]["ledger"]["prose"]] == ["orders.status", "orders"]
+    assert [m["about"] for m in finding["evidence"][0]["ledger"]["prose"]] == ["orders.status"]
 
 
-def test_a_qualified_default_filter_still_receives_the_models_words(tmp_path):
+def test_a_qualified_default_filter_receives_the_words_about_the_column_it_filters(tmp_path):
     """The receipt spells the table as the statement wrote it, schema and all; the mentions verb keys
-    tables bare. Without the fold the caveat never reached the one part where it matters most."""
+    tables bare, so the schema has to be folded off or nothing attaches. And the subject is the
+    filter's own COLUMN (ACE-150): a declared filter is about one column, and quoting the table's
+    description instead answered a missing-filter check with the dataset's blurb."""
     _ran_ok(tmp_path)
     _write(tmp_path, "statement-receipt.json", _receipt(
         tables=[_table("main.orders", [{"expr": "o.status != 'cancelled'", "status": "omitted"}])]))
     _write(tmp_path, "mentions.json", _mentions_file())
     row = _parts(ledger(tmp_path))["default_filter:main.orders:o.status != 'cancelled'"]
-    assert [m["source"] for m in row["evidence"]["prose"]] == ["table.caveat"]
+    assert [m["source"] for m in row["evidence"]["prose"]] == ["column.caveat"]
+    assert [m["about"] for m in row["evidence"]["prose"]] == ["orders.status"]
 
 
 def test_words_that_could_not_be_read_are_noted_not_silently_missing(tmp_path):
@@ -1051,3 +1057,18 @@ def test_without_a_pre_flight_an_unmatched_aggregate_stays_open():
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, None)] == [("metric:total", "unresolved")]
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, {"error": "empty_file"})] == [("metric:total", "unresolved")]
 
+
+
+def test_a_filter_expression_that_does_not_open_with_a_column_falls_back_to_its_table():
+    """ACE-150. A declared filter is about one column, so that column is the subject worth quoting.
+    Taking the first identifier made `NOT is_test` read as the column `not` and `lower(status)` as
+    the column `lower` — subjects that match nothing in the mentions index, so the part silently
+    lost both its quoted prose and the note that two descriptions disagree about it."""
+    def subjects(expr):
+        return reconcile._part_subjects(f"default_filter:main.orders:{expr}")
+
+    assert subjects("is_deleted = false") == ["orders.is_deleted"]
+    assert subjects("o.status != 'cancelled'") == ["orders.status"]
+    assert subjects("deleted_at IS NULL") == ["orders.deleted_at"]
+    for expr in ("NOT is_test", "lower(status) = 'open'", "COALESCE(x,0) > 0", "CASE WHEN a THEN b END"):
+        assert subjects(expr) == ["orders"], expr

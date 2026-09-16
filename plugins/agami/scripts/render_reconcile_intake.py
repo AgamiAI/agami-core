@@ -5,7 +5,7 @@ Reconcile intake page renderer.
 What we read from what the person gave us, before anything runs: one row per thing to check, the
 question read from a label (editable), the number parsed, whether SQL came with it. The person fixes
 a question or drops a row and pastes one block back, the way the connect skill's prune page works.
-Stdlib only; the same theme and shared page CSS as the report and grading pages.
+Stdlib only; the same theme and shared page CSS as the report page.
 
 Usage:
 
