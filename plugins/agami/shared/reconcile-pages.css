@@ -78,3 +78,15 @@
     .intake textarea { width: 100%; min-height: 44px; font: inherit; font-size: 14px; border: 1px solid var(--border, #d9dde3); border-radius: 6px; padding: 6px 8px; background: var(--bg, #fff); color: inherit; }
     .intake .drop { color: var(--fg-muted, #5b6875); font-size: 13px; }
     .intake .row.dropped { opacity: 0.5; }
+    /* filters: the count chips become toggles, a search box narrows by a word, and the block a page
+       builds always covers every decided row, filtered or not */
+    .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 10px; font-size: 13px; color: var(--fg-muted, #5b6875); }
+    .filters input[type=search] { flex: 1 1 220px; min-width: 180px; font: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--border, #d9dde3); border-radius: 6px; background: var(--bg, #fff); color: inherit; }
+    .filters[hidden] { display: none; }
+    button.chip, button.pill { font: inherit; cursor: pointer; text-align: left; }
+    button.pill { border: 0; }
+    .chip.on, .pill.on { outline: 2px solid var(--accent, #1d5fb4); outline-offset: 1px; }
+    .chips.filtering .chip:not(.on), .filters.filtering .pill[data-owner]:not(.on) { opacity: 0.55; }
+    .linkish { background: none; border: 0; color: var(--accent, #1d5fb4); cursor: pointer; font: inherit; font-size: 13px; padding: 0; }
+    .showing { margin-left: auto; font-variant-numeric: tabular-nums; }
+    .filters .k { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }

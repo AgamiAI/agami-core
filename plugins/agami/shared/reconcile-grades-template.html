@@ -49,6 +49,14 @@
 
     <p class="lede">These questions came with no answers to compare against, so agami answered each one and you grade the answers. Mark each right, wrong or unsure. If it is wrong and you know the right SQL, paste it; if you can only say what is wrong, say it in words. Then generate the block and paste it back into Claude. Nothing changes until you do.</p>
 
+    <div class="chips" id="chips"></div>
+    <div class="filters" id="filters">
+      <span class="k">Show</span><span id="owner-chips"></span>
+      <input type="search" id="q" placeholder="a word in the question or the answer" aria-label="narrow the rows by a word">
+      <button type="button" id="clear" class="linkish">Show all</button>
+      <span class="showing" id="showing"></span>
+    </div>
+
     <div id="items"></div>
 
     <div class="footer">
@@ -78,9 +86,31 @@
       return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
+    // What is shown. A filter narrows the cards, never the block: graded() reads every row.
+    const view = { grade: new Set(), q: '' };
+    const GRADE_WORDS = { ungraded: ['noted', 'not graded yet'], right: ['held', 'right'], wrong: ['defect', 'wrong'], unsure: ['open', 'unsure'] };
+    function gradeOf(item) { return (grades[item.row] || {}).grade || 'ungraded'; }
+    function visible() {
+      const q = view.q.trim().toLowerCase();
+      return DATA.items.filter(item => (!view.grade.size || view.grade.has(gradeOf(item)))
+        && (!q || [item.question, item.answer].concat(item.signals || []).filter(Boolean).join(' ').toLowerCase().includes(q)));
+    }
+    function chips() {
+      const counts = {};
+      DATA.items.forEach(i => { const g = gradeOf(i); counts[g] = (counts[g] || 0) + 1; });
+      const root = document.getElementById('chips');
+      root.classList.toggle('filtering', view.grade.size > 0);
+      root.innerHTML = Object.keys(GRADE_WORDS).filter(g => counts[g]).map(g =>
+        '<button type="button" class="chip ' + GRADE_WORDS[g][0] + (view.grade.has(g) ? ' on' : '') + '" data-filter="' + g + '" aria-pressed="' + view.grade.has(g) + '"><b>' + counts[g] + '</b><span>' + GRADE_WORDS[g][1] + '</span></button>').join('');
+      root.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { const k = el.dataset.filter; if (view.grade.has(k)) view.grade.delete(k); else view.grade.add(k); renderItems(); }));
+      document.getElementById('filters').hidden = DATA.items.length < 2;
+      const filtered = view.grade.size || view.q.trim();
+      document.getElementById('showing').textContent = filtered ? 'Showing ' + visible().length + ' of ' + DATA.items.length + ' questions' : 'All ' + DATA.items.length + ' questions';
+    }
     function renderItems() {
+      chips();
       const root = document.getElementById('items');
-      root.innerHTML = DATA.items.map(item => {
+      root.innerHTML = visible().map(item => {
         const g = grades[item.row] || {};
         const signals = (item.signals || []).map(s => '<li>' + esc(s) + '</li>').join('');
         return '<div class="card" data-row="' + item.row + '">'
@@ -102,7 +132,7 @@
           + '<label>Or say what is wrong, in words<textarea data-field="words" placeholder="e.g. revenue should exclude refunds">' + esc(g.words || '') + '</textarea></label>'
           + '</div></div>'
           + '</div></div>';
-      }).join('');
+      }).join('') || '<p class="meta">No question matches this filter. Your grades on the hidden questions are kept.</p>';
       root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onGrade));
       root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
       renderSummary();
@@ -151,6 +181,8 @@
     }
 
     document.getElementById('btn-generate').addEventListener('click', generateFeedback);
+    document.getElementById('q').addEventListener('input', e => { view.q = e.target.value; renderItems(); });
+    document.getElementById('clear').addEventListener('click', () => { view.grade.clear(); view.q = ''; document.getElementById('q').value = ''; renderItems(); });
     document.getElementById('modal-close').addEventListener('click', () => {
       document.getElementById('modal').hidden = true;
     });

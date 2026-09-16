@@ -123,10 +123,10 @@ Then say it in two lines and **end the turn**:
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_intake.py" --block-file /tmp/agami-reconcile-intake-<ts>.txt \
-  --rows-file /tmp/agami-reconcile-rows-<ts>.json --run <ts>
+  --rows-file /tmp/agami-reconcile-rows-<ts>.json --run <ts> --out "<artifacts_dir>/local/reconcile/<ts>/intake.json"
 ```
 
-`ok: true` with `kept`, `dropped` and `edited` counts means the rows file now holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: ask for the block again. If the person answers in chat instead ("looks right, go ahead"), run with the rows as read; a per-row "is this the question?" in chat is never asked.
+`intake.json` in the run directory is the run's own copy of what runs: Phase 2 reads the next rows from it, a resume on a later day reads it, and nothing under `/tmp` is needed again. `ok: true` with `kept`, `dropped` and `edited` counts means it holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: ask for the block again. If the person answers in chat instead ("looks right, go ahead"), run with the rows as read: Phase 2's first `next-chunk --rows-file` call copies them into the run directory unchanged. A per-row "is this the question?" in chat is never asked.
 
 ---
 
@@ -148,7 +148,20 @@ For every row that carries a `statement`. Skip this phase for a row that does no
 
 ## Phase 2: Generate questions + execute
 
-For each row in the parsed list:
+**Work five rows at a time.** `rows.jsonl` is the run's checkpoint: Phase 2d appends one record per finished row, and the next rows to run are read from it, never chosen by hand:
+
+```bash
+python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" next-chunk --run-dir "<artifacts_dir>/local/reconcile/<ts>" \
+  --rows-file /tmp/agami-reconcile-rows-<ts>.json    # seeds the run's intake.json once; later calls need only --run-dir
+```
+
+Exit `0` hands back `chunk`, the next five rows not yet in `rows.jsonl`, with `finished`, `remaining`, `chunk_index` of `chunks_total`, and `progress`, the counts by status over the rows done so far, read from the checkpoint and never tallied by hand. Take the five through Phase 1.5 (statement rows) and 2a to 2f below; each lands in `rows.jsonl` as it finishes. When the chunk is done: build the report items for every row finished so far and render the report page (3a.5), so the person can already read the first rows, say one progress line, and **end the turn**:
+
+> Rows 6 to 10 of 50 done. So far: `<progress as colored words, in 3a's wording>`. Page: `<artifacts_dir>/local/reconcile/<ts>/report.html`. Say **continue** for the next five, or **continue all** to run the rest without stopping.
+
+`continue` calls `next-chunk` again. `continue all` runs chunk after chunk, a progress line per chunk and no stop, until exit `4`. Exit `4` means every row is in the checkpoint: go to Phase 3. **A run interrupted anywhere resumes with the same call**: a row in `rows.jsonl` is never run twice, and "resume the reconcile" on a later day means the newest run directory that still has rows remaining. Exit `2` names a checkpoint line that cannot be read; fix or remove it before continuing, never skip it, since skipping would run its row again. The first five are a smoke test: a wrong profile, a misread file or a question in the wrong words is caught at five rows, not fifty. The keep-offer stays one per run (3e), never one per chunk.
+
+For each row in the chunk:
 
 ### 2a — Generate the NL question
 
@@ -178,7 +191,7 @@ If the SQL fails OR the result isn't a single scalar (e.g., the LLM-generated qu
 
 ### 2.5 — Grade the answers when there is nothing to compare against
 
-Only for rows that carry a question and neither a statement nor an expected value (the questions branch). Agami has answered each one in 2b and there is no number to diff against, so the person grades. **One page, one block back. Never one prompt per answer**: a thirty-question list is not thirty interruptions, and the pattern across answers is the thing a question list is for.
+Only for rows that carry a question and neither a statement nor an expected value (the questions branch). Agami has answered each one in 2b and there is no number to diff against, so the person grades. **One page, one block back. Never one prompt per answer**: a thirty-question list is not thirty interruptions, and the pattern across answers is the thing a question list is for. The page filters by grade state and by a word in the question; a filter narrows what is shown, never what the block sends.
 
 1. **Build the items file** with the Write tool, one entry per graded row: `{"row": <n>, "question": "...", "answer": "<the one recorded cell, or 'a table of N rows, columns a, b'>", "signals": ["<one line per receipt fact worth knowing: an unreviewed join or metric, an AI-written description the answer leaned on, a fan-out finding>"], "report_path": "<the receipt>"}`. Never a result row: the answer is one cell or a shape.
 2. **Render and open the page:**
@@ -339,7 +352,7 @@ What each card says, whether on the page or, without one, in chat:
 
 Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap, "the question" for a doubtful fit, and "agami's answer" for a mismatch where your statement held on every part (a worked example is the fix). It never says "the model".
 
-**Render the four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. The page picks its layout from the items: **cards** for a batch of rows, the four beats as four columns with the fourth colored by who acts; **audit** for a single statement row that carries `checks`, the checks in the order they ran with pass, fail, open, gap and noticed marks, and a rail of what to do. Force one with `--layout cards|audit` when the person asks. The chat keeps 3a, the link and one line of next steps; 3b to 3d below still render when the page could not be written.
+**Render the four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. The page picks its layout from the items: **cards** for a batch of rows, the four beats as four columns with the fourth colored by who acts; **audit** for a single statement row that carries `checks`, the checks in the order they ran with pass, fail, open, gap and noticed marks, and a rail of what to do. Force one with `--layout cards|audit` when the person asks. Render it after every chunk with every row finished so far; the render after Phase 2's exit `4` is the one 3a points at. The page filters by status, by who acts and by a word in the question or the beats; a filter narrows what is shown, never what the block sends, so a row decided and then filtered away is still in the block. The chat keeps 3a, the link and one line of next steps; 3b to 3d below still render when the page could not be written.
 
 1. **Build the report items file** with the Write tool, one entry per row: `{"row": <n>, "label": "...", "question": "...", "source": "<from your CSV, tile 3, with the SQL behind it>", "status": "<the row's status>", "expected": "<display text or null>", "answer": "<the one recorded cell, or 'a table of N rows, columns a, b'>", "delta_pct": <signed percent or null>, "single_cell": <true when recorded is one cell>, "owner": "<who acts in beat 4: you | model | question | agami | keep | nothing>", "checks": [{"step": "<a check, in plain words>", "state": "held | defect | open | gap | noted", "detail": "<one sentence>"}] (for a single statement row: every ledger part in the order it ran, each as one step), "todo": ["<the rail: one action per line, naming the side>"], "read": ["<beat 1, one sentence per line>"], "how": ["<beat 3>"], "words": ["<one line per prose source from evidence.prose>"], "disagreement": "<the one sentence when two lines name different values, or null>", "change": ["<beat 4>"], "report_path": "<the receipt>"}`. Never a result row. Every sentence in the words of `shared/plain-language.md`.
 2. **Render and point at it:**
