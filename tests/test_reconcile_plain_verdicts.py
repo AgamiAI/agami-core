@@ -102,6 +102,22 @@ def test_no_token_reaches_a_person_in_what_phase_3_says():
             assert token not in block, (token, block.strip()[:160])
 
 
+def test_a_status_the_skill_spells_out_is_the_table_s_sentence_verbatim():
+    """Banning the token is half the rule; the other half is that the words replacing it come from
+    `_STATUS_WORDS` and not from a paraphrase. Phase 3's summary line quoted both sentences and then
+    appended a fragment from an older template, so the line a person read ended "and your query has
+    a problem in them" — no token, and still not the sentence the table gives.
+    """
+    phase3 = SKILL[SKILL.index("## Phase 3"):]
+    for status in (reconcile.MATCH_UNVERIFIED, reconcile.EXPECTED_DOUBTFUL):
+        words = reconcile._STATUS_WORDS[status]
+        for block in re.findall(r"```[a-z]*\n(.*?)```", phase3, re.S):
+            if words in block:
+                # Whatever follows the sentence must start a new clause, never continue it.
+                tail = block.split(words, 1)[1][:1]
+                assert tail in ("", ".", ";", ",", "\n", ")"), (status, block.split(words, 1)[1][:60])
+
+
 def test_the_card_never_labels_a_check_with_the_machinery_s_word():
     labels = " ".join(reconcile._PART_KEYS.values())
     assert "fan-out" not in labels and "fan_out" not in labels

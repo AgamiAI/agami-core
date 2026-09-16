@@ -53,6 +53,8 @@ plugins/agami/samples/store/model/curation_log.jsonl
 
 # Python tooling artifacts
 .coverage
+# per-worker data files under `-n auto`; merged and removed at the end, left behind if a run is interrupted
+.coverage.*
 coverage.xml
 htmlcov/
 .ruff_cache/

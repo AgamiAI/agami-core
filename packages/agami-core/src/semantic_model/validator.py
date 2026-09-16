@@ -224,6 +224,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
         _check_cross_relationship(rel, org, res)
 
     _check_cross_area_entity_collisions(org, res)
+    _check_table_name_across_schemas(org, res)
     _check_metric_backend_neutrality(org, res)
     _check_derived_metrics(org, res)
     _check_metric_binding_columns(org, res)
@@ -812,6 +813,28 @@ def _check_cross_relationship(
                 f"cross-area relationship {rel.from_table}->{rel.to_table}: executable="
                 f"'split' but both endpoints are on {conn_from}; 'same_engine' is achievable",
             )
+
+
+def _check_table_name_across_schemas(org: Datasource, res: ValidationResult) -> None:
+    """Warn when one table name is declared under two or more schemas.
+
+    A warning, not an error: the scope gates tell such tables apart by schema (#332), so querying
+    them is safe. But model lookups and schema serving still key tables by bare name and will
+    resolve that name to one of them, and an unqualified reference is refused as ambiguous.
+    """
+    schemas: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schemas.setdefault(t.name.lower(), set()).add((t.schema_name or "").lower())
+    for name, found in sorted(schemas.items()):
+        if len(found) < 2:
+            continue
+        res.warn(
+            "table_name_in_multiple_schemas",
+            f"table {name} is declared under {len(found)} schemas; model lookups and schema "
+            "serving treat it by bare name, and queries must use the qualified form "
+            "(schema.table)",
+        )
 
 
 def _check_cross_area_entity_collisions(org: Datasource, res: ValidationResult) -> None:

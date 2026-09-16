@@ -12,7 +12,171 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Text past plain ASCII survives `sm` on Windows.** Five `sm` commands — `set-terminology`,
+  `curate`, `add`, `add-example` and `seed-examples` — read their JSON file in the platform's
+  default encoding, which on Windows is not UTF-8. An em dash became `â€”`, and was saved as valid
+  UTF-8, so nothing flagged it. Worse, that garbled text holds a byte Windows' encoding cannot read
+  back, so the next read of the file failed — and because `get_prompt_examples` reads every subject
+  area into one response, one such file dropped the curated examples for every area. Both reads now
+  use UTF-8, and a file that still cannot be read is skipped on its own rather than failing the
+  rest. Text already garbled by an earlier `sm` run is not repaired by this; re-save it. (#236)
+
+## [0.8.8] — 2026-09-15
+
+### Fixed
+
+- **A same-named table in another schema no longer passes table or column scope** (#332). With
+  `sales_data.orders` declared, `SELECT … FROM staging.orders` used to pass because only the bare
+  name was compared. A schema-qualified reference must now match a table declared with that schema
+  (a table declared without one is reachable only unqualified), and an unqualified name the model
+  declares under two or more schemas is refused as ambiguous, asking for `schema.table`. Column
+  scope checks a column against the schema actually read, not every same-named table.
+- **A CTE name no longer hides a physical table its `WITH` does not enclose.** CTE references are
+  resolved per reference: a body sees earlier siblings and enclosing `WITH`s, its own name only in
+  the last arm of a `WITH RECURSIVE … UNION` (its recursive term), a schema-qualified name is never a CTE, and a
+  quoted name binds only a quoted reference spelled exactly the same.
+- The validator warns when one table name is declared under two or more schemas: lookups and schema
+  serving still treat such names by bare name, so queries must use the qualified form.
+
+## [0.8.7] — 2026-09-15
+
+### Added
+
+- **An organisation can have its own row cap and statement time limit** (#329, engine half). Core
+  stores no such setting: an embedder registers a provider, `(org_id) -> {"max_rows", "timeout_s"}`,
+  through `Adapters.statement_limits` or `tools.set_statement_limits_provider`. A missing, `None` or
+  unusable value (not a positive whole number, or a provider that raises) falls back to
+  `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`, which stay the deployment default, with a warning in
+  the log. There is no policy ceiling, only what the engines can represent: a time limit whose native
+  setting — the limit plus the executor's 5-second skew — would pass seven days (604,800 seconds,
+  Snowflake's own maximum and the smallest among the supported engines; so 604,795 is the largest
+  usable limit) and a
+  row cap of 2,147,483,647 or more (the drivers fetch one row past the cap, in a 32-bit count) are
+  treated as unusable, from the provider and from `AGAMI_SQL_TIMEOUT_S` / `AGAMI_SQL_MAX_ROWS` alike.
+  - An evaluation run scores both statements of each case under the named organisation's limits.
+  - `tools.statement_limit_is_usable(key, value)` is the rule a provider's values are held to (a
+    positive whole number within those two bounds), public so a settings screen can refuse at save
+    time what the executor would otherwise decline on every statement.
+  - The limits are resolved once per `execute_sql` call and held for the whole call, and the forked
+    child is handed the same two numbers in its environment, so the watchdog, the native bound, the
+    outer bound and the supervisor still derive from one budget on both sides of the fork.
+  - `tools.statement_limits(org_id=None)` reports the limits in force for the current (or a named)
+    organisation; `tools.statement_limit_defaults()` reports the deployment values and the
+    recommended ones (1000 rows, 30 seconds). `tools.pinned_statement_limits(org_id)` lets a direct
+    caller of `execute_guarded` apply an organisation's limits.
+  - The `execute_sql` description states the caller's organisation's numbers, built when tools are
+    listed rather than once at start-up. A client keeps the list for its session, so a changed limit
+    reaches new sessions; an existing session meets it in the refusal, which names the number per call.
+- **`sm set-description`, and onboarding asks for a datasource description** (#327). The one line
+  `list_datasources` shows an agent to route a question by could only be hand-edited into
+  `datasource.yaml`. `sm set-description <root> --description "…"` writes it (validated, committed),
+  `agami-connect` asks for it on every onboard — with an option to generate it from the enriched
+  model, as it does for the database narrative — and `model_deploy` warns when a datasource is
+  deployed without one. A generated line is passed to the command through a quoted heredoc, never
+  pasted into a shell argument, since database metadata can contain quotes or `$(…)`; a re-onboard
+  can keep an existing description.
+
+### Fixed
+
+- **Follow-ups to per-organisation statement limits** (#334, #338):
+  - A row cap too large for the drivers to fetch (2,147,483,647 or more) and a time limit over seven
+    days now fall back to the deployment value, instead of failing every statement with an
+    `OverflowError` or a native timeout the engine rejects before the query runs.
+  - A provider mapping that raises when read falls back like a provider that raises, instead of
+    escaping the resolver.
+  - With a provider registered, the HTTP server's tool-visibility predicate runs in the request task
+    again, as `build_server` documents; only the descriptions are computed off the event loop.
+  - The `execute_sql` description no longer names "the deployment row ceiling" before stating the
+    caller's own row limit.
+- **A table outside the connection's default schema resolves when the client names it without its
+  schema** (#258). A large model is served at the `summary` tier, whose area table lists carried a
+  bare name, so the client wrote `FROM orders` and a warehouse keeping it in `sales_data` answered
+  `relation "orders" does not exist` — a failed statement and a retry on every such question. Two
+  changes:
+  - `get_datasource_schema`'s summary table list now carries each table's `schema`, as the full
+    and table-scoped tiers already did.
+  - On Postgres, Redshift and Supabase, when every table in the model declares the same schema and it
+    is not `public`, a statement runs with `SET LOCAL search_path` set to that schema (plus `public`),
+    so a bare name still resolves. Any other model — two or more schemas, a table in `public`, or a
+    table with no schema — gets no path: the path would outrank the schema those tables resolve
+    through, and a bare name meant for one could silently read a same-named table the model does not
+    declare. It uses the model the semantic-model pass already loaded, so it applies only when that
+    pass is on — which is off by default on a server (see `SECURITY.md`); there, the summary tier's
+    `schema` is the fix.
+- **A query that names no datasource no longer runs against a guessed one** (#327). On an
+  organization serving several datasources, an omitted `datasource` fell through to a fallback (an
+  env var, an active profile) and the statement ran there — so SQL written for one datasource reached
+  another and was refused as out of scope. `execute_sql`, `get_datasource_schema` and
+  `get_prompt_examples` now refuse an omitted `datasource` when more than one is served, naming the
+  choices (new `datasource_required` rule, decided before any model is consulted). One served
+  datasource still resolves as before.
+- **A table-scope refusal names the datasource that declares the table** (#327). It said "add the
+  table to the model" when the table was already declared in another of the organization's
+  datasources; it now says which one to run the query against — only a datasource that declares every
+  table in the statement — or that the tables live in different datasources and one statement cannot
+  join them. Only the same organization's datasources are named. Table-scope refusals come from the
+  semantic-model pass, which is off by default on a server (see `SECURITY.md`), so there the hint has
+  nothing to rewrite.
+
+## [0.8.6] — 2026-09-14
+
+### Added
+
+- **A Redshift schema response tells the client what Redshift rejects** (#325). The client was told
+  the engine and still wrote PostgreSQL — `FILTER` on aggregates, `SUBSTR`, date arithmetic in
+  PostgreSQL argument order, boolean casts — and each statement failed at the warehouse and cost a
+  retry. `get_datasource_schema` now carries `dialect_rules` for an engine with known gaps (Redshift
+  today): each construct it rejects and what to write instead, read before the SQL is written. Rules
+  are per engine and read-path only; an engine with no entry gets nothing.
+- **`execute_sql`'s description states the row cap and statement deadline** (#326). It said a result
+  over "the deployment row ceiling" was refused and never said what the ceiling was, so a client
+  learned it by being refused. The numbers now come from the same settings the executor enforces
+  (`AGAMI_SQL_MAX_ROWS`, `AGAMI_SQL_TIMEOUT_S`), with what to do about each. `tools.statement_limits()`
+  returns both, so an administration screen can show the limits in force.
+
+### Fixed
+
+- **The activity log records the datasource a call ran against** (#328). `tool_calls.datasource`
+  was the argument the client sent, so every call that omitted it — and the server resolved one —
+  was logged with an empty datasource. It is now the resolved datasource, and the new
+  `datasource_source` column (migration 025) says whether the client named it (`explicit`) or the
+  server chose it (`resolved`).
+
+## [0.8.5] — 2026-09-14
+
+### Added
+
+- **The import door reads an Excel workbook.** `golden_author.py parse --file bank.xlsx` reads one
+  sheet of an `.xlsx` into the same parse a CSV goes through, with the standard library alone — a
+  workbook is a zip of XML, so no dependency is added to a plugin that installs with none. A workbook
+  with several sheets stops and names them, because which tab holds the questions is the person's
+  call; `--sheet` names it. In a workbook the header no longer has to be the first row: the first row
+  within the top 20 that names a question column is taken, so a title block above the table is fine,
+  and every row above the header is reported rather than silently dropped. A CSV's header is still
+  its first row. Rows keep Excel's own numbering, so a skipped row is reported at the number the
+  person sees, and trailing rows Excel formats but never fills are dropped rather than reported as
+  empty questions. Both the Transitional and Strict flavours of `.xlsx` are read. Every coordinate
+  in the file is checked against Excel's own limits before it is used, and a part declaring a DTD is
+  refused in any encoding, so a crafted workbook costs a refusal rather than memory. An `.xls` file
+  — Excel's older binary format — is still refused, with how to get past it, and `--csv` keeps
+  working. A column the import doesn't read, but that looks like a field it does — a header with
+  `sql` or `question` in it, for a field the sheet hasn't supplied — is reported rather than
+  silently ignored, the skill asks the person about it, and `--column sql="<header>"` reads it
+  without renaming anything. (#261)
+
 ### Changed
+
+- **A schema response says when a datasource has stored examples.** Clients often skipped
+  `get_prompt_examples` (#301): the only instruction to call it lived in the server instructions,
+  which a host may weight below its own, so curated corrections never reached the SQL.
+  `get_datasource_schema` now carries `prompt_examples` — how many examples the datasource has, and
+  a one-line reminder to fetch them — whenever it has any. It carries a count, never the examples:
+  ranking and returning them stays `get_prompt_examples`' job. The count is datasource-wide even on
+  an `area`-scoped call, and the instructions and both tool descriptions now say to pass the
+  question as `query` and leave `area` out unless sure, because an `area` drops every other
+  area's examples, however well they match.
 
 - **The reconcile card shows a verdict and what to do, and nothing else until asked.** Five
   statements run against a real warehouse found the card burying the answer: the verdict sat as plain

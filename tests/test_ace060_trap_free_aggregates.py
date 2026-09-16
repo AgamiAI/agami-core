@@ -543,9 +543,10 @@ UNDECLARED_KEY_JOIN = "SELECT SUM(w.amount) FROM widget w JOIN widget_premium_v 
 
 
 def test_a_join_on_the_identity_edge_does_not_fan_when_a_sibling_edge_also_exists(two_edge_org):
-    """Sandeep's finding: a subclass view joined to its base table on the key the model declares
-    one-to-one was reported as a fan trap, because the pre-flight collected every multiplying edge
-    between the two tables and never read which key the join wrote. The written key names the edge."""
+    """Found in testing: a subclass view joined to its base table on the key the semantic model
+    declares one-to-one was reported as a fan trap, because the pre-flight collected every
+    multiplying edge between the two tables and never read which key the join wrote. The written key
+    names the edge."""
     receipt = rt.assemble_receipt(two_edge_org, IDENTITY_JOIN)
     (item,) = receipt["aggregates"]["items"]
     assert item["status"] == rt.NOT_MULTIPLIED and item["findings"] == [], item

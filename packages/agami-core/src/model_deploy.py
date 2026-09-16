@@ -72,6 +72,15 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
     org_id = org_id if org_id is not None else _default_org()
     # --- read + parse everything first (where malformed input fails, before any write) ---
     org = loader.load_datasource(profile_dir)
+    if not (org.description or "").strip():
+        # A warning, not a failure (#327): the model is still correct without one. But the description is
+        # the one line `list_datasources` gives an agent to route a question by, and on an organization
+        # with several datasources an agent choosing without it is guessing from the name.
+        print(
+            f"model_deploy: datasource {datasource!r} has no description — agents pick a datasource by "
+            f"it; set one with `sm set-description {profile_dir} --description \"...\"`",
+            file=sys.stderr,
+        )
     # Examples live per subject area (prompt_examples/<area>/examples.yaml); tag each with its area so the
     # served row carries it (write_examples reads ex["area"]). A malformed examples file for one area is
     # skipped with a warning, not fatal — examples are best-effort few-shots, not the model itself, and a bad

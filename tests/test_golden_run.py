@@ -1038,6 +1038,37 @@ def test_a_client_that_cannot_be_found_still_fails_as_a_generation(monkeypatch, 
 
 
 
+# --- the org's statement limits (#329) ---------------------------------------------------------
+
+
+def test_both_statements_are_scored_under_the_orgs_own_statement_limits(chokepoint):
+    """A hosted evaluation names its org; the statements it runs must meet that org's limits, not
+    the deployment's, or the run scores a statement the org's own questions could never have run."""
+    import tools
+
+    seen: list[tuple[int, int]] = []
+
+    class _LimitsSpy(_SpyExecutor):
+        def execute(self, vetted_sql, creds, *, profile):
+            seen.append((execute_sql._resolve_row_cap(), execute_sql._resolve_timeout_s()))
+            return super().execute(vetted_sql, creds, profile=profile)
+
+    asked: list[str] = []
+
+    def _provider(org_id):
+        asked.append(org_id)
+        return {"max_rows": 4321, "timeout_s": 77}
+
+    tools.set_statement_limits_provider(_provider)
+    try:
+        _run(_dataset(), _StubGenerator(), _LimitsSpy())
+    finally:
+        tools.set_statement_limits_provider(None)
+
+    assert asked and set(asked) == {ORG}
+    assert seen == [(4321, 77), (4321, 77)]  # the answer key and the generated statement
+    assert execute_sql._statement_limits.get() is None
+
 # --- ACE-135: several statements in one answer ---------------------------------------------------
 
 
