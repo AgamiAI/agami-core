@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-16
+
 ### Added
 
 - **`python -m execute_sql --batch` runs a plan of statements in one process.** Every statement paid
