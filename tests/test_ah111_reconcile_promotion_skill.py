@@ -58,8 +58,10 @@ def test_the_row_record_keeps_the_statement_and_the_result_beside_the_number():
     # `recorded` is shaped like the golden receipt — the two keys a promotion hands straight on.
     recorded = next(line for line in RECORD.splitlines() if line.strip().startswith('"recorded":'))
     assert '"columns"' in recorded and '"rows"' in recorded
-    # An error row carries neither, so nothing on it can be mistaken for a verified answer.
-    assert '**On a `status: "error"` row both `sql` and `recorded` are `null`.**' in RECORD
+    # An error row carries no RESULT that could be mistaken for a verified answer. It does carry
+    # the statement: reading what failed is the whole diagnosis on that row, and this assertion
+    # existed in the other form while the code had already stopped doing it.
+    assert '**On a `status: "error"` row `recorded` is `null` and the statement is kept.**' in RECORD
 
     for key in (
         "label", "question", "expected", "actual", "delta_pct",
@@ -140,10 +142,12 @@ def test_a_run_with_no_agreeing_rows_makes_no_offer():
 
 
 def test_an_error_row_is_never_offered_and_the_prose_says_why():
-    """The reason is the point: an error row has no statement to replay, so there is nothing a
-    promotion could write that a later run could score."""
+    """The reason is the point, and it is not that the row has no statement: it keeps one now, and
+    the gate never read it. An error row is not offered because it never reached a verified answer,
+    which is what a promotion writes down. The prose used to give the absent statement as the
+    reason, and this assertion held it there after the code had stopped agreeing."""
     assert "A row with no statement is never offered" in OFFER
-    assert "`sql: null`" in OFFER
+    assert "never reached a verified answer" in OFFER
 
 
 def test_a_disagreeing_row_is_not_offered_and_needs_the_explicit_resolution_step():

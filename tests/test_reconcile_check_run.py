@@ -36,6 +36,20 @@ def _intake(run: Path, records: list[dict]) -> None:
             (row_dir / "ledger.json").write_text(json.dumps(r.get("ledger") or {"rows": [], "verdict": None}))
 
 
+def test_a_statement_that_did_not_run_is_not_a_missing_result_file(tmp_path, capsys):
+    """The rule asked for `actual.csv` wherever the record carried a statement. Now that a failed
+    row keeps its statement, that demand would fire on every row whose query never ran, which is
+    the one shape that cannot have a result file. The demand belongs to rows that answered."""
+    failed = {**ERROR, "row": 4, "sql": "SELECT 1", "recorded": None,
+              "error": "agami's statement did not run: The database was unreachable."}
+    run = _run(tmp_path, [SCALAR_MATCH, failed])
+    _intake(run, [SCALAR_MATCH, failed])
+    (run / "rows" / "4" / "actual.csv").unlink(missing_ok=True)
+    assert _render(run) == 0
+    capsys.readouterr()
+    assert reconcile.check_run(run)["ok"] is True
+
+
 def test_a_page_rendered_from_the_run_directory_passes_and_a_changed_checkpoint_fails(tmp_path, capsys):
     run = _run(tmp_path, [SCALAR_MATCH, ERROR])
     _intake(run, [SCALAR_MATCH, ERROR])
