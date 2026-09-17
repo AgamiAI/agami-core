@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-09-17
+
 ### Added
 
 - **A hosted `execute_sql` now requires proof the client looked at the examples (#376).** Clients
