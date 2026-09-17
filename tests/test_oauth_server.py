@@ -979,3 +979,210 @@ def test_a_refresh_token_issued_before_audiences_renews_into_a_token_with_one(en
     renewed = _refresh(c, presented)
     claims = jwt.decode(renewed["access_token"], SECRET, algorithms=["HS256"], audience=AUD)
     assert claims["aud"] == AUD and claims["sub"] == "admin"
+
+
+# --- clients identified by a metadata-document URL --------------------------------------------------
+
+CLIENT_DOC_URL = "https://app.example.com/oauth/client.json"
+DOC_REDIRECT = "https://app.example.com/callback"
+LOOPBACK_REDIRECT = "http://127.0.0.1/callback"
+
+
+@pytest.fixture
+def client_doc(monkeypatch):
+    """Serve a client metadata document with no network: DNS answers a global address nobody connects
+    to, and the transport is mocked. Returns the list of requests the transport saw, and the document."""
+    httpx = pytest.importorskip("httpx")
+    import client_metadata
+
+    doc = {
+        "client_id": CLIENT_DOC_URL,
+        "client_name": "Claude",  # what an impostor would write; the page must not show it
+        "redirect_uris": [DOC_REDIRECT, LOOPBACK_REDIRECT],
+    }
+    requests: list = []
+
+    def handle(request):
+        requests.append(request)
+        body = httpx.Response(200, json=doc).content
+        return httpx.Response(200, content=iter([body]))
+
+    client_metadata._cache.clear()
+    monkeypatch.setattr(client_metadata, "_resolve", lambda host, port: ["11.0.0.1"])
+    monkeypatch.setattr(
+        client_metadata, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handle))
+    )
+    yield requests, doc
+    client_metadata._cache.clear()
+
+
+def _authorize_post(client: TestClient, **fields: str):
+    data = {
+        "username": "admin",
+        "password": "s3cret-pw",
+        "redirect_uri": REDIRECT,
+        "client_id": "cid",
+        "code_challenge": _challenge(VERIFIER),
+        "state": "xyz",
+        **fields,
+    }
+    return client.post("/oauth/authorize", data=data, follow_redirects=False)
+
+
+def _oauth_client_count() -> int:
+    s = Store.from_env()
+    try:
+        return s.query("SELECT COUNT(*) AS n FROM oauth_client")[0]["n"]
+    finally:
+        s.close()
+
+
+def test_metadata_document_client_signs_in_without_registering(env, client_doc):
+    requests, _ = client_doc
+    c = TestClient(mcp_http.build_app())
+    before = _oauth_client_count()
+    r = _authorize_post(c, client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 302, r.text
+    loc = urlparse(r.headers["location"])
+    assert f"{loc.scheme}://{loc.netloc}{loc.path}" == DOC_REDIRECT
+    qs = parse_qs(loc.query)
+    assert qs["state"] == ["xyz"] and qs["iss"] == [BASE]
+    tok = c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": qs["code"][0],
+            "code_verifier": VERIFIER,
+            "redirect_uri": DOC_REDIRECT,
+            "client_id": CLIENT_DOC_URL,
+            "resource": AUD,
+        },
+    )
+    assert tok.status_code == 200, tok.text
+    claims = jwt.decode(tok.json()["access_token"], SECRET, algorithms=["HS256"], audience=AUD)
+    assert claims["sub"] == "admin"
+    assert _oauth_client_count() == before  # no registration row: that growth is what this replaces
+    assert len(requests) == 1
+
+
+def test_an_invalid_metadata_document_is_invalid_client_with_no_redirect(env, client_doc):
+    _, doc = client_doc
+    doc["client_id"] = "https://other.example.com/oauth/client.json"  # vouches for someone else
+    c = TestClient(mcp_http.build_app())
+    r = _authorize_post(c, client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_client"
+    assert "location" not in r.headers
+
+
+def test_an_http_metadata_url_is_refused_not_looked_up(env, client_doc):
+    requests, _ = client_doc
+    r = _authorize_post(
+        TestClient(mcp_http.build_app()),
+        client_id="http://app.example.com/oauth/client.json",
+        redirect_uri=REDIRECT,
+    )
+    assert r.status_code == 400 and r.json()["error"] == "invalid_client"
+    assert requests == []
+
+
+def test_a_metadata_client_may_not_use_a_redirect_its_document_does_not_list(env, client_doc):
+    # The Claude callback and same-origin fallbacks are for registered clients only. A document names its
+    # own redirect URIs, and anything else would let any URL claim a code bound for Claude.
+    c = TestClient(mcp_http.build_app())
+    for redirect in (REDIRECT, BASE + "/callback", "https://evil.example.com/steal"):
+        r = _authorize_post(c, client_id=CLIENT_DOC_URL, redirect_uri=redirect)
+        assert r.status_code == 400 and r.json()["error"] == "invalid_request", redirect
+        assert "location" not in r.headers
+
+
+def test_a_metadata_client_loopback_redirect_matches_on_any_port(env, client_doc):
+    # A native client listens on whatever port the OS gives it, so its document cannot list the port.
+    r = _authorize_post(
+        TestClient(mcp_http.build_app()),
+        client_id=CLIENT_DOC_URL,
+        redirect_uri="http://127.0.0.1:53123/callback",
+    )
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("http://127.0.0.1:53123/callback?")
+
+
+def test_a_registered_client_loopback_redirect_matches_on_any_port(env):
+    c = TestClient(mcp_http.build_app())
+    cid = c.post("/oauth/register", json={"redirect_uris": [LOOPBACK_REDIRECT]}).json()["client_id"]
+    r = _authorize_post(c, client_id=cid, redirect_uri="http://localhost:53123/callback")
+    assert r.status_code == 400  # a different loopback NAME is not the registered one
+    r = _authorize_post(c, client_id=cid, redirect_uri="http://127.0.0.1:53123/callback")
+    assert r.status_code == 302
+
+
+@pytest.mark.parametrize(
+    ("uri", "allowed", "expected"),
+    [
+        ("https://app.example.com/callback", "https://app.example.com/callback", True),
+        ("http://127.0.0.1:53123/callback", "http://127.0.0.1/callback", True),
+        ("http://localhost:1/callback?x=1", "http://localhost:2/callback?x=1", True),
+        ("http://127.0.0.1:53123/other", "http://127.0.0.1/callback", False),
+        ("http://127.0.0.1:53123/callback?x=2", "http://127.0.0.1/callback?x=1", False),
+        ("http://localhost:53123/callback", "http://127.0.0.1/callback", False),
+        ("https://127.0.0.1:53123/callback", "https://127.0.0.1/callback", False),
+        ("http://127.0.0.1.example.com:1/callback", "http://127.0.0.1.example.com/callback", False),
+        ("http://[::1]:53123/callback", "http://[::1]/callback", False),
+        ("http://evil@127.0.0.1:53123/callback", "http://127.0.0.1/callback", False),
+        ("https://app.example.com:8443/callback", "https://app.example.com/callback", False),
+    ],
+)
+def test_redirect_matches(uri, allowed, expected):
+    from oauth_server import _redirect_matches
+
+    assert _redirect_matches(uri, allowed) is expected
+
+
+def test_the_sign_in_page_names_the_redirect_host_not_the_document(env, client_doc):
+    requests, _ = client_doc
+    r = TestClient(mcp_http.build_app()).get(
+        "/oauth/authorize",
+        params={"client_id": CLIENT_DOC_URL, "redirect_uri": DOC_REDIRECT, "state": "xyz"},
+    )
+    assert r.status_code == 200
+    assert '<p class="who">app.example.com</p>' in r.text
+    assert '<p class="who">Claude</p>' not in r.text  # the document's self-chosen name is never shown
+    assert requests == []  # rendering the page fetches nothing
+
+
+def test_the_sign_in_page_survives_an_unparseable_redirect(env, client_doc):
+    r = TestClient(mcp_http.build_app()).get(
+        "/oauth/authorize", params={"client_id": CLIENT_DOC_URL, "redirect_uri": "http://[bad"}
+    )
+    assert r.status_code == 200 and '<p class="who">' not in r.text
+
+
+def test_the_resource_rides_the_form_to_the_post(env):
+    r = TestClient(mcp_http.build_app()).get(
+        "/oauth/authorize", params={"redirect_uri": REDIRECT, "resource": AUD}
+    )
+    assert f'name="resource" value="{AUD}"' in r.text
+
+
+def test_iss_is_on_the_success_redirect(env):
+    r = _authorize_post(TestClient(mcp_http.build_app()))
+    assert parse_qs(urlparse(r.headers["location"]).query)["iss"] == [BASE]
+
+
+def test_a_wrong_resource_at_authorize_redirects_invalid_target_with_iss(env):
+    c = TestClient(mcp_http.build_app())
+    r = _authorize_post(c, resource="https://other.example.com/mcp")
+    assert r.status_code == 302
+    loc = urlparse(r.headers["location"])
+    assert f"{loc.scheme}://{loc.netloc}{loc.path}" == REDIRECT
+    assert parse_qs(loc.query) == {"error": ["invalid_target"], "state": ["xyz"], "iss": [BASE]}
+    # ...but only to a redirect URI that passed the allow-list: an unvetted one gets no redirect at all.
+    bad = _authorize_post(
+        c, resource="https://other.example.com/mcp", redirect_uri="https://evil.example.com/cb"
+    )
+    assert bad.status_code == 400 and "location" not in bad.headers
+
+
+@pytest.mark.parametrize("resource", [AUD, AUD + "/"])
+def test_the_canonical_resource_is_served_at_authorize(env, resource):
+    r = _authorize_post(TestClient(mcp_http.build_app()), resource=resource)
+    assert r.status_code == 302 and "code" in parse_qs(urlparse(r.headers["location"]).query)

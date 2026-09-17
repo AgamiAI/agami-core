@@ -585,3 +585,91 @@ def test_verify_id_token_rejects_blank_sub(env):
     p = oidc.provider("google")
     with pytest.raises(Exception):
         oidc.verify_id_token(p, _id_token(sub="   "), nonce="the-nonce")
+
+
+# --- the chokepoint, iss and resource on the OIDC path -----------------------------------------------
+
+CLIENT_DOC_URL = "https://app.example.com/oauth/client.json"
+DOC_REDIRECT = "https://app.example.com/callback"
+
+
+@pytest.fixture
+def client_doc(monkeypatch):
+    """A client metadata document served with no network (see test_client_metadata.py)."""
+    import client_metadata
+    import httpx
+
+    doc = {"client_id": CLIENT_DOC_URL, "client_name": "Acme", "redirect_uris": [DOC_REDIRECT]}
+    client_metadata._cache.clear()
+    monkeypatch.setattr(client_metadata, "_resolve", lambda host, port: ["11.0.0.1"])
+    monkeypatch.setattr(
+        client_metadata,
+        "_client",
+        lambda: httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, content=iter([httpx.Response(200, json=doc).content])
+                )
+            )
+        ),
+    )
+    yield doc
+    client_metadata._cache.clear()
+
+
+def _oidc_start(c: TestClient, **overrides):
+    params = {
+        "provider": "google",
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT,
+        "code_challenge": CHALLENGE,
+        "state": "client-xyz",
+        **overrides,
+    }
+    return c.get("/oauth/oidc/start", params=params, follow_redirects=False)
+
+
+def test_oidc_callback_success_redirect_carries_iss(env, monkeypatch):
+    c = _client()
+    state, nonce = _start_and_capture(c)
+    monkeypatch.setattr(
+        oidc, "exchange_code", lambda p, *, code, redirect_uri: _id_token(nonce=nonce)
+    )
+    cb = c.get(
+        "/oauth/oidc/callback", params={"code": "idp-code", "state": state}, follow_redirects=False
+    )
+    assert parse_qs(urlparse(cb.headers["location"]).query)["iss"] == [BASE]
+
+
+def test_oidc_start_refuses_a_redirect_the_metadata_document_does_not_list(env, client_doc):
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=REDIRECT)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"
+    assert "location" not in r.headers
+
+
+def test_oidc_start_refuses_an_invalid_metadata_document(env, client_doc):
+    client_doc["redirect_uris"] = []
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_client"
+    assert "location" not in r.headers
+
+
+def test_oidc_start_accepts_a_listed_metadata_redirect(env, client_doc):
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 302 and r.headers["location"].startswith(f"{ISSUER}/authorize")
+
+
+def test_oidc_start_redirects_a_wrong_resource_as_invalid_target_with_iss(env):
+    r = _oidc_start(_client(), resource="https://other.example.com/mcp")
+    assert r.status_code == 302
+    loc = urlparse(r.headers["location"])
+    assert f"{loc.scheme}://{loc.netloc}{loc.path}" == REDIRECT
+    expected = {"error": ["invalid_target"], "state": ["client-xyz"], "iss": [BASE]}
+    assert parse_qs(loc.query) == expected
+
+
+def test_the_provider_button_carries_the_resource(env):
+    html = _client().get(
+        "/oauth/authorize", params={"redirect_uri": REDIRECT, "resource": f"{BASE}/mcp"}
+    ).text
+    assert "resource=https%3A%2F%2Fyour-host.example.com%2Fmcp" in html
