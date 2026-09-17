@@ -2360,10 +2360,12 @@ def _log_refusal(env: Envelope, profile: str | None) -> None:
     is the only trace. Every path reaches here through `_emit`, so one call covers both transports and
     both execution paths.
 
-    **Value-free, by the same contract as the refusal itself, and narrower.** The rule, the reason and
-    the identifiers that join this line to its row — never the statement, never `detail` (it echoes
+    **Value-free, by the same contract as the refusal itself, and narrower.** The rule and the
+    identifiers that join this line to its row — never the statement, never `detail` (it echoes
     identifiers the caller sent), never the caller's identity (the row carries that; a log sink is
-    usually read more widely). WARNING, because the served entrypoint configures no logging and
+    usually read more widely). Not the reason either: it is one of three coarse categories, and
+    `undetermined` — correct for a call stopped before any check — reads in a log as "unknown cause"
+    beside a rule that names the cause exactly. WARNING, because the served entrypoint configures no logging and
     Python's fallback handler prints WARNING and above only: at INFO a self-hosted server would drop
     it.
 
@@ -2374,9 +2376,8 @@ def _log_refusal(env: Envelope, profile: str | None) -> None:
     if env.status != "refused" or env.refusal is None:
         return
     _LOG.warning(
-        "execute_sql refused: rule=%s reason=%s datasource=%r org_id=%s audit_id=%s",
+        "execute_sql refused: rule=%s datasource=%r org_id=%s audit_id=%s",
         env.refusal.rule,
-        env.refusal.reason,
         (profile or "")[:LOG_DATASOURCE_MAX_CHARS],
         _current_org_id(),
         env.audit_id or "-",

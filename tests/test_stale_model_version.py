@@ -226,7 +226,7 @@ def test_a_refusal_writes_one_value_free_server_log_line(served, caplog):
         body = json.loads(tools.tool_execute_sql({"datasource": "demo", "sql": secret_sql}))
     lines = [r.getMessage() for r in caplog.records if "execute_sql refused" in r.getMessage()]
     assert len(lines) == 1
-    assert "rule=stale_model" in lines[0] and "reason=undetermined" in lines[0]
+    assert "rule=stale_model" in lines[0] and "reason=" not in lines[0]
     assert "datasource='demo'" in lines[0] and "org_id=local" in lines[0]
     assert f"audit_id={body['audit_id']}" in lines[0]
     # Never the statement, its literal, the refusal's own sentences, or the live version.
