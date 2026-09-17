@@ -117,8 +117,9 @@ def _new_run(sample: dict, base: Path) -> dict:
 
 @pytest.fixture
 def store(sample, tmp_path):
-    """A reconcile run of the test's own over the shared sample. The run is what tests write to, so a
-    shared one lets a test pass or fail by which tests ran before it on its pytest-xdist worker."""
+    """A reconcile run of the test's own, over the shared sample. Tests write to the run, so this fixture
+    is function-scoped: a run shared across tests would let one pass or fail depending on which tests
+    ran before it on its pytest-xdist worker."""
     return _new_run(sample, tmp_path)
 
 
