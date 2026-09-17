@@ -50,9 +50,14 @@ one's.
    Mark the row `error`.
 2. **Does it run at all?** It wraps the statement so it returns no rows, the way seed validation
    does, `SELECT 1 FROM (<statement>) AS _agami_check WHERE 1=0`, writes that to `zero-row.sql`, and
-   runs it through the guard. A failure whose classifier kind is `column_not_found`,
-   `table_not_found` or `syntax` is the person's defect: `run.json` gets `status: "failed"` and the
-   `kind`, and nothing is probed.
+   runs it through the guard. The wrap's copy of the statement loses the terminating semicolon and
+   any comment around it, so a statement ending `; -- done` is wrapped as one statement and not two;
+   the statement itself still runs verbatim at step 4. The wrap's own outcome goes to
+   `zero-row.run.json`, in `run.json`'s shape, whatever it was. A failure whose classifier kind is
+   `column_not_found`, `table_not_found` or `syntax` is the person's defect: `run.json` gets
+   `status: "failed"` and the `kind`, and nothing is probed. A wrap the guard refuses is **this
+   check not run**, not a fault in the statement — the wrap is agami's statement, not the person's —
+   so it is recorded in `zero-row.run.json` and the statement is still checked on its own.
 3. **`sm prepare`**, to `statement-prepare.json`: `aggregates`, `findings` and `unchecked`. It
    describes and never refuses.
 4. **The statement itself**, through the guard, its result to `statement.csv` (absent or empty when
@@ -93,8 +98,9 @@ one's.
 9. **Nothing in these steps writes `query_log.jsonl`, and nothing here runs unrecorded.**
    `agami-save-correction` reads that log's last successful line as the question to correct, and a
    probe there would be corrected instead of the answer. The record of this phase is the row
-   directory itself: `run.json` for the statement and `<probe>.run.json` for every probe, each with
-   its exit, rule and kind, so every execution and every refusal in this phase is written down. The
+   directory itself: `run.json` for the statement, `zero-row.run.json` for its wrap and
+   `<probe>.run.json` for every probe, each with its exit, rule and kind, so every execution and
+   every refusal in this phase is written down. The
    AI's own run logs as `agami-query` Phase 5 always has.
 
 ## What stays with the session

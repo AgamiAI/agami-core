@@ -48,6 +48,7 @@ BASE_FILES = {
     "statement.sql",
     "run.json",
     "zero-row.sql",
+    "zero-row.run.json",
     "statement-prepare.json",
     "statement.csv",
     "statement-receipt.json",
@@ -226,12 +227,105 @@ def test_a_value_no_row_holds_gets_its_near_miss_probe_and_no_other_value_does(r
     assert lit["verdict"] == "query_defect" and lit["evidence"]["near_miss"] == "delivered"
 
 
-def test_a_trailing_line_comment_does_not_swallow_the_zero_row_wrapper(row):
-    got = row(
-        "SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled' -- every order not cancelled\n;"
-    )
+@pytest.mark.parametrize(
+    "tail",
+    [
+        " -- every order not cancelled\n;",  # a comment, then the semicolon
+        "; -- done",  # the semicolon, then a comment: wrapped verbatim this is two statements
+        ";\n/* done */\n",
+        "\n;\n",
+    ],
+    ids=["comment-then-semicolon", "semicolon-then-comment", "block-comment", "bare-semicolon"],
+)
+def test_a_trailing_comment_or_semicolon_never_costs_the_row_its_zero_row_check(row, tail):
+    """The wrap must hold one statement and no comment that could swallow its tail. Before ACE-155's
+    review the `; -- done` form wrapped to two statements, the guard refused the wrap on `read_only`,
+    and the refusal was dropped: no `zero-row.run.json`, nothing said, the statement ran anyway."""
+    got = row(f"SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'{tail}")
+
     assert got.rc == 0 and got.run["status"] == "ok"
-    assert (got.dir / "zero-row.sql").read_text().endswith("cancelled\n) AS _agami_check WHERE 1=0")
+    zero = (got.dir / "zero-row.sql").read_text()
+    assert zero.endswith("!= 'cancelled'\n) AS _agami_check WHERE 1=0")
+    assert "--" not in zero and "/*" not in zero and ";" not in zero
+    # The wrap ran, and its own outcome is on disk beside it.
+    assert json.loads((got.dir / "zero-row.run.json").read_text())["status"] == "ok"
+    assert got.seen[0] == zero
+    assert _ledger(got.dir)["runs"]["verdict"] == "confirmed"
+
+
+@pytest.mark.parametrize("tail", ["", ";", "; -- done"])
+def test_a_semicolon_or_two_dashes_inside_a_value_is_not_read_as_the_end_of_the_statement(row, tail):
+    """A `;` or a `--` inside a quoted value never ends a statement, so the wrap keeps it and the
+    filter still means what the person wrote. Cutting there would make a sound statement a syntax
+    error, and a syntax error at this step is graded as the person's own defect."""
+    got = row(f"SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'a; -- b'{tail}")
+
+    assert got.rc == 0 and got.run["status"] == "ok"
+    assert (got.dir / "zero-row.sql").read_text().endswith(
+        "WHERE o.status != 'a; -- b'\n) AS _agami_check WHERE 1=0"
+    )
+
+
+def test_what_the_zero_row_wrap_drops_off_the_end_and_what_it_must_not():
+    """`_wrap_body` on its own: the wrap must hold one statement, and must never cut into one."""
+    for statement, body in (
+        ("SELECT 1", "SELECT 1"),
+        ("  SELECT 1 ;\n ", "SELECT 1"),
+        ("SELECT 1;;", "SELECT 1"),
+        ("SELECT 1; -- done", "SELECT 1"),
+        ("SELECT 1 -- done\n;", "SELECT 1"),
+        ("SELECT 1;\n/* done */\n", "SELECT 1"),
+        ("SELECT 1 /* a */ FROM t;", "SELECT 1 /* a */ FROM t"),
+        ("SELECT 1 -- a\nFROM t;", "SELECT 1 -- a\nFROM t"),
+        # A value or an identifier that holds what would otherwise end the statement.
+        ("SELECT 'a; -- b';", "SELECT 'a; -- b'"),
+        ("SELECT 'it''s; -- b';", "SELECT 'it''s; -- b'"),
+        ('SELECT "a; -- b" FROM t;', 'SELECT "a; -- b" FROM t'),
+        # Where a value ends cannot be read: drop the semicolon and no more, as it always did.
+        ("SELECT 'a;", "SELECT 'a"),
+        ("SELECT 'a\\' ; -- b", "SELECT 'a\\' ; -- b"),
+        ("SELECT 'a\\' ;", "SELECT 'a\\'"),
+    ):
+        assert cs._wrap_body(statement) == body, statement
+
+
+def test_a_wrap_the_guard_refuses_is_written_down_and_the_statement_is_still_checked(
+    row, monkeypatch
+):
+    """The wrap is agami's statement, not the person's, so a refusal of it is this check not run.
+    It must still reach disk: `SKILL.md` and `statement-check.md` both promise every execution and
+    every refusal in this phase is written down."""
+    real = cs.execute_sql.execute_guarded
+    calls: list[str] = []
+
+    def guarded(sql, profile, area, **kwargs):
+        calls.append(sql)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                status="refused",
+                failure=None,
+                data=None,
+                refusal=SimpleNamespace(
+                    rule="read_only", detail="a value-free sentence", remediation="one sentence"
+                ),
+            )
+        return real(sql, profile, area, **kwargs)
+
+    monkeypatch.setattr(cs.execute_sql, "execute_guarded", guarded)
+    got = row("SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'")
+
+    assert got.rc == 0
+    assert json.loads((got.dir / "zero-row.run.json").read_text()) == {
+        "status": "refused",
+        "exit": 1,
+        "kind": None,
+        "rule": "read_only",
+        "detail": "a value-free sentence",
+        "remediation": "one sentence",
+    }
+    # The statement is checked on its own, and `run.json` carries its outcome, not the wrap's.
+    assert got.run["status"] == "ok" and calls[1] == "SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'"
+    assert _ledger(got.dir)["runs"]["verdict"] == "confirmed"
 
 
 # --- refusals are findings ------------------------------------------------------------------
@@ -319,8 +413,12 @@ def test_a_probe_the_guard_refuses_leaves_an_empty_csv_and_its_run_record(row, m
     [
         # Refused at the read-only gate: nothing but the outcome.
         ("DELETE FROM orders", [], {"run.json"}),
-        # Ended by the zero-row check: the wrap and the outcome.
-        ("SELECT COUNT(*) AS n FROM orders", ["column_not_found"], {"zero-row.sql", "run.json"}),
+        # Ended by the zero-row check: the wrap, the wrap's own outcome, and the row's.
+        (
+            "SELECT COUNT(*) AS n FROM orders",
+            ["column_not_found"],
+            {"zero-row.sql", "zero-row.run.json", "run.json"},
+        ),
     ],
 )
 def test_checking_a_row_again_clears_every_file_the_last_statement_left(
@@ -387,7 +485,9 @@ def test_the_zero_row_check_ends_the_row_on_the_persons_own_defect(row, monkeypa
         "detail": f"a value-free sentence about {kind}",
         "remediation": f"a value-free sentence about {kind}",
     }
-    assert _names(got.dir) == {"statement.sql", "zero-row.sql", "run.json"}
+    assert _names(got.dir) == {"statement.sql", "zero-row.sql", "zero-row.run.json", "run.json"}
+    # The wrap's own record says the same thing the row's does; it is the wrap that failed.
+    assert json.loads((got.dir / "zero-row.run.json").read_text()) == got.run
     runs = _ledger(got.dir)["runs"]
     assert runs["verdict"] == "query_defect" and runs["evidence"]["remediation"]
 
@@ -410,24 +510,26 @@ def test_a_database_that_cannot_be_reached_as_configured_stops_the_run(
 
 
 @pytest.mark.parametrize(
-    "sql,calls_made",
-    [
-        ("SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'", 1),
-        # The guard refuses this zero-row wrap as two statements, so the statement meets the refusal.
-        ("SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'; -- done", 2),
-    ],
+    "tail",
+    ["", "; -- done"],
+    ids=["plain", "trailing-comment"],
 )
 def test_a_semantic_model_declaring_another_engine_than_its_credentials_stops_the_run(
-    row, monkeypatch, sql, calls_made
+    row, monkeypatch, tail
 ):
-    """The guard refuses every statement on that datasource until an operator fixes it."""
+    """The guard refuses every statement on that datasource until an operator fixes it.
+
+    Both spellings stop at the zero-row check, on the first call. The `; -- done` form used to reach
+    a second call, because the wrap was refused as two statements and that refusal was dropped;
+    reaching the guard once is the stronger pin, so it replaces it."""
     monkeypatch.setenv(
         f"DATASOURCE_URL__{PROFILE.upper()}", "postgresql://reader@127.0.0.1:1/sales"
     )
-    got = row(sql)
+    got = row(f"SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'{tail}")
 
-    assert got.rc == 3 and len(got.seen) == calls_made
+    assert got.rc == 3 and len(got.seen) == 1
     assert got.run["status"] == "refused" and got.run["rule"] == "engine_mismatch"
+    assert json.loads((got.dir / "zero-row.run.json").read_text()) == got.run
     assert (
         not (got.dir / "join-probes.json").exists() and not (got.dir / "probes.plan.json").exists()
     )
@@ -517,6 +619,41 @@ def test_a_break_in_agamis_own_code_is_named_on_stderr_and_in_run_json_without_i
     assert str(creds) not in said and "already exists" not in said and "server log" not in said
 
 
+def test_a_verb_that_returns_non_zero_leaves_an_empty_file_and_never_lands_its_payload(
+    tmp_path, capsys
+):
+    """A verb can print a JSON error payload and return non-zero instead of raising: `cli.main`
+    answers a root with no model that way, and four of these verbs return 2 the same way. Written to
+    the part file, that payload reads as an answer, and this one names an absolute path."""
+    out = tmp_path / "statement-receipt.json"
+    out.write_text("left by an earlier check")
+    no_model = tmp_path / "not-a-profile"
+    no_model.mkdir()
+    (tmp_path / "statement.sql").write_text("SELECT 1 AS n")
+
+    cs._sm(out, "receipt", str(no_model), "--sql-file", str(tmp_path / "statement.sql"))
+
+    assert out.read_text() == ""
+    err = capsys.readouterr().err
+    assert err == "check_statement: `sm receipt` returned 3\n"
+    assert str(no_model) not in err and "no_model" not in err
+
+
+def test_a_verb_called_wrongly_leaves_an_empty_file_instead_of_ending_the_row(tmp_path, capsys):
+    """argparse ends a wrong call with `SystemExit`, which `except Exception` lets past: the script
+    would die mid-row, some files written and some not, on a fault in its own call. It also writes
+    the call's own arguments to stderr, where a `--sql-file` path would be."""
+    out = tmp_path / "statement-prepare.json"
+    out.write_text("left by an earlier check")
+
+    cs._sm(out, "prepare")  # no root, no statement: argparse refuses the call
+
+    assert out.read_text() == ""
+    err = capsys.readouterr().err
+    assert err == "check_statement: `sm prepare` raised SystemExit\n"
+    assert "usage" not in err
+
+
 def test_a_row_with_no_readable_statement_cannot_start(tmp_path, capsys):
     assert cs.main(["--profile", PROFILE, "--area", AREA, "--row-dir", str(tmp_path)]) == 2
     assert "no readable statement.sql" in capsys.readouterr().err
@@ -556,3 +693,34 @@ def test_an_interpreter_without_the_semantic_model_package_is_told_how_to_get_on
         text=True,
     )
     assert r.returncode == 2 and 'sm" install' in r.stderr
+
+
+def test_an_interpreter_with_no_agami_core_at_all_is_told_the_same_thing(tmp_path):
+    """The bare directory: the two script files and nothing else, so the resolver finds no layout at
+    all and raises ImportError itself. That raise used to sit outside the `try`, and left a traceback
+    and exit 1 where this script's docstring, `statement-check.md` and `SKILL.md` all promise 2."""
+    env = {**os.environ, "PYTHONPATH": ""}
+    if (
+        subprocess.run(
+            [sys.executable, "-S", "-c", "import agami_paths"], env=env, capture_output=True
+        ).returncode
+        == 0
+    ):
+        pytest.skip("cannot hide the installed agami-core from a subprocess here")
+    bare = tmp_path / "scripts"
+    bare.mkdir()
+    for name in ("check_statement.py", "_agami_lib.py"):
+        shutil.copy(SCRIPTS / name, bare / name)
+    r = subprocess.run(
+        [sys.executable, "-S", str(bare / "check_statement.py"), "--help"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert r.returncode == 2 and 'sm" install' in r.stderr
+    # The type, and no more: the resolver's own sentence is not relayed, and neither is a traceback,
+    # because an import error's text can name an absolute path.
+    assert r.stderr.strip().endswith("(ImportError)")
+    assert "Traceback" not in r.stderr and "sync-lib" not in r.stderr
+    assert str(tmp_path) not in r.stderr

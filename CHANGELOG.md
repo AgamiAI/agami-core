@@ -30,7 +30,11 @@ below corresponds to one such version.
   on every tier: without it the script exits `3` with `driver_missing` and the install line, and the
   run stops. The run also stops when the semantic model declares an engine its credentials do not
   connect to. Checking a row again first clears the files the last check wrote, so an earlier
-  statement's files are never graded as the new one's. (ACE-155)
+  statement's files are never graded as the new one's. The zero-row check now writes its own outcome
+  to `zero-row.run.json` whatever it was, so no execution in this phase is unrecorded, and the wrap
+  it runs drops the statement's terminating semicolon along with any comment around it: a statement
+  ending `; -- done` used to be wrapped as two statements, which the guard refused, and that refusal
+  was written nowhere. (ACE-155)
 
 ## [0.9.3] — 2026-09-17
 

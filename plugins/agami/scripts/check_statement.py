@@ -12,6 +12,7 @@ For the row directory given, holding `statement.sql`, this writes the files the 
 
     run.json                   the statement's outcome: status, exit, kind, rule, detail, remediation
     zero-row.sql               the statement wrapped to return no rows
+    zero-row.run.json          that wrap's own outcome, in `run.json`'s shape, whatever it was
     statement-prepare.json     `sm prepare`
     statement.csv              the statement's result (absent or empty when it did not run)
     statement-receipt.json     `sm receipt`
@@ -53,17 +54,22 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _agami_lib  # noqa: E402
 
-_agami_lib.ensure_importable()
-
 try:
+    # Inside the try because it raises ImportError too, when no layout provides the library. Outside
+    # it, that raise left a traceback and exit 1 where this script promises exit 2.
+    _agami_lib.ensure_importable()
+
     import agami_paths
     import execute_sql
     import sql_guard
     from semantic_model import cli as sm_cli
 except ImportError as exc:
+    # Only the error's type, never its text: an import error's message can name an absolute path,
+    # and this script keeps a path out of every line it prints.
     print(
         "check_statement needs agami-core and its model extra (pydantic, sqlglot, pyyaml): run "
-        f'`bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` and call this with "$PY". ({exc})',
+        f'`bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` and call this with "$PY". '
+        f"({type(exc).__name__})",
         file=sys.stderr,
     )
     raise SystemExit(2) from exc
@@ -91,6 +97,7 @@ _STOP_RULES = frozenset({"engine_mismatch"})
 _OWN_FILES = (
     "run.json",
     "zero-row.sql",
+    "zero-row.run.json",
     "statement.csv",
     "statement-prepare.json",
     "statement-receipt.json",
@@ -223,19 +230,87 @@ def _sm(out: Path, *argv: str) -> None:
     """One `sm` verb, in process, its stdout written to `out` as `sm … > out` wrote it.
 
     In process because the guard above already needs the semantic_model package in this interpreter,
-    and `sm` runs this same `cli.main`. A verb that raises leaves an empty file, even when it printed
-    part of its answer first: the ledger reads an empty file as a part that was not checked, and a
-    half-written one could read as checked. The exception's text is not relayed, since a parser's
-    message can quote the statement."""
+    and `sm` runs this same `cli.main`. A verb that does not answer leaves an empty file, even when
+    it printed something first: the ledger reads an empty file as a part that was not checked, and a
+    half-written one, or a verb's own error payload, could read as checked. Three ways a verb does
+    not answer, all treated alike:
+
+      it raises           — the file would hold half an answer;
+      it exits            — argparse ends a wrong call that way, and `SystemExit` would otherwise
+                            carry past `except Exception` and end the row mid-check;
+      it returns non-zero — several verbs print a JSON error payload and return 2, and `cli.main`
+                            returns 3 for a root with no model.
+
+    Neither channel of the verb is relayed: its own stdout can hold the payload, and argparse writes
+    a wrong call's arguments to stderr, which would put a path in front of the person. Only the line
+    below, which names the verb and how it ended and nothing else."""
     buf = io.StringIO()
     text = ""
     try:
-        with contextlib.redirect_stdout(buf):
-            sm_cli.main(list(argv))
-        text = buf.getvalue()
-    except Exception as exc:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = sm_cli.main(list(argv))
+    except (Exception, SystemExit) as exc:
         print(f"check_statement: `sm {argv[0]}` raised {type(exc).__name__}", file=sys.stderr)
+    else:
+        if code:
+            print(f"check_statement: `sm {argv[0]}` returned {code}", file=sys.stderr)
+        else:
+            text = buf.getvalue()
     out.write_text(text, encoding="utf-8")
+
+
+def _past_quoted(text: str, start: int) -> tuple[int, bool]:
+    """One past the quoted value or identifier opening at `start`, and whether it closed cleanly.
+
+    A doubled quote is an escaped one, as standard SQL writes it. A backslash inside makes the answer
+    uncertain: MySQL reads it as escaping the next character and standard SQL does not, so where the
+    value ends depends on the engine."""
+    quote = text[start]
+    i = start + 1
+    while i < len(text):
+        if text[i] == "\\":
+            return i, False
+        if text[i] == quote:
+            if text[i + 1 : i + 2] == quote:
+                i += 2
+                continue
+            return i + 1, True
+        i += 1
+    return i, False
+
+
+def _wrap_body(statement: str) -> str:
+    """The statement as the zero-row wrap must hold it: up to its last character of code.
+
+    The terminating semicolon and any comment around it are dropped. Wrapped verbatim, a statement
+    ending `; -- done` becomes two statements inside the wrap, and the guard refuses the wrap for a
+    fault the statement does not have. Step 1 has already proved there is no second statement to
+    lose. This is the wrap's copy; the statement itself still runs verbatim at step 4.
+
+    Quoted values are walked over, never read, so a `;` or a `--` inside one is code and stays. When
+    the scan cannot say where a value ends — a quote left open, or a backslash inside one — it drops
+    the trailing semicolon and no more, as it always did: cutting mid-value would turn a sound
+    statement into a syntax error, which reads as the person's own defect."""
+    text = statement.strip()
+    end = i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "'\"`":
+            i, closed = _past_quoted(text, i)
+            if not closed:
+                return text.rstrip(";").rstrip()
+            end = i
+        elif text.startswith("--", i):
+            newline = text.find("\n", i)
+            i = len(text) if newline < 0 else newline + 1
+        elif text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            i = len(text) if close < 0 else close + 2
+        else:
+            i += 1
+            if not ch.isspace() and ch != ";":
+                end = i
+    return text[:end]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -318,11 +393,17 @@ def check(row_dir: Path, statement: str, profile: str, area: str) -> tuple[int, 
         _write_json(row_dir / "run.json", run)
         return 0, {**summary, "run": run}
 
-    # 2. Does it run at all? The newlines keep a trailing line comment from swallowing the wrapper.
-    body = statement.strip().rstrip(";").rstrip()
+    # 2. Does it run at all? See `_wrap_body` for what the wrap drops; the newlines still keep a
+    #    comment it left in place from swallowing the wrapper. The wrap is agami's own statement,
+    #    not the person's, so its outcome gets its own file rather than `run.json`: a wrap the guard
+    #    refuses is this check not run, never a fault in the statement, and the statement is still
+    #    checked on its own below. Written whatever happened, so nothing this script runs is
+    #    unrecorded.
+    body = _wrap_body(statement)
     zero_row = f"SELECT 1 FROM (\n{body}\n) AS _agami_check WHERE 1=0"
     (row_dir / "zero-row.sql").write_text(zero_row, encoding="utf-8")
     zero = _record(_guarded(zero_row, profile, area))
+    _write_json(row_dir / "zero-row.run.json", zero)
     if zero["kind"] in _DEFECT_KINDS or _stops(zero):
         _write_json(row_dir / "run.json", zero)
         return (_STOP_RUN if _stops(zero) else 0), {**summary, "run": zero}

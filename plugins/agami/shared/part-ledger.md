@@ -61,6 +61,7 @@ and writes `ledger.json` beside the inputs.
 | `statement.sql` | the skill | the person's statement, verbatim |
 | `run.json` | `check_statement.py` | `{"status": "ok" \| "refused" \| "failed", "exit": ..., "rule": ..., "kind": ..., "detail": ..., "remediation": ...}` from the guard's refusal or the classified failure, never the engine's own text |
 | `zero-row.sql` | `check_statement.py` | the statement wrapped to return no rows, the check that it runs at all |
+| `zero-row.run.json` | `check_statement.py`, through the guard | that wrap's own outcome, in `run.json`'s shape. A refusal here is the check not run, never a fault in the statement: the wrap is agami's statement, not the person's |
 | `statement.csv` | `check_statement.py`, through the guard | the statement's result; only its shape and one cell are ever copied onward |
 | `statement-prepare.json` | `sm prepare --sql-file` | aggregates, findings, `unchecked` |
 | `statement-receipt.json` | `sm receipt --sql-file` | the receipt of the person's statement |
