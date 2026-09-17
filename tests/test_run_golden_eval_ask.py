@@ -46,7 +46,10 @@ def test_ask_answers_one_question_with_the_golden_runs_generator_and_context(mon
     out = tmp_path / "rows" / "1" / "agami-answer.json"
     assert rge.main(["--profile", "demo", "--ask", "How many orders?", "--top-k", "3", "--timeout-s", "45", "--out", str(out)]) == 0
     printed = json.loads(capsys.readouterr().out)
-    assert printed == {"question": "How many orders?", "sql": "SELECT COUNT(*) AS n FROM orders", "statements": ["SELECT COUNT(*) AS n FROM orders"], "error": None}
+    # `mode` says which surface answered. The two measure different things, so a reader deciding
+    # whether to trust a number has to be told which one produced it.
+    assert printed == {"question": "How many orders?", "sql": "SELECT COUNT(*) AS n FROM orders",
+                       "statements": ["SELECT COUNT(*) AS n FROM orders"], "error": None, "mode": "context"}
     assert json.loads(out.read_text()) == printed
     gen = _Generator.made[0]
     assert gen.timeout_s == 45.0 and gen.asked == ("How many orders?", "local", "demo", "schema for How many orders? with 3 examples")
@@ -111,3 +114,172 @@ def test_ask_writes_every_statement_the_client_wrote_and_answers_with_the_last(m
     printed = json.loads(capsys.readouterr().out)
     assert printed["sql"] == "SELECT COUNT(*) AS n FROM orders"
     assert printed["statements"] == ["SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders"]
+
+
+# --- agami's result under --via mcp, written in code through the guard ---------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+ANSWER_SQL = "SELECT region, COUNT(*) AS n FROM orders GROUP BY region"
+
+
+def _answer(status="ok", detail=None, area=None):
+    call = {"tool": "execute_sql", "args": {"datasource": "sales", "sql": ANSWER_SQL, **({"area": area} if area else {})},
+            "status": status}
+    if detail:
+        call["detail"] = detail
+    return {"sql": ANSWER_SQL, "error": detail, "mode": "mcp", "probes": [
+        {"tool": "get_datasource_schema", "args": {"datasource": "sales"}, "status": None}, call]}
+
+
+def _guard(monkeypatch, envelope):
+    calls = []
+
+    def fake(sql, profile, area, *, executor, org_id=None, no_safety=False):
+        calls.append({"sql": sql, "profile": profile, "area": area, "executor": executor, "no_safety": no_safety})
+        return envelope
+
+    monkeypatch.setattr(rge.execute_sql, "execute_guarded", fake)
+    return calls
+
+
+def test_a_statement_that_ran_is_run_once_more_through_the_guard_for_its_result(monkeypatch, tmp_path):
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["region", "n"], rows=[("east", 3), ("west", 5)])))
+
+    rge._write_agami_result(tmp_path, _answer(area="store"), "sales")
+
+    assert calls == [{"sql": ANSWER_SQL, "profile": "sales", "area": "store", "executor": rge.execute_sql.BUILTIN_EXECUTOR, "no_safety": False}]
+    assert (tmp_path / "actual.csv").read_text().splitlines() == ["region,n", "east,3", "west,5"]
+    assert json.loads((tmp_path / "agami-run.json").read_text())["status"] == "ok"
+
+
+def test_a_statement_the_server_did_not_run_is_never_run_again(monkeypatch, tmp_path):
+    """The outcome comes from the trace. Running it again, by any road, is how a statement the server
+    blocked could reach the database."""
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    (tmp_path / "actual.csv").write_text("n\n1\n")  # left by an earlier run of this row
+    refusal = "query references column(s) not in the semantic model: orders.units_sold — only columns declared on the model's tables may be queried."
+
+    rge._write_agami_result(tmp_path, _answer(status="refused", detail=refusal), "sales")
+
+    assert calls == []
+    assert not (tmp_path / "actual.csv").exists()
+    run = json.loads((tmp_path / "agami-run.json").read_text())
+    assert run["status"] == "refused" and run["detail"] == refusal and run["source"] == "trace"
+
+
+def test_the_guard_refusing_the_rerun_is_recorded_with_its_rule_and_no_result(monkeypatch, tmp_path):
+    _guard(monkeypatch, SimpleNamespace(status="refused", refusal=SimpleNamespace(rule="column_scope", detail="query references column(s) not in the semantic model: orders.x")))
+
+    rge._write_agami_result(tmp_path, _answer(), "sales")
+
+    run = json.loads((tmp_path / "agami-run.json").read_text())
+    assert (run["status"], run["rule"]) == ("refused", "column_scope")
+    assert not (tmp_path / "actual.csv").exists()
+
+
+def test_a_database_failure_on_the_rerun_is_recorded_with_its_kind(monkeypatch, tmp_path):
+    _guard(monkeypatch, SimpleNamespace(status="failed", failure=SimpleNamespace(kind="network", message="The database was unreachable.")))
+
+    rge._write_agami_result(tmp_path, _answer(), "sales")
+
+    run = json.loads((tmp_path / "agami-run.json").read_text())
+    assert (run["status"], run["kind"], run["detail"]) == ("failed", "network", "The database was unreachable.")
+
+
+def test_an_answer_with_no_statement_or_no_trace_writes_nothing(monkeypatch, tmp_path):
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+
+    rge._write_agami_result(tmp_path, {"sql": None, "probes": []}, "sales")
+    rge._write_agami_result(tmp_path, {"sql": ANSWER_SQL}, "sales")
+
+    assert calls == [] and not (tmp_path / "agami-run.json").exists()
+
+
+def test_asking_a_row_again_with_no_statement_clears_the_old_result(monkeypatch, tmp_path):
+    """An old `actual.csv` beside an answer that has none would be read as this answer's result."""
+    _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    (tmp_path / "actual.csv").write_text("n\n1\n")
+    (tmp_path / "agami-run.json").write_text('{"status": "ok"}')
+
+    rge._write_agami_result(tmp_path, {"sql": None, "error": "the generator exited without answering"}, "sales")
+
+    assert not (tmp_path / "actual.csv").exists() and not (tmp_path / "agami-run.json").exists()
+
+
+def test_only_the_servers_own_statement_is_run_again(monkeypatch, tmp_path):
+    """A statement the trace does not hold character for character is not run. The trace is the
+    only record of what the server let through, so anything else would be a statement nobody guarded
+    in the session."""
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    answer = _answer(area="store")
+    answer["sql"] = ANSWER_SQL.lower()
+
+    rge._write_agami_result(tmp_path, answer, "sales")
+
+    assert calls == [] and not (tmp_path / "actual.csv").exists() and not (tmp_path / "agami-run.json").exists()
+
+
+def test_the_area_comes_from_the_query_that_is_run_again(monkeypatch, tmp_path):
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    answer = _answer(area="store")
+    answer["probes"].append({"tool": "execute_sql", "args": {"sql": "SELECT 1", "area": "finance"}, "status": "ok"})
+
+    rge._write_agami_result(tmp_path, answer, "sales")
+
+    assert [c["area"] for c in calls] == ["store"]
+
+
+def test_every_query_that_ran_on_a_row_with_an_error_was_a_probe():
+    trace = (
+        {"tool": "execute_sql", "args": {"sql": "SELECT DISTINCT region FROM orders"}, "status": "ok"},
+        {"tool": "execute_sql", "args": {"sql": "SELECT 1 FROM returns"}, "status": "refused", "detail": "no"},
+    )
+    failed = gr.GeneratedSql(sql="SELECT 1 FROM returns", error="no", trace=trace)
+    answered = gr.GeneratedSql(sql="SELECT DISTINCT region FROM orders", error=None, trace=trace[:1])
+
+    assert rge._answer_payload(1, "q", failed, "mcp")["probe_count"] == 1
+    assert rge._answer_payload(1, "q", answered, "mcp")["probe_count"] == 0
+
+
+def test_ask_file_via_mcp_writes_each_rows_result_beside_its_answer(monkeypatch, tmp_path, capsys):
+    _wire(monkeypatch, tmp_path)
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(7,)])))
+    trace = tuple(_answer()["probes"])
+
+    class _McpGenerator:
+        def generate(self, question, org, datasource):
+            return gr.GeneratedSql(sql=ANSWER_SQL, error=None, statements=(ANSWER_SQL,), trace=trace)
+
+    monkeypatch.setattr(rge, "_generator_for", lambda args: (_McpGenerator(), None))
+
+    def no_command_line_tier(*args, **kwargs):
+        raise AssertionError("agami's statement must never be run through a command-line tier")
+
+    monkeypatch.setattr(rge.subprocess, "run", no_command_line_tier)
+    questions = tmp_path / "chunk.json"
+    questions.write_text(json.dumps({"chunk": [{"row": 4, "question": "Orders by region?"}]}))
+
+    assert rge.main(["--profile", "sales", "--via", "mcp", "--ask-file", str(questions), "--out-dir", str(tmp_path / "rows")]) == 0
+
+    assert len(calls) == 1
+    assert (tmp_path / "rows" / "4" / "actual.csv").read_text().splitlines() == ["n", "7"]
+    assert json.loads((tmp_path / "rows" / "4" / "agami-run.json").read_text())["status"] == "ok"
+
+
+def test_ask_via_mcp_writes_the_result_beside_its_answer_file(monkeypatch, tmp_path, capsys):
+    _wire(monkeypatch, tmp_path)
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(9,)])))
+    trace = tuple(_answer()["probes"])
+
+    class _McpGenerator:
+        def generate(self, question, org, datasource):
+            return gr.GeneratedSql(sql=ANSWER_SQL, error=None, statements=(ANSWER_SQL,), trace=trace)
+
+    monkeypatch.setattr(rge, "_generator_for", lambda args: (_McpGenerator(), None))
+    out = tmp_path / "rows" / "2" / "agami-answer.json"
+
+    assert rge.main(["--profile", "sales", "--via", "mcp", "--ask", "Orders by region?", "--out", str(out)]) == 0
+
+    assert len(calls) == 1
+    assert (out.parent / "actual.csv").read_text().splitlines() == ["n", "9"]
