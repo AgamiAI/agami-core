@@ -3204,6 +3204,7 @@ def record_tool_call(
     audit_id: str | None = None,
     org_id: str | None = None,
     datasource: str | None = None,
+    error_detail: str | None = None,
 ) -> None:
     """Record one MCP tool call to the activity log (the transport calls this for **every** tool). The
     audit-grade fields are server-observed; `success`/`row_count`/`error_kind` are derived from the
@@ -3243,6 +3244,10 @@ def record_tool_call(
       to be re-read later from a context that may no longer be the same one. The fallback when that
       read finds nothing is the deployment-wide org, and for an audit row that is the wrong direction
       to fail in.
+
+    `error_detail` is why a call that RAISED crashed (027) — the text the HTTP transport no longer
+    sends to the client. Kept only with `raised=True`: a call that returned has a body saying how it
+    went, and a reason stated beside it would describe something that did not happen.
     """
     args = arguments or {}
     derived_success, derived_row_count, derived_error_kind = True, None, None
@@ -3390,6 +3395,10 @@ def record_tool_call(
         # The statement, where one ran. A plain override rather than one of the coherent trio: it is
         # an identity, so a stated value cannot contradict a derived one the way an outcome can.
         "audit_id": audit_id if audit_id is not None else derived_audit_id,
+        # Operator-only and cut to the same bound as the driver's error (016), for the same reason.
+        "error_detail": (
+            error_detail[:AUDIT_ERROR_DETAIL_MAX_CHARS] if raised and error_detail else None
+        ),
     }
     if org_id is not None:
         # Set rather than left absent, so `_record_tool_call`'s `setdefault` keeps it instead of

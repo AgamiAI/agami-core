@@ -226,6 +226,17 @@ def test_a_crash_is_logged_once_with_its_traceback(era, store_url, caplog):
 
 
 @pytest.mark.parametrize("era", ERAS)
+def test_a_crash_is_recorded_for_the_operator(era, store_url):
+    """The audit row keeps the reason the wire no longer carries, beside the failure it explains."""
+    response = _call(_app(_raise), era)
+
+    (row,) = [r for r in _tool_calls(store_url) if r["tool_name"] == "probe"]
+    assert row["success"] == 0 and row["error_kind"] == "exception"
+    assert MARKER in row["error_detail"]
+    _assert_nothing_leaked(response)
+
+
+@pytest.mark.parametrize("era", ERAS)
 def test_a_raising_predicate_leaks_nothing(era):
     """A predicate that raises hides the tool, and its words stay in the log like any other crash."""
 

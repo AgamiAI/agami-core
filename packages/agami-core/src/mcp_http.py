@@ -634,6 +634,8 @@ def build_server(
                 execution_ms=int((time.monotonic() - started) * 1000),
                 actor=_actor_ctx.get(),
                 raised=crash is not None,
+                # The reason the client no longer gets (ACE-152), kept for the operator instead.
+                error_detail=f"{type(crash).__name__}: {crash}" if crash is not None else None,
                 # The classified outcome, when the handler produced one (ACE-098). Empty for every
                 # tool that does not speak the Envelope, which means "derive it the way you always
                 # have" — so those tools keep the body parse and nothing about them changes.
