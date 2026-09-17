@@ -258,7 +258,7 @@ async def _client_redirect_error(
 
     if client_metadata.is_metadata_client_id(client_id):
         try:
-            listed = await run_blocking(client_metadata.redirect_uris, client_id)
+            listed = await client_metadata.redirect_uris(client_id)
         except client_metadata.ClientMetadataError:
             return _oauth_error("invalid_client", "client metadata document could not be used")
         if not redirect_uri or not any(_redirect_matches(redirect_uri, u) for u in listed):

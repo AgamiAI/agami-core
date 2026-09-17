@@ -600,17 +600,20 @@ def client_doc(monkeypatch):
     import httpx
 
     doc = {"client_id": CLIENT_DOC_URL, "client_name": "Acme", "redirect_uris": [DOC_REDIRECT]}
+
+    async def body():
+        yield httpx.Response(200, json=doc).content
+
+    async def resolve(host, port):
+        return ["11.0.0.1"]
+
     client_metadata._cache.clear()
-    monkeypatch.setattr(client_metadata, "_resolve", lambda host, port: ["11.0.0.1"])
+    monkeypatch.setattr(client_metadata, "_resolve", resolve)
     monkeypatch.setattr(
         client_metadata,
         "_client",
-        lambda: httpx.Client(
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(
-                    200, content=iter([httpx.Response(200, json=doc).content])
-                )
-            )
+        lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body()))
         ),
     )
     yield doc

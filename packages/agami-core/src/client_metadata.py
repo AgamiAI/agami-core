@@ -12,7 +12,10 @@ The URL is chosen by whoever starts the sign-in, so the fetch is written against
     the address that was checked (the name rides along as `Host` and TLS SNI, so the certificate is
     still verified against it) — a second lookup could answer an internal address;
   - no redirects, no proxy from the environment (a proxy would resolve the name itself), a 5 KB body
-    cap enforced while streaming, and one 3 s deadline for the whole read.
+    cap enforced while streaming, and one 3 s deadline on the wall clock for all of it — the lookup,
+    the connection, the headers and the body.
+The fetch is async on the event loop, not on a worker thread: the worker pool is shared with every
+query, and a sign-in anyone can start must not be able to hold its threads.
 A document that passes is cached in memory for an hour, under a cap, because the cache key is
 attacker-chosen too. Failures are not cached.
 """
@@ -22,10 +25,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
-import threading
 import time
 from urllib.parse import SplitResult, urlsplit
 
+import anyio
 import httpx
 
 _MAX_BYTES = 5120
@@ -34,9 +37,8 @@ _TTL = 3600
 _CACHE_MAX = 256
 
 # url -> (monotonic expiry, redirect URIs). Insertion-ordered, so the first key is the oldest entry.
+# Only the event loop touches it, and never across an await, so it needs no lock.
 _cache: dict[str, tuple[float, list[str]]] = {}
-# Sign-ins run the fetch on worker threads, and eviction reads then deletes the oldest key.
-_cache_lock = threading.Lock()
 
 
 class ClientMetadataError(Exception):
@@ -49,20 +51,25 @@ def is_metadata_client_id(client_id: str) -> bool:
     return client_id.startswith(("https://", "http://"))
 
 
-def redirect_uris(client_id: str) -> list[str]:
+async def redirect_uris(client_id: str) -> list[str]:
     """The redirect URIs the document at `client_id` lists, from the cache or a fresh fetch.
 
-    Blocking (DNS + HTTP) — call it through `run_blocking`. Raises `ClientMetadataError` on any failure."""
-    with _cache_lock:
-        hit = _cache.get(client_id)
+    Raises `ClientMetadataError` on any failure, including no document within `_DEADLINE` seconds."""
+    hit = _cache.get(client_id)
     if hit is not None and hit[0] > time.monotonic():
         return hit[1]
-    uris = _validate(client_id, _fetch(client_id))
-    with _cache_lock:
-        _cache.pop(client_id, None)
-        if len(_cache) >= _CACHE_MAX:
-            del _cache[next(iter(_cache))]
-        _cache[client_id] = (time.monotonic() + _TTL, uris)
+    # httpx's own timeout restarts on every byte, so a server trickling its response would never trip
+    # it; this bounds the whole fetch, DNS included.
+    try:
+        with anyio.fail_after(_DEADLINE):
+            doc = await _fetch(client_id)
+    except TimeoutError as exc:
+        raise ClientMetadataError("client metadata fetch timed out") from exc
+    uris = _validate(client_id, doc)
+    _cache.pop(client_id, None)
+    if len(_cache) >= _CACHE_MAX:
+        del _cache[next(iter(_cache))]
+    _cache[client_id] = (time.monotonic() + _TTL, uris)
     return uris
 
 
@@ -81,32 +88,36 @@ def _check_url(url: str) -> SplitResult:
     return parts
 
 
-def _resolve(host: str, port: int) -> list[str]:
+def _is_public(address: str) -> bool:
+    return ipaddress.ip_address(address).is_global
+
+
+async def _resolve(host: str, port: int) -> list[str]:
     """Every address `host` resolves to. The network seam tests patch."""
-    return [info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
+    infos = await anyio.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [info[4][0] for info in infos]
 
 
-def _client() -> httpx.Client:
+def _client() -> httpx.AsyncClient:
     """The HTTP client for the fetch. The other network seam tests patch."""
-    return httpx.Client(trust_env=False, follow_redirects=False, timeout=_DEADLINE)
+    return httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=_DEADLINE)
 
 
-def _fetch(url: str) -> dict:
+async def _fetch(url: str) -> dict:
     parts = _check_url(url)
-    deadline = time.monotonic() + _DEADLINE
     host, port = parts.hostname, parts.port or 443
     try:
-        addresses = _resolve(host, port)
+        addresses = await _resolve(host, port)
     except OSError as exc:
         raise ClientMetadataError("client_id host does not resolve") from exc
-    if not addresses or not all(ipaddress.ip_address(a).is_global for a in addresses):
+    if not addresses or not all(_is_public(a) for a in addresses):
         raise ClientMetadataError("client_id host is not a public address")
     address = addresses[0]
     netloc = f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
     target = f"https://{netloc}{parts.path}" + (f"?{parts.query}" if parts.query else "")
     body = bytearray()
     try:
-        with (
+        async with (
             _client() as client,
             client.stream(
                 "GET",
@@ -122,12 +133,10 @@ def _fetch(url: str) -> dict:
         ):
             if response.status_code != 200:
                 raise ClientMetadataError(f"client metadata fetch returned {response.status_code}")
-            for chunk in response.iter_raw():
+            async for chunk in response.aiter_raw():
                 body += chunk
                 if len(body) > _MAX_BYTES:
                     raise ClientMetadataError("client metadata document is too large")
-                if time.monotonic() > deadline:
-                    raise ClientMetadataError("client metadata fetch timed out")
     except httpx.HTTPError as exc:
         raise ClientMetadataError("client metadata fetch failed") from exc
     try:

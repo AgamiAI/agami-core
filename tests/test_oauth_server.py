@@ -1002,15 +1002,20 @@ def client_doc(monkeypatch):
     }
     requests: list = []
 
+    async def body():
+        yield httpx.Response(200, json=doc).content
+
     def handle(request):
         requests.append(request)
-        body = httpx.Response(200, json=doc).content
-        return httpx.Response(200, content=iter([body]))
+        return httpx.Response(200, content=body())
+
+    async def resolve(host, port):
+        return ["11.0.0.1"]
 
     client_metadata._cache.clear()
-    monkeypatch.setattr(client_metadata, "_resolve", lambda host, port: ["11.0.0.1"])
+    monkeypatch.setattr(client_metadata, "_resolve", resolve)
     monkeypatch.setattr(
-        client_metadata, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handle))
+        client_metadata, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle))
     )
     yield requests, doc
     client_metadata._cache.clear()
@@ -1063,6 +1068,26 @@ def test_metadata_document_client_signs_in_without_registering(env, client_doc):
     assert claims["sub"] == "admin"
     assert _oauth_client_count() == before  # no registration row: that growth is what this replaces
     assert len(requests) == 1
+
+
+def test_the_metadata_fetch_takes_no_worker_thread(env, client_doc, monkeypatch):
+    # The worker pool is shared with every query. A sign-in anyone can start, pointed at a slow URL, must
+    # not be able to occupy its threads, so the fetch stays on the event loop.
+    import oauth_server
+
+    offloaded = []
+    real = oauth_server.run_blocking
+
+    async def recording(func, *args, **kwargs):
+        offloaded.append(func)
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(oauth_server, "run_blocking", recording)
+    requests, _ = client_doc
+    # A redirect the document does not list: refused at the gate, before any credential check offloads.
+    r = _authorize_post(TestClient(mcp_http.build_app()), client_id=CLIENT_DOC_URL)
+    assert r.status_code == 400 and len(requests) == 1
+    assert offloaded == []
 
 
 def test_an_invalid_metadata_document_is_invalid_client_with_no_redirect(env, client_doc):
