@@ -22,6 +22,10 @@ below corresponds to one such version.
   machine, and `list_datasources` reported that name as active. A served deployment now ignores
   `.config`, and `list_datasources` reports `active_datasource` as `null` rather than `default`
   when several datasources are served and none is named. The local CLI is unchanged. (#253)
+- **`AGAMI_REQUIRE_THREAD_ID` no longer accepts a blank `thread_id`.** A required field only has to
+  be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
+  blank id is now rejected as an input validation error — a deployment turning the flag on should
+  confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
 
 ## [0.9.2] — 2026-09-16
 
