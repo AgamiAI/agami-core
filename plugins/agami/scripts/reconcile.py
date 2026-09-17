@@ -2209,6 +2209,15 @@ def _summaries(rows: list[dict], result: dict, rec: dict) -> dict:
     whose = "agami's query" if not_graded else "Your query"
     if not_graded:
         sql = "Only agami wrote a query for this row."
+    elif not [r for r in sql_rows if r is not fit]:
+        # The same rule the checks line below already keeps: a silence must not read as a pass.
+        # `differs` is empty both when the two queries agreed on everything and when neither was
+        # ever compared, and on a row whose query did not run the second is what happened — so "the
+        # two queries ask for the same things" was the card stating agreement it had no evidence for,
+        # on the one row a person opened to find out what went wrong. The fit check lives in this
+        # section too, but it reads your query rather than comparing two, so it does not count.
+        sql = ("agami's query did not run, so the two were never compared."
+               if _rejected_query(rec) is not None else "The two queries were not compared.")
     else:
         sql = ("The two queries differ in " + _and_list(differs) + ".") if differs else "The two queries ask for the same things."
     if fit and fit["state"] != "held":
@@ -2256,6 +2265,9 @@ _NOT_GRADED = {"data": "not_graded", "query": "not_comparable", "label": "not gr
 
 _ERROR_LEAD = {
     "agami_failed": "agami's query failed",
+    # Separate from `agami_failed` because it wants the opposite fix: the safety check blocked the
+    # statement or the database rejected it, so the semantic model and the database disagree.
+    "agami_query_rejected": "agami's query did not run",
     "yours_failed": "your query did not run",
     "nothing_to_compare": "both queries returned no rows, so there is nothing to compare",
     "unknown": "the run's files do not say why",
@@ -2284,9 +2296,99 @@ def _error_cause(rec: dict) -> str | None:
     score = (rec.get("comparison") or {}).get("result_set") if isinstance(rec.get("comparison"), dict) else None
     if score and score.get("status") == "unscored":
         return "nothing_to_compare"
+    if _rejected_query(rec) is not None:
+        # Read before `agami_failed`, because it is the SAME row with a different fix. A statement
+        # the database rejected or the safety check blocked means the semantic model names something that
+        # is not there; a client that never answered means ask again. Both arrive as an error row
+        # with no result, and only the trace can tell them apart.
+        return "agami_query_rejected"
     if not rec.get("sql") or (rec.get("recorded") is None and rec.get("actual") is None and rec.get("error")):
         return "agami_failed"
     return "unknown"
+
+
+def _rejected_query(rec: dict) -> dict | None:
+    """The first query the database rejected or the safety check blocked, from the run's own trace.
+
+    `None` when the row has no trace (a run that did not serve agami's tools) or when every query it
+    ran came back with rows. A call the server STOPPED is skipped: it carries no status, and it is a
+    consequence of the rejection rather than a second one. A call whose tool RAISED is skipped too:
+    that is agami's own tool failing, which says nothing about the semantic model, so the row is one
+    to ask again rather than one to fix.
+    """
+    for entry in rec.get("probes") or []:
+        if not isinstance(entry, dict) or entry.get("tool") != "execute_sql":
+            continue
+        if entry.get("status") in _DID_NOT_RUN and not entry.get("stopped"):
+            return entry
+    return None
+
+
+#: The statuses a query that did not run carries: the safety check blocked it, or the database
+#: rejected it. `raised` (the tool itself threw) is deliberately not one of them.
+_DID_NOT_RUN = ("refused", "failed")
+
+# Why the safety check blocked a query, in words a reader who has never seen the rule names can follow.
+# Keyed by the start of the product's own refusal text, which is what the trace carries. The text is
+# matched and never the rule name alone: one rule covers more than one reason (a table the semantic
+# model lacks, and a table name that exists in more than one schema), and they want different fixes.
+_BLOCKED_BECAUSE = (
+    ("query references column(s) not in the semantic model", "it names a column the semantic model does not have"),
+    ("query references table(s) not in the semantic model", "it reads a table the semantic model does not have"),
+    ("query references table(s) whose name matches tables in more than one schema",
+     "a table name it uses exists in more than one schema, so which one is meant cannot be decided"),
+    ("query uses SELECT *", "it uses SELECT * instead of naming its columns"),
+)
+
+
+# The reasons that say the semantic model and the database disagree about what exists: a name the
+# semantic model does not have, or one the database does not have. Only these send a row to the
+# semantic model. A result too large to return, a timeout, a credential, a SELECT * or an ambiguous
+# table name says nothing about what the semantic model declares, so asking again is the fix for
+# those. Keyed like `_BLOCKED_BECAUSE`, by the start of the product's own text, per trace status.
+_NAMES_SOMETHING_MISSING = {
+    "refused": ("query references column(s) not in the semantic model",
+                "query references table(s) not in the semantic model"),
+    "failed": ("The statement referenced a column this database does not have",
+               "The statement referenced a table this database does not have"),
+}
+
+
+def _names_something_missing(entry: dict | None) -> bool:
+    """Whether any reason a query did not run is a name one side has and the other does not."""
+    starts = _NAMES_SOMETHING_MISSING.get((entry or {}).get("status"), ())
+    said = _first_line((entry or {}).get("detail"))
+    return bool(starts) and any(part.strip().startswith(starts) for part in re.split(r"(?<=\.) (?=query )", said))
+
+
+def _blocked_because(part: str) -> str | None:
+    """One refusal sentence in plain words, with what it names, or None when it is not one we know."""
+    part = part.strip().rstrip(".")
+    match = next(((start, plain) for start, plain in _BLOCKED_BECAUSE if part.startswith(start)), None)
+    if match is None:
+        return None
+    # What the refusal names comes after its last colon ("…more than one schema, so which one is meant
+    # cannot be decided: orders"), or straight after the prefix; an explanation after a dash is not a name.
+    rest = part[len(match[0]):].lstrip(":").strip()
+    if ": " in rest:
+        rest = rest.rsplit(": ", 1)[1]
+    named = "" if rest.startswith(("—", ",")) else rest.split(" — ")[0].strip().rstrip(".")
+    return match[1] + (f" ({named})" if named else "")
+
+
+def _why_it_did_not_run(status: Any, detail: Any) -> str:
+    """One plain sentence for a query that did not run, naming who stopped it and why."""
+    said = _first_line(detail).rstrip(".")
+    if status == "refused":
+        # One refusal can carry several reasons, one sentence each ("…not in the semantic model: a —
+        # only tables declared… query references table(s) whose name matches…: b.").
+        reasons = [_blocked_because(part) for part in re.split(r"(?<=\.) (?=query )", said)] if said else []
+        if reasons and all(reasons):
+            return "agami's safety check blocked it before it reached the database: " + "; ".join(reasons) + "."
+        return "agami's safety check blocked it before it reached the database" + (f": {said}." if said else ".")
+    if status == "failed":
+        return "The database returned an error" + (f": {said}." if said else ".")
+    return "It did not run" + (f": {said}." if said else ".")
 
 
 def _result(rec: dict, diff: list[dict]) -> dict:
@@ -2396,6 +2498,11 @@ def _fix(rec: dict, diff: list[dict], result: dict) -> str:
             return "semantic_model" if any(p.get("verdict") == MODEL_GAP for p in parts) else "query"
         if cause == "nothing_to_compare":
             return "none"
+        if cause == "agami_query_rejected":
+            # A name the semantic model or the database lacks is rejected again on every attempt, so
+            # the fix is the model, and "ask agami again" would send a person round a loop. Any other
+            # reason (a limit, a timeout, a credential) is not about the model, and asking again is.
+            return "semantic_model" if _names_something_missing(_rejected_query(rec)) else "ask_again"
         return "ask_again"
     if rec.get("status") == "expected_doubtful" or any(p.get("verdict") == QUERY_DEFECT for p in parts):
         return "query"
@@ -2452,10 +2559,22 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
             change = ["Fix your query where the marks are red, then run this row again."]
         todo = ["Your query: fix the red rows, then re-run."]
     elif fix == "semantic_model":
-        change = [f"The semantic model is missing: {', '.join(gaps)}. Add them through /agami-save-correction." if gaps
-                  else "Decide which definition your team means. A change to the semantic model goes through /agami-save-correction."]
-        todo = [f"The semantic model: {', '.join(gaps)}." if gaps else "The semantic model: decide the definition."]
-        prefill["change"] = ("add " + ", ".join(gaps)) if gaps else ""
+        rejected = _rejected_query(rec) if cause == "agami_query_rejected" else None
+        if rejected is not None:
+            # What stopped it and why, in plain words, because that names the thing that is not
+            # there. The generic "decide which definition your team means" below is for a row where
+            # two definitions disagree; here nothing disagreed, the query never ran.
+            change = ["agami's query did not run. " + _why_it_did_not_run(rejected.get("status"), rejected.get("detail")),
+                      "Asking again would hit the same problem. Correct the semantic model through "
+                      "/agami-save-correction, or re-introspect the datasource with /agami-connect if "
+                      "the database has changed, then run this row again."]
+            todo = ["The semantic model: it and the database disagree about what exists."]
+            prefill["change"] = ""
+        else:
+            change = [f"The semantic model is missing: {', '.join(gaps)}. Add them through /agami-save-correction." if gaps
+                      else "Decide which definition your team means. A change to the semantic model goes through /agami-save-correction."]
+            todo = [f"The semantic model: {', '.join(gaps)}." if gaps else "The semantic model: decide the definition."]
+            prefill["change"] = ("add " + ", ".join(gaps)) if gaps else ""
     elif fix == "examples":
         change, todo = list(_FIX_CHANGE["examples"][0]), list(_FIX_CHANGE["examples"][1])
     elif fix == "question":
@@ -2467,7 +2586,12 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
                   "Reword the question, or change your query, so they ask the same thing."]
         todo = ["The question: reword it and re-run."]
     elif fix == "ask_again":
-        if cause == "agami_failed":
+        rejected = _rejected_query(rec) if cause == "agami_query_rejected" else None
+        if rejected is not None:
+            change = ["agami's query did not run. " + _why_it_did_not_run(rejected.get("status"), rejected.get("detail")),
+                      "That does not point at the semantic model, so ask the question again."]
+            todo = ["agami: ask again."]
+        elif cause == "agami_failed":
             change, todo = list(_OWNER_CHANGE["agami"][0]), list(_OWNER_CHANGE["agami"][1])
         elif cause == "unknown":
             change = ["Run this row again; it could not be compared and the run's files do not say why."]
@@ -2607,7 +2731,11 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
         cause = _error_cause(rec) or "unknown"
         error = _first_line(rec.get("error"))
         with_error = cause in ("agami_failed", "yours_failed", "unknown") and error
-        return f"This row could not be compared: {_ERROR_LEAD[cause]}{': ' + error if with_error else ''}."
+        # The error's own trailing stop is dropped before this sentence adds one. A relayed message
+        # is a sentence already ("…re-introspect the datasource."), and appending regardless put two
+        # full stops on the line a person reads first.
+        said = (": " + error.rstrip().rstrip(".")) if with_error and error else ""
+        return f"This row could not be compared: {_ERROR_LEAD[cause]}{said}."
     # What the two QUERIES differ in is the SQL section's summary; repeating it here made the card
     # say one thing twice and, on a row whose paired columns all agreed, contradict itself. This
     # sentence says what happened to the ANSWER, and leaves the queries to their own section.
@@ -2824,8 +2952,15 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         error = answer.get("error") or "agami wrote no statement"
     elif recorded is None:
         detail = agami_run if isinstance(agami_run, dict) else {}
-        error = detail.get("detail") or detail.get("kind") or detail.get("status") or "agami's statement was not run, or its result was not recorded"
-        error = f"agami's statement did not run: {error}" if detail else error
+        if detail.get("source") == "trace" and detail.get("status") in _DID_NOT_RUN:
+            # Who stopped it and why, in plain words: the run file's own `status` ("refused") names a
+            # mechanism a reader who has never seen the safety check cannot decode. Only for an outcome
+            # copied from agami's own session: a statement that ran there and was refused when run
+            # again for its result did run, and saying it did not would be false.
+            error = "agami's query did not run. " + _why_it_did_not_run(detail["status"], detail.get("detail") or answer.get("error"))
+        else:
+            error = detail.get("detail") or detail.get("kind") or detail.get("status") or "agami's statement was not run, or its result was not recorded"
+            error = f"agami's statement did not run: {error}" if detail else error
     elif exp is None and statement is None:
         # A question on its own: the person supplied no statement and no number, so there is nothing
         # of theirs to compare against and NO file on disk can change that. `comparison.json` and
@@ -2872,6 +3007,14 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         "ledger": ledger, "ledger_verdict": ledger_verdict, "comparison": comparison, "claims": claims,
         "finding_keys": [],
         "agami_statements": [] if not sql or len(statements) < 2 else statements,
+        # How agami was asked, and what it did on the way. Present only when the run served agami's
+        # own tools (`run_golden_eval.py --via mcp`), because only then is there a trace to carry:
+        # `probes` is the server's record of the call, and it is what lets a failed row say whether
+        # the WAREHOUSE rejected the statement or the client never answered at all. Those two want
+        # opposite fixes, and telling them apart by reading an error sentence would be guesswork.
+        **({"mode": answer["mode"]} if isinstance(answer.get("mode"), str) else {}),
+        **({"probe_count": answer["probe_count"]} if isinstance(answer.get("probe_count"), int) else {}),
+        **({"probes": answer["probes"]} if isinstance(answer.get("probes"), list) else {}),
     }
     if delta is not None:
         rec["delta"] = delta
