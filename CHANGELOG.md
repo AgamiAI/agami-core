@@ -14,6 +14,18 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A served deployment no longer names a datasource the organization does not have.** With no
+  `datasource` named and `AGAMI_PROFILE` unset, the server resolved a profile from
+  `.config.active_profile` — a setting the local CLI writes — before looking at what the deployment
+  actually serves. A leftover `.config` on a dev box or a mounted artifacts directory therefore won:
+  on an organization with one datasource, an omitted call ran against a name from someone's
+  machine, and `list_datasources` reported that name as active. A served deployment now ignores
+  `.config`, and `list_datasources` reports `active_datasource` as `null` rather than `default`
+  when several datasources are served and none is named. The local CLI is unchanged. (#253)
+- **`AGAMI_REQUIRE_THREAD_ID` no longer accepts a blank `thread_id`.** A required field only has to
+  be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
+  blank id is now rejected as an input validation error — a deployment turning the flag on should
+  confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
 - **An identical answer no longer scores as different when two of its columns hold the same values
   on different rows.** When row order is not compared (reconcile always, and a golden run whose
   answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
@@ -28,7 +40,6 @@ below corresponds to one such version.
   below 1.0 when neither names nor order line their rows up. And it reads at most two million rows
   in all, about a quarter of a second. Past that it keeps the best pairing it has found, which is
   never worse than the old one.
-
 - **A column that mostly repeats one value no longer pairs with a different column.** A flag that
   is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
   the rows differed and blamed a column that was right, when the real finding was a missing

@@ -114,3 +114,66 @@ def test_the_served_surface_is_unchanged_while_the_flag_is_off(monkeypatch):
     for meta in TOOLS.values():
         schema = meta.get("inputSchema") or {}
         assert "thread_id" not in (schema.get("required") or ())
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_a_blank_id_does_not_satisfy_the_requirement(blank):
+    """#257: `required` only checks the key is present, so `""` passed without naming a conversation."""
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = require_thread_id(TOOLS)["list_datasources"]["inputSchema"]
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"thread_id": blank}, schema)
+    jsonschema.validate({"thread_id": "t-1"}, schema)
+
+
+def _served_schema(tool: str) -> dict:
+    """The schema the MCP SDK validates a call against."""
+    import asyncio
+
+    import mcp.types as types
+    from mcp_http import build_server
+
+    server = build_server()
+    listed = asyncio.run(server.request_handlers[types.ListToolsRequest](types.ListToolsRequest()))
+    return next(t for t in listed.root.tools if t.name == tool).inputSchema
+
+
+def test_a_blank_id_is_still_accepted_while_the_flag_is_off(monkeypatch):
+    """Promoting a registry elsewhere in the process must not leak the rule into a server that
+    never opted in."""
+    jsonschema = pytest.importorskip("jsonschema")
+    require_thread_id(TOOLS)
+    monkeypatch.delenv("AGAMI_REQUIRE_THREAD_ID", raising=False)
+
+    jsonschema.validate({"thread_id": ""}, _served_schema("list_datasources"))
+
+
+def test_the_served_server_refuses_a_blank_id_when_the_flag_is_on(monkeypatch):
+    """The schema the MCP SDK validates against, not just the function's output."""
+    jsonschema = pytest.importorskip("jsonschema")
+    monkeypatch.setenv("AGAMI_REQUIRE_THREAD_ID", "1")
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"thread_id": ""}, _served_schema("list_datasources"))
+
+
+def test_a_pattern_the_tool_already_declares_is_kept():
+    """Replacing it with the looser non-blank rule would admit ids the tool used to refuse."""
+    jsonschema = pytest.importorskip("jsonschema")
+    tool = _tool({"thread_id": {"type": "string", "pattern": "^t-[0-9]+$"}})
+    schema = require_thread_id({"a": tool})["a"]["inputSchema"]
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"thread_id": "abc"}, schema)
+    jsonschema.validate({"thread_id": "t-1"}, schema)
+
+
+def test_a_tool_that_already_requires_thread_id_still_refuses_a_blank_one():
+    jsonschema = pytest.importorskip("jsonschema")
+    tool = _tool({"thread_id": {"type": "string"}}, ["thread_id"])
+    schema = require_thread_id({"a": tool})["a"]["inputSchema"]
+
+    assert schema["required"] == ["thread_id"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"thread_id": ""}, schema)
