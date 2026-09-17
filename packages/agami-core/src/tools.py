@@ -2707,6 +2707,10 @@ EXAMPLE_ID_MAX_CHARS = 200
 EXAMPLE_USE_MAX_CHARS = 40
 
 
+#: What the two example columns hold for every call that is not an `execute_sql` naming one.
+_NO_EXAMPLE_CLAIM: dict[str, str | None] = {"example_id": None, "example_use": None}
+
+
 def _example_claim(raw: Any) -> dict[str, str | None]:
     """`execute_sql`'s `example` argument as the tool-call row stores it (#376): the id and the use,
     each a bounded string or None. Guarded for the reason `_bounded_client_model` is — JSON hands back
@@ -3541,7 +3545,10 @@ def record_tool_call(
         "client_model": _bounded_client_model(args.get("client_model")),
         # The example the client consulted (#376). Read off the arguments like the self-reported
         # fields above; the gate in `tool_execute_sql` is what checked the id before anything ran.
-        **_example_claim(args.get("example")),
+        # Only from `execute_sql`, the one tool that declares it and the one whose gate checked it: a
+        # consumer tool carrying an `example` key of its own would otherwise write a claim nothing
+        # verified into columns the migration says are NULL for every other tool.
+        **(_example_claim(args.get("example")) if name == "execute_sql" else _NO_EXAMPLE_CLAIM),
         "thread_id": thread_id if thread_id is not None else args.get("thread_id"),
         "correlation_id": (  # the turn (one user question)
             correlation_id if correlation_id is not None else args.get("correlation_id")

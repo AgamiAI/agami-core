@@ -6,7 +6,7 @@
 --
 --   example_id   the id the client sent (checked to exist before the statement ran)
 --   example_use  'followed' or 'shown_only' as sent — self-reported, never verified against the SQL
---   both NULL    any other tool, a call that sent neither, or a row written before 026
+--   both NULL    any other tool, an execute_sql that sent neither, or a row written before 026
 --
 -- Kept apart from `basis` (020), which is optional free text nothing checks: these two are what the
 -- gate decided on, so a reader can count how often the examples fit without parsing JSON.

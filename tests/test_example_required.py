@@ -248,8 +248,14 @@ def test_the_claim_is_recorded_with_the_call(served):
         execution_ms=1,
         actor="you@example.com",
     )
+    # A tool that does not declare `example` records NULLs even when its arguments carry one: the
+    # gate that checked the id runs on execute_sql alone, so a claim from anywhere else is unverified.
     tools.record_tool_call(
-        name="list_datasources", arguments={}, result_text="{}", execution_ms=1, actor=None
+        name="list_datasources",
+        arguments={"example": {"id": ex_id, "use": "followed"}},
+        result_text="{}",
+        execution_ms=1,
+        actor=None,
     )
     store = Store.connect(db_url)
     try:
@@ -310,3 +316,40 @@ def test_the_activity_view_shows_the_example_on_the_call(served):
     assert "Example" not in admin._call_card(
         {"sql": SQL, "tool_name": "execute_sql", "ts": "2026-09-17T00:00:00Z", "success": 1}
     )
+
+
+def test_an_edited_example_keeps_a_curator_authored_id_and_the_claim_stays_valid(served):
+    """The known limit of checking identity rather than content (#376), pinned rather than implied.
+
+    An id derived from an example's own content changes when the example is edited, so a claim naming
+    the old one is refused and the client re-reads — the test above. An id a CURATOR authored is
+    preserved across re-seeds on purpose (`model_store.write_examples`), so editing that example's SQL
+    leaves the old claim valid, and a client that refetched only the schema after `stale_model` never
+    sees the new content. Deliberate for now: the gate asks whether the client looked at the examples,
+    not which version of one it read. Closing it needs a per-fetch receipt, which #376 put out of
+    scope."""
+    deploy, db_url = served
+    deploy([])
+    store = Store.connect(db_url)
+    try:
+        model_store.write_examples(
+            store,
+            "demo",
+            [{"area": "Catalog", "id": "curated1", "question": "q", "sql": "SELECT 1"}],
+            org_id="local",
+        )
+        version_before = _version()
+        model_store.write_examples(
+            store,
+            "demo",
+            [{"area": "Catalog", "id": "curated1", "question": "q", "sql": "SELECT 2"}],
+            org_id="local",
+        )
+    finally:
+        store.close()
+
+    # The model version is untouched here (the files did not change), so this isolates identity: the
+    # authored id still names an example, and the claim is let through.
+    assert _version() == version_before
+    with pytest.raises(_Reached):
+        _run(example={"id": "curated1", "use": "followed"})
