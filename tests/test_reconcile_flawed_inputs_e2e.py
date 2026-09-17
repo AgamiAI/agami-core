@@ -95,7 +95,9 @@ def _tree_hash(root: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def store(tmp_path_factory):
+def sample(tmp_path_factory):
+    """The sample database and a snapshotted copy of its model, built once per worker. Every test
+    reads both and none may write to either, which test_8 checks."""
     base = tmp_path_factory.mktemp("agami-e2e")
     db = base / "store.db"
     build_sample.build(db, prefer_cli=True)
@@ -104,9 +106,20 @@ def store(tmp_path_factory):
     # `snapshot` prints the hash it stamped, not JSON, so it is not read through `_sm`.
     with contextlib.redirect_stdout(io.StringIO()):
         assert cli.main(["snapshot", str(root)]) == 0
+    return {"db": db, "root": root, "profile_hash": _tree_hash(root)}
+
+
+def _new_run(sample: dict, base: Path) -> dict:
     run = base / "reconcile-run"
     (run / "rows").mkdir(parents=True)
-    return {"db": db, "root": root, "run": run, "profile_hash": _tree_hash(root)}
+    return {**sample, "run": run}
+
+
+@pytest.fixture
+def store(sample, tmp_path):
+    """A reconcile run of the test's own over the shared sample. The run is what tests write to, so a
+    shared one lets a test pass or fail by which tests ran before it on its pytest-xdist worker."""
+    return _new_run(sample, tmp_path)
 
 
 # --- the chain, as the skill's Phase 1.5 walks it ----------------------------------------
@@ -225,117 +238,158 @@ def _parts(ledger: dict) -> dict[str, dict]:
     return {row["part"]: row for row in ledger["rows"]}
 
 
+# --- the flawed-inputs run ----------------------------------------------------------------
+#
+# Rows 1 to 9 are one run, the one the brief describes, and each row is written down once, here. A
+# numbered test builds its own row into a run of its own. `flawed_run` builds every row into one
+# shared run, for the tests that need the run whole. So those tests see every row on any worker and
+# in any order, and a change to a row's statement reaches both at once.
+
+WRONG_KEY_SQL = "SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay JOIN orders o ON o.id = pay.id"
+RIGHT_KEY_SQL = ("SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay "
+                 "JOIN orders o ON o.id = pay.order_id WHERE o.status != 'cancelled'")
+CLEAN_COUNT_SQL = "SELECT COUNT(*) AS order_count FROM orders o WHERE o.status != 'cancelled'"
+
+# Row number -> the question, the person's statement, and what agami ran for that question.
+STATEMENT_ROWS = {
+    # A join on the wrong key: a payment's own id matched to an order's id.
+    1: {"question": "What is paid revenue?", "sql": WRONG_KEY_SQL, "agami_sql": RIGHT_KEY_SQL},
+    # The same wrong key under a 0.1% band, which sees the gap the default 1% band does not.
+    9: {"question": "What is paid revenue, tightly?", "sql": WRONG_KEY_SQL, "agami_sql": RIGHT_KEY_SQL,
+        "tolerance": 0.001},
+    # A miscased value: no order's status is 'Delivered'.
+    2: {"question": "How many orders were delivered?",
+        "sql": "SELECT COUNT(*) AS delivered FROM orders o WHERE o.status = 'Delivered' AND o.status != 'cancelled'",
+        "agami_sql": "SELECT COUNT(*) AS delivered FROM orders o WHERE o.status = 'delivered' "
+                     "AND o.status != 'cancelled'"},
+    # A required filter left out: the cancelled orders stay in the total.
+    3: {"question": "What is total revenue?",
+        "sql": "SELECT ROUND(SUM(total_amount), 2) AS revenue FROM orders",
+        "agami_sql": "SELECT ROUND(SUM(o.total_amount), 2) AS revenue FROM orders o "
+                     "WHERE o.status != 'cancelled'"},
+    # A correct statement the AI gets wrong. The seed example for this question omits the filter:
+    # that is exactly what agami would write.
+    4: {"question": "What is our total revenue?",
+        "sql": "SELECT SUM(o.total_amount) AS revenue FROM orders o WHERE o.status != 'cancelled'",
+        "agami_sql": "SELECT SUM(total_amount) AS revenue FROM orders", "record_claims": True},
+    # A clean count, which agami writes the same way.
+    5: {"question": "How many orders have been placed?", "sql": CLEAN_COUNT_SQL, "agami_sql": CLEAN_COUNT_SQL},
+}
+
+# Row number -> a bare question and what agami ran for it. No statement or number stands behind these.
+QUESTION_ROWS = {
+    6: ("How many orders come from the web channel?",
+        "SELECT COUNT(*) AS orders FROM orders o WHERE o.channel = 'web' AND o.status != 'cancelled'"),
+    7: ("How many customers do we have?", "SELECT COUNT(*) AS customers FROM customers"),
+    8: ("What is the refund rate?", "SELECT 0.5 AS refund_rate"),
+}
+
+
+def build_statement_row(store: dict, n: int) -> dict:
+    """Row `n` of STATEMENT_ROWS through the whole chain: grade the statement, take its number as the
+    expected value, ask agami, compare, record. Returns each step's output for the row's test."""
+    spec = STATEMENT_ROWS[n]
+    graded = grade_statement(store, n, spec["sql"])
+    expected = scalar((store["run"] / "rows" / str(n) / "statement.csv").read_text())
+    actual = ask_agami(store, n, spec["agami_sql"])
+    diff, ledger = compare(store, n, expected, actual, tolerance=spec.get("tolerance", 0.01))
+    extra = {}
+    if spec.get("record_claims"):
+        extra["claims"] = json.loads((store["run"] / "rows" / str(n) / "claims.json").read_text())
+    rec = record(store, n, spec["question"], spec["sql"], expected, diff, ledger, **extra)
+    return {"graded": graded, "expected": expected, "actual": actual, "diff": diff, "rec": rec, **extra}
+
+
+def build_question_rows(store: dict) -> dict[int, dict]:
+    """The rows of QUESTION_ROWS: agami answers each, then each is recorded. Returns the records."""
+    for n, (_question, agami_sql) in QUESTION_ROWS.items():
+        ask_agami(store, n, agami_sql)
+    return {n: record(store, n, question, None, None, None, None)
+            for n, (question, _agami_sql) in QUESTION_ROWS.items()}
+
+
+@pytest.fixture(scope="module")
+def flawed_run(sample, tmp_path_factory):
+    """Rows 1 to 9 built into one run of their own, once per worker. A test that reads the run whole
+    gets it here rather than from the tests that build each row, which may have run on another worker
+    or not yet."""
+    flawed = _new_run(sample, tmp_path_factory.mktemp("flawed-run"))
+    for n in STATEMENT_ROWS:
+        build_statement_row(flawed, n)
+    build_question_rows(flawed)
+    return flawed
+
+
 # --- the fixtures -----------------------------------------------------------------------
 
 
 def test_1_a_join_on_the_wrong_key_is_the_persons_defect_and_the_expected_value_is_doubtful(store):
-    sql = "SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay JOIN orders o ON o.id = pay.id"
-    ledger = grade_statement(store, 1, sql)
-    parts = _parts(ledger)
+    built = build_statement_row(store, 1)
+    parts = _parts(built["graded"])
     join = parts["join:orders-payments"]
     assert join["verdict"] == "query_defect", join
     assert join["evidence"]["declared_pairs"] == [[["orders", "id"], ["payments", "order_id"]]]
-    expected = scalar((store["run"] / "rows" / "1" / "statement.csv").read_text())
-    actual = ask_agami(store, 1, "SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay "
-                                 "JOIN orders o ON o.id = pay.order_id WHERE o.status != 'cancelled'")
-    diff, ledger = compare(store, 1, expected, actual)
-    rec = record(store, 1, "What is paid revenue?", sql, expected, diff, ledger)
     # On this data the wrong key gives a total 0.28% away from the right one, inside the default 1%
     # band, so the numbers "agree" while the join is the person's defect: that is the lucky match
     # `match_unverified` exists for, and it never reaches the keep-offer.
-    assert rec["status"] == "match_unverified", rec["status"]
+    assert built["rec"]["status"] == "match_unverified", built["rec"]["status"]
 
 
 def test_1b_the_same_wrong_key_makes_the_expected_value_doubtful_when_the_numbers_differ(store):
     """The brief's case 1 outcome: the totals differ (a 0.1% band sees the 0.28% gap) and the
     person's own defect makes the expected value doubtful rather than a mismatch charged to agami."""
-    sql = "SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay JOIN orders o ON o.id = pay.id"
-    ledger = grade_statement(store, 9, sql)
-    assert _parts(ledger)["join:orders-payments"]["verdict"] == "query_defect"
-    expected = scalar((store["run"] / "rows" / "9" / "statement.csv").read_text())
-    actual = ask_agami(store, 9, "SELECT SUM(o.total_amount) AS paid_revenue FROM payments pay "
-                                 "JOIN orders o ON o.id = pay.order_id WHERE o.status != 'cancelled'")
-    diff, ledger = compare(store, 9, expected, actual, tolerance=0.001)
-    assert diff["match"] is False
-    rec = record(store, 9, "What is paid revenue, tightly?", sql, expected, diff, ledger)
-    assert rec["status"] == "expected_doubtful"
+    built = build_statement_row(store, 9)
+    assert _parts(built["graded"])["join:orders-payments"]["verdict"] == "query_defect"
+    assert built["diff"]["match"] is False
+    assert built["rec"]["status"] == "expected_doubtful"
 
 
 def test_2_a_miscased_value_is_the_persons_defect_with_the_near_miss_named(store):
-    sql = "SELECT COUNT(*) AS delivered FROM orders o WHERE o.status = 'Delivered' AND o.status != 'cancelled'"
-    ledger = grade_statement(store, 2, sql)
-    parts = _parts(ledger)
+    built = build_statement_row(store, 2)
+    parts = _parts(built["graded"])
     lit = parts["literal:orders.status=Delivered"]
     assert lit["verdict"] == "query_defect" and lit["evidence"]["near_miss"] == "delivered"
     assert lit["evidence"]["rows_with_value"] == 0
     # The list is populated, so the semantic model answered; the probe confirmed that no row holds it.
     assert lit["evidence"]["tier"] == "choice_field"
-    expected = scalar((store["run"] / "rows" / "2" / "statement.csv").read_text())
-    actual = ask_agami(store, 2, "SELECT COUNT(*) AS delivered FROM orders o WHERE o.status = 'delivered' "
-                                 "AND o.status != 'cancelled'")
-    diff, ledger = compare(store, 2, expected, actual)
-    rec = record(store, 2, "How many orders were delivered?", sql, expected, diff, ledger)
-    assert expected == 0 and actual and actual > 0 and rec["status"] == "expected_doubtful"
+    expected, actual = built["expected"], built["actual"]
+    assert expected == 0 and actual and actual > 0 and built["rec"]["status"] == "expected_doubtful"
 
 
 def test_3_a_required_filter_left_out_is_a_gap_of_kind_filter(store):
-    sql = "SELECT ROUND(SUM(total_amount), 2) AS revenue FROM orders"
-    ledger = grade_statement(store, 3, sql)
+    built = build_statement_row(store, 3)
+    ledger = built["graded"]
     parts = _parts(ledger)
     (flt,) = [row for part, row in parts.items() if part.startswith("default_filter:orders:")]
     assert flt["verdict"] == "model_gap" and flt["kind"] == "filter"
     assert not any(row["verdict"] == "query_defect" for row in ledger["rows"]), ledger["rows"]
-    expected = scalar((store["run"] / "rows" / "3" / "statement.csv").read_text())
-    actual = ask_agami(store, 3, "SELECT ROUND(SUM(o.total_amount), 2) AS revenue FROM orders o "
-                                 "WHERE o.status != 'cancelled'")
-    diff, ledger = compare(store, 3, expected, actual)
-    rec = record(store, 3, "What is total revenue?", sql, expected, diff, ledger)
-    assert diff["match"] is False and rec["status"] == "mismatch"
+    assert built["diff"]["match"] is False and built["rec"]["status"] == "mismatch"
 
 
 def test_4_a_correct_statement_the_ai_gets_wrong_names_the_filter_that_differs(store):
-    sql = "SELECT SUM(o.total_amount) AS revenue FROM orders o WHERE o.status != 'cancelled'"
-    ledger = grade_statement(store, 4, sql)
+    built = build_statement_row(store, 4)
+    ledger = built["graded"]
     parts = _parts(ledger)
     (flt,) = [row for part, row in parts.items() if part.startswith("default_filter:orders:")]
     assert flt["verdict"] == "confirmed", flt
     # Every part holds: the brief's "correct statement", and the only way to an `example` finding.
     assert ledger["verdict"] == "confirmed", [r for r in ledger["rows"] if r["verdict"] != "confirmed"]
-    expected = scalar((store["run"] / "rows" / "4" / "statement.csv").read_text())
-    # The seed example for this question omits the filter: that is exactly what agami would write.
-    actual = ask_agami(store, 4, "SELECT SUM(total_amount) AS revenue FROM orders")
-    diff, ledger = compare(store, 4, expected, actual)
-    claims = json.loads((store["run"] / "rows" / "4" / "claims.json").read_text())
-    by_name = {c["name"]: c["status"] for c in claims["claims"]}
+    by_name = {c["name"]: c["status"] for c in built["claims"]["claims"]}
     assert by_name["filter_predicates"] == "differs" and by_name["tables"] == "agrees"
-    rec = record(store, 4, "What is our total revenue?", sql, expected, diff, ledger,
-                 claims=claims)
-    assert rec["status"] == "mismatch"
+    assert built["rec"]["status"] == "mismatch"
 
 
 def test_5_a_clean_count_matches_and_may_be_kept(store):
-    sql = "SELECT COUNT(*) AS order_count FROM orders o WHERE o.status != 'cancelled'"
-    ledger = grade_statement(store, 5, sql)
-    assert ledger["verdict"] == "confirmed", ledger["rows"]
-    expected = scalar((store["run"] / "rows" / "5" / "statement.csv").read_text())
-    actual = ask_agami(store, 5, sql)
-    diff, ledger = compare(store, 5, expected, actual)
-    rec = record(store, 5, "How many orders have been placed?", sql, expected, diff, ledger)
-    assert rec["status"] == "match"
+    built = build_statement_row(store, 5)
+    assert built["graded"]["verdict"] == "confirmed", built["graded"]["rows"]
+    assert built["rec"]["status"] == "match"
 
 
-def test_6_three_bare_questions_are_checked_and_decided_on_the_report_page(store, tmp_path):
+def test_6_three_bare_questions_are_checked_and_decided_on_the_report_page(store):
     """The questions branch. Nothing here can say whether an answer is right, so the row records
     `ungraded` and a person decides on the same report page every other row lands on. What CAN be
     measured, the query agami wrote, is measured; what cannot is asked."""
-    answers = {
-        6: ("How many orders come from the web channel?",
-            "SELECT COUNT(*) AS orders FROM orders o WHERE o.channel = 'web' AND o.status != 'cancelled'"),
-        7: ("How many customers do we have?", "SELECT COUNT(*) AS customers FROM customers"),
-        8: ("What is the refund rate?", "SELECT 0.5 AS refund_rate"),
-    }
-    for n, (_question, agami_sql) in answers.items():
-        ask_agami(store, n, agami_sql)
+    recs = build_question_rows(store)
 
     block = ("profile: demo\nreconcile-run: e2e\ndecisions:\n"
              + json.dumps([{"row": 6, "decision": "example"},
@@ -349,14 +403,13 @@ def test_6_three_bare_questions_are_checked_and_decided_on_the_report_page(store
 
     # No statement of the person's on any of the three, so every row records ungraded and none of
     # them takes its expected value from the run: agami's own answer is never its own answer key.
-    for n in answers:
-        rec = record(store, n, answers[n][0], None, None, None, None)
+    for rec in recs.values():
         assert rec["status"] == reconcile.UNGRADED, rec
         assert rec["expected"] is None
 
 
-def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(store):
-    out = reconcile.findings(store["run"])
+def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(flawed_run):
+    out = reconcile.findings(flawed_run["run"])
     keys = {f["key"] for f in out["findings"]}
     # One declared filter, omitted by row 3's statement, is one finding whatever alias spelt it.
     assert len([k for k in keys if k.startswith("filter:orders:")]) == 1, keys
@@ -372,7 +425,7 @@ def test_7_the_findings_name_the_gaps_and_list_the_defects_apart(store):
     # Nothing about the person's defects became a finding about the semantic model.
     assert not any("payments" in k for k in keys)
     for name in ("findings.json", "query_defects.json", "ledger.json"):
-        assert (store["run"] / name).exists()
+        assert (flawed_run["run"] / name).exists()
 
 
 def test_10_a_count_through_declared_many_to_one_joins_is_confirmed_and_the_drops_are_noted(store):
@@ -483,5 +536,8 @@ def test_14_a_sound_statement_paired_with_the_wrong_question_is_never_kept(store
     assert rec["status"] == "match"
 
 
-def test_8_the_profile_was_never_written_to(store):
-    assert _tree_hash(store["root"]) == store["profile_hash"]
+def test_8_the_profile_was_never_written_to(flawed_run):
+    # `flawed_run` has put every row of the run through the chain over this profile before the hash
+    # is taken, so the check has something to catch on any worker. The other tests share the profile
+    # too, so whatever of theirs ran earlier on this worker is checked with it.
+    assert _tree_hash(flawed_run["root"]) == flawed_run["profile_hash"]
