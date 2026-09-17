@@ -2453,6 +2453,43 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
     return _replace(env, refusal=_replace(refusal, remediation=remediation))
 
 
+def _log_refusal(env: Envelope, profile: str | None) -> None:
+    """One server-log line per refused statement, beside the audit rows `_record_execution` writes.
+
+    The audit rows are the record; this is what an operator watching the server's own log sees
+    without a database prompt — and for `audit_unavailable`, which writes no row by construction, it
+    is the only trace. Every path reaches here through `_emit`, so one call covers both transports and
+    both execution paths.
+
+    **Value-free, by the same contract as the refusal itself, and narrower.** The rule and the
+    identifiers that join this line to its row — never the statement, never `detail` (it echoes
+    identifiers the caller sent), never the caller's identity (the row carries that; a log sink is
+    usually read more widely). Not the reason either: it is one of three coarse categories, and
+    `undetermined` — correct for a call stopped before any check — reads in a log as "unknown cause"
+    beside a rule that names the cause exactly. WARNING, because the served entrypoint configures no logging and
+    Python's fallback handler prints WARNING and above only: at INFO a self-hosted server would drop
+    it.
+
+    `datasource` is the one caller-written field, and a read-only refusal is reached before anything
+    checks that the name exists — so it is cut to a bound and written as a repr. Bare, a newline in it
+    started a second line of exactly this shape, naming whatever rule and organization the caller
+    chose."""
+    if env.status != "refused" or env.refusal is None:
+        return
+    _LOG.warning(
+        "execute_sql refused: rule=%s datasource=%r org_id=%s audit_id=%s",
+        env.refusal.rule,
+        (profile or "")[:LOG_DATASOURCE_MAX_CHARS],
+        _current_org_id(),
+        env.audit_id or "-",
+    )
+
+
+# How much of a caller's `datasource` a refusal's log line keeps. Far above any real name; a cut
+# means the name was not one, and the audit row is where the whole call is recorded.
+LOG_DATASOURCE_MAX_CHARS = 200
+
+
 def _emit(
     env: Envelope,
     *,
@@ -2521,6 +2558,10 @@ def _emit(
     body["receipt"] = asdict(env.receipt)
     body["audit_id"] = env.audit_id
 
+    # Logged BEFORE the audit write: on a served deployment that write is load-bearing and re-raises
+    # when it fails (`_record_query`), and a refusal whose row could not be written is exactly the one
+    # an operator most needs to see in the server log.
+    _log_refusal(env, profile)
     _record_execution(env, sql=sql, profile=profile, args=args, row_count=row_count)
     # Publish the TYPED outcome for the tool-call recorder (ACE-098). It runs later, in the
     # transport's `finally`, where the Envelope no longer exists and only this serialized string
