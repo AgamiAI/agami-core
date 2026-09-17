@@ -376,8 +376,8 @@ _sole_served_datasource.cache_clear = _SOLE_SERVED.clear  # type: ignore[attr-de
 
 
 def resolve_profile(explicit: str | None = None) -> str:
-    """Resolution order: explicit arg → AGAMI_PROFILE → .config.active_profile → the sole served
-    datasource → 'default'.
+    """Resolution order: explicit arg → AGAMI_PROFILE → .config.active_profile (local only) → the
+    sole served datasource → 'default'.
 
     The store step is what makes this true on a served deployment. `.config` lives under
     `<artifacts_dir>/local/` and a DB-only deploy reads NO files at runtime, so before it every
@@ -394,9 +394,15 @@ def resolve_profile(explicit: str | None = None) -> str:
     env = os.environ.get("AGAMI_PROFILE")
     if env:
         return env
-    active = _load_config().get("active_profile")
-    if isinstance(active, str) and active:
-        return active
+    from execute_sql import _hosted  # local import: keeps the module import graph acyclic
+
+    # `.config` is written by the local CLI, so on a served deployment it is at best a leftover — a
+    # dev box, or a mounted artifacts dir — naming a profile this org may not have. It used to rank
+    # above the datasource the deployment actually serves (#253).
+    if not _hosted():
+        active = _load_config().get("active_profile")
+        if isinstance(active, str) and active:
+            return active
     served = _sole_served_datasource(_current_org_id())
     if served:
         return served
@@ -1022,7 +1028,13 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
         finally:
             store.close()
         if out:
-            return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
+            # Only a datasource this org serves can be active. `resolve_profile` still falls back to
+            # the literal 'default' when several are served and none is named, and reporting that
+            # would read as a real account (#253); the data tools refuse that omission already.
+            listed = any(d["datasource"] == active for d in out)
+            return json.dumps(
+                {"datasources": out, "active_datasource": active if listed else None}, indent=2
+            )
         return json.dumps(
             {
                 "datasources": [],
