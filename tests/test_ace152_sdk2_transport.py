@@ -35,7 +35,7 @@ import tools  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 from store import Store  # noqa: E402
 
-from mcp_eras import ERAS, envelope, rpc  # noqa: E402
+from mcp_eras import ERAS, LEGACY, MODERN, base_headers, envelope, rpc  # noqa: E402
 
 PUBLIC_BASE_URL = "https://demo.example.com"
 MARKER = "marker-7f3a"
@@ -279,3 +279,84 @@ def test_a_validation_refusal_writes_no_row(era, store_url):
 
     assert envelope(response)["result"]["isError"] is True
     assert _tool_calls(store_url) == []
+
+
+# --- the host and origin allowlist ---------------------------------------------------------------
+
+
+def _opening_request(client, era: str):
+    """The first request a client of `era` sends: `initialize` on 2025-06-18, a plain `tools/list`
+    on 2026-07-28. Sent raw on the handshake era, because `rpc` asserts the handshake succeeded and
+    a refused host is exactly the case where it must not."""
+    if era == MODERN:
+        return rpc(client, era, "tools/list")
+    return client.post(
+        "/mcp",
+        headers=base_headers(),
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": era,
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"},
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_foreign_host_is_421(era):
+    """DNS rebinding: a page on another name that resolves to this server must not reach /mcp."""
+    with TestClient(_app(), base_url="https://elsewhere.example.net") as client:
+        response = _opening_request(client, era)
+
+    assert response.status_code == 421
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_matching_host_is_served(era):
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        response = _opening_request(client, era)
+
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_loopback_serves_localhost_and_127(era, monkeypatch):
+    """A developer's browser and tools spell loopback both ways, on whatever port they bound."""
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:18152")
+    for base in ("http://localhost:18152", "http://127.0.0.1:18152", "http://127.0.0.1:9000"):
+        with TestClient(_app(), base_url=base) as client:
+            response = _opening_request(client, era)
+        assert response.status_code == 200, (base, response.text)
+
+
+def test_foreign_origin_is_403():
+    """A browser page on another origin is refused even with the right Host. A server-to-server
+    client sends no Origin and is unaffected; so is a page served from PUBLIC_BASE_URL itself."""
+
+    def tools_list(client, origin: str):
+        return client.post(
+            "/mcp",
+            headers={**base_headers(), "MCP-Protocol-Version": LEGACY, "Origin": origin},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        )
+
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        foreign = tools_list(client, "https://elsewhere.example.net")
+        own = tools_list(client, PUBLIC_BASE_URL)
+
+    assert foreign.status_code == 403
+    assert own.status_code == 200, own.text
+
+
+def test_well_known_ignores_the_allowlist():
+    """REQ-003: only /mcp is checked. Discovery is what a client reads before it knows anything, and
+    it already names PUBLIC_BASE_URL as the resource, whatever host it was asked on."""
+    with TestClient(_app(), base_url="https://elsewhere.example.net") as client:
+        response = client.get("/.well-known/oauth-protected-resource")
+
+    assert response.status_code == 200
+    assert response.json()["resource"] == f"{PUBLIC_BASE_URL}/mcp"

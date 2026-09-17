@@ -478,7 +478,7 @@ def test_the_transport_no_longer_swallows_it_either(env, monkeypatch):
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.create_app(), raise_server_exceptions=False) as client:
+    with TestClient(mcp_http.create_app(), base_url="https://your-host.example.com", raise_server_exceptions=False) as client:
         init = client.post("/mcp", headers=headers, json={
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {},

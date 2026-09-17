@@ -674,6 +674,33 @@ def _is_loopback(base: str) -> bool:
     return urlsplit(base).hostname in ("localhost", "127.0.0.1", "::1")
 
 
+def _transport_security(base: str):
+    """The Host and Origin values `/mcp` accepts, derived from `PUBLIC_BASE_URL` (ACE-152).
+
+    DNS rebinding: a page on some other name that resolves to this server would otherwise reach
+    `/mcp` from a victim's browser. The SDK refuses a foreign `Host` with 421 and a foreign `Origin`
+    with 403; an absent `Origin` passes, so a server-to-server client (claude.ai) is unaffected, while
+    a browser client served from any origin but `PUBLIC_BASE_URL` is refused.
+
+    The allowed host is the base URL's own netloc, the one name the discovery documents already
+    publish. On a loopback base URL both spellings of loopback are also allowed, on any port: a
+    developer's browser, curl and a port-forward do not agree on which name they send, and nothing
+    else can resolve to a loopback address.
+    """
+    from urllib.parse import urlsplit
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    parts = urlsplit(base)
+    hosts = [parts.netloc]
+    origins = [f"{parts.scheme}://{parts.netloc}"]
+    if _is_loopback(base):
+        for name in ("localhost", "127.0.0.1", "[::1]"):
+            hosts += [name, f"{name}:*"]
+            origins += [f"http://{name}", f"http://{name}:*"]
+    return TransportSecuritySettings(allowed_hosts=hosts, allowed_origins=origins)
+
+
 def create_app(
     extra_tools: dict | None = None,
     adapters: Adapters | None = None,
@@ -738,6 +765,9 @@ def create_app(
         ),
         json_response=True,
         stateless=True,
+        # Checked on `/mcp` only: the discovery and OAuth routes answer whatever host asked, because
+        # they are what a client reads before it knows the server's name.
+        security_settings=_transport_security(base),
     )
 
     async def handle_mcp(scope, receive, send):

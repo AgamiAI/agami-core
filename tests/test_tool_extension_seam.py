@@ -167,7 +167,7 @@ def test_create_app_serves_the_extra_instructions_to_the_client(base_url):
     # End-to-end: the instructions reach the model via the MCP initialize result — the whole reason
     # the seam exists (a tool description alone never makes the model watch for a trigger).
     app = mcp_http.create_app(extra_instructions="Extra: call demo_probe when X.")
-    with TestClient(app) as c:  # `with` runs the lifespan — without it the session manager is dead
+    with TestClient(app, base_url=BASE) as c:  # `with` runs the lifespan — without it the session manager is dead
         r = c.post(
             "/mcp",
             json={
@@ -242,7 +242,7 @@ def test_the_oss_resolver_never_refuses(base_url):
     # The refusal path is inert single-tenant: SingleTenantOrgResolver returns its one org unconditionally,
     # so a plain deploy never sees a 403 from it. `with` runs the lifespan — this request gets PAST the
     # resolver into the MCP session manager, which a bare TestClient never starts.
-    with TestClient(mcp_http.create_app()) as c:
+    with TestClient(mcp_http.create_app(), base_url=BASE) as c:
         r = c.post(
             "/mcp",
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},

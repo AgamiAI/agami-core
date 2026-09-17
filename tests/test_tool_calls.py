@@ -311,7 +311,7 @@ def _mcp_tool_call(subject: str, name: str) -> None:
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.build_app()) as c:
+    with TestClient(mcp_http.build_app(), base_url=BASE) as c:
         init = c.post("/mcp", headers=headers, json={
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
