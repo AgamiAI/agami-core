@@ -1110,6 +1110,17 @@ def test_an_http_metadata_url_is_refused_not_looked_up(env, client_doc):
     assert requests == []
 
 
+def test_a_non_ascii_metadata_url_is_invalid_client_not_a_server_error(env, client_doc):
+    requests, _ = client_doc
+    r = _authorize_post(
+        TestClient(mcp_http.build_app(), raise_server_exceptions=False),
+        client_id="https://ünïcode.example.com/oauth/client.json",
+        redirect_uri=DOC_REDIRECT,
+    )
+    assert r.status_code == 400 and r.json()["error"] == "invalid_client"
+    assert requests == []
+
+
 def test_a_metadata_client_may_not_use_a_redirect_its_document_does_not_list(env, client_doc):
     # The Claude callback and same-origin fallbacks are for registered clients only. A document names its
     # own redirect URIs, and anything else would let any URL claim a code bound for Claude.

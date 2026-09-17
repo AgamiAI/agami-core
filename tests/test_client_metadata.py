@@ -159,8 +159,10 @@ def test_an_invalid_document_is_refused(net, doc):
     [
         _served(content=b"<html>not json</html>"),
         _served(json_body=["a", "list"]),
+        # Nested deeper than the parser recurses: a RecursionError on some Pythons, not a ValueError.
+        _served(content=b"[" * client_metadata._MAX_BYTES),
     ],
-    ids=["non-json", "non-object"],
+    ids=["non-json", "non-object", "deeply-nested"],
 )
 def test_a_body_that_is_not_a_json_object_is_refused(net, response):
     net.respond = lambda request: response
@@ -182,8 +184,21 @@ def test_a_body_that_is_not_a_json_object_is_refused(net, response):
         "https://app.example.com/./client.json",
         "https:///client.json",
         "https://app.example.com:notaport/client.json",
+        "https://ünïcode.example.com/client.json",
+        "https://" + "a" * 64 + ".example.com/client.json",
     ],
-    ids=["http", "userinfo", "fragment", "no-path", "dot-dot", "dot", "no-host", "bad-port"],
+    ids=[
+        "http",
+        "userinfo",
+        "fragment",
+        "no-path",
+        "dot-dot",
+        "dot",
+        "no-host",
+        "bad-port",
+        "non-ascii-host",
+        "label-too-long",
+    ],
 )
 def test_a_malformed_url_is_refused_without_resolving_or_fetching(net, url):
     with pytest.raises(ClientMetadataError):
@@ -247,6 +262,17 @@ def test_a_name_that_does_not_resolve_is_refused(net, monkeypatch):
         _redirect_uris(URL)
     net.addresses = []
     monkeypatch.setattr(client_metadata, "_resolve", net.resolve)
+    with pytest.raises(ClientMetadataError):
+        _redirect_uris(URL)
+    assert net.requests == []
+
+
+def test_a_name_the_resolver_cannot_encode_is_refused(net, monkeypatch):
+    # The system resolver encodes the name itself and raises UnicodeError, not OSError, on one it cannot.
+    async def unencodable(host, port):
+        raise UnicodeError("label too long")
+
+    monkeypatch.setattr(client_metadata, "_resolve", unencodable)
     with pytest.raises(ClientMetadataError):
         _redirect_uris(URL)
     assert net.requests == []

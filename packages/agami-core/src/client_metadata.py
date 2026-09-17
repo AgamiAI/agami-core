@@ -84,6 +84,13 @@ def _check_url(url: str) -> SplitResult:
         raise ClientMetadataError("client_id must be an https URL with a host and a path")
     if "#" in url or "@" in parts.netloc:
         raise ClientMetadataError("client_id must not carry a fragment or userinfo")
+    # The name goes out as a Host header and TLS SNI, which take ASCII only; the idna codec is what TLS
+    # encodes it with, so a label it refuses (over 63 characters) is refused here, not mid-connection.
+    try:
+        parts.netloc.encode("ascii")
+        parts.hostname.encode("idna")
+    except UnicodeError as exc:
+        raise ClientMetadataError("client_id host is not a valid ASCII name") from exc
     if any(segment in (".", "..") for segment in parts.path.split("/")):
         raise ClientMetadataError("client_id must not contain dot segments")
     return parts
@@ -124,7 +131,7 @@ async def _fetch(url: str) -> dict:
     host, port = parts.hostname, parts.port or 443
     try:
         addresses = await _resolve(host, port)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise ClientMetadataError("client_id host does not resolve") from exc
     if not addresses or not all(_is_public(a) for a in addresses):
         raise ClientMetadataError("client_id host is not a public address")
@@ -157,7 +164,7 @@ async def _fetch(url: str) -> dict:
         raise ClientMetadataError("client metadata fetch failed") from exc
     try:
         doc = json.loads(body)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ClientMetadataError("client metadata document is not JSON") from exc
     if not isinstance(doc, dict):
         raise ClientMetadataError("client metadata document is not a JSON object")
