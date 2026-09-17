@@ -213,16 +213,24 @@ def test_a_crash_answers_the_fixed_text(era, cause, store_url, monkeypatch):
     _assert_nothing_leaked(response)
 
 
+@pytest.mark.parametrize(("cause", "expected"), [("handler", 1), ("both", 2)])
 @pytest.mark.parametrize("era", ERAS)
-def test_a_crash_is_logged_once_with_its_traceback(era, store_url, caplog):
-    """The reason leaves the wire, so the log is where an operator finds it."""
+def test_a_crash_is_logged_once_with_its_traceback(
+    era, cause, expected, store_url, caplog, monkeypatch
+):
+    """The reason leaves the wire, so the log is where an operator finds it. Once per failure: a
+    raising handler whose audit write also fails is two failures, and each keeps its own record."""
+    if cause == "both":
+        _break_the_sink(monkeypatch)
     caplog.set_level(logging.ERROR)
 
     _call(_app(_raise), era)
 
     records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert len(records) == 1, [r.getMessage() for r in records]
-    assert records[0].exc_info and MARKER in str(records[0].exc_info[1])
+    assert len(records) == expected, [r.getMessage() for r in records]
+    for record in records:
+        assert record.exc_info and MARKER in str(record.exc_info[1])
+    assert len({id(r.exc_info[1]) for r in records}) == expected
 
 
 @pytest.mark.parametrize("era", ERAS)
@@ -279,6 +287,22 @@ def test_a_validation_refusal_writes_no_row(era, store_url):
 
     assert envelope(response)["result"]["isError"] is True
     assert _tool_calls(store_url) == []
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_a_missing_thread_id_is_refused_when_required(era, monkeypatch):
+    """`AGAMI_REQUIRE_THREAD_ID` is enforced by nothing but the served schema, so the refusal has to
+    arrive over HTTP itself, on both eras, with 1.x's text."""
+    monkeypatch.setenv("AGAMI_REQUIRE_THREAD_ID", "1")
+
+    response = _call(_app(), era, name="execute_sql", arguments={"sql": "SELECT 1"})
+
+    assert response.status_code == 200, response.text
+    result = envelope(response)["result"]
+    assert result["isError"] is True
+    assert result["content"] == [
+        {"type": "text", "text": "Input validation error: 'thread_id' is a required property"}
+    ]
 
 
 def test_a_tool_with_an_invalid_schema_is_refused_at_startup():

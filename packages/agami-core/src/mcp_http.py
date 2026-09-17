@@ -592,11 +592,15 @@ def build_server(
         try:
             return await _recorded_call(name, arguments, meta)
         except Exception:
-            # Only a failed audit write reaches here: `_recorded_call` answers a raising handler
+            # Only a failure while recording the call reaches here — the audit write, or reading or
+            # resetting the typed outcome around it: `_recorded_call` answers a raising handler
             # itself. The call still fails (ACE-097), and it fails the same way a crash does, because
             # SDK 2 would otherwise send `str(e)` on 2025-06-18, and a store's error text says as
-            # much about the deployment as a driver's does.
-            _log.exception("tool %r: the audit write failed; the call is answered as failed", name)
+            # much about the deployment as a driver's does. Logged here even when the handler also
+            # raised and was logged below: two failures, one record each.
+            _log.exception(
+                "tool %r: recording the call failed; the call is answered as failed", name
+            )
             return _crashed(name)
 
     async def _recorded_call(name: str, arguments: dict, meta: dict) -> mt.CallToolResult:
@@ -642,7 +646,8 @@ def build_server(
             return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])
         except Exception as exc:
             # Logged here, once, with its traceback: this is the only place the reason is kept for
-            # an operator, now that it no longer reaches the client.
+            # an operator, now that it no longer reaches the client. (If the audit write then fails
+            # too, `_on_call_tool` logs that as its own record.)
             crash = exc
             _log.exception("tool %r raised", name)
             return _crashed(name)

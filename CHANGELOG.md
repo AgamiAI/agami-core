@@ -21,9 +21,10 @@ below corresponds to one such version.
   - **A crashed tool's reason no longer reaches the client.** A handler that raises, or an audit
     write that fails, now answers `isError` with the fixed text `Error executing tool <name>`. The
     exception's own words could name a column the caller never sent. They go to the server log, as
-    one ERROR record with its traceback, and to the new operator-only `tool_calls.error_detail`
-    column, cut to the same bound as `query_executions.error_detail`. Migration 027 adds the column
-    and runs on startup.
+    one ERROR record per failure with its traceback (two when the handler raises and the audit
+    write then fails too), and to the new operator-only `tool_calls.error_detail` column, cut to
+    the same bound as `query_executions.error_detail`. Migration 027 adds the column and runs on
+    startup.
   - **A hidden or unknown tool now answers JSON-RPC error `-32602` `Unknown tool: <name>`** rather
     than an `isError` result. A hidden tool and a name nobody registered get byte-identical answers
     on both eras, including when the arguments are invalid, and the stdio server answers the same.
