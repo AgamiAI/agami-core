@@ -204,6 +204,16 @@ def test_a_malformed_url_is_refused_without_resolving_or_fetching(net, url):
         "::ffff:127.0.0.1",
         "0.0.0.0",
         "100.64.0.1",
+        # Multicast ranges count as global, yet no document is served from one.
+        "224.0.1.1",
+        "ff0e::1",
+        # IPv6 forms that carry an IPv4 address, which count as global whatever they embed: NAT64
+        # (64:ff9b::/96) and IPv4-compatible (::/96). A NAT64 gateway delivers them to the IPv4 inside.
+        "64:ff9b::a00:5",
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b::7f00:1",
+        "::127.0.0.1",
+        "::a00:5",
     ],
 )
 def test_a_non_global_address_is_refused_with_no_request(net, address):
@@ -211,6 +221,12 @@ def test_a_non_global_address_is_refused_with_no_request(net, address):
     with pytest.raises(ClientMetadataError):
         _redirect_uris(URL)
     assert net.requests == []
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::b00:1", "2606:4700::1"])
+def test_a_public_address_is_fetched_including_one_behind_nat64(net, address):
+    net.addresses = [address]
+    assert _redirect_uris(URL) == _doc()["redirect_uris"]
 
 
 def test_one_non_global_address_among_public_ones_is_refused(net):

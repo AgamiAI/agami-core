@@ -8,9 +8,10 @@ no customer data: a plain GET with no body, no cookies and no credentials. It li
 
 The URL is chosen by whoever starts the sign-in, so the fetch is written against an attacker:
   - https only, with a host and a path, and no userinfo, fragment or dot segments;
-  - the name is resolved once, every address must be globally routable, and the connection goes to
-    the address that was checked (the name rides along as `Host` and TLS SNI, so the certificate is
-    still verified against it) — a second lookup could answer an internal address;
+  - the name is resolved once, every address must be globally routable (an IPv6 address carrying an
+    IPv4 one, as NAT64 does, is judged by the IPv4 inside), and the connection goes to the address
+    that was checked (the name rides along as `Host` and TLS SNI, so the certificate is still verified
+    against it) — a second lookup could answer an internal address;
   - no redirects, no proxy from the environment (a proxy would resolve the name itself), a 5 KB body
     cap enforced while streaming, and one 3 s deadline on the wall clock for all of it — the lookup,
     the connection, the headers and the body.
@@ -88,8 +89,23 @@ def _check_url(url: str) -> SplitResult:
     return parts
 
 
+# IPv6 prefixes whose last 32 bits are an IPv4 address the packet is delivered to: NAT64's well-known
+# prefix and the deprecated IPv4-compatible form. `is_global` judges the IPv6 prefix, not what it carries.
+_IPV4_CARRIERS = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("::/96"))
+
+
 def _is_public(address: str) -> bool:
-    return ipaddress.ip_address(address).is_global
+    """Globally routable, not multicast, and for IPv6 any IPv4 address it carries is public too."""
+    ip = ipaddress.ip_address(address)
+    if not ip.is_global or ip.is_multicast:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        carried = ip.ipv4_mapped or ip.sixtofour
+        if carried is None and any(ip in net for net in _IPV4_CARRIERS):
+            carried = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if carried is not None:
+            return _is_public(str(carried))
+    return True
 
 
 async def _resolve(host: str, port: int) -> list[str]:
