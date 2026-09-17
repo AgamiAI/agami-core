@@ -189,6 +189,8 @@ def test_every_receipt_section_says_something_on_some_governed_vector(file_path)
 #     on one fixture. Covered by `tests/test_datasource_routing.py`.
 #   * `stale_model` (#364) is also decided from the call: a `model_version` that is missing or is
 #     not the one being served. Covered by `tests/test_stale_model_version.py`.
+#   * `example_required` (#376) is decided from the call too: no `example`, or an id the datasource
+#     does not store. The corpus model stores no examples. Covered by `tests/test_example_required.py`.
 _RULES_NO_VECTOR_CAN_PRODUCE = frozenset(
     {
         guardrail.RULE_MODEL_UNAVAILABLE,
@@ -196,6 +198,7 @@ _RULES_NO_VECTOR_CAN_PRODUCE = frozenset(
         guardrail.RULE_ENGINE_MISMATCH,
         guardrail.RULE_DATASOURCE_REQUIRED,
         guardrail.RULE_STALE_MODEL,
+        guardrail.RULE_EXAMPLE_REQUIRED,
     }
 )
 
