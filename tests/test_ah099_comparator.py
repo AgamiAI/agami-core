@@ -1483,9 +1483,9 @@ def test_flags_selected_in_the_other_order_score_through_the_answer_key_s_orderi
 # --- searching the assignments inside a class of equal columns --------------------------------------
 #
 # When neither the names nor the column order line the rows up, the comparator tries the ways to pair
-# a class of equal columns and keeps the one that lines up the most rows. It counts rows two ways, so
-# most cases run on two fixtures: in the flag rows `region` names each row once, and in the trio rows
-# `tier` repeats, so no column names a row.
+# a class of equal columns and keeps the one that lines up the most rows. Most cases run on two
+# fixtures, because rows line up differently in each: in the flag rows `region` names each row once,
+# and in the trio rows `tier` repeats, so no column names a row.
 
 _FLAG_TRIO = ["region", "is_active", "is_verified", "is_staff"]
 _TRIO = ["tier", "is_active", "is_verified", "is_staff"]
@@ -1635,28 +1635,70 @@ def test_the_same_class_lines_up_when_the_cap_allows_the_search(monkeypatch):
     "golden, generated",
     _both_row_kinds(["tier", "is_staff", "is_active", "is_verified"], _TRIO),
 )
-def test_a_search_out_of_rows_to_read_keeps_the_rule_s_pairing(monkeypatch, golden, generated):
-    # With nothing to spend, the search stops before its first step and the pairing is the one the
-    # rule chose: by names, which here misaligns rows but still completes.
+def test_a_search_out_of_rows_to_read_still_finishes_its_first_descent(
+    monkeypatch, golden, generated
+):
+    # With nothing to spend, the search still pairs every column once, taking the branch that lines
+    # up the most rows each time, and here that is the right assignment. A large result used to run
+    # out of rows before it paired every column, so a right answer kept the rule's pairing and
+    # scored near 0.
+    monkeypatch.setattr(c, "_SEARCH_ROW_BUDGET", 0)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert dict(score.column_pairs[1:]) == {
+        "is_active": "is_verified", "is_verified": "is_staff", "is_staff": "is_active"
+    }
+
+
+def test_a_search_out_of_rows_after_its_first_descent_keeps_the_best_it_has_found(monkeypatch):
+    # Every flag is True on one row and False on the other, so each first pairing lines up both
+    # rows, and the tie goes to column order. That branch pairs `is_active` with `f0` and lines up
+    # no row once every column is paired. With rows to read, the search goes on to the right
+    # assignment. With none, it stops there and keeps the rule's pairing, which completes.
+    golden = c.ExecResult(
+        columns=["tier", "is_active", "is_verified", "is_staff"],
+        rows=[("gold", False, True, True), ("gold", True, False, False)],
+    )
+    generated = c.ExecResult(
+        columns=["t", "f0", "f1", "f2"],
+        rows=[("gold", True, True, False), ("gold", False, False, True)],
+    )
+    assert c.compare_result_sets(golden, generated, match="values", ordered=False).accuracy == 1.0
     monkeypatch.setattr(c, "_SEARCH_ROW_BUDGET", 0)
     score = c.compare_result_sets(golden, generated, match="values", ordered=False)
     assert score.status == "scored" and score.accuracy < 1.0
-    assert all(g == p for g, p in score.column_pairs)
+    assert score.column_pairs == (
+        ("tier", "t"), ("is_active", "f0"), ("is_verified", "f1"), ("is_staff", "f2")
+    )
 
 
-def test_rows_line_up_one_to_one_only_when_the_fixed_columns_name_each_row_once_on_both_sides():
-    def rows(*values):
-        return [c.canonical_row((value,)) for value in values]
-
-    def spend(_rows):
-        return None
-
-    assert c._aligned_steps([0], [0], rows("a", "b"), rows("b", "a"), spend) is not None
-    assert c._aligned_steps([0], [0], rows("a", "a"), rows("a", "a"), spend) is None
-    # Unique on the golden side, but two generated rows share a golden row's name.
-    two_columns = [c.canonical_row(row) for row in [(1, 1), (1, 2), (2, 1), (2, 2)]]
-    repeated = [c.canonical_row(row) for row in [(1, 1), (1, 1), (2, 2), (2, 2)]]
-    assert c._aligned_steps([0, 1], [0, 1], two_columns, repeated, spend) is None
+def test_a_repeated_row_lines_up_only_as_often_as_both_results_hold_it():
+    # No column names a row, and `gold` with True then False appears twice in the answer key. Either
+    # first pairing lines up all four rows, so the tie goes to column order and the wrong assignment
+    # completes first. Under it the generated rows hold that row once, and `gold` with False then True
+    # twice where the answer key holds it once. Counting each such row by the result that holds it
+    # more often would call all four rows lined up, and the right assignment would never be reached.
+    golden = c.ExecResult(
+        columns=["tier", "is_active", "is_verified"],
+        rows=[
+            ("gold", True, False),
+            ("gold", True, False),
+            ("gold", False, True),
+            ("silver", False, True),
+        ],
+    )
+    generated = c.ExecResult(
+        columns=["t", "f0", "f1"],
+        rows=[
+            ("silver", True, False),
+            ("gold", True, False),
+            ("gold", False, True),
+            ("gold", False, True),
+        ],
+    )
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("tier", "t"), ("is_active", "f1"), ("is_verified", "f0"))
 
 
 def test_an_ordered_comparison_never_searches(monkeypatch):

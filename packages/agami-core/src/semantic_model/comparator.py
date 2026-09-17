@@ -50,7 +50,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Context, Decimal
-from operator import eq, itemgetter
+from operator import itemgetter
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Optional
 
@@ -479,65 +479,23 @@ def _equal_classes(
     return sorted(classes)
 
 
-# How many rows the search may read in all. Two million is about a quarter of a second, and covers
+# How many rows the search may read in all. Two million is about a fifth of a second, and covers
 # every assignment of six columns over some six hundred distinct rows even when nothing is pruned.
-# Past it the search stops and keeps the best assignment it has found, which never lines up fewer
-# rows than the pairing it started from. What usually gets there is a large result that lines up
-# badly under every assignment, so pruning has no good assignment to measure the others against.
+# The budget never stops the first descent, which pairs every column by taking the branch that lines
+# up the most rows each time. That descent reads each result a few dozen times at most (27 times for
+# six equal columns), so its cost grows with the rows and not with the ways to pair them. When some
+# assignment lines up every row, the descent usually reaches it, however large the result. A budget
+# that could stop the descent was worse than slow: a right answer of a hundred thousand rows ran out
+# before pairing every column, kept the old pairing and scored near 0. Past the budget the search
+# keeps the best assignment it has found, which never lines up fewer rows than the pairing it
+# started from but can fall short of the best. What usually gets there is a large result that lines
+# up badly under every assignment, so pruning has no good assignment to measure the others against.
 _SEARCH_ROW_BUDGET = 2_000_000
 
 
 class _BudgetSpent(Exception):
-    """The search has read `_SEARCH_ROW_BUDGET` rows, and keeps what it has found."""
-
-
-# A step pairs one more column. It takes a partial assignment's state, a golden column and its
-# partner, and scratch space shared by the steps from one state, and returns the child's state and
-# how many rows the child lines up.
-_Step = Callable[[Any, int, int, dict], tuple[Any, int]]
-
-
-def _aligned_steps(
-    fixed: Sequence[int],
-    fixed_partners: Sequence[int],
-    golden_rows: Sequence[tuple[tuple[str, Any], ...]],
-    generated_rows: Sequence[tuple[tuple[str, Any], ...]],
-    spend: Callable[[int], None],
-) -> Optional[tuple[_Step, int, int]]:
-    """Steps for rows the fixed columns line up one to one, or None when they do not.
-
-    When the fixed columns hold a different combination on every golden row, and on every generated
-    row, a golden row can only line up with the one generated row that shares it. So the rows a pair
-    of columns agrees on are a mask, one byte per row, read once per pair. An assignment lines up
-    the rows all its pairs agree on: an AND of masks and a bit count, both native and fast.
-    """
-    golden_fixed = _picker(fixed)
-    row_of: dict[tuple[tuple[str, Any], ...], int] = {}
-    for index, row in enumerate(golden_rows):
-        if row_of.setdefault(golden_fixed(row), index) != index:
-            return None
-    generated_fixed = _picker(fixed_partners)
-    partner_of: dict[int, tuple[tuple[str, Any], ...]] = {}
-    for row in generated_rows:
-        index = row_of.get(generated_fixed(row))
-        if index is not None:
-            if index in partner_of:
-                return None
-            partner_of[index] = row
-    golden = [golden_rows[index] for index in sorted(partner_of)]
-    generated = [partner_of[index] for index in sorted(partner_of)]
-    masks: dict[tuple[int, int], int] = {}
-
-    def step(state: int, index: int, partner: int, _shared: dict) -> tuple[int, int]:
-        mask = masks.get((index, partner))
-        if mask is None:
-            spend(len(golden))
-            cells = map(itemgetter(index), golden), map(itemgetter(partner), generated)
-            mask = masks[index, partner] = int.from_bytes(bytes(map(eq, *cells)), "big")
-        child = state & mask
-        return child, child.bit_count()
-
-    return step, int.from_bytes(bytes([1]) * len(golden), "big"), len(golden)
+    """The search has read `_SEARCH_ROW_BUDGET` rows after its first descent, and keeps what it has
+    found."""
 
 
 class _Side(NamedTuple):
@@ -549,11 +507,26 @@ class _Side(NamedTuple):
     counts: list[int]
 
 
-def _extend_golden(
-    side: _Side, position: int, width: int
-) -> tuple[_Side, dict[int, int], list[int]]:
-    """The golden side keyed on one more column: the new keys, the table from an old key and a cell
+class _Partial(NamedTuple):
+    """A partial assignment during the search: both results keyed on the columns it pairs, and how
+    many golden rows carry each key."""
+
+    golden: _Side
+    golden_totals: list[int]
+    generated: _Side
+
+
+class _GoldenKeyed(NamedTuple):
+    """The golden side keyed on one more column: the new side, the table from an old key and a cell
     to a new key, and how many golden rows carry each new key."""
+
+    side: _Side
+    table: dict[int, int]
+    totals: list[int]
+
+
+def _extend_golden(side: _Side, position: int, width: int) -> _GoldenKeyed:
+    """The golden side keyed on one more column."""
     table: dict[int, int] = {}
     keys = [
         table.setdefault(key * width + cells[position], len(table))
@@ -562,7 +535,7 @@ def _extend_golden(
     totals = [0] * len(table)
     for key, count in zip(keys, side.counts):
         totals[key] += count
-    return side._replace(keys=keys), table, totals
+    return _GoldenKeyed(side._replace(keys=keys), table, totals)
 
 
 def _extend_generated(side: _Side, position: int, width: int, table: dict[int, int]) -> _Side:
@@ -593,8 +566,14 @@ def _distinct_row_steps(
     golden_rows: Sequence[tuple[tuple[str, Any], ...]],
     generated_rows: Sequence[tuple[tuple[str, Any], ...]],
     spend: Callable[[int], None],
-) -> tuple[_Step, Any, int]:
-    """Steps for any rows, keying each distinct row on one more column at a time.
+) -> tuple[
+    Callable[[_Partial, int, int, dict[int, _GoldenKeyed]], tuple[_Partial, int]], _Partial, int
+]:
+    """The search's step, its starting state, and how many rows that state lines up.
+
+    A step pairs one more column: it takes a partial assignment, a golden column and its partner,
+    and the golden sides already keyed from that assignment, and returns the child and how many
+    rows it lines up.
 
     Each side collapses to its distinct rows with a count, keyed on the fixed columns. The searched
     cells become small integers per class: only columns of one class are ever compared, and they
@@ -605,12 +584,12 @@ def _distinct_row_steps(
     searched_generated = [index for _, generated in classes for index in generated]
     fixed_keys: dict[tuple[tuple[str, Any], ...], int] = {}
     golden_fixed, golden_searched = _picker(fixed), _picker(searched_golden)
-    golden_tally: Counter = Counter()
+    golden_tally: Counter[tuple[int, tuple[tuple[str, Any], ...]]] = Counter()
     for row in golden_rows:
         key = fixed_keys.setdefault(golden_fixed(row), len(fixed_keys))
         golden_tally[key, golden_searched(row)] += 1
     generated_fixed, generated_searched = _picker(fixed_partners), _picker(searched_generated)
-    generated_tally: Counter = Counter()
+    generated_tally: Counter[tuple[int, tuple[tuple[str, Any], ...]]] = Counter()
     for row in generated_rows:
         key = fixed_keys.get(generated_fixed(row))
         if key is not None:
@@ -622,7 +601,7 @@ def _distinct_row_steps(
     def code(cell: tuple[str, Any], owner: int) -> int:
         return codes[owner].setdefault(cell, len(codes[owner]))
 
-    def side(tally: Counter, owners: list[int]) -> _Side:
+    def side(tally: Counter[tuple[int, tuple[tuple[str, Any], ...]]], owners: list[int]) -> _Side:
         coded = [tuple(map(code, cells, owners)) for _, cells in tally]
         return _Side([key for key, _ in tally], coded, list(tally.values()))
 
@@ -637,18 +616,22 @@ def _distinct_row_steps(
     golden_position = {index: position for position, index in enumerate(searched_golden)}
     generated_position = {index: position for position, index in enumerate(searched_generated)}
 
-    def step(state: Any, index: int, partner: int, shared: dict) -> tuple[Any, int]:
-        golden, golden_totals, generated = state
+    def step(
+        state: _Partial, index: int, partner: int, shared: dict[int, _GoldenKeyed]
+    ) -> tuple[_Partial, int]:
         width = widths[class_of[index]]
         if index not in shared:
-            spend(len(golden.keys))
-            shared[index] = _extend_golden(golden, golden_position[index], width)
-        golden_next, table, totals_next = shared[index]
-        spend(len(generated.keys))
-        generated_next = _extend_generated(generated, generated_position[partner], width, table)
-        return (golden_next, totals_next, generated_next), _lined_up(generated_next, totals_next)
+            spend(len(state.golden.keys))
+            shared[index] = _extend_golden(state.golden, golden_position[index], width)
+        keyed = shared[index]
+        spend(len(state.generated.keys))
+        generated_next = _extend_generated(
+            state.generated, generated_position[partner], width, keyed.table
+        )
+        child = _Partial(keyed.side, keyed.totals, generated_next)
+        return child, _lined_up(generated_next, keyed.totals)
 
-    return step, (golden, totals, generated), _lined_up(generated, totals)
+    return step, _Partial(golden, totals, generated), _lined_up(generated, totals)
 
 
 def _search_classes(
@@ -668,6 +651,9 @@ def _search_classes(
     assignment lines up bound every assignment that completes it, and a branch that cannot beat the
     best so far is dropped. Branches are taken best first, so when some assignment lines up every
     row it is usually reached at once, and every other branch is dropped early.
+
+    The first descent always runs to its end, a complete assignment or a branch that cannot beat
+    `current`. Only then can `_SEARCH_ROW_BUDGET` stop the search.
     """
     golden_names = [_folded_name(name) for name in golden_columns]
     generated_names = [_folded_name(name) for name in generated_columns]
@@ -675,18 +661,17 @@ def _search_classes(
     fixed = sorted(set(current) - searched)
     fixed_partners = [current[index] for index in fixed]
     rows_left = _SEARCH_ROW_BUDGET
+    descending = True
 
     def spend(rows: int) -> None:
         nonlocal rows_left
         rows_left -= rows
-        if rows_left < 0:
+        if rows_left < 0 and not descending:
             raise _BudgetSpent
 
-    rows = (golden_rows, generated_rows, spend)
-    steps = _aligned_steps(fixed, fixed_partners, *rows)
-    if steps is None:
-        steps = _distinct_row_steps(classes, fixed, fixed_partners, *rows)
-    step, start, start_overlap = steps
+    step, start, start_overlap = _distinct_row_steps(
+        classes, fixed, fixed_partners, golden_rows, generated_rows, spend
+    )
 
     # A slot is a column of a class's smaller side, and its options are the other side's columns.
     slots: list[tuple[int, int, bool]] = []
@@ -714,15 +699,24 @@ def _search_classes(
     best_overlap = current_overlap
     best_names = sum(golden_names[g] == generated_names[p] for g, p in best.items())
 
-    def visit(depth: int, state: Any, overlap: int, names: int, used: set, chosen: dict) -> None:
-        nonlocal best, best_overlap, best_names
+    def visit(
+        depth: int,
+        state: _Partial,
+        overlap: int,
+        names: int,
+        used: set[tuple[int, int]],
+        chosen: dict[int, int],
+    ) -> None:
+        nonlocal best, best_overlap, best_names, descending
         if (overlap, names + name_ceiling(depth, used)) <= (best_overlap, best_names):
+            descending = False
             return
         if depth == len(slots):
             best, best_overlap, best_names = dict(chosen), overlap, names
+            descending = False
             return
         number, column, slot_is_golden = slots[depth]
-        shared: dict = {}
+        shared: dict[int, _GoldenKeyed] = {}
         children = []
         for order, option in enumerate(options[number]):
             if (number, option) in used:
@@ -818,11 +812,13 @@ def pair_columns(
     statement can swap two labels, alias one of two columns that share a label, or rename every
     column. So when the order does not count, the assignments inside the classes are searched for
     the one that lines up the most rows, ties going to the one that pairs the most same-named
-    columns (see `_line_up_equal_columns`). The search is bounded: past `_ASSIGNMENT_CAP`
-    assignments a class keeps the pairing by names or in order, whichever lines up more rows. When
-    the order counts there is nothing to search: equal vectors are equal row for row, so every
-    choice inside a class lines up the same rows, and a golden column takes a partner of its own
-    name first (see `_pair_equal_vectors`).
+    columns (see `_line_up_equal_columns`). The search is bounded in two ways. Past
+    `_ASSIGNMENT_CAP` assignments a class keeps the pairing by names or in order, whichever lines up
+    more rows. And once its first descent has paired every column, the search reads at most
+    `_SEARCH_ROW_BUDGET` rows and then keeps the best assignment found so far. When the order counts
+    there is nothing to search: equal vectors are equal row for row, so every choice inside a class
+    lines up the same rows, and a golden column takes a partner of its own name first (see
+    `_pair_equal_vectors`).
 
     Stage two is for what stage one left: one differing cell would otherwise unpair a column that
     is plainly there, and the score would read "no generated column carries the values of total"
