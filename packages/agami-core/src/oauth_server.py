@@ -123,12 +123,18 @@ def issue_jwt(subject: str, *, sid: str | None = None) -> str:
     the OAuth flow (a script, a test, an operator's hand-rolled bearer) carries exactly the claims it
     always did, and consumers must treat its absence as "no session", never as an error.
     """
-    from mcp_http import public_base_url  # lazy: mcp_http imports these handlers at module load
+    from mcp_http import (  # lazy: mcp_http imports these handlers at module load
+        canonical_resource,
+        public_base_url,
+    )
 
     now = _now()
     payload = {
         "sub": subject,
         "iss": public_base_url(),
+        # The audience binds the token to this server's MCP resource, so a token minted here cannot be
+        # replayed against another resource that trusts the same issuer, and vice versa.
+        "aud": canonical_resource(),
         "iat": int(now.timestamp()),
         "exp": int((now + _access_ttl()).timestamp()),
     }
@@ -144,11 +150,12 @@ class JwtAuthProvider:
     """Validates the self-signed HS256 JWTs `issue_jwt` mints — the transport's real token gate.
 
     Conforms structurally to the `ports.AuthProvider` protocol (validate_token → Principal | None).
-    Pins the algorithm to HS256 (no `alg=none`/confusion), requires sub/exp/iss, and checks the
-    issuer == PUBLIC_BASE_URL. Any bad/expired/forged token returns None (fail closed → 401)."""
+    Pins the algorithm to HS256 (no `alg=none`/confusion), requires sub/exp/iss/aud, and checks the
+    issuer == PUBLIC_BASE_URL and the audience == this server's MCP resource. Any bad/expired/forged
+    token returns None (fail closed → 401)."""
 
     def validate_token(self, token: str) -> Principal | None:
-        from mcp_http import public_base_url  # lazy: avoid the import cycle
+        from mcp_http import canonical_resource, public_base_url  # lazy: avoid the import cycle
 
         try:
             claims = jwt.decode(
@@ -156,10 +163,11 @@ class JwtAuthProvider:
                 _signing_secret(),
                 algorithms=["HS256"],
                 issuer=public_base_url(),
-                options={"require": ["exp", "sub", "iss"]},
+                audience=canonical_resource(),
+                options={"require": ["exp", "sub", "iss", "aud"]},
             )
         except Exception:
-            # Invalid signature, expired, wrong issuer, malformed, or no secret → reject.
+            # Invalid signature, expired, wrong issuer or audience, malformed, or no secret → reject.
             return None
         sub = claims.get("sub")
         # `Principal.subject` is a str — reject a non-string or blank sub rather than carry a
@@ -217,6 +225,16 @@ async def _form(request: Request) -> dict[str, str]:
 def _oauth_error(error: str, description: str, status: int = 400) -> JSONResponse:
     # OAuth-style error; never includes a token, secret, or the submitted password.
     return JSONResponse({"error": error, "error_description": description}, status_code=status)
+
+
+def _resource_ok(resource: str) -> bool:
+    """RFC 8707: a client may name the resource it wants a token for. Absent is fine (the token is for
+    this server's MCP resource regardless); present, it must be that resource, give or take one trailing
+    slash, because a token minted for a resource the client did not ask for is the confusion the
+    parameter exists to prevent."""
+    from mcp_http import canonical_resource
+
+    return not resource or resource.removesuffix("/") == canonical_resource()
 
 
 def _open_store() -> Store | None:
@@ -521,6 +539,9 @@ async def token(request: Request) -> Response:
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
+        # One check ahead of the dispatch covers both grants.
+        if not _resource_ok(form.get("resource", "")):
+            return _oauth_error("invalid_target", "resource is not this server's MCP endpoint")
         if grant == "authorization_code":
             return _grant_authorization_code(store, form)
         if grant == "refresh_token":

@@ -36,6 +36,7 @@ from store import Store  # noqa: E402
 BASE = "https://your-host.example.com"
 SECRET = "x" * 40  # a throwaway HS256 key for tests (≥32 bytes); obviously not a real secret
 REDIRECT = "https://claude.ai/api/mcp/auth_callback"
+AUD = f"{BASE}/mcp"  # the canonical resource: every access token is minted for, and checked against, it
 VERIFIER = "a" * 64  # a fixed PKCE code_verifier
 
 
@@ -110,7 +111,7 @@ def test_full_pkce_flow_yields_a_verifiable_jwt(env):
     assert r.status_code == 200
     body = r.json()
     assert body["token_type"] == "Bearer" and body["expires_in"] == 3600
-    claims = jwt.decode(body["access_token"], SECRET, algorithms=["HS256"])
+    claims = jwt.decode(body["access_token"], SECRET, algorithms=["HS256"], audience=AUD)
     assert claims["sub"] == "admin" and claims["iss"] == BASE
 
 
@@ -324,7 +325,9 @@ def test_jwt_provider_accepts_issued_token_and_rejects_junk(env):
     assert principal is not None and principal.subject == "admin"
     assert provider.validate_token("not-a-jwt") is None
     # a token signed with the WRONG secret must not validate
-    forged = jwt.encode({"sub": "admin", "iss": BASE, "exp": 9_999_999_999}, "wrong", "HS256")
+    forged = jwt.encode(
+        {"sub": "admin", "iss": BASE, "aud": AUD, "exp": 9_999_999_999}, "wrong", "HS256"
+    )
     assert provider.validate_token(forged) is None
 
 
@@ -334,7 +337,7 @@ def test_jwt_provider_rejects_alg_none_and_alg_confusion(env):
     from oauth_server import JwtAuthProvider
 
     provider = JwtAuthProvider()
-    claims = {"sub": "admin", "iss": BASE, "exp": 9_999_999_999}
+    claims = {"sub": "admin", "iss": BASE, "aud": AUD, "exp": 9_999_999_999}
     assert provider.validate_token(jwt.encode(claims, None, algorithm="none")) is None
     assert provider.validate_token(jwt.encode(claims, SECRET, algorithm="HS512")) is None
 
@@ -343,7 +346,9 @@ def test_jwt_provider_rejects_token_from_a_different_issuer(env):
     from oauth_server import JwtAuthProvider
 
     forged = jwt.encode(
-        {"sub": "admin", "iss": "https://evil.example.com", "exp": 9_999_999_999}, SECRET, "HS256"
+        {"sub": "admin", "iss": "https://evil.example.com", "aud": AUD, "exp": 9_999_999_999},
+        SECRET,
+        "HS256",
     )
     assert JwtAuthProvider().validate_token(forged) is None
 
@@ -352,8 +357,12 @@ def test_jwt_provider_rejects_non_string_or_blank_sub(env):
     from oauth_server import JwtAuthProvider
 
     provider = JwtAuthProvider()
-    numeric = jwt.encode({"sub": 123, "iss": BASE, "exp": 9_999_999_999}, SECRET, "HS256")
-    blank = jwt.encode({"sub": "   ", "iss": BASE, "exp": 9_999_999_999}, SECRET, "HS256")
+    numeric = jwt.encode(
+        {"sub": 123, "iss": BASE, "aud": AUD, "exp": 9_999_999_999}, SECRET, "HS256"
+    )
+    blank = jwt.encode(
+        {"sub": "   ", "iss": BASE, "aud": AUD, "exp": 9_999_999_999}, SECRET, "HS256"
+    )
     assert provider.validate_token(numeric) is None
     assert provider.validate_token(blank) is None
 
@@ -466,7 +475,9 @@ def test_refresh_grant_rotates_and_renews(env):
     first = _token_pair(c)
     second = _refresh(c, first["refresh_token"])
     # a fresh, verifiable access JWT for the same subject
-    claims = jwt.decode(second["access_token"], SECRET, algorithms=["HS256"], issuer=BASE)
+    claims = jwt.decode(
+        second["access_token"], SECRET, algorithms=["HS256"], issuer=BASE, audience=AUD
+    )
     assert claims["sub"] == "admin"
     # rotation: a NEW refresh token, different from the one presented
     assert second["refresh_token"] and second["refresh_token"] != first["refresh_token"]
@@ -753,7 +764,9 @@ def test_token_ttls_are_env_configurable_and_fail_safe(env, monkeypatch):
 
 
 def _sid(access_token: str) -> str | None:
-    return jwt.decode(access_token, SECRET, algorithms=["HS256"], issuer=BASE).get("sid")
+    return jwt.decode(
+        access_token, SECRET, algorithms=["HS256"], issuer=BASE, audience=AUD
+    ).get("sid")
 
 
 def test_access_token_carries_the_hashed_refresh_family_as_sid(env):
@@ -812,7 +825,7 @@ def test_a_token_minted_without_a_sid_still_validates(env):
     from oauth_server import JwtAuthProvider, issue_jwt
 
     token = issue_jwt("admin")
-    assert "sid" not in jwt.decode(token, SECRET, algorithms=["HS256"], issuer=BASE)
+    assert "sid" not in jwt.decode(token, SECRET, algorithms=["HS256"], issuer=BASE, audience=AUD)
     principal = JwtAuthProvider().validate_token(token)
     assert principal is not None and principal.subject == "admin"
     assert principal.session_id is None  # absent reads as "no session", not as an error
@@ -835,6 +848,7 @@ def test_a_malformed_sid_degrades_to_none_rather_than_rejecting(env):
             {
                 "sub": "admin",
                 "iss": BASE,
+                "aud": AUD,
                 "iat": 1,
                 "exp": 4102444800,  # 2100-01-01, comfortably unexpired
                 "sid": bad,
@@ -852,6 +866,116 @@ def test_a_blank_sid_is_never_minted(env):
     from oauth_server import issue_jwt
 
     for bad in ("", "   ", None):
-        claims = jwt.decode(issue_jwt("admin", sid=bad), SECRET, algorithms=["HS256"], issuer=BASE)
+        claims = jwt.decode(
+            issue_jwt("admin", sid=bad), SECRET, algorithms=["HS256"], issuer=BASE, audience=AUD
+        )
         assert "sid" not in claims, bad
     assert _sid(issue_jwt("admin", sid="real")) == "real"
+
+
+# --- audience and resource: a token is for this server's /mcp and nothing else -------------------------
+
+
+def test_metadata_advertises_cimd_iss_and_none_auth(env):
+    c = TestClient(mcp_http.build_app())
+    meta = c.get("/.well-known/oauth-authorization-server").json()
+    assert meta["client_id_metadata_document_supported"] is True
+    assert meta["token_endpoint_auth_methods_supported"] == ["none"]
+    assert meta["authorization_response_iss_parameter_supported"] is True
+    # The protected-resource document and the token audience name the same resource.
+    assert c.get("/.well-known/oauth-protected-resource").json()["resource"] == AUD
+
+
+def test_an_access_token_is_minted_for_the_canonical_resource(env):
+    c = TestClient(mcp_http.build_app())
+    token = _token_pair(c)["access_token"]
+    assert jwt.decode(token, SECRET, algorithms=["HS256"], audience=AUD)["aud"] == AUD
+
+
+def test_jwt_provider_rejects_a_token_without_or_with_the_wrong_audience(env):
+    from oauth_server import JwtAuthProvider
+
+    provider = JwtAuthProvider()
+    claims = {"sub": "admin", "iss": BASE, "exp": 9_999_999_999}
+    assert provider.validate_token(jwt.encode(claims, SECRET, "HS256")) is None
+    for wrong in (f"{BASE}/other", "https://other.example.com/mcp", [f"{BASE}/other"]):
+        token = jwt.encode({**claims, "aud": wrong}, SECRET, "HS256")
+        assert provider.validate_token(token) is None, wrong
+    assert provider.validate_token(jwt.encode({**claims, "aud": AUD}, SECRET, "HS256")) is not None
+
+
+def _code_exchange(client: TestClient, **extra: str):
+    code = _authorize_code(client)
+    return client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": VERIFIER,
+            "redirect_uri": REDIRECT,
+            **extra,
+        },
+    )
+
+
+@pytest.mark.parametrize("resource", [AUD, AUD + "/"])
+def test_the_canonical_resource_is_served_at_the_token_endpoint(env, resource):
+    c = TestClient(mcp_http.build_app())
+    r = _code_exchange(c, resource=resource)
+    assert r.status_code == 200, r.text
+    refreshed = c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": r.json()["refresh_token"],
+            "resource": resource,
+        },
+    )
+    assert refreshed.status_code == 200, refreshed.text
+
+
+@pytest.mark.parametrize(
+    "resource", [f"{BASE}/other", "https://other.example.com/mcp", AUD + "//", BASE]
+)
+def test_a_wrong_resource_is_invalid_target_on_both_grants(env, resource):
+    c = TestClient(mcp_http.build_app())
+    wrong = _code_exchange(c, resource=resource)
+    assert wrong.status_code == 400 and wrong.json()["error"] == "invalid_target"
+    pair = _token_pair(c)
+    refreshed = c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": pair["refresh_token"],
+            "resource": resource,
+        },
+    )
+    assert refreshed.status_code == 400 and refreshed.json()["error"] == "invalid_target"
+    # The refusal happens before the grant runs, so the refresh token was not spent on it.
+    assert _refresh(c, pair["refresh_token"])["access_token"]
+
+
+def test_a_refresh_token_issued_before_audiences_renews_into_a_token_with_one(env):
+    # A deployment upgrading in place has refresh rows minted before tokens carried `aud`. Those rows
+    # hold no claims at all, so they must keep renewing, and what they renew into carries the audience.
+    import oauth_server
+
+    presented = "pre-audience-refresh-token"
+    s = Store.from_env()
+    try:
+        s.execute(
+            "INSERT INTO oauth_refresh_token (token_hash, family, client_id, username, expires_at, "
+            "revoked, created) VALUES (?, 'old-family', 'cid', 'admin', ?, 0, ?)",
+            (
+                oauth_server._hash_token(presented),
+                "2999-01-01T00:00:00+00:00",
+                "2000-01-01T00:00:00+00:00",
+            ),
+        )
+        s.commit()
+    finally:
+        s.close()
+    c = TestClient(mcp_http.build_app())
+    renewed = _refresh(c, presented)
+    claims = jwt.decode(renewed["access_token"], SECRET, algorithms=["HS256"], audience=AUD)
+    assert claims["aud"] == AUD and claims["sub"] == "admin"

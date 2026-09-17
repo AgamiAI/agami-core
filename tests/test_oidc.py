@@ -218,7 +218,9 @@ def test_full_oidc_flow_resumes_ace005_and_issues_a_jwt(env, monkeypatch):
         },
     )
     assert tok.status_code == 200
-    claims = jwt.decode(tok.json()["access_token"], SECRET, algorithms=["HS256"], issuer=BASE)
+    claims = jwt.decode(
+        tok.json()["access_token"], SECRET, algorithms=["HS256"], issuer=BASE, audience=f"{BASE}/mcp"
+    )
     assert claims["sub"] == "alice"
 
 
