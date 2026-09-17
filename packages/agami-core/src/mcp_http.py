@@ -451,6 +451,7 @@ def build_server(
     """
     import mcp.types as mt
     from mcp.server import Server, ServerRequestContext
+    from mcp.shared.exceptions import MCPError
 
     registry = TOOLS if registry is None else registry
     # Applied to whatever registry is being served, consumer tools included: a conversation is
@@ -512,6 +513,16 @@ def build_server(
             return mt.ListToolsResult(tools=_described(names))
         return mt.ListToolsResult(tools=await run_blocking(_described, names))
 
+    def _crashed(name: str) -> mt.CallToolResult:
+        """The one answer to a call that raised, whatever raised. The exception's own words are an
+        enumeration channel — a driver's error can name a column the caller never sent (migration
+        016 records exactly such a hint) — so they go to the log, and the client learns only that
+        the call failed."""
+        return mt.CallToolResult(
+            content=[mt.TextContent(type="text", text=f"Error executing tool {name}")],
+            is_error=True,
+        )
+
     async def _on_call_tool(
         ctx: ServerRequestContext, params: mt.CallToolRequestParams
     ) -> mt.CallToolResult:
@@ -519,14 +530,28 @@ def build_server(
         meta = registry.get(name)
         # A hidden tool answers as an ABSENT one, not as a refused one: the same `Unknown tool` a typo
         # gets. Distinguishing them would turn the list into an oracle — a caller could enumerate what
-        # exists but is withheld, which is the fact hiding it was meant to keep.
+        # exists but is withheld, which is the fact hiding it was meant to keep. Raised as the SDK's
+        # own protocol error, `-32602`, which is what the stdio harness answers too (REQ-002): any
+        # other exception type becomes a generic internal error on 2026-07-28, which would make a
+        # hidden tool read as a crash.
         if meta is None or not _visible(name):
-            raise ValueError(f"Unknown tool: {name}")
+            raise MCPError(code=mt.INVALID_PARAMS, message=f"Unknown tool: {name}")
+        try:
+            return await _recorded_call(name, arguments, meta)
+        except Exception:
+            # Only a failed audit write reaches here: `_recorded_call` answers a raising handler
+            # itself. The call still fails (ACE-097), and it fails the same way a crash does, because
+            # SDK 2 would otherwise send `str(e)` on 2025-06-18, and a store's error text says as
+            # much about the deployment as a driver's does.
+            _log.exception("tool %r: the audit write failed; the call is answered as failed", name)
+            return _crashed(name)
+
+    async def _recorded_call(name: str, arguments: dict | None, meta: dict) -> mt.CallToolResult:
         # Record every tool call to the admin activity log — timed, attributed to the authenticated
         # actor, never allowed to break the tool (logging is best-effort + double-guarded).
         started = time.monotonic()
         result_text = None
-        raised = False
+        crash: Exception | None = None
         handler_ctx = contextvars.copy_context()
         # Cleared inside the context we own, before the handler can run. `copy_context()`
         # copies whatever is current, so a verdict published by an earlier call would be
@@ -562,9 +587,12 @@ def build_server(
 
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
             return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])
-        except Exception:
-            raised = True
-            raise
+        except Exception as exc:
+            # Logged here, once, with its traceback: this is the only place the reason is kept for
+            # an operator, now that it no longer reaches the client.
+            crash = exc
+            _log.exception("tool %r raised", name)
+            return _crashed(name)
         finally:
             # The per-call audit write opens a fresh Store + INSERT + close; run it off the event loop so
             # it doesn't add DB latency to every tool call on the loop (ACE-048). `_actor_ctx.get()` is read
@@ -580,7 +608,8 @@ def build_server(
             # the call fails; local, it warns and returns. That decision belongs there, beside the
             # write, rather than being pre-empted here by a transport that cannot tell the two
             # deployments apart. Raising from a `finally` replaces the handler's own result, which is
-            # the intended outcome: a call whose record was lost must not read as a success.
+            # the intended outcome: a call whose record was lost must not read as a success. The
+            # caller, `_on_call_tool`, turns that raise into the same failed answer a crash gets.
             await run_blocking(
                 record_tool_call,
                 name=name,
@@ -588,7 +617,7 @@ def build_server(
                 result_text=result_text,
                 execution_ms=int((time.monotonic() - started) * 1000),
                 actor=_actor_ctx.get(),
-                raised=raised,
+                raised=crash is not None,
                 # The classified outcome, when the handler produced one (ACE-098). Empty for every
                 # tool that does not speak the Envelope, which means "derive it the way you always
                 # have" — so those tools keep the body parse and nothing about them changes.
