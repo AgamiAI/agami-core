@@ -286,11 +286,13 @@ def test_a_check_that_could_not_run_is_still_said_beside_the_repeated_value(tmp_
     capsys.readouterr()
     assert reconcile.record(run, 1)["status"] == "match_unverified"
     item = reconcile.report_items(run)[0]
-    # The same query with nothing to fix, so the change is the one for a row not kept. It still says a
-    # check could not run, as the checks summary does, and adds the look at the two columns.
+    # The same query with nothing to fix. It still says a check could not run, as the checks summary
+    # does, and adds the look at the two columns — but never opens with "Nothing to change", which
+    # would contradict the instruction beside it.
     assert item["fix"] == "none" and item["result"]["unchecked"] == 1
     assert "couldn't be run" in item["summaries"]["checks"]
-    assert item["change"] == [reconcile._OWNER_CHANGE["nothing"][0][0],
+    assert item["change"] == ["Some checks could not run against the database, so this row is not offered as an example.",
                               "Open Data to see the two columns side by side. If agami returned the wrong column, "
                               "add your query as a prompt example for this question through /agami-save-correction."]
+    assert not any("Nothing to change" in line for line in item["change"])
     assert item["todo"] == ["Check the column agami returned."]

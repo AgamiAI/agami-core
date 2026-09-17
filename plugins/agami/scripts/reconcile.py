@@ -2621,7 +2621,11 @@ def _change(owner: str, rec: dict, diff: list[dict]) -> tuple[list[str], list[st
         # the look replaces that text; when another check could not run as well, the look is added to it.
         look = ("Open Data to see the two columns side by side. If agami returned the wrong column, "
                 "add your query as a prompt example for this question through /agami-save-correction.")
-        change = (change + [look]) if _result(rec, diff)["unchecked"] else [look]
+        # Without "Nothing to change", which the look contradicts: there IS something to do, and the
+        # person is the only one who can do it. What the other text is for — that a check could not
+        # run, so the row is not offered — still holds and is kept.
+        unchecked = "Some checks could not run against the database, so this row is not offered as an example."
+        change = ([unchecked, look]) if _result(rec, diff)["unchecked"] else [look]
         todo = ["Check the column agami returned."]
     if owner == "model":
         gaps = [r["key"] for r in diff if r["state"] == "gap"]
