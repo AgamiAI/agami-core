@@ -97,7 +97,8 @@ def _tree_hash(root: Path) -> str:
 @pytest.fixture(scope="module")
 def sample(tmp_path_factory):
     """The sample database and a snapshotted copy of its model, built once per worker. Every test
-    reads both and none may write to either, which test_8 checks."""
+    reads both and none writes to either; test_8 checks the model, by hashing the tree. Nothing
+    hashes the database, so a write to it would show up as a test failing rather than as a check."""
     base = tmp_path_factory.mktemp("agami-e2e")
     db = base / "store.db"
     build_sample.build(db, prefer_cli=True)
