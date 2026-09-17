@@ -1786,7 +1786,30 @@ def _agami_steps(rec: dict) -> list[str]:
     return steps if len(steps) > 1 else []
 
 
-def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
+def _agami_query_ran(rec: dict, row_dir: Path | None = None) -> bool:
+    """Whether agami's own query reached the database and came back with a result.
+
+    A row is an error whenever nothing could be compared, and that includes rows where the query ran
+    and answered perfectly well, so the row's status alone cannot say whether anything failed.
+
+    Two sources, in that order. A record that carries `attempts` already says what happened to every
+    query agami wrote, and is read first so this keeps agreeing with the card's own list of them.
+    Otherwise the run record that agami's execution wrote beside the result, which every row has had
+    since long before attempts existed.
+    """
+    for attempt in reversed(rec.get("attempts") or []):
+        if attempt.get("run_by") == "agami" and attempt.get("answered"):
+            return attempt.get("happened") == "ran"
+    if row_dir is None:
+        return False
+    try:
+        run = json.loads((row_dir / "agami-run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(run, dict) and run.get("status") == "ok"
+
+
+def _diff_rows(rec: dict, agami_receipt: Any, row_dir: Path | None = None) -> tuple[list[dict], list[str]]:
     # Whether one query was written or two, decided once. With one there is no second side to name
     # anywhere: no answer-against-answer row, no "agami" column beside it, and a failing check names
     # agami rather than the person, who wrote nothing here to be wrong about.
@@ -1822,7 +1845,12 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
     # 1 · the answers. One row for a number; rows, columns and values for a table.
     agami_text, _single = _recorded_display(rec.get("recorded"), (result_set or {}).get("generated_row_count"))
     if rec.get("status") == "error" or rec.get("error"):
-        agami_text = "failed"
+        # "failed" is a claim about agami's query, so it is made only when the query did not run.
+        # An error row is also how a run records that there was nothing to compare, and on such a
+        # row the query ran and answered: calling that failed contradicts the row's own attempts and
+        # the card's own verdict a few lines above it, and sends the reader after a fault that is
+        # not there.
+        agami_text = "failed" if not _agami_query_ran(rec, row_dir) else "not compared"
     yours_text, _ = _recorded_display(rec.get("statement_recorded"), (result_set or {}).get("golden_row_count"))
     if yours_text is None and rec.get("expected") is not None:
         yours_text = _fmt(rec.get("expected"))
@@ -2075,7 +2103,8 @@ def result_set_for_sample(rec: dict) -> dict:
     return {}
 
 
-def _sample(row_dir: Path, score: Any, limit: int = 5, *, one_sided: bool = False) -> dict | None:
+def _sample(row_dir: Path, score: Any, limit: int = 5, *, one_sided: bool = False,
+            wrote_statement: bool = True) -> dict | None:
     """Up to five rows of the two results, side by side, read from the run's own CSVs.
 
     The CSVs are on disk already, so nothing here travels through `rows.jsonl` or the row record:
@@ -2095,10 +2124,17 @@ def _sample(row_dir: Path, score: Any, limit: int = 5, *, one_sided: bool = Fals
         # another name. Two columns of the same numbers is not a comparison, and showing one as
         # yours would credit the person with a query they did not write.
         yours = []
-    elif not yours:
+    elif not yours and wrote_statement:
         # The person wrote a statement and it produced no result: a failed run, a refusal. That is
         # not a one-sided answer, and listing agami's rows alone under a heading the person will
         # read as theirs is worse than showing no grid.
+        #
+        # `wrote_statement` is what separates that from the person never having written a statement
+        # at all, which is every row of a screenshot or a CSV: they gave a number, so there is no
+        # result of theirs and no failure either. Without it both cases read as "yours is empty" and
+        # the branch below, which exists to show agami's rows on their own, is unreachable for them.
+        # An empty grid on those rows leaves nobody able to tell a right answer from a wrong one,
+        # which is the one thing the Data section is for.
         return None
     if not yours:
         # A question on its own: only agami answered, and its rows are the whole of what there is to
@@ -2674,7 +2710,7 @@ def report_items(run_dir: Path) -> list[dict]:
         if agami_receipt is None and str(rec.get("receipt_path") or "").endswith(".json") and Path(rec["receipt_path"]).exists():
             agami_receipt = _load_json(Path(rec["receipt_path"]))
         one_query = _one_query(rec)
-        diff, words = _diff_rows(rec, agami_receipt)
+        diff, words = _diff_rows(rec, agami_receipt, run_dir / "rows" / str(n))
         result = _result(rec, diff)
         fix = _fix(rec, diff, result)
         legacy_owner = _owner(rec, diff)
@@ -2697,7 +2733,8 @@ def report_items(run_dir: Path) -> list[dict]:
         # would let a rolled-up line change a result, which is the one thing it must never do.
         diff = _condense(diff)
         summaries = _summaries(diff, result, rec)
-        sample = _sample(run_dir / "rows" / str(n), result_set_for_sample(rec), one_sided=one_query)
+        sample = _sample(run_dir / "rows" / str(n), result_set_for_sample(rec), one_sided=one_query,
+                         wrote_statement=bool(rec.get("statement")))
         prov = rec.get("provenance") or {}
         shape_words = {"a": "a question", "b": "a question with your SQL", "c": "a number from your dashboard", "d": "a number with the SQL behind it"}
         source = ", ".join(p for p in (prov.get("source"), f"{prov['file']}:{prov['line']}" if prov.get("file") and prov.get("line") else prov.get("file"),
