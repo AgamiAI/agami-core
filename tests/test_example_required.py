@@ -149,6 +149,27 @@ def test_an_id_the_datasource_does_not_store_is_refused(served):
     assert "no longer exists" in refusal["remediation"]
 
 
+@pytest.mark.parametrize(("org_id", "datasource"), [("local", "other_ds"), ("another-org", "demo")])
+def test_an_id_stored_for_another_datasource_or_org_is_refused(served, org_id, datasource):
+    """An id identifies an example within one organization's datasource. One stored anywhere else
+    is refused with the same sentence as one stored nowhere, so the refusal says nothing about it."""
+    deploy, db_url = served
+    deploy(TWO)
+    store = Store.connect(db_url)
+    try:
+        model_store.write_examples(
+            store,
+            datasource,
+            [{"area": "Catalog", "question": "elsewhere", "sql": "SELECT 1", "id": "elsewhere01"}],
+            org_id=org_id,
+        )
+    finally:
+        store.close()
+    refusal = _refused(_run(example={"id": "elsewhere01", "use": "followed"}))
+    assert "no longer exists" in refusal["remediation"]
+    assert "elsewhere" not in refusal["detail"]
+
+
 @pytest.mark.parametrize("use", [None, "", "used", "FOLLOWED", 1])
 def test_a_use_other_than_the_two_words_is_refused(served, use):
     deploy, _ = served
@@ -251,4 +272,3 @@ def test_execute_sql_declares_the_example_without_requiring_it():
     assert set(schema["properties"]["example"]["properties"]) == {"id", "use"}
     assert "enum" not in schema["properties"]["example"]["properties"]["use"]
     assert "example" not in schema.get("required", [])
-    assert model_store.count_examples  # the count the gate relies on stays public

@@ -2643,16 +2643,20 @@ EXAMPLE_USES = frozenset({"followed", "shown_only"})
 #: or a curator's short label; a cut means the value was never one.
 EXAMPLE_ID_MAX_CHARS = 200
 
+#: How much of `example.use` is kept. Only two short words are accepted; anything longer was refused,
+#: and the row keeps enough of it to show what was sent.
+EXAMPLE_USE_MAX_CHARS = 40
+
 
 def _example_claim(raw: Any) -> dict[str, str | None]:
     """`execute_sql`'s `example` argument as the tool-call row stores it (#376): the id and the use,
     each a bounded string or None. Guarded for the reason `_bounded_client_model` is — JSON hands back
-    any type — and applied to every tool's arguments, so a tool without the field records NULLs."""
+    any type. A call that sends no `example` records NULLs."""
     claim = raw if isinstance(raw, dict) else {}
     ex_id, use = claim.get("id"), claim.get("use")
     return {
         "example_id": ex_id[:EXAMPLE_ID_MAX_CHARS] if isinstance(ex_id, str) and ex_id else None,
-        "example_use": use[:EXAMPLE_ID_MAX_CHARS] if isinstance(use, str) and use else None,
+        "example_use": use[:EXAMPLE_USE_MAX_CHARS] if isinstance(use, str) and use else None,
     }
 
 

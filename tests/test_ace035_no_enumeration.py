@@ -792,7 +792,8 @@ _NO_VECTOR = {
         "Not drivable from this matrix: no STATEMENT produces it. It fires on the CALL — no "
         "`example`, or one naming an id this datasource does not store (#376) — and the matrix's "
         "fixture stores no examples, where the rule stands aside. Its text names only the "
-        "datasource the caller itself named and the two words `use` accepts; it never lists, "
+        "datasource the call resolved to (the caller's own, or the one its organization serves) "
+        "and the two words `use` accepts; it never lists, "
         "counts or quotes the stored examples. Driven directly by tests/test_example_required.py."
     ),
     # `RULE_MODEL_SAFETY` sat here and its note said THIS IS THE ENTRY TO DELETE FIRST, because the
