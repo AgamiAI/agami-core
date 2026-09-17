@@ -24,11 +24,10 @@ comparator must never do.
 On top of those keys sits the comparison itself, in three steps that are deliberately separate:
 whether the answer key asked for an ordering at all, which generated column answers which golden
 one, and how far the rows agree once the columns are paired. Column identity is decided by VALUES
-first — a generated statement is free to alias a total and to select it second. When several
-columns hold equal values, the rows decide which pairs with which, and a name decides only what the
-rows leave open. A name also decides which column a near miss that agrees on only some rows belongs
-to. Rows are compared as a multiset unless the author ordered them, because duplicates are signal
-and order usually is not.
+first — a generated statement is free to alias a total and to select it second. A name decides
+only what the values leave open: which of several columns with equal values pairs with which, and
+which column a near miss that agrees on only some rows belongs to. Rows are compared as a multiset
+unless the author ordered them, because duplicates are signal and order usually is not.
 
 ``compare_result_sets`` is the one way in. It is TOTAL: a malformed result, an unreadable
 statement or a band that cannot be applied all come back as a score with an error status, never as
@@ -46,11 +45,10 @@ import io
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Context, Decimal
-from operator import eq, itemgetter
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Optional
 
@@ -292,32 +290,6 @@ def _sort_key(canon: tuple[str, Any]) -> tuple[str, str]:
     return (canon[0], str(canon[1]))
 
 
-def _canonical_rows(
-    columns: Sequence[str], rows: Sequence[Sequence[Any]], *, quantize: bool
-) -> list[tuple[tuple[str, Any], ...]]:
-    """Every row canonicalised, after checking it is as wide as its columns."""
-    canonical = []
-    for row in rows:
-        if len(row) != len(columns):
-            raise RaggedRow(f"a row of {len(row)} cells arrived with {len(columns)} columns")
-        canonical.append(canonical_row(row, quantize=quantize))
-    return canonical
-
-
-def _vectors(
-    canonical: Sequence[tuple[tuple[str, Any], ...]], width: int, *, ordered: bool
-) -> list[tuple[tuple[str, Any], ...]]:
-    """One comparable vector per column of canonical rows: its cells in row order, or sorted when
-    order is not part of the answer."""
-    vectors = []
-    for index in range(width):
-        cells = [row[index] for row in canonical]
-        if not ordered:
-            cells.sort(key=_sort_key)
-        vectors.append(tuple(cells))
-    return vectors
-
-
 def _column_vectors(
     columns: Sequence[str],
     rows: Sequence[Sequence[Any]],
@@ -327,8 +299,18 @@ def _column_vectors(
 ) -> list[tuple[tuple[str, Any], ...]]:
     """One comparable vector per column: its cells in row order, or sorted when order is not part
     of the answer."""
-    canonical = _canonical_rows(columns, rows, quantize=quantize)
-    return _vectors(canonical, len(columns), ordered=ordered)
+    canonical = []
+    for row in rows:
+        if len(row) != len(columns):
+            raise RaggedRow(f"a row of {len(row)} cells arrived with {len(columns)} columns")
+        canonical.append(canonical_row(row, quantize=quantize))
+    vectors = []
+    for index in range(len(columns)):
+        cells = [row[index] for row in canonical]
+        if not ordered:
+            cells.sort(key=_sort_key)
+        vectors.append(tuple(cells))
+    return vectors
 
 
 class ColumnPairing(NamedTuple):
@@ -428,372 +410,6 @@ def _pair_equal_vectors(
     return pairing
 
 
-# The most assignments of equal columns an unordered pairing tries, counted over all the classes it
-# searches together: 720 is every order of six columns. A class that would take the count past it
-# keeps the pairing `_line_up_equal_columns` chose before its search, so a result with many
-# interchangeable columns costs a bounded search and never a runaway one.
-_ASSIGNMENT_CAP = 720
-
-
-def _picker(indices: Sequence[int]) -> Callable[[Sequence[Any]], tuple[Any, ...]]:
-    """A function that takes the cells at `indices` out of a row, always as a tuple. `itemgetter`
-    alone returns a bare cell for one index and cannot take none."""
-    if not indices:
-        return lambda row: ()
-    if len(indices) == 1:
-        index = indices[0]
-        return lambda row: (row[index],)
-    return itemgetter(*indices)
-
-
-def _overlap(
-    golden_rows: Sequence[tuple[tuple[str, Any], ...]],
-    generated_rows: Sequence[tuple[tuple[str, Any], ...]],
-    pairing: dict[int, int],
-) -> int:
-    """`compare_rows`' unordered overlap, over rows that are already canonical."""
-    order = sorted(pairing)
-    golden = Counter(map(_picker(order), golden_rows))
-    generated = Counter(map(_picker([pairing[index] for index in order]), generated_rows))
-    return sum((golden & generated).values())
-
-
-def _equal_classes(
-    golden_vectors: Sequence[tuple[tuple[str, Any], ...]],
-    generated_vectors: Sequence[tuple[tuple[str, Any], ...]],
-) -> list[tuple[int, list[int], list[int]]]:
-    """Every class of columns with equal vectors that can pair in more than one way: how many ways,
-    then its golden and its generated columns. Fewest ways first."""
-    members: dict[tuple[tuple[str, Any], ...], tuple[list[int], list[int]]] = {}
-    for index, vector in enumerate(golden_vectors):
-        members.setdefault(vector, ([], []))[0].append(index)
-    for index, vector in enumerate(generated_vectors):
-        if vector in members:
-            members[vector][1].append(index)
-    classes = []
-    for golden, generated in members.values():
-        fewer, more = sorted((len(golden), len(generated)))
-        ways = math.perm(more, fewer)
-        if ways > 1:
-            classes.append((ways, golden, generated))
-    return sorted(classes)
-
-
-# How many rows the search may read in all. Two million is about a quarter of a second, and covers
-# every assignment of six columns over some six hundred distinct rows even when nothing is pruned.
-# Past it the search stops and keeps the best assignment it has found, which never lines up fewer
-# rows than the pairing it started from. What usually gets there is a large result that lines up
-# badly under every assignment, so pruning has no good assignment to measure the others against.
-_SEARCH_ROW_BUDGET = 2_000_000
-
-
-class _BudgetSpent(Exception):
-    """The search has read `_SEARCH_ROW_BUDGET` rows, and keeps what it has found."""
-
-
-# A step pairs one more column. It takes a partial assignment's state, a golden column and its
-# partner, and scratch space shared by the steps from one state, and returns the child's state and
-# how many rows the child lines up.
-_Step = Callable[[Any, int, int, dict], tuple[Any, int]]
-
-
-def _aligned_steps(
-    fixed: Sequence[int],
-    fixed_partners: Sequence[int],
-    golden_rows: Sequence[tuple[tuple[str, Any], ...]],
-    generated_rows: Sequence[tuple[tuple[str, Any], ...]],
-    spend: Callable[[int], None],
-) -> Optional[tuple[_Step, int, int]]:
-    """Steps for rows the fixed columns line up one to one, or None when they do not.
-
-    When the fixed columns hold a different combination on every golden row, and on every generated
-    row, a golden row can only line up with the one generated row that shares it. So the rows a pair
-    of columns agrees on are a mask, one byte per row, read once per pair. An assignment lines up
-    the rows all its pairs agree on: an AND of masks and a bit count, both native and fast.
-    """
-    golden_fixed = _picker(fixed)
-    row_of: dict[tuple[tuple[str, Any], ...], int] = {}
-    for index, row in enumerate(golden_rows):
-        if row_of.setdefault(golden_fixed(row), index) != index:
-            return None
-    generated_fixed = _picker(fixed_partners)
-    partner_of: dict[int, tuple[tuple[str, Any], ...]] = {}
-    for row in generated_rows:
-        index = row_of.get(generated_fixed(row))
-        if index is not None:
-            if index in partner_of:
-                return None
-            partner_of[index] = row
-    golden = [golden_rows[index] for index in sorted(partner_of)]
-    generated = [partner_of[index] for index in sorted(partner_of)]
-    masks: dict[tuple[int, int], int] = {}
-
-    def step(state: int, index: int, partner: int, _shared: dict) -> tuple[int, int]:
-        mask = masks.get((index, partner))
-        if mask is None:
-            spend(len(golden))
-            cells = map(itemgetter(index), golden), map(itemgetter(partner), generated)
-            mask = masks[index, partner] = int.from_bytes(bytes(map(eq, *cells)), "big")
-        child = state & mask
-        return child, child.bit_count()
-
-    return step, int.from_bytes(bytes([1]) * len(golden), "big"), len(golden)
-
-
-class _Side(NamedTuple):
-    """One result's distinct rows during the search, aligned: each row's key over the columns paired
-    so far, its searched cells as small integers, and how many times the row occurs."""
-
-    keys: list[int]
-    cells: list[tuple[int, ...]]
-    counts: list[int]
-
-
-def _extend_golden(
-    side: _Side, position: int, width: int
-) -> tuple[_Side, dict[int, int], list[int]]:
-    """The golden side keyed on one more column: the new keys, the table from an old key and a cell
-    to a new key, and how many golden rows carry each new key."""
-    table: dict[int, int] = {}
-    keys = [
-        table.setdefault(key * width + cells[position], len(table))
-        for key, cells in zip(side.keys, side.cells)
-    ]
-    totals = [0] * len(table)
-    for key, count in zip(keys, side.counts):
-        totals[key] += count
-    return side._replace(keys=keys), table, totals
-
-
-def _extend_generated(side: _Side, position: int, width: int, table: dict[int, int]) -> _Side:
-    """The generated side keyed on one more column, through the golden side's table. A row whose key
-    no golden row carries can never line up again, so it is dropped, and later steps skip it."""
-    keys, cells, counts = [], [], []
-    for key, row, count in zip(side.keys, side.cells, side.counts):
-        extended = table.get(key * width + row[position])
-        if extended is not None:
-            keys.append(extended)
-            cells.append(row)
-            counts.append(count)
-    return _Side(keys, cells, counts)
-
-
-def _lined_up(generated: _Side, golden_totals: list[int]) -> int:
-    """How many rows the two sides share, as multisets, over the columns keyed so far."""
-    tally: dict[int, int] = {}
-    for key, count in zip(generated.keys, generated.counts):
-        tally[key] = tally.get(key, 0) + count
-    return sum(min(count, golden_totals[key]) for key, count in tally.items())
-
-
-def _distinct_row_steps(
-    classes: Sequence[tuple[list[int], list[int]]],
-    fixed: Sequence[int],
-    fixed_partners: Sequence[int],
-    golden_rows: Sequence[tuple[tuple[str, Any], ...]],
-    generated_rows: Sequence[tuple[tuple[str, Any], ...]],
-    spend: Callable[[int], None],
-) -> tuple[_Step, Any, int]:
-    """Steps for any rows, keying each distinct row on one more column at a time.
-
-    Each side collapses to its distinct rows with a count, keyed on the fixed columns. The searched
-    cells become small integers per class: only columns of one class are ever compared, and they
-    all hold the same values. So a step costs one integer lookup per distinct row, and a generated
-    row whose key no golden row carries is dropped for good.
-    """
-    searched_golden = [index for golden, _ in classes for index in golden]
-    searched_generated = [index for _, generated in classes for index in generated]
-    fixed_keys: dict[tuple[tuple[str, Any], ...], int] = {}
-    golden_fixed, golden_searched = _picker(fixed), _picker(searched_golden)
-    golden_tally: Counter = Counter()
-    for row in golden_rows:
-        key = fixed_keys.setdefault(golden_fixed(row), len(fixed_keys))
-        golden_tally[key, golden_searched(row)] += 1
-    generated_fixed, generated_searched = _picker(fixed_partners), _picker(searched_generated)
-    generated_tally: Counter = Counter()
-    for row in generated_rows:
-        key = fixed_keys.get(generated_fixed(row))
-        if key is not None:
-            generated_tally[key, generated_searched(row)] += 1
-
-    codes: list[dict[tuple[str, Any], int]] = [{} for _ in classes]
-    class_of = {index: number for number, (golden, _) in enumerate(classes) for index in golden}
-
-    def code(cell: tuple[str, Any], owner: int) -> int:
-        return codes[owner].setdefault(cell, len(codes[owner]))
-
-    def side(tally: Counter, owners: list[int]) -> _Side:
-        coded = [tuple(map(code, cells, owners)) for _, cells in tally]
-        return _Side([key for key, _ in tally], coded, list(tally.values()))
-
-    golden = side(golden_tally, [class_of[index] for index in searched_golden])
-    generated = side(
-        generated_tally, [number for number, (_, members) in enumerate(classes) for _ in members]
-    )
-    widths = [len(table) for table in codes]
-    totals = [0] * len(fixed_keys)
-    for key, count in zip(golden.keys, golden.counts):
-        totals[key] += count
-    golden_position = {index: position for position, index in enumerate(searched_golden)}
-    generated_position = {index: position for position, index in enumerate(searched_generated)}
-
-    def step(state: Any, index: int, partner: int, shared: dict) -> tuple[Any, int]:
-        golden, golden_totals, generated = state
-        width = widths[class_of[index]]
-        if index not in shared:
-            spend(len(golden.keys))
-            shared[index] = _extend_golden(golden, golden_position[index], width)
-        golden_next, table, totals_next = shared[index]
-        spend(len(generated.keys))
-        generated_next = _extend_generated(generated, generated_position[partner], width, table)
-        return (golden_next, totals_next, generated_next), _lined_up(generated_next, totals_next)
-
-    return step, (golden, totals, generated), _lined_up(generated, totals)
-
-
-def _search_classes(
-    classes: Sequence[tuple[list[int], list[int]]],
-    current: dict[int, int],
-    current_overlap: int,
-    golden_columns: Sequence[str],
-    golden_rows: Sequence[tuple[tuple[str, Any], ...]],
-    generated_columns: Sequence[str],
-    generated_rows: Sequence[tuple[tuple[str, Any], ...]],
-) -> dict[int, int]:
-    """The assignment inside `classes` that lines up the most rows, ties going to the one with the
-    most same-named pairs and then to `current`. A column outside them keeps its `current` partner.
-
-    Branch and bound, pairing one column of each class's smaller side at a time. Pairing one more
-    column can split rows that lined up but never join rows that did not, so the rows a partial
-    assignment lines up bound every assignment that completes it, and a branch that cannot beat the
-    best so far is dropped. Branches are taken best first, so when some assignment lines up every
-    row it is usually reached at once, and every other branch is dropped early.
-    """
-    golden_names = [_folded_name(name) for name in golden_columns]
-    generated_names = [_folded_name(name) for name in generated_columns]
-    searched = {index for golden, _ in classes for index in golden}
-    fixed = sorted(set(current) - searched)
-    fixed_partners = [current[index] for index in fixed]
-    rows_left = _SEARCH_ROW_BUDGET
-
-    def spend(rows: int) -> None:
-        nonlocal rows_left
-        rows_left -= rows
-        if rows_left < 0:
-            raise _BudgetSpent
-
-    rows = (golden_rows, generated_rows, spend)
-    steps = _aligned_steps(fixed, fixed_partners, *rows)
-    if steps is None:
-        steps = _distinct_row_steps(classes, fixed, fixed_partners, *rows)
-    step, start, start_overlap = steps
-
-    # A slot is a column of a class's smaller side, and its options are the other side's columns.
-    slots: list[tuple[int, int, bool]] = []
-    options: list[list[int]] = []
-    for number, (golden, generated) in enumerate(classes):
-        slot_is_golden = len(golden) <= len(generated)
-        own, other = (golden, generated) if slot_is_golden else (generated, golden)
-        slots.extend((number, index, slot_is_golden) for index in own)
-        options.append(other)
-
-    def name_ceiling(depth: int, used: set[tuple[int, int]]) -> int:
-        """The most same-named pairs the slots from `depth` on can still make."""
-        ceiling = 0
-        for number in {slot[0] for slot in slots[depth:]}:
-            slot_is_golden = len(classes[number][0]) <= len(classes[number][1])
-            own, other = golden_names, generated_names
-            if not slot_is_golden:
-                own, other = other, own
-            wanted = Counter(own[slot[1]] for slot in slots[depth:] if slot[0] == number)
-            free = Counter(other[i] for i in options[number] if (number, i) not in used)
-            ceiling += sum((wanted & free).values())
-        return ceiling
-
-    best = {index: current[index] for index in sorted(searched) if index in current}
-    best_overlap = current_overlap
-    best_names = sum(golden_names[g] == generated_names[p] for g, p in best.items())
-
-    def visit(depth: int, state: Any, overlap: int, names: int, used: set, chosen: dict) -> None:
-        nonlocal best, best_overlap, best_names
-        if (overlap, names + name_ceiling(depth, used)) <= (best_overlap, best_names):
-            return
-        if depth == len(slots):
-            best, best_overlap, best_names = dict(chosen), overlap, names
-            return
-        number, column, slot_is_golden = slots[depth]
-        shared: dict = {}
-        children = []
-        for order, option in enumerate(options[number]):
-            if (number, option) in used:
-                continue
-            index, partner = (column, option) if slot_is_golden else (option, column)
-            child, lined = step(state, index, partner, shared)
-            other_name = golden_names[index] != generated_names[partner]
-            children.append((-lined, other_name, order, option, index, partner, child))
-        # Most rows first, then a same-named pair, then column order. `order` is unique, so the
-        # sort never reaches the states.
-        children.sort(key=lambda entry: entry[:3])
-        for negative_lined, other_name, _, option, index, partner, child in children:
-            used.add((number, option))
-            chosen[index] = partner
-            visit(depth + 1, child, -negative_lined, names + (not other_name), used, chosen)
-            used.discard((number, option))
-            del chosen[index]
-
-    try:
-        visit(0, start, start_overlap, 0, set(), {})
-    except _BudgetSpent:
-        pass
-    pairing = {index: current[index] for index in fixed}
-    pairing.update(best)
-    return dict(sorted(pairing.items()))
-
-
-def _line_up_equal_columns(
-    golden_columns: Sequence[str],
-    golden_vectors: Sequence[tuple[tuple[str, Any], ...]],
-    golden_rows: Sequence[tuple[tuple[str, Any], ...]],
-    generated_columns: Sequence[str],
-    generated_vectors: Sequence[tuple[tuple[str, Any], ...]],
-    generated_rows: Sequence[tuple[tuple[str, Any], ...]],
-) -> dict[int, int]:
-    """Stage one when the order does not count: of the ways to pair columns with equal vectors, one
-    that lines up the most rows.
-
-    Tried cheapest first. With no class of equal columns that can pair in two ways there is nothing
-    to choose. The pairing by names is kept when it lines up every row, since nothing lines up more
-    and nothing pairs more names. Otherwise the plain in-order pairing replaces it when it lines up
-    more rows, which was the whole rule before the search. Then the classes are searched, fewest
-    ways first while the ways multiply to at most `_ASSIGNMENT_CAP`, and a class past that keeps
-    the pairing chosen so far. The search keeps that pairing on a tie, so its result never lines up
-    fewer rows.
-    """
-    columns = (golden_columns, golden_vectors, generated_columns, generated_vectors)
-    pairing = _pair_equal_vectors(*columns, names_first=True)
-    classes = _equal_classes(golden_vectors, generated_vectors)
-    if not classes:
-        return pairing
-    overlap = _overlap(golden_rows, generated_rows, pairing)
-    if overlap == min(len(golden_rows), len(generated_rows)):
-        return pairing
-    in_order = _pair_equal_vectors(*columns, names_first=False)
-    if in_order != pairing:
-        in_order_overlap = _overlap(golden_rows, generated_rows, in_order)
-        if in_order_overlap > overlap:
-            pairing, overlap = in_order, in_order_overlap
-    searched, ways = [], 1
-    for class_ways, golden, generated in classes:
-        if ways * class_ways <= _ASSIGNMENT_CAP:
-            searched.append((golden, generated))
-            ways *= class_ways
-    if not searched:
-        return pairing
-    return _search_classes(
-        searched, pairing, overlap, golden_columns, golden_rows, generated_columns, generated_rows
-    )
-
-
 def pair_columns(
     golden_columns: Sequence[str],
     golden_rows: Sequence[Sequence[Any]],
@@ -814,15 +430,12 @@ def pair_columns(
     Inside a class the partners are interchangeable for the pairing, but not always for the rows.
     When the order does not count, the vectors are sorted. Two different flags that are each Y on
     half the rows are then equal vectors, and pairing each with the other's partner misaligns every
-    row, so an identical answer scored as a mismatch. A name alone cannot settle it either: a
-    statement can swap two labels, alias one of two columns that share a label, or rename every
-    column. So when the order does not count, the assignments inside the classes are searched for
-    the one that lines up the most rows, ties going to the one that pairs the most same-named
-    columns (see `_line_up_equal_columns`). The search is bounded: past `_ASSIGNMENT_CAP`
-    assignments a class keeps the pairing by names or in order, whichever lines up more rows. When
-    the order counts there is nothing to search: equal vectors are equal row for row, so every
-    choice inside a class lines up the same rows, and a golden column takes a partner of its own
-    name first (see `_pair_equal_vectors`).
+    row, so an identical answer scored as a mismatch. So a golden column takes a partner of its own
+    name first (see `_pair_equal_vectors`). A name can mislead too: a statement can swap two labels,
+    or alias one of two columns that share a label. So when the order does not count, the pairing
+    by names is checked against the plain in-order one, and the one that lines up more rows is
+    kept, a tie going to the names. When the order counts there is nothing to check: equal vectors
+    are equal row for row, so every choice inside a class lines up the same rows.
 
     Stage two is for what stage one left: one differing cell would otherwise unpair a column that
     is plainly there, and the score would read "no generated column carries the values of total"
@@ -834,19 +447,23 @@ def pair_columns(
     agreeing rows pairs when that share is above one half, ties going to generated order. A golden
     column with no such partner is reported unmatched.
     """
-    golden_canonical = _canonical_rows(golden_columns, golden_rows, quantize=quantize)
-    generated_canonical = _canonical_rows(generated_columns, generated_rows, quantize=quantize)
-    golden_vectors = _vectors(golden_canonical, len(golden_columns), ordered=ordered)
-    generated_vectors = _vectors(generated_canonical, len(generated_columns), ordered=ordered)
-    if ordered:
-        pairing = _pair_equal_vectors(
-            golden_columns, golden_vectors, generated_columns, generated_vectors, names_first=True
-        )
-    else:
-        pairing = _line_up_equal_columns(
-            golden_columns, golden_vectors, golden_canonical,
-            generated_columns, generated_vectors, generated_canonical,
-        )
+    golden_vectors = _column_vectors(
+        golden_columns, golden_rows, ordered=ordered, quantize=quantize
+    )
+    generated_vectors = _column_vectors(
+        generated_columns, generated_rows, ordered=ordered, quantize=quantize
+    )
+    columns = (golden_columns, golden_vectors, generated_columns, generated_vectors)
+    pairing = _pair_equal_vectors(*columns, names_first=True)
+    if not ordered:
+        in_order = _pair_equal_vectors(*columns, names_first=False)
+        if in_order != pairing:
+            overlaps = [
+                compare_rows(golden_rows, generated_rows, p, ordered=False, quantize=quantize)[0]
+                for p in (pairing, in_order)
+            ]
+            if overlaps[1] > overlaps[0]:
+                pairing = in_order
     agreement: dict[int, float] = dict.fromkeys(pairing, 1.0)
 
     claimed = set(pairing.values())

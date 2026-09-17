@@ -31,15 +31,10 @@ below corresponds to one such version.
   answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
   flags that are each true on half the rows then look the same, and the comparator paired
   whichever came first. Pairing each flag with the other's partner misaligned every row, so a
-  right answer scored below 1.0. The comparator now tries the ways to pair such columns and keeps
-  the one that lines up the most rows. A tie goes to the way that pairs more columns with a
-  same-named partner. So the answer scores 1.0 whether its columns keep their names, are renamed,
-  or have their labels swapped. The search is bounded in two ways. It tries at most 720 ways, every
-  order of six equal columns. Columns past that keep the old pairing: by name first, or in order
-  when that lines up more rows. So seven or more columns holding the same values can still score
-  below 1.0 when neither names nor order line their rows up. And it reads at most two million rows
-  in all, about a quarter of a second. Past that it keeps the best pairing it has found, which is
-  never worse than the old one.
+  right answer scored below 1.0. A golden column now takes a generated column of its own name
+  first. A name can mislead too, when a statement swaps two labels or aliases one of two columns
+  that share a label, so that pairing is checked against the old one and the one that lines up
+  more rows is kept.
 - **A column that mostly repeats one value no longer pairs with a different column.** A flag that
   is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
   the rows differed and blamed a column that was right, when the real finding was a missing
