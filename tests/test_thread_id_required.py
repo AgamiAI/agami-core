@@ -131,12 +131,11 @@ def _served_schema(tool: str) -> dict:
     """The schema the MCP SDK validates a call against."""
     import asyncio
 
-    import mcp.types as types
     from mcp_http import build_server
 
     server = build_server()
-    listed = asyncio.run(server.request_handlers[types.ListToolsRequest](types.ListToolsRequest()))
-    return next(t for t in listed.root.tools if t.name == tool).inputSchema
+    listed = asyncio.run(server.get_request_handler("tools/list").handler(None, None))
+    return next(t for t in listed.tools if t.name == tool).input_schema
 
 
 def test_a_blank_id_is_still_accepted_while_the_flag_is_off(monkeypatch):

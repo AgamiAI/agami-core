@@ -432,7 +432,7 @@ def build_server(
     `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools).
 
     `extra_instructions` is APPENDED to `server_instructions()` (never replaces it) and surfaced to the
-    model in the MCP `initialize` result — append-only so a consumer can add guidance but can't drop
+    model in the MCP `initialize` and `server/discover` results — append-only so a consumer can add guidance but can't drop
     the base protocol's safety directives (e.g. the receipt-reporting rules). None = no-op.
 
     `visibility(tool_name) -> bool` narrows the surface PER REQUEST. None (the default) is exactly
@@ -450,7 +450,7 @@ def build_server(
     surface into a private variant under cover of "visibility".
     """
     import mcp.types as mt
-    from mcp.server.lowlevel import Server
+    from mcp.server import Server, ServerRequestContext
 
     registry = TOOLS if registry is None else registry
     # Applied to whatever registry is being served, consumer tools included: a conversation is
@@ -483,7 +483,6 @@ def build_server(
     instructions = server_instructions()
     if extra_instructions:
         instructions = f"{instructions}\n{extra_instructions}"
-    server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
     def _described(names: list[str]) -> list:
         return [
@@ -493,13 +492,14 @@ def build_server(
             mt.Tool(
                 name=name,
                 description=tool_description(name, registry[name]["description"]),
-                inputSchema=registry[name]["inputSchema"],
+                input_schema=registry[name]["inputSchema"],
             )
             for name in names
         ]
 
-    @server.list_tools()
-    async def _list_tools() -> list:
+    async def _on_list_tools(
+        ctx: ServerRequestContext, params: mt.PaginatedRequestParams | None
+    ) -> mt.ListToolsResult:
         # The visibility predicate runs HERE, in the request task, before any hop: that is the context
         # its contract promises a consumer, who may read request-task state from it. Only the
         # descriptions go off the loop, for ACE-048's reason: the limits provider is the consumer's
@@ -509,11 +509,13 @@ def build_server(
         # nothing.
         names = [name for name in registry if _visible(name)]
         if not has_statement_limits_provider():
-            return _described(names)
-        return await run_blocking(_described, names)
+            return mt.ListToolsResult(tools=_described(names))
+        return mt.ListToolsResult(tools=await run_blocking(_described, names))
 
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict) -> list:
+    async def _on_call_tool(
+        ctx: ServerRequestContext, params: mt.CallToolRequestParams
+    ) -> mt.CallToolResult:
+        name, arguments = params.name, params.arguments
         meta = registry.get(name)
         # A hidden tool answers as an ABSENT one, not as a refused one: the same `Unknown tool` a typo
         # gets. Distinguishing them would turn the list into an oracle — a caller could enumerate what
@@ -559,7 +561,7 @@ def build_server(
                 return _with_caller_identity(meta["handler"](arguments or {}), actor)
 
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
-            return [mt.TextContent(type="text", text=result_text)]
+            return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])
         except Exception:
             raised = True
             raise
@@ -593,7 +595,13 @@ def build_server(
                 **typed_outcome_overrides(handler_ctx),
             )
 
-    return server
+    return Server(
+        SERVER_NAME,
+        version=server_version(),
+        instructions=instructions,
+        on_list_tools=_on_list_tools,
+        on_call_tool=_on_call_tool,
+    )
 
 
 def _is_loopback(base: str) -> bool:

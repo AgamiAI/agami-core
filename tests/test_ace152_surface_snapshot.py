@@ -11,8 +11,8 @@ moved, and this file only ever reads them. Two claims ride on them:
   comparison is of parsed JSON, where key order means nothing.
 - **An `execute_sql` envelope and its audit row** (criterion 7), for an `ok`, a `refused` and a
   `failed` call. The envelope inside `content[0].text` is compared byte for byte; the outer result
-  as parsed JSON, because SDK 2 orders `content[0]`'s keys differently and adds `resultType` on the
-  modern path.
+  as parsed JSON, because SDK 2 orders `content[0]`'s keys differently and adds `resultType` and a
+  `serverInfo` stamp under `_meta` on the modern path.
 
 Volatile values (ids, timestamps, timings) are replaced by a placeholder on both sides before the
 comparison, so the fixtures pin shape and content, not a particular run.
@@ -104,7 +104,9 @@ def served_tools(variant: str, era: str, monkeypatch) -> list[dict[str, str]]:
         {
             "name": tool["name"],
             "description": tool["description"],
-            "inputSchema": json.dumps(tool["inputSchema"], separators=(",", ":"), ensure_ascii=False),
+            "inputSchema": json.dumps(
+                tool["inputSchema"], separators=(",", ":"), ensure_ascii=False
+            ),
         }
         for tool in envelope(response)["result"]["tools"]
     ]
@@ -236,7 +238,8 @@ def execute_sql_outcomes(app_db: str, era: str) -> dict[str, dict]:
     for outcome, sql in CALLS.items():
         row = dict(by_sql[sql])
         outcomes[outcome]["row"] = {
-            k: (_VOLATILE if k in _VOLATILE_COLUMNS and v is not None else v) for k, v in row.items()
+            k: (_VOLATILE if k in _VOLATILE_COLUMNS and v is not None else v)
+            for k, v in row.items()
         }
     return outcomes
 
@@ -249,8 +252,10 @@ def test_execute_sql_envelopes_match_pre_upgrade(served, era):
         want, got = expected[outcome], actual[outcome]
         # The envelope a model reads, byte for byte.
         assert got["result"]["content"][0]["text"] == want["result"]["content"][0]["text"], outcome
-        # The rest of the result as parsed JSON, less the one field SDK 2 adds on 2026-07-28.
-        got_result = {k: v for k, v in got["result"].items() if k != "resultType"}
+        # The rest of the result as parsed JSON. On 2026-07-28 SDK 2 adds two fields every result
+        # carries on that era, whatever the tool: `resultType` and the `serverInfo` stamp in `_meta`.
+        added = {"resultType", "_meta"} if era == MODERN else set()
+        got_result = {k: v for k, v in got["result"].items() if k not in added}
         assert got_result == want["result"], outcome
         # Only the columns the capture had: a column added since (ACE-152's own `error_detail`) is
         # additive, and its value is asserted where it is introduced.

@@ -15,24 +15,11 @@ Shared by the ACE-152 test files so every transport claim runs on both eras thro
 from __future__ import annotations
 
 import json
-from importlib.metadata import version
 from typing import Any
-
-import pytest
 
 LEGACY = "2025-06-18"
 MODERN = "2026-07-28"
-# SDK 1.x has no 2026-07-28 path. Skipped there only so the snapshot of the pre-upgrade surface can
-# be committed and pass before the pin moves; the pin then makes the skip unreachable.
-ERAS = (
-    LEGACY,
-    pytest.param(
-        MODERN,
-        marks=pytest.mark.skipif(
-            int(version("mcp").split(".")[0]) < 2, reason="SDK 1.x serves no 2026-07-28 path"
-        ),
-    ),
-)
+ERAS = (LEGACY, MODERN)
 
 # The reserved `_meta` keys a 2026-07-28 request must carry. Spelled out rather than imported from
 # `mcp_types`, so a test can build a request without importing SDK internals.
