@@ -449,6 +449,7 @@ def build_server(
     surviving tool's description and inputSchema pass through untouched, so a consumer cannot fork the
     surface into a private variant under cover of "visibility".
     """
+    import jsonschema
     import mcp.types as mt
     from mcp.server import Server, ServerRequestContext
     from mcp.shared.exceptions import MCPError
@@ -526,7 +527,9 @@ def build_server(
     async def _on_call_tool(
         ctx: ServerRequestContext, params: mt.CallToolRequestParams
     ) -> mt.CallToolResult:
-        name, arguments = params.name, params.arguments
+        # `or {}` as SDK 1.x did before anything else saw them, so the schema check, the handler and
+        # the audit row all read the same value they always have.
+        name, arguments = params.name, params.arguments or {}
         meta = registry.get(name)
         # A hidden tool answers as an ABSENT one, not as a refused one: the same `Unknown tool` a typo
         # gets. Distinguishing them would turn the list into an oracle — a caller could enumerate what
@@ -536,6 +539,19 @@ def build_server(
         # hidden tool read as a crash.
         if meta is None or not _visible(name):
             raise MCPError(code=mt.INVALID_PARAMS, message=f"Unknown tool: {name}")
+        # SDK 1.x checked the arguments against `inputSchema` before the handler ran; SDK 2's
+        # low-level Server does not, and `AGAMI_REQUIRE_THREAD_ID` is enforced by nothing but the
+        # schema (`tools.require_thread_id`). Rebuilt here with 1.x's exact text, so a client sees the
+        # refusal it always did. AFTER the visibility check, unlike 1.x, whose check ran first: a
+        # hidden tool must answer `Unknown tool` whatever its arguments, not its own schema's
+        # complaint. Outside the recorded scope, so a refusal here writes no row, as it never did.
+        try:
+            jsonschema.validate(instance=arguments, schema=meta["inputSchema"])
+        except jsonschema.ValidationError as e:
+            return mt.CallToolResult(
+                content=[mt.TextContent(type="text", text=f"Input validation error: {e.message}")],
+                is_error=True,
+            )
         try:
             return await _recorded_call(name, arguments, meta)
         except Exception:
@@ -546,7 +562,7 @@ def build_server(
             _log.exception("tool %r: the audit write failed; the call is answered as failed", name)
             return _crashed(name)
 
-    async def _recorded_call(name: str, arguments: dict | None, meta: dict) -> mt.CallToolResult:
+    async def _recorded_call(name: str, arguments: dict, meta: dict) -> mt.CallToolResult:
         # Record every tool call to the admin activity log — timed, attributed to the authenticated
         # actor, never allowed to break the tool (logging is best-effort + double-guarded).
         started = time.monotonic()
@@ -583,7 +599,7 @@ def build_server(
             actor = _actor_ctx.get()
 
             def _run_and_stamp() -> str:
-                return _with_caller_identity(meta["handler"](arguments or {}), actor)
+                return _with_caller_identity(meta["handler"](arguments), actor)
 
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
             return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])

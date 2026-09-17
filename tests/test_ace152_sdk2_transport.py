@@ -241,3 +241,30 @@ def test_a_raising_predicate_leaks_nothing(era):
     assert envelope(called)["error"] == {"code": -32602, "message": "Unknown tool: probe"}
     _assert_nothing_leaked(listed)
     _assert_nothing_leaked(called)
+
+
+# --- argument validation -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_invalid_arguments_get_1x_text(era):
+    ran: list[dict] = []
+
+    response = _call(_app(lambda args: ran.append(args) or "ran"), era, arguments={"limit": "ten"})
+
+    assert response.status_code == 200, response.text
+    result = envelope(response)["result"]
+    assert result["isError"] is True
+    assert result["content"] == [
+        {"type": "text", "text": "Input validation error: 'ten' is not of type 'integer'"}
+    ]
+    assert ran == []
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_a_validation_refusal_writes_no_row(era, store_url):
+    """As on SDK 1.x, where the SDK refused before the handler, and so before the audit write."""
+    response = _call(_app(), era, arguments={"limit": "ten"})
+
+    assert envelope(response)["result"]["isError"] is True
+    assert _tool_calls(store_url) == []
