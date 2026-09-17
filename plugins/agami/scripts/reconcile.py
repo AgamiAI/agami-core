@@ -586,19 +586,27 @@ def _part(part: str, verdict: str, *, kind: str | None = None, depends_on=(),
             "evidence": evidence or {}, "note": note}
 
 
+# The key `_load_json` puts on its own error objects, so a reader can tell "this file could not be
+# read" from a file whose author wrote an `error` of their own. Several row files are written by the
+# session rather than by code, and `{"error": "the client timed out"}` in one of them is a record of
+# a run that failed, not a parser message. Nothing on disk carries this key, because nothing but the
+# loader writes it.
+_LOAD_ERROR = "__load_error__"
+
+
 def _load_json(path: Path) -> Any:
-    """The JSON in `path`; None when the file is absent; `{"error": ...}` when it is empty or is not
-    JSON. A verb that crashed leaves a zero-byte redirect behind, and that must read as "this input
-    is unusable", never as "checked and clean"."""
+    """The JSON in `path`; None when the file is absent; `{"error": ..., _LOAD_ERROR: True}` when it
+    is empty or is not JSON. A verb that crashed leaves a zero-byte redirect behind, and that must
+    read as "this input is unusable", never as "checked and clean"."""
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-8")
     if not text.strip():
-        return {"error": "empty_file"}
+        return {"error": "empty_file", _LOAD_ERROR: True}
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        return {"error": "unreadable_json", "detail": str(exc).splitlines()[0]}
+        return {"error": "unreadable_json", "detail": str(exc).splitlines()[0], _LOAD_ERROR: True}
 
 
 def _usable(payload: Any, key: str) -> "tuple[dict | None, str | None]":
@@ -2781,11 +2789,12 @@ def _run_result(path: Path, run: Any) -> tuple[dict | None, Any]:
 
 def _run_record(path: Path) -> Any:
     """The run record at `path`, or None when it is absent or cannot be read. An empty or broken file
-    is `_load_json`'s error object, with `error` and no `status`. It says nothing about how the run
-    went, so it counts as no record: the CSV beside it decides, and no parser message becomes the
-    reason a statement did not run."""
+    is `_load_json`'s own error object, marked `_LOAD_ERROR`. It says nothing about how the run went,
+    so it counts as no record: the CSV beside it decides, and no parser message becomes the reason a
+    statement did not run. The mark is what tells it from a record the session wrote by hand, which
+    carries only an `error` of its own and is a real record of a run that did not succeed."""
     run = _optional_json(path)
-    return None if isinstance(run, dict) and run.get("error") and "status" not in run else run
+    return None if isinstance(run, dict) and run.get(_LOAD_ERROR) else run
 
 
 def _optional_json(path: Path) -> Any:
@@ -2845,9 +2854,13 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
     if sql is None:
         error = answer.get("error") or "agami wrote no statement"
     elif recorded is None:
+        # Why it did not run, from the run record when it says: the tier's own fields first, then an
+        # `error` the session wrote by hand. A record that says none of them leaves only the plain
+        # sentence, which is the same one a row with no run record at all gets.
         detail = agami_run if isinstance(agami_run, dict) else {}
-        error = detail.get("detail") or detail.get("kind") or detail.get("status") or "agami's statement was not run, or its result was not recorded"
-        error = f"agami's statement did not run: {error}" if detail else error
+        why = detail.get("detail") or detail.get("kind") or detail.get("status") or detail.get("error")
+        error = f"agami's statement did not run: {why}" if why else \
+            "agami's statement was not run, or its result was not recorded"
     elif exp is None and statement is None:
         # A question on its own: the person supplied no statement and no number, so there is nothing
         # of theirs to compare against and NO file on disk can change that. `comparison.json` and

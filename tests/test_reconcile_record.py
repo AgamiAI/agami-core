@@ -191,6 +191,22 @@ def test_a_run_record_that_cannot_be_read_leaves_the_result_to_its_file(tmp_path
     assert rec["status"] == "error" and rec["error"] == "agami's statement was not run, or its result was not recorded"
 
 
+@pytest.mark.parametrize("written", ["the client timed out", "empty_file"])
+def test_a_run_error_the_session_wrote_is_a_record_and_not_a_parser_message(tmp_path, written):
+    """`agami-run.json` is written by the session (Phase 2b), not by code, so a run that failed can
+    arrive as `{"error": "..."}` and nothing else. That is a record of a run that did not succeed,
+    and a leftover `actual.csv` beside it is not its result. Reading any `error` as "this file could
+    not be read" recorded the failed run as a verified match against whatever the file still held —
+    including when the session's own word is one the loader uses too, as `empty_file` is."""
+    run = _run(tmp_path)
+    _files(run, 1, agami_answer__json=json.dumps({"sql": "SELECT COUNT(id) AS n FROM orders", "error": None}),
+           actual__csv="n\n42\n", statement__csv="n\n42\n", ledger__json=json.dumps(LEDGER_OK),
+           agami_run__json=json.dumps({"error": written}))
+    rec = reconcile.record(run, 1)
+    assert rec["status"] == "error" and rec["error"] == f"agami's statement did not run: {written}"
+    assert rec["recorded"] is None and rec["actual"] is None and rec["comparison"] is None
+
+
 def test_a_run_that_returned_a_header_and_no_rows_is_still_a_result(tmp_path):
     """The other side of the rule above: a statement that ran and matched nothing is an answer, and
     the comparison decides whether it is the right one."""

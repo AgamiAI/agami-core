@@ -62,9 +62,12 @@ below corresponds to one such version.
   gave. Now an empty result file is never a result, because a real one always has a header row that
   names its columns. A file holding only a blank line counts as empty too. A run record that is
   there and does not say `ok` means there is no result either, whatever file sits beside it. A run
-  record that is empty or not JSON says nothing about the run, so the result file decides. The same
-  holds for your own query: when it did not run, the page no longer shows your result as "0 rows".
-  A query that ran and returned a header with no rows is still a result, and is still compared.
+  record whose own file is empty or not JSON says nothing about the run, so the result file decides.
+  That is the file being unreadable, not the session saying the run went wrong: a run record holding
+  only an error the session wrote is a record of a run that failed, and the file beside it is not its
+  result. The same holds for your own query: when it did not run, the page no longer shows your
+  result as "0 rows". A query that ran and returned a header with no rows is still a result, and is
+  still compared.
 
 ## [0.9.2] — 2026-09-16
 
