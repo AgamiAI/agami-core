@@ -1372,3 +1372,196 @@ def test_nothing_pairs_when_the_row_counts_differ_and_the_share_is_absent():
     generated = c.ExecResult(columns=["customer"], rows=_TEN[:9])
     score = c.compare_result_sets(golden, generated, match="values", ordered=False)
     assert score.column_pairs == () and score.column_agreement == () and score.paired_row_share is None
+
+
+# --- pairing columns whose values are equal as multisets --------------------------------------------
+#
+# When the order does not count, a column's values are sorted before they are compared, so two
+# different flags that are each true on two rows of four are equal vectors. Which golden flag takes
+# which generated flag then decides whether the rows line up at all.
+
+# Two flags with equal counts on different rows, and a region that tells the rows apart. `is_staff`
+# is a third flag with the same counts, for a generated statement that selects a column too many.
+_FLAG_COLUMNS = ["region", "is_active", "is_verified"]
+_FLAG_ROWS = [
+    ("north", True, False),
+    ("south", True, True),
+    ("east", False, True),
+    ("west", False, False),
+]
+_IS_STAFF = {"north": True, "south": False, "east": True, "west": False}
+_REORDERED = ["region", "is_verified", "is_active"]
+
+
+def _flags_selected_as(columns, *, labels=None, shuffle=True):
+    """The flag rows as a statement selecting `columns` returns them: under `labels` when given, and
+    with the rows in another order unless `shuffle` is off."""
+    rows = list(reversed(_FLAG_ROWS)) if shuffle else _FLAG_ROWS
+    selected = []
+    for row in rows:
+        cells = dict(zip(_FLAG_COLUMNS, row), is_staff=_IS_STAFF[row[0]])
+        selected.append(tuple(cells[name] for name in columns))
+    return c.ExecResult(columns=list(labels or columns), rows=selected)
+
+
+_FLAGS_BY_NAME = (("region", "region"), ("is_active", "is_active"), ("is_verified", "is_verified"))
+
+
+def test_same_named_flags_selected_in_the_other_order_pair_by_name_when_unordered():
+    golden = c.ExecResult(columns=_FLAG_COLUMNS, rows=_FLAG_ROWS)
+    score = c.compare_result_sets(
+        golden, _flags_selected_as(_REORDERED), match="values", ordered=False
+    )
+    assert score.accuracy == 1.0 and score.column_pairs == _FLAGS_BY_NAME
+
+
+def test_an_extra_flag_with_equal_counts_listed_first_does_not_take_a_named_partner():
+    golden = c.ExecResult(columns=_FLAG_COLUMNS, rows=_FLAG_ROWS)
+    generated = _flags_selected_as(["region", "is_staff", "is_verified", "is_active"])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0 and score.column_pairs == _FLAGS_BY_NAME
+    assert score.unmatched_generated_columns == ("is_staff",)
+
+
+def test_a_tie_between_the_two_pairings_goes_to_the_names():
+    # Without the region, swapping two flags with equal counts leaves the same rows as a multiset,
+    # so both pairings line up every row. The names break the tie.
+    golden = _flags_selected_as(["is_active", "is_verified"], shuffle=False)
+    generated = _flags_selected_as(["is_verified", "is_active"])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("is_active", "is_active"), ("is_verified", "is_verified"))
+
+
+def test_swapped_labels_still_pair_by_values_when_the_names_would_misalign_the_rows():
+    # The generated statement put each label on the other column. Pairing by name would misalign
+    # every row; pairing in order lines them all up, so that pairing is kept.
+    rows = [(1, 2), (2, 3), (3, 1)]
+    golden = c.ExecResult(columns=["x", "y"], rows=rows)
+    generated = c.ExecResult(columns=["y", "x"], rows=rows)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("x", "y"), ("y", "x"))
+
+
+def test_a_repeated_golden_label_with_one_column_aliased_still_scores_a_full_match():
+    rows = [("a", "b"), ("b", "c"), ("c", "a")]
+    golden = c.ExecResult(columns=["name", "name"], rows=rows)
+    generated = c.ExecResult(columns=["from_name", "name"], rows=rows)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("name", "from_name"), ("name", "name"))
+
+
+@pytest.mark.parametrize("golden_columns", [_FLAG_COLUMNS, _REORDERED])
+def test_a_flag_without_a_namesake_does_not_take_a_later_flag_s_namesake(golden_columns):
+    # `is_active` is selected as `active`, so it has no namesake. Checked in both golden column
+    # orders: it must not take `is_verified`'s partner whether it comes before that column or after.
+    golden = _flags_selected_as(golden_columns, shuffle=False)
+    generated = _flags_selected_as(_REORDERED, labels=["region", "is_verified", "active"])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert dict(score.column_pairs) == {
+        "region": "region", "is_active": "active", "is_verified": "is_verified"
+    }
+
+
+def test_flags_selected_in_the_other_order_score_through_the_answer_key_s_ordering():
+    golden = c.ExecResult(columns=_FLAG_COLUMNS, rows=_FLAG_ROWS)
+    unordered_sql = "SELECT region, is_active, is_verified FROM accounts"
+    score = c.compare_result_sets(golden, _flags_selected_as(_REORDERED), golden_sql=unordered_sql)
+    assert score.order_sensitive is False and score.accuracy == 1.0
+    # With an ORDER BY the rows are compared in place, so the same statement passes only when its
+    # rows come back in the answer key's order. Neither verdict changed with this pairing.
+    ordered_sql = unordered_sql + " ORDER BY region"
+    in_place = _flags_selected_as(_REORDERED, shuffle=False)
+    assert c.compare_result_sets(golden, in_place, golden_sql=ordered_sql).accuracy == 1.0
+    moved = _flags_selected_as(_REORDERED)
+    assert c.compare_result_sets(golden, moved, golden_sql=ordered_sql).accuracy < 1.0
+
+
+# --- a column that could agree with most columns by chance ------------------------------------------
+
+_CUSTOMERS = [f"c{i}" for i in range(10)]
+
+
+def _two_columns(names, second):
+    return c.ExecResult(columns=list(names), rows=list(zip(_CUSTOMERS, second)))
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_a_flag_that_is_n_on_every_row_does_not_pair_with_another_mostly_n_column(ordered):
+    golden = _two_columns(["customer", "is_closed"], ["N"] * 10)
+    generated = _two_columns(["customer", "is_hidden"], ["N"] * 9 + ["Y"])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=ordered)
+    assert score.accuracy == 0.0
+    assert score.reason == "no generated column carries the values of: is_closed"
+    assert score.unmatched_golden_columns == ("is_closed",)
+    assert score.unmatched_generated_columns == ("is_hidden",)
+    # Every column that did pair agrees on every row, and the report says so.
+    assert score.column_pairs == (("customer", "customer"),) and score.paired_row_share == 1.0
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_a_same_named_flag_pairs_at_any_agreement_however_little_its_values_vary(ordered):
+    golden = _two_columns(["customer", "is_closed"], ["N"] * 10)
+    generated = _two_columns(["customer", "o.is_closed"], ["N"] * 9 + ["Y"])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=ordered)
+    assert score.column_pairs == (("customer", "customer"), ("is_closed", "o.is_closed"))
+    assert score.column_agreement == (1.0, 0.9)
+    assert score.accuracy == 0.9
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_a_renamed_skewed_column_wrong_on_one_row_is_reported_missing(ordered):
+    # The accepted cost of the rule above. The column is there under another name and wrong on one
+    # row, but most of its rows hold one value, so agreeing on nine rows of ten is no evidence that
+    # it is the same column. It is reported missing rather than paired.
+    statuses = ["open"] * 8 + ["closed"] * 2
+    golden = _two_columns(["customer", "status"], statuses)
+    generated = _two_columns(["customer", "state"], ["closed"] + statuses[1:])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=ordered)
+    assert score.unmatched_golden_columns == ("status",)
+    assert score.reason == "no generated column carries the values of: status"
+
+
+def test_a_balanced_flag_does_not_pair_with_an_unrelated_flag_when_unordered():
+    # As multisets, five true of ten and six true of ten overlap on nine rows, whatever rows the
+    # values sit on. So under an unordered comparison this flag's values are not telling.
+    golden = _two_columns(["customer", "is_admin"], [True] * 5 + [False] * 5)
+    generated = _two_columns(["customer", "is_staff"], [False] + [True] * 6 + [False] * 3)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.unmatched_golden_columns == ("is_admin",) and score.accuracy == 0.0
+
+
+def test_a_balanced_flag_renamed_and_wrong_on_one_row_still_pairs_when_ordered():
+    # Row by row, agreeing on nine rows of ten is evidence for a flag that is true on half of them.
+    flags = [True] * 5 + [False] * 5
+    golden = _two_columns(["customer", "is_admin"], flags)
+    generated = _two_columns(["customer", "admin"], [False] + flags[1:])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=True)
+    assert score.column_pairs == (("customer", "customer"), ("is_admin", "admin"))
+    assert score.column_agreement == (1.0, 0.9) and score.accuracy == 0.9
+
+
+def _vector(*values):
+    return tuple(c.canonical_cell(value) for value in values)
+
+
+def test_telling_when_ordered_allows_one_value_on_exactly_half_the_rows():
+    assert c._telling(_vector("Y", "Y", "N", "N"), ordered=True) is True
+    assert c._telling(_vector("Y", "Y", "Y", "N"), ordered=True) is False
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_telling_is_false_for_a_mostly_null_a_single_row_and_an_empty_column(ordered):
+    assert c._telling(_vector(None, None, None, 7), ordered=ordered) is False
+    assert c._telling(_vector(42), ordered=ordered) is False
+    assert c._telling((), ordered=ordered) is False
+
+
+def test_telling_when_unordered_needs_more_than_half_the_values_distinct():
+    assert c._telling(_vector(1, 2, 3, 4, 5, 1, 2, 3, 4, 5), ordered=False) is False
+    assert c._telling(_vector(1, 2, 3, 4, 5, 6, 2, 3, 4, 5), ordered=False) is True
+    # A flag true on half its rows is telling in place, but not as a multiset.
+    assert c._telling(_vector("Y", "Y", "N", "N"), ordered=False) is False
