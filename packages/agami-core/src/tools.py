@@ -1951,7 +1951,7 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     Relayed only when BOTH hold:
 
       * the exit code is one the child's CLI contract produces from a `Failure`
-        (`execute_sql.EXIT_TO_FAILURE_KIND` — 2/3/4/5/6). Those are the codes `main` reaches by
+        (`execute_sql.EXIT_TO_FAILURE_KIND`, 2-11). Those are the codes `main` reaches by
         writing `env.failure.message`, so the text is something the child classified and chose. Any
         other code — a Python-level crash exiting 1, a signal, a code we do not know — means the
         child never got that far, so its stderr is whatever happened to be on the way out.
@@ -3899,13 +3899,17 @@ TOOLS: dict[str, dict[str, Any]] = {
             "  {status:'failed', failure:{kind, message}, receipt, audit_id} — the DATABASE's "
             "outcome rather than ours, so unlike a refusal it names no fix and `message` is "
             "value-free. `kind` is one of syntax, column_not_found, table_not_found, permission, "
-            "auth, network, dsn, driver_missing, timeout, other. On syntax / column_not_found / "
-            "table_not_found the schema you already hold is enough to repair it: correct the "
-            "statement and retry SILENTLY, without narrating the retry or echoing the failed SQL. "
-            "auth / dsn / driver_missing / permission are deployment configuration and retrying "
-            "cannot help — say what is wrong and stop. A `timeout` here is the server giving up on "
-            "an unresponsive executor, which is not the same as the per-statement deadline above "
-            "and does not on its own mean the query was too broad.\n"
+            "auth, network, dsn, driver_missing, timeout, sign_in_required, other. On syntax / "
+            "column_not_found / table_not_found the schema you already hold is enough to repair "
+            "it: correct the statement and retry SILENTLY, without narrating the retry or echoing "
+            "the failed SQL. auth / dsn / driver_missing / permission are deployment configuration "
+            "and retrying cannot help — say what is wrong and stop. sign_in_required is the "
+            "person's own sign-in, not the deployment: nothing is broken, so do not retry and do "
+            "not describe the database or the connection as failing — relay the message, which "
+            "tells them to sign in again (reconnect the connector) and start a new conversation. "
+            "A `timeout` here is the server giving up on an unresponsive executor, which is not "
+            "the same as the per-statement deadline above and does not on its own mean the query "
+            "was too broad.\n"
             # The declared-filter clause. Spec ids stay in comments like this one — this string
             # ships to every client, and an id only resolves inside the spec repo.
             "A table's declared `default_filters` are NOT applied to your SQL — if a filter "

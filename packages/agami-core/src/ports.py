@@ -123,8 +123,13 @@ class Executor(Protocol):
 
     Raises:
         ``execute_sql.ExecutorError`` for a connect / credential / driver / run failure. That is the
-        classified channel: its ``code`` picks the ``Failure.kind`` the caller sees and its ``msg``
-        is relayed, so an adapter that wants a specific kind and a useful message raises this.
+        classified channel: its ``code`` picks the ``Failure.kind`` the caller sees. Its ``msg`` is
+        relayed only for the authored codes 2 and 3; for every other code the caller gets the fixed
+        sentence for the kind, and ``msg`` goes to the audit detail and the server log only. An
+        adapter that wants a specific kind raises this with that kind's code, looked up in
+        ``execute_sql.FAILURE_KIND_TO_EXIT`` (``sign_in_required`` when the asking person's own
+        credential is missing or cannot be renewed). Use ``.get(kind, 4)`` for a kind an older core
+        may not have, so the failure stays classified.
 
         Any **other** exception is caught by ``execute_guarded`` and becomes ``failed`` / ``other``
         with a generic, value-free message; the raw text and stack go to the server log only. So a

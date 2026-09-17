@@ -48,6 +48,9 @@ Exit codes:
     8  — the statement referenced a table the database does not have
     9  — the connection's role lacks SELECT on a referenced object
     10 — the database was unreachable mid-statement (connection refused / reset)
+    11 — the person asking must sign in again (`Failure.kind == "sign_in_required"`). Never raised by
+         the built-in executor; an injected executor that connects as the person raises it when
+         that person's own credential is missing or can no longer be renewed.
 
 Codes 7-10 exist for the same reason 6 does. The child classifies a driver error at the chokepoint
 and then `main` collapses that classification to an exit code, so a kind without a code of its own is
@@ -262,6 +265,15 @@ EXIT_TO_FAILURE_KIND: dict[int, FailureKind] = {
     8: "table_not_found",
     9: "permission",  # the ROLE lacks SELECT; distinct from `auth`, where the credentials failed
     10: "network",
+    # The one code the built-in executor never raises. An injected executor that connects as the
+    # asking person (`Adapters.executor`) raises it when that person's own credential is missing or
+    # cannot be renewed. It needs a code of its own for the reason 7-10 do, and a caller-facing
+    # sentence of its own because the fix is the person's, not an operator's: `auth` tells a client
+    # the deployment is misconfigured, and a client relaying that sends everyone to the warehouse.
+    # An executor should look the code up as `FAILURE_KIND_TO_EXIT.get("sign_in_required", 4)` rather
+    # than write 11: on a core that predates the kind the key is absent, and the default keeps the
+    # failure classified (as `auth`) instead of raising `KeyError` or landing on an unmapped code.
+    11: "sign_in_required",
 }
 
 # The inverse, for ``main`` turning a ``Failure`` back into today's exit code. Every failure
@@ -320,6 +332,10 @@ _ERROR_MESSAGES: dict[str, str] = {
     "network": "The database was unreachable.",
     "dsn": "The datasource host or path could not be resolved.",
     "driver_missing": "The database driver is not installed on the server.",
+    "sign_in_required": (
+        "Your sign-in has expired or is missing, so the data source could not be opened as you. "
+        "Sign in again (reconnect the connector), then start a new conversation."
+    ),
 }
 
 
@@ -357,6 +373,11 @@ def _classify_db_error(text: str, code: int) -> FailureKind:
     def has(*needles: str) -> bool:
         return any(needle in lowered for needle in needles)
 
+    # Checked before any needle: the executor that raised 11 has already decided what happened, and
+    # its message is its own — a word in it must not reclassify a sign-in as something an operator
+    # has to fix.
+    if code == FAILURE_KIND_TO_EXIT["sign_in_required"]:
+        return "sign_in_required"
     if code == 3 or has("no module named", "modulenotfounderror", "command not found"):
         return "driver_missing"
     # Ten engines spell an authorization failure ten ways, and getting this wrong is not cosmetic:
