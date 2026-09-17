@@ -281,6 +281,58 @@ def test_a_validation_refusal_writes_no_row(era, store_url):
     assert _tool_calls(store_url) == []
 
 
+def test_a_tool_with_an_invalid_schema_is_refused_at_startup():
+    """A schema that is not itself valid JSON Schema fails the build, like any other malformed extra
+    tool, rather than on every call to it."""
+    extra = {
+        "broken": {
+            "handler": lambda args: "ran",
+            "description": "d",
+            "inputSchema": {"type": "nosuchtype"},
+        }
+    }
+
+    with pytest.raises(ValueError, match="broken"):
+        mcp_http.create_app(extra_tools=extra)
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_an_unresolvable_ref_answers_the_fixed_text(era, monkeypatch):
+    """A schema that passes the metaschema can still fail while validating: a `$ref` nobody can
+    resolve raises something other than ValidationError, whose words (the URL) must stay off the
+    wire. And it must not be fetched: a consumer's schema is no licence for the server to egress."""
+    import urllib.request
+
+    fetched: list = []
+
+    def _no_egress(*args, **kwargs):
+        fetched.append(args)
+        raise OSError("egress attempted")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _no_egress)
+    ran: list[dict] = []
+    schema = {
+        "type": "object",
+        "properties": {"x": {"$ref": f"https://unreachable.example/schema-{MARKER}"}},
+    }
+    extra = {
+        "probe": {
+            "handler": lambda args: ran.append(args) or "ran",
+            "description": "d",
+            "inputSchema": schema,
+        }
+    }
+
+    response = _call(mcp_http.create_app(extra_tools=extra), era, arguments={"x": 1})
+
+    assert response.status_code == 200, response.text
+    result = envelope(response)["result"]
+    assert result["isError"] is True
+    assert result["content"] == [{"type": "text", "text": "Error executing tool probe"}]
+    assert ran == [] and fetched == []
+    _assert_nothing_leaked(response)
+
+
 # --- the host and origin allowlist ---------------------------------------------------------------
 
 
@@ -321,6 +373,45 @@ def test_matching_host_is_served(era):
         response = _opening_request(client, era)
 
     assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_a_mixed_case_base_url_serves_a_lowercase_host(era, monkeypatch):
+    """The SDK compares Host exactly, and a client sends the name lowercased whatever the operator
+    typed into PUBLIC_BASE_URL."""
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://Demo.Example.com")
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        response = _opening_request(client, era)
+
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize(
+    ("base", "host", "status"),
+    [
+        ("https://demo.example.com:443", "demo.example.com", 200),
+        ("https://demo.example.com", "demo.example.com:443", 200),
+        ("https://demo.example.com:443", "elsewhere.example.net:443", 421),
+        ("https://demo.example.com", "elsewhere.example.net", 421),
+    ],
+)
+@pytest.mark.parametrize("era", ERAS)
+def test_the_default_port_is_optional_either_way(era, base, host, status, monkeypatch):
+    """`demo.example.com` and `demo.example.com:443` are one origin; which spelling a client sends
+    is its choice, not the operator's. Only the default port is folded: a foreign name stays out."""
+    monkeypatch.setenv("PUBLIC_BASE_URL", base)
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL, headers={"Host": host}) as client:
+        response = _opening_request(client, era)
+
+    assert response.status_code == status, response.text
+
+
+def test_an_ipv6_base_url_keeps_its_brackets():
+    """`hostname` drops the brackets an IPv6 literal needs to be a Host value again."""
+    settings = mcp_http._transport_security("https://[2001:db8::1]")
+
+    assert settings.allowed_hosts == ["[2001:db8::1]", "[2001:db8::1]:443"]
+    assert settings.allowed_origins == ["https://[2001:db8::1]", "https://[2001:db8::1]:443"]
 
 
 @pytest.mark.parametrize("era", ERAS)

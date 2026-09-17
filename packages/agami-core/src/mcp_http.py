@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import admin
 import onboarding
@@ -64,6 +65,10 @@ from tools import (
     tool_description,
     typed_outcome_overrides,
 )
+
+if TYPE_CHECKING:
+    # Imported where it is used, like the rest of the SDK, so importing this module needs no `mcp`.
+    from mcp.server.transport_security import TransportSecuritySettings
 
 _log = logging.getLogger(__name__)
 
@@ -451,6 +456,7 @@ def build_server(
     """
     import jsonschema
     import mcp.types as mt
+    import referencing
     from mcp.server import Server, ServerRequestContext
     from mcp.server.caching import CacheHint
     from mcp.shared.exceptions import MCPError
@@ -465,6 +471,27 @@ def build_server(
     # it after would mean a hidden tool still had its schema rewritten, which is work for nothing.
     if thread_id_is_required():
         registry = require_thread_id(registry)
+
+    # One validator per tool, built once. `jsonschema.validate` re-checks the schema against its
+    # metaschema on every call, which is ~2ms of pure repetition, and raises SchemaError mid-call for a
+    # broken schema — an exception that is not a ValidationError and that SDK 2 would send as `str(e)`
+    # on 2025-06-18. Checked here instead, so a consumer's malformed schema fails the build with its
+    # name, the way `create_app` refuses any other malformed extra tool.
+    #
+    # An empty `Registry`, not jsonschema's default: the default one FETCHES a remote `$ref` with
+    # `urlopen`. A tool schema is no licence for the server to reach the network, and an unresolvable
+    # `$ref` then raises at call time, where `_on_call_tool` answers it as a crash.
+    validators = {}
+    for tool_name, meta in registry.items():
+        schema = meta["inputSchema"]
+        validator_cls = jsonschema.validators.validator_for(schema)
+        try:
+            validator_cls.check_schema(schema)
+        except jsonschema.SchemaError as e:
+            raise ValueError(
+                f"tool {tool_name!r} inputSchema is not a valid JSON Schema: {e.message}"
+            ) from e
+        validators[tool_name] = validator_cls(schema, registry=referencing.Registry())
 
     def _visible(name: str) -> bool:
         """Applied at BOTH seams. Listing alone would leave an unlisted tool callable by name, which is
@@ -546,11 +573,20 @@ def build_server(
         # refusal it always did. AFTER the visibility check, unlike 1.x, whose check ran first: a
         # hidden tool must answer `Unknown tool` whatever its arguments, not its own schema's
         # complaint. Outside the recorded scope, so a refusal here writes no row, as it never did.
+        #
+        # `best_match`, as `jsonschema.validate` picks, so the message names the same error it did.
+        # Anything else raised while validating (an unresolvable `$ref`) is the schema's fault, not
+        # the caller's: logged, and answered as a crash, so the reason stays off the wire.
         try:
-            jsonschema.validate(instance=arguments, schema=meta["inputSchema"])
-        except jsonschema.ValidationError as e:
+            error = jsonschema.exceptions.best_match(validators[name].iter_errors(arguments))
+        except Exception:
+            _log.exception("tool %r: validating the arguments failed", name)
+            return _crashed(name)
+        if error is not None:
             return mt.CallToolResult(
-                content=[mt.TextContent(type="text", text=f"Input validation error: {e.message}")],
+                content=[
+                    mt.TextContent(type="text", text=f"Input validation error: {error.message}")
+                ],
                 is_error=True,
             )
         try:
@@ -684,7 +720,7 @@ def _is_loopback(base: str) -> bool:
     return urlsplit(base).hostname in ("localhost", "127.0.0.1", "::1")
 
 
-def _transport_security(base: str):
+def _transport_security(base: str) -> "TransportSecuritySettings":
     """The Host and Origin values `/mcp` accepts, derived from `PUBLIC_BASE_URL` (ACE-152).
 
     DNS rebinding: a page on some other name that resolves to this server would otherwise reach
@@ -692,18 +728,34 @@ def _transport_security(base: str):
     with 403; an absent `Origin` passes, so a server-to-server client (claude.ai) is unaffected, while
     a browser client served from any origin but `PUBLIC_BASE_URL` is refused.
 
-    The allowed host is the base URL's own netloc, the one name the discovery documents already
+    The allowed host is the base URL's own host, the one name the discovery documents already
     publish. On a loopback base URL both spellings of loopback are also allowed, on any port: a
     developer's browser, curl and a port-forward do not agree on which name they send, and nothing
     else can resolve to a loopback address.
+
+    Normalised, not copied from the netloc, because the SDK compares by exact string while a client
+    sends the host lowercased and usually without the default port. `https://Demo.Example.com` or
+    `https://demo.example.com:443` copied verbatim would answer 421 to every call from every client.
+    For the same reason, at the default port both spellings are allowed, `host` and `host:443`: they
+    are one origin, and which one arrives is the client's choice rather than the operator's.
     """
     from urllib.parse import urlsplit
 
     from mcp.server.transport_security import TransportSecuritySettings
 
     parts = urlsplit(base)
-    hosts = [parts.netloc]
-    origins = [f"{parts.scheme}://{parts.netloc}"]
+    scheme = parts.scheme.lower()
+    # `hostname` is already lowercased and unbracketed; an IPv6 literal needs its brackets back to
+    # be a Host value again.
+    hostname = parts.hostname or ""
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    if parts.port is None or parts.port == default_port:
+        hosts = [hostname, f"{hostname}:{default_port}"]
+    else:
+        hosts = [f"{hostname}:{parts.port}"]
+    origins = [f"{scheme}://{host}" for host in hosts]
     if _is_loopback(base):
         for name in ("localhost", "127.0.0.1", "[::1]"):
             hosts += [name, f"{name}:*"]
