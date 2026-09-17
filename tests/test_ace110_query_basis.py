@@ -114,10 +114,11 @@ def test_the_advertised_kinds_and_the_enforced_set_agree():
 
 
 def test_the_basis_schema_constrains_nothing_the_sdk_could_refuse():
-    """The MCP SDK validates arguments against this schema BEFORE the handler runs, so every
-    constraint here is a whole-query refusal rather than a bound — and this field is optional and
-    advisory. `_bounded_basis` truncates instead, which is what the spec asks for. Anything but
-    `type` reappearing here is a regression that would make an over-long ref lose the user's answer.
+    """The HTTP transport validates arguments against this schema in `mcp_http.build_server` BEFORE
+    the handler runs, so every constraint here is a whole-query refusal rather than a bound — and
+    this field is optional and advisory. `_bounded_basis` truncates instead, which is what the spec
+    asks for. Anything but `type` reappearing here is a regression that would make an over-long ref
+    lose the user's answer.
     """
     prop = tools.TOOLS["execute_sql"]["inputSchema"]["properties"]["basis"]
     assert set(prop) == {"type", "description"} and prop["type"] == "array"
@@ -138,11 +139,11 @@ def test_a_payload_the_boundary_trims_is_accepted_by_the_schema():
 
 @pytest.mark.parametrize("bad", ["nonsense", "", None, "EXAMPLE", 7, True])
 def test_an_unknown_kind_is_dropped_at_the_boundary(bad):
-    """Criterion 3, and the drop is the whole of it. The MCP SDK validates arguments against
-    `inputSchema` before the handler runs, so a constraint declared there does not filter a bad entry
-    out of `basis` — it refuses the entire call, taking the answer with it. That is why the property
-    carries no `items` schema and the kinds are advertised as prose: enforcement belongs here, where
-    an unknown kind costs its own entry and nothing else."""
+    """Criterion 3, and the drop is the whole of it. The HTTP transport validates arguments against
+    `inputSchema` in `mcp_http.build_server` before the handler runs, so a constraint declared there
+    does not filter a bad entry out of `basis` — it refuses the entire call, taking the answer with
+    it. That is why the property carries no `items` schema and the kinds are advertised as prose:
+    enforcement belongs here, where an unknown kind costs its own entry and nothing else."""
     doc = _stored(tools._bounded_basis([{"kind": bad, "ref": "x", "why": "y"}, ENTRY]))
     assert doc["entries"] == [ENTRY]
     assert doc["truncated"] is True  # dropped is not verbatim, and the row has to say so

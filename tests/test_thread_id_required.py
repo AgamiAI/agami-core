@@ -96,10 +96,11 @@ def test_anything_else_leaves_it_off(monkeypatch, value):
 
 
 def test_the_default_is_off(monkeypatch):
-    """**The most important assertion here.** The MCP SDK validates arguments against `inputSchema`
-    before dispatch, so a call omitting a required property never reaches its handler — it returns
-    "Input validation error". Against a measured omission rate of up to 100%, switching this on for
-    existing deployments would take their tools out of service rather than improve their logs."""
+    """**The most important assertion here.** The HTTP transport validates arguments against
+    `inputSchema` in `mcp_http.build_server` before dispatch, so a call omitting a required property
+    never reaches its handler — it returns "Input validation error". Against a measured omission
+    rate of up to 100%, switching this on for existing deployments would take their tools out of
+    service rather than improve their logs."""
     monkeypatch.delenv("AGAMI_REQUIRE_THREAD_ID", raising=False)
     assert thread_id_is_required() is False
 
@@ -128,7 +129,7 @@ def test_a_blank_id_does_not_satisfy_the_requirement(blank):
 
 
 def _served_schema(tool: str) -> dict:
-    """The schema the MCP SDK validates a call against."""
+    """The schema the HTTP transport validates a call against, in `build_server`."""
     import asyncio
 
     from mcp_http import build_server
@@ -149,7 +150,7 @@ def test_a_blank_id_is_still_accepted_while_the_flag_is_off(monkeypatch):
 
 
 def test_the_served_server_refuses_a_blank_id_when_the_flag_is_on(monkeypatch):
-    """The schema the MCP SDK validates against, not just the function's output."""
+    """The schema the HTTP transport validates against, not just the function's output."""
     jsonschema = pytest.importorskip("jsonschema")
     monkeypatch.setenv("AGAMI_REQUIRE_THREAD_ID", "1")
 
