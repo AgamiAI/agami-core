@@ -145,7 +145,7 @@ def test_a_failed_run_that_left_an_empty_result_file_did_not_run(tmp_path):
            agami_run__json=json.dumps({"status": "failed", "exit": 1, "kind": "column_not_found", "rule": None,
                                        "remediation": "Check the column name against the schema."}))
     rec = reconcile.record(run, 1)
-    # Before, this row said "the two values could not be compared", as though both had one.
+    # Before, this row said "the two results are tables, and they were not compared", about a number.
     assert rec["status"] == "error" and rec["error"] == "agami's statement did not run: column_not_found"
     assert rec["recorded"] is None and rec["actual"] is None and rec["comparison"] is None
 
@@ -160,6 +160,35 @@ def test_an_empty_result_file_with_no_run_record_is_not_an_answer(tmp_path):
     rec = reconcile.record(run, 2)
     assert rec["status"] == "error" and rec["error"] == "agami's statement was not run, or its result was not recorded"
     assert rec["recorded"] is None and rec["sql"] == "SELECT region FROM orders"
+
+
+@pytest.mark.parametrize("text", ["\n", "\r\n", "   \n", " , \n"])
+def test_a_result_file_holding_only_a_blank_line_is_not_an_answer(tmp_path, text):
+    """A blank line, or a header of nothing but spaces, names no column. Read as a result, it was a
+    table with no columns, which is the empty file the rule above refuses, one newline longer."""
+    run = _run(tmp_path)
+    _files(run, 2, agami_answer__json=json.dumps({"sql": "SELECT region FROM orders", "error": None}), actual__csv=text)
+    rec = reconcile.record(run, 2)
+    assert rec["status"] == "error" and rec["error"] == "agami's statement was not run, or its result was not recorded"
+    assert rec["recorded"] is None
+
+
+@pytest.mark.parametrize("broken", ["", '{"status": "ok", "exit": 0, "kind"'])
+def test_a_run_record_that_cannot_be_read_leaves_the_result_to_its_file(tmp_path, broken):
+    """An empty or broken run file says nothing about how the run went, so it is no run record: it
+    must not hide a result that is there, and a JSON parser's message is not why a statement did not
+    run."""
+    run = _run(tmp_path)
+    row_dir = _files(run, 1, agami_answer__json=json.dumps({"sql": "SELECT COUNT(id) AS n FROM orders", "error": None}),
+                     actual__csv="n\n42\n", statement__csv="n\n42\n", ledger__json=json.dumps(LEDGER_OK),
+                     agami_run__json=broken, run__json=broken)
+    rec = reconcile.record(run, 1)
+    assert rec["status"] == "match" and rec["error"] is None and rec["actual"] == 42
+    assert rec["statement_recorded"] == {"columns": ["n"], "rows": [[42.0]]} and rec["expected"] == 42.0
+    # With nothing in the result file either, the row says only what is known: no result was recorded.
+    (row_dir / "actual.csv").write_text("")
+    rec = reconcile.record(run, 1)
+    assert rec["status"] == "error" and rec["error"] == "agami's statement was not run, or its result was not recorded"
 
 
 def test_a_run_that_returned_a_header_and_no_rows_is_still_a_result(tmp_path):
