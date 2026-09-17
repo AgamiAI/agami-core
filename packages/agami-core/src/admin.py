@@ -264,6 +264,10 @@ def _basis_block(raw: Any) -> str:
     )
 
 
+# How the activity view says what the client did with the example it named (#376).
+_EXAMPLE_USE_LABELS = {"followed": "followed", "shown_only": "shown only — none fit"}
+
+
 def _call_card(c: dict[str, Any]) -> str:
     """One call inside a turn. A **query** call (has `sql`) shows its agent-framing + SQL; a **non-query**
     call (list_datasources, get_datasource_schema, …) has no SQL, so it shows its tool name — so every call
@@ -303,9 +307,19 @@ def _call_card(c: dict[str, Any]) -> str:
         if model
         else ""
     )
+    # The example the client named before this statement (#376). The id was checked to exist before
+    # the statement ran; the use is the client's word, and is marked as such like the model above.
+    example_id, example_use = _text(c.get("example_id")), _text(c.get("example_use"))
+    example_bit = (
+        f'<div class="muted" style="font-size:13px;margin-top:6px">Example {ui.esc(example_id)} · '
+        f'{ui.esc(_EXAMPLE_USE_LABELS.get(example_use, example_use or "use not given"))} '
+        f'<span class="muted">· self-reported</span></div>'
+        if example_id
+        else ""
+    )
     return (
         '<div style="border-top:1px solid var(--line);padding:9px 0 11px">'
-        f"{head}{body}{_basis_block(c.get('basis'))}{model_bit}"
+        f"{head}{body}{_basis_block(c.get('basis'))}{example_bit}{model_bit}"
         f'<div class="muted" style="font-size:13px;margin-top:6px">{_utc(c["ts"])} · {ds} · '
         f"{lat} {_ok_pill(c['success'])}{rows_bit}</div></div>"
     )
