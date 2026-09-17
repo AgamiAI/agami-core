@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A served deployment no longer names a datasource the organization does not have.** With no
+  `datasource` named and `AGAMI_PROFILE` unset, the server resolved a profile from
+  `.config.active_profile` — a setting the local CLI writes — before looking at what the deployment
+  actually serves. A leftover `.config` on a dev box or a mounted artifacts directory therefore won:
+  on an organization with one datasource, an omitted call ran against a name from someone's
+  machine, and `list_datasources` reported that name as active. A served deployment now ignores
+  `.config`, and `list_datasources` reports `active_datasource` as `null` rather than `default`
+  when several datasources are served and none is named. The local CLI is unchanged. (#253)
+
 ## [0.9.2] — 2026-09-16
 
 ### Added
