@@ -20,15 +20,17 @@ below corresponds to one such version.
   nothing checked that the statement was read-only, in scope or bounded, so a pasted statement that
   writes met the database with only the database role in its way. The new
   `plugins/agami/scripts/check_statement.py` does those steps for one row directory, in code: the
-  guard's own read-only gate first (a refusal is written to `run.json` as `refused` with its rule,
-  and nothing runs after it), then the zero-row check and the statement through
+  guard's own read-only and recon gates first (a refusal is written to `run.json` as `refused` with
+  its rule, and nothing runs after it), then the zero-row check and the statement through
   `execute_sql.execute_guarded` with the built-in executor, the semantic-model verbs in process, and
   the probes through `execute_sql`'s batch door, each still through the guard on its own. It writes
   the same files the ledger read before, plus `probes.folded.plan.json` when a near-miss probe runs.
   The skill and `shared/statement-check.md` now call it once per row; the question-fit step stays
   a judgment the session makes by reading. Grading now needs the database's Python driver in `$PY`
   on every tier: without it the script exits `3` with `driver_missing` and the install line, and the
-  run stops. (ACE-155)
+  run stops. The run also stops when the semantic model declares an engine its credentials do not
+  connect to. Checking a row again first clears the files the last check wrote, so an earlier
+  statement's files are never graded as the new one's. (ACE-155)
 
 ### Fixed
 

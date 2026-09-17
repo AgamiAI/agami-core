@@ -22,22 +22,32 @@ has agami-core and the database driver. `<area>` is the subject area the scope g
 taken from the profile's subject areas. Stdout is one JSON line: the statement's outcome and how
 many probes ran. It never carries SQL.
 
+To check a row again, say after the person rewords its statement, make the same call. It first
+clears every file the last check wrote, so nothing from the earlier statement is graded as this
+one's.
+
 - **Exit `0`**: the row was checked, whatever the statement's outcome. A refusal is a finding.
-- **Exit `3`**: the database could not be reached as configured. `run.json` carries the `kind`
-  (`auth`, `dsn`, `network`, `permission` or `driver_missing`) and its `remediation`. Stop the whole
-  run, as `agami-query` Phase 3b stops it, and tell the person that sentence. `driver_missing` means
-  `$PY` lacks the Python driver for this database; the sentence names what to install.
+- **Exit `3`**: the database cannot be queried as configured. Stop the whole run, as `agami-query`
+  Phase 3b stops it, and tell the person the `remediation` in `run.json`. `run.json` names the
+  cause: a failure `kind` (`auth`, `dsn`, `network`, `permission` or `driver_missing`), or the
+  refusal `rule` `engine_mismatch`, which means the semantic model declares an engine its
+  credentials do not connect to. `driver_missing` means `$PY` lacks the Python driver for this
+  database; the sentence names what to install.
 - **Exit `2`**: it could not start. Either `statement.sql` is missing, or the interpreter lacks
   agami-core; run `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` and call it with `"$PY"`.
+- **Any other exit**: the script crashed. Stop the run and tell the person. Never run the statement
+  or a probe yourself instead.
 
 ## What the script does, in order
 
-1. **Read-only first.** The guard's own read-only gate, the one every statement meets at the
-   chokepoint, reads the statement before anything runs. It enforces
-   [`sql-generation-rules.md`](sql-generation-rules.md): one `SELECT` or `WITH ... SELECT`. Anything
-   else is refused: `run.json` gets `status: "refused"` and the gate's `rule` (`read_only` for a
-   statement that writes), and nothing runs after it, not even the zero-row check. Mark the row
-   `error`.
+1. **Read-only first, then no recon.** Two of the guard's own gates read the statement before
+   anything runs, in the order every statement meets them at the chokepoint. The read-only gate
+   enforces [`sql-generation-rules.md`](sql-generation-rules.md): one `SELECT` or `WITH ... SELECT`.
+   The recon gate refuses a call that reads the server's own metadata, such as its version, the
+   session's identity or a privilege check. A statement either gate refuses gets
+   `status: "refused"` in `run.json` and the gate's `rule` (`read_only` for a statement that
+   writes, `recon` for a metadata call), and nothing runs after it, not even the zero-row check.
+   Mark the row `error`.
 2. **Does it run at all?** It wraps the statement so it returns no rows, the way seed validation
    does, `SELECT 1 FROM (<statement>) AS _agami_check WHERE 1=0`, writes that to `zero-row.sql`, and
    runs it through the guard. A failure whose classifier kind is `column_not_found`,
@@ -45,17 +55,22 @@ many probes ran. It never carries SQL.
    `kind`, and nothing is probed.
 3. **`sm prepare`**, to `statement-prepare.json`: `aggregates`, `findings` and `unchecked`. It
    describes and never refuses.
-4. **The statement itself**, through the guard, its result to `statement.csv` (empty when it did not
-   run). `run.json` records `status` (`ok`, `failed`, `refused`), `exit`, the classifier's `kind`, the
-   guard's `rule`, `detail` and `remediation`. **Never the raw error text**, which can carry the
-   statement and the engine's own words. The guard's fields are value-free by contract.
+4. **The statement itself**, through the guard, its result to `statement.csv` (absent or empty when
+   it did not run). `run.json` records `status` (`ok`, `failed`, `refused`), `exit`, the
+   classifier's `kind`, the guard's `rule`, `detail` and `remediation`. **Never the raw error
+   text**, which can carry the statement and the engine's own words. The guard's fields are
+   value-free by contract.
 5. **A refusal is a finding, not a crash.** `table_scope` and `column_scope` become a
    `scope: model_gap` in the ledger: the person wanted a table or column the semantic model does not
    expose. `select_star` becomes `runs: query_defect`. The script never rewrites the statement and
    never retries, and neither does the session: a regenerated statement is one the person never
    wrote.
 6. **Other failures** carry the kind [`db_error_classifier.md`](db_error_classifier.md) names.
-   `auth`, `dsn`, `network`, `permission` and `driver_missing` end the script with exit `3`.
+   `auth`, `dsn`, `network`, `permission` and `driver_missing` end the script with exit `3`, and so
+   does an `engine_mismatch` refusal. A failure of kind `other` says in `run.json` which side
+   broke. Either agami's own code raised an error, named by its type alone, which the script also
+   prints on stderr; or the database failed with an error agami could not classify. The error's
+   text is never kept.
 7. **`sm receipt`** to `statement-receipt.json`, and beside it **`sm mentions`** to `mentions.json`:
    the semantic model's own words (descriptions, caveats, glossary, narrative, prompt examples) about
    every table and column the statement reads, for the ledger to put beside a part that falls short.

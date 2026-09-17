@@ -122,13 +122,16 @@ def _names(row_dir: Path) -> set[str]:
 
 
 def _stub_sm(monkeypatch, **replies):
-    """Answer the named `sm` verbs with a fixed payload, or raise when the payload is an exception;
-    every other verb runs for real."""
+    """Answer the named `sm` verbs with a fixed payload, or raise when the payload is an exception,
+    or print the text of a `(text, exception)` pair and then raise; every other verb runs for real."""
 
     def main(argv):
         reply = replies.get(argv[0].replace("-", "_"))
         if reply is None:
             return REAL_SM(argv)
+        if isinstance(reply, tuple):
+            printed, reply = reply
+            print(printed, end="")
         if isinstance(reply, Exception):
             raise reply
         print(json.dumps(reply))
@@ -155,7 +158,9 @@ def test_a_select_runs_every_step_through_the_guard_and_the_ledger_reads_what_it
         "detail": None,
         "remediation": None,
     }
-    assert (got.dir / "statement.csv").read_text().splitlines()[0] == "n"
+    # The result itself, not only its header: Phase 1.5f takes `expected` from this file's one cell.
+    count = sqlite3.connect(store["db"]).execute(sql).fetchone()[0]
+    assert (got.dir / "statement.csv").read_text().splitlines() == ["n", str(count)]
     # One plan of every probe the verbs emitted, named as the part ledger lists them.
     plan = json.loads((got.dir / "probes.plan.json").read_text())
     ids = {entry["id"] for entry in plan}
@@ -196,6 +201,9 @@ def test_a_select_runs_every_step_through_the_guard_and_the_ledger_reads_what_it
     assert parts["join_key:orders-subscriptions"]["verdict"] == "confirmed"
     assert parts["dropped_rows:orders-subscriptions"]["verdict"] == "noted"
     assert parts["values_declared:orders.status"]["verdict"] == "confirmed"
+    # A `:*` part is the ledger's mark for a file that is missing, empty or an error. A verb called
+    # with a wrong argument writes one of those, and this is where it would show.
+    assert [name for name in parts if name.endswith(":*")] == []
     # This phase keeps its own record; the query log is the AI's.
     assert not list(store["base"].rglob("query_log.jsonl"))
 
@@ -229,17 +237,23 @@ def test_a_trailing_line_comment_does_not_swallow_the_zero_row_wrapper(row):
 # --- refusals are findings ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("sql", ["DELETE FROM orders", "SELECT 1; DROP TABLE orders"])
-def test_a_statement_that_writes_is_refused_by_the_guards_own_gate_and_nothing_runs_after_it(
-    row, store, sql
+@pytest.mark.parametrize(
+    "sql,rule",
+    [
+        ("DELETE FROM orders", "read_only"),
+        ("SELECT 1; DROP TABLE orders", "read_only"),
+        # Reads the server's own metadata: the recon gate, which runs before anything too.
+        ("SELECT version() AS v", "recon"),
+    ],
+)
+def test_a_statement_that_writes_or_reads_the_servers_metadata_is_refused_and_nothing_runs_after_it(
+    row, store, sql, rule
 ):
     before = sqlite3.connect(store["db"]).execute("SELECT COUNT(*) FROM orders").fetchone()[0]
     got = row(sql)
 
     assert got.rc == 0
-    assert (
-        got.run["status"] == "refused" and got.run["exit"] == 1 and got.run["rule"] == "read_only"
-    )
+    assert got.run["status"] == "refused" and got.run["exit"] == 1 and got.run["rule"] == rule
     assert got.run["remediation"]
     assert got.seen == [] and _names(got.dir) == {"statement.sql", "run.json"}
     assert (
@@ -297,6 +311,41 @@ def test_a_probe_the_guard_refuses_leaves_an_empty_csv_and_its_run_record(row, m
     assert summary["probes"] == 4 and summary["probes_ok"] == 3
 
 
+# --- checking a row again -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "second,kinds,left",
+    [
+        # Refused at the read-only gate: nothing but the outcome.
+        ("DELETE FROM orders", [], {"run.json"}),
+        # Ended by the zero-row check: the wrap and the outcome.
+        ("SELECT COUNT(*) AS n FROM orders", ["column_not_found"], {"zero-row.sql", "run.json"}),
+    ],
+)
+def test_checking_a_row_again_clears_every_file_the_last_statement_left(
+    row, monkeypatch, second, kinds, left
+):
+    first = row(
+        "SELECT COUNT(*) AS delivered FROM subscriptions s JOIN orders o ON o.customer_id = s.customer_id "
+        "WHERE o.status = 'Delivered' AND o.status != 'cancelled'"
+    )
+    assert first.run["status"] == "ok"
+    assert {"join-1.overlap.0.csv", "lit-1.exists_folded.csv", "probes.folded.plan.json"} <= _names(
+        first.dir
+    )
+    # Files the session and Phase 2 write beside them are not the script's to clear.
+    kept = {"question_fit.json", "agami.sql", "actual.csv"}
+    for name in kept:
+        (first.dir / name).write_text("kept")
+
+    _failing(monkeypatch, kinds)
+    got = row(second)
+
+    assert _names(got.dir) == {"statement.sql"} | left | kept
+    assert not [name for name in _ledger(got.dir) if name.startswith(("join", "literal"))]
+
+
 # --- failures -------------------------------------------------------------------------------
 
 
@@ -321,8 +370,9 @@ def _failing(monkeypatch, kinds: list[str | None]) -> list[str]:
     return calls
 
 
-def test_the_zero_row_check_ends_the_row_on_the_persons_own_defect(row, monkeypatch):
-    calls = _failing(monkeypatch, ["column_not_found"])
+@pytest.mark.parametrize("kind", ["column_not_found", "table_not_found", "syntax"])
+def test_the_zero_row_check_ends_the_row_on_the_persons_own_defect(row, monkeypatch, kind):
+    calls = _failing(monkeypatch, [kind])
     got = row("SELECT COUNT(*) AS n FROM orders;")
 
     assert got.rc == 0 and len(calls) == 1
@@ -331,27 +381,53 @@ def test_the_zero_row_check_ends_the_row_on_the_persons_own_defect(row, monkeypa
     )
     assert got.run == {
         "status": "failed",
-        "exit": 7,
-        "kind": "column_not_found",
+        "exit": cs.execute_sql.FAILURE_KIND_TO_EXIT[kind],
+        "kind": kind,
         "rule": None,
-        "detail": "a value-free sentence about column_not_found",
-        "remediation": "a value-free sentence about column_not_found",
+        "detail": f"a value-free sentence about {kind}",
+        "remediation": f"a value-free sentence about {kind}",
     }
     assert _names(got.dir) == {"statement.sql", "zero-row.sql", "run.json"}
     runs = _ledger(got.dir)["runs"]
     assert runs["verdict"] == "query_defect" and runs["evidence"]["remediation"]
 
 
-@pytest.mark.parametrize("kinds,calls_made", [(["auth"], 1), ([None, "driver_missing"], 2)])
+# Written out rather than read from the script, so dropping one from the script fails here.
+@pytest.mark.parametrize("kind", ["auth", "dsn", "network", "permission", "driver_missing"])
+@pytest.mark.parametrize("before", [0, 1], ids=["at-the-zero-row-check", "at-the-statement"])
 def test_a_database_that_cannot_be_reached_as_configured_stops_the_run(
-    row, monkeypatch, kinds, calls_made
+    row, monkeypatch, kind, before
 ):
-    calls = _failing(monkeypatch, kinds)
+    calls = _failing(monkeypatch, [None] * before + [kind])
     got = row("SELECT COUNT(*) AS n FROM orders")
 
-    assert got.rc == 3 and len(calls) == calls_made
-    assert got.run["status"] == "failed" and got.run["kind"] == kinds[-1]
+    assert got.rc == 3 and len(calls) == before + 1
+    assert got.run["status"] == "failed" and got.run["kind"] == kind
     # Nothing is probed over a connection that cannot open.
+    assert (
+        not (got.dir / "join-probes.json").exists() and not (got.dir / "probes.plan.json").exists()
+    )
+
+
+@pytest.mark.parametrize(
+    "sql,calls_made",
+    [
+        ("SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'", 1),
+        # The guard refuses this zero-row wrap as two statements, so the statement meets the refusal.
+        ("SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'; -- done", 2),
+    ],
+)
+def test_a_semantic_model_declaring_another_engine_than_its_credentials_stops_the_run(
+    row, monkeypatch, sql, calls_made
+):
+    """The guard refuses every statement on that datasource until an operator fixes it."""
+    monkeypatch.setenv(
+        f"DATASOURCE_URL__{PROFILE.upper()}", "postgresql://reader@127.0.0.1:1/sales"
+    )
+    got = row(sql)
+
+    assert got.rc == 3 and len(got.seen) == calls_made
+    assert got.run["status"] == "refused" and got.run["rule"] == "engine_mismatch"
     assert (
         not (got.dir / "join-probes.json").exists() and not (got.dir / "probes.plan.json").exists()
     )
@@ -361,7 +437,10 @@ def test_a_verb_that_raises_leaves_an_empty_file_the_ledger_reads_as_unchecked(
     row, monkeypatch, capsys
 ):
     _stub_sm(
-        monkeypatch, receipt=RuntimeError("near SELECT secret_column"), join_probes=ValueError("x")
+        monkeypatch,
+        # Half an answer, then the raise: the file must not read as a receipt.
+        receipt=('{"tables": {"items": [', RuntimeError("near SELECT secret_column")),
+        join_probes=ValueError("x"),
     )
     got = row("SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'")
 
@@ -373,6 +452,69 @@ def test_a_verb_that_raises_leaves_an_empty_file_the_ledger_reads_as_unchecked(
     assert (
         parts["receipt:*"]["verdict"] == "unresolved" and parts["join:*"]["verdict"] == "unresolved"
     )
+
+
+def test_the_drivers_own_words_never_reach_stderr(store, tmp_path):
+    """Run as the skill runs it, in a process of its own. In process, pytest's log capture takes a
+    record before it could reach stderr, so only a subprocess shows what the session would see."""
+    row_dir = tmp_path / "rows" / "1"
+    row_dir.mkdir(parents=True)
+    # The guard passes it, and SQLite fails it while running it: an integer overflow.
+    (row_dir / "statement.sql").write_text(
+        "SELECT abs(-9223372036854775808) AS n FROM orders o WHERE o.status != 'cancelled'"
+    )
+    env = {
+        **os.environ,
+        "AGAMI_ARTIFACTS_DIR": str(store["base"]),
+        f"DATASOURCE_URL__{PROFILE.upper()}": f"sqlite:///{store['db']}",
+    }
+    for key in ("AGAMI_DB_URL", "APP_DATABASE_URL"):
+        env.pop(key, None)
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "check_statement.py"),
+            "--profile",
+            PROFILE,
+            "--area",
+            AREA,
+            "--row-dir",
+            str(row_dir),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    run = json.loads((row_dir / "run.json").read_text())
+
+    assert r.returncode == 0 and run["status"] == "failed" and run["kind"] == "other"
+    assert r.stderr == ""
+    # Said plainly, with nothing the database said, and no log that is not there.
+    assert "could not classify" in run["detail"]
+    assert "overflow" not in json.dumps(run) and "server log" not in json.dumps(run)
+
+
+def test_a_break_in_agamis_own_code_is_named_on_stderr_and_in_run_json_without_its_text(
+    row, monkeypatch, tmp_path, capsys
+):
+    # A credentials file configparser cannot read: the chokepoint's catch-all, not the database.
+    creds = tmp_path / "credentials"
+    creds.write_text("[demo]\ntype = sqlite\n[demo]\ntype = sqlite\n")
+    creds.chmod(0o600)
+    monkeypatch.delenv(f"DATASOURCE_URL__{PROFILE.upper()}")
+    monkeypatch.setattr(cs.execute_sql, "CREDENTIALS_PATH", creds)
+    got = row("SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'cancelled'")
+
+    assert got.rc == 0 and got.run["status"] == "failed" and got.run["kind"] == "other"
+    assert "raised DuplicateSectionError" in got.run["detail"]
+    err = capsys.readouterr().err
+    assert (
+        "check_statement: execute_sql: unhandled error in the guarded execution path "
+        "(DuplicateSectionError)"
+    ) in err
+    # The error's own text names the file's path; neither channel carries it, or a log nobody has.
+    said = err + json.dumps(got.run)
+    assert str(creds) not in said and "already exists" not in said and "server log" not in said
 
 
 def test_a_row_with_no_readable_statement_cannot_start(tmp_path, capsys):

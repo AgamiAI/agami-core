@@ -13,7 +13,7 @@ For the row directory given, holding `statement.sql`, this writes the files the 
     run.json                   the statement's outcome: status, exit, kind, rule, detail, remediation
     zero-row.sql               the statement wrapped to return no rows
     statement-prepare.json     `sm prepare`
-    statement.csv              the statement's result (empty when it did not run)
+    statement.csv              the statement's result (absent or empty when it did not run)
     statement-receipt.json     `sm receipt`
     mentions.json              `sm mentions`
     join-probes.json           `sm join-probes`
@@ -22,8 +22,9 @@ For the row directory given, holding `statement.sql`, this writes the files the 
     probes.folded.plan.json    the near-miss probes, only for a value whose `exists` returned 0
     filter-values.judge.json   `sm filter-values judge`
 
-Nothing here writes `query_log.jsonl`, and `question_fit.json` stays with the session: it is a
-judgment made by reading, not a measurement.
+Checking a row again first clears every file an earlier check wrote there, so nothing a previous
+statement left is graded as this one's. Nothing here writes `query_log.jsonl`, and
+`question_fit.json` stays with the session: it is a judgment made by reading, not a measurement.
 
 Usage:
 
@@ -31,8 +32,9 @@ Usage:
 
 Exit codes: `0` the row was checked, whatever the statement's outcome (a refusal is a finding);
 `2` cannot start (no `statement.sql`, or this interpreter lacks agami-core with its model extra);
-`3` the database could not be reached as configured (`auth`, `dsn`, `network`, `permission`,
-`driver_missing`), which stops the whole run. Stdout is one JSON line and never carries SQL.
+`3` the database cannot be queried as configured, which stops the whole run: a failure of kind
+`auth`, `dsn`, `network`, `permission` or `driver_missing`, or an `engine_mismatch` refusal. Any
+other exit is a crash in this script. Stdout is one JSON line and never carries SQL.
 """
 
 from __future__ import annotations
@@ -76,6 +78,65 @@ _DEFECT_KINDS = frozenset({"column_not_found", "table_not_found", "syntax"})
 # same way, so the run stops, as `agami-query` Phase 3b stops. `driver_missing` is here because this
 # door needs the Python driver whatever tier the profile queries on, and its message names the install.
 _STOP_KINDS = frozenset({"auth", "dsn", "network", "permission", "driver_missing"})
+# The one refusal that stops the run. It says the semantic model declares an engine its credentials
+# do not connect to, and the guard refuses every statement on that datasource until an operator
+# fixes the configuration, so every later row would be refused the same way.
+_STOP_RULES = frozenset({"engine_mismatch"})
+
+# Every file this script writes into a row directory: the fixed names, then the probe files in the
+# shapes `_probes` names them. A row is checked again in place when the person rewords its
+# statement, and the ledger grades the files it finds whatever `run.json` says, so a file the last
+# statement left would be graded as this one's. Only these are cleared: `statement.sql`,
+# `question_fit.json` and the files Phase 2 writes beside them are not this script's.
+_OWN_FILES = (
+    "run.json",
+    "zero-row.sql",
+    "statement.csv",
+    "statement-prepare.json",
+    "statement-receipt.json",
+    "mentions.json",
+    "join-probes.json",
+    "filter-values.plan.json",
+    "filter-values.judge.json",
+    "probes.plan.json",
+    "probes.plan.json.manifest.json",
+    "probes.folded.plan.json",
+    "probes.folded.plan.json.manifest.json",
+)
+_OWN_PROBE_FILES = (
+    "join-*.overlap.*",
+    "join-*.dropped_rows.*",
+    "cardinality.*",
+    "*.distinct.*",
+    "lit-*.exists*",
+)
+
+
+class _OwnErrors(logging.Handler):
+    """`execute_sql`'s own log records, one value-free line each on stderr, and the type of every
+    error they carry, for `run.json`.
+
+    That log is where the chokepoint reports a break in agami's own code, such as a credentials file
+    it cannot parse, and this entry point has no server log behind it. Dropping it, as
+    `execute_sql.main` does, hid the break: the row read `failed` and pointed at a log nobody has.
+    So each record is kept, but only its fixed message and its error's type. The error's own text
+    can carry an absolute path or a value, and a record's arguments can carry the driver's words."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.errors: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        error = record.exc_info[0].__name__ if record.exc_info and record.exc_info[0] else None
+        if error:
+            self.errors.append(error)
+        print(
+            f"check_statement: execute_sql: {record.msg}" + (f" ({error})" if error else ""),
+            file=sys.stderr,
+        )
+
+
+_OWN_ERRORS = _OwnErrors()
 
 
 def _record(env: Any) -> dict[str, Any]:
@@ -94,14 +155,34 @@ def _record(env: Any) -> dict[str, Any]:
     if env.status == "refused":
         return _refused(env.refusal)
     failure = env.failure
+    message = failure.message
+    if message == execute_sql.UNEXPECTED_FAILURE_MESSAGE:
+        message = _unexpected(_OWN_ERRORS.errors)
     return {
         "status": "failed",
-        "exit": execute_sql.FAILURE_KIND_TO_EXIT.get(failure.kind, 6),
+        "exit": execute_sql.FAILURE_KIND_TO_EXIT.get(
+            failure.kind, execute_sql._DEFAULT_FAILURE_EXIT
+        ),
         "kind": failure.kind,
         "rule": None,
-        "detail": failure.message,
-        "remediation": failure.message,
+        "detail": message,
+        "remediation": message,
     }
+
+
+def _unexpected(errors: list[str]) -> str:
+    """The sentence for a failure the chokepoint could not classify. Its own sentence sends the reader
+    to a server log, and there is none on this entry point, so this one says what is known instead:
+    the type of the error agami's own code raised, or else that the database's words were dropped."""
+    if errors:
+        return (
+            f"agami's own code raised {errors[-1]} while running the statement. Only the error's "
+            "type is kept, because its text can carry a path or a value."
+        )
+    return (
+        "The database failed the statement with an error agami could not classify. Its text is not "
+        "kept, because it can quote the statement."
+    )
 
 
 def _refused(refusal: Any) -> dict[str, Any]:
@@ -120,23 +201,41 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _guarded(sql: str, profile: str, area: str) -> Any:
+    _OWN_ERRORS.errors.clear()
     return execute_sql.execute_guarded(sql, profile, area, executor=execute_sql.BUILTIN_EXECUTOR)
+
+
+def _stops(run: dict[str, Any]) -> bool:
+    """Whether every later row would end the same way, so the whole run stops here."""
+    return run["kind"] in _STOP_KINDS or run["rule"] in _STOP_RULES
+
+
+def _clear(row_dir: Path) -> None:
+    """Remove every file an earlier check of this row wrote. See `_OWN_FILES`."""
+    for name in _OWN_FILES:
+        (row_dir / name).unlink(missing_ok=True)
+    for pattern in _OWN_PROBE_FILES:
+        for path in row_dir.glob(pattern):
+            path.unlink(missing_ok=True)
 
 
 def _sm(out: Path, *argv: str) -> None:
     """One `sm` verb, in process, its stdout written to `out` as `sm … > out` wrote it.
 
     In process because the guard above already needs the semantic_model package in this interpreter,
-    and `sm` runs this same `cli.main`. A verb that raises leaves what it printed, often nothing: the
-    ledger reads an empty file as a part that was not checked, exactly as it read a crashed redirect.
-    The exception's text is not relayed, since a parser's message can quote the statement."""
+    and `sm` runs this same `cli.main`. A verb that raises leaves an empty file, even when it printed
+    part of its answer first: the ledger reads an empty file as a part that was not checked, and a
+    half-written one could read as checked. The exception's text is not relayed, since a parser's
+    message can quote the statement."""
     buf = io.StringIO()
+    text = ""
     try:
         with contextlib.redirect_stdout(buf):
             sm_cli.main(list(argv))
+        text = buf.getvalue()
     except Exception as exc:
         print(f"check_statement: `sm {argv[0]}` raised {type(exc).__name__}", file=sys.stderr)
-    out.write_text(buf.getvalue(), encoding="utf-8")
+    out.write_text(text, encoding="utf-8")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -208,9 +307,11 @@ def check(row_dir: Path, statement: str, profile: str, area: str) -> tuple[int, 
     statement_file = row_dir / "statement.sql"
     root = str(agami_paths.profile_dir(profile))
     summary: dict[str, Any] = {"row_dir": str(row_dir), "probes": 0, "probes_ok": 0}
+    _clear(row_dir)
 
-    # 1. Read-only first, by the guard's own gates in the chokepoint's own order. Nothing runs after
-    #    a statement that is not one read-only SELECT, not even the zero-row wrap around it.
+    # 1. Read-only first, then no recon, by the guard's own gates in the chokepoint's own order.
+    #    Nothing runs after a statement that is not one read-only SELECT, or that reads the server's
+    #    own metadata, not even the zero-row wrap around it.
     refusal = sql_guard.check_read_only(statement) or sql_guard.check_no_recon(statement)
     if refusal is not None:
         run = _refused(refusal)
@@ -222,9 +323,9 @@ def check(row_dir: Path, statement: str, profile: str, area: str) -> tuple[int, 
     zero_row = f"SELECT 1 FROM (\n{body}\n) AS _agami_check WHERE 1=0"
     (row_dir / "zero-row.sql").write_text(zero_row, encoding="utf-8")
     zero = _record(_guarded(zero_row, profile, area))
-    if zero["status"] == "failed" and zero["kind"] in _DEFECT_KINDS | _STOP_KINDS:
+    if zero["kind"] in _DEFECT_KINDS or _stops(zero):
         _write_json(row_dir / "run.json", zero)
-        return (_STOP_RUN if zero["kind"] in _STOP_KINDS else 0), {**summary, "run": zero}
+        return (_STOP_RUN if _stops(zero) else 0), {**summary, "run": zero}
 
     # 3. What the semantic model says about its aggregates. Describes, never refuses.
     sql_arg = ("--sql-file", str(statement_file))
@@ -240,7 +341,7 @@ def check(row_dir: Path, statement: str, profile: str, area: str) -> tuple[int, 
     run = _record(env)
     _write_json(row_dir / "run.json", run)
     summary["run"] = run
-    if run["status"] == "failed" and run["kind"] in _STOP_KINDS:
+    if _stops(run):
         return _STOP_RUN, summary
 
     # 7. The receipt, and the semantic model's own words about what the statement reads.
@@ -291,13 +392,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--row-dir", required=True, help="the row directory holding statement.sql")
     args = parser.parse_args(argv)
 
-    # The chokepoint logs raw driver text for an operator. On this entry point stderr reaches the
-    # session, and that text can carry the statement and the engine's own words, so it is dropped here
-    # exactly as `execute_sql.main` drops it.
-    for name in ("execute_sql", "execute_sql.raw"):
-        logger = logging.getLogger(name)
-        logger.addHandler(logging.NullHandler())
-        logger.propagate = False
+    # The chokepoint logs to two places. Its raw log carries the driver's own words for an operator.
+    # On this entry point stderr reaches the session, and those words can quote the statement, so
+    # they are dropped exactly as `execute_sql.main` drops them. Its own log reports a break in
+    # agami's code, and nothing else would show that break here, so it is kept, value-free.
+    raw = logging.getLogger(execute_sql.__name__ + ".raw")
+    raw.addHandler(logging.NullHandler())
+    raw.propagate = False
+    own = logging.getLogger(execute_sql.__name__)
+    if _OWN_ERRORS not in own.handlers:
+        own.addHandler(_OWN_ERRORS)
+    own.propagate = False
 
     row_dir = Path(args.row_dir).expanduser().resolve()
     try:
