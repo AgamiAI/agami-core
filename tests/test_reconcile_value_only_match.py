@@ -214,12 +214,33 @@ def test_only_a_full_match_between_two_statements_is_read(tmp_path):
     for changed in ({"accuracy": 0.5}, {"status": "unscored", "accuracy": None}):
         _write(row_dir, "comparison.json", dict(score, **changed))
         assert not any(p["part"].startswith("value_pair:") for p in reconcile.ledger(row_dir, with_claims=True)["rows"])
-    # A pair naming a column the person's result does not have, or a result that is gone, is skipped.
-    _write(row_dir, "comparison.json", dict(score, column_pairs=[["region", "region"], ["gone", "is_express"], ["bad"]]))
-    assert not any(p["part"].startswith("value_pair:") for p in reconcile.ledger(row_dir, with_claims=True)["rows"])
+    # A result that is gone is skipped.
     _write(row_dir, "comparison.json", score)
     (row_dir / "statement.csv").write_text("")
     assert not any(p["part"].startswith("value_pair:") for p in reconcile.ledger(row_dir, with_claims=True)["rows"])
+
+
+ALTERNATING = ["Y", "N"] * 3
+
+
+@pytest.mark.parametrize("first, second, flagged", [
+    # Your second is_gift is "N" on every row and paired with agami's is_express: the false match. Read
+    # by name, the pair read your first is_gift, whose values vary, and the row stayed a match.
+    (ALTERNATING, ["N"] * 6, True),
+    # Your first is_gift is the constant one, and it paired with agami's is_gift. Read by name, the
+    # is_express pair read that first column too, and the row was flagged from the wrong values.
+    (["N"] * 6, ALTERNATING, False),
+])
+def test_a_repeated_column_name_is_read_by_position(tmp_path, first, second, flagged):
+    rows = [[r, a, b] for r, a, b in zip(REGIONS, first, second)]
+    run = _run(tmp_path, {1: ((["region", "is_gift", "is_gift"], rows), (["region", "is_gift", "is_express"], rows))})
+    score = json.loads((run / "rows" / "1" / "comparison.json").read_text())
+    assert score["accuracy"] == 1.0
+    assert score["column_pairs"] == [["region", "region"], ["is_gift", "is_gift"], ["is_gift", "is_express"]]
+    ledger = json.loads((run / "rows" / "1" / "ledger.json").read_text())
+    evidence = [p["evidence"] for p in ledger["rows"] if p["part"].startswith("value_pair:")]
+    assert evidence == ([{"yours": "is_gift", "agami": "is_express", "rows": 6}] if flagged else [])
+    assert _records(run)[1]["status"] == ("match_unverified" if flagged else "match")
 
 
 def test_several_pairs_are_named_in_one_sentence(tmp_path):
@@ -252,3 +273,24 @@ def test_other_checks_that_did_not_pass_are_still_named_and_a_different_selectio
     # agami selected another column, so the fix is the one a different query with nothing wrong behind it gets.
     assert item["fix"] == "examples" and item["keep_allowed"] is False
     assert item["result"]["unchecked"] == 1  # the pre-flight that could not run, and not the repeated value
+
+
+
+def test_a_check_that_could_not_run_is_still_said_beside_the_repeated_value(tmp_path, capsys):
+    yours = (["region", "is_gift"], [[r, "N"] for r in REGIONS])
+    agamis = (["region", "is_express"], [[r, "N"] for r in REGIONS])
+    run = _run(tmp_path, {1: (yours, agamis)})
+    row_dir = run / "rows" / "1"
+    _write(row_dir, "statement-prepare.json", {"aggregates": [], "findings": [], "unchecked": "the pre-flight could not read it"})
+    assert reconcile.main(["ledger", "--row-dir", str(row_dir), "--with-claims"]) == 0
+    capsys.readouterr()
+    assert reconcile.record(run, 1)["status"] == "match_unverified"
+    item = reconcile.report_items(run)[0]
+    # The same query with nothing to fix, so the change is the one for a row not kept. It still says a
+    # check could not run, as the checks summary does, and adds the look at the two columns.
+    assert item["fix"] == "none" and item["result"]["unchecked"] == 1
+    assert "couldn't be run" in item["summaries"]["checks"]
+    assert item["change"] == [reconcile._OWNER_CHANGE["nothing"][0][0],
+                              "Open Data to see the two columns side by side. If agami returned the wrong column, "
+                              "add your query as a prompt example for this question through /agami-save-correction."]
+    assert item["todo"] == ["Check the column agami returned."]

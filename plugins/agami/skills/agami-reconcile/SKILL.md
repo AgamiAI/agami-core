@@ -305,7 +305,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" claims "$ROOT" --sql-file rows/<n>/agami.sq
 python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n> --with-claims
 ```
 
-**This is the row's one ledger run.** Every file Phase 1.5 wrote is still there, so the grades are the same ones 1.5 would have produced, plus the two claim parts. When agami's own run failed and there is no statement to compare against, run it here without `--with-claims`. Never run it twice.
+**This is the row's one ledger run.** Every file Phase 1.5 wrote is still there, so the grades are the same ones 1.5 would have produced, plus the two claim parts and, for a table that matched, a `value_pair` part for each column of yours that matched a differently named column only through one repeated value. When agami's own run failed and there is no statement to compare against, run it here without `--with-claims`. Never run it twice.
 
 The eight claims (tables, what is selected, filter predicates, date window, group keys, join keys, ordering, limit) say which part differs; they never say who is right. Two statements are the same query only when every claim that could be read agrees, what they select included; when the data could not be compared, the page still says "same query, answer not compared" or "different query, answer not compared". Then set the row's `status` with `reconcile.py status`, from the diff's `match` and the ledger's verdict. For a table there is no `diff`: pass `--match true` when `compare-results` reports `accuracy` of `1.0`, `false` otherwise, and `none` when it could not score.
 

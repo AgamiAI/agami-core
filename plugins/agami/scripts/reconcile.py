@@ -1179,15 +1179,14 @@ def _grade_value_pairs(score: Any, row_dir: Path) -> list[dict]:
     table = _read_csv(row_dir / "statement.csv")
     if len(table) < 3:
         return []
-    header, body = table[0], [row for row in table[1:] if row]
+    body = [row for row in table[1:] if row]
     rows: list[dict] = []
-    for pair in score.get("column_pairs") or []:
-        if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+    # A full match pairs every column of the person's, and the pairs come in the person's column order,
+    # so the k-th pair is the k-th column. Read it by position, not by name: a result can repeat a
+    # column name, and a lookup by name reads the first of them for every pair that names it.
+    for index, (yours, agamis) in enumerate(score.get("column_pairs") or []):
+        if _folded_column(yours) == _folded_column(agamis):
             continue
-        yours, agamis = str(pair[0]), str(pair[1])
-        if _folded_column(yours) == _folded_column(agamis) or yours not in header:
-            continue
-        index = header.index(yours)
         cells = [row[index] if index < len(row) else "" for row in body]
         if not _one_value_fills_most(cells):
             continue
@@ -2617,10 +2616,12 @@ def _change(owner: str, rec: dict, diff: list[dict]) -> tuple[list[str], list[st
                   else "The numbers match, but the statement may not answer its question, so this row is not kept as an example."]
         todo = ["Nothing to do."]
     if owner == "nothing" and rec.get("status") == MATCH_UNVERIFIED and _value_pairs(rec):
-        # "Some checks could not run" is not what happened: every check ran, and the match rests on a
-        # repeated value. The person can settle it by looking, which nothing in the run can do.
-        change = ["Open Data to see the two columns side by side. If agami returned the wrong column, "
-                  "add your query as a prompt example for this question through /agami-save-correction."]
+        # The match rests on a repeated value, and the person can settle that by looking, which nothing in
+        # the run can do. When it is the only doubt, "some checks could not run" is not what happened, so
+        # the look replaces that text; when another check could not run as well, the look is added to it.
+        look = ("Open Data to see the two columns side by side. If agami returned the wrong column, "
+                "add your query as a prompt example for this question through /agami-save-correction.")
+        change = (change + [look]) if _result(rec, diff)["unchecked"] else [look]
         todo = ["Check the column agami returned."]
     if owner == "model":
         gaps = [r["key"] for r in diff if r["state"] == "gap"]
