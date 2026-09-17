@@ -283,3 +283,74 @@ def test_ask_via_mcp_writes_the_result_beside_its_answer_file(monkeypatch, tmp_p
 
     assert len(calls) == 1
     assert (out.parent / "actual.csv").read_text().splitlines() == ["n", "9"]
+
+
+# --- the query agami tried next, run after the session through the same guard --------------------
+
+NEXT_SQL = "SELECT region, COUNT(*) AS n FROM orders GROUP BY region"
+BLOCKED_SQL = "SELECT region, units_sold FROM orders"
+REFUSED = "query references column(s) not in the semantic model: orders.units_sold — only columns declared on the model's tables may be queried."
+
+
+def _blocked_then(next_sql):
+    return {"sql": BLOCKED_SQL, "error": REFUSED, "mode": "mcp", "probes": [
+        {"tool": "execute_sql", "args": {"datasource": "sales", "sql": BLOCKED_SQL}, "status": "refused", "detail": REFUSED},
+        {"tool": "execute_sql", "args": {"datasource": "sales", "sql": next_sql}, "stopped": "query_failed"},
+        {"tool": "execute_sql", "args": {"datasource": "sales", "sql": "SELECT 2"}, "stopped": "query_failed"}]}
+
+
+def test_the_query_agami_tried_next_is_run_once_through_the_guard_and_the_blocked_one_never(monkeypatch, tmp_path):
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["region", "n"], rows=[("east", 3)])))
+
+    rge._write_agami_result(tmp_path, _blocked_then(NEXT_SQL), "sales")
+
+    assert [c["sql"] for c in calls] == [NEXT_SQL]  # only the next query, and only the first one after the failure
+    assert json.loads((tmp_path / "agami-run.json").read_text())["status"] == "refused"
+    assert not (tmp_path / "actual.csv").exists()
+    assert (tmp_path / "next-query.sql").read_text() == NEXT_SQL
+    assert (tmp_path / "next-query.csv").read_text().splitlines() == ["region,n", "east,3"]
+    assert json.loads((tmp_path / "next-query-run.json").read_text())["status"] == "ok"
+
+
+def test_a_next_query_the_trace_cut_short_is_written_but_never_run(monkeypatch, tmp_path):
+    """The trace cuts a long statement and marks the cut; running that text would grade the cut."""
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    cut = "SELECT " + "c, " * 50 + "… [5407 more characters]"
+
+    rge._write_agami_result(tmp_path, _blocked_then(cut), "sales")
+
+    assert calls == []
+    run = json.loads((tmp_path / "next-query-run.json").read_text())
+    assert (run["status"], run["reason"]) == ("not_run", "trimmed")
+    assert not (tmp_path / "next-query.csv").exists()
+
+
+def test_a_row_whose_queries_all_ran_has_no_next_query_and_loses_an_old_one(monkeypatch, tmp_path):
+    _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    names = ("next-query.sql", "next-query.csv", "next-query-run.json", "next-query-comparison.json", "next-query-diff.json")
+    for name in names:
+        (tmp_path / name).write_text("left by an earlier run")
+
+    rge._write_agami_result(tmp_path, _answer(), "sales")
+
+    assert not any((tmp_path / name).exists() for name in names)
+
+
+def test_a_row_asked_again_with_no_statement_loses_its_old_next_query(monkeypatch, tmp_path):
+    """The record reads these files only for this answer's next query, so none may outlive the answer."""
+    _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    (tmp_path / "next-query.sql").write_text(NEXT_SQL)
+
+    rge._write_agami_result(tmp_path, {"sql": None, "error": "the generator exited without answering"}, "sales")
+
+    assert not (tmp_path / "next-query.sql").exists()
+
+
+def test_nothing_runs_after_a_session_that_stopped_at_the_ceiling(monkeypatch, tmp_path):
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    answer = _answer()
+    answer["probes"].append({"tool": "execute_sql", "args": {"datasource": "sales", "sql": "SELECT 2"}, "stopped": "ceiling"})
+
+    rge._write_agami_result(tmp_path, answer, "sales")
+
+    assert [c["sql"] for c in calls] == [ANSWER_SQL] and not (tmp_path / "next-query.sql").exists()

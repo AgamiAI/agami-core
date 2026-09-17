@@ -353,7 +353,7 @@ def test_one_query_written_means_one_value_column_and_one_sql_pane():
     # The value shown is the graded side, whichever field carried it.
     assert "cell(one ? (r.yours ?? r.agami) : r.yours" in tpl
     # A SQL pane reading "(none)" is a placeholder shown as content; one query renders one pane.
-    assert "if (!item.sql_yours) return '<div class=\"sql1\">' + agami + '</div>';" in tpl
+    assert "if (!item.sql_yours) return '<div class=\"sql1\">' + agami + '</div>' + attempts;" in tpl
     assert "esc(item.sql_yours || '(none)')" not in tpl
 
 

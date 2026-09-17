@@ -2391,6 +2391,30 @@ def _why_it_did_not_run(status: Any, detail: Any) -> str:
     return "It did not run" + (f": {said}." if said else ".")
 
 
+def _next_query_words(rec: dict) -> str | None:
+    """What became of the query agami tried next, for the card of a row whose query did not run.
+
+    The run executed it after agami's session ended, so the row's verdict never rests on it. It still
+    says whether agami would have recovered, which is what a person deciding how to fix the row wants.
+    """
+    tried = next((a for a in rec.get("attempts") or [] if a.get("run_by") == "reconcile"), None)
+    if tried is None or tried.get("happened") == "not_run":
+        return None
+    grade = tried.get("grade")
+    if tried.get("happened") != "ran":
+        # Reconcile failing to reach the database says nothing about agami's statement.
+        return None if grade == "not_graded" else "agami's next query did not run either. " + (tried.get("why") or "")
+    yours = "query" if rec.get("statement") else "number"
+    if grade not in ("right", "partly", "wrong"):
+        reason = str(tried.get("grade_words") or "").removeprefix("Not graded: ")
+        return "Reconcile ran agami's next query after agami's session ended, but it was not graded: " + reason
+    return "agami's next query, which reconcile ran after agami's session ended, " + {
+        "right": f"gave the same result as your {yours}.",
+        "partly": f"returned the same rows as your {yours}, with different columns.",
+        "wrong": f"gave a different result from your {yours}.",
+    }[grade]
+
+
 def _result(rec: dict, diff: list[dict]) -> dict:
     """The result in two facts read by code: whether the data matches, and whether the two queries are
     the same. `label` is the plain-word pill; `unchecked` counts the checks on your query that could
@@ -2568,6 +2592,9 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
                       "Asking again would hit the same problem. Correct the semantic model through "
                       "/agami-save-correction, or re-introspect the datasource with /agami-connect if "
                       "the database has changed, then run this row again."]
+            tried_next = _next_query_words(rec)
+            if tried_next:
+                change.append(tried_next)
             todo = ["The semantic model: it and the database disagree about what exists."]
             prefill["change"] = ""
         else:
@@ -2853,6 +2880,7 @@ def report_items(run_dir: Path) -> list[dict]:
             "words": words, "disagreement": None, "change": list(change), "todo": list(todo),
             "sql_yours": rec.get("statement") or None, "sql_agami": rec.get("sql") or None,
             "sql_agami_steps": _agami_steps(rec),
+            "attempts": rec.get("attempts") or [],
             "summaries": summaries, "sample": sample,
             "report_path": rec.get("report_path"),
         })
@@ -2897,6 +2925,185 @@ def _csv_shape(path: Path) -> tuple[dict | None, Any]:
 
 def _optional_json(path: Path) -> Any:
     return _load_json(path) if path.exists() else None
+
+
+#: What the run writes for the query agami tried next after its session ended at a failure: the
+#: statement, its result and its run (`run_golden_eval.py --via mcp`, through execute_sql's guard).
+#: Named apart from `agami.sql` because agami never saw this result.
+NEXT_QUERY_SQL = "next-query.sql"
+
+#: What `_load_json` returns in place of a file it could not read.
+_UNREADABLE = ("empty_file", "unreadable_json")
+
+
+def _execute_calls(answer: Any) -> list[dict]:
+    """Every `execute_sql` call in a run's trace, in the order agami made them."""
+    probes = answer.get("probes") if isinstance(answer, dict) else None
+    return [call for call in probes or [] if isinstance(call, dict) and call.get("tool") == "execute_sql"]
+
+
+def _flat(sql: Any) -> str:
+    """A statement as the trace check compares it: whitespace collapsed, a trailing semicolon off,
+    case folded. The client's reported `sql` and the statement the server saw differ in exactly those."""
+    return " ".join(str(sql or "").split()).rstrip("; ").casefold()
+
+
+def _unreadable(loaded: Any) -> bool:
+    return isinstance(loaded, dict) and loaded.get("error") in _UNREADABLE
+
+
+def _graded(comparison: Any, yours: str | None) -> tuple[str, str]:
+    """A result's grade against the person's, and the grade as a sentence.
+
+    `comparison` is a scalar `diff` or a `compare-results` score, `None` when none was written, or
+    `_load_json`'s marker for a file it could not read; `yours` is "query", "number" or None.
+    """
+    if yours is None:
+        return "not_graded", "Not graded: there is no query or number of yours to compare it with."
+    if comparison is None:
+        return "not_graded", "Not graded: its result has not been compared with yours."
+    if _unreadable(comparison) or not isinstance(comparison, dict):
+        return "not_graded", "Not graded: the comparison of its result with yours could not be read."
+    if "match" in comparison and "status" not in comparison:
+        grade = "right" if comparison.get("match") else "wrong"
+    elif comparison.get("status") != "scored":
+        return "not_graded", "Not graded: the two results could not be compared."
+    elif comparison.get("accuracy") is not None and float(comparison["accuracy"]) >= 1.0:
+        grade = "right"
+    elif _values_agree_on_shared_columns({"comparison": {"result_set": comparison}}):
+        grade = "partly"
+    else:
+        grade = "wrong"
+    return grade, {
+        "right": f"Right: the same result as your {yours}.",
+        "partly": f"Partly right: the same rows as your {yours}, with different columns.",
+        "wrong": f"Wrong: a different result from your {yours}.",
+    }[grade]
+
+
+#: The grade of a query that did not run, whoever stopped it. It gave no answer, which is not the same
+#: as a wrong one.
+_NO_ANSWER = ("no_answer", "No answer: it did not run.")
+
+#: How many queries that never ran are listed one by one, besides the query agami tried next. A client
+#: can go on calling after its session ends, and listing every one would grow the page without saying
+#: anything new.
+_LISTED_NOT_RUN = 1
+
+#: Why a query never ran, by what stopped it.
+_NEVER_RAN = {
+    "query_failed": "agami's session ended when query {failed} did not run",
+    "ceiling": "agami had already run as many queries as a run allows",
+}
+
+
+def _never_ran(stopped: Any, first_failure: int | None) -> str:
+    if stopped == "query_failed" and first_failure:
+        return _NEVER_RAN["query_failed"].format(failed=first_failure)
+    return _NEVER_RAN.get(stopped, "its session had already ended")
+
+
+def _attempts(row_dir: Path, answer: Any, sql: str | None, comparison: dict | None, yours: str | None) -> list[dict]:
+    """Every query agami tried for this row, in order, with what happened to it and whether it was right.
+
+    A reader learns from the queries that failed as much as from the one that answered, so none is
+    dropped. `happened` is `ran`, `blocked` (the safety check stopped it), `failed` (the database
+    returned an error), `crashed` (agami's own tool failed) or `not_run` (it never ran). `run_by` is
+    `reconcile` only for the query agami tried next after a failure, when the run executed it
+    afterwards through the same guard. `why` says what became of it, and `grade` is `right`, `partly`,
+    `wrong`, `no_answer` or `not_graded`, with `grade_words` saying it (and, when not graded, why) in a
+    sentence. `answered` marks the query agami answered from. Grades never change the row's verdict.
+    """
+    calls = _execute_calls(answer)
+    if not calls:
+        return []
+    first_failure = next((n for n, c in enumerate(calls, 1) if c.get("status") in (*_DID_NOT_RUN, "raised")
+                          and not c.get("stopped")), None)
+    # A row that ended at a failure has no answering query, even when an earlier query had the same text.
+    answered_at = None
+    if sql and first_failure is None:
+        answered_at = max((n for n, c in enumerate(calls, 1)
+                           if c.get("status") == "ok" and _flat((c.get("args") or {}).get("sql")) == _flat(sql)), default=None)
+    next_at = next((n for n, c in enumerate(calls, 1) if first_failure and n > first_failure and c.get("stopped")), None)
+
+    attempts: list[dict] = []
+    unlisted: list[Any] = []
+    listed_not_run = 0
+    for n, call in enumerate(calls, 1):
+        text = str((call.get("args") or {}).get("sql") or "")
+        entry: dict[str, Any] = {"query": n, "sql": text, "happened": "ran", "run_by": "agami"}
+        status = call.get("status")
+        if call.get("stopped") and n == next_at and (row_dir / NEXT_QUERY_SQL).exists():
+            entry.update(_tried_next(row_dir, comparison_yours=yours))
+        elif call.get("stopped"):
+            if listed_not_run >= _LISTED_NOT_RUN:
+                unlisted.append(call.get("stopped"))
+                continue
+            listed_not_run += 1
+            entry.update(happened="not_run", why=f"It never ran: {_never_ran(call.get('stopped'), first_failure)}.",
+                         grade="not_graded", grade_words="Not graded: it never ran.")
+        elif status in _DID_NOT_RUN:
+            entry.update(happened="blocked" if status == "refused" else "failed",
+                         why=_why_it_did_not_run(status, call.get("detail")))
+            entry["grade"], entry["grade_words"] = _NO_ANSWER
+        elif status == "raised":
+            detail = _first_line(call.get("detail")).rstrip(".")
+            entry.update(happened="crashed", why="agami's own tool failed" + (f" ({detail})" if detail else "") + ", so no result came back.")
+            entry["grade"], entry["grade_words"] = _NO_ANSWER
+        elif n == answered_at:
+            entry.update(answered=True, why="agami answered from it.")
+            entry["grade"], entry["grade_words"] = _graded(
+                (comparison or {}).get("result_set") or (comparison or {}).get("scalar"), yours)
+        elif answered_at is not None:
+            entry.update(why="agami ran it to look at the data.", grade="not_graded",
+                         grade_words="Not graded: it was a look at the data, not the answer.")
+        else:
+            entry.update(why="agami ran it.", grade="not_graded",
+                         grade_words="Not graded: agami gave no answer to compare it with.")
+        attempts.append(entry)
+    if unlisted:
+        count = len(unlisted)
+        attempts.append({"query": None, "sql": "", "happened": "not_run", "run_by": "agami", "more": count,
+                         "why": f"{count} more {'query' if count == 1 else 'queries'} never ran: "
+                                f"{_never_ran(unlisted[0], first_failure)}.",
+                         "grade": "not_graded", "grade_words": "Not graded: they never ran."})
+    return attempts
+
+
+#: A failure on reconcile's side of running the next query: it says nothing about agami's statement.
+_RECONCILE_COULD_NOT_RUN = ("dsn", "driver_missing", "auth", "network", "timeout")
+
+
+def _tried_next(row_dir: Path, *, comparison_yours: str | None) -> dict[str, Any]:
+    """What became of the query agami tried next, read from the files the run wrote for it.
+
+    The run clears these files before it writes any for a new answer, so the ones here belong to this
+    row's answer. A run file that is missing or cannot be read is still possible: the run can stop
+    between writing the statement and writing its run file.
+    """
+    never = {"happened": "not_run", "grade": "not_graded", "grade_words": "Not graded: it never ran."}
+    run = _optional_json(row_dir / "next-query-run.json")
+    if not isinstance(run, dict) or _unreadable(run):
+        return {**never, "why": "Reconcile has no readable record of running it."}
+    status = run.get("status")
+    if status == "ok":
+        compared = _optional_json(row_dir / "next-query-comparison.json")
+        if compared is None or _unreadable(compared):
+            compared = _optional_json(row_dir / "next-query-diff.json") or compared
+        grade, words = _graded(compared, comparison_yours)
+        return {"run_by": "reconcile", "happened": "ran", "grade": grade, "grade_words": words,
+                "why": "Reconcile ran it after agami's session ended, so agami never saw its result."}
+    if status == "failed" and run.get("kind") in _RECONCILE_COULD_NOT_RUN:
+        return {"run_by": "reconcile", "happened": "failed", "grade": "not_graded",
+                "why": "Reconcile could not run it: " + _first_line(run.get("detail") or run.get("kind")).rstrip(".") + ".",
+                "grade_words": "Not graded: reconcile could not reach the database to run it."}
+    if status in _DID_NOT_RUN:
+        return {"run_by": "reconcile", "happened": "blocked" if status == "refused" else "failed",
+                "why": _why_it_did_not_run(status, run.get("detail") or run.get("kind")),
+                "grade": _NO_ANSWER[0], "grade_words": _NO_ANSWER[1]}
+    why = ("Its text was cut short in the run's record, so reconcile did not run it."
+           if run.get("reason") == "trimmed" else "Reconcile did not run it.")
+    return {**never, "why": why}
 
 
 def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str | None = None) -> dict:
@@ -2987,6 +3194,8 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
     status = UNGRADED if (match is None and error is None and exp is None and statement is None) \
         else row_status(match, ledger_verdict)
     is_error = status == ERROR
+    yours = "query" if statement is not None else ("number" if base.get("expected") is not None else None)
+    attempts = _attempts(row_dir, answer, sql, comparison, yours)
     provenance = dict(base.get("provenance") or {})
     rec = {
         "row": row, "label": base.get("label"), "question": base.get("question"),
@@ -3015,6 +3224,9 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         **({"mode": answer["mode"]} if isinstance(answer.get("mode"), str) else {}),
         **({"probe_count": answer["probe_count"]} if isinstance(answer.get("probe_count"), int) else {}),
         **({"probes": answer["probes"]} if isinstance(answer.get("probes"), list) else {}),
+        # Every query agami tried, graded: the ones that did not run, and the one it tried next, which
+        # the run executed afterwards. `probes` is the raw trace; this is what a person reads.
+        **({"attempts": attempts} if attempts else {}),
     }
     if delta is not None:
         rec["delta"] = delta

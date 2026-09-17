@@ -19,7 +19,7 @@
     ITEMS_JSON — [{row, label, question, source, status, status_words, expected, answer, delta_pct,
                   single_cell, owner, one_query, result, fix, fix_words, prefill, summaries, sample,
                   diff:[{key, state, section, family, yours, agami, note}], sentence, words:[..],
-                  change:[..], todo:[..], sql_yours, sql_agami, report_path, keep_allowed}]
+                  change:[..], todo:[..], sql_yours, sql_agami, attempts:[..], report_path, keep_allowed}]
     AGAMI_LOGO_DARK_TEXT, AGAMI_LOGO_LIGHT_TEXT, THEME_CSS
 -->
 <html lang="en">
@@ -323,6 +323,8 @@
         + esc(item.fix ? (item.fix_words || FIX_WORDS[fix] || fix) : (OWNER_SHORT[item.owner || 'nothing'] || '')) + '</span>'
         + '<span class="vchange">' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div></div>';
     }
+    // What happened to one of agami's queries, in the words the card uses everywhere else.
+    const HAPPENED = { ran: 'ran', blocked: 'blocked by the safety check', failed: 'the database returned an error', crashed: "agami's tool failed", not_run: 'never ran' };
     // The two statements, collapsed: the person's own SQL shown to its author, and agami's, which
     // the receipt already shows. Never a result row.
     function sqlBlock(item) {
@@ -339,11 +341,31 @@
           + steps.map((s, i) => '<div class="step"><small>' + (i + 1) + (compared && i === steps.length - 1 ? ' · compared' : '') + '</small><pre>' + esc(s) + '</pre></div>').join('')
           + '</div>'
         : '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div>';
+      // Every query agami tried, whenever there is more to it than one query that ran and answered: a
+      // query blocked or rejected, one that never ran, or the one it tried next, which reconcile ran
+      // afterwards. Each says what happened and whether it was right, because a query that failed is
+      // where there is most to learn, and the statement pane above shows only one of them.
+      const tried = Array.isArray(item.attempts)
+        && item.attempts.some(a => a.happened !== 'ran' || a.run_by === 'reconcile' || !a.answered) ? item.attempts : null;
+      const attempts = tried
+        // Closed at rest, like the card's sections: the verdict already says what went wrong, and the
+        // list is the working behind it. `sql1` gives the body the statement panes' own box: SQL that
+        // wraps and scrolls inside it rather than pushing the whole page sideways.
+        // The count is agami's queries: the numbered ones, plus those a summary line stands for.
+        ? '<details class="attempts"><summary>Every query agami tried ('
+          + tried.reduce((n, a) => n + (a.query == null ? (a.more || 0) : 1), 0) + ')</summary><div class="sql1">'
+          // A line with no query number counts the queries that never ran after the ones listed.
+          + tried.map(a => '<div class="attempt"><small>' + (a.query == null ? '' : esc(String(a.query)) + ' · ') + esc(HAPPENED[a.happened] || a.happened)
+            + (a.run_by === 'reconcile' ? ' · run by reconcile afterwards' : '') + '</small>'
+            + '<div>' + (a.why ? esc(a.why) + ' ' : '') + esc(a.grade_words || '') + '</div>'
+            + (a.sql ? '<pre>' + esc(a.sql) + '</pre>' : '') + '</div>').join('')
+          + '</div></details>'
+        : '';
       // A pane reading "(none)" is a placeholder shown as content. A row with one query shows it.
-      if (!item.sql_yours) return '<div class="sql1">' + agami + '</div>';
+      if (!item.sql_yours) return '<div class="sql1">' + agami + '</div>' + attempts;
       return '<div class="sql2">'
         + '<div><b>yours</b><pre>' + esc(item.sql_yours) + '</pre></div>'
-        + agami + '</div>';
+        + agami + '</div>' + attempts;
     }
     // The semantic model's own words, beside the checks they belong to and capped: ninety-one quotes
     // on one row is not evidence, it is a wall.

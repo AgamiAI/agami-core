@@ -159,6 +159,13 @@
        page itself rather than scrolling inside its own box. */
     .sql1, .sql2 { margin-top: 6px; }
     .sql2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+    details.attempts { margin-top: 12px; }
+    details.attempts > summary { cursor: pointer; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); font-weight: 600; list-style: none; }
+    details.attempts > summary::before { content: "▸ "; }
+    details.attempts[open] > summary::before { content: "▾ "; }
+    details.attempts > summary::-webkit-details-marker { display: none; }
+    .attempt { padding: 8px 0; border-top: 1px solid var(--border, #d9dde3); font-size: var(--t-body); }
+    .attempt small { color: var(--muted, #5b6875); }
     .sql1 b, .sql2 b { display: block; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); margin-bottom: 4px; }
     .sql1 pre, .sql2 pre { margin: 0; padding: 8px 10px; background: var(--code-bg, #f3f5f7); border: 1px solid var(--border, #d9dde3); border-radius: 6px; font-size: var(--t-micro); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
     @media (max-width: 640px) { .sql2 { grid-template-columns: 1fr; } }

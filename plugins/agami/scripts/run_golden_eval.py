@@ -1184,8 +1184,34 @@ def _ask(args: argparse.Namespace) -> int:
     return 0 if sql and generated.error is None else _NO_STATEMENT
 
 
+def _run_guarded(sql: str, profile: str, area: Optional[str], out: Path) -> dict[str, Any]:
+    """Run one statement through `execute_sql`'s guarded envelope and write its result to `out`.
+
+    The one road a statement reconcile runs on its own account takes: the read-only guard, then the
+    semantic model's safety pass, then the database. Returns the run record in `run.json`'s shape.
+    """
+    env = execute_sql.execute_guarded(sql, profile, area, executor=execute_sql.BUILTIN_EXECUTOR)
+    if env.status == "ok":
+        with out.open("w", newline="", encoding="utf-8") as fh:
+            if env.data.columns:
+                writer = csv.writer(fh)
+                writer.writerow(env.data.columns)
+                writer.writerows(env.data.rows)
+        return {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None}
+    if env.status == "refused":
+        return {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
+                "detail": getattr(env.refusal, "detail", None)}
+    return {"status": "failed", "exit": None, "kind": env.failure.kind, "rule": None, "detail": env.failure.message}
+
+
+#: The trace cuts a long argument and marks the cut. A statement ending in this marker is not the
+#: statement agami wrote, and running it would grade the trace's cut as agami's mistake.
+_TRIMMED = re.compile(r"… \[\d+ more characters\]$")
+
+
 def _write_agami_result(row_dir: Path, answer: dict[str, Any], profile: str) -> None:
-    """Write `actual.csv` and `agami-run.json` beside a row answered through agami's own tools.
+    """Write agami's result, and the result of the query it tried next, beside a row answered through
+    agami's own tools.
 
     Reconcile compares agami's result with the person's, and the server hands that result to the
     client, not to the run. Leaving the run of `agami.sql` to the skill let it take any execution tier,
@@ -1197,17 +1223,24 @@ def _write_agami_result(row_dir: Path, answer: dict[str, Any], profile: str) -> 
     What runs is the server's own record of the statement, with the `area` it ran under, never the
     client's copy of it. A statement this cannot find in the trace, character for character, is not
     run at all.
+
+    When the session ended at a query that did not run, the query agami wrote next never ran either.
+    Whether it would have answered says whether agami would have recovered on its own, so that one
+    statement is run too, after the session, through the same guard. It never changes the row's
+    verdict: the failure is still the finding.
     """
-    # A result left by an earlier run of this row is not this answer's result, whatever happens next.
-    for stale in ("actual.csv", "agami-run.json"):
+    # A file left by an earlier run of this row is not this answer's, whatever happens next.
+    for stale in ("actual.csv", "agami-run.json", "next-query.sql", "next-query.csv", "next-query-run.json",
+                  "next-query-comparison.json", "next-query-diff.json"):
         (row_dir / stale).unlink(missing_ok=True)
     sql = (answer.get("sql") or "").strip()
     probes = answer.get("probes")
     if not sql or not isinstance(probes, list):
         return
     queries = [p for p in probes if isinstance(p, dict) and p.get("tool") == "execute_sql"]
-    failed = next((p for p in queries if p.get("status") not in (None, "ok") and not p.get("stopped")), None)
-    if failed is not None:
+    first = next((i for i, p in enumerate(queries) if p.get("status") not in (None, "ok") and not p.get("stopped")), None)
+    if first is not None:
+        failed = queries[first]
         run = {"status": failed.get("status"), "exit": None, "kind": None, "rule": None,
                "detail": failed.get("detail"), "source": "trace"}
     else:
@@ -1215,22 +1248,22 @@ def _write_agami_result(row_dir: Path, answer: dict[str, Any], profile: str) -> 
                     and str(p.get("args", {}).get("sql") or "").strip() == sql), None)
         if ran is None:
             return
-        area = ran.get("args", {}).get("area") or None
-        env = execute_sql.execute_guarded(sql, profile, area, executor=execute_sql.BUILTIN_EXECUTOR)
-        if env.status == "ok":
-            with (row_dir / "actual.csv").open("w", newline="", encoding="utf-8") as fh:
-                if env.data.columns:
-                    writer = csv.writer(fh)
-                    writer.writerow(env.data.columns)
-                    writer.writerows(env.data.rows)
-            run = {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None}
-        elif env.status == "refused":
-            run = {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
-                   "detail": getattr(env.refusal, "detail", None)}
-        else:
-            run = {"status": "failed", "exit": None, "kind": env.failure.kind, "rule": None,
-                   "detail": env.failure.message}
+        run = _run_guarded(sql, profile, ran.get("args", {}).get("area") or None, row_dir / "actual.csv")
     (row_dir / "agami-run.json").write_text(json.dumps(run, indent=2), encoding="utf-8")
+    if first is None:
+        return
+
+    tried = next((p for p in queries[first + 1:] if p.get("stopped")), None)
+    next_sql = (tried or {}).get("args", {}).get("sql")
+    if not isinstance(next_sql, str) or not next_sql.strip():
+        return
+    (row_dir / "next-query.sql").write_text(next_sql, encoding="utf-8")
+    if _TRIMMED.search(next_sql):
+        next_run: dict[str, Any] = {"status": "not_run", "exit": None, "kind": None, "rule": None, "detail": None,
+                                    "reason": "trimmed"}
+    else:
+        next_run = _run_guarded(next_sql, profile, tried.get("args", {}).get("area") or None, row_dir / "next-query.csv")
+    (row_dir / "next-query-run.json").write_text(json.dumps(next_run, indent=2), encoding="utf-8")
 
 
 def _generator_for(args: argparse.Namespace) -> tuple[Any, Optional[str]]:

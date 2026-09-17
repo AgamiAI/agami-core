@@ -42,9 +42,11 @@ PAGE_CSS_PATH = SHARED_DIR / "reconcile-pages.css"
 # What one card may carry, beat by beat. Every text field is DISPLAY text the skill already wrote in
 # plain language; the lists are one sentence per line. A `rows` or `recorded` key is refused.
 _FIELDS = ("row", "label", "question", "source", "status", "status_words", "expected", "answer", "delta_pct", "single_cell",
-           "owner", "read", "how", "words", "disagreement", "change", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill", "summaries", "sample", "one_query")
+           "owner", "read", "how", "words", "disagreement", "change", "todo", "report_path", "diff", "sentence", "sql_yours", "sql_agami", "sql_agami_steps", "keep_allowed", "result", "fix", "fix_words", "prefill", "summaries", "sample", "one_query", "attempts")
 _LISTS = ("read", "how", "words", "change", "todo")
 _DIFF_KEYS = ("key", "state", "section", "family", "rolled", "yours", "agami", "note", "yours_hi", "agami_hi", "renamed")
+# Every query agami tried, as the card lists it. The statement and the plain words only: never a result.
+_ATTEMPT_KEYS = ("query", "sql", "happened", "run_by", "why", "grade", "grade_words", "answered", "more")
 _STATUSES = {"match", "match_unverified", "mismatch", "expected_doubtful", "error", "ungraded"}
 # Who acts in beat 4, which colors the fourth column: the person's query, the semantic model, the
 # question, agami's answer (a worked example), keep, or nothing.
@@ -175,6 +177,8 @@ def render(*, title: str, profile: str, run: str, items: list[dict]) -> str:
     for item in projected:
         if item.get("diff"):
             item["diff"] = [{k: row.get(k) for k in _DIFF_KEYS if k in row} for row in item["diff"]]
+        if item.get("attempts"):
+            item["attempts"] = [{k: a.get(k) for k in _ATTEMPT_KEYS if k in a} for a in item["attempts"] if isinstance(a, dict)]
     for item in projected:
         # ACE-138's guarantee is that every row a person reads has its status in words. report-items
         # fills it; a hand-written items file need not, and the verdict would then be blank.

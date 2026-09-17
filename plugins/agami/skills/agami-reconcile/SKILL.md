@@ -195,6 +195,20 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/run_golden_eval.py" --profile <profile> --vi
 
 Each row's file carries `rows/<n>/agami-answer.json` as `{row, question, sql, statements, error, mode, probe_count, probes, client_value}` (the last three only under `--via mcp`, where there is a trace to carry): `statements` is every statement the client wrote, in order, and `sql` is the last of them, the one whose result answers the question. What is reused across the chunk is what does not depend on the question; the session itself is never reused, because a fresh one is the thing being measured. One question at a time is `--ask "<question>" --out rows/<n>/agami-answer.json`. Per row, exit `0` for the batch, or a `sql` in the row's file, carries a statement: write it verbatim to `rows/<n>/agami.sql` (only `sql`; when `statements` has more than one, keep them all in the row record's `agami_statements` for the page and never run the earlier ones: the read-only rule refuses anything but a SELECT, so an earlier statement can only be a look at the data). **Under `--via mcp`, do not run it yourself:** the run has already written `rows/<n>/actual.csv` and `rows/<n>/agami-run.json`, in code. A statement the server did not run is never run again (its outcome is copied from the trace), and one that ran is run once more, only for its result, through `execute_sql`'s guarded envelope. No command-line tier is involved, and what runs is the server's own record of the statement, never the client's copy of it. Under `--via context`, run it through the profile's tier exactly as 1.5b runs yours (stdout to `rows/<n>/actual.csv`, its exit to `rows/<n>/agami-run.json` in `run.json`'s shape). Then `sm receipt --sql-file rows/<n>/agami.sql` and the chart report, as agami-query Phase 3 does. A row whose file has no `sql` carries one of the generator's fixed sentences as its `error` (the client could not be started, timed out, exited without answering, answered without a statement, or, under `--via mcp`, reported a number it did not query or a statement it did not run); the batch exits `3` when any row is like that. A row whose query DID NOT RUN (the safety check blocked it, or the database rejected it) is different and keeps its statement: its `error` says in plain words what stopped it and why. When it names something the semantic model or the database does not have, the fix is the semantic model, not another attempt; any other reason (a limit, a timeout, a credential) makes it a row to ask again. That row is `error` with the sentence as its `error`. **Never write agami's SQL yourself, and never retry with your own wording**; a row with no cold answer is an error row, and that is the finding. Exit `2` means the run could not start: the profile's context could not be built, or, under `--via mcp`, agami's tools did not come up on this machine. Stop the run and say which. A tool surface that will not start is broken tool fetching, which is a finding about the deployment — never answer the rows another way and print the numbers under agami's name.
 
+**Then grade the query agami tried next, when its session ended at a failure.** The server ends agami's session at the first query that does not run, so the query agami wrote after it never ran. Under `--via mcp` the run has already written it and run it, in code and through the same guard: `rows/<n>/next-query.sql`, its result in `rows/<n>/next-query.csv`, and its outcome in `rows/<n>/next-query-run.json` (a statement the trace cut short is written but never run). Compare its result the way 2c and 2e compare agami's own, and only when `next-query-run.json` says `ok`:
+
+```bash
+# A table, beside the person's statement:
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" compare-results "$ROOT" \
+  --golden-csv rows/<n>/statement.csv --generated-csv rows/<n>/next-query.csv \
+  --match values --unordered > rows/<n>/next-query-comparison.json
+# One number, beside the person's number:
+python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" diff --expected "<expected_value>" \
+  --actual "<the one cell of next-query.csv>" --tolerance 0.01 > rows/<n>/next-query-diff.json
+```
+
+Skip it on a row with no statement and no number. Never run `next-query.sql` yourself. `record` reads these files and lists every query agami tried as the row's `attempts`, each with what happened to it and whether it was right, and the report card shows them in a collapsed list inside its SQL section. The row's verdict never rests on the next query: the failure is still the finding.
+
 Capture, per row:
 
 - The generated SQL, verbatim, from `agami-answer.json` (its `sql`; and its `statements` when the client wrote several)
@@ -261,7 +275,10 @@ Per row:
   "comparison":   {"scalar": <the diff>} | {"result_set": <the compare-results score>} | null,
   "claims":       <the sm claims diff between the two statements, or null>,
   "finding_keys": ["<keys of the findings this row contributed to>"],
-  "agami_statements": ["<every statement the client wrote, in order; sql is the last>"]  // only when there were several, else []
+  "agami_statements": ["<every statement the client wrote, in order; sql is the last>"],  // only when there were several, else []
+  "attempts":     [{"query": 1, "sql": "…", "happened": "ran" | "blocked" | "failed" | "crashed" | "not_run", "run_by": "agami" | "reconcile",
+                    "why": "<plain sentence>", "grade": "right" | "partly" | "wrong" | "no_answer" | "not_graded",
+                    "grade_words": "<the grade as a sentence; for not_graded, why>", "answered": true}]  // only under --via mcp; `answered` only on the query agami answered from; a last entry with "query": null and "more": <n> counts the queries past the listed ones that never ran
 }
 ```
 

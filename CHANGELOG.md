@@ -14,6 +14,18 @@ below corresponds to one such version.
 
 ### Added
 
+- **A reconcile row lists every query agami tried, with what happened to it and whether it was
+  right.** A query that did not run is where there is most to learn, and the card showed one
+  statement. Now every `execute_sql` call agami made is kept on the row as `attempts`: it ran, the
+  safety check blocked it, the database returned an error, agami's own tool failed, or it never ran,
+  each with a plain sentence and a grade (right, partly right, wrong, no answer, or not graded and
+  why). agami's
+  session still ends at the first query that does not run, so a failure is never buried under a later
+  success. But the query agami tried next is run afterwards, by the run itself and through
+  `execute_sql`'s guard, and graded against the person's query or number, which says whether agami
+  would have recovered on its own. It never changes the row's verdict. The card lists the queries in a
+  collapsed "Every query agami tried" section inside SQL, and says what became of the next query.
+
 - **Reconcile can ask agami through agami's own tools, so a row's answer comes from the surface a
   person uses.** `run_golden_eval.py --via mcp` serves the cold client the local stdio MCP server and
   lets it work: it calls `get_datasource_schema` and `get_prompt_examples` itself, scoping them as it
