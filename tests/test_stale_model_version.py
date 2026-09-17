@@ -227,7 +227,7 @@ def test_a_refusal_writes_one_value_free_server_log_line(served, caplog):
     lines = [r.getMessage() for r in caplog.records if "execute_sql refused" in r.getMessage()]
     assert len(lines) == 1
     assert "rule=stale_model" in lines[0] and "reason=undetermined" in lines[0]
-    assert "datasource=demo" in lines[0] and "org_id=local" in lines[0]
+    assert "datasource='demo'" in lines[0] and "org_id=local" in lines[0]
     assert f"audit_id={body['audit_id']}" in lines[0]
     # Never the statement, its literal, the refusal's own sentences, or the live version.
     assert "acme-literal-7731" not in caplog.text and "SELECT" not in caplog.text
@@ -249,3 +249,16 @@ def test_a_call_that_is_not_refused_writes_no_line(served, caplog):
     with caplog.at_level("WARNING", logger=tools.__name__), pytest.raises(_Reached):
         _run(model_version=_schema()["model_version"])
     assert "execute_sql refused" not in caplog.text
+
+
+def test_a_caller_written_datasource_cannot_forge_a_second_line(served, caplog):
+    _arts, deploy = served
+    deploy()
+    forged = "x\nexecute_sql refused: rule=pii reason=forged datasource=prod org_id=victim"
+    with caplog.at_level("WARNING", logger=tools.__name__):
+        tools.tool_execute_sql({"datasource": forged + "y" * 5000, "sql": "DELETE FROM t"})
+    lines = [r.getMessage() for r in caplog.records if "execute_sql refused" in r.getMessage()]
+    assert len(lines) == 1
+    assert "\n" not in lines[0]  # the newline is escaped, not written
+    assert "org_id=local" in lines[0]
+    assert len(lines[0]) < tools.LOG_DATASOURCE_MAX_CHARS + 200

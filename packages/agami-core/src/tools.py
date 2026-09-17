@@ -2365,17 +2365,27 @@ def _log_refusal(env: Envelope, profile: str | None) -> None:
     identifiers the caller sent), never the caller's identity (the row carries that; a log sink is
     usually read more widely). WARNING, because the served entrypoint configures no logging and
     Python's fallback handler prints WARNING and above only: at INFO a self-hosted server would drop
-    it."""
+    it.
+
+    `datasource` is the one caller-written field, and a read-only refusal is reached before anything
+    checks that the name exists — so it is cut to a bound and written as a repr. Bare, a newline in it
+    started a second line of exactly this shape, naming whatever rule and organization the caller
+    chose."""
     if env.status != "refused" or env.refusal is None:
         return
     _LOG.warning(
-        "execute_sql refused: rule=%s reason=%s datasource=%s org_id=%s audit_id=%s",
+        "execute_sql refused: rule=%s reason=%s datasource=%r org_id=%s audit_id=%s",
         env.refusal.rule,
         env.refusal.reason,
-        profile or "-",
+        (profile or "")[:LOG_DATASOURCE_MAX_CHARS],
         _current_org_id(),
         env.audit_id or "-",
     )
+
+
+# How much of a caller's `datasource` a refusal's log line keeps. Far above any real name; a cut
+# means the name was not one, and the audit row is where the whole call is recorded.
+LOG_DATASOURCE_MAX_CHARS = 200
 
 
 def _emit(
