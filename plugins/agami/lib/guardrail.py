@@ -105,9 +105,21 @@ RULE_UNSCOPABLE = "unscopable"
 # like `model_unavailable`, not a finding about the statement. Declared locally: the guardrail
 # contract's rule list does not name it yet (see `LOCAL_ADDITIONS` in its contract test).
 RULE_DATASOURCE_REQUIRED = "datasource_required"
+# The call's `model_version` is not the version this datasource is serving, or the call carried none
+# (#364). The statement was written from a schema the client fetched earlier — typically an old
+# conversation resumed after the model changed or an older version was put back — and nothing the
+# server returns can tell the client its context went stale except refusing to run on it. Decided
+# from one version lookup and no model, so PRE_MODEL; declared locally like `datasource_required`.
+RULE_STALE_MODEL = "stale_model"
 
 PRE_MODEL_RULES: frozenset[str] = frozenset(
-    {RULE_READ_ONLY, RULE_RECON, RULE_AUDIT_UNAVAILABLE, RULE_DATASOURCE_REQUIRED}
+    {
+        RULE_READ_ONLY,
+        RULE_RECON,
+        RULE_AUDIT_UNAVAILABLE,
+        RULE_DATASOURCE_REQUIRED,
+        RULE_STALE_MODEL,
+    }
 )
 """The rules decided BEFORE any semantic model is consulted, and the home for the next one.
 
@@ -160,6 +172,9 @@ REASON_FOR_RULE: dict[str, RefusalReason] = {
     # We did not determine anything about the statement: which datasource it is FOR is unknown, so
     # neither safety nor scope could be asked. The same argument as `model_unavailable`.
     RULE_DATASOURCE_REQUIRED: "undetermined",
+    # Nothing about the statement was asked: the model it was written against is not the one being
+    # served, so whether it is safe or in scope HERE was never determined.
+    RULE_STALE_MODEL: "undetermined",
 }
 
 
@@ -217,13 +232,21 @@ FailureKind = Literal[
     "dsn",
     "driver_missing",
     "timeout",
+    "sign_in_required",
     "other",
 ]
-"""Ten classified operational errors declared, six produced.
+"""Eleven classified operational errors declared.
 
 Produced today: `dsn`, `driver_missing`, `auth` and `syntax` from the executor's classified exit
-codes, `other` from its catch-all, and `timeout` from the subprocess supervisor at the tool edge —
-the bound that kills a forked executor which never returned.
+codes, `other` from its catch-all, `timeout` from the subprocess supervisor at the tool edge —
+the bound that kills a forked executor which never returned — and `sign_in_required` from an
+injected executor only (below).
+
+**`sign_in_required` is produced only by an injected executor** that connects as the person asking
+(a per-user credential exchange, for instance). It means the person's own credential is missing or
+could no longer be renewed, so the fix is theirs: sign in again. It is not `auth`, whose fix is an
+operator's re-credential, and reporting it as `auth` made a client tell a person the warehouse was
+broken when a fresh sign-in was all it took.
 
 **`timeout` is a failure, not a refusal, and whose decision it was is not the test on its own.** The
 supervisor bound is ours, but it cannot attribute the kill to the STATEMENT: the child may have hung

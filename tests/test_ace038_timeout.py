@@ -779,8 +779,9 @@ def test_a_database_error_with_the_flag_unset_is_a_failure_not_a_refusal(
     """Direction (a): the watchdog never fired, so this is the database's outcome, not ours.
 
     A generous budget means the flag stays clear while the identical error text arrives. It must
-    unwind as an `ExecutorError` and leave the chokepoint as `failed`/`syntax` — a refusal here would
-    tell a caller to narrow a statement that never ran long at all.
+    unwind as an `ExecutorError` and leave the chokepoint as `failed`/`other` — a refusal here would
+    tell a caller to narrow a statement that never ran long at all. `other` and not `syntax`, since
+    ACE-132: "interrupted" names no syntax error, and an execution failure no rule reads is `other`.
     """
     monkeypatch.setenv("AGAMI_SQL_TIMEOUT_S", str(300))
     fake_sqlite(_ImmediateErrorCursor)
@@ -788,7 +789,7 @@ def test_a_database_error_with_the_flag_unset_is_a_failure_not_a_refusal(
     env = _guarded("SELECT c FROM orders")
 
     assert env.status == "failed"
-    assert env.failure.kind == "syntax"
+    assert env.failure.kind == "other"
     assert env.refusal is None
 
 
@@ -835,7 +836,7 @@ def test_an_error_that_merely_arrives_late_is_still_a_failure(warehouse, fake_sq
 
     assert elapsed > _BUDGET_S, "the statement did not actually outlive its budget"
     assert env.status == "failed"
-    assert env.failure.kind == "syntax"
+    assert env.failure.kind == "other"  # "interrupted" names no syntax error (ACE-132)
     assert env.refusal is None
 
 

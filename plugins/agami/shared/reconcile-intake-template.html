@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<!--
+  agami · reconcile intake page — used by the agami-reconcile skill via scripts/render_reconcile_intake.py.
+  What we read from what the person gave us, before anything runs: one row per thing to check, the
+  question we read from a label (editable), the number we parsed, whether SQL came with it. The
+  person fixes a question or drops a row, generates the block, pastes it back; the parser applies it
+  to the rows file. The prune page's pattern, in the reconcile pages' design language.
+  NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose.
+  Renderer fills: REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON,
+    ITEMS_JSON — [{row, file, line, shape, label, question, expected, has_statement, statement_preview, source}],
+    AGAMI_LOGO_DARK_TEXT, AGAMI_LOGO_LIGHT_TEXT, THEME_CSS, PAGE_CSS
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} · agami</title>
+  <style>
+{{THEME_CSS}}
+{{PAGE_CSS}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">
+        <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+        <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+      </div>
+      <div>
+        <h1>{{REPORT_TITLE}}</h1>
+        <div class="meta">profile {{PROFILE}} · run {{RUN}} · generated {{GENERATED_AT}}</div>
+      </div>
+    </header>
+    <p class="lede">This is what we read from what you gave us, before anything runs. Each row is one thing to check: the question we will ask agami (edit it if we read your label wrong), the number you expect, and whether your SQL came with it. Untick a row to leave it out. Then generate the block and paste it back into Claude. Nothing runs until you do.</p>
+    <div class="chips" id="chips"></div>
+    <div class="filters" id="filters">
+      <span class="k">Show</span><span id="owner-chips"></span>
+      <input type="search" id="q" placeholder="a word in the label, question or file" aria-label="narrow the rows by a word">
+      <button type="button" id="clear" class="linkish">Show all</button>
+      <span class="showing" id="showing"></span>
+    </div>
+    <div id="items" class="intake"></div>
+    <div class="footer">
+      <button type="button" id="btn-generate" class="primary">Generate for Claude</button>
+      <span class="summary" id="summary"></span>
+    </div>
+  </div>
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Send to Claude</h2>
+      <p class="meta">Copy this block and paste it back into Claude. Rows you unticked are left out of the run; a question you edited is asked in your words.</p>
+      <textarea id="modal-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" id="modal-copy" class="primary">Copy to clipboard</button>
+        <button type="button" id="modal-close">Close</button>
+        <span class="modal-status" id="modal-status"></span>
+      </div>
+    </div>
+  </div>
+  <script>
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, items: {{ITEMS_JSON}} };
+    const edits = {};   // row -> {keep, question}
+    const SHAPE = { a: 'a question', b: 'a question with your SQL', c: 'a number from your dashboard', d: 'a number with the SQL behind it' };
+    function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    // What is shown. A filter narrows the rows, never the block: decided() reads every row.
+    const view = { shape: new Set(), q: '' };
+    function visible() {
+      const q = view.q.trim().toLowerCase();
+      return DATA.items.filter(item => (!view.shape.size || view.shape.has(item.shape))
+        && (!q || [item.label, item.question, item.file, item.source, item.expected, (edits[item.row] || {}).question].filter(Boolean).join(' ').toLowerCase().includes(q)));
+    }
+    function chips() {
+      const counts = {};
+      DATA.items.forEach(i => { counts[i.shape] = (counts[i.shape] || 0) + 1; });
+      const root = document.getElementById('chips');
+      root.classList.toggle('filtering', view.shape.size > 0);
+      root.innerHTML = Object.entries(counts).map(([shape, n]) =>
+        '<button type="button" class="chip noted' + (view.shape.has(shape) ? ' on' : '') + '" data-filter="' + esc(shape) + '" aria-pressed="' + view.shape.has(shape) + '"><b>' + n + '</b><span>' + esc(SHAPE[shape] || shape) + '</span></button>').join('');
+      root.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { const k = el.dataset.filter; if (view.shape.has(k)) view.shape.delete(k); else view.shape.add(k); renderItems(); }));
+      document.getElementById('filters').hidden = DATA.items.length < 2;
+      const filtered = view.shape.size || view.q.trim();
+      document.getElementById('showing').textContent = filtered ? 'Showing ' + visible().length + ' of ' + DATA.items.length + ' rows' : 'All ' + DATA.items.length + ' rows';
+    }
+    function renderItems() {
+      chips();
+      const root = document.getElementById('items');
+      root.innerHTML = visible().map(item => {
+        const e = edits[item.row] || { keep: true, question: item.question || '' };
+        return '<div class="card row' + (e.keep ? '' : ' dropped') + '" data-row="' + item.row + '">'
+          + '<div><input type="checkbox" data-field="keep"' + (e.keep ? ' checked' : '') + ' aria-label="keep row ' + item.row + '"></div>'
+          + '<div><div class="head"><span class="n">#' + item.row + '</span><span class="title">' + esc(item.label || item.question || '(no label)') + '</span>'
+          + '<span class="pill noted">' + esc(SHAPE[item.shape] || item.shape) + '</span></div>'
+          + '<div class="k">' + esc(item.file || '') + (item.line ? ':' + esc(item.line) : '') + (item.source ? ' · ' + esc(item.source) : '') + '</div>'
+          + '<div class="dg one">' + (item.expected ? '<div class="m held">·</div><div class="v">you expect ' + esc(item.expected) + '</div>' : '<div class="m noted">·</div><div class="v noted">no number to compare against; agami answers and you decide on the report</div>')
+          + (item.has_statement ? '<div class="m held">·</div><div class="v">your SQL: ' + esc(item.statement_preview || '') + '</div>' : '') + '</div></div>'
+          + '<div><label class="k">The question we will ask agami<textarea data-field="question">' + esc(e.question) + '</textarea></label></div>'
+          + '</div>';
+      }).join('') || '<p class="meta">No row matches this filter. Your edits on the hidden rows are kept.</p>';
+      root.querySelectorAll('input[type=checkbox]').forEach(el => el.addEventListener('change', onKeep));
+      root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
+      renderSummary();
+    }
+    function state(row) { const item = DATA.items.find(i => i.row === row); return edits[row] || (edits[row] = { keep: true, question: item.question || '' }); }
+    function onKeep(e) { const row = Number(e.target.closest('.card').dataset.row); state(row).keep = e.target.checked; renderItems(); }
+    function onText(e) { const row = Number(e.target.closest('.card').dataset.row); state(row).question = e.target.value; renderSummary(); }
+    function decided() {
+      return DATA.items.map(item => {
+        const e = edits[item.row] || { keep: true, question: item.question || '' };
+        const out = { row: item.row, keep: !!e.keep };
+        if (e.keep && e.question.trim() && e.question.trim() !== (item.question || '')) out.question = e.question.trim();
+        return out;
+      });
+    }
+    function renderSummary() {
+      const kept = decided().filter(d => d.keep).length;
+      const edited = decided().filter(d => d.question).length;
+      document.getElementById('summary').textContent = kept + ' of ' + DATA.items.length + ' rows will run' + (edited ? ', ' + edited + ' question' + (edited === 1 ? '' : 's') + ' in your words' : '') + '. Nothing runs until you paste the block into Claude.';
+    }
+    // The block Claude reads back: profile first, then the run, then the rows under a bare header
+    // with the array on its own line, and done last: the same grammar as every reconcile page.
+    function generate() {
+      const out = ['profile: ' + (DATA.profile || ''), 'reconcile-run: ' + (DATA.run || ''), 'intake:', JSON.stringify(decided()), 'done'];
+      document.getElementById('modal-text').value = out.join('\n') + '\n';
+      document.getElementById('modal').hidden = false; document.getElementById('modal-status').textContent = '';
+    }
+    document.getElementById('btn-generate').addEventListener('click', generate);
+    document.getElementById('q').addEventListener('input', e => { view.q = e.target.value; renderItems(); });
+    document.getElementById('clear').addEventListener('click', () => { view.shape.clear(); view.q = ''; document.getElementById('q').value = ''; renderItems(); });
+    document.getElementById('modal-close').addEventListener('click', () => { document.getElementById('modal').hidden = true; });
+    document.getElementById('modal-copy').addEventListener('click', async () => {
+      const status = document.getElementById('modal-status');
+      try { await navigator.clipboard.writeText(document.getElementById('modal-text').value); status.textContent = '✓ Copied. Paste it back in Claude.'; }
+      catch (e) { document.getElementById('modal-text').select(); status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.'; }
+    });
+    renderItems();
+  </script>
+</body>
+</html>

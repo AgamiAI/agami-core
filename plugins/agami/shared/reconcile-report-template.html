@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<!--
+  agami · reconcile report page — used by the agami-reconcile skill via
+  scripts/render_reconcile_report.py.
+  One layout: a card per row, carrying the question, one verdict, one thing to do, and three
+  sections closed at rest (Data, SQL, Checks). A row where only agami wrote a query renders one
+  value column instead of two, because there is no second side to name. Same theme, logos and
+  paste-back grammar as the intake page and the model explorer.
+  Two rules this page keeps, both asserted by tests/test_render_reconcile_report.py:
+    * Result rows only as the Data section's sample, at most five, capped by the renderer itself in
+      _validate_sample rather than trusted from whatever built them. Everywhere else it is one
+      recorded cell or the shape of a table, never the rows.
+    * A control decides nothing on its own. "keep" is the person's yes to Phase 3e's offer for that
+      row and is offered only where the run scored the row match with one cell; change, fix, reword
+      and nothing go back through the doors that exist. The skill applies each, never this page.
+  NOTE: the placeholder names below are written WITHOUT their double-brace wrappers on purpose.
+  Renderer fills:
+    REPORT_TITLE, GENERATED_AT, PROFILE, RUN, PROFILE_JSON, RUN_JSON,
+    ITEMS_JSON — [{row, label, question, source, status, status_words, expected, answer, delta_pct,
+                  single_cell, owner, one_query, result, fix, fix_words, prefill, summaries, sample,
+                  diff:[{key, state, section, family, yours, agami, note}], sentence, words:[..],
+                  change:[..], todo:[..], sql_yours, sql_agami, report_path, keep_allowed}]
+    AGAMI_LOGO_DARK_TEXT, AGAMI_LOGO_LIGHT_TEXT, THEME_CSS
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}} · agami</title>
+  <style>
+{{THEME_CSS}}
+{{PAGE_CSS}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">
+        <span class="logo-light-mode">{{AGAMI_LOGO_DARK_TEXT}}</span>
+        <span class="logo-dark-mode">{{AGAMI_LOGO_LIGHT_TEXT}}</span>
+      </div>
+      <div>
+        <h1>{{REPORT_TITLE}}</h1>
+        <div class="meta">profile {{PROFILE}} · run {{RUN}} · generated {{GENERATED_AT}}</div>
+      </div>
+    </header>
+
+    <p class="lede" id="lede"></p>
+    <div class="chips" id="chips"></div>
+    <div class="filters" id="result-row" hidden>
+      <span class="k">Result</span><span class="chips result" id="result-chips"></span>
+    </div>
+    <div class="filters" id="filters">
+      <span class="k">Fix</span><span id="owner-chips"></span>
+    </div>
+    <!-- Find is a different act from filtering by facet: one narrows by a value the page computed,
+         the other by whatever the reader remembers. Its own row, under the two facet rows. -->
+    <div class="filters find">
+      <span class="k">Find</span><input type="search" id="q" placeholder="a word in the question, a check or a value" aria-label="narrow the rows by a word">
+      <button type="button" id="clear" class="linkish">Clear filters</button>
+      <span class="showing" id="showing"></span>
+    </div>
+    <div id="items"></div>
+
+    <div class="footer">
+      <button type="button" id="btn-generate" class="primary" disabled>Generate decisions</button>
+      <span class="summary" id="summary"></span>
+    </div>
+  </div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card">
+      <h2>Send to Claude</h2>
+      <p class="meta">Copy this block and paste it back into Claude. "keep" is your yes to the offer for that row. "change" sends a definition to save-correction, with your words. "fix" and "reword" come back to you. "example" sends your query to save-correction as a prompt example. "nothing" changes nothing.</p>
+      <textarea id="modal-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" id="modal-copy" class="primary">Copy to clipboard</button>
+        <button type="button" id="modal-close">Close</button>
+        <span class="modal-status" id="modal-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const DATA = { profile: {{PROFILE_JSON}}, run: {{RUN_JSON}}, status: {{STATUS_JSON}}, items: {{ITEMS_JSON}} };
+    const decisions = {};   // row -> {decision, words}
+    const touched = new Set();   // rows the reader actually changed, as opposed to the seeded suggestion
+    // Seeded from each row's own suggestion before anything renders, so what the radios show and
+    // what the block carries are the same thing. A person changing one overwrites its seed.
+    function seedDecisions() {
+      (DATA.items || []).forEach(item => {
+        const s = suggestionFor(item);
+        if (s && !decisions[item.row]) decisions[item.row] = { decision: s, words: prefillFor(item, s) };
+      });
+    }
+    // The colour family a status belongs to, and the chip words, both handed over by reconcile.py.
+    // No status vocabulary is written on this page: an item carries its own sentence in
+    // `status_words`, so the card, the chips and the chat cannot drift into calling one row three
+    // different things.
+    const STATUS_CLASS = DATA.status.cls;
+    const OWNER = { you: 'What to change: your query', model: 'What to change: the semantic model', question: 'What to change: the question',
+                    agami: "What to change: agami's answer", keep: 'Keep it', nothing: 'Nothing to change' };
+
+    function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function lines(list) { return (list || []).length ? '<ul>' + list.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''; }
+    function pill(item) { return '<span class="pill ' + statusClass(item) + '">' + esc(item.status_words || '') + '</span>'; }
+    // The fix words come from the items themselves (report-items writes fix_words); one home for six strings.
+    const FIX_WORDS = {};
+    DATA.items.forEach(i => { if (i.fix && i.fix_words) FIX_WORDS[i.fix] = i.fix_words; });
+    // The display mirror of reconcile.py's _FIX_OWNER: one entry per fix, or the pill renders with
+    // no colour family at all. A test asserts the two stay in step.
+    const FIX_CLASS = { ungraded: 'nothing', query: 'you', semantic_model: 'model', examples: 'agami', question: 'question', ask_again: 'agami', none: 'keep' };
+    function fixOf(item) { return item.fix || ({ you: 'query', model: 'semantic_model', question: 'question', agami: 'ask_again', keep: 'none', nothing: 'none' }[item.owner || 'nothing']); }
+    function nums(item) {
+      const parts = [];
+      if (item.expected) parts.push('yours ' + item.expected);
+      if (item.answer) parts.push('agami ' + item.answer);
+      if (item.delta_pct !== null && item.delta_pct !== undefined) parts.push((item.delta_pct > 0 ? '+' : '') + item.delta_pct + '%');
+      return esc(parts.join(' · '));
+    }
+    // The five decisions, each saying what it is and what happens next. The values are the block's
+    // contract (keep | change | fix | reword | nothing) and do not change; the words around them do.
+    const DECISIONS = {
+      keep: { word: 'keep', what: 'Keep this row as a worked example or a test. Offered only where the numbers matched and every check passed.' },
+      change: { word: 'change the semantic model', what: 'A definition is wrong or missing in the semantic model. Your words go to /agami-save-correction.',
+                prompt: 'What should the semantic model say?', ph: 'e.g. cancelled orders count toward the order count' },
+      fix: { word: 'fix your query', what: 'The mistake is in your SQL. You fix it and run this row again.',
+             prompt: 'What you will fix, in a few words (optional)', ph: 'e.g. the status value is lower-case delivered' },
+      reword: { word: 'reword the question', what: 'The question was read differently from what you meant. Ask it in other words.',
+                prompt: 'The question, in the words you mean', ph: 'e.g. How many orders were placed in Q3 2025, cancelled ones included?' },
+      example: { word: 'add an example', what: 'A prompt example for this question goes to /agami-save-correction, so agami writes it this way next time. On a row with your SQL it sends yours; on a row where only agami wrote a query, and you say that query is right, it sends agami\'s.',
+                 prompt: 'Anything to add for the example (optional)', ph: 'e.g. use this whenever the question says "open"' },
+      nothing: { word: 'nothing', what: 'Leave this row as it is.' },
+    };
+    // What each box starts with, from the run's own words for this row; the person edits or clears it.
+    function prefillFor(item, decision) { return ((item.prefill || {})[decision]) || ''; }
+    const SUGGEST = { keep: 'keep', model: 'change', you: 'fix', question: 'reword', agami: 'nothing', nothing: 'nothing' };
+    const BY_FIX = { query: 'fix', semantic_model: 'change', examples: 'example', question: 'reword', ask_again: 'nothing', none: 'nothing' };
+    // What the run itself concluded, as a decision. Pre-selected below, and still labelled
+    // "suggested", so a reader can see it was chosen for them and change it in one click.
+    function suggestionFor(item) {
+      // Nothing computed a verdict for an ungraded row, so nothing is suggested: the radios start
+      // empty and the reader's first click is their own.
+      if (item.fix === 'ungraded') return null;
+      if (item.fix) return item.fix === 'examples' && item.keep_allowed ? 'keep'
+        : (item.fix === 'none' && item.keep_allowed ? 'keep' : BY_FIX[item.fix]);
+      return (SUGGEST[item.owner] === 'keep' && !item.keep_allowed) ? 'nothing' : (SUGGEST[item.owner] || null);
+    }
+    function controls(item, d) {
+      // "fix your query" is withheld when there is no query of theirs: an option that cannot apply
+      // invites a person to blame a statement nobody wrote.
+      const mine = Boolean(item.sql_yours);
+      const choices = (item.keep_allowed ? ['keep'] : []).concat(['change'], mine ? ['fix'] : [], ['reword', 'example', 'nothing']);
+      const suggested = suggestionFor(item);
+      const spec = DECISIONS[d.decision] || {};
+      // A fieldset, not a div: five radios sharing a name are a group, and a group with no legend has
+      // no accessible name, so a screen reader reads five options and never says what they decide.
+      // The legend is the visible title too, which is the one place on the card you act rather than read.
+      return '<fieldset class="grade opts"><legend>What to do</legend>' + choices.map(v =>
+          '<label class="opt' + (d.decision === v ? ' on' : '') + '"><input type="radio" name="d' + item.row + '" value="' + v + '"' + (d.decision === v ? ' checked' : '') + '>'
+          + '<b>' + esc(DECISIONS[v].word) + (v === suggested ? ' <span class="tag suggested">suggested</span>' : '') + '</b>'
+          + '<span class="what">' + esc(DECISIONS[v].what) + '</span></label>').join('') + '</fieldset>'
+        + '<div class="more"' + (['change', 'fix', 'reword', 'example'].includes(d.decision) ? '' : ' hidden') + '>'
+        + '<label><span class="p">' + esc(spec.prompt || 'Say it in words') + '</span><textarea data-field="words" placeholder="' + esc(spec.ph || '') + '">' + esc(d.words || '') + '</textarea></label></div>';
+    }
+    // What is shown. A filter narrows the cards, never the block: decided() reads every row.
+    const view = { status: new Set(), owner: new Set(), result: new Set(), q: '' };
+    const OWNER_SHORT = { you: 'your query', model: 'the semantic model', question: 'the question', agami: 'agami', keep: 'keep', nothing: 'nothing' };
+    function statusClass(item) { return STATUS_CLASS[item.status] || 'noted'; }
+    function haystack(item) {
+      const parts = [item.question, item.label, item.source, item.disagreement, item.expected, item.answer, item.sentence, item.sql_yours, item.sql_agami]
+        .concat(item.change || [], item.words || [], item.todo || [], Object.values(item.summaries || {}))
+        .concat((item.diff || []).flatMap(r => [r.key, r.note].concat(r.yours || [], r.agami || [])));
+      return parts.filter(Boolean).join(' ').toLowerCase();
+    }
+    // Whether a row passes the filters. `ignore` names one filter to leave out: each chip row counts
+    // the rows the OTHER filters leave, so the Fix counts follow the Result filter and the search, and
+    // the Result counts follow the Fix filter, the way facets do.
+    function passes(item, ignore) {
+      const q = view.q.trim().toLowerCase();
+      return (ignore === 'status' || !view.status.size || view.status.has(statusClass(item)))
+        && (ignore === 'result' || !view.result.size || view.result.has((item.result || {}).label || ''))
+        && (ignore === 'owner' || !view.owner.size || view.owner.has(item.fix ? fixOf(item) : (item.owner || 'nothing')))
+        && (!q || haystack(item).includes(q));
+    }
+    function visible() { return DATA.items.filter(item => passes(item)); }
+    function chips() {
+      const counts = {};
+      DATA.items.forEach(i => { const cls = statusClass(i); counts[cls] = (counts[cls] || 0) + (passes(i, 'status') ? 1 : 0); });
+      const words = DATA.status.chips;
+      // The result chips filter like every other chip; when the items carry result labels they are
+      // the one filter row, and the older status chips step aside.
+      const labels = {};
+      DATA.items.forEach(i => { if (i.result && i.result.label) labels[i.result.label] = (labels[i.result.label] || 0) + (passes(i, 'result') ? 1 : 0); });
+      const results = document.getElementById('result-chips');
+      results.classList.toggle('filtering', view.result.size > 0);
+      results.innerHTML = Object.entries(labels).map(([label, n]) =>
+        '<button type="button" class="chip plain' + (view.result.has(label) ? ' on' : '') + (n ? '' : ' zero') + '" data-result="' + esc(label) + '" aria-pressed="' + view.result.has(label) + '"><span>' + esc(label) + '</span><b>' + n + '</b></button>').join('');
+      results.querySelectorAll('[data-result]').forEach(el => el.addEventListener('click', () => { toggle(view.result, el.dataset.result); renderItems(); }));
+      // `root` (the status chips) is declared further down in this function; reach it by id here.
+      // A facet with one value narrows nothing: on a one-row run the whole bar is chrome. Both chip
+      // rows hide on the same rule the fix row and the find row already use.
+      const facets = Object.keys(labels).length;
+      document.getElementById('chips').hidden = facets > 0 || DATA.items.length < 2;
+      document.getElementById('result-row').hidden = facets === 0 || DATA.items.length < 2;
+      const root = document.getElementById('chips');
+      root.classList.toggle('filtering', view.status.size > 0);
+      root.innerHTML = Object.entries(counts).map(([cls, n]) =>
+        '<button type="button" class="chip ' + cls + (view.status.has(cls) ? ' on' : '') + (n ? '' : ' zero') + '" data-filter="' + cls + '" aria-pressed="' + view.status.has(cls) + '"><span>' + esc(words[cls] || cls) + '</span><b>' + n + '</b></button>').join('');
+      root.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { toggle(view.status, el.dataset.filter); renderItems(); }));
+      const owners = {};
+      DATA.items.forEach(i => { const o = i.fix ? fixOf(i) : (i.owner || 'nothing'); owners[o] = (owners[o] || 0) + (passes(i, 'owner') ? 1 : 0); });
+      const bar = document.getElementById('filters');
+      bar.hidden = DATA.items.length < 2;
+      document.querySelector('.filters.find').hidden = DATA.items.length < 2;
+      bar.classList.toggle('filtering', view.owner.size > 0);
+      document.getElementById('owner-chips').innerHTML = Object.entries(owners).map(([o, n]) =>
+        '<button type="button" class="pill ' + esc(FIX_CLASS[o] || o) + (view.owner.has(o) ? ' on' : '') + (n ? '' : ' zero') + '" data-owner="' + esc(o) + '" aria-pressed="' + view.owner.has(o) + '">' + esc(FIX_WORDS[o] || OWNER_SHORT[o] || o) + ' <b>' + n + '</b></button>').join(' ');
+      document.getElementById('owner-chips').querySelectorAll('[data-owner]').forEach(el => el.addEventListener('click', () => { toggle(view.owner, el.dataset.owner); renderItems(); }));
+    }
+    function toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
+    function showing(n) {
+      const filtered = view.status.size || view.owner.size || view.result.size || view.q.trim();
+      document.getElementById('showing').textContent = filtered ? 'Showing ' + n + ' of ' + DATA.items.length + ' rows' : 'All ' + DATA.items.length + ' rows';
+    }
+    // The diff grid: one grid row per check, mark | what was checked | yours | agami, so a tall cell on
+    // one side never pushes the other out of line. Differing tokens are highlighted in place.
+    const MARK = { held: '✓', defect: '✗', open: '○', gap: '▲', noted: '·', differs: '≠' };
+    const MARK_WORDS = { held: 'passed', defect: 'does not match', open: 'could not check', gap: 'gap in the semantic model', noted: 'noted', differs: 'the two queries differ' };
+    // A list cell reads like a diff: a token only on this side is removed (yours, red, a minus) or
+    // added (agami, green, a plus); a token whose partner on the other side has another name is
+    // marked in place, with the partner's name on hover. No sentence repeats what the marks show.
+    function cell(v, hi, side, state, renamed) {
+      const cls = 'v ' + side + ' ' + state + (Array.isArray(v) || !(hi || []).length ? '' : ' whole');
+      if (v == null) return '<div class="' + cls + '"></div>';
+      if (Array.isArray(v)) {
+        const partner = {};
+        (renamed || []).forEach(([a, b]) => { if (side === 'yours') partner[a] = b; else partner[b] = a; });
+        return '<div class="' + cls + '">' + v.map(tok => {
+          if ((hi || []).includes(tok)) return '<span class="tok ' + (state === 'differs' ? 'diff' : (side === 'yours' ? 'del' : 'add')) + '">' + (state === 'differs' ? '' : (side === 'yours' ? '−' : '+')) + esc(tok) + '</span>';
+          if (partner[tok]) return '<span class="tok renamed" title="same values as ' + esc(partner[tok]) + '">' + esc(tok) + '</span>';
+          return '<span class="tok">' + esc(tok) + '</span>';
+        }).join('') + '</div>';
+      }
+      return '<div class="' + cls + '">' + ((hi || []).includes(v) ? '<span class="hi">' + esc(v) + '</span>' : esc(v)) + '</div>';
+    }
+    // One section's rows only. A row carries its own section from the items verb, so the page never
+    // guesses from a label: "value list for x" and "values" are one prefix apart and mean different things.
+    function diffGrid(item, section) {
+      const rows = (item.diff || []).filter(r => !section || r.section === section);
+      if (!rows.length) return '';
+      // One query, one value column. The grid's two columns say "yours beside agami", and when only
+      // agami wrote a query there is no "yours": filing agami's own facts under that heading tells a
+      // reader their SQL answered the question when they wrote none, and leaves a dead column
+      // beside it on every row.
+      const one = !!item.one_query;
+      const head = one
+        ? '<div class="h"></div><div class="h">checked</div><div class="h">agami’s query</div>'
+        : '<div class="h"></div><div class="h">checked</div><div class="h">yours</div><div class="h">agami</div>';
+      return '<div class="dg' + (one ? ' one-query' : '') + '" role="table" aria-label="'
+        + (one ? 'what was checked on agami’s query' : 'what was checked, yours beside agami') + '">' + head
+        + rows.map(r => '<div class="m ' + esc(r.state) + '" title="' + esc(MARK_WORDS[r.state] || r.state) + '">' + (MARK[r.state] || '·') + '</div>'
+            + '<div class="k ' + esc(r.state) + '">' + esc(r.key) + '</div>'
+            + cell(one ? (r.yours ?? r.agami) : r.yours, r.yours_hi, one ? 'agami' : 'yours', r.state, r.renamed)
+            + (one ? '' : cell(r.agami, r.agami_hi, 'agami', r.state, r.renamed))
+            + (r.note && (r.state !== 'held' || r.key === 'columns') ? '<div class="n ' + esc(r.state) + '">' + esc(r.note) + '</div>' : '')).join('')
+        + '</div>';
+    }
+    // Five rows of the two results, side by side, differing rows first. The only place the page
+    // shows warehouse values, and never more than five.
+    function grid(sample) {
+      if (!sample) return '';
+      // One side only: agami answered and there is nothing of the person's to set beside it. The
+      // rows still show, without the side column, whose five repetitions of one word say nothing.
+      const solo = !sample.rows.length && (sample.agami_rows || []).length > 0;
+      if (!sample.rows.length && !solo) return '';
+      const head = sample.pairs.map(pr => '<th>' + esc(pr[0] === pr[1] ? pr[0] : pr[0] + ' / ' + pr[1]) + '</th>').join('');
+      const body = sample.rows.map(r => {
+        const y = '<tr class="y' + (r.same ? '' : ' differs') + '"><th>yours</th>'
+          + r.yours.map((v, i) => '<td class="' + (r.same || !r.agami || v === r.agami[i] ? '' : 'differs') + '">' + esc(v) + '</td>').join('') + '</tr>';
+        const a = r.agami ? '<tr class="a' + (r.same ? '' : ' differs') + '"><th>agami</th>'
+          + r.agami.map((v, i) => '<td class="' + (r.same || v === r.yours[i] ? '' : 'differs') + '">' + esc(v) + '</td>').join('') + '</tr>' : '';
+        return y + a;
+      }).join('');
+      const extra = (sample.agami_rows || []).map(r => '<tr class="a">' + (solo ? '' : '<th>agami</th>')
+        + r.map(v => '<td>' + esc(v) + '</td>').join('') + '</tr>').join('');
+      const many = (n, one) => n + ' ' + (n === 1 ? one : one + 's');
+      const notes = [];
+      if (sample.total) notes.push(sample.shown + ' of ' + many(sample.total, 'row') + ' from yours');
+      if (sample.agami_rows) notes.push(sample.agami_rows.length + ' of ' + many(sample.agami_total, 'row') + ' from agami');
+      if (sample.total && !sample.aligned) notes.push('the two returned different row counts, so they are listed rather than lined up');
+      if (sample.by_name) notes.push('columns paired by name');
+      if (sample.only_yours.length) notes.push('only yours: ' + sample.only_yours.join(', '));
+      if (sample.only_agami.length) notes.push('only agami: ' + sample.only_agami.join(', '));
+      return '<div class="grid-wrap"><table class="sample"><thead><tr>' + (solo ? '' : '<th></th>') + head + '</tr></thead><tbody>'
+        + body + extra + '</tbody></table><p class="gnote">' + esc(notes.join(' · ')) + '</p></div>';
+    }
+    // The three sections, all closed at rest. Each summary names the exception when there is one and
+    // a count when there is not, so most cards need no opening at all.
+    function section(item, key, title) {
+      const sum = (item.summaries || {})[key] || '';
+      let body = '';
+      if (key === 'data') body = grid(item.sample) + diffGrid(item, 'data');
+      else if (key === 'sql') body = diffGrid(item, 'sql') + sqlBlock(item);
+      else body = diffGrid(item, 'checks') + words(item);
+      if (!body) return '';
+      return '<details class="sec"><summary><span class="st">' + esc(title) + '</span><span class="ss">' + esc(sum) + '</span></summary>'
+        + '<div class="secbody">' + body + '</div></details>';
+    }
+    // The verdict, and the one thing to do about it. Everything else on the card is behind a
+    // disclosure, so these two are what a reader sees on fifty rows in a row.
+    function verdict(item) {
+      const r = item.result || {};
+      // The bar takes the FIX's colour, not the outcome's. Colour on this page answers one question,
+      // "who has to act", and an outcome is not an owner: a different answer can be agami's to learn
+      // from or the question's to reword, and the words already say which.
+      const fix = fixOf(item);
+      const cls = FIX_CLASS[fix] || 'noted';
+      const label = r.label || item.status_words || '';
+      return '<div class="verdict ' + esc(cls) + '"><div class="vl">' + esc(label) + '</div>'
+        + (item.sentence ? '<p class="vs">' + esc(item.sentence) + '</p>' : '')
+        + '<div class="vact"><span class="pill ' + esc(item.fix ? FIX_CLASS[fix] : (item.owner || 'nothing')) + '">'
+        + esc(item.fix ? (item.fix_words || FIX_WORDS[fix] || fix) : (OWNER_SHORT[item.owner || 'nothing'] || '')) + '</span>'
+        + '<span class="vchange">' + esc((item.change || []).join(' ') || (item.todo || []).join(' ')) + '</span></div></div>';
+    }
+    // The two statements, collapsed: the person's own SQL shown to its author, and agami's, which
+    // the receipt already shows. Never a result row.
+    function sqlBlock(item) {
+      if (!item.sql_yours && !item.sql_agami) return '';
+      // agami may have written several statements to answer; every one is shown in order and the
+      // last, the one whose result was compared, is marked.
+      const steps = Array.isArray(item.sql_agami_steps) && item.sql_agami_steps.length > 1 ? item.sql_agami_steps : null;
+      // "the last is compared" is only true where a comparison happened. An error row can carry
+      // statements now, and on that row nothing was compared: the card's own verdict says the query
+      // failed, so a step marked "compared" beside it claims a result that does not exist.
+      const compared = item.status !== 'error';
+      const agami = steps
+        ? '<div><b>agami</b> <small>(' + steps.length + ' statements' + (compared ? '; the last is compared' : '') + ')</small>'
+          + steps.map((s, i) => '<div class="step"><small>' + (i + 1) + (compared && i === steps.length - 1 ? ' · compared' : '') + '</small><pre>' + esc(s) + '</pre></div>').join('')
+          + '</div>'
+        : '<div><b>agami</b><pre>' + esc(item.sql_agami || '(none)') + '</pre></div>';
+      // A pane reading "(none)" is a placeholder shown as content. A row with one query shows it.
+      if (!item.sql_yours) return '<div class="sql1">' + agami + '</div>';
+      return '<div class="sql2">'
+        + '<div><b>yours</b><pre>' + esc(item.sql_yours) + '</pre></div>'
+        + agami + '</div>';
+    }
+    // The semantic model's own words, beside the checks they belong to and capped: ninety-one quotes
+    // on one row is not evidence, it is a wall.
+    function words(item) {
+      const w = (item.words || []).slice(0, 3);
+      return w.length ? '<div class="quote"><b>What the semantic model says</b><ul>'
+        + w.map(x => '<li>' + esc(x) + '</li>').join('')
+        + ((item.words || []).length > 3 ? '<li class="more">and ' + ((item.words || []).length - 3) + ' more, in mentions.json</li>' : '')
+        + '</ul></div>' : '';
+    }
+    function diffCard(item) {
+      const d = decisions[item.row] || {};
+      return '<div class="card" data-row="' + item.row + '">'
+        + '<div class="head"><span class="n">' + item.row + '</span><span class="title q">' + esc(item.question) + '</span></div>'
+        + ((item.label || item.source) ? '<div class="src">' + esc([item.label, item.source].filter(Boolean).join(' · ')) + '</div>' : '')
+        + verdict(item)
+        + section(item, 'data', 'Data')
+        + section(item, 'sql', 'SQL')
+        + section(item, 'checks', 'Checks')
+        + (item.report_path ? '<div class="receipt meta">receipt: ' + esc(item.report_path) + '</div>' : '')
+        + controls(item, d) + '</div>';
+    }
+    function renderItems() {
+      // One row or fifty, the card is the same; only the opening sentence knows the difference.
+      document.getElementById('lede').textContent = DATA.items.length === 1
+        ? 'One query, with what we found and what we suggest doing about it. The point is to teach agami to answer it the way you would. Open Data, SQL or Checks to see the working, change the suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.'
+        : 'Every row you gave us, with what we found and what we suggest doing about it. The point is to teach agami to answer these questions the way you would, so the colours say who acts: an example or a definition changes what agami writes next time. Open Data, SQL or Checks on any row to see the working, change a suggestion if you disagree, then generate the block and paste it back into Claude. Nothing changes until you do.';
+      chips();
+      const shown = visible();
+      showing(shown.length);
+      const root = document.getElementById('items');
+      root.innerHTML = shown.map(diffCard).join('')
+        || '<p class="meta">No row matches this filter. Your decisions on the hidden rows are kept.</p>';
+      root.querySelectorAll('input[type=radio]').forEach(el => el.addEventListener('change', onDecide));
+      root.querySelectorAll('textarea').forEach(el => el.addEventListener('input', onText));
+      renderSummary();
+    }
+    function onDecide(e) {
+      const card = e.target.closest('.card'); const row = Number(card.dataset.row);
+      const item = DATA.items.find(i => i.row === row) || {};
+      const prior = decisions[row] || {};
+      // A box the person has not typed in starts with the run's words for the new decision.
+      const untouched = !prior.words || prior.words === prefillFor(item, prior.decision);
+      touched.add(row);
+      decisions[row] = Object.assign(prior, { decision: e.target.value, words: untouched ? prefillFor(item, e.target.value) : prior.words });
+      const more = card.querySelector('.more'); const spec = DECISIONS[e.target.value] || {};
+      more.hidden = !['change', 'fix', 'reword', 'example'].includes(e.target.value);
+      more.querySelector('.p').textContent = spec.prompt || 'Say it in words';
+      more.querySelector('textarea').placeholder = spec.ph || '';
+      if (untouched) more.querySelector('textarea').value = decisions[row].words || '';
+      card.querySelectorAll('.opt').forEach(el => el.classList.toggle('on', el.querySelector('input').value === e.target.value));
+      renderSummary();
+    }
+    function onText(e) { const row = Number(e.target.closest('.card').dataset.row); touched.add(row); decisions[row] = Object.assign(decisions[row] || {}, { [e.target.dataset.field]: e.target.value }); }
+    function decided() {
+      return Object.keys(decisions).filter(r => decisions[r].decision).map(r => {
+        const d = decisions[r]; const out = { row: Number(r), decision: d.decision };
+        if (d.words && d.words.trim() && d.decision !== 'keep' && d.decision !== 'nothing') out.words = d.words.trim();
+        return out;
+      }).sort((a, b) => a.row - b.row);
+    }
+    function renderSummary() {
+      const n = decided().length;
+      document.getElementById('btn-generate').disabled = n === 0;
+      // Every row arrives with a suggestion selected, so counting them as decisions would credit the
+      // reader with choices they have not made. Count only what they changed.
+      const mine = Object.keys(decisions).filter(r => touched.has(Number(r))).length;
+      document.getElementById('summary').textContent = mine
+        ? mine + ' of ' + DATA.items.length + ' changed by you. Nothing is applied until you paste the block into Claude.'
+        : (DATA.items.length === 1 ? '1 row' : DATA.items.length + ' rows')
+          + (DATA.items.every(i => i.fix === 'ungraded')
+              ? ', waiting on you. Choose what to do, then paste the block as it stands.'
+              : ', each with a suggestion. Change any you disagree with, or paste the block as it stands.');
+    }
+    // The block Claude reads back: profile first, then the run, then the decisions under a bare
+    // header with the array on its own line, and done last: the same grammar the intake page uses.
+    function generateDecisions() {
+      const out = ['profile: ' + (DATA.profile || ''), 'reconcile-run: ' + (DATA.run || ''), 'decisions:', JSON.stringify(decided()), 'done'];
+      document.getElementById('modal-text').value = out.join('\n') + '\n';
+      document.getElementById('modal').hidden = false; document.getElementById('modal-status').textContent = '';
+    }
+    document.getElementById('btn-generate').addEventListener('click', generateDecisions);
+    document.getElementById('q').addEventListener('input', e => { view.q = e.target.value; renderItems(); });
+    document.getElementById('clear').addEventListener('click', () => { view.status.clear(); view.owner.clear(); view.result.clear(); view.q = ''; document.getElementById('q').value = ''; renderItems(); });
+    document.getElementById('modal-close').addEventListener('click', () => { document.getElementById('modal').hidden = true; });
+    document.getElementById('modal-copy').addEventListener('click', async () => {
+      const status = document.getElementById('modal-status');
+      try { await navigator.clipboard.writeText(document.getElementById('modal-text').value); status.textContent = '✓ Copied. Paste it back in Claude.'; }
+      catch (e) { document.getElementById('modal-text').select(); status.textContent = '⚠ Clipboard blocked. The text is selected; press ⌘/Ctrl+C.'; }
+    });
+    seedDecisions();
+    renderItems();
+  </script>
+</body>
+</html>

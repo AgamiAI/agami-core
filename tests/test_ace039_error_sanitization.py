@@ -68,6 +68,15 @@ _DRIVER_ERRORS = [
     ("The SELECT permission was denied on the object 'payroll'", 5, "permission"),  # SQL Server
     ("ORA-01031: insufficient privileges", 5, "permission"),                    # Oracle
     ("Access denied for user 'app'@'%' to database 'payroll'", 5, "permission"),  # MySQL 1044
+    # The wire dropping mid-statement. None of these names the statement, and every one used to fall
+    # to the exit-5 prior and read as `syntax`, which told the skill to regenerate a correct statement
+    # twice and told reconcile the person's query was wrong (ACE-132).
+    ("server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally",
+     5, "network"),                                                            # psycopg2, Redshift
+    ("SSL SYSCALL error: EOF detected", 5, "network"),                          # psycopg2 over TLS
+    ("SSL connection has been closed unexpectedly", 5, "network"),              # psycopg2 over TLS
+    ("terminating connection due to administrator command", 5, "network"),     # Postgres server
+    ("[Errno 32] Broken pipe", 5, "network"),                                   # any socket
 ]
 
 # Ceded to ACE-038: a deadline is classified from a watchdog signal, never a driver string.
@@ -123,15 +132,30 @@ def test_no_cancellation_signature_produces_timeout(text, warehouse):
     """Ceded to ACE-038, and NOT by deleting the arm.
 
     Deleting it would not leave these unclassified, it would leave them mis-classified: the
-    text contains "timed out" or "lost connection", which earlier drafts routed to `network`,
-    and failing that it falls to the exit-5 prior and reads as `syntax`. An unattributable
-    server-side cancellation is honestly `other`.
+    text contains "timed out" or "lost connection", which earlier drafts routed to `network`.
+    An unattributable server-side cancellation is honestly `other`, and since ACE-132 so is any
+    other execution failure no rule reads: there is no exit-5 prior left to fall to.
     """
     env = execute_sql.execute_guarded(
         "SELECT id FROM orders", PROFILE, None, executor=_Raiser(text, 5), no_safety=True
     )
     assert env.failure.kind != "timeout"
     assert env.failure.kind == "other"
+
+
+def test_an_execution_failure_no_rule_reads_is_other_never_syntax(warehouse):
+    """The exit-5 prior is gone. Every engine raises its execution failure with code 5, so an
+    unreadable driver message used to come out as `syntax`: the skill then regenerated a correct
+    statement twice, and reconcile graded the person's statement a defect for a message nobody had
+    read. Not knowing is `other`, which stops the caller and blames nothing."""
+    env = execute_sql.execute_guarded(
+        "SELECT id FROM orders", PROFILE, None,
+        executor=_Raiser("the driver said something no rule in the classifier reads", 5),
+        no_safety=True,
+    )
+    assert env.status == "failed" and env.failure.kind == "other"
+    assert env.failure.message == execute_sql.UNEXPECTED_FAILURE_MESSAGE
+    assert "driver said" not in env.failure.message
 
 
 def test_a_connect_timeout_is_still_auth(warehouse):

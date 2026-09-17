@@ -67,7 +67,7 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
     write from a rare mid-write DB error is never served and self-heals on the next deploy. (The writers commit
     individually, so this isn't one transaction — load-then-write is the practical guard.)"""
     from semantic_model import loader
-    from semantic_model.snapshot import newest_version
+    from semantic_model.snapshot import compute_model_hash
 
     org_id = org_id if org_id is not None else _default_org()
     # --- read + parse everything first (where malformed input fails, before any write) ---
@@ -95,7 +95,10 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
         examples.extend({**ex, "area": ex.get("area") or sa.name} for ex in area_examples if isinstance(ex, dict))
     datasource_md = profile_dir / "datasource.md"
     datasource_text = datasource_md.read_text() if datasource_md.exists() else None
-    version = newest_version(profile_dir) or "deployed"
+    # The hash of the tree being deployed, not the newest snapshot's name: a model edited without a new
+    # snapshot would otherwise deploy under the previous version, and one never snapshotted under the
+    # constant "deployed", so a client pinning the version could never see it change (#364).
+    version = compute_model_hash(profile_dir)
 
     # --- then write (version last, so its presence marks a completed deploy) ---
     model_store.write_datasource(store, datasource, org, org_id=org_id)

@@ -779,6 +779,15 @@ _NO_VECTOR = {
         "interpolated. So it enumerates nothing the caller could not already read, which is the "
         "property this file guards. Driven directly by tests/test_datasource_routing.py."
     ),
+    guardrail.RULE_STALE_MODEL: (
+        "Not drivable from this matrix: no STATEMENT produces it. It fires on the CALL — a "
+        "`model_version` that is missing or is not the one the datasource serves (#364) — and the "
+        "matrix's calls carry none on a fixture with no recorded version, where the rule stands "
+        "aside. Its text names two things only: the datasource the caller itself named, and the "
+        "live version, which get_datasource_schema already returns to the same caller. Nothing "
+        "about tables, columns or the statement is interpolated. Driven directly by "
+        "tests/test_stale_model_version.py."
+    ),
     # `RULE_MODEL_SAFETY` sat here and its note said THIS IS THE ENTRY TO DELETE FIRST, because the
     # branch it stood in for included the sensitive-column refusal, whose `sens.columns` listed every
     # sensitive column of a `SELECT *`-ed table — declared names the caller never sent. The entry has
