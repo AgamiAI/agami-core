@@ -358,4 +358,10 @@ class ToolCallRecord(_Contract):
     # Where `datasource` came from (025, #328): 'explicit' when the client sent it, 'resolved' when
     # the server chose it because the client sent none. NULL for a tool about no single datasource.
     datasource_source: str | None = None
+    # The example the client says it consulted before an `execute_sql` (026, #376): an id returned by
+    # `get_prompt_examples`, and 'followed' or 'shown_only'. The id was checked to exist before the
+    # statement ran; the use is self-reported like `basis` and never checked against the SQL. NULL on
+    # every other tool and on a call that sent neither.
+    example_id: str | None = None
+    example_use: str | None = None
     org_id: str = "local"  # the tenant this call ran for; defaults to the single-tenant org

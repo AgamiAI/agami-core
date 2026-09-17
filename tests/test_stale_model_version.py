@@ -107,6 +107,15 @@ def _schema(**extra) -> dict:
 
 
 def _run(**extra) -> dict:
+    """execute_sql as a client that also looked at the examples (#376), unless a test says otherwise.
+    These tests are about the version; the example is sent so that gate is not what answers."""
+    if "example" not in extra:
+        try:
+            shown = json.loads(tools.tool_get_prompt_examples({"datasource": "demo"}))["examples"]
+        except Exception:
+            shown = []
+        if shown:
+            extra["example"] = {"id": shown[0]["id"], "use": "shown_only"}
     return json.loads(tools.tool_execute_sql({"datasource": "demo", "sql": SQL, **extra}))
 
 

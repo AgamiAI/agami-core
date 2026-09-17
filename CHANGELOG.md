@@ -14,6 +14,19 @@ below corresponds to one such version.
 
 ### Added
 
+- **A hosted `execute_sql` now requires proof the client looked at the examples (#376).** Clients
+  skipped `get_prompt_examples`: the schema is indispensable for writing SQL, the examples feel
+  optional, and the pointer and instruction line from #301 were advice a client could weigh below its
+  own judgement. After a model change this also meant a change to the examples never reached the
+  conversation. When a datasource has stored examples, the call now carries `example` — an `id` the
+  lookup returned and `use`, either `followed` or `shown_only`. A missing example, an id the
+  datasource does not store (including one a model change removed), or any other `use` is refused on
+  the new rule `example_required`, and the remediation says exactly what to send. `shown_only` is
+  always accepted, so nothing pushes a statement toward a poor match, and `followed` is not verified.
+  Both values are recorded on the call (migration `026`), so the activity log shows how often the
+  examples fit. A datasource with no examples, and the local path, require nothing. Like
+  `model_version`, the field is optional in the input schema and enforced in the handler.
+
 - **Every refused `execute_sql` writes one line to the server log.** Refusals were recorded only in
   the app database, so an operator watching the server's own log (a container's stderr, or a cloud
   log sink) saw a blocked query as an ordinary `200`. The line names the rule, the datasource, the
