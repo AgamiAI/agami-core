@@ -448,6 +448,30 @@ def test_loopback_serves_localhost_and_127(era, monkeypatch):
         assert response.status_code == 200, (base, response.text)
 
 
+@pytest.mark.parametrize("era", ERAS)
+def test_an_https_loopback_base_url_serves_every_loopback_name(era, monkeypatch):
+    """Local TLS (`https://localhost`) is still loopback: the aliases follow the host, not the scheme,
+    or `127.0.0.1` answers 421 on the developer's own machine. A foreign name stays out."""
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://localhost:5173")
+    # The Host is set directly: TestClient cannot parse an IPv6 literal in `base_url`.
+    for host, status in (
+        ("localhost:5173", 200),
+        ("127.0.0.1:5173", 200),
+        ("[::1]:5173", 200),
+        ("elsewhere.example.net:5173", 421),
+    ):
+        with TestClient(_app(), base_url="https://localhost:5173", headers={"Host": host}) as client:
+            response = _opening_request(client, era)
+        assert response.status_code == status, (host, response.text)
+
+
+def test_an_https_loopback_base_url_allows_its_own_scheme_as_origin():
+    settings = mcp_http._transport_security("https://localhost:5173")
+
+    assert "https://127.0.0.1:*" in settings.allowed_origins
+    assert "http://127.0.0.1:*" not in settings.allowed_origins
+
+
 def test_foreign_origin_is_403():
     """A browser page on another origin is refused even with the right Host. A server-to-server
     client sends no Origin and is unaffected; so is a page served from PUBLIC_BASE_URL itself."""

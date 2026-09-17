@@ -233,7 +233,7 @@ def test_a_refusing_resolver_gives_403_not_500(base_url):
         org_resolver=_RefusingResolver(),
         auth_provider=PresenceAuthProvider(),
     )
-    c = TestClient(mcp_http.create_app(adapters=adapters))
+    c = TestClient(mcp_http.create_app(adapters=adapters), base_url=BASE)
     r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=AUTH)
     assert r.status_code == 403
 
@@ -255,7 +255,7 @@ def test_the_oss_resolver_never_refuses(base_url):
 
 
 def test_build_app_still_serves_the_same_auth_challenge(base_url):
-    c = TestClient(mcp_http.build_app())
+    c = TestClient(mcp_http.build_app(), base_url=BASE)
     r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert r.status_code == 401  # unchanged entrypoint behavior
     assert r.headers.get("www-authenticate", "").startswith("Bearer ")

@@ -761,10 +761,13 @@ def _transport_security(base: str) -> "TransportSecuritySettings":
     else:
         hosts = [f"{hostname}:{parts.port}"]
     origins = [f"{scheme}://{host}" for host in hosts]
-    if _is_loopback(base):
+    # Loopback is decided by the host alone, not `_is_loopback`: that one is true only over plain http,
+    # because it answers the TLS-cookie rule, while `https://localhost` (local TLS) is just as much the
+    # developer's own machine, and without the aliases `127.0.0.1` would answer 421 there.
+    if parts.hostname in ("localhost", "127.0.0.1", "::1"):
         for name in ("localhost", "127.0.0.1", "[::1]"):
             hosts += [name, f"{name}:*"]
-            origins += [f"http://{name}", f"http://{name}:*"]
+            origins += [f"{scheme}://{name}", f"{scheme}://{name}:*"]
     return TransportSecuritySettings(allowed_hosts=hosts, allowed_origins=origins)
 
 
