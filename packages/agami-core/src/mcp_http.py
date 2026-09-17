@@ -452,6 +452,7 @@ def build_server(
     import jsonschema
     import mcp.types as mt
     from mcp.server import Server, ServerRequestContext
+    from mcp.server.caching import CacheHint
     from mcp.shared.exceptions import MCPError
 
     registry = TOOLS if registry is None else registry
@@ -642,10 +643,19 @@ def build_server(
                 **typed_outcome_overrides(handler_ctx),
             )
 
+    # A minute, and private. Private because both lists are per caller: the visibility predicate and
+    # execute_sql's per-organisation limits decide what `tools/list` says, so a result cached for one
+    # authorization must not be served to another. A minute because a deployment's tool surface
+    # changes on a restart, not per request, and a client re-listing on every turn is pure cost.
+    # `server/discover` carries the instructions a 2026-07-28 client reads in place of `initialize`;
+    # the SDK's default handler already returns `instructions` below, so it needs only the hint.
+    # Sent on 2026-07-28 only: the 2025-06-18 results have no fields for it.
+    hint = CacheHint(ttl_ms=60_000, scope="private")
     return Server(
         SERVER_NAME,
         version=server_version(),
         instructions=instructions,
+        cache_hints={"tools/list": hint, "server/discover": hint},
         on_list_tools=_on_list_tools,
         on_call_tool=_on_call_tool,
     )
@@ -717,7 +727,8 @@ def create_app(
     guarded path that refuses a duplicate name.
 
     `extra_instructions` is APPENDED to the base MCP instructions and surfaced to the model via the
-    MCP `initialize` result (never replaces the base protocol — see `build_server`). None = no-op."""
+    MCP `initialize` and `server/discover` results (never replaces the base protocol — see
+    `build_server`). None = no-op."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware

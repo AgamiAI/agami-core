@@ -360,3 +360,52 @@ def test_well_known_ignores_the_allowlist():
 
     assert response.status_code == 200
     assert response.json()["resource"] == f"{PUBLIC_BASE_URL}/mcp"
+
+
+# --- cache hints and discover --------------------------------------------------------------------
+
+
+def test_cache_hints_on_the_modern_era():
+    """Private, because the tool list is per caller: the visibility predicate and the per-org limits
+    in execute_sql's description both depend on who asked."""
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        listed = envelope(rpc(client, MODERN, "tools/list"))["result"]
+        discovered = envelope(rpc(client, MODERN, "server/discover"))["result"]
+
+    for result in (listed, discovered):
+        assert result["ttlMs"] == 60000
+        assert result["cacheScope"] == "private"
+
+
+def test_no_cache_fields_on_legacy():
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        listed = envelope(rpc(client, LEGACY, "tools/list"))["result"]
+
+    assert "ttlMs" not in listed and "cacheScope" not in listed
+
+
+def test_discover_carries_the_initialize_instructions():
+    """A 2026-07-28 client never sends `initialize`, so `server/discover` is the only place it reads
+    the instructions — including the PII rule and a consumer's appended ones."""
+    extra = "Extra: call demo_probe when asked about widgets."
+    app = mcp_http.create_app(extra_instructions=extra)
+    with TestClient(app, base_url=PUBLIC_BASE_URL) as client:
+        initialized = client.post(
+            "/mcp",
+            headers=base_headers(),
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": LEGACY,
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "1"},
+                },
+            },
+        )
+        discovered = rpc(client, MODERN, "server/discover")
+
+    instructions = envelope(initialized)["result"]["instructions"]
+    assert extra in instructions
+    assert envelope(discovered)["result"]["instructions"] == instructions
