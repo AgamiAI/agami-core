@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-09-16
+
 ### Added
 
 - **A resumed conversation can no longer query a model that has since changed (#364).** A client
