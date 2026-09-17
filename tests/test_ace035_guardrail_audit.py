@@ -715,6 +715,22 @@ def test_a_sink_whose_write_raises_fails_the_call(env, monkeypatch):
     assert len(_rows(env.app_db)) == 1  # and nothing new landed
 
 
+def test_a_refusal_whose_row_cannot_be_written_is_still_in_the_server_log(env, monkeypatch, caplog):
+    """The refusal line is written before the load-bearing audit write, so a failed write still
+    leaves the operator a trace of the refusal it was recording."""
+    import model_store
+
+    def _boom(self, record):
+        raise RuntimeError("the audit table is unreachable")
+
+    monkeypatch.setattr(model_store.DbActivitySink, "record_query_execution", _boom)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError):
+        tools._emit(_refused_envelope(), sql="DELETE FROM orders", execution_ms=None)
+
+    assert "execute_sql refused: rule=read_only" in caplog.text
+
+
 def test_a_store_that_cannot_even_be_opened_fails_the_call(env, monkeypatch):
     """The failure that used to escape, and now escapes on purpose: `Store.from_env()` raising.
 

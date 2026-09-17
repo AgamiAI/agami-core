@@ -2469,8 +2469,11 @@ def _emit(
     body["receipt"] = asdict(env.receipt)
     body["audit_id"] = env.audit_id
 
-    _record_execution(env, sql=sql, profile=profile, args=args, row_count=row_count)
+    # Logged BEFORE the audit write: on a served deployment that write is load-bearing and re-raises
+    # when it fails (`_record_query`), and a refusal whose row could not be written is exactly the one
+    # an operator most needs to see in the server log.
     _log_refusal(env, profile)
+    _record_execution(env, sql=sql, profile=profile, args=args, row_count=row_count)
     # Publish the TYPED outcome for the tool-call recorder (ACE-098). It runs later, in the
     # transport's `finally`, where the Envelope no longer exists and only this serialized string
     # does — so without this the tool_calls row's account of why a call failed is a `json.loads` of
