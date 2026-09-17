@@ -2352,6 +2352,32 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
     return _replace(env, refusal=_replace(refusal, remediation=remediation))
 
 
+def _log_refusal(env: Envelope, profile: str | None) -> None:
+    """One server-log line per refused statement, beside the audit rows `_record_execution` writes.
+
+    The audit rows are the record; this is what an operator watching the server's own log sees
+    without a database prompt — and for `audit_unavailable`, which writes no row by construction, it
+    is the only trace. Every path reaches here through `_emit`, so one call covers both transports and
+    both execution paths.
+
+    **Value-free, by the same contract as the refusal itself, and narrower.** The rule, the reason and
+    the identifiers that join this line to its row — never the statement, never `detail` (it echoes
+    identifiers the caller sent), never the caller's identity (the row carries that; a log sink is
+    usually read more widely). WARNING, because the served entrypoint configures no logging and
+    Python's fallback handler prints WARNING and above only: at INFO a self-hosted server would drop
+    it."""
+    if env.status != "refused" or env.refusal is None:
+        return
+    _LOG.warning(
+        "execute_sql refused: rule=%s reason=%s datasource=%s org_id=%s audit_id=%s",
+        env.refusal.rule,
+        env.refusal.reason,
+        profile or "-",
+        _current_org_id(),
+        env.audit_id or "-",
+    )
+
+
 def _emit(
     env: Envelope,
     *,
@@ -2421,6 +2447,7 @@ def _emit(
     body["audit_id"] = env.audit_id
 
     _record_execution(env, sql=sql, profile=profile, args=args, row_count=row_count)
+    _log_refusal(env, profile)
     # Publish the TYPED outcome for the tool-call recorder (ACE-098). It runs later, in the
     # transport's `finally`, where the Envelope no longer exists and only this serialized string
     # does — so without this the tool_calls row's account of why a call failed is a `json.loads` of

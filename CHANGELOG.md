@@ -12,6 +12,16 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Every refused `execute_sql` writes one line to the server log.** Refusals were recorded only in
+  the app database, so an operator watching the server's own log (a container's stderr, or a cloud
+  log sink) saw a blocked query as an ordinary `200`. The line names the rule, the reason, the
+  datasource, the organization and the `audit_id` that joins it to its `query_executions` row. It
+  never carries the statement, the refusal's own sentences or the caller's identity. It is written
+  at WARNING because the served entrypoint configures no logging and Python's fallback handler drops
+  anything lower. For `audit_unavailable`, which writes no row by design, it is the only trace.
+
 ## [0.9.1] — 2026-09-16
 
 ### Added

@@ -213,3 +213,39 @@ def test_a_store_that_will_not_open_is_logged_not_raised(served, monkeypatch, ca
     with caplog.at_level("WARNING", logger=tools.__name__):
         assert tools._resolve_model_version("demo") is None
     assert "model_version unavailable" in caplog.text
+
+
+# --- the server-log line every refusal writes ------------------------------------------------------
+
+
+def test_a_refusal_writes_one_value_free_server_log_line(served, caplog):
+    _arts, deploy = served
+    live = deploy()
+    secret_sql = "SELECT sku FROM products WHERE sku = 'acme-literal-7731'"
+    with caplog.at_level("WARNING", logger=tools.__name__):
+        body = json.loads(tools.tool_execute_sql({"datasource": "demo", "sql": secret_sql}))
+    lines = [r.getMessage() for r in caplog.records if "execute_sql refused" in r.getMessage()]
+    assert len(lines) == 1
+    assert "rule=stale_model" in lines[0] and "reason=undetermined" in lines[0]
+    assert "datasource=demo" in lines[0] and "org_id=local" in lines[0]
+    assert f"audit_id={body['audit_id']}" in lines[0]
+    # Never the statement, its literal, the refusal's own sentences, or the live version.
+    assert "acme-literal-7731" not in caplog.text and "SELECT" not in caplog.text
+    assert body["refusal"]["detail"] not in caplog.text
+    assert live not in caplog.text
+
+
+def test_every_refusal_rule_is_logged_not_only_stale_model(served, caplog):
+    _arts, deploy = served
+    deploy()
+    with caplog.at_level("WARNING", logger=tools.__name__):
+        tools.tool_execute_sql({"datasource": "demo", "sql": "DELETE FROM products"})
+    assert "execute_sql refused: rule=read_only" in caplog.text
+
+
+def test_a_call_that_is_not_refused_writes_no_line(served, caplog):
+    _arts, deploy = served
+    deploy()
+    with caplog.at_level("WARNING", logger=tools.__name__), pytest.raises(_Reached):
+        _run(model_version=_schema()["model_version"])
+    assert "execute_sql refused" not in caplog.text

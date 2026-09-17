@@ -676,7 +676,13 @@ def _refused_envelope() -> guardrail.Envelope:
 
 
 def _warnings(caplog) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.name == "tools"]
+    """The sink's own warnings. The one-line record of the refusal itself (`tools._log_refusal`) is
+    left out: it is written on every refused call, broken sink or not, and says nothing about one."""
+    return [
+        r
+        for r in caplog.records
+        if r.name == "tools" and not r.getMessage().startswith("execute_sql refused:")
+    ]
 
 
 def test_a_sink_whose_write_raises_fails_the_call(env, monkeypatch):
@@ -761,6 +767,7 @@ def test_locally_a_broken_sink_still_changes_nothing_and_says_so(env, caplog, mo
     assert broken == healthy  # byte-identical answer
     assert [r.levelname for r in _warnings(caplog)] == ["WARNING"]
     assert _warnings(caplog)[0].exc_info is not None  # the cause is in the log, not just the fact
+    assert "execute_sql refused: rule=read_only" in caplog.text  # and the refusal is still logged
 
 
 # ---------------------------------------------------------------------------
