@@ -268,7 +268,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|non
 | Status | When |
 |---|---|
 | `match` | the numbers match, and every graded part is `confirmed` (or there was no statement to grade) |
-| `match_unverified` | the numbers match, but a part of the person's statement is not `confirmed`. Phase 3e never sees it: a match nobody could verify may be luck. A query written differently from agami's is not this: the claims comparison notes it (`noted`, "same answer, different query" on the page) and the row stays `match` |
+| `match_unverified` | the numbers match, but a part of the person's statement is not `confirmed`. Phase 3e never sees it: a match nobody could verify may be luck. A query written differently from agami's is not this: the claims comparison notes it (`noted`, "same answer, different query" on the page) and the row stays `match`. A table that matched only because a column of yours paired with a differently named column of agami's, where one value fills most of your column's rows, is this: the two could be different columns holding the same values, so the ledger's `value_pair` part stays open and the card names both columns |
 | `mismatch` | the numbers differ and the person's statement has no `query_defect`, so agami is the likelier culprit |
 | `expected_doubtful` | the numbers differ and the person's statement has a `query_defect`, so the expected value itself is in doubt. Kept out of the mismatch tally |
 | `error` | the row could not run |
