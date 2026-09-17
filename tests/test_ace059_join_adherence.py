@@ -1311,7 +1311,7 @@ def test_the_http_surface_returns_the_undeclared_join_on_the_body(served):
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.create_app()) as client:
+    with TestClient(mcp_http.create_app(), base_url="https://your-host.example.com") as client:
         assert tools._INJECTED_EXECUTOR is not None, (
             "create_app() no longer injects an executor, so this surface is now the fork path and "
             "the in-process edge this test believes it drives is undriven"

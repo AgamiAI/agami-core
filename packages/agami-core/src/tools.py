@@ -2484,10 +2484,11 @@ def _bounded_audit_sql(sql: str) -> tuple[str, bool]:
 
 
 # What the agent may say it based a query on. A CLOSED set, enforced HERE and named in the tool
-# description as prose rather than declared as a schema `enum`. The MCP SDK validates arguments
-# against `inputSchema` before the handler runs, so an `enum` would not filter a bad value out of
-# the list — it would refuse the whole query over an optional note. An entry naming a kind we do not
-# know is dropped instead, and the row says the claim was not stored verbatim.
+# description as prose rather than declared as a schema `enum`. The HTTP transport validates
+# arguments against `inputSchema` in `mcp_http.build_server` before the handler runs, so an `enum`
+# would not filter a bad value out of the list — it would refuse the whole query over an optional
+# note. An entry naming a kind we do not know is dropped instead, and the row says the claim was not
+# stored verbatim.
 BASIS_KINDS = frozenset(
     {"example", "table", "join", "metric", "entity", "glossary", "filter", "date_range"}
 )
@@ -3204,6 +3205,7 @@ def record_tool_call(
     audit_id: str | None = None,
     org_id: str | None = None,
     datasource: str | None = None,
+    error_detail: str | None = None,
 ) -> None:
     """Record one MCP tool call to the activity log (the transport calls this for **every** tool). The
     audit-grade fields are server-observed; `success`/`row_count`/`error_kind` are derived from the
@@ -3243,6 +3245,10 @@ def record_tool_call(
       to be re-read later from a context that may no longer be the same one. The fallback when that
       read finds nothing is the deployment-wide org, and for an audit row that is the wrong direction
       to fail in.
+
+    `error_detail` is why a call that RAISED crashed (027) — the text the HTTP transport no longer
+    sends to the client. Kept only with `raised=True`: a call that returned has a body saying how it
+    went, and a reason stated beside it would describe something that did not happen.
     """
     args = arguments or {}
     derived_success, derived_row_count, derived_error_kind = True, None, None
@@ -3390,6 +3396,10 @@ def record_tool_call(
         # The statement, where one ran. A plain override rather than one of the coherent trio: it is
         # an identity, so a stated value cannot contradict a derived one the way an outcome can.
         "audit_id": audit_id if audit_id is not None else derived_audit_id,
+        # Operator-only and cut to the same bound as the driver's error (016), for the same reason.
+        "error_detail": (
+            error_detail[:AUDIT_ERROR_DETAIL_MAX_CHARS] if raised and error_detail else None
+        ),
     }
     if org_id is not None:
         # Set rather than left absent, so `_record_tool_call`'s `setdefault` keeps it instead of
@@ -3593,9 +3603,10 @@ def require_thread_id(registry: dict[str, dict[str, Any]]) -> dict[str, dict[str
 
     **Why the schema rather than better wording.** The directive is prose on a surface where the
     CLIENT supplies the prompt, and it has now produced 20% and then 0% compliance. The input schema
-    is the one channel the server controls: the MCP SDK validates `arguments` against `inputSchema`
-    before dispatch, and a model populates a field marked required. Measured after the change on the
-    same client: 9 of 9 calls carried it, with distinct per-turn `correlation_id`s.
+    is the one channel the server controls: the HTTP transport validates `arguments` against
+    `inputSchema` in `mcp_http.build_server` before dispatch, and a model populates a field marked
+    required. Measured after the change on the same client: 9 of 9 calls carried it, with distinct
+    per-turn `correlation_id`s.
 
     **Why it is flagged, and why the default is off.** That same validation is the risk. A call
     omitting a required property never reaches its handler — it returns "Input validation error". So
@@ -4037,14 +4048,15 @@ TOOLS: dict[str, dict[str, Any]] = {
                 "client_model": _CLIENT_MODEL_PROP,
                 "thread_id": _THREAD_ID_PROP,
                 "correlation_id": _CORRELATION_ID_PROP,
-                # Deliberately a bare array: no `items` schema, no `maxItems`. The MCP SDK validates
-                # every call against this schema BEFORE the handler runs, so any constraint here
-                # refuses the whole query rather than bounding the field — a 260-character `ref` is
-                # an ordinary IN-list predicate, and losing the user's answer over an advisory note
-                # is the opposite of what this field is for. `_bounded_basis` is the bound, which is
-                # also the only place a bound belongs: it truncates and records that it did.
-                # Validation is per-item and runs on the event loop, so an items schema also made a
-                # max-size body cost seconds of everyone else's latency.
+                # Deliberately a bare array: no `items` schema, no `maxItems`. The HTTP transport
+                # validates every call against this schema (`mcp_http.build_server`) BEFORE the
+                # handler runs, so any constraint here refuses the whole query rather than bounding
+                # the field — a 260-character `ref` is an ordinary IN-list predicate, and losing the
+                # user's answer over an advisory note is the opposite of what this field is for.
+                # `_bounded_basis` is the bound, which is also the only place a bound belongs: it
+                # truncates and records that it did. Validation is per-item and runs on the event
+                # loop, so an items schema also made a max-size body cost seconds of everyone else's
+                # latency.
                 "basis": {
                     "type": "array",
                     "description": "OPTIONAL. What you based this query on: objects of {kind, ref, "

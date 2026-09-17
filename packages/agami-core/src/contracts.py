@@ -358,4 +358,9 @@ class ToolCallRecord(_Contract):
     # Where `datasource` came from (025, #328): 'explicit' when the client sent it, 'resolved' when
     # the server chose it because the client sent none. NULL for a tool about no single datasource.
     datasource_source: str | None = None
+    # Why the call crashed (027, ACE-152): the exception the transport caught, as
+    # `<type>: <message>`. Operator-only, like `QueryExecutionRecord.error_detail` — it is the text
+    # that no longer reaches the client, and for the same reason. Bounded by the writer
+    # (`tools.AUDIT_ERROR_DETAIL_MAX_CHARS`). NULL on every call that did not raise.
+    error_detail: str | None = None
     org_id: str = "local"  # the tenant this call ran for; defaults to the single-tenant org

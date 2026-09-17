@@ -611,8 +611,8 @@ class DbActivitySink:
             "INSERT INTO tool_calls (id, ts, org_id, actor, tool_name, datasource, sql, row_count, "
             "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
             "correlation_id, refusal_detail, refusal_remediation, audit_id, basis, "
-            "conversation_id, client_model, datasource_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "conversation_id, client_model, datasource_source, error_detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -655,6 +655,9 @@ class DbActivitySink:
                 # Whether the client named `datasource` or the server resolved it (025, #328).
                 # `getattr`-guarded like the six above.
                 getattr(record, "datasource_source", None),
+                # Why the call crashed (027, ACE-152), operator-only. `getattr`-guarded like the
+                # seven above; NULL on every call that did not raise.
+                getattr(record, "error_detail", None),
             ),
         )
         self._store.commit()

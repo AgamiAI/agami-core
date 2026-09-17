@@ -457,8 +457,12 @@ def test_the_transport_no_longer_swallows_it_either(env, monkeypatch):
     The two are why neither had been closed. Removing this one alone changes nothing, because
     `_record_tool_call` swallowed internally and never raised anything for it to catch; removing
     that one alone changes nothing, because this caught what it then raised. Each made the other
-    unobservable. So this drives the real transport with the sink broken and asserts the failure
-    reaches the wire — which is only true once BOTH are gone.
+    unobservable. So this drives the real transport with the sink broken and asserts the call
+    fails on the wire — which is only true once BOTH are gone.
+
+    What the failure says changed with ACE-152: the transport answers a lost record with the same
+    fixed `Error executing tool <name>` a crashed handler gets, and the store's own words stay in the
+    server log. So the reason is asserted ABSENT from the reply, where it used to be asserted present.
     """
     import mcp_http
     from oauth_server import issue_jwt
@@ -474,7 +478,7 @@ def test_the_transport_no_longer_swallows_it_either(env, monkeypatch):
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.create_app(), raise_server_exceptions=False) as client:
+    with TestClient(mcp_http.create_app(), base_url="https://your-host.example.com", raise_server_exceptions=False) as client:
         init = client.post("/mcp", headers=headers, json={
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -497,7 +501,8 @@ def test_the_transport_no_longer_swallows_it_either(env, monkeypatch):
     assert result["isError"] is True, (
         "the tool call returned an answer with its audit row lost — a swallow is back"
     )
-    assert "unreachable" in result["content"][0]["text"]
+    assert result["content"] == [{"type": "text", "text": "Error executing tool execute_sql"}]
+    assert "unreachable" not in reply.text
 
 
 def test_locally_the_tool_call_recorder_is_still_best_effort(env, monkeypatch, caplog):

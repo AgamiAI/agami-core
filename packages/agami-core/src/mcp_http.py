@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import admin
 import onboarding
@@ -64,6 +65,10 @@ from tools import (
     tool_description,
     typed_outcome_overrides,
 )
+
+if TYPE_CHECKING:
+    # Imported where it is used, like the rest of the SDK, so importing this module needs no `mcp`.
+    from mcp.server.transport_security import TransportSecuritySettings
 
 _log = logging.getLogger(__name__)
 
@@ -432,7 +437,7 @@ def build_server(
     `tools.TOOLS`; `create_app` passes a merged copy (base + a consumer's extra tools).
 
     `extra_instructions` is APPENDED to `server_instructions()` (never replaces it) and surfaced to the
-    model in the MCP `initialize` result — append-only so a consumer can add guidance but can't drop
+    model in the MCP `initialize` and `server/discover` results — append-only so a consumer can add guidance but can't drop
     the base protocol's safety directives (e.g. the receipt-reporting rules). None = no-op.
 
     `visibility(tool_name) -> bool` narrows the surface PER REQUEST. None (the default) is exactly
@@ -449,8 +454,12 @@ def build_server(
     surviving tool's description and inputSchema pass through untouched, so a consumer cannot fork the
     surface into a private variant under cover of "visibility".
     """
+    import jsonschema
     import mcp.types as mt
-    from mcp.server.lowlevel import Server
+    import referencing
+    from mcp.server import Server, ServerRequestContext
+    from mcp.server.caching import CacheHint
+    from mcp.shared.exceptions import MCPError
 
     registry = TOOLS if registry is None else registry
     # Applied to whatever registry is being served, consumer tools included: a conversation is
@@ -462,6 +471,27 @@ def build_server(
     # it after would mean a hidden tool still had its schema rewritten, which is work for nothing.
     if thread_id_is_required():
         registry = require_thread_id(registry)
+
+    # One validator per tool, built once. `jsonschema.validate` re-checks the schema against its
+    # metaschema on every call, which is ~2ms of pure repetition, and raises SchemaError mid-call for a
+    # broken schema — an exception that is not a ValidationError and that SDK 2 would send as `str(e)`
+    # on 2025-06-18. Checked here instead, so a consumer's malformed schema fails the build with its
+    # name, the way `create_app` refuses any other malformed extra tool.
+    #
+    # An empty `Registry`, not jsonschema's default: the default one FETCHES a remote `$ref` with
+    # `urlopen`. A tool schema is no licence for the server to reach the network, and an unresolvable
+    # `$ref` then raises at call time, where `_on_call_tool` answers it as a crash.
+    validators = {}
+    for tool_name, meta in registry.items():
+        schema = meta["inputSchema"]
+        validator_cls = jsonschema.validators.validator_for(schema)
+        try:
+            validator_cls.check_schema(schema)
+        except jsonschema.SchemaError as e:
+            raise ValueError(
+                f"tool {tool_name!r} inputSchema is not a valid JSON Schema: {e.message}"
+            ) from e
+        validators[tool_name] = validator_cls(schema, registry=referencing.Registry())
 
     def _visible(name: str) -> bool:
         """Applied at BOTH seams. Listing alone would leave an unlisted tool callable by name, which is
@@ -483,7 +513,6 @@ def build_server(
     instructions = server_instructions()
     if extra_instructions:
         instructions = f"{instructions}\n{extra_instructions}"
-    server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
     def _described(names: list[str]) -> list:
         return [
@@ -493,13 +522,14 @@ def build_server(
             mt.Tool(
                 name=name,
                 description=tool_description(name, registry[name]["description"]),
-                inputSchema=registry[name]["inputSchema"],
+                input_schema=registry[name]["inputSchema"],
             )
             for name in names
         ]
 
-    @server.list_tools()
-    async def _list_tools() -> list:
+    async def _on_list_tools(
+        ctx: ServerRequestContext, params: mt.PaginatedRequestParams | None
+    ) -> mt.ListToolsResult:
         # The visibility predicate runs HERE, in the request task, before any hop: that is the context
         # its contract promises a consumer, who may read request-task state from it. Only the
         # descriptions go off the loop, for ACE-048's reason: the limits provider is the consumer's
@@ -509,22 +539,76 @@ def build_server(
         # nothing.
         names = [name for name in registry if _visible(name)]
         if not has_statement_limits_provider():
-            return _described(names)
-        return await run_blocking(_described, names)
+            return mt.ListToolsResult(tools=_described(names))
+        return mt.ListToolsResult(tools=await run_blocking(_described, names))
 
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict) -> list:
+    def _crashed(name: str) -> mt.CallToolResult:
+        """The one answer to a call that raised, whatever raised. The exception's own words are an
+        enumeration channel — a driver's error can name a column the caller never sent (migration
+        016 records exactly such a hint) — so they go to the log, and the client learns only that
+        the call failed."""
+        return mt.CallToolResult(
+            content=[mt.TextContent(type="text", text=f"Error executing tool {name}")],
+            is_error=True,
+        )
+
+    async def _on_call_tool(
+        ctx: ServerRequestContext, params: mt.CallToolRequestParams
+    ) -> mt.CallToolResult:
+        # `or {}` as SDK 1.x did before anything else saw them, so the schema check, the handler and
+        # the audit row all read the same value they always have.
+        name, arguments = params.name, params.arguments or {}
         meta = registry.get(name)
         # A hidden tool answers as an ABSENT one, not as a refused one: the same `Unknown tool` a typo
         # gets. Distinguishing them would turn the list into an oracle — a caller could enumerate what
-        # exists but is withheld, which is the fact hiding it was meant to keep.
+        # exists but is withheld, which is the fact hiding it was meant to keep. Raised as the SDK's
+        # own protocol error, `-32602`, which is what the stdio harness answers too (REQ-002): any
+        # other exception type becomes a generic internal error on 2026-07-28, which would make a
+        # hidden tool read as a crash.
         if meta is None or not _visible(name):
-            raise ValueError(f"Unknown tool: {name}")
+            raise MCPError(code=mt.INVALID_PARAMS, message=f"Unknown tool: {name}")
+        # SDK 1.x checked the arguments against `inputSchema` before the handler ran; SDK 2's
+        # low-level Server does not, and `AGAMI_REQUIRE_THREAD_ID` is enforced by nothing but the
+        # schema (`tools.require_thread_id`). Rebuilt here with 1.x's exact text, so a client sees the
+        # refusal it always did. AFTER the visibility check, unlike 1.x, whose check ran first: a
+        # hidden tool must answer `Unknown tool` whatever its arguments, not its own schema's
+        # complaint. Outside the recorded scope, so a refusal here writes no row, as it never did.
+        #
+        # `best_match`, as `jsonschema.validate` picks, so the message names the same error it did.
+        # Anything else raised while validating (an unresolvable `$ref`) is the schema's fault, not
+        # the caller's: logged, and answered as a crash, so the reason stays off the wire.
+        try:
+            error = jsonschema.exceptions.best_match(validators[name].iter_errors(arguments))
+        except Exception:
+            _log.exception("tool %r: validating the arguments failed", name)
+            return _crashed(name)
+        if error is not None:
+            return mt.CallToolResult(
+                content=[
+                    mt.TextContent(type="text", text=f"Input validation error: {error.message}")
+                ],
+                is_error=True,
+            )
+        try:
+            return await _recorded_call(name, arguments, meta)
+        except Exception:
+            # Only a failure while recording the call reaches here — the audit write, or reading or
+            # resetting the typed outcome around it: `_recorded_call` answers a raising handler
+            # itself. The call still fails (ACE-097), and it fails the same way a crash does, because
+            # SDK 2 would otherwise send `str(e)` on 2025-06-18, and a store's error text says as
+            # much about the deployment as a driver's does. Logged here even when the handler also
+            # raised and was logged below: two failures, one record each.
+            _log.exception(
+                "tool %r: recording the call failed; the call is answered as failed", name
+            )
+            return _crashed(name)
+
+    async def _recorded_call(name: str, arguments: dict, meta: dict) -> mt.CallToolResult:
         # Record every tool call to the admin activity log — timed, attributed to the authenticated
         # actor, never allowed to break the tool (logging is best-effort + double-guarded).
         started = time.monotonic()
         result_text = None
-        raised = False
+        crash: Exception | None = None
         handler_ctx = contextvars.copy_context()
         # Cleared inside the context we own, before the handler can run. `copy_context()`
         # copies whatever is current, so a verdict published by an earlier call would be
@@ -556,13 +640,17 @@ def build_server(
             actor = _actor_ctx.get()
 
             def _run_and_stamp() -> str:
-                return _with_caller_identity(meta["handler"](arguments or {}), actor)
+                return _with_caller_identity(meta["handler"](arguments), actor)
 
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
-            return [mt.TextContent(type="text", text=result_text)]
-        except Exception:
-            raised = True
-            raise
+            return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])
+        except Exception as exc:
+            # Logged here, once, with its traceback: this is the only place the reason is kept for
+            # an operator, now that it no longer reaches the client. (If the audit write then fails
+            # too, `_on_call_tool` logs that as its own record.)
+            crash = exc
+            _log.exception("tool %r raised", name)
+            return _crashed(name)
         finally:
             # The per-call audit write opens a fresh Store + INSERT + close; run it off the event loop so
             # it doesn't add DB latency to every tool call on the loop (ACE-048). `_actor_ctx.get()` is read
@@ -578,7 +666,8 @@ def build_server(
             # the call fails; local, it warns and returns. That decision belongs there, beside the
             # write, rather than being pre-empted here by a transport that cannot tell the two
             # deployments apart. Raising from a `finally` replaces the handler's own result, which is
-            # the intended outcome: a call whose record was lost must not read as a success.
+            # the intended outcome: a call whose record was lost must not read as a success. The
+            # caller, `_on_call_tool`, turns that raise into the same failed answer a crash gets.
             await run_blocking(
                 record_tool_call,
                 name=name,
@@ -586,14 +675,31 @@ def build_server(
                 result_text=result_text,
                 execution_ms=int((time.monotonic() - started) * 1000),
                 actor=_actor_ctx.get(),
-                raised=raised,
+                raised=crash is not None,
+                # The reason the client no longer gets (ACE-152), kept for the operator instead.
+                error_detail=f"{type(crash).__name__}: {crash}" if crash is not None else None,
                 # The classified outcome, when the handler produced one (ACE-098). Empty for every
                 # tool that does not speak the Envelope, which means "derive it the way you always
                 # have" — so those tools keep the body parse and nothing about them changes.
                 **typed_outcome_overrides(handler_ctx),
             )
 
-    return server
+    # A minute, and private. Private because both lists are per caller: the visibility predicate and
+    # execute_sql's per-organisation limits decide what `tools/list` says, so a result cached for one
+    # authorization must not be served to another. A minute because a deployment's tool surface
+    # changes on a restart, not per request, and a client re-listing on every turn is pure cost.
+    # `server/discover` carries the instructions a 2026-07-28 client reads in place of `initialize`;
+    # the SDK's default handler already returns `instructions` below, so it needs only the hint.
+    # Sent on 2026-07-28 only: the 2025-06-18 results have no fields for it.
+    hint = CacheHint(ttl_ms=60_000, scope="private")
+    return Server(
+        SERVER_NAME,
+        version=server_version(),
+        instructions=instructions,
+        cache_hints={"tools/list": hint, "server/discover": hint},
+        on_list_tools=_on_list_tools,
+        on_call_tool=_on_call_tool,
+    )
 
 
 def _is_loopback(base: str) -> bool:
@@ -619,6 +725,49 @@ def _is_loopback(base: str) -> bool:
     return urlsplit(base).hostname in ("localhost", "127.0.0.1", "::1")
 
 
+def _transport_security(base: str) -> "TransportSecuritySettings":
+    """The Host and Origin values `/mcp` accepts, derived from `PUBLIC_BASE_URL` (ACE-152).
+
+    DNS rebinding: a page on some other name that resolves to this server would otherwise reach
+    `/mcp` from a victim's browser. The SDK refuses a foreign `Host` with 421 and a foreign `Origin`
+    with 403; an absent `Origin` passes, so a server-to-server client (claude.ai) is unaffected, while
+    a browser client served from any origin but `PUBLIC_BASE_URL` is refused.
+
+    The allowed host is the base URL's own host, the one name the discovery documents already
+    publish. On a loopback base URL both spellings of loopback are also allowed, on any port: a
+    developer's browser, curl and a port-forward do not agree on which name they send, and nothing
+    else can resolve to a loopback address.
+
+    Normalised, not copied from the netloc, because the SDK compares by exact string while a client
+    sends the host lowercased and usually without the default port. `https://Demo.Example.com` or
+    `https://demo.example.com:443` copied verbatim would answer 421 to every call from every client.
+    For the same reason, at the default port both spellings are allowed, `host` and `host:443`: they
+    are one origin, and which one arrives is the client's choice rather than the operator's.
+    """
+    from urllib.parse import urlsplit
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    parts = urlsplit(base)
+    scheme = parts.scheme.lower()
+    # `hostname` is already lowercased and unbracketed; an IPv6 literal needs its brackets back to
+    # be a Host value again.
+    hostname = parts.hostname or ""
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    if parts.port is None or parts.port == default_port:
+        hosts = [hostname, f"{hostname}:{default_port}"]
+    else:
+        hosts = [f"{hostname}:{parts.port}"]
+    origins = [f"{scheme}://{host}" for host in hosts]
+    if _is_loopback(base):
+        for name in ("localhost", "127.0.0.1", "[::1]"):
+            hosts += [name, f"{name}:*"]
+            origins += [f"http://{name}", f"http://{name}:*"]
+    return TransportSecuritySettings(allowed_hosts=hosts, allowed_origins=origins)
+
+
 def create_app(
     extra_tools: dict | None = None,
     adapters: Adapters | None = None,
@@ -635,7 +784,8 @@ def create_app(
     guarded path that refuses a duplicate name.
 
     `extra_instructions` is APPENDED to the base MCP instructions and surfaced to the model via the
-    MCP `initialize` result (never replaces the base protocol — see `build_server`). None = no-op."""
+    MCP `initialize` and `server/discover` results (never replaces the base protocol — see
+    `build_server`). None = no-op."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
@@ -683,6 +833,9 @@ def create_app(
         ),
         json_response=True,
         stateless=True,
+        # Checked on `/mcp` only: the discovery and OAuth routes answer whatever host asked, because
+        # they are what a client reads before it knows the server's name.
+        security_settings=_transport_security(base),
     )
 
     async def handle_mcp(scope, receive, send):

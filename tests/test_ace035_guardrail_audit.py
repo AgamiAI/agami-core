@@ -203,7 +203,7 @@ def _http_execute_sql(sql: str) -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.create_app()) as client:
+    with TestClient(mcp_http.create_app(), base_url=BASE_URL) as client:
         assert tools._INJECTED_EXECUTOR is not None, (
             "create_app() no longer injects an executor, so this surface is now the fork path — "
             "the in-process path this file believes it covers is uncovered"
