@@ -118,7 +118,7 @@ _HOSTED_PREAMBLE = (
     "When a datasource has stored examples, execute_sql also needs `example`: an id "
     "get_prompt_examples returned, and whether you 'followed' it or it was 'shown_only'. So call "
     "get_prompt_examples before your first execute_sql on a datasource; 'shown_only' is always "
-    "an acceptable answer when no example fits.\n"
+    "an acceptable answer when no example fits, and never bend the SQL to fit an example.\n"
 )
 # What a `get_datasource_schema` response tells a client when the datasource has stored examples
 # (#301). The only instruction to call get_prompt_examples lived in the instructions above, which a
@@ -663,8 +663,15 @@ def _example_refusal(args: dict[str, Any], profile: str) -> Refusal | None:
 
     if not _hosted():
         return None
+    claim = args.get("example")
+    use = claim.get("use") if isinstance(claim, dict) else None
+    # A string before the membership test: `use` is caller JSON, and a list or an object is
+    # unhashable, so testing it against a frozenset would raise instead of refusing.
+    use_ok = isinstance(use, str) and use in EXAMPLE_USES
     try:
-        stored, known = _example_facts(profile, args.get("example"))
+        # The id is looked up only when `use` is valid, so a bad `use` costs no lookup and its
+        # refusal cannot depend on whether the id exists.
+        stored, known = _example_facts(profile, claim if use_ok else None)
     except Exception as e:
         _LOG.warning("examples unavailable for %r: %s", profile, type(e).__name__)
         return None
@@ -678,14 +685,13 @@ def _example_refusal(args: dict[str, Any], profile: str) -> Refusal | None:
         "to 'followed' if the statement is based on that example, or 'shown_only' if none of them "
         "answers this question. Never bend the statement to fit an example."
     )
-    claim = args.get("example")
     if not isinstance(claim, dict) or not isinstance(claim.get("id"), str) or not claim["id"]:
         return refuse(
             RULE_EXAMPLE_REQUIRED,
             detail="this call named no example; this datasource has stored examples",
             remediation=fetch,
         )
-    if claim.get("use") not in EXAMPLE_USES:
+    if not use_ok:
         return refuse(
             RULE_EXAMPLE_REQUIRED,
             detail="`example.use` must be 'followed' or 'shown_only'",

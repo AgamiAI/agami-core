@@ -678,7 +678,9 @@ _TOOL_CALL_COLS = (
     # Selected as well as inserted, which is the half that is easy to miss: this list is narrower
     # than the INSERT (`org_id` and `audit_id` are written and never read), so a column added to one
     # and not the other is recorded faithfully and reaches no reader at all.
-    "client_model, datasource_source"
+    "client_model, datasource_source, "
+    # The example the client says it consulted (026, #376), so the activity view can show it.
+    "example_id, example_use"
 )
 
 

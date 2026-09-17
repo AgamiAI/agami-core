@@ -170,7 +170,7 @@ def test_an_id_stored_for_another_datasource_or_org_is_refused(served, org_id, d
     assert "elsewhere" not in refusal["detail"]
 
 
-@pytest.mark.parametrize("use", [None, "", "used", "FOLLOWED", 1])
+@pytest.mark.parametrize("use", [None, "", "used", "FOLLOWED", 1, [], {"a": 1}])
 def test_a_use_other_than_the_two_words_is_refused(served, use):
     deploy, _ = served
     deploy(TWO)
@@ -254,8 +254,14 @@ def test_the_claim_is_recorded_with_the_call(served):
     store = Store.connect(db_url)
     try:
         rows = store.query("SELECT tool_name, example_id, example_use FROM tool_calls ORDER BY ts")
+        # And the activity view's reader carries them, which is what lets the view show them.
+        read = [c for s in model_store.list_sessions(store, org_id="local") for c in s["calls"]]
     finally:
         store.close()
+    assert {(c["tool_name"], c["example_id"], c["example_use"]) for c in read} == {
+        ("execute_sql", ex_id, "shown_only"),
+        ("list_datasources", None, None),
+    }
     assert [dict(r) for r in rows] == [
         {"tool_name": "execute_sql", "example_id": ex_id, "example_use": "shown_only"},
         {"tool_name": "list_datasources", "example_id": None, "example_use": None},
@@ -272,3 +278,35 @@ def test_execute_sql_declares_the_example_without_requiring_it():
     assert set(schema["properties"]["example"]["properties"]) == {"id", "use"}
     assert "enum" not in schema["properties"]["example"]["properties"]["use"]
     assert "example" not in schema.get("required", [])
+
+
+def test_a_bad_use_does_not_look_the_id_up(served, monkeypatch):
+    """The refusal for a bad `use` must not depend on whether the id exists, and costs no lookup."""
+    deploy, _ = served
+    deploy(TWO)
+    looked = []
+    real = model_store.example_by_id
+    monkeypatch.setattr(
+        model_store, "example_by_id", lambda *a, **k: looked.append(1) or real(*a, **k)
+    )
+    _refused(_run(example={"id": _ids()[0], "use": "used"}))
+    assert looked == []
+
+
+def test_the_activity_view_shows_the_example_on_the_call(served):
+    import admin
+
+    card = admin._call_card(
+        {
+            "sql": SQL,
+            "tool_name": "execute_sql",
+            "ts": "2026-09-17T00:00:00Z",
+            "success": 1,
+            "example_id": "22f7a070f7c5",
+            "example_use": "shown_only",
+        }
+    )
+    assert "Example 22f7a070f7c5" in card and "shown only" in card
+    assert "Example" not in admin._call_card(
+        {"sql": SQL, "tool_name": "execute_sql", "ts": "2026-09-17T00:00:00Z", "success": 1}
+    )
