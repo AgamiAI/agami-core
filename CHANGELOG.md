@@ -100,7 +100,11 @@ below corresponds to one such version.
   names something the semantic model or the database does not have, because only that is rejected
   again on every attempt. A query stopped for any other reason (a result too large to return, a
   timeout, a credential, a `SELECT *`) still says what stopped it, and its row is one to ask again, as
-  is a row whose tool crashed.
+  is a row whose tool crashed. The card says the query never reached the database only where that is
+  true. The scope checks and the `SELECT *` check run before the statement is sent; the row cap and
+  the two time limits fire after it ran, so on those the card says agami stopped the query and its
+  answer never came back, and it never tells a reader to go looking for a scope problem when what
+  they need to do is narrow their query.
 
 - **The SQL section of such a row claimed the two queries asked for the same things.** Nothing had
   been compared: agami's statement never ran, so there were no differences to find, and an empty
