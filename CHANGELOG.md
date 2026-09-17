@@ -12,6 +12,22 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-09-16
+
+### Added
+
+- **A `sign_in_required` failure kind, for an executor that connects as the person asking.** An
+  injected executor that exchanges the signed-in person's own credential for a warehouse one had
+  only exit code 4 to report a missing or unrenewable credential. That reached the caller as `auth`
+  and "The database rejected the connection's credentials.", and a client relaying it told the
+  person their warehouse was broken when signing in again was the whole fix. Exit code 11 now
+  arrives as `sign_in_required` on every transport, with a sentence telling the person to sign in
+  again (reconnect the connector) and start a new conversation. The `execute_sql` description tells
+  the agent not to retry and not to describe the database as failing. The executor's own text is
+  never relayed and cannot reclassify the code. The built-in executor never raises it. An executor
+  should use `FAILURE_KIND_TO_EXIT.get("sign_in_required", 4)` rather than the literal, so it falls
+  back to `auth` on an older core.
+
 ## [0.9.1] — 2026-09-16
 
 ### Added
@@ -46,17 +62,6 @@ below corresponds to one such version.
   asked. The columns rule is keyed to the table's own entry rather than to the response as a
   whole, since a response sized down to `summary` or `index` carries no columns at all and a rule
   keyed on what was read would tell that agent every column it needs is out of scope.
-- **A `sign_in_required` failure kind, for an executor that connects as the person asking.** An
-  injected executor that exchanges the signed-in person's own credential for a warehouse one had
-  only exit code 4 to report a missing or unrenewable credential. That reached the caller as `auth`
-  and "The database rejected the connection's credentials.", and a client relaying it told the
-  person their warehouse was broken when signing in again was the whole fix. Exit code 11 now
-  arrives as `sign_in_required` on every transport, with a sentence telling the person to sign in
-  again (reconnect the connector) and start a new conversation. The `execute_sql` description tells
-  the agent not to retry and not to describe the database as failing. The executor's own text is
-  never relayed and cannot reclassify the code. The built-in executor never raises it. An executor
-  should use `FAILURE_KIND_TO_EXIT.get("sign_in_required", 4)` rather than the literal, so it falls
-  back to `auth` on an older core.
 
 ### Fixed
 
