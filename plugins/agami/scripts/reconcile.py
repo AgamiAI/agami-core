@@ -2751,13 +2751,15 @@ def stamp_for(run: str, items: list[dict]) -> str:
 def _csv_shape(path: Path) -> tuple[dict | None, Any]:
     """A result CSV as the record carries it: one cell as `{"columns", "rows": [[cell]]}`, anything
     else as `{"columns", "row_count"}`. Never result rows beyond one cell. The second value is that one
-    cell, as a number when it reads as one."""
+    cell, as a number when it reads as one. Nothing when the file is absent or empty."""
     if not path.exists():
         return None, None
     with path.open(newline="", encoding="utf-8") as fh:
         rows = [row for row in csv.reader(fh)]
     if not rows:
-        return {"columns": [], "row_count": 0}, None
+        # A zero-byte file is a run that returned nothing, never a result of no rows: the execution
+        # tier writes CSV only on success, and a real result always has a header row.
+        return None, None
     columns, data = rows[0], [r for r in rows[1:] if any(cell.strip() for cell in r)]
     if len(data) == 1 and len(data[0]) == 1:
         cell = data[0][0]
@@ -2765,6 +2767,15 @@ def _csv_shape(path: Path) -> tuple[dict | None, Any]:
         kept = value if value is not None else cell
         return {"columns": columns, "rows": [[kept]]}, kept
     return {"columns": columns, "row_count": len(data)}, None
+
+
+def _run_result(path: Path, run: Any) -> tuple[dict | None, Any]:
+    """`_csv_shape` of the CSV a run wrote, or nothing when the run record beside it is there and does
+    not say `ok`: a refused or failed run can still leave its CSV behind. No run record says nothing
+    either way, so the CSV decides alone."""
+    if run is not None and not (isinstance(run, dict) and run.get("status") == "ok"):
+        return None, None
+    return _csv_shape(path)
 
 
 def _optional_json(path: Path) -> Any:
@@ -2801,9 +2812,10 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
     sql = answer.get("sql") if isinstance(answer.get("sql"), str) and answer["sql"].strip() else None
     statements = [st for st in (answer.get("statements") or []) if isinstance(st, str) and st.strip()]
     agami_run = _optional_json(row_dir / "agami-run.json")
-    recorded, actual_cell = _csv_shape(row_dir / "actual.csv")
+    recorded, actual_cell = _run_result(row_dir / "actual.csv", agami_run)
     statement = base.get("statement") or None
-    statement_recorded, statement_cell = _csv_shape(row_dir / "statement.csv") if statement else (None, None)
+    statement_recorded, statement_cell = (
+        _run_result(row_dir / "statement.csv", _optional_json(row_dir / "run.json")) if statement else (None, None))
     exp = base.get("expected")
     if exp is None and statement and isinstance(statement_cell, (int, float)) and not isinstance(statement_cell, bool):
         exp = float(statement_cell)  # Phase 1.5f: the statement's own result is the expected value

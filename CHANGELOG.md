@@ -12,6 +12,19 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reconcile row whose query never ran said something else happened.** When agami's query was
+  refused or failed, the run still left an empty `actual.csv` behind, and `reconcile.py record` read
+  that empty file as a result with no columns and no rows. So the row skipped the sentence "agami's
+  statement did not run" and said the two results were tables that were not compared. On a row that
+  was only a question, it was worse: the row waited for a person to judge an answer agami never
+  gave. Now an empty result file is never a result, because a real one always has a header row. A
+  run record that is there and does not say `ok` means there is no result either, whatever file
+  sits beside it. The same holds for your own query: when it did not run, the page no longer shows
+  your result as "0 rows". A query that ran and returned a header with no rows is still a result,
+  and is still compared.
+
 ## [0.9.1] — 2026-09-16
 
 ### Added
