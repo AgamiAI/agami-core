@@ -1129,6 +1129,7 @@ def test_a_registered_client_loopback_redirect_matches_on_any_port(env):
         ("http://[::1]:53123/callback", "http://[::1]/callback", False),
         ("http://evil@127.0.0.1:53123/callback", "http://127.0.0.1/callback", False),
         ("https://app.example.com:8443/callback", "https://app.example.com/callback", False),
+        ("http://[bad:53123/callback", "http://127.0.0.1/callback", False),  # unparseable
     ],
 )
 def test_redirect_matches(uri, allowed, expected):

@@ -86,13 +86,6 @@ def _resolve(host: str, port: int) -> list[str]:
     return [info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
 
 
-def _is_global(address: str) -> bool:
-    try:
-        return ipaddress.ip_address(address).is_global
-    except ValueError:
-        return False
-
-
 def _client() -> httpx.Client:
     """The HTTP client for the fetch. The other network seam tests patch."""
     return httpx.Client(trust_env=False, follow_redirects=False, timeout=_DEADLINE)
@@ -106,7 +99,7 @@ def _fetch(url: str) -> dict:
         addresses = _resolve(host, port)
     except OSError as exc:
         raise ClientMetadataError("client_id host does not resolve") from exc
-    if not addresses or not all(_is_global(a) for a in addresses):
+    if not addresses or not all(ipaddress.ip_address(a).is_global for a in addresses):
         raise ClientMetadataError("client_id host is not a public address")
     address = addresses[0]
     netloc = f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
