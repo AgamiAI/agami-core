@@ -220,7 +220,7 @@ FailureKind = Literal[
     "sign_in_required",
     "other",
 ]
-"""Eleven classified operational errors declared, six produced by the built-in executor.
+"""Eleven classified operational errors declared.
 
 Produced today: `dsn`, `driver_missing`, `auth` and `syntax` from the executor's classified exit
 codes, `other` from its catch-all, and `timeout` from the subprocess supervisor at the tool edge —

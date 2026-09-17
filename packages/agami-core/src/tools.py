@@ -1868,7 +1868,7 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     Relayed only when BOTH hold:
 
       * the exit code is one the child's CLI contract produces from a `Failure`
-        (`execute_sql.EXIT_TO_FAILURE_KIND` — 2/3/4/5/6). Those are the codes `main` reaches by
+        (`execute_sql.EXIT_TO_FAILURE_KIND`, 2-11). Those are the codes `main` reaches by
         writing `env.failure.message`, so the text is something the child classified and chose. Any
         other code — a Python-level crash exiting 1, a signal, a code we do not know — means the
         child never got that far, so its stderr is whatever happened to be on the way out.
