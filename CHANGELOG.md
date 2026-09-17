@@ -41,6 +41,42 @@ below corresponds to one such version.
   have reached the database another way. `--via context` stays the default, so every golden score
   remains comparable with the runs before it.
 
+### Fixed
+
+- **A reconcile row whose query did not run said to ask agami again, which is the one thing that
+  cannot work.** Found by reading the report from the first live tool-driven run: both rows had
+  failed because the semantic model names a column and a table the warehouse does not have, and both
+  cards said "ask agami again" while the evidence quoted in the same card said to re-introspect the
+  datasource. The classifier had one branch for an error row where the PERSON's query failed and
+  none for agami's, so every such row fell through to `ask_again`. That was defensible while agami's
+  query failing meant the client never answered (not installed, timed out, unreadable), where asking
+  again is right. It stops being defensible once the client runs its own statement, because then the
+  usual cause is a rejection, and asking again replays it forever. A query that did not run is now its
+  own cause, read from the run's trace rather than guessed at from an error sentence: the fix is `fix
+  the semantic model`, the owner is the model, and the row says in plain words what stopped the query
+  and why (for example, that agami's safety check blocked it before it reached the database because it
+  names a column the semantic model does not have), that asking again would hit the same problem, and
+  which of `/agami-connect` or `/agami-save-correction` repairs it. That route is only for a query that
+  names something the semantic model or the database does not have, because only that is rejected
+  again on every attempt. A query stopped for any other reason (a result too large to return, a
+  timeout, a credential, a `SELECT *`) still says what stopped it, and its row is one to ask again, as
+  is a row whose tool crashed. The card says the query never reached the database only where that is
+  true. The scope checks and the `SELECT *` check run before the statement is sent; the row cap and
+  the two time limits fire after it ran, so on those the card says agami stopped the query and its
+  answer never came back, and it never tells a reader to go looking for a scope problem when what
+  they need to do is narrow their query.
+
+- **The SQL section of such a row claimed the two queries asked for the same things.** Nothing had
+  been compared: agami's statement never ran, so there were no differences to find, and an empty
+  difference list read as agreement. The card was stating agreement it had no evidence for, on the
+  one row a person opens to find out what went wrong. It now says the two were never compared, which
+  is the rule the checks line beside it already kept (a silence must not read as a pass). That
+  includes a row whose question-fit check was graded: the check lives in the same section but reads
+  the person's query rather than comparing two, and counting it hid that nothing was compared.
+
+- **A relayed error put two full stops on the card's first line.** The message is a sentence already
+  ("...re-introspect the datasource."), and the lead-in appended one regardless.
+
 ## [0.9.3] — 2026-09-17
 
 ### Added
@@ -82,40 +118,6 @@ below corresponds to one such version.
   be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
   blank id is now rejected as an input validation error — a deployment turning the flag on should
   confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
-
-- **A reconcile row whose query did not run said to ask agami again, which is the one thing that
-  cannot work.** Found by reading the report from the first live tool-driven run: both rows had
-  failed because the semantic model names a column and a table the warehouse does not have, and both
-  cards said "ask agami again" while the evidence quoted in the same card said to re-introspect the
-  datasource. The classifier had one branch for an error row where the PERSON's query failed and
-  none for agami's, so every such row fell through to `ask_again`. That was defensible while agami's
-  query failing meant the client never answered (not installed, timed out, unreadable), where asking
-  again is right. It stops being defensible once the client runs its own statement, because then the
-  usual cause is a rejection, and asking again replays it forever. A query that did not run is now its
-  own cause, read from the run's trace rather than guessed at from an error sentence: the fix is `fix
-  the semantic model`, the owner is the model, and the row says in plain words what stopped the query
-  and why (for example, that agami's safety check blocked it before it reached the database because it
-  names a column the semantic model does not have), that asking again would hit the same problem, and
-  which of `/agami-connect` or `/agami-save-correction` repairs it. That route is only for a query that
-  names something the semantic model or the database does not have, because only that is rejected
-  again on every attempt. A query stopped for any other reason (a result too large to return, a
-  timeout, a credential, a `SELECT *`) still says what stopped it, and its row is one to ask again, as
-  is a row whose tool crashed. The card says the query never reached the database only where that is
-  true. The scope checks and the `SELECT *` check run before the statement is sent; the row cap and
-  the two time limits fire after it ran, so on those the card says agami stopped the query and its
-  answer never came back, and it never tells a reader to go looking for a scope problem when what
-  they need to do is narrow their query.
-
-- **The SQL section of such a row claimed the two queries asked for the same things.** Nothing had
-  been compared: agami's statement never ran, so there were no differences to find, and an empty
-  difference list read as agreement. The card was stating agreement it had no evidence for, on the
-  one row a person opens to find out what went wrong. It now says the two were never compared, which
-  is the rule the checks line beside it already kept (a silence must not read as a pass). That
-  includes a row whose question-fit check was graded: the check lives in the same section but reads
-  the person's query rather than comparing two, and counting it hid that nothing was compared.
-
-- **A relayed error put two full stops on the card's first line.** The message is a sentence already
-  ("...re-introspect the datasource."), and the lead-in appended one regardless.
 
 ## [0.9.2] — 2026-09-16
 
@@ -822,7 +824,6 @@ scripted generator for the real one — silently, the way it already happened on
 Everything below came out of running the golden-dataset feature against a live warehouse for the
 first time. One fix is the difference between the feature working and not working at all; the rest
 is what a first real run and its review turned up.
-
 
 ### Added
 
