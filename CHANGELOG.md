@@ -12,6 +12,25 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The team server supports sign-in from 2026 MCP clients.** A client may identify itself with an
+  https URL instead of registering (Client ID Metadata Documents), so a connection no longer adds a
+  row to `oauth_client` each time. The server fetches that public document at most once an hour per
+  client: https only, to a public address it checked, with no redirects, a 5 KB cap and a 3 s
+  deadline. The request carries no customer data. Such a client may use only the redirect URIs its
+  document lists, and the sign-in page names it by its redirect host. Authorization redirects now
+  carry `iss`, `resource` is checked at authorize and token (`invalid_target`), and a loopback `http`
+  callback matches on any port.
+
+### Changed
+
+- **Access tokens carry and require an audience.** Every token is minted with
+  `aud = <PUBLIC_BASE_URL>/mcp`, and `/mcp` answers a token without it with the usual 401 challenge.
+  Access tokens issued before the upgrade stop working at once, so connected clients renew through
+  their refresh token (which keeps working) or sign in again. A script that hand-mints a bearer must
+  add the claim.
+
 ### Fixed
 
 - **A served deployment no longer names a datasource the organization does not have.** With no
