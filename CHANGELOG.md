@@ -42,8 +42,8 @@ below corresponds to one such version.
   again (reconnect the connector) and start a new conversation. The `execute_sql` description tells
   the agent not to retry and not to describe the database as failing. The executor's own text is
   never relayed and cannot reclassify the code. The built-in executor never raises it. An executor
-  should use `FAILURE_KIND_TO_EXIT["sign_in_required"]` rather than the literal, so it can fall back
-  on an older core.
+  should use `FAILURE_KIND_TO_EXIT.get("sign_in_required", 4)` rather than the literal, so it falls
+  back to `auth` on an older core.
 
 ### Fixed
 

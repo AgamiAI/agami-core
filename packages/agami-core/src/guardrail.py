@@ -223,8 +223,9 @@ FailureKind = Literal[
 """Eleven classified operational errors declared.
 
 Produced today: `dsn`, `driver_missing`, `auth` and `syntax` from the executor's classified exit
-codes, `other` from its catch-all, and `timeout` from the subprocess supervisor at the tool edge —
-the bound that kills a forked executor which never returned.
+codes, `other` from its catch-all, `timeout` from the subprocess supervisor at the tool edge —
+the bound that kills a forked executor which never returned — and `sign_in_required` from an
+injected executor only (below).
 
 **`sign_in_required` is produced only by an injected executor** that connects as the person asking
 (a per-user credential exchange, for instance). It means the person's own credential is missing or

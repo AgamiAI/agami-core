@@ -270,8 +270,9 @@ EXIT_TO_FAILURE_KIND: dict[int, FailureKind] = {
     # cannot be renewed. It needs a code of its own for the reason 7-10 do, and a caller-facing
     # sentence of its own because the fix is the person's, not an operator's: `auth` tells a client
     # the deployment is misconfigured, and a client relaying that sends everyone to the warehouse.
-    # An executor should look the code up as `FAILURE_KIND_TO_EXIT["sign_in_required"]` rather than
-    # write 11, so it can fall back cleanly on a core that predates the kind.
+    # An executor should look the code up as `FAILURE_KIND_TO_EXIT.get("sign_in_required", 4)` rather
+    # than write 11: on a core that predates the kind the key is absent, and the default keeps the
+    # failure classified (as `auth`) instead of raising `KeyError` or landing on an unmapped code.
     11: "sign_in_required",
 }
 

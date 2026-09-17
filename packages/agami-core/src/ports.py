@@ -128,7 +128,8 @@ class Executor(Protocol):
         sentence for the kind, and ``msg`` goes to the audit detail and the server log only. An
         adapter that wants a specific kind raises this with that kind's code, looked up in
         ``execute_sql.FAILURE_KIND_TO_EXIT`` (``sign_in_required`` when the asking person's own
-        credential is missing or cannot be renewed).
+        credential is missing or cannot be renewed). Use ``.get(kind, 4)`` for a kind an older core
+        may not have, so the failure stays classified.
 
         Any **other** exception is caught by ``execute_guarded`` and becomes ``failed`` / ``other``
         with a generic, value-free message; the raw text and stack go to the server log only. So a
