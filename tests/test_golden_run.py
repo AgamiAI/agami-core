@@ -389,14 +389,15 @@ def test_a_required_filter_left_out_turns_a_would_be_pass_into_a_fail(chokepoint
     assert result.failed == 1 and result.gating_failures == 1
 
 
-def test_a_scored_item_carries_the_seven_claims(chokepoint):
+def test_a_scored_item_carries_the_eight_claims(chokepoint):
     """A failing item's whole value is the sentence after 'the rows disagree', so the diff rides on
     every item that had two statements to read."""
     result = _run(_dataset(_item()), _StubGenerator(), _SpyExecutor())
 
     claims = result.outcomes[0].claims
     assert [claim["name"] for claim in claims["claims"]] == [
-        "tables", "filter_predicates", "date_window", "group_keys", "join_keys", "ordering", "limit",
+        "tables", "outputs", "filter_predicates", "date_window", "group_keys", "join_keys", "ordering",
+        "limit",
     ]
     assert claims["gated"] is False and result.outcomes[0].passed
 
@@ -985,6 +986,12 @@ def _no_client(monkeypatch, home):
     monkeypatch.setattr(gr.shutil, "which", lambda name: None)
     monkeypatch.delenv(gr._CLIENT_ENV, raising=False)
     monkeypatch.setenv("HOME", str(home))
+    # Drop the fallbacks `HOME` does not move. Left in place, "no client" is only true on a machine
+    # that happens not to have one: the resolver walks past the empty tmp home and finds
+    # /opt/homebrew/bin/claude, so this helper never simulated what it names. The test is on
+    # absoluteness rather than a leading "~", which would also drop a relative entry added later.
+    monkeypatch.setattr(gr, "_CLIENT_FALLBACKS",
+                        tuple(c for c in gr._CLIENT_FALLBACKS if not Path(c).is_absolute()))
     gr._client.cache_clear()
 
 
@@ -1067,3 +1074,43 @@ def test_both_statements_are_scored_under_the_orgs_own_statement_limits(chokepoi
     assert asked and set(asked) == {ORG}
     assert seen == [(4321, 77), (4321, 77)]  # the answer key and the generated statement
     assert execute_sql._statement_limits.get() is None
+
+# --- ACE-135: several statements in one answer ---------------------------------------------------
+
+
+def test_a_list_of_statements_keeps_every_one_and_answers_with_the_last(monkeypatch):
+    reply = json.dumps({"sql": ["SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders"]})
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=reply))
+
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    assert generated.error is None and generated.sql == "SELECT COUNT(*) AS n FROM orders"
+    assert generated.statements == ("SELECT status FROM orders LIMIT 5", "SELECT COUNT(*) AS n FROM orders")
+
+
+def test_several_statements_in_one_string_are_cut_at_top_level_semicolons_only(monkeypatch):
+    text = "SELECT status FROM orders WHERE note = 'a;b' -- not; here\n; /* nor; here */ SELECT COUNT(*) AS n FROM orders;"
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=json.dumps({"sql": text})))
+
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+
+    assert generated.statements == ("SELECT status FROM orders WHERE note = 'a;b' -- not; here",
+                                    "/* nor; here */ SELECT COUNT(*) AS n FROM orders")
+    assert generated.sql == "/* nor; here */ SELECT COUNT(*) AS n FROM orders"
+
+
+def test_one_statement_is_one_statement(monkeypatch):
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=ANSWER))
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+    assert generated.statements == (generated.sql,) and generated.sql.startswith("SELECT COUNT")
+
+
+@pytest.mark.parametrize("raw", [[], ["", "  "], ["SELECT 1", 3], "  ;  ; "])
+def test_a_list_carrying_anything_but_statements_is_unreadable(monkeypatch, raw):
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(stdout=json.dumps({"sql": raw})))
+    generated = _cli_generator().generate(QUESTION, ORG, DATASOURCE)
+    assert generated.sql == "" and generated.error == gr._GENERATION_UNREADABLE and generated.statements == ()
+
+
+def test_the_prompt_says_how_to_answer_with_several_queries():
+    assert "put them in order in a list under sql; the last must be the statement whose result answers the question" in gr._QUESTION_PROMPT

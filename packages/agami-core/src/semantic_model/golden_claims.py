@@ -3,10 +3,10 @@
 A golden item that fails on its numbers says the two statements returned different rows. It cannot
 say *why*, and "why" is the whole value of the failure: a window off by a quarter, a required filter
 left out and a genuinely different question all look identical from a row count. This module is the
-sentence after that one. It reads each statement into seven claims about what the statement asks
+sentence after that one. It reads each statement into eight claims about what the statement asks
 for, compares them claim by claim, and hands the caller a structured diff.
 
-**It is a describer with two gates, and the split is the design.** Five of the seven claims are
+**It is a describer with two gates, and the split is the design.** Six of the eight claims are
 REPORTED — a difference in them is a fact for a person to read, not a verdict — and exactly two are
 allowed to decide anything:
 
@@ -53,11 +53,13 @@ AGREES = "agrees"
 DIFFERS = "differs"
 UNKNOWN = "unknown"
 
-# Exactly seven, and the tuple is the contract: an eighth claim is a change to what a golden item
-# is allowed to assert about a statement, not an implementation detail of this module. The order is
-# the order a diff renders in.
+# Exactly eight, and the tuple is the contract: a new claim is a change to what a golden item is
+# allowed to assert about a statement, not an implementation detail of this module (the eighth,
+# `outputs`, was added by ACE-131 so that "the same query" can mean "selects the same things" too).
+# The order is the order a diff renders in.
 CLAIM_NAMES = (
     "tables",
+    "outputs",
     "filter_predicates",
     "date_window",
     "group_keys",
@@ -113,13 +115,19 @@ class DateWindow:
 
 @dataclass
 class ClaimSet:
-    """What one statement asks for, in the seven terms two statements are compared in.
+    """What one statement asks for, in the eight terms two statements are compared in.
 
     Every field defaults to its own empty value so that `ClaimSet(unreadable=…)` is the whole of
     the unreadable case; `read_claims` is the only constructor, and it always fills all of them.
     """
 
     tables: frozenset[str] = frozenset()  # bare, case-folded
+    # What the statement selects: one key per output expression with its alias peeled, so two
+    # statements that select the same expressions under different names agree, and a statement
+    # that selects a different expression differs. `SELECT *` is the one key `*`. A describer,
+    # never a gate: the projection is what an answer's columns come from, and a comparison of the
+    # columns' VALUES lives in the comparator, not here.
+    outputs: frozenset[str] = frozenset()
     filter_predicates: frozenset[str] = frozenset()  # normalized keys, not the statement's text
     # Every column any predicate the statement writes mentions — the `must_filter` gate's input,
     # and a different question from the one above: *is this column constrained anywhere* rather
@@ -141,6 +149,7 @@ class ClaimSet:
     def as_dict(self) -> dict[str, Any]:
         return {
             "tables": sorted(self.tables),
+            "outputs": sorted(self.outputs),
             "filter_predicates": sorted(self.filter_predicates),
             # Bounded here rather than at the source: a quoted identifier is written by whoever
             # wrote the statement, and this is the one claim value that is held raw so the gate can
@@ -162,7 +171,7 @@ def _join_keys_as_list(keys: "frozenset[frozenset[tuple[str, str]]]") -> list[li
 
 
 def read_claims(sql: str, *, dialect: str) -> ClaimSet:
-    """Read one statement into its seven claims. Never raises: an input this module cannot read
+    """Read one statement into its eight claims. Never raises: an input this module cannot read
     comes back as a `ClaimSet` whose `unreadable` says so."""
     tree, why = rt._parse_reporting(sql, dialect=dialect)
     if tree is None:
@@ -187,6 +196,7 @@ def read_claims(sql: str, *, dialect: str) -> ClaimSet:
         # written, and these are the values that would otherwise arrive in the diff at whatever
         # length and with whatever line breaks the statement gave them.
         tables=frozenset(rt._echo_name(rt._tkey(ref.bare)) for ref in rt._table_references(select)),
+        outputs=_outputs(select, aliases),
         filter_predicates=frozenset(_expression_key(node, aliases) for node in conjuncts),
         filtered_columns=_constrained_columns(select),
         date_window=_resolve_date_window(conjuncts, aliases),
@@ -195,6 +205,22 @@ def read_claims(sql: str, *, dialect: str) -> ClaimSet:
         ordering=_ordering(select, aliases),
         limit=_limit(select),
     )
+
+
+def _outputs(select: "exp.Select", aliases: dict[str, str]) -> frozenset[str]:
+    """What the statement selects, one key per output expression, the alias peeled off first: an
+    alias is the author's name for a value and not the value. `SELECT *` (and `t.*`) is the key `*`,
+    because a star selects whatever the table has and no list of names can be read out of it here.
+    `DISTINCT` is not read: this claim says what is selected, not how many times."""
+    keys = []
+    for node in select.expressions:
+        if isinstance(node, exp.Alias):
+            node = node.this
+        if isinstance(node, exp.Star) or (isinstance(node, exp.Column) and isinstance(node.this, exp.Star)):
+            keys.append("*")
+            continue
+        keys.append(_expression_key(node, aliases))
+    return frozenset(keys)
 
 
 def _expression_key(node: "exp.Expression", aliases: dict[str, str]) -> str:
@@ -235,6 +261,12 @@ def _rendered(node: "exp.Expression", aliases: dict[str, str], depth: int) -> st
     if isinstance(node, exp.Column):
         qualifier = node.table
         if not qualifier:
+            # An unqualified column in a SELECT that reads exactly one table belongs to that table,
+            # so `opened` and `r.opened` are one key; with two tables in scope it stays bare, since
+            # guessing an owner would make two different columns one key.
+            tables = {rt._tkey(rt._bare(t)) for t in aliases.values()}
+            if len(tables) == 1:
+                return f"{next(iter(tables))}.{node.name.lower()}"
             return node.name.lower()
         # The schema and catalog parts are dropped with the alias: `sales.orders.region` and
         # `orders.region` name one column, and `_bare` has already stripped the schema off the
@@ -363,8 +395,8 @@ def _temporal_bounds(
     does not model the shape it was written in."""
     if isinstance(node, exp.Between):
         column = node.this
-        low = _date_literal(node.args.get("low"))
-        high = _date_literal(node.args.get("high"))
+        low = _date_literal(node.args.get("low")) or _relative_bound(node.args.get("low"))
+        high = _date_literal(node.args.get("high")) or _relative_bound(node.args.get("high"))
         if isinstance(column, exp.Column) and low is not None and high is not None:
             # BETWEEN is inclusive at BOTH ends, and the upper one stays where it was written —
             # shifting it to the next day is only sound on a DATE column, and no column type
@@ -378,24 +410,64 @@ def _temporal_bounds(
         column, year = extracted
         # A calendar year IS a half-open interval, so this folds to exactly the chain form and the
         # two spellings compare equal.
-        return column, [("start", f"{year}-01-01", True), ("end", f"{year + 1}-01-01", False)]
+        return column, [("start", f"{year:04d}-01-01", True), ("end", f"{year + 1:04d}-01-01", False)]
 
     bound = _COMPARISON_BOUNDS.get(type(node))
     if bound is None:
         return None
     side, inclusive = bound
     if isinstance(node.this, exp.Column):
-        column, value = node.this, _date_literal(node.expression)
+        column, value = node.this, _date_literal(node.expression) or _relative_bound(node.expression)
     elif isinstance(node.expression, exp.Column):
         # `'2025-01-01' <= d` is `d >= '2025-01-01'` written the other way round, so the bound it
         # puts on the column is the mirror of the operator rather than the operator itself.
-        column, value = node.expression, _date_literal(node.this)
+        column, value = node.expression, _date_literal(node.this) or _relative_bound(node.this)
         side = "end" if side == "start" else "start"
     else:
         return None
     if value is None:
         return None
     return column, [(side, value, inclusive)]
+
+
+_TEMPORAL_NODE_TYPES = tuple(
+    t for t in (getattr(exp, name, None) for name in (
+        "CurrentDate", "CurrentTimestamp", "CurrentTime", "Interval", "DateTrunc", "TimestampTrunc",
+        "DateAdd", "DateSub", "DateDiff", "TsOrDsToDate", "StrToDate", "StrToTime", "DateStrToDate",
+        "TimeStrToDate", "Extract", "Year", "Month", "Day", "Date", "Timestamp", "UnixToTime",
+    )) if t is not None
+)
+_TEMPORAL_CAST_TYPES = {"DATE", "DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMPLTZ", "TIMESTAMPNTZ", "TIME"}
+
+
+def count_temporal_predicates(sql: str, *, dialect: str) -> Optional[int]:
+    """How many of the statement's filtering conjuncts speak of time. None when it cannot be read.
+
+    A conjunct speaks of time when `_temporal_bounds` reads it, or when it carries an ISO date
+    literal, a date or time function, an INTERVAL, or a cast to a temporal type. The count is
+    deliberately generous: zero is the only value a caller may lean on, and it says the statement
+    wrote no date filter in any spelling this module recognises. That is what separates a
+    `date_window` that reads `unknown` because neither statement filtered on a date (nothing to
+    disagree about) from one that reads `unknown` because a window was written in a shape the
+    resolver does not fold (still open).
+    """
+    tree, _why = rt._parse_reporting(sql, dialect=dialect)
+    if tree is None or not isinstance(tree, exp.Select):
+        return None
+    select = rt._fold_unquoted_identifiers(tree)
+    return sum(1 for conjunct in rt._filtering_conjuncts(select)
+               if _temporal_bounds(conjunct) is not None or _speaks_of_time(conjunct))
+
+
+def _speaks_of_time(node: "exp.Expression") -> bool:
+    if _TEMPORAL_NODE_TYPES and any(True for _ in node.find_all(*_TEMPORAL_NODE_TYPES)):
+        return True
+    for cast in node.find_all(exp.Cast, exp.TryCast):
+        to = cast.args.get("to")
+        kind = getattr(getattr(to, "this", None), "value", None) or str(getattr(to, "this", ""))
+        if str(kind).upper() in _TEMPORAL_CAST_TYPES:
+            return True
+    return any(lit.is_string and _ISO_DATE.match(lit.this) for lit in node.find_all(exp.Literal))
 
 
 def _date_literal(node: "exp.Expression | None") -> Optional[str]:
@@ -410,6 +482,146 @@ def _date_literal(node: "exp.Expression | None") -> Optional[str]:
     if isinstance(node, exp.Literal) and node.is_string and _ISO_DATE.match(node.this):
         return node.this
     return None
+
+
+_RELATIVE_UNITS = {"year": "year", "years": "year", "quarter": "quarter", "quarters": "quarter", "month": "month", "months": "month",
+                   "week": "week", "weeks": "week", "day": "day", "days": "day", "hour": "hour", "hours": "hour"}
+
+
+def _unit_name(node: "exp.Expression | None") -> Optional[str]:
+    """The calendar unit a node names (`YEAR`, `'month'`, `var(months)`), normalised to one spelling."""
+    if node is None:
+        return None
+    text = node.this if isinstance(node, (exp.Var, exp.Literal)) else getattr(node, "name", None) or str(node)
+    return _RELATIVE_UNITS.get(str(text).strip().strip("'\"").lower())
+
+
+_MAX_RELATIVE_DEPTH = 8
+
+
+def _relative_bound(node: "exp.Expression | None", depth: int = _MAX_RELATIVE_DEPTH) -> Optional[str]:
+    """The bound a node spells RELATIVE to the run date, as words: `today`, `start of this year`,
+    `start of this year + 7 month`, `today - 30 day`. None for any other shape.
+
+    A window written against the clock is the commonest way a dashboard says "this year so far",
+    and two statements that both write it should compare as the same window rather than read
+    `unknown`. The rendering is words, never a date: the module does not know what day it is, and a
+    date it computed would be a bound neither statement wrote. It is compared only against another
+    relative bound (`_window_status`), never against a literal date.
+    """
+    if node is None or depth <= 0:
+        # A relative bound deeper than a handful of steps is not a window anyone wrote; past the
+        # budget it reads None, so `read_claims` keeps its promise never to raise on a pathological tree.
+        return None
+    if isinstance(node, exp.Paren):
+        return _relative_bound(node.this, depth - 1)
+    if isinstance(node, exp.Cast):
+        return _relative_bound(node.this, depth - 1)
+    if isinstance(node, exp.CurrentDate):
+        return "today"
+    if isinstance(node, exp.CurrentTimestamp) or (isinstance(node, exp.Anonymous) and str(node.this).lower() in ("now", "getdate", "sysdate", "current_timestamp")):
+        return "now"
+    if isinstance(node, (exp.DateTrunc, exp.TimestampTrunc)):
+        inner = _relative_bound(node.this if isinstance(node, exp.TimestampTrunc) else node.args.get("this"), depth - 1)
+        unit = _unit_name(node.args.get("unit"))
+        if isinstance(node, exp.DateTrunc):
+            # sqlglot's DateTrunc holds the unit in `unit` and the value in `this`; some dialects
+            # parse the argument order the other way round, so both are tried.
+            inner = _relative_bound(node.this, depth - 1) or _relative_bound(node.args.get("unit"), depth - 1)
+            unit = _unit_name(node.args.get("unit")) or _unit_name(node.this)
+        if inner in ("today", "now") and unit:
+            return f"start of this {unit}"
+        return None
+    if isinstance(node, (exp.Add, exp.Sub)):
+        base = _relative_bound(node.this, depth - 1)
+        step = _interval_words(node.expression)
+        if base and step:
+            return _step(base, isinstance(node, exp.Add), *step)
+        return None
+    date_add_types = tuple(t for t in (exp.DateAdd, getattr(exp, "TsOrDsAdd", None)) if t is not None)
+    if isinstance(node, date_add_types + (exp.DateSub,)):
+        base = _relative_bound(node.this, depth - 1)
+        n = node.expression
+        unit = _unit_name(node.args.get("unit"))
+        count: Optional[int] = None
+        if isinstance(n, exp.Interval):
+            words = _interval_words(n)
+            if words:
+                count, unit = words
+        else:
+            count = _signed_integral(n)
+        if base and count is not None and unit:
+            return _step(base, not isinstance(node, exp.DateSub), count, unit)
+        return None
+    return None
+
+
+def _signed_integral(node: "exp.Expression | None") -> Optional[int]:
+    """`7`, `-7` (a `Neg` over a literal) or `+7` as an int; None for anything else."""
+    if isinstance(node, exp.Paren):
+        return _signed_integral(node.this)
+    if isinstance(node, exp.Neg):
+        inner = _signed_integral(node.this)
+        return None if inner is None else -inner
+    if isinstance(node, exp.Literal) and not node.is_string:
+        return _integral(node)
+    if isinstance(node, exp.Literal) and node.is_string:
+        try:
+            return int(node.this.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _step(base: str, forward: bool, count: int, unit: str) -> str:
+    """`today - 30 day`: the sign lives in the operator, never in the count, so `+ INTERVAL '-30 days'`
+    and `- INTERVAL '30 days'` render alike."""
+    if count < 0:
+        forward, count = not forward, -count
+    return f"{base} {'+' if forward else '-'} {count} {unit}"
+
+
+def _interval_words(node: "exp.Expression | None") -> "Optional[tuple[int, str]]":
+    """`INTERVAL '7' MONTH`, `INTERVAL '7 months'`, `INTERVAL 7 MONTH` or `INTERVAL '-30 days'` as
+    (count, unit); the count keeps its sign for the caller to fold into the operator."""
+    if not isinstance(node, exp.Interval):
+        return None
+    unit = _unit_name(node.args.get("unit"))
+    value = node.this
+    if isinstance(value, exp.Neg):
+        inner = _interval_words(exp.Interval(this=value.this, unit=node.args.get("unit")))
+        return None if inner is None else (-inner[0], inner[1])
+    if isinstance(value, exp.Literal):
+        text = str(value.this).strip()
+        if unit is None and " " in text:
+            count_text, _, word = text.partition(" ")
+            unit = _unit_name(exp.Literal.string(word))
+            text = count_text
+        try:
+            count = int(text)
+        except ValueError:
+            return None
+        return (count, unit) if unit else None
+    return None
+
+
+def _symbolic(value: Optional[str]) -> bool:
+    return value is not None and not _ISO_DATE.match(value)
+
+
+_EXACT_UNITS = {"week": (7, "day"), "year": (12, "month"), "quarter": (3, "month")}
+
+
+def _canonical_words(value: Optional[str]) -> Optional[str]:
+    """`today - 4 week` and `today - 28 day` are one window; `1 month` and `30 day` are not. Only the
+    conversions that hold on every calendar are applied: weeks to days, years and quarters to months."""
+    if value is None:
+        return None
+    parts = value.split(" ")
+    if len(parts) >= 3 and parts[-1] in _EXACT_UNITS and parts[-2].lstrip("-").isdigit():
+        factor, unit = _EXACT_UNITS[parts[-1]]
+        parts[-2], parts[-1] = str(int(parts[-2]) * factor), unit
+    return " ".join(parts)
 
 
 def _integral(literal: "exp.Literal") -> Optional[int]:
@@ -524,7 +736,7 @@ _DATE_WINDOW_REASON = "the two statements resolve their date filters to differen
 
 @dataclass
 class Claim:
-    """One of the seven claims, and whether the two statements agree on it.
+    """One of the eight claims, and whether the two statements agree on it.
 
     `generated` and `golden` are the claim's own value on each side, in the JSON-able form
     `ClaimSet.as_dict` renders it — identifiers, bounds and counts, never a statement.
@@ -558,9 +770,9 @@ class GateVerdict:
 
 @dataclass
 class ClaimDiff:
-    """What two statements say about each other: seven claims, and whatever gated."""
+    """What two statements say about each other: eight claims, and whatever gated."""
 
-    claims: list[Claim]  # exactly seven, in CLAIM_NAMES order
+    claims: list[Claim]  # exactly eight, in CLAIM_NAMES order
     gates: list[GateVerdict]  # empty when nothing gates
 
     @property
@@ -607,7 +819,7 @@ def diff_claims(
         if unreadable:
             claims.append(Claim(name=name, status=UNKNOWN, generated=None, golden=None))
             continue
-        # Six of the seven are decided on the RENDERED value, which `as_dict` has already sorted —
+        # Seven of the eight are decided on the RENDERED value, which `as_dict` has already sorted —
         # so every claim that is a set underneath compares order-insensitively for free, and the
         # value a reader is shown is the same value the status was decided from. The window is the
         # exception, because its own rule ignores one of its fields.
@@ -636,6 +848,16 @@ def _window_status(generated: Optional[DateWindow], golden: Optional[DateWindow]
     """
     if generated is None or golden is None:
         return UNKNOWN
+    for a, b in ((generated.start, golden.start), (generated.end, golden.end)):
+        # A bound written against the clock and a literal date are not comparable here: the module
+        # does not know what day it is, so it cannot say whether `start of this year + 5 month` is
+        # `2025-06-01`. One relative side against one literal side reads `unknown`, never `differs`.
+        if (a is not None and b is not None) and (_symbolic(a) != _symbolic(b)):
+            return UNKNOWN
+        # `now - 30 day` against `today - 30 day` differ by the time of day, which decides rows on a
+        # timestamp column and nothing on a date column; nothing here knows the column type.
+        if (a is not None and b is not None) and _symbolic(a) and (a.startswith("now") != b.startswith("now")):
+            return UNKNOWN
     return AGREES if _windows_agree(generated, golden) else DIFFERS
 
 
@@ -647,15 +869,18 @@ def _windows_agree(generated: DateWindow, golden: DateWindow) -> bool:
     rewrite on a qualifier. Which column each side constrains still rides on the claim, so a report
     can say so; it just does not decide.
     """
+    def canon(value: Optional[str]) -> Optional[str]:
+        return _canonical_words(value) if _symbolic(value) else _canonical_bound(value)
+
     return (
-        _canonical_bound(generated.start),
+        canon(generated.start),
         generated.start_inclusive,
-        _canonical_bound(generated.end),
+        canon(generated.end),
         generated.end_inclusive,
     ) == (
-        _canonical_bound(golden.start),
+        canon(golden.start),
         golden.start_inclusive,
-        _canonical_bound(golden.end),
+        canon(golden.end),
         golden.end_inclusive,
     )
 

@@ -62,8 +62,8 @@ def test_deploy_and_serve_resolve_the_same_id(tmp_path, monkeypatch):
     # even with AGAMI_PROFILE unset and the model under a named profile (not 'default').
     import model_deploy
 
-    build.write_tree(_minimal_org("acme"), tmp_path / "northpeak_salesforce")
-    minted = loader.load_org_id(tmp_path / "northpeak_salesforce")
+    build.write_tree(_minimal_org("acme"), tmp_path / "acme_salesforce")
+    minted = loader.load_org_id(tmp_path / "acme_salesforce")
 
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     monkeypatch.delenv("AGAMI_ORG_ID", raising=False)

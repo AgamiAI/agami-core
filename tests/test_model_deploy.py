@@ -99,6 +99,48 @@ def test_examples_memory_and_version_are_loaded(tmp_path):
     assert version  # a model_version row was written
 
 
+def _versions(store: Store, datasource: str) -> list[dict]:
+    return store.query(
+        "SELECT version, created_at FROM model_version WHERE datasource = ?", (datasource,)
+    )
+
+
+def test_version_is_the_hash_of_the_deployed_tree_even_without_a_snapshot(tmp_path):
+    # #364: the version used to be the newest `.snapshots/` dir name, falling back to the constant
+    # "deployed" — so a never-snapshotted model had a version that could never change.
+    from semantic_model.snapshot import compute_model_hash
+
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    assert not (arts / "demo" / ".snapshots").exists()
+    store = _store(tmp_path)
+    model_deploy.deploy_models(store, arts)
+    rows = _versions(store, "demo")
+    store.close()
+    assert [r["version"] for r in rows] == [compute_model_hash(arts / "demo")]
+    assert rows[0]["created_at"]
+
+
+def test_redeploying_changed_content_leaves_one_row_for_the_new_version(tmp_path):
+    # #364: one row per datasource, the live one. An edit to the examples alone is a new version,
+    # because a client pinning the version has to re-fetch them too.
+    arts = tmp_path / "artifacts"
+    _write_model(arts, "demo")
+    store = _store(tmp_path)
+    model_deploy.deploy_models(store, arts, org_id="local")
+    first = _versions(store, "demo")[0]["version"]
+    (arts / "demo" / "prompt_examples" / "Catalog" / "examples.yaml").write_text(
+        "examples:\n  - question: how many skus?\n    sql: SELECT COUNT(DISTINCT sku) FROM products\n"
+    )
+    model_deploy.deploy_models(store, arts, org_id="local")
+    rows = _versions(store, "demo")
+    live = model_store.newest_model_version(store, "demo")
+    store.close()
+    assert len(rows) == 1
+    assert rows[0]["version"] != first
+    assert live == rows[0]["version"]
+
+
 def test_user_memory_is_loaded_from_the_artifacts_root(tmp_path, monkeypatch):
     # USER_MEMORY.md is install-global — it lives at the artifacts ROOT (not per profile) and writes one
     # shared row. main() handles it once (deploy_one does not).

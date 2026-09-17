@@ -25,6 +25,23 @@ uv run dev.py cover     # did the lines I changed get tested? (patch coverage)
 Run `uv run dev.py check` before you push. **CI is the real, unbypassable gate** (`.github/
 workflows/ci.yml`); the local hooks are convenience.
 
+## Pull requests
+
+These apply to every contributor and every Claude session, because CI time and review rounds are
+shared:
+
+- **Open every PR as a draft** (`gh pr create --draft`). CI skips the test work on drafts (the required checks still report). Handle
+  Copilot's review on the draft, posted AND suppressed comments, fixing all of them in one push, then
+  mark it ready (`gh pr ready`) so every applicable check runs once.
+- **Base PRs on `main`.** CI rules come from the PR's base branch, so a PR stacked on an older branch
+  runs without them.
+- **Stay in the issue's scope.** Findings outside it go into one follow-up issue, not another round on
+  this PR. When a finding hits one code path, fix every path of the same shape in the same push.
+- **Reply to each review comment** when you push its fix, or say why you are not fixing it.
+- **Release PRs** change only the version strings and the changelog heading; CI skips their tests.
+  A PR that depends on a new agami-core release (not the release PR itself) waits until PyPI lists
+  that version.
+
 ## Code conventions
 
 - **Match the surrounding code.** Its naming, comment density, and idioms are the spec.

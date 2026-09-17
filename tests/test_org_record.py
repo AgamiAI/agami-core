@@ -74,7 +74,7 @@ def test_second_profile_shares_the_record_id_without_a_sibling_scan(tmp_path, mo
 def test_legacy_lift_preserves_a_pre_record_org_id_idempotently(tmp_path):
     # A post-F14 / pre-F15 deployment keeps its id in a profile's datasource.yaml and has no record yet.
     # ensure_org_record LIFTS that id up (never re-mints), and is idempotent on re-run.
-    prof = tmp_path / "northpeak_salesforce"
+    prof = tmp_path / "acme_salesforce"
     prof.mkdir()
     (prof / "datasource.yaml").write_text(
         yaml.safe_dump({"org_id": "legacyid0000", "datasource": "acme"}), encoding="utf-8"

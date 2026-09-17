@@ -21,13 +21,14 @@ Credentials live in `<artifacts_dir>/local/credentials` (per-profile `[section]`
 |---|---|---|
 | `auth` | psycopg2 `OperationalError` with "password authentication failed", "FATAL: password", "no pg_hba.conf entry"; mysql `Access denied`; snowflake `Incorrect username or password`; SF/HTTP 401; `KeyError` on a missing credential field (`PASSWORD`, `PWD`, `USER`, `TOKEN`, `KEY`) | `"Edit <artifacts_dir>/local/credentials — your <db> credentials may have rotated, a field may be missing, or the user may lack login permission. Re-run after fixing."` |
 | `dsn` | "could not translate host name", "Name or service not known", "getaddrinfo ENOTFOUND", "Unknown MySQL server host"; mysql `Can't connect`; "no such file or directory" against a sqlite/duckdb path | `"Check <artifacts_dir>/local/credentials: the host/path for this profile doesn't resolve. Common causes: typo in hostname, VPN not connected, server moved. For local sqlite/duckdb, confirm the file path exists."` |
-| `network` | "Connection refused", "timed out", "Connection reset by peer", `socket.timeout`, requests `ConnectTimeout` / `ReadTimeout`, snowflake `OperationalError` with "Could not connect", "SSL: WRONG_VERSION_NUMBER" | `"Network error reaching <db_host>. Common causes: VPN not connected, firewall blocking the port, server is down, SSL/TLS misconfiguration. Test with: nc -zv <host> <port> (or your usual reachability check)."` |
+| `network` | "Connection refused", "timed out", "Connection reset by peer", "server closed the connection unexpectedly", "SSL SYSCALL error: EOF detected", "SSL connection has been closed unexpectedly", "terminating connection", "Broken pipe", `socket.timeout`, requests `ConnectTimeout` / `ReadTimeout`, snowflake `OperationalError` with "Could not connect", "SSL: WRONG_VERSION_NUMBER" | `"Network error reaching <db_host>. Common causes: VPN not connected, firewall blocking the port, server is down, SSL/TLS misconfiguration. Test with: nc -zv <host> <port> (or your usual reachability check)."` |
 | `driver_missing` | `ModuleNotFoundError` / `ImportError` for `psycopg2`, `pymysql`, `pyodbc`, `snowflake.connector`, `google.cloud.bigquery`, `redshift_connector`, `duckdb`; native-CLI shell error "command not found: <psql\|mysql\|bq\|snowsql\|sqlite3>" | `"Driver missing: pip install <driver_pkg> (or install the CLI, e.g. brew install <cli_pkg>). See docs/credentials.md for the driver per dialect."` |
 | `permission` | "permission denied for table", "permission denied for relation", "permission denied for schema", "INSUFFICIENT_PRIVILEGES" (Snowflake), MySQL `1142` `SELECT command denied to user`, BigQuery `Access Denied`, SF `INSUFFICIENT_ACCESS_OR_READONLY` | `"Your DB user can connect but cannot read <object>. Grant SELECT on <schema>.<table> (or GRANT USAGE on the schema), then re-run."` |
 | `column_not_found` | psycopg2 `UndefinedColumn`; mysql `1054` `Unknown column`; snowflake `Invalid identifier`; BigQuery `Name <x> not found`; sqlite `no such column`; SF `INVALID_FIELD` | If the missing column **is** in the local semantic model YAML: `"Your model references <col> but it's no longer in the live database — schema drift. Re-introspect with /agami-connect to sync."` Otherwise: `"Generated SQL referenced a column that doesn't exist. Re-run the query — it'll auto-retry with corrected SQL."` |
 | `table_not_found` | psycopg2 `UndefinedTable`; mysql `1146` `Table doesn't exist`; snowflake `Object <x> does not exist`; BigQuery `Table <x> not found`; sqlite `no such table` | If the missing table **is** in the local semantic model: `"Your model references <table> but it's no longer in the live database — schema drift. Re-introspect with /agami-connect to sync."` Otherwise: `"Generated SQL referenced a table that doesn't exist in this datasource. Re-run the query."` |
-| `syntax` | psycopg2 `SyntaxError` (DB-side); mysql `1064` `You have an error in your SQL syntax`; snowflake `compilation error`; sqlite `near "X": syntax error` | `"SQL syntax error from the generator. Re-run the query — auto-retry usually fixes generator slips."` |
-| `other` | anything else | `"<original error message>. For deeper per-datasource troubleshooting see the connection reference (plugins/agami/shared/connection-reference.md) and docs/troubleshooting.md."` |
+| `syntax` | psycopg2 `SyntaxError` (DB-side); mysql `1064` `You have an error in your SQL syntax`; snowflake `compilation error`; sqlite `near "X": syntax error`. Only a message that names a syntax error: an execution failure no rule reads is `other`, never `syntax` | `"SQL syntax error from the generator. Re-run the query — auto-retry usually fixes generator slips."` |
+| `sign_in_required` | Never from driver text. Only exit code 11, raised by an injected executor that connects as the asking person when that person's own credential is missing or cannot be renewed | `"Your sign-in has expired or is missing, so the data source could not be opened as you. Sign in again (reconnect the connector), then start a new conversation."` |
+| `other` | anything else, including an execution-time driver message no rule above reads (no exit-code prior turns it into `syntax`) | `"<original error message>. For deeper per-datasource troubleshooting see the connection reference (plugins/agami/shared/connection-reference.md) and docs/troubleshooting.md."` |
 
 **There is no `timeout` row, deliberately.** It used to detect psycopg2 `QueryCanceled`, MySQL 2013,
 Snowflake `query was canceled` and explicit `statement_timeout` errors — every one of which is a
@@ -82,7 +83,7 @@ The classifier returns:
   # raw error is already in front of the user and a remediation is worth giving, while
   # `execute_sql`'s failure crosses the LLM boundary and carries `{kind, message}` with no
   # remediation and no value text. Detection rules are shared; presentation is per-surface.
-  "kind": "auth | dsn | network | driver_missing | permission | column_not_found | table_not_found | syntax | timeout | other",
+  "kind": "auth | dsn | network | driver_missing | permission | column_not_found | table_not_found | syntax | timeout | sign_in_required | other",
   "remediation": "<one-line user-facing remediation message>",
   "raw_message": "<original exception message, truncated to 500 chars>",
   "drift_match": True | False,    # set only on column_not_found / table_not_found
@@ -97,7 +98,8 @@ preserved so the query log captures the original.
 ## Where this is consumed
 
 - **`agami-query`** — wraps each connection method's SQL call. On `auth` / `dsn` / `network` /
-  `driver_missing` / `permission`, surface the remediation and stop. On `column_not_found` /
+  `driver_missing` / `permission`, surface the remediation and stop. On `sign_in_required`, relay the
+  message and stop — nothing is broken. On `column_not_found` /
   `table_not_found`, run the drift-match step and emit the appropriate message. On `syntax` / `timeout`,
   the query path's auto-retry fires; the classifier just labels the failure.
 - **`agami-connect`** — when an introspection query fails, classify it and surface the one-line

@@ -153,6 +153,7 @@ Route any error through [`shared/db_error_classifier.md`](../../shared/db_error_
 
 - `auth` / `dsn` → credentials may have rotated; point at `<artifacts_dir>/local/credentials`.
 - `network` → check VPN / DB endpoint reachability.
+- `sign_in_required` → the person's own sign-in expired; relay the message (sign in again, new conversation).
 - `driver_missing` → fall through to the next available method.
 
 If the cached method doesn't work, re-run tool detection per [`agami-connect/SKILL.md → Phase 0a.5`](../agami-connect/SKILL.md#0a5--tool-detection).
@@ -401,6 +402,7 @@ Route any non-zero exit through [`shared/db_error_classifier.md`](../../shared/d
 | `auth`, `dsn`, `network` | Stop. Surface the one-line remediation. No retry. |
 | `driver_missing` | Fall through to the next available method (native CLI → DuckDB → Python driver). |
 | `permission` | Stop. DB user lacks SELECT on the touched dataset. |
+| `sign_in_required` | Stop. The person's own sign-in expired or is missing — relay the message (sign in again, then start a new conversation). Nothing is broken; don't retry. |
 | `column_not_found`, `table_not_found`, `syntax` | Auto-retry up to **2** times. Pass the error back to the SQL generator: "The previous SQL failed with `<one-line classifier message>`. Regenerate using only table / column names from the schema context above." |
 | `other` | Stop. Surface raw error truncated to 200 chars. |
 
