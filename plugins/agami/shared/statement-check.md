@@ -1,72 +1,88 @@
-# Running a statement a person supplied
+# Checking a statement a person supplied
 
-The person's statement takes the road the AI's SQL takes. There is no second road. `agami-query`
-Phase 1e says how the profile's tier is invoked, Phase 3a says the two steps every statement goes
-through, Phase 3b says what an error means, and Phase 4e.iii.5 says how a receipt is assembled. This
-page only says what to do at each step with a statement you did not write, and which file to write it
-to. The files are the ones [`part-ledger.md`](part-ledger.md) reads.
+The person's statement runs through the guard agami's own SQL runs through, and it runs there in
+code. **It is never run on a command-line tier**: not psql, mysql, snowsql, sqlite3 or DuckDB,
+whatever tier the profile queries on. Those tools have no read-only gate, no scope gate and no row
+or time bound, so a statement that writes, or a probe, would reach the database with only the
+database role in its way. One script does every step below that touches the database, and it sends
+each statement through `execute_sql`'s guarded chokepoint with the built-in executor, never with
+`--no-safety`. The session never runs the statement or a probe itself. The files it writes are the
+ones [`part-ledger.md`](part-ledger.md) reads.
 
 Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. Write
-`statement.sql` first, verbatim.
+`statement.sql` first, verbatim, with the Write tool. Then check the row, once:
 
-1. **Read-only first.** One `SELECT` or `WITH ... SELECT` per
-   [`sql-generation-rules.md`](sql-generation-rules.md). Anything else is refused here: write
-   `run.json` with `status: "not_run"`, mark the row `error`, and probe nothing.
-2. **Does it run at all?** Wrap it so it returns no rows, the way seed validation does:
-   `SELECT 1 FROM (<statement>) AS _agami_check WHERE 1=0`, through steps 3 and 4. A failure whose
-   classifier kind is `column_not_found`, `table_not_found` or `syntax` is the person's defect: write
-   `run.json` with `status: "failed"` and the `kind`, and stop probing.
-3. **`sm prepare` on every tier.** `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" prepare "$ROOT" --area <area>
-   --sql-file statement.sql > statement-prepare.json`. Keep `aggregates`, `findings` and `unchecked`.
-   It describes and never refuses.
-4. **The tier's own tool**, exactly as `agami-query` Phase 1e tabulates it for this profile: psql,
-   mysql, snowsql, sqlite3, DuckDB, or `"$PY" -m execute_sql --profile <profile> --area <area>
-   --sql-file statement.sql`. **Never `--no-safety`.** Always pass the statement **by file** (the
-   tool's `-f` or `--sql-file` form), never inline in a shell string: a literal such as `'$(id)'` is
-   legal SQL and the shell would expand it. stdout goes to `statement.csv`. `run.json` records
-   `status` (`ok`, `failed`, `refused`, `not_run`), `exit`, the classifier's `kind`, the guard's
-   `rule`, and its `remediation`; **never the raw stderr**, which can carry the statement and the
-   engine's error text.
-5. **A refusal is a finding, not a crash.** `execute_sql` exits `1` with one JSON line on stderr,
-   `{"refusal": {"reason", "rule", "detail", "remediation"}}`. Write `run.json` with
-   `status: "refused"` and that `rule`. `table_scope` and `column_scope` become a `scope: model_gap`
-   in the ledger: the person wanted a table or column the semantic model does not expose.
-   `select_star` becomes `runs: query_defect`. Never rewrite the statement and never retry: a
-   regenerated statement is one the person never wrote.
-6. **Other failures** go through [`db_error_classifier.md`](db_error_classifier.md). `auth`, `dsn`,
-   `network` and `permission` stop the whole run, as Phase 3b stops it; write the `kind` and its
-   `remediation` and move on.
-7. **`sm receipt`** whenever the statement parsed: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" receipt
-   "$ROOT" --sql-file statement.sql > statement-receipt.json`. Beside it, `bash
-   "$AGAMI_PLUGIN_ROOT/scripts/sm" mentions "$ROOT" --sql-file statement.sql > mentions.json`: the
-   semantic model's own words (descriptions, caveats, glossary, narrative, prompt examples) about every
-   table and column the statement reads, for the ledger to put beside a part that falls short.
-8. **Probes** go through step 4 only, each written to its own `.sql` file first and passed by path,
-   each result to its own CSV named as `part-ledger.md` lists:
-   `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" join-probes "$ROOT" --sql-file statement.sql >
-   join-probes.json`, then each join's `probes.overlap[i].sql` to `<join id>.overlap.<i>.csv` and
-   each entry of the top-level `cardinality` map to `cardinality.<table>.<column>.csv` (skip a null
-   entry: the semantic model already says that column is unique), and each join's `dropped_rows_probe.sql` to
-   `<join id>.dropped_rows.csv` (skip a null probe); `bash "$AGAMI_PLUGIN_ROOT/scripts/sm"
-   filter-values plan "$ROOT" --sql-file statement.sql > filter-values.plan.json`, then each
-   `columns[<key>].distinct` to `<key>.distinct.csv`, each literal's `probes.exists` to
-   `<literal id>.exists.csv`, and `probes.exists_folded` to `<literal id>.exists_folded.csv` only when
-   `exists` returned 0; then `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" filter-values judge "$ROOT" --plan
-   filter-values.plan.json --results . > filter-values.judge.json`.
-   A probe the tier refuses or fails leaves an empty CSV; leave it, the ledger reads it as a probe
-   that failed. Beside every probe's CSV write `<same name>.run.json` with the same fields as step
-   4's `run.json`, refusal `rule` included: that file is the record of the probe having run or having
-   been refused. **On the `execute_sql` tier, run every probe of the row as one plan**: write
-   `probes.plan.json`, a list of `{id, sql_file, out}` (one entry per probe, `out` the CSV named
-   above), and run `"$PY" -m execute_sql --profile <profile> --batch probes.plan.json`; the door
-   resolves the semantic model once and keeps the connection open, and writes each CSV, each `.run.json` and
-   the manifest itself. The other tiers keep one call per probe.
+```bash
+"$PY" "$AGAMI_PLUGIN_ROOT/scripts/check_statement.py" --profile <profile> --area <area> \
+  --row-dir "<artifacts_dir>/local/reconcile/<ts>/rows/<n>"
+```
+
+`$PY` is the interpreter `sm` resolves ([`connection-reference.md`](connection-reference.md)); it
+has agami-core and the database driver. `<area>` is the subject area the scope gates check against,
+taken from the profile's subject areas. Stdout is one JSON line: the statement's outcome and how
+many probes ran. It never carries SQL.
+
+- **Exit `0`**: the row was checked, whatever the statement's outcome. A refusal is a finding.
+- **Exit `3`**: the database could not be reached as configured. `run.json` carries the `kind`
+  (`auth`, `dsn`, `network`, `permission` or `driver_missing`) and its `remediation`. Stop the whole
+  run, as `agami-query` Phase 3b stops it, and tell the person that sentence. `driver_missing` means
+  `$PY` lacks the Python driver for this database; the sentence names what to install.
+- **Exit `2`**: it could not start. Either `statement.sql` is missing, or the interpreter lacks
+  agami-core; run `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` and call it with `"$PY"`.
+
+## What the script does, in order
+
+1. **Read-only first.** The guard's own read-only gate, the one every statement meets at the
+   chokepoint, reads the statement before anything runs. It enforces
+   [`sql-generation-rules.md`](sql-generation-rules.md): one `SELECT` or `WITH ... SELECT`. Anything
+   else is refused: `run.json` gets `status: "refused"` and the gate's `rule` (`read_only` for a
+   statement that writes), and nothing runs after it, not even the zero-row check. Mark the row
+   `error`.
+2. **Does it run at all?** It wraps the statement so it returns no rows, the way seed validation
+   does, `SELECT 1 FROM (<statement>) AS _agami_check WHERE 1=0`, writes that to `zero-row.sql`, and
+   runs it through the guard. A failure whose classifier kind is `column_not_found`,
+   `table_not_found` or `syntax` is the person's defect: `run.json` gets `status: "failed"` and the
+   `kind`, and nothing is probed.
+3. **`sm prepare`**, to `statement-prepare.json`: `aggregates`, `findings` and `unchecked`. It
+   describes and never refuses.
+4. **The statement itself**, through the guard, its result to `statement.csv` (empty when it did not
+   run). `run.json` records `status` (`ok`, `failed`, `refused`), `exit`, the classifier's `kind`, the
+   guard's `rule`, `detail` and `remediation`. **Never the raw error text**, which can carry the
+   statement and the engine's own words. The guard's fields are value-free by contract.
+5. **A refusal is a finding, not a crash.** `table_scope` and `column_scope` become a
+   `scope: model_gap` in the ledger: the person wanted a table or column the semantic model does not
+   expose. `select_star` becomes `runs: query_defect`. The script never rewrites the statement and
+   never retries, and neither does the session: a regenerated statement is one the person never
+   wrote.
+6. **Other failures** carry the kind [`db_error_classifier.md`](db_error_classifier.md) names.
+   `auth`, `dsn`, `network`, `permission` and `driver_missing` end the script with exit `3`.
+7. **`sm receipt`** to `statement-receipt.json`, and beside it **`sm mentions`** to `mentions.json`:
+   the semantic model's own words (descriptions, caveats, glossary, narrative, prompt examples) about
+   every table and column the statement reads, for the ledger to put beside a part that falls short.
+8. **Probes.** `sm join-probes` to `join-probes.json` and `sm filter-values plan` to
+   `filter-values.plan.json` emit the probe SQL. Each probe is written to its own `.sql` file, and
+   each result goes to its own CSV named as `part-ledger.md` lists: each join's
+   `probes.overlap[i].sql` to `<join id>.overlap.<i>.csv`, each non-null entry of the top-level
+   `cardinality` map to `cardinality.<table>.<column>.csv` (a null entry means the semantic model
+   already says that column is unique), each join's `dropped_rows_probe.sql` to
+   `<join id>.dropped_rows.csv`, each `columns[<key>].distinct` to `<key>.distinct.csv`, and each
+   literal's `probes.exists` to `<literal id>.exists.csv`. All of them run as one plan,
+   `probes.plan.json`, through `execute_sql`'s batch door: the semantic model is resolved once and
+   the connection kept open, and every probe still meets the guard on its own. The door writes each
+   CSV, a `<same name>.run.json` beside it (`status`, `exit`, `kind`, `rule` and `detail`, refusal
+   rule included) and the manifest, `probes.plan.json.manifest.json`. Then each literal's
+   `probes.exists_folded` runs to `<literal id>.exists_folded.csv`, **only when `exists` returned 0**,
+   as a second plan, `probes.folded.plan.json`. Last, `sm filter-values judge` reads the CSVs to
+   `filter-values.judge.json`. A probe the guard refuses or the database fails leaves an empty CSV
+   beside its `.run.json`; the ledger reads it as a probe that failed.
 9. **Nothing in these steps writes `query_log.jsonl`, and nothing here runs unrecorded.**
    `agami-save-correction` reads that log's last successful line as the question to correct, and a
    probe there would be corrected instead of the answer. The record of this phase is the row
    directory itself: `run.json` for the statement and `<probe>.run.json` for every probe, each with
    its exit, rule and kind, so every execution and every refusal in this phase is written down. The
    AI's own run logs as `agami-query` Phase 5 always has.
+
+## What stays with the session
 
 10. **Does the statement answer the question?** For every statement row, write `question_fit.json`;
    when the row carries a question, read the two side by side first: `{"fit": "plausible" | "doubtful" | "no_question",
