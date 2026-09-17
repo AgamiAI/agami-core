@@ -231,7 +231,7 @@ CONTRACT_RULES = frozenset({
 # `datasource` on an organization serving several. It is a routing decision made before any statement
 # or model is consulted, which the contract's list predates. It belongs in the contract; until it is
 # transcribed there, it is declared here so the drift this test guards against stays visible.
-LOCAL_ADDITIONS: frozenset[str] = frozenset({"datasource_required"})
+LOCAL_ADDITIONS: frozenset[str] = frozenset({"datasource_required", "stale_model"})
 
 
 def _declared_rules() -> set[str]:
