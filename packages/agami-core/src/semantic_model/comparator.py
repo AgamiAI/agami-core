@@ -434,8 +434,9 @@ def pair_columns(
     name first (see `_pair_equal_vectors`). A name can mislead too: a statement can swap two labels,
     or alias one of two columns that share a label. So when the order does not count, the pairing
     by names is checked against the plain in-order one, and the one that lines up more rows is
-    kept, a tie going to the names. When the order counts there is nothing to check: equal vectors
-    are equal row for row, so every choice inside a class lines up the same rows.
+    kept, a tie going to the names. The check is skipped when the names already line up every row,
+    since nothing lines up more. When the order counts there is nothing to check: equal vectors are
+    equal row for row, so every choice inside a class lines up the same rows.
 
     Stage two is for what stage one left: one differing cell would otherwise unpair a column that
     is plainly there, and the score would read "no generated column carries the values of total"
@@ -458,12 +459,18 @@ def pair_columns(
     if not ordered:
         in_order = _pair_equal_vectors(*columns, names_first=False)
         if in_order != pairing:
-            overlaps = [
-                compare_rows(golden_rows, generated_rows, p, ordered=False, quantize=quantize)[0]
-                for p in (pairing, in_order)
-            ]
-            if overlaps[1] > overlaps[0]:
-                pairing = in_order
+            overlap = compare_rows(
+                golden_rows, generated_rows, pairing, ordered=False, quantize=quantize
+            )[0]
+            # Both pairings pair the same golden columns, so no pairing can line up more rows than
+            # the shorter result holds. Once the names have lined up that many, reading the rows a
+            # second time can only tie, and a tie goes to the names.
+            if overlap < min(len(golden_rows), len(generated_rows)):
+                in_order_overlap = compare_rows(
+                    golden_rows, generated_rows, in_order, ordered=False, quantize=quantize
+                )[0]
+                if in_order_overlap > overlap:
+                    pairing = in_order
     agreement: dict[int, float] = dict.fromkeys(pairing, 1.0)
 
     claimed = set(pairing.values())
