@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
@@ -207,6 +209,19 @@ def test_asking_a_row_again_with_no_statement_clears_the_old_result(monkeypatch,
     assert not (tmp_path / "actual.csv").exists() and not (tmp_path / "agami-run.json").exists()
 
 
+def test_asking_a_row_again_clears_the_comparison_of_the_answer_before_it(monkeypatch, tmp_path):
+    """`record` reads `comparison.json` for the row's verdict. Left beside a new result, the previous
+    answer's comparison reports a match the new result does not support."""
+    _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(999,)])))
+    (tmp_path / "comparison.json").write_text('{"status": "scored", "accuracy": 1.0}')
+    (tmp_path / "diff.json").write_text('{"match": true, "delta": 0}')
+
+    rge._write_agami_result(tmp_path, _answer(area="store"), "sales")
+
+    assert not (tmp_path / "comparison.json").exists() and not (tmp_path / "diff.json").exists()
+    assert (tmp_path / "actual.csv").read_text().splitlines() == ["n", "999"]
+
+
 def test_only_the_servers_own_statement_is_run_again(monkeypatch, tmp_path):
     """A statement the trace does not hold character for character is not run. The trace is the
     only record of what the server let through, so anything else would be a statement nobody guarded
@@ -265,6 +280,33 @@ def test_ask_file_via_mcp_writes_each_rows_result_beside_its_answer(monkeypatch,
     assert len(calls) == 1
     assert (tmp_path / "rows" / "4" / "actual.csv").read_text().splitlines() == ["n", "7"]
     assert json.loads((tmp_path / "rows" / "4" / "agami-run.json").read_text())["status"] == "ok"
+
+
+def test_every_answer_is_on_disk_before_any_result_is_run(monkeypatch, tmp_path, capsys):
+    """The clients are already paid for. A run that dies on the first row's guarded re-run must not
+    take the other rows' answers with it, so every answer file is written before any result runs."""
+    _wire(monkeypatch, tmp_path)
+    trace = tuple(_answer()["probes"])
+
+    def die(sql, profile, area, *, executor, org_id=None, no_safety=False):
+        raise SystemExit(2)   # what `execute_guarded` lets through, rather than catching
+
+    monkeypatch.setattr(rge.execute_sql, "execute_guarded", die)
+
+    class _McpGenerator:
+        def generate(self, question, org, datasource):
+            return gr.GeneratedSql(sql=ANSWER_SQL, error=None, statements=(ANSWER_SQL,), trace=trace)
+
+    monkeypatch.setattr(rge, "_generator_for", lambda args: (_McpGenerator(), None))
+    questions = tmp_path / "chunk.json"
+    questions.write_text(json.dumps({"chunk": [{"row": 1, "question": "Orders by region?"},
+                                               {"row": 2, "question": "Orders by month?"}]}))
+
+    with pytest.raises(SystemExit):
+        rge.main(["--profile", "sales", "--via", "mcp", "--ask-file", str(questions), "--out-dir", str(tmp_path / "rows")])
+
+    for row in (1, 2):
+        assert json.loads((tmp_path / "rows" / str(row) / "agami-answer.json").read_text())["sql"] == ANSWER_SQL
 
 
 def test_ask_via_mcp_writes_the_result_beside_its_answer_file(monkeypatch, tmp_path, capsys):

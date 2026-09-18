@@ -1198,8 +1198,10 @@ def _write_agami_result(row_dir: Path, answer: dict[str, Any], profile: str) -> 
     client's copy of it. A statement this cannot find in the trace, character for character, is not
     run at all.
     """
-    # A result left by an earlier run of this row is not this answer's result, whatever happens next.
-    for stale in ("actual.csv", "agami-run.json"):
+    # A file left by an earlier run of this row is not this answer's, whatever happens next. The
+    # comparison goes with them: `record` reads it for the row's verdict, so a comparison of the
+    # PREVIOUS answer left beside a new result reports a match the new result does not support.
+    for stale in ("actual.csv", "agami-run.json", "comparison.json", "diff.json"):
         (row_dir / stale).unlink(missing_ok=True)
     sql = (answer.get("sql") or "").strip()
     probes = answer.get("probes")

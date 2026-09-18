@@ -320,6 +320,21 @@ def test_an_exact_copy_wins_over_a_near_one(monkeypatch):
     assert _generate().sql == quoted
 
 
+def test_the_latest_near_copy_wins_when_no_copy_is_exact(monkeypatch):
+    """A client that reformatted the same statement twice reported neither spelling exactly. The row
+    takes the LAST one the server ran, because that is the statement whose result the client read."""
+    first = "SELECT COUNT(*) AS n FROM orders"
+    last = "SELECT  COUNT(*)  AS  n  FROM  orders"
+    monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(
+        stdout=_envelope(json.dumps({"sql": "select count(*) as n from orders", "value": "3"})),
+        calls=[
+            {"tool": "execute_sql", "args": {"sql": first}, "status": "ok"},
+            {"tool": "execute_sql", "args": {"sql": last}, "status": "ok"},
+        ],
+    ))
+    assert _generate().sql == last
+
+
 def test_a_tool_that_raised_ends_the_row_like_any_query_that_did_not_run(monkeypatch):
     monkeypatch.setattr(gr.subprocess, "run", _RecordedSpawn(calls=[
         {"tool": "execute_sql", "args": {"sql": ANSWERED}, "status": "raised", "detail": "TimeoutError"},
