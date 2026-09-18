@@ -2440,10 +2440,9 @@ def _next_query_words(rec: dict) -> str | None:
     tried = next((a for a in rec.get("attempts") or [] if a.get("run_by") == "reconcile"), None)
     if tried is None or tried.get("happened") == "not_run":
         return None
-    grade = tried.get("grade")
     if tried.get("happened") != "ran":
-        # Reconcile failing to reach the database says nothing about agami's statement.
-        return None if grade == "not_graded" else "agami's next query did not run either. " + (tried.get("why") or "")
+        return "agami's next query did not run either. " + (tried.get("why") or "")
+    grade = tried.get("grade")
     yours = "query" if rec.get("statement") else "number"
     if grade not in ("right", "partly", "wrong"):
         reason = str(tried.get("grade_words") or "").removeprefix("Not graded: ")
@@ -3136,7 +3135,10 @@ def _tried_next(row_dir: Path, *, comparison_yours: str | None) -> dict[str, Any
         return {"run_by": "reconcile", "happened": "ran", "grade": grade, "grade_words": words,
                 "why": "Reconcile ran it after agami's session ended, so agami never saw its result."}
     if status == "failed" and run.get("kind") in _RECONCILE_COULD_NOT_RUN:
-        return {"run_by": "reconcile", "happened": "failed", "grade": "not_graded",
+        # Reconcile never reached the database, so the query never ran and nobody ran it. Calling it
+        # `failed` put "the database returned an error" at the head of the card's line, over a
+        # sentence saying the opposite; and `run_by: reconcile` claimed a run that did not happen.
+        return {"happened": "not_run", "grade": "not_graded",
                 "why": "Reconcile could not run it: " + _first_line(run.get("detail") or run.get("kind")).rstrip(".") + ".",
                 "grade_words": "Not graded: reconcile could not reach the database to run it."}
     if status in _DID_NOT_RUN:

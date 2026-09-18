@@ -130,7 +130,7 @@ def test_an_unreadable_comparison_falls_back_to_a_number_diff(tmp_path: Path) ->
      "failed", "reconcile", "no_answer",
      "The database returned an error: The generated SQL was not valid for this database. Re-run the query."),
     # Reconcile failing to reach the database says nothing about agami's statement.
-    ({"status": "failed", "kind": "network", "detail": "The database was unreachable."}, "failed", "reconcile", "not_graded",
+    ({"status": "failed", "kind": "network", "detail": "The database was unreachable."}, "not_run", "agami", "not_graded",
      "Reconcile could not run it: The database was unreachable."),
     # The run can stop between writing the statement and its run file. Nobody ran it.
     (None, "not_run", "agami", "not_graded", "Reconcile has no readable record of running it."),
@@ -286,6 +286,23 @@ def test_a_tool_that_crashed_is_not_described_as_the_database(tmp_path: Path) ->
 
     assert (only["happened"], only["why"]) == ("crashed", "agami's own tool failed (TimeoutError), so no result came back.")
     assert (only["grade"], only["grade_words"]) == ("no_answer", "No answer: it did not run.")
+
+
+def test_reconcile_failing_to_reach_the_database_is_never_shown_as_agamis_query_failing(tmp_path: Path) -> None:
+    """The card's line opens with what happened. "The database returned an error" over a sentence
+    saying reconcile could not reach the database contradicts itself, on the line a reader scans."""
+    run = _run(tmp_path)
+    _blocked_row(run, next_query_run__json={"status": "failed", "kind": "auth",
+                                            "detail": "The database rejected the connection's credentials."})
+    reconcile.record(run, 1)
+
+    (item,) = reconcile.report_items(run)
+    tried_next = json.loads((run / "rows.jsonl").read_text().splitlines()[0])["attempts"][1]
+
+    assert (tried_next["happened"], tried_next["grade"]) == ("not_run", "not_graded")
+    assert "run_by" not in tried_next or tried_next["run_by"] == "agami"
+    # And the card says nothing about agami's next query, because nothing ran it.
+    assert not any("next query" in line for line in item["change"])
 
 
 def test_a_run_without_a_trace_records_no_attempts(tmp_path: Path) -> None:
