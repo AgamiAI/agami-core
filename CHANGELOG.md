@@ -50,6 +50,19 @@ below corresponds to one such version.
   missing too, rather than as a column that differs on one row. And a score without row order can
   change for such items. A different column that holds exactly the same values still pairs.
 
+- **A reconcile table that matched only because a different column holds the same repeated value
+  is now marked unverified.** Reconcile compares two tables by pairing each of your columns with the
+  column of agami's that holds the same values. So when your `is_gift` is "N" on every row and
+  agami returned `is_express`, also "N" on every row, the two paired and the row scored as a match.
+  Values alone cannot tell a renamed column from a different one, so the comparator is unchanged.
+  Reconcile has the names and your result. The answers still match (`match` stays `true`), but the
+  row's status is now `match_unverified`, not `match`, and it reads "same answer, but part of your
+  query could not be checked". The card says why, naming both columns, and asks you to check that
+  agami returned the column you meant. The rule is narrow, so a legitimate rename stays a match: it
+  needs a full match, a pair whose names differ (ignoring case and a table prefix), and a column of
+  yours where one value fills more than half the rows. A column whose values vary, a one-row result
+  and a single number are left as they were.
+
 ## [0.9.3] — 2026-09-17
 
 ### Added
