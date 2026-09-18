@@ -235,6 +235,19 @@ def test_only_the_servers_own_statement_is_run_again(monkeypatch, tmp_path):
     assert calls == [] and not (tmp_path / "actual.csv").exists() and not (tmp_path / "agami-run.json").exists()
 
 
+def test_a_tool_that_raised_is_recorded_as_a_statement_that_did_not_run(monkeypatch, tmp_path):
+    """`raised` is the trace's word for agami's own tool throwing. The run file's vocabulary has no
+    such status, and nothing came back, so the row records the statement as not run."""
+    calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
+    answer = _answer(status="raised", detail="KeyError")
+
+    rge._write_agami_result(tmp_path, answer, "sales")
+
+    run = json.loads((tmp_path / "agami-run.json").read_text())
+    assert (run["status"], run["detail"], run["source"]) == ("not_run", "KeyError", "trace")
+    assert calls == [] and not (tmp_path / "actual.csv").exists()
+
+
 def test_the_area_comes_from_the_query_that_is_run_again(monkeypatch, tmp_path):
     calls = _guard(monkeypatch, SimpleNamespace(status="ok", data=SimpleNamespace(columns=["n"], rows=[(1,)])))
     answer = _answer(area="store")
