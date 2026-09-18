@@ -292,7 +292,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|non
 | Status | When |
 |---|---|
 | `match` | the numbers match, and every graded part is `confirmed` (or there was no statement to grade) |
-| `match_unverified` | the numbers match, but a part of the person's statement is not `confirmed`. Phase 3e never sees it: a match nobody could verify may be luck. A query written differently from agami's is not this: the claims comparison notes it (`noted`, "same answer, different query" on the page) and the row stays `match` |
+| `match_unverified` | the numbers match, but a part of the person's statement is not `confirmed`. Phase 3e never sees it: a match nobody could verify may be luck. A query written differently from agami's is not this: the claims comparison notes it (`noted`, "same answer, different query" on the page) and the row stays `match`. A table that matched only because a column of yours paired with a differently named column of agami's, where one value fills most of your column's rows, is this: the two could be different columns holding the same values, so the ledger's `value_pair` part stays open and the card names both columns |
 | `mismatch` | the numbers differ and the person's statement has no `query_defect`, so agami is the likelier culprit |
 | `expected_doubtful` | the numbers differ and the person's statement has a `query_defect`, so the expected value itself is in doubt. Kept out of the mismatch tally |
 | `error` | the row could not run |
@@ -329,7 +329,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" claims "$ROOT" --sql-file rows/<n>/agami.sq
 python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n> --with-claims
 ```
 
-**This is the row's one ledger run.** Every file Phase 1.5 wrote is still there, so the grades are the same ones 1.5 would have produced, plus the two claim parts. When agami's own run failed and there is no statement to compare against, run it here without `--with-claims`. Never run it twice.
+**This is the row's one ledger run.** Every file Phase 1.5 wrote is still there, so the grades are the same ones 1.5 would have produced, plus the two claim parts and, for a table that matched, a `value_pair` part for each column of yours that matched a differently named column only through one repeated value. When agami's own run failed and there is no statement to compare against, run it here without `--with-claims`. Never run it twice.
 
 The eight claims (tables, what is selected, filter predicates, date window, group keys, join keys, ordering, limit) say which part differs; they never say who is right. Two statements are the same query only when every claim that could be read agrees, what they select included; when the data could not be compared, the page still says "same query, answer not compared" or "different query, answer not compared". Then set the row's `status` with `reconcile.py status`, from the diff's `match` and the ledger's verdict. For a table there is no `diff`: pass `--match true` when `compare-results` reports `accuracy` of `1.0`, `false` otherwise, and `none` when it could not score.
 
