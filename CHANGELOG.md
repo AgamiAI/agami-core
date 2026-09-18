@@ -127,6 +127,29 @@ below corresponds to one such version.
   yours where one value fills more than half the rows. A column whose values vary, a one-row result
   and a single number are left as they were.
 
+- **A right answer now scores 1.0 when its equal columns are renamed or have their labels swapped.**
+  When row order is not compared, columns that hold the same values look the same. The comparator
+  pairs them by name first, or in order when that lines up more rows. When every column is renamed,
+  or labels are swapped among three or more such columns, neither lines the rows up, and a right
+  answer scored below 1.0. The comparator now tries the ways to pair these columns and keeps the one
+  that lines up the most rows. A tie goes to the way that pairs more same-named columns, then to the
+  old pairing. The search is bounded in two ways. It tries at most 720 ways, every order of six
+  equal columns. A group past that keeps the old pairing, so seven or more such columns can still
+  score below 1.0. And once it has paired every column one way, taking the choice that lines up the
+  most rows each time, it reads the result a hundred more times, or two million rows, whichever is
+  more. Past that it keeps the best pairing it has found. That pairing never lines up fewer rows
+  than the old one, but it can fall short of the best. The budget counts reads of the result and not
+  rows, because a flat count bought a hundred reads of a 20,000-row result and only twenty of a
+  100,000-row one — and at 100,000 rows a right answer with every column renamed then scored 0.0.
+
+- **A wrong answer's score can drop, and when it drops it usually drops to 0.0.** The search can
+  take the generated column that carried a golden column's values and give it to a different golden
+  column. The first column is then left with no partner. Over 6,000 near misses — a right answer
+  with its columns permuted and renamed, and then one cell changed — 188 scored lower than before
+  and 85 scored higher. All 188 landed on 0.0, and each one reports "no generated column carries the
+  values of X" about a column whose values a generated column holds exactly. So a near miss that
+  read as mostly right can now read as entirely wrong, and name a column that is there.
+
 ## [0.9.3] — 2026-09-17
 
 ### Added
