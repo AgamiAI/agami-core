@@ -52,7 +52,7 @@ would make a crashed verb read as a clean statement.
 ## The row directory
 
 The skill writes one directory per row, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`, with fixed
-filenames, and `reconcile.py ledger --row-dir <dir> [--with-claims]` reads them, once per row after the
+filenames, most of them through `check_statement.py` ([`statement-check.md`](statement-check.md)), and `reconcile.py ledger --row-dir <dir> [--with-claims]` reads them, once per row after the
 two statements have been compared (with `--with-claims`) or once without it when there is nothing to
 compare against. The verb is idempotent
 and writes `ledger.json` beside the inputs.
@@ -60,17 +60,20 @@ and writes `ledger.json` beside the inputs.
 | File | Written by | Holds |
 |---|---|---|
 | `statement.sql` | the skill | the person's statement, verbatim |
-| `run.json` | the skill | `{"status": "ok" \| "refused" \| "failed" \| "not_run", "rule": ..., "kind": ..., "detail": ...}` from the tier's exit, the refusal line, or the error classifier |
-| `statement.csv` | the tier | the statement's result; only its shape and one cell are ever copied onward |
+| `run.json` | `check_statement.py` | `{"status": "ok" \| "refused" \| "failed", "exit": ..., "rule": ..., "kind": ..., "detail": ..., "remediation": ...}` from the guard's refusal or the classified failure, never the engine's own text |
+| `zero-row.sql` | `check_statement.py` | the statement wrapped to return no rows, the check that it runs at all |
+| `zero-row.run.json` | `check_statement.py`, through the guard | that wrap's own outcome, in `run.json`'s shape. A refusal here is the check not run, never a fault in the statement: the wrap is agami's statement, not the person's |
+| `statement.csv` | `check_statement.py`, through the guard | the statement's result; only its shape and one cell are ever copied onward |
 | `statement-prepare.json` | `sm prepare --sql-file` | aggregates, findings, `unchecked` |
 | `statement-receipt.json` | `sm receipt --sql-file` | the receipt of the person's statement |
 | `join-probes.json` | `sm join-probes --sql-file` | every join written with its status, what the semantic model declares about it (`declared_cardinality`, `unique_by_model`), the probes to run, and a top-level `cardinality` map of one probe per column |
-| `<join id>.overlap.<i>.csv` | the tier | the `i`-th overlap probe's `matched` count |
-| `<join id>.dropped_rows.csv` | the tier | `total, dropped` for the join's left table: its rows with no partner on the right |
-| `cardinality.<table>.<column>.csv` | the tier | `total, distinct_count, null_count` for one column, shared by every join that reads it; not written for a column the semantic model declares a key |
+| `<join id>.overlap.<i>.csv` | the batch door, through the guard | the `i`-th overlap probe's `matched` count |
+| `<join id>.dropped_rows.csv` | the batch door, through the guard | `total, dropped` for the join's left table: its rows with no partner on the right |
+| `cardinality.<table>.<column>.csv` | the batch door, through the guard | `total, distinct_count, null_count` for one column, shared by every join that reads it; not written for a column the semantic model declares a key |
 | `filter-values.plan.json` | `sm filter-values plan --sql-file` | every typed value and its probes, and a `columns` map of one distinct-values probe per column |
-| `<column key>.distinct.csv` | the tier | one column's distinct values, bounded one past the enum ceiling |
-| `<literal id>.exists.csv`, `<literal id>.exists_folded.csv` | the tier | one value's row count, and the folded near miss, run only when `exists` returned 0 |
+| `<column key>.distinct.csv` | the batch door, through the guard | one column's distinct values, bounded one past the enum ceiling |
+| `<literal id>.exists.csv`, `<literal id>.exists_folded.csv` | the batch door, through the guard | one value's row count, and the folded near miss, run only when `exists` returned 0 |
+| `<probe>.sql`, `<probe>.run.json`, `probes.plan.json`, `probes.folded.plan.json` and their `.manifest.json` | `check_statement.py`, the batch door | each probe as sent, its outcome (`status`, `exit`, `kind`, `rule`, `detail`), and the plans that ran them; the folded plan exists only when an `exists` probe counted 0 |
 | `filter-values.judge.json` | `sm filter-values judge` | one grade per typed value |
 | `claims.json` | `sm claims` | the diff against the AI's own statement, once both exist |
 | `question_fit.json` | the skill, Phase 1.5g | `{"fit": "plausible" \| "doubtful" \| "no_question", "reason": "<one sentence, or null>"}`: whether the statement plausibly answers the question it came with, decided by reading |
@@ -89,8 +92,8 @@ mentions about that column and its table, at most twenty. A `values_named_differ
 lands in `evidence.prose_flags` and the note says two descriptions disagree. Never a grade: the words
 that shaped the SQL sit beside the number that went wrong, for a person to read.
 
-**A zero-byte probe CSV is a probe that failed**, because the tier writes CSV to stdout only on
-success. The ledger reads it as unresolved and says so. A header-only CSV is a probe that ran and
+**A zero-byte probe CSV is a probe that failed**, because the batch door writes rows only for a
+probe that ran, and an empty file for one the guard refused or the database failed. The ledger reads it as unresolved and says so. A header-only CSV is a probe that ran and
 found nothing.
 
 ## The findings file
