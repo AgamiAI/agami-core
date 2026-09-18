@@ -908,9 +908,13 @@ def test_no_generator_is_built_except_through_the_one_name():
     }
     built = {name for name in built if name.lower().endswith("generator")}
 
-    assert built <= {"GENERATOR"}, (
-        f"{sorted(built - {'GENERATOR'})} is constructed directly — route it through GENERATOR, "
-        "or every scripted substitution in this file silently becomes a live client"
+    # Two names, for the two ways of asking. `MCP_GENERATOR` earns a place here on exactly the same
+    # terms as `GENERATOR`: it is a NAME a test substitutes, so a substitution cannot go on passing
+    # while a real client runs behind it. A third entry is only ever justified the same way.
+    seams = {"GENERATOR", "MCP_GENERATOR"}
+    assert built <= seams, (
+        f"{sorted(built - seams)} is constructed directly — route it through GENERATOR or "
+        "MCP_GENERATOR, or every scripted substitution in this file silently becomes a live client"
     )
 
 
@@ -920,3 +924,11 @@ def test_the_default_generator_is_the_client_one():
     Whoever moves this line is the person who most needs to read the one above it.
     """
     assert run_golden_eval.GENERATOR is gr.ClaudeCliGenerator
+
+
+def test_the_tool_driven_seam_is_the_mcp_generator():
+    """The other seam's setting, pinned for the same reason, and the default that keeps a golden
+    score comparable: `--via context` is what every score so far was measured with, so the dataset
+    path still reaches `GENERATOR` unless a run asks for the other one by name."""
+    assert run_golden_eval.MCP_GENERATOR is gr.ClaudeMcpGenerator
+    assert run_golden_eval.VIA_CHOICES[0] == "context"

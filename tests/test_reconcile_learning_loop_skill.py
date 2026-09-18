@@ -388,16 +388,27 @@ def test_the_example_decision_has_a_route():
 def test_agamis_answer_comes_from_a_cold_client_never_from_the_session():
     phase_2b = _between(SKILL, "### 2b", "### 2.5")
     assert "--ask-file /tmp/agami-reconcile-chunk-<ts>.json" in phase_2b and "--parallel 4" in phase_2b and "--out rows/<n>/agami-answer.json" in phase_2b
-    assert "fetches the model context once for the batch" in phase_2b and "the session itself is never reused" in phase_2b
+    # The client fetches its own context now (`--via mcp`), which is the point of asking that way:
+    # a run that pasted one schema into the prompt would never exercise what decides whether a real
+    # question succeeds. What stays pinned is that the session is never the one answering.
+    assert "--via mcp" in phase_2b and "the session itself is never reused" in phase_2b
+    assert "calls `get_datasource_schema` and `get_prompt_examples` itself" in phase_2b
     assert "**Agami's answer comes from a cold client, never from this session.**" in phase_2b
     assert "**Never write agami's SQL yourself, and never retry with your own wording**" in phase_2b
-    assert "four fixed sentences" in phase_2b and "the batch exits `3` when any row is like that" in phase_2b
+    # A query the warehouse turned down ends the row and keeps its statement: the rejection is the
+    # finding, and a client free to retry would bury it.
+    assert "a query that did not answer ends the row" in phase_2b
+    # Under `--via mcp` the run writes agami's result itself, through the guard. A skill told to run
+    # it "through the profile's tier" would hand a statement the server blocked to a tier with none.
+    assert "**Under `--via mcp`, do not run it yourself:**" in phase_2b
+    assert "what runs is the server's own record of the statement" in phase_2b
+    assert "fixed sentences" in phase_2b and "the batch exits `3` when any row is like that" in phase_2b
     assert "Invoke the same SQL-generation + execution path agami-query uses" not in phase_2b
 
 
 
 def test_agamis_several_statements_are_kept_and_only_the_last_is_run():
     ask = _between(SKILL, "### 2b", "### 2c")
-    assert "{row, question, sql, statements, error}" in ask and "never run the earlier ones" in ask
+    assert "{row, question, sql, statements, error, mode," in ask and "never run the earlier ones" in ask
     record = _between(SKILL, "### 2d", "### 2e")
     assert '"agami_statements":' in record and "sql is the last" in record
