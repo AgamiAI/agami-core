@@ -58,6 +58,40 @@ below corresponds to one such version.
   result as "0 rows". A query that ran and returned a header with no rows is still a result, and is
   still compared.
 
+- **An identical answer no longer scores as different when two of its columns hold the same values
+  on different rows.** When row order is not compared (reconcile always, and a golden run whose
+  answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
+  flags that are each true on half the rows then look the same, and the comparator paired
+  whichever came first. Pairing each flag with the other's partner misaligned every row, so a
+  right answer scored below 1.0. A golden column now takes a generated column of its own name
+  first. A name can mislead too, when a statement swaps two labels or aliases one of two columns
+  that share a label, so that pairing is checked against the old one and the one that lines up
+  more rows is kept.
+
+- **A column that mostly repeats one value no longer pairs with a different column.** A flag that
+  is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
+  the rows differed and blamed a column that was right, when the real finding was a missing
+  column. A column with no same-named partner now pairs on its values only when those values can
+  tell it apart. When row order is compared, no one value may fill more than half the rows. When
+  it is not, more than half the values must be distinct, because two flags with similar counts
+  overlap on most rows as multisets whatever they hold. Otherwise the column is reported missing.
+  Two costs are accepted. A renamed column of that kind that is wrong on one row is now reported
+  missing too, rather than as a column that differs on one row. And a score without row order can
+  change for such items. A different column that holds exactly the same values still pairs.
+
+- **A reconcile table that matched only because a different column holds the same repeated value
+  is now marked unverified.** Reconcile compares two tables by pairing each of your columns with the
+  column of agami's that holds the same values. So when your `is_gift` is "N" on every row and
+  agami returned `is_express`, also "N" on every row, the two paired and the row scored as a match.
+  Values alone cannot tell a renamed column from a different one, so the comparator is unchanged.
+  Reconcile has the names and your result. The answers still match (`match` stays `true`), but the
+  row's status is now `match_unverified`, not `match`, and it reads "same answer, but part of your
+  query could not be checked". The card says why, naming both columns, and asks you to check that
+  agami returned the column you meant. The rule is narrow, so a legitimate rename stays a match: it
+  needs a full match, a pair whose names differ (ignoring case and a table prefix), and a column of
+  yours where one value fills more than half the rows. A column whose values vary, a one-row result
+  and a single number are left as they were.
+
 - **A reconcile row whose query did not run said to ask agami again, which is the one thing that
   cannot work.** Found by reading the report from the first live tool-driven run: both rows had
   failed because the semantic model names a column and a table the warehouse does not have, and both

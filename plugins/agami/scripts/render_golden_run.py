@@ -49,13 +49,14 @@ LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
 # The accuracy is deliberately NOT projected, and this is the note that keeps it that way.
 #
 # It reached the page as a headline number and told a reader nothing. Over a real fifteen-case run
-# every value was exactly 1.0 or exactly 0.0, which is structural rather than luck: differing row
-# counts, an unpaired column and an extra column each short-circuit to 0.0 before any overlap is
-# computed, and `match_columns` pairs only on EQUAL value vectors, so a column that is wrong
-# anywhere does not pair at all. The one route to a value in between — every column carrying the
-# right set of values while the rows themselves do not line up — is real and rare.
+# every value was exactly 1.0 or exactly 0.0, and much of that is structural: differing row counts,
+# an unpaired column and an extra column each short-circuit to 0.0 before any overlap is computed.
+# A value in between needs every golden column paired while some rows still differ. That happens
+# when a column is wrong on a few rows yet pairs anyway, because it shares the golden column's
+# name or agrees on most rows, and when every column carries the right values in rows that do not
+# line up.
 #
-# And on exactly that occasion the comparator already writes the same fact in words ("5 of the
+# And on every such occasion the comparator already writes the same fact in words ("5 of the
 # answer key's 15 rows matched"), which `reason` carries. So the number was redundant when it meant
 # something and misleading the rest of the time: printed as "accuracy 1.000" beside a gated item
 # that had reproduced its answer key perfectly, it read as a contradiction of the sentence next to
