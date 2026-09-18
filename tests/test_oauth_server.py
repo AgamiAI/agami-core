@@ -764,9 +764,9 @@ def test_token_ttls_are_env_configurable_and_fail_safe(env, monkeypatch):
 
 
 def _sid(access_token: str) -> str | None:
-    return jwt.decode(
-        access_token, SECRET, algorithms=["HS256"], issuer=BASE, audience=AUD
-    ).get("sid")
+    return jwt.decode(access_token, SECRET, algorithms=["HS256"], issuer=BASE, audience=AUD).get(
+        "sid"
+    )
 
 
 def test_access_token_carries_the_hashed_refresh_family_as_sid(env):
@@ -1099,6 +1099,15 @@ def test_an_invalid_metadata_document_is_invalid_client_with_no_redirect(env, cl
     assert "location" not in r.headers
 
 
+def test_a_registered_client_with_no_datastore_is_a_server_error_not_a_redirect(env, monkeypatch):
+    # The gate looks up a registered client itself, so it answers a missing datastore before any
+    # handler opens one; the sign-in must stop there rather than send a code anywhere.
+    monkeypatch.delenv("AGAMI_DB_URL")
+    r = _authorize_post(TestClient(mcp_http.build_app()), client_id="cid", redirect_uri=REDIRECT)
+    assert r.status_code == 500 and r.json()["error"] == "server_error"
+    assert "location" not in r.headers
+
+
 def test_an_http_metadata_url_is_refused_not_looked_up(env, client_doc):
     requests, _ = client_doc
     r = _authorize_post(
@@ -1184,7 +1193,9 @@ def test_the_sign_in_page_names_the_redirect_host_not_the_document(env, client_d
     )
     assert r.status_code == 200
     assert '<p class="who">app.example.com</p>' in r.text
-    assert '<p class="who">Claude</p>' not in r.text  # the document's self-chosen name is never shown
+    assert (
+        '<p class="who">Claude</p>' not in r.text
+    )  # the document's self-chosen name is never shown
     assert requests == []  # rendering the page fetches nothing
 
 
