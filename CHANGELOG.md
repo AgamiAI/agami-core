@@ -12,6 +12,110 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Security
+
+- **A statement a person hands to reconcile now reaches the database only through the guard.**
+  Phase 1.5 used to have the session run the person's statement, its zero-row check and every probe
+  by hand, on whatever tier the profile queries on. On psql, mysql, snowsql, sqlite3 or DuckDB
+  nothing checked that the statement was read-only, in scope or bounded, so a pasted statement that
+  writes met the database with only the database role in its way. The new
+  `plugins/agami/scripts/check_statement.py` does those steps for one row directory, in code: the
+  guard's own read-only and recon gates first (a refusal is written to `run.json` as `refused` with
+  its rule, and nothing runs after it), then the zero-row check and the statement through
+  `execute_sql.execute_guarded` with the built-in executor, the semantic-model verbs in process, and
+  the probes through `execute_sql`'s batch door, each still through the guard on its own. It writes
+  the same files the ledger read before, plus `probes.folded.plan.json` when a near-miss probe runs.
+  The skill and `shared/statement-check.md` now call it once per row; the question-fit step stays
+  a judgment the session makes by reading. Grading now needs the database's Python driver in `$PY`
+  on every tier: without it the script exits `3` with `driver_missing` and the install line, and the
+  run stops. The run also stops when the semantic model declares an engine its credentials do not
+  connect to. Checking a row again first clears the files the last check wrote, so an earlier
+  statement's files are never graded as the new one's. The zero-row check now writes its own outcome
+  to `zero-row.run.json` whatever it was, so no execution in this phase is unrecorded, and the wrap
+  it runs drops the statement's terminating semicolon along with any comment around it: a statement
+  ending `; -- done` used to be wrapped as two statements, which the guard refused, and that refusal
+  was written nowhere. (ACE-155)
+
+### Added
+
+- **Reconcile can ask agami through agami's own tools, so a row's answer comes from the surface a
+  person uses.** `run_golden_eval.py --via mcp` serves the cold client the local stdio MCP server and
+  lets it work: it calls `get_datasource_schema` and `get_prompt_examples` itself, scoping them as it
+  sees fit, and runs its own statement. Until now that client had every tool switched off and was
+  handed one pre-fetched schema blob, so a reconcile run never exercised the things that decide
+  whether a real question succeeds: how a question gets scoped, whether the prompt examples surface
+  the one that would have carried it, `execute_sql`'s safety pass, or the server's own
+  instructions. A run could therefore pass on a semantic model nobody could query,
+  and fail on one that works, with no way to tell which. Two rules make the result comparable
+  anyway, and both are enforced by the server rather than asked for in the prompt, because an
+  instruction can be partly obeyed and then nobody knows what the run measured. A query that did not
+  run ENDS the row: the failure is the finding, since a statement the database rejected or
+  the safety check blocked says the semantic model or the tool fetching is broken, and a client free
+  to retry would paper over exactly that. Successful queries are NOT capped, because a client reading a
+  column's values before it filters on one is a person doing the same; capping them would end the
+  row and report a defect against a model that works, which is the most expensive error this report
+  can make. The count of those probes is the measurement instead: it reads how much the semantic
+  model failed to say up front. The client names the query it answered from and the run checks that
+  against the server's own trace, so reporting a number with no query behind it, or a statement it
+  never ran, is an error row rather than an ordinary answer. The run also writes agami's result for
+  reconcile itself, in code: a statement the server did not run is never run again, and one that ran
+  is run once more, only for its result, through `execute_sql`'s guarded envelope, from the server's
+  own record of the statement rather than the client's copy. Leaving that run to
+  the skill let it pick a command-line tier with no guard, so a statement the server had blocked could
+  have reached the database another way. `--via context` stays the default, so every golden score
+  remains comparable with the runs before it.
+
+### Fixed
+
+- **A reconcile row whose query never ran said something else happened.** When agami's query was
+  refused or failed, the run still left an empty `actual.csv` behind, and `reconcile.py record` read
+  that empty file as a result with no columns and no rows. So the row skipped the sentence "agami's
+  statement did not run" and said the two results were tables that were not compared. On a row that
+  was only a question, it was worse: the row waited for a person to judge an answer agami never
+  gave. Now an empty result file is never a result, because a real one always has a header row that
+  names its columns. A file holding only a blank line counts as empty too. A run record that is
+  there and does not say `ok` means there is no result either, whatever file sits beside it. A run
+  record whose own file is empty or not JSON says nothing about the run, so the result file decides.
+  That is the file being unreadable, not the session saying the run went wrong: a run record holding
+  only an error the session wrote is a record of a run that failed, and the file beside it is not its
+  result. The same holds for your own query: when it did not run, the page no longer shows your
+  result as "0 rows". A query that ran and returned a header with no rows is still a result, and is
+  still compared.
+
+- **An identical answer no longer scores as different when two of its columns hold the same values
+  on different rows.** When row order is not compared (reconcile always, and a golden run whose
+  answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
+  flags that are each true on half the rows then look the same, and the comparator paired
+  whichever came first. Pairing each flag with the other's partner misaligned every row, so a
+  right answer scored below 1.0. A golden column now takes a generated column of its own name
+  first. A name can mislead too, when a statement swaps two labels or aliases one of two columns
+  that share a label, so that pairing is checked against the old one and the one that lines up
+  more rows is kept.
+
+- **A column that mostly repeats one value no longer pairs with a different column.** A flag that
+  is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
+  the rows differed and blamed a column that was right, when the real finding was a missing
+  column. A column with no same-named partner now pairs on its values only when those values can
+  tell it apart. When row order is compared, no one value may fill more than half the rows. When
+  it is not, more than half the values must be distinct, because two flags with similar counts
+  overlap on most rows as multisets whatever they hold. Otherwise the column is reported missing.
+  Two costs are accepted. A renamed column of that kind that is wrong on one row is now reported
+  missing too, rather than as a column that differs on one row. And a score without row order can
+  change for such items. A different column that holds exactly the same values still pairs.
+
+- **A reconcile table that matched only because a different column holds the same repeated value
+  is now marked unverified.** Reconcile compares two tables by pairing each of your columns with the
+  column of agami's that holds the same values. So when your `is_gift` is "N" on every row and
+  agami returned `is_express`, also "N" on every row, the two paired and the row scored as a match.
+  Values alone cannot tell a renamed column from a different one, so the comparator is unchanged.
+  Reconcile has the names and your result. The answers still match (`match` stays `true`), but the
+  row's status is now `match_unverified`, not `match`, and it reads "same answer, but part of your
+  query could not be checked". The card says why, naming both columns, and asks you to check that
+  agami returned the column you meant. The rule is narrow, so a legitimate rename stays a match: it
+  needs a full match, a pair whose names differ (ignoring case and a table prefix), and a column of
+  yours where one value fills more than half the rows. A column whose values vary, a one-row result
+  and a single number are left as they were.
+
 ## [0.9.3] — 2026-09-17
 
 ### Added
@@ -759,7 +863,6 @@ scripted generator for the real one — silently, the way it already happened on
 Everything below came out of running the golden-dataset feature against a live warehouse for the
 first time. One fix is the difference between the feature working and not working at all; the rest
 is what a first real run and its review turned up.
-
 
 ### Added
 
