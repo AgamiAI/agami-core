@@ -12,6 +12,28 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An identical answer no longer scores as different when two of its columns hold the same values
+  on different rows.** When row order is not compared (reconcile always, and a golden run whose
+  answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
+  flags that are each true on half the rows then look the same, and the comparator paired
+  whichever came first. Pairing each flag with the other's partner misaligned every row, so a
+  right answer scored below 1.0. A golden column now takes a generated column of its own name
+  first. A name can mislead too, when a statement swaps two labels or aliases one of two columns
+  that share a label, so that pairing is checked against the old one and the one that lines up
+  more rows is kept.
+- **A column that mostly repeats one value no longer pairs with a different column.** A flag that
+  is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
+  the rows differed and blamed a column that was right, when the real finding was a missing
+  column. A column with no same-named partner now pairs on its values only when those values can
+  tell it apart. When row order is compared, no one value may fill more than half the rows. When
+  it is not, more than half the values must be distinct, because two flags with similar counts
+  overlap on most rows as multisets whatever they hold. Otherwise the column is reported missing.
+  Two costs are accepted. A renamed column of that kind that is wrong on one row is now reported
+  missing too, rather than as a column that differs on one row. And a score without row order can
+  change for such items. A different column that holds exactly the same values still pairs.
+
 ## [0.9.3] — 2026-09-17
 
 ### Added
@@ -53,26 +75,6 @@ below corresponds to one such version.
   be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
   blank id is now rejected as an input validation error — a deployment turning the flag on should
   confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
-- **An identical answer no longer scores as different when two of its columns hold the same values
-  on different rows.** When row order is not compared (reconcile always, and a golden run whose
-  answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
-  flags that are each true on half the rows then look the same, and the comparator paired
-  whichever came first. Pairing each flag with the other's partner misaligned every row, so a
-  right answer scored below 1.0. A golden column now takes a generated column of its own name
-  first. A name can mislead too, when a statement swaps two labels or aliases one of two columns
-  that share a label, so that pairing is checked against the old one and the one that lines up
-  more rows is kept.
-- **A column that mostly repeats one value no longer pairs with a different column.** A flag that
-  is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
-  the rows differed and blamed a column that was right, when the real finding was a missing
-  column. A column with no same-named partner now pairs on its values only when those values can
-  tell it apart. When row order is compared, no one value may fill more than half the rows. When
-  it is not, more than half the values must be distinct, because two flags with similar counts
-  overlap on most rows as multisets whatever they hold. Otherwise the column is reported missing.
-  Two costs are accepted. A renamed column of that kind that is wrong on one row is now reported
-  missing too, rather than as a column that differs on one row. And a score without row order can
-  change for such items. A different column that holds exactly the same values still pairs.
-
 ## [0.9.2] — 2026-09-16
 
 ### Added
@@ -778,7 +780,6 @@ scripted generator for the real one — silently, the way it already happened on
 Everything below came out of running the golden-dataset feature against a live warehouse for the
 first time. One fix is the difference between the feature working and not working at all; the rest
 is what a first real run and its review turned up.
-
 
 ### Added
 
