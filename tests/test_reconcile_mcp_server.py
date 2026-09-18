@@ -171,6 +171,18 @@ def test_no_trace_is_written_when_the_run_asked_for_none(tmp_path: Path) -> None
 # --- what the client reads --------------------------------------------------
 
 
+def test_the_client_is_told_the_query_did_not_run_rather_than_that_it_returned_nothing(tmp_path: Path) -> None:
+    """The rule is about a query that did not run. A query that ran and returned no rows answered,
+    and a client told otherwise would go looking for the wrong thing."""
+    assert "did not run" in rms.STOPPED_AFTER_FAILURE
+    assert "did not return rows" not in rms.STOPPED_AFTER_FAILURE
+    budget = _budget(tmp_path)
+    run = budget.wrap("execute_sql", lambda args, answers=iter([FAILED, OK]): next(answers))
+    run({"sql": "SELECT SUM(o.amt) FROM orders o"})
+
+    assert "did not run" in run({"sql": "SELECT 1"})
+
+
 def test_a_stopped_call_never_pretends_agami_refused(tmp_path: Path) -> None:
     """The harness stopped this, not the product. A message shaped like agami's own refusal would
     put words in its mouth on a page someone reads to decide whether to trust it."""
@@ -213,4 +225,7 @@ def test_the_server_takes_its_trace_path_from_the_environment_and_the_default_ce
 ) -> None:
     monkeypatch.setenv(rms.TRACE_ENV, str(tmp_path / "t.jsonl"))
     budget = rms.budget_from_env()
-    assert budget.trace_path == tmp_path / "t.jsonl" and budget.ceiling == rms.DEFAULT_MAX_QUERIES
+    # The ceiling is pinned to its number, not to the constant: comparing the default with itself
+    # asserts nothing, and the server's docstring and the PR both tell a reader it is ten.
+    assert budget.trace_path == tmp_path / "t.jsonl" and budget.ceiling == 10
+    assert rms.DEFAULT_MAX_QUERIES == 10

@@ -97,9 +97,34 @@ def test_the_statement_is_evidence_and_the_rule_names_the_worked_case():
 
 
 def test_phase_1_5_runs_the_statement_the_way_agami_runs_its_own():
-    assert "**The person's statement runs on the road agami's own SQL runs, with the same guards.**" in PHASE_1_5
-    assert "`sm prepare` first" in PHASE_1_5
-    assert "never `--no-safety`" in PHASE_1_5
+    assert ("**The person's statement runs through the guard agami's own SQL runs through, and never on a "
+            "command-line tier.**") in PHASE_1_5
+    # ACE-155: one call per row, and every execution inside it goes through the chokepoint.
+    assert '"$PY" "$AGAMI_PLUGIN_ROOT/scripts/check_statement.py" --profile <profile> --area <area>' in PHASE_1_5
+    assert "`execute_sql`'s guarded chokepoint with the built-in executor, never with `--no-safety`" in PHASE_1_5
+    assert "psql, mysql, snowsql, sqlite3 and DuckDB are never used here" in PHASE_1_5
+    assert "**Never run the statement or a probe yourself.**" in PHASE_1_5
+    assert "The zero-row check, then `sm prepare`, then the statement through the guard" in PHASE_1_5
+    assert "the profile's tier exactly as `agami-query` Phase 1e tabulates it" not in PHASE_1_5
+    assert "1.5g is a judgment made by reading, and no script makes it." in PHASE_1_5
+    check = REFERENCES["statement-check.md"]
+    assert "**It is never run on a command-line tier**" in check and "The session never runs the statement or a probe itself." in check
+    assert "## What stays with the session" in check and check.index("check_statement.py") < check.index("question_fit.json")
+    # The session is what acts on the script's exit codes, so the words that tell it to stop are pinned.
+    assert "exit `3` stops the run" in PHASE_1_5
+    assert "any other exit is a crash, which stops the run too" in PHASE_1_5
+    exit_3 = SKILL.split("| `check_statement.py` exits `3` |", 1)[1].split("\n", 1)[0]
+    assert "`engine_mismatch`" in exit_3 and "Stop the run" in exit_3
+    assert "Never fall back to running the statement on a command-line tier." in exit_3
+    assert "| `check_statement.py` exits anything else | The script crashed. Stop the run" in SKILL
+    flat_check = " ".join(check.split())
+    assert "Stop the whole run, as `agami-query` Phase 3b stops it" in flat_check
+    assert "the refusal `rule` `engine_mismatch`" in flat_check
+    assert ("**Any other exit**: the script crashed. Stop the run and tell the person. Never run the "
+            "statement or a probe yourself instead.") in flat_check
+    # Both gates that read the statement before anything runs are named, and nothing runs after them.
+    assert "and then its recon gate" in PHASE_1_5 and "nothing runs after it" in PHASE_1_5
+    assert "The recon gate refuses a call that reads the server's own metadata" in flat_check
     assert "**A refusal is a finding, not a crash**" in PHASE_1_5
     assert "Never rewrite the statement and never retry." in PHASE_1_5
     assert "Nothing in this phase writes `query_log.jsonl`" in PHASE_1_5
@@ -175,7 +200,7 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
     assert "`noted`, a fact the run states and never judges" in PHASE_1_5
     assert "| `noted` |" in REFERENCES["part-ledger.md"]
     # The semantic model's own words ride on the parts that fell short, quoted and never graded.
-    assert "sm mentions" in PHASE_1_5 and "> mentions.json" in PHASE_1_5
+    assert "`sm mentions` to `mentions.json`" in PHASE_1_5
     assert "**What the semantic model says in words**" in statements
     assert "which is right is the person's call, never the ledger's" in statements
     assert "| `mentions.json` |" in REFERENCES["part-ledger.md"]

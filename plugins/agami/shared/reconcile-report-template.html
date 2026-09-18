@@ -361,8 +361,16 @@
             + (a.sql ? '<pre>' + esc(a.sql) + '</pre>' : '') + '</div>').join('')
           + '</div></details>'
         : '';
-      // A pane reading "(none)" is a placeholder shown as content. A row with one query shows it.
-      if (!item.sql_yours) return '<div class="sql1">' + agami + '</div>' + attempts;
+      // A row where only agami wrote a query still shows both panes, and the empty one says in words
+      // why it is empty. One pane on its own sits where "yours" sits in the grid above it, so a
+      // reader files agami's statement under their own name and then cannot tell whose query failed.
+      // The words differ by what the person actually gave, because "you gave a number" and "you gave
+      // a question" send them to different next steps.
+      if (!item.sql_yours) return '<div class="sql2">'
+        + '<div><b>yours</b><div class="none">' + esc(item.expected != null
+          ? 'Not provided. You gave a number from your dashboard, not a query.'
+          : 'Not provided. You gave a question, not a query.') + '</div></div>'
+        + agami + '</div>' + attempts;
       return '<div class="sql2">'
         + '<div><b>yours</b><pre>' + esc(item.sql_yours) + '</pre></div>'
         + agami + '</div>' + attempts;

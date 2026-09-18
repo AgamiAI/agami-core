@@ -352,8 +352,18 @@ def test_one_query_written_means_one_value_column_and_one_sql_pane():
     assert ".dg.one-query { grid-template-columns: 22px minmax(140px, 230px) minmax(0, 1fr); }" in css
     # The value shown is the graded side, whichever field carried it.
     assert "cell(one ? (r.yours ?? r.agami) : r.yours" in tpl
-    # A SQL pane reading "(none)" is a placeholder shown as content; one query renders one pane.
-    assert "if (!item.sql_yours) return '<div class=\"sql1\">' + agami + '</div>' + attempts;" in tpl
+    # ACE-150 rendered ONE pane here, on the reasoning that a pane reading "(none)" is a placeholder
+    # shown as content. Reversed: a lone pane sits exactly where "yours" sits in the grid above it,
+    # so a reader files agami's statement under their own name and then cannot tell whose query is
+    # being discussed. Both panes render, and the empty one says in words why it is empty, which
+    # serves ACE-150's own intent (never credit the person with a query they did not write) without
+    # the ambiguity. "(none)" as bare content stays out.
+    assert "if (!item.sql_yours) return '<div class=\"sql2\">'" in tpl
+    assert "Not provided. You gave a number from your dashboard, not a query." in tpl
+    assert "Not provided. You gave a question, not a query." in tpl
+    # And the list of every query agami tried is appended to that layout as well, not only to
+    # the one for a row with two queries.
+    assert "+ agami + '</div>' + attempts;" in tpl
     assert "esc(item.sql_yours || '(none)')" not in tpl
 
 

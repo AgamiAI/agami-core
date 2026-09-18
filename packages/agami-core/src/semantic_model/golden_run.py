@@ -1167,8 +1167,9 @@ def _spawn(
     directory, the prompt on stdin, the system prompt in a file of its own, the discarded stderr,
     and the fixed sentences that are the only thing a caller ever learns about a failure.
 
-    `unwrap` turns the client's raw stdout into the text to look for the answer in. It exists because the two generators ask for different output formats and nothing
-    else: a one-shot child writes the answer object straight out, while a tool-driven one is asked
+    `unwrap` turns the client's raw stdout into the text to look for the answer in. It exists because
+    the two generators ask for different output formats and nothing else: a one-shot child writes the
+    answer object straight out, while a tool-driven one is asked
     for `--output-format json` and writes an envelope with the answer inside it. Defaulting to None
     keeps the one-shot path byte-identical to what it was.
     """
