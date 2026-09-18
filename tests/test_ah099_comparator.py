@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import pickle
+import random
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -1631,6 +1632,98 @@ def test_the_same_class_lines_up_when_the_cap_allows_the_search(monkeypatch):
     assert score.accuracy == 1.0
 
 
+def _seven_flags_relabelled():
+    """The seven flags with their labels rotated: pairing by names misaligns every row, and the
+    plain in-order pairing lines them all up."""
+    golden = c.ExecResult(columns=["name", *_SEVEN_FLAGS], rows=_SEVEN_ROWS)
+    relabelled = ["name", *_SEVEN_FLAGS[1:], _SEVEN_FLAGS[0]]
+    return golden, c.ExecResult(columns=relabelled, rows=list(reversed(_SEVEN_ROWS)))
+
+
+def test_a_class_too_large_to_search_still_falls_back_from_names_to_column_order():
+    # Seven equal columns are past the assignment cap, so the class is not searched and the fallback
+    # is all that is left: the names pair `flag_0` with the column labelled `flag_0`, which holds
+    # `flag_6`'s values, and misalign every row. The plain in-order pairing lines them all up, so it
+    # replaces the names. Nothing else on this branch exercises that fallback, because a class the
+    # search takes reaches the same pairing on its own.
+    golden, generated = _seven_flags_relabelled()
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (
+        ("name", "name"), *((f"flag_{k}", f"flag_{(k + 1) % 7}") for k in range(7))
+    )
+
+
+def _one_flag_against_many(width):
+    """One golden flag against `width` generated flags that hold the same values as a set, only one
+    of them on the same rows. Nothing but a search can tell which."""
+    rows = [(f"r{row}", row % 2 == 0) for row in range(8)]
+    golden = c.ExecResult(columns=["key", "is_active"], rows=rows)
+    # `c0` is true on the first four rows; only the last column is true on the golden column's rows.
+    generated_rows = [
+        (row[0], *[(position < 4) if k < width - 1 else row[1] for k in range(width)])
+        for position, row in enumerate(reversed(rows))
+    ]
+    columns = ["key", *(f"c{k}" for k in range(width))]
+    return golden, c.ExecResult(columns=columns, rows=generated_rows)
+
+
+def test_a_wide_shallow_class_is_searched_and_lines_the_rows_up():
+    # The assignment cap counts assignments, and 40 options at one slot is only 40 of them. So the
+    # class is searched, one column deep and forty wide, and the descent reads the result once per
+    # option to find the one that lines the rows up. That is what the search costs for a wide class,
+    # and it is bounded by the generated columns, since an option is one of them.
+    golden, generated = _one_flag_against_many(40)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("key", "key"), ("is_active", "c39"))
+
+
+def _rotated_result(rows):
+    """A right answer of six columns holding one pool of values, every column renamed and selected
+    in the next one's place. Nothing outside the class holds the rows together, so every option at
+    the first slot lines up every row: the descent chooses on column order alone, which is wrong
+    here by construction, and only backtracking reaches the answer."""
+    numbers = random.Random(3)
+    columns = [numbers.sample(range(rows), rows) for _ in range(6)]
+    golden_rows = [tuple(column[row] for column in columns) for row in range(rows)]
+    rotated = [*range(1, 6), 0]
+    return (
+        c.ExecResult(columns=[f"p{k}" for k in range(6)], rows=golden_rows),
+        c.ExecResult(
+            columns=[f"q{k}" for k in range(6)],
+            rows=[tuple(row[k] for k in rotated) for row in reversed(golden_rows)],
+        ),
+    )
+
+
+@pytest.mark.parametrize("rows", [50, 500])
+def test_the_budget_lets_the_search_reach_a_right_answer_at_either_size(monkeypatch, rows):
+    # With no floor the budget is the rows alone, and a right answer is reached at both sizes.
+    monkeypatch.setattr(c, "_SEARCH_ROW_FLOOR", 0)
+    golden, generated = _rotated_result(rows)
+    assert c.compare_result_sets(golden, generated, match="values", ordered=False).accuracy == 1.0
+
+
+def test_a_budget_that_does_not_grow_with_the_rows_leaves_a_larger_result_short(monkeypatch):
+    # The bug this pins: the budget was a flat count, so it bought a hundred reads of a small result
+    # and a handful of a large one, and the search stopped before it could recover from a descent
+    # that went the wrong way. Here the flat budget is exactly what 50 rows earn. It is enough at 50
+    # rows and not at 500, which is why the budget counts reads of the result and not rows.
+    monkeypatch.setattr(c, "_SEARCH_ROW_FACTOR", 0)
+    monkeypatch.setattr(c, "_SEARCH_ROW_FLOOR", 100 * 50)
+    small = c.compare_result_sets(*_rotated_result(50), match="values", ordered=False)
+    large = c.compare_result_sets(*_rotated_result(500), match="values", ordered=False)
+    assert small.accuracy == 1.0
+    assert large.status == "scored" and large.accuracy < 1.0
+
+
+def _nothing_to_read(monkeypatch):
+    """Leave the search no rows to read once its first descent has ended."""
+    monkeypatch.setattr(c, "_SEARCH_ROW_FACTOR", 0)
+    monkeypatch.setattr(c, "_SEARCH_ROW_FLOOR", 0)
+
+
 @pytest.mark.parametrize(
     "golden, generated",
     _both_row_kinds(["tier", "is_staff", "is_active", "is_verified"], _TRIO),
@@ -1642,7 +1735,7 @@ def test_a_search_out_of_rows_to_read_still_finishes_its_first_descent(
     # up the most rows each time, and here that is the right assignment. A large result used to run
     # out of rows before it paired every column, so a right answer kept the rule's pairing and
     # scored near 0.
-    monkeypatch.setattr(c, "_SEARCH_ROW_BUDGET", 0)
+    _nothing_to_read(monkeypatch)
     score = c.compare_result_sets(golden, generated, match="values", ordered=False)
     assert score.accuracy == 1.0
     assert dict(score.column_pairs[1:]) == {
@@ -1664,7 +1757,7 @@ def test_a_search_out_of_rows_after_its_first_descent_keeps_the_best_it_has_foun
         rows=[("gold", True, True, False), ("gold", False, False, True)],
     )
     assert c.compare_result_sets(golden, generated, match="values", ordered=False).accuracy == 1.0
-    monkeypatch.setattr(c, "_SEARCH_ROW_BUDGET", 0)
+    _nothing_to_read(monkeypatch)
     score = c.compare_result_sets(golden, generated, match="values", ordered=False)
     assert score.status == "scored" and score.accuracy < 1.0
     assert score.column_pairs == (

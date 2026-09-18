@@ -433,6 +433,15 @@ def _pair_equal_vectors(
 # keeps the pairing `_line_up_equal_columns` chose before its search, so a result with many
 # interchangeable columns costs a bounded search and never a runaway one.
 _ASSIGNMENT_CAP = 720
+# The cap counts assignments and not the options at one slot, which are what the first descent —
+# the part the row budget never stops — reads the result for. A class can be wide and shallow: one
+# golden column against 720 equal generated ones is 720 assignments but only one column deep, and
+# the descent then reads the result once per option. That is bounded by the columns, because an
+# option IS a generated column, and a comparison already builds one value vector per column. So the
+# widest class a result can hold costs the descent about what reading that result once more costs.
+# Measured on exactly that class, one golden flag against 720 equal generated ones: at 20,000 rows
+# the search took 1.0s of a 17.7s comparison, at 60,000 rows 6.7s of 55.4s. A separate cap on the
+# width was tried and dropped: it saved that tenth and lost the right answer the search had found.
 
 
 def _picker(indices: Sequence[int]) -> Callable[[Sequence[Any]], tuple[Any, ...]]:
@@ -479,22 +488,39 @@ def _equal_classes(
     return sorted(classes)
 
 
-# How many rows the search may read in all. Two million is about a fifth of a second, and covers
-# every assignment of six columns over some six hundred distinct rows even when nothing is pruned.
-# The budget never stops the first descent, which pairs every column by taking the branch that lines
-# up the most rows each time. That descent reads each result a few dozen times at most (27 times for
-# six equal columns), so its cost grows with the rows and not with the ways to pair them. When some
-# assignment lines up every row, the descent usually reaches it, however large the result. A budget
-# that could stop the descent was worse than slow: a right answer of a hundred thousand rows ran out
-# before pairing every column, kept the old pairing and scored near 0. Past the budget the search
-# keeps the best assignment it has found, which never lines up fewer rows than the pairing it
-# started from but can fall short of the best. What usually gets there is a large result that lines
-# up badly under every assignment, so pruning has no good assignment to measure the others against.
-_SEARCH_ROW_BUDGET = 2_000_000
+# How many rows the search may read, as a multiple of the distinct rows one step reads, and the
+# floor that multiple never goes below.
+#
+# The budget is a multiple and not a constant because what it buys has to be the same at every size.
+# A flat two million bought a hundred reads of a twenty-thousand-row result but only twenty of a
+# hundred-thousand-row one, and a hundred is about what the search needs when nothing outside the
+# class of equal columns holds the rows together. Every option at the first slot then lines up every
+# row, so the descent picks on column order alone, and only backtracking finds the answer. Measured
+# on six equal columns over a hundred thousand rows, a right answer with every column renamed and
+# rotated: at twenty reads 0.0 in 7.1s, at a hundred 1.0 in 8.0s. The same answer over fifty
+# thousand rows went from 4e-05 in 3.3s to 1.0 in 3.5s, and over twenty thousand nothing moved,
+# because there the floor below is still what decides.
+#
+# The floor keeps a small result's search exactly as generous as it was: two million covers every
+# assignment of six columns over some six hundred distinct rows even when nothing is pruned.
+#
+# What bounds the worst case is that both terms are read counts, and each read is one pass over the
+# distinct rows. The first descent, which the budget never stops, reads each result a few dozen
+# times (27 times for six equal columns, and once per option for a wide one). The budget adds
+# `_SEARCH_ROW_FACTOR` reads on top, against the roughly 3,200 an exhaustive search of six equal
+# columns would take. So one comparison costs a bounded number of passes over the result, and grows
+# with the rows rather than with the ways to pair them.
+#
+# Past the budget the search keeps the best assignment it has found, which never lines up fewer rows
+# than the pairing it started from but can fall short of the best. What usually gets there is a
+# large result that lines up badly under every assignment, so pruning has no good assignment to
+# measure the others against.
+_SEARCH_ROW_FACTOR = 100
+_SEARCH_ROW_FLOOR = 2_000_000
 
 
 class _BudgetSpent(Exception):
-    """The search has read `_SEARCH_ROW_BUDGET` rows after its first descent, and keeps what it has
+    """The search has read its budget of rows after its first descent, and keeps what it has
     found."""
 
 
@@ -653,14 +679,14 @@ def _search_classes(
     row it is usually reached at once, and every other branch is dropped early.
 
     The first descent always runs to its end, a complete assignment or a branch that cannot beat
-    `current`. Only then can `_SEARCH_ROW_BUDGET` stop the search.
+    `current`. Only then can the row budget stop the search.
     """
     golden_names = [_folded_name(name) for name in golden_columns]
     generated_names = [_folded_name(name) for name in generated_columns]
     searched = {index for golden, _ in classes for index in golden}
     fixed = sorted(set(current) - searched)
     fixed_partners = [current[index] for index in fixed]
-    rows_left = _SEARCH_ROW_BUDGET
+    rows_left = 0
     descending = True
 
     def spend(rows: int) -> None:
@@ -671,6 +697,13 @@ def _search_classes(
 
     step, start, start_overlap = _distinct_row_steps(
         classes, fixed, fixed_partners, golden_rows, generated_rows, spend
+    )
+    # The budget is set here rather than above because it counts reads of the result, and what one
+    # read costs is known only once both sides have collapsed to their distinct rows. Nothing is
+    # spent before this point.
+    rows_left = max(
+        _SEARCH_ROW_FLOOR,
+        _SEARCH_ROW_FACTOR * max(len(start.golden.keys), len(start.generated.keys)),
     )
 
     # A slot is a column of a class's smaller side, and its options are the other side's columns.
@@ -814,8 +847,9 @@ def pair_columns(
     the one that lines up the most rows, ties going to the one that pairs the most same-named
     columns (see `_line_up_equal_columns`). The search is bounded in two ways. Past
     `_ASSIGNMENT_CAP` assignments a class keeps the pairing by names or in order, whichever lines up
-    more rows. And once its first descent has paired every column, the search reads at most
-    `_SEARCH_ROW_BUDGET` rows and then keeps the best assignment found so far. When the order counts
+    more rows. And once its first descent has ended, the search reads a budget of rows
+    (`_SEARCH_ROW_FACTOR` reads of the result, and at least `_SEARCH_ROW_FLOOR` rows) and then keeps
+    the best assignment found so far. When the order counts
     there is nothing to search: equal vectors are equal row for row, so every choice inside a class
     lines up the same rows, and a golden column takes a partner of its own name first (see
     `_pair_equal_vectors`).
