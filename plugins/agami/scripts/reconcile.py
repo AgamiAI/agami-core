@@ -1144,6 +1144,67 @@ def _grade_claims(claims: dict | None) -> list[dict]:
     return rows
 
 
+def _folded_column(name: str) -> str:
+    """A column name folded the way the comparator folds it before comparing names: lowercase, the
+    qualifier off, so `o.Total` and `total` are one name. A copy, because this script is stdlib only."""
+    return name.rsplit(".", 1)[-1].strip().lower()
+
+
+def _one_value_fills_most(cells: list[str]) -> bool:
+    """Whether one value fills more than half of a column's rows, and at least two of them.
+
+    Such a column says little about which column it is: another column that repeats the same value
+    can hold exactly the same values by chance. A single row repeats nothing, so a one-row table is
+    never counted here; otherwise every renamed column of a one-row result would read as doubtful.
+    """
+    counts: dict[str, int] = {}
+    for cell in cells:
+        counts[cell] = counts.get(cell, 0) + 1
+    top = max(counts.values(), default=0)
+    return top >= 2 and top > len(cells) / 2
+
+
+def _grade_value_pairs(score: Any, row_dir: Path) -> list[dict]:
+    """One open part per column of the person's that matched a differently named column of agami's
+    only by holding one value repeated on most rows.
+
+    The comparator pairs columns by their values, so a renamed column is the same column. The cost is
+    that a different column holding the same values pairs too: the person's `is_gift`, "N" on every
+    row, pairs with agami's `is_express`, also "N" on every row, and the table scores a match. Values
+    alone cannot tell those two apart, so the comparator cannot, and it is not changed. The ledger has
+    what it lacks, the two names and the person's own result, and says the match is not proven. The
+    part is `unresolved`, so the row's status is `match_unverified` through the weakest-part rule and
+    never reaches the keep-offer.
+
+    Narrow on purpose, so a legitimate rename stays a match: only a table that matched in full, only a
+    pair whose names differ after the comparator's folding, and only a column of the person's where one
+    value fills most rows. A scalar row has no `comparison.json` and a one-row table repeats nothing, so
+    neither is touched. The part carries the two names and counts, never the value: `rows.jsonl`
+    carries the ledger, and it holds no result rows.
+    """
+    if not isinstance(score, dict) or score.get("status") != "scored" or score.get("accuracy") != 1.0:
+        return []
+    table = _read_csv(row_dir / "statement.csv")
+    if len(table) < 3:
+        return []
+    body = [row for row in table[1:] if row]
+    rows: list[dict] = []
+    # A full match pairs every column of the person's, and the pairs come in the person's column order,
+    # so the k-th pair is the k-th column. Read it by position, not by name: a result can repeat a
+    # column name, and a lookup by name reads the first of them for every pair that names it.
+    for index, (yours, agamis) in enumerate(score.get("column_pairs") or []):
+        if _folded_column(yours) == _folded_column(agamis):
+            continue
+        cells = [row[index] if index < len(row) else "" for row in body]
+        if not _one_value_fills_most(cells):
+            continue
+        rows.append(_part(f"value_pair:{yours}", UNRESOLVED, kind="value_pair",
+                          evidence={"yours": yours, "agami": agamis, "rows": len(cells)},
+                          note=f"your {yours} and agami's {agamis} hold the same values, mostly one value "
+                               "repeated, so the values cannot show that agami returned the column you meant"))
+    return rows
+
+
 # Words an expression can open with that are never the column it filters.
 _SQL_LEADING_WORDS = frozenset({"not", "case", "exists", "any", "all", "distinct", "null", "true", "false"})
 
@@ -1239,6 +1300,8 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     probes = _load_json(row_dir / "join-probes.json")
     judge = _load_json(row_dir / "filter-values.judge.json")
     claims = _load_json(row_dir / "claims.json") if with_claims else None
+    # The table comparison, read only when there are two statements to compare. Absent on a number row.
+    comparison = _load_json(row_dir / "comparison.json") if with_claims else None
     # Optional: the semantic model's own words about what the statement reads. Absent, the ledger
     # grades exactly as it would have; present, they ride on the parts that fell short.
     mentions = _load_json(row_dir / "mentions.json")
@@ -1274,6 +1337,7 @@ def ledger(row_dir: Path, *, with_claims: bool = False) -> dict:
     rows.extend(_grade_metrics(receipt, prepare))
     rows.extend(_grade_literals(judge))
     rows.extend(_grade_claims(claims))
+    rows.extend(_grade_value_pairs(comparison, row_dir))
 
     rows.extend(_prose_status(mentions))
     _attach_prose(rows, mentions if isinstance(mentions, dict) and not mentions.get("error") else None)
@@ -1579,12 +1643,13 @@ _PART_WORDS = {
     "prose": {"noted": "read", "open": "could not read"},
     "scope": {"held": "in scope", "gap": "refused: outside the semantic model"},
     "runs": {"held": "ran", "defect": "failed", "gap": "refused", "open": "not run"},
+    "value_pair": {"open": "one value on most rows"},
 }
 _PART_KEYS = {"join": "join {a} to {b}", "join_key": "join key {a} to {b}", "cardinality": "one row per key, {a} to {b}",
               "fan_out": "double counting in {x}", "aggregation": "aggregation {x}", "default_filter": "default filter on {t}",
               "metric": "metric {x}", "literal": "value {x}", "values_declared": "value list for {x}",
               "dropped_rows": "rows dropped by join {a} to {b}", "question_fit": "answers the question",
-              "prose": "caveats read", "scope": "scope", "runs": "ran"}
+              "prose": "caveats read", "scope": "scope", "runs": "ran", "value_pair": "agami's column for your {x}"}
 _OWNER_CHANGE = {
     "keep": ([], ["Keep as a worked example, if you say yes."]),
     "you": (["Fix your query where the marks are red, then run this row again."], ["Your query: fix the red rows, then re-run."]),
@@ -2003,12 +2068,15 @@ def _diff_rows(rec: dict, agami_receipt: Any) -> tuple[list[dict], list[str]]:
             yours = {"plausible": "yes", "doubtful": "doubtful", "no_question": "no question given"}.get(ev["fit"], ev["fit"])
         elif fam == "literal" and ev.get("near_miss") and state == "defect":
             yours = f"matches no rows; the data spells it {ev['near_miss']}"
+        elif fam == "value_pair" and ev.get("yours") and ev.get("agami"):
+            yours, agami = ev["yours"], ev["agami"]
         for mention in ev.get("prose") or []:
             if isinstance(mention, dict) and mention.get("text"):
                 words.append(f"{mention.get('about') or mention.get('source') or 'the semantic model'}: \"{mention['text']}\"")
         # The fit judgment is about the statement against its question, which is the SQL section's
-        # subject, not a check of the statement against the semantic model.
-        section = "sql" if fam == "question_fit" else "checks"
+        # subject, not a check of the statement against the semantic model. A match that rests on one
+        # repeated value is a doubt about the answers themselves, so it sits beside the columns row.
+        section = {"question_fit": "sql", "value_pair": "data"}.get(fam, "checks")
         add(_part_key(pid), state, yours, None if one_query else agami,
             note=part.get("note") if state != "held" else None, family=fam)
     return rows, words
@@ -2208,6 +2276,11 @@ def _summaries(rows: list[dict], result: dict, rec: dict) -> dict:
     if extra and extra.get("yours_hi") and not not_graded:
         n = len(extra["yours_hi"])
         data += f" Your query returns {_count_word(n)} more column{'s' if n > 1 else ''}."
+    repeated = _value_pairs(rec)
+    if len(repeated) == 1:
+        data += f" Your {repeated[0][0]} and agami's {repeated[0][1]} match only through one repeated value."
+    elif repeated:
+        data += f" {_count_word(len(repeated)).capitalize()} of your columns match agami's only through one repeated value."
 
     sql_rows = of("sql")
     differs = [r["key"] for r in sql_rows if r["state"] == "differs"]
@@ -2346,7 +2419,10 @@ def _result(rec: dict, diff: list[dict]) -> dict:
         query = "same"
     # A check counts once: a claim the ledger carries as a part is counted as that part.
     graded_claims = {"date_window", "filter_predicates"} if part_verdicts else set()
-    unchecked = sum(1 for p in parts if p.get("verdict") == UNRESOLVED) + sum(1 for n, st in by_name.items() if st == "unknown" and n not in graded_claims)
+    # A match resting on one repeated value is not a check that could not run: the card says it in the
+    # Data section, so it is not counted here as well.
+    unchecked = sum(1 for p in parts if p.get("verdict") == UNRESOLVED and _part_family(p.get("part", "")) != "value_pair") \
+        + sum(1 for n, st in by_name.items() if st == "unknown" and n not in graded_claims)
     if data == "could_not_compare":
         # The data could not be compared; the two statements still say what they are.
         label = {"same": "same query, answer not compared", "different": "different query, answer not compared"}.get(query, "could not compare")
@@ -2547,6 +2623,18 @@ def _change(owner: str, rec: dict, diff: list[dict]) -> tuple[list[str], list[st
         change = ["The two answers match. A table is not kept as an example; nothing to change." if table
                   else "The numbers match, but the statement may not answer its question, so this row is not kept as an example."]
         todo = ["Nothing to do."]
+    if owner == "nothing" and rec.get("status") == MATCH_UNVERIFIED and _value_pairs(rec):
+        # The match rests on a repeated value, and the person can settle that by looking, which nothing in
+        # the run can do. When it is the only doubt, "some checks could not run" is not what happened, so
+        # the look replaces that text; when another check could not run as well, the look is added to it.
+        look = ("Open Data to see the two columns side by side. If agami returned the wrong column, "
+                "add your query as a prompt example for this question through /agami-save-correction.")
+        # Without "Nothing to change", which the look contradicts: there IS something to do, and the
+        # person is the only one who can do it. What the other text is for — that a check could not
+        # run, so the row is not offered — still holds and is kept.
+        unchecked = "Some checks could not run against the database, so this row is not offered as an example."
+        change = ([unchecked, look]) if _result(rec, diff)["unchecked"] else [look]
+        todo = ["Check the column agami returned."]
     if owner == "model":
         gaps = [r["key"] for r in diff if r["state"] == "gap"]
         if gaps:
@@ -2580,6 +2668,27 @@ def _measured_mistakes(rec: dict) -> list[str]:
             if p.get("verdict") == QUERY_DEFECT and _part_family(p.get("part", "")) not in ("runs", "predicates", "date_window")]
 
 
+def _value_pairs(rec: dict) -> list[tuple[str, str]]:
+    """The columns of the person's that matched a differently named column of agami's only by one
+    repeated value, as (yours, agami's) names, from the ledger's open `value_pair` parts."""
+    parts = ((rec.get("ledger") or {}).get("rows") or []) if isinstance(rec.get("ledger"), dict) else []
+    return [(str(p["evidence"]["yours"]), str(p["evidence"]["agami"])) for p in parts
+            if isinstance(p, dict) and _part_family(p.get("part", "")) == "value_pair" and p.get("verdict") == UNRESOLVED
+            and isinstance(p.get("evidence"), dict) and p["evidence"].get("yours") and p["evidence"].get("agami")]
+
+
+def _value_pair_sentence(pairs: list[tuple[str, str]]) -> str:
+    """Why a table that matched is not shown to match, and the one thing to do, in two sentences."""
+    if len(pairs) == 1:
+        (yours, agamis), = pairs
+        return (f"The two answers match only because your {yours} and agami's {agamis} hold the same values, "
+                "mostly one value repeated. Check that agami returned the column you meant.")
+    # A semicolon between pairs, because each pair already has an "and" inside it.
+    named = "; ".join(f"your {yours} and agami's {agamis}" for yours, agamis in pairs)
+    return (f"The two answers match only because {_count_word(len(pairs))} pairs of columns hold the same values, "
+            f"mostly one value repeated: {named}. Check that agami returned the columns you meant.")
+
+
 def _one_sentence(text: Any, cap: bool = True) -> str:
     """Text as one sentence: capitalised unless it opens with the product's name, and stopped once."""
     said = str(text).strip().rstrip(".")
@@ -2607,6 +2716,12 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
     gaps = [r["key"] for r in diff if r["state"] == "gap"]
     if status == "match":
         return "The numbers match and every check passed." if not any(r["key"] == "rows" for r in diff) else "The two answers match row for row, and every check passed."
+    if status == "match_unverified" and _value_pairs(rec):
+        # The repeated value leads, because it is the reason the match is in doubt; any other check that
+        # did not pass is still named. A claim that differs is not one: the clause after this says it.
+        others = [r["key"] for r in diff if r.get("family") != "value_pair"
+                  and (r["state"] in ("open", "gap") or (r["state"] == "defect" and r["key"] not in ("answer", "rows", "values")))]
+        return _value_pair_sentence(_value_pairs(rec)) + (f" These checks did not pass either: {', '.join(others)}." if others else "")
     if status == "match_unverified":
         return "The numbers match, but " + (f"these checks could not be confirmed: {', '.join(open_ + red + gaps)}." if (open_ or red or gaps) else "one check on your query could not be confirmed.")
     if status == "expected_doubtful":
