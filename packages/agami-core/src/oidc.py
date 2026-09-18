@@ -1,10 +1,10 @@
 """Generic OIDC client — "Sign in with Google/Microsoft" behind the OAuth authorize page.
 
-This is one of the server's two deliberate outbound egress modules: it calls the IdP's discovery, token,
-and JWKS endpoints (httpx + PyJWT's JWKS fetch). The other, `client_metadata`, fetches the public
-metadata document a signing-in client names; neither carries customer data. It is server-only (the `[server]` extra) and excluded from
-the zero-egress privacy contract — the local skill never imports it; users who want no egress run the
-local `agami serve`.
+This is one of the server's two deliberate outbound egress modules: it calls the IdP's discovery,
+token, and JWKS endpoints (httpx + PyJWT's JWKS fetch). The other, `client_metadata`, fetches the
+public metadata document a signing-in client names; neither carries customer data. This module is
+server-only (the `[server]` extra) and excluded from the zero-egress privacy contract — the local
+skill never imports it; users who want no egress run the local `agami serve`.
 
 Verification is **explicit and uniform** for every provider (a provider is just a discovery URL +
 client id/secret): the ID token's RS256 signature is checked against the IdP JWKS, and

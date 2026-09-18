@@ -17,8 +17,8 @@ below corresponds to one such version.
 - **The team server supports sign-in from 2026 MCP clients.** A client may identify itself with an
   https URL instead of registering (Client ID Metadata Documents), so a connection no longer adds a
   row to `oauth_client` each time. The server fetches that public document at most once an hour per
-  client: https only, to a public address it checked, with no redirects, a 5 KB cap and a 3 s
-  deadline. The request carries no customer data. Such a client may use only the redirect URIs its
+  client: https only, to a public address it checked, with no redirects, a 5 KB cap and one 3 s
+  deadline on the whole fetch, lookup included. The request carries no customer data. Such a client may use only the redirect URIs its
   document lists, and the sign-in page names it by its redirect host. Authorization redirects now
   carry `iss`, `resource` is checked at authorize and token (`invalid_target`), and a loopback `http`
   callback matches on any port.

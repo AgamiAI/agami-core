@@ -122,8 +122,9 @@ def issue_jwt(subject: str, *, sid: str | None = None) -> str:
 
     `sid` identifies the CLIENT AUTHORIZATION this token belongs to, so one login driving two clients is
     distinguishable per request (see `_session_id`). Omitted when there is none — a token minted outside
-    the OAuth flow (a script, a test, an operator's hand-rolled bearer) carries exactly the claims it
-    always did, and consumers must treat its absence as "no session", never as an error.
+    the OAuth flow (a script, a test, an operator's hand-rolled bearer) carries no `sid`, and consumers
+    must treat its absence as "no session", never as an error. Every token carries `aud`, the MCP
+    resource it is for; validation refuses one without it.
     """
     from mcp_http import (  # lazy: mcp_http imports these handlers at module load
         canonical_resource,
@@ -363,7 +364,7 @@ def _login_form(
     return HTMLResponse(login_body_html(params, error=error, providers=providers, wrap=True))
 
 
-def _client_label(redirect_uri: str, client_id: str = "") -> str | None:
+def _client_label(redirect_uri: str, client_id: str) -> str | None:
     """A friendly name for the connecting client, derived from its callback. claude.ai/.com → 'Claude';
     otherwise None (we don't store a per-client name, so show a generic sign-in).
 
