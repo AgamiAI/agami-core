@@ -572,3 +572,73 @@ def test_a_failed_statement_of_the_persons_gets_no_grid_of_agamis_rows_alone(tmp
     (run / "rows" / "1" / "actual.csv").write_text("region\nEU\nUS\nAPAC\n", encoding="utf-8")
     item = reconcile.report_items(run)[0]
     assert item["one_query"] is False and item["sample"] is None
+
+
+def test_a_row_where_you_gave_only_a_number_still_shows_agamis_rows(tmp_path):
+    """The one-sided sample fired on `one_query` alone, which is a fact about whose query is being
+    GRADED. A screenshot or CSV row is neither: the person wrote no query and no statement.csv
+    exists, so the sample bailed on "yours is empty" and the Data section came up blank on every row
+    of the commonest input this skill has. Nobody could tell a right answer from a wrong one."""
+    row = dict(SCALAR_MATCH, row=1, statement=None, statement_recorded=None, ledger=None, ledger_verdict=None,
+               claims=None, question="How many applied?", sql="SELECT school_name, applicants FROM uc.f",
+               recorded={"columns": ["school_name", "applicants"], "row_count": 1})
+    run = _run(tmp_path, [row])
+    (run / "rows" / "1").mkdir(parents=True, exist_ok=True)
+    (run / "rows" / "1" / "actual.csv").write_text("school_name,applicants\nARAGON HIGH SCHOOL,197\n", encoding="utf-8")
+    item = reconcile.report_items(run)[0]
+
+    # One query was written, but not by the person, and `one_query` stays false because nothing of
+    # agami's is being graded here. The grid is one-sided all the same.
+    assert item["one_query"] is False
+    assert item["sample"]["agami_rows"] == [["ARAGON HIGH SCHOOL", "197"]]
+    assert item["sample"]["rows"] == [] and item["sample"]["total"] == 0
+
+
+def test_a_row_that_could_not_be_compared_does_not_call_agamis_query_failed(tmp_path):
+    """An error row is how a run records that nothing could be compared, which includes rows where
+    agami's query ran and answered. Printing "failed" there contradicted the row's own attempts and
+    the card's verdict a few lines above it, and sent the reader after a fault that is not there."""
+    ran = {"query": 1, "sql": "SELECT action, count_value FROM uc.f", "happened": "ran", "run_by": "agami",
+           "answered": True, "why": "agami answered from it.", "grade": "not_graded", "grade_words": "Not graded."}
+    row = dict(ERROR, row=1, statement=None, expected=72.0, sql="SELECT action, count_value FROM uc.f",
+               error="the two results are tables, and they were not compared", attempts=[ran])
+    run = _run(tmp_path, [row])
+    (run / "rows" / "1").mkdir(parents=True, exist_ok=True)
+    (run / "rows" / "1" / "actual.csv").write_text("action,count_value\nAdm,12\nApp,72\nEnr,9\n", encoding="utf-8")
+    item = reconcile.report_items(run)[0]
+
+    answer = next(r for r in item["diff"] if r["key"] == "answer")
+    assert answer["agami"] == "not compared"
+    # The rows are there to be read, which is the whole reason the comparison's absence is bearable.
+    assert item["sample"]["agami_rows"] == [["Adm", "12"], ["App", "72"], ["Enr", "9"]]
+
+
+def test_a_query_that_truly_did_not_run_is_still_called_failed(tmp_path):
+    """The other side of the line above: when agami's query never reached the database there IS a
+    failure, and softening it would hide the finding this skill exists to surface."""
+    blocked = {"query": 1, "sql": "SELECT * FROM uc.f", "happened": "blocked", "run_by": "agami",
+               "answered": True, "why": "the safety check blocked it.", "grade": "wrong", "grade_words": "Blocked."}
+    row = dict(ERROR, row=1, statement=None, expected=72.0, sql="SELECT * FROM uc.f",
+               error="agami's query did not run", attempts=[blocked])
+    run = _run(tmp_path, [row])
+    item = reconcile.report_items(run)[0]
+    assert next(r for r in item["diff"] if r["key"] == "answer")["agami"] == "failed"
+
+
+def test_a_record_without_attempts_reads_the_run_agami_wrote_beside_the_result(tmp_path):
+    """Records did not always carry `attempts`, and a card that could only read them would call
+    every older row's query failed. The run record agami's own execution wrote is the fallback, so
+    the label follows what actually happened on rows written before attempts existed."""
+    row = dict(ERROR, row=1, statement=None, expected=72.0, sql="SELECT action, count_value FROM uc.f",
+               error="the two results are tables, and they were not compared")
+    row.pop("attempts", None)
+    run = _run(tmp_path, [row])
+    (run / "rows" / "1").mkdir(parents=True, exist_ok=True)
+    (run / "rows" / "1" / "actual.csv").write_text("action,count_value\nAdm,12\nApp,72\n", encoding="utf-8")
+    (run / "rows" / "1" / "agami-run.json").write_text(json.dumps({"status": "ok", "exit": 0}), encoding="utf-8")
+    item = reconcile.report_items(run)[0]
+    assert next(r for r in item["diff"] if r["key"] == "answer")["agami"] == "not compared"
+
+    # And with no run record at all there is nothing saying the query ran, so the older word stands.
+    (run / "rows" / "1" / "agami-run.json").unlink()
+    assert next(r for r in reconcile.report_items(run)[0]["diff"] if r["key"] == "answer")["agami"] == "failed"

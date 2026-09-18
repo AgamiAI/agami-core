@@ -94,6 +94,17 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A reconcile card showed nothing of what agami answered.** On a run read from a dashboard
+  screenshot, every card's Data section read "1 row" and the rows that could not be compared read
+  "failed", so a reader could not see the numbers that in fact matched. Three display faults, none of
+  them touching a verdict. The data sample was fetched only for a row whose own query was being
+  graded, which a screenshot row never is. "Failed" was written for any error row, including one where
+  agami's query ran and answered and only the comparison could not be made — that row now reads "not
+  compared", and "failed" is kept for a query that did not run, read from the row's attempts or from
+  the run record beside the result. And a row where only agami wrote a query rendered one SQL pane,
+  sitting where the person's query sits in the grid above it, so agami's statement read as theirs:
+  both panes now render, and the empty one says why it is empty.
+
 - **A reconcile row whose query never ran said something else happened.** When agami's query was
   refused or failed, the run still left an empty `actual.csv` behind, and `reconcile.py record` read
   that empty file as a result with no columns and no rows. So the row skipped the sentence "agami's
