@@ -338,7 +338,9 @@ def test_a_non_200_including_a_redirect_is_refused_and_not_followed(net, status)
 
 
 def test_a_body_past_the_cap_is_refused(net):
-    big = b" " * (client_metadata._MAX_BYTES + 1)
+    # A valid document, so only the cap can refuse it: one byte past the limit.
+    body = httpx.Response(200, json=_doc()).content
+    big = body + b" " * (client_metadata._MAX_BYTES + 1 - len(body))
     net.respond = lambda request: _served(content=big)
     with pytest.raises(ClientMetadataError):
         _redirect_uris(URL)
