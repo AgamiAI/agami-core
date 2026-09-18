@@ -111,6 +111,10 @@ RULE_DATASOURCE_REQUIRED = "datasource_required"
 # server returns can tell the client its context went stale except refusing to run on it. Decided
 # from one version lookup and no model, so PRE_MODEL; declared locally like `datasource_required`.
 RULE_STALE_MODEL = "stale_model"
+# The call named no example this datasource stores, or named one badly (#376). Clients skip
+# `get_prompt_examples`; an id it returned is the one thing a client cannot supply without calling
+# it. Decided from two store reads and no model, so PRE_MODEL; declared locally like the two above.
+RULE_EXAMPLE_REQUIRED = "example_required"
 
 PRE_MODEL_RULES: frozenset[str] = frozenset(
     {
@@ -119,6 +123,7 @@ PRE_MODEL_RULES: frozenset[str] = frozenset(
         RULE_AUDIT_UNAVAILABLE,
         RULE_DATASOURCE_REQUIRED,
         RULE_STALE_MODEL,
+        RULE_EXAMPLE_REQUIRED,
     }
 )
 """The rules decided BEFORE any semantic model is consulted, and the home for the next one.
@@ -175,6 +180,9 @@ REASON_FOR_RULE: dict[str, RefusalReason] = {
     # Nothing about the statement was asked: the model it was written against is not the one being
     # served, so whether it is safe or in scope HERE was never determined.
     RULE_STALE_MODEL: "undetermined",
+    # As above: the statement was not asked about, because the call did not show it was written with
+    # the datasource's examples in view.
+    RULE_EXAMPLE_REQUIRED: "undetermined",
 }
 
 
