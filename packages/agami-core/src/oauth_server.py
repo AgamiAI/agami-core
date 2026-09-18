@@ -244,16 +244,17 @@ def _redirect_allowed(redirect_uri: str, registered: str | None) -> bool:
     return _same_origin(redirect_uri, public_base_url())
 
 
-async def _client_redirect_error(
-    store: Store, client_id: str, redirect_uri: str
-) -> JSONResponse | None:
+async def _client_redirect_error(client_id: str, redirect_uri: str) -> JSONResponse | None:
     """The one gate on where a sign-in may send its code, shared by the password POST and the OIDC
     start. None when `redirect_uri` is allowed for `client_id`; otherwise the error to return, which is
     never a redirect (the target is exactly what is not trusted).
 
     A client identified by a metadata-document URL may use only the redirect URIs its document lists:
     the claude.ai and same-origin fallbacks below exist for registered clients, and extending them to a
-    URL anyone can publish would let any document claim a code bound for Claude."""
+    URL anyone can publish would let any document claim a code bound for Claude.
+
+    It opens a store only to look up a registered client, and callers open theirs after it returns: the
+    metadata fetch can take seconds, and a store open across it holds a database connection that long."""
     import client_metadata  # lazy: the egress module, like oidc
 
     if client_metadata.is_metadata_client_id(client_id):
@@ -264,7 +265,15 @@ async def _client_redirect_error(
         if not redirect_uri or not any(_redirect_matches(redirect_uri, u) for u in listed):
             return _oauth_error("invalid_request", "redirect_uri not allowed")
         return None
-    client = store.query("SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (client_id,))
+    store = _open_store()
+    if store is None:
+        return _oauth_error("server_error", "no datastore configured", status=500)
+    try:
+        client = store.query(
+            "SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (client_id,)
+        )
+    finally:
+        store.close()
     registered = client[0]["redirect_uris"] if client else None
     if not _redirect_allowed(redirect_uri, registered):
         return _oauth_error("invalid_request", "redirect_uri not allowed")
@@ -426,16 +435,16 @@ async def authorize(request: Request) -> Response:
         return _login_form(dict(request.query_params), providers=providers)
 
     form = await _form(request)
+    redirect_uri = form.get("redirect_uri", "")
+    client_id = form.get("client_id", "")
+    # Validate the redirect target BEFORE authenticating — never send a code to an unvetted URL.
+    error = await _client_redirect_error(client_id, redirect_uri)
+    if error is not None:
+        return error
     store = _open_store()
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
-        redirect_uri = form.get("redirect_uri", "")
-        client_id = form.get("client_id", "")
-        # Validate the redirect target BEFORE authenticating — never send a code to an unvetted URL.
-        error = await _client_redirect_error(store, client_id, redirect_uri)
-        if error is not None:
-            return error
         # Only now is the redirect trusted enough to carry an error back to the client.
         if not _resource_ok(form.get("resource", "")):
             return _authorization_redirect(
@@ -844,13 +853,7 @@ async def oidc_start(request: Request) -> Response:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
     redirect_uri = q.get("redirect_uri", "")
     code_challenge = q.get("code_challenge", "")
-    store = _open_store()
-    if store is None:
-        return _oauth_error("server_error", "no datastore configured", status=500)
-    try:
-        error = await _client_redirect_error(store, q.get("client_id", ""), redirect_uri)
-    finally:
-        store.close()
+    error = await _client_redirect_error(q.get("client_id", ""), redirect_uri)
     if error is not None:
         return error
     # The resource is checked here rather than carried in the state: nothing after the IdP changes it.

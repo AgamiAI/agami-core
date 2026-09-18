@@ -662,6 +662,52 @@ def test_oidc_start_accepts_a_listed_metadata_redirect(env, client_doc):
     assert r.status_code == 302 and r.headers["location"].startswith(f"{ISSUER}/authorize")
 
 
+@pytest.fixture
+def stores_open_during_fetch(monkeypatch, client_doc):
+    """How many datastore connections were open each time the metadata document was fetched. The fetch
+    can take seconds, and on Postgres every open store is a connection held for all of it."""
+    import client_metadata
+    import oauth_server
+
+    open_stores: list = []
+    seen: list[int] = []
+    real_open, real_fetch = oauth_server._open_store, client_metadata.redirect_uris
+
+    def tracked_open():
+        store = real_open()
+        if store is not None:
+            open_stores.append(store)
+            real_close = store.close
+            store.close = lambda: (open_stores.remove(store), real_close())
+        return store
+
+    async def tracked_fetch(client_id):
+        seen.append(len(open_stores))
+        return await real_fetch(client_id)
+
+    monkeypatch.setattr(oauth_server, "_open_store", tracked_open)
+    monkeypatch.setattr(client_metadata, "redirect_uris", tracked_fetch)
+    return seen
+
+
+def test_oidc_start_holds_no_store_open_during_the_metadata_fetch(env, stores_open_during_fetch):
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 302
+    assert stores_open_during_fetch == [0]
+
+
+def test_authorize_post_holds_no_store_open_during_the_metadata_fetch(env, stores_open_during_fetch):
+    data = {
+        "client_id": CLIENT_DOC_URL,
+        "redirect_uri": DOC_REDIRECT,
+        "code_challenge": CHALLENGE,
+        "state": "x",
+    }
+    r = _client().post("/oauth/authorize", data=data, follow_redirects=False)
+    assert r.status_code == 200  # an OIDC deployment re-renders the provider page after the gate
+    assert stores_open_during_fetch == [0]
+
+
 def test_oidc_start_redirects_a_wrong_resource_as_invalid_target_with_iss(env):
     r = _oidc_start(_client(), resource="https://other.example.com/mcp")
     assert r.status_code == 302
