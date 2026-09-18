@@ -1198,8 +1198,10 @@ def _write_agami_result(row_dir: Path, answer: dict[str, Any], profile: str) -> 
     client's copy of it. A statement this cannot find in the trace, character for character, is not
     run at all.
     """
-    # A result left by an earlier run of this row is not this answer's result, whatever happens next.
-    for stale in ("actual.csv", "agami-run.json"):
+    # A file left by an earlier run of this row is not this answer's, whatever happens next. The
+    # comparison goes with them: `record` reads it for the row's verdict, so a comparison of the
+    # PREVIOUS answer left beside a new result reports a match the new result does not support.
+    for stale in ("actual.csv", "agami-run.json", "comparison.json", "diff.json"):
         (row_dir / stale).unlink(missing_ok=True)
     sql = (answer.get("sql") or "").strip()
     probes = answer.get("probes")
@@ -1208,7 +1210,13 @@ def _write_agami_result(row_dir: Path, answer: dict[str, Any], profile: str) -> 
     queries = [p for p in probes if isinstance(p, dict) and p.get("tool") == "execute_sql"]
     failed = next((p for p in queries if p.get("status") not in (None, "ok") and not p.get("stopped")), None)
     if failed is not None:
-        run = {"status": failed.get("status"), "exit": None, "kind": None, "rule": None,
+        # `run.json`'s vocabulary is ok / refused / failed / not_run, and the trace has one status it
+        # does not: `raised`, the tool itself throwing. Nothing came back and no guard reported an
+        # outcome, so it is recorded as not run, with the exception's type as the reason. Writing
+        # `raised` into a file every other reader treats as a run record would invent a fifth status.
+        status = failed.get("status")
+        run = {"status": status if status in ("refused", "failed") else "not_run",
+               "exit": None, "kind": None, "rule": None,
                "detail": failed.get("detail"), "source": "trace"}
     else:
         ran = next((p for p in reversed(queries) if p.get("status") == "ok" and not p.get("stopped")

@@ -17,8 +17,9 @@ That is the whole reason this file exists rather than a paragraph in the system 
 
   1. **A query that did not run ends the row.** Reconcile's finding IS the failure: a statement the
      warehouse rejected, or one the guardrail refused, says the semantic model or the tool fetching
-     is broken. A query that ran and returned no rows is not this case: it ran, and it answered. A client left free to retry would paper over exactly that, so after a
-     query comes back anything but `ok`, every later query is stopped here. Note that a REFUSAL
+     is broken. A query that ran and returned no rows is not this case: it ran, and it answered. A
+     client left free to retry would paper over exactly that, so after a query comes back anything
+     but `ok`, every later query is stopped here. Note that a REFUSAL
      counts: an out-of-scope table is the semantic model being wrong about the warehouse, which is
      the finding, not an obstacle to route around.
 
