@@ -206,6 +206,13 @@ def public_base_url() -> str:
     return url
 
 
+def canonical_resource() -> str:
+    """This server's MCP resource identifier. The protected-resource document advertises it, every
+    access token is minted with it as `aud`, and a client's `resource` parameter must name it — one
+    source, so the three can never disagree."""
+    return f"{public_base_url()}/mcp"
+
+
 def _resource_metadata_url(base: str) -> str:
     return f"{base}/.well-known/oauth-protected-resource"
 
@@ -334,7 +341,7 @@ async def _protected_resource(request: Request) -> JSONResponse:
     base = public_base_url()
     return JSONResponse(
         {
-            "resource": f"{base}/mcp",
+            "resource": canonical_resource(),
             "authorization_servers": [base],
             "bearer_methods_supported": ["header"],
         },
@@ -355,6 +362,11 @@ async def _auth_server(request: Request) -> JSONResponse:
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
+            # A client may send a metadata-document URL as its client_id instead of registering. It is a
+            # public client either way, so no token-endpoint authentication is offered.
+            "client_id_metadata_document_supported": True,
+            "token_endpoint_auth_methods_supported": ["none"],
+            "authorization_response_iss_parameter_supported": True,
         },
         headers={"Access-Control-Allow-Origin": "*"},
     )

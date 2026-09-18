@@ -218,7 +218,9 @@ def test_full_oidc_flow_resumes_ace005_and_issues_a_jwt(env, monkeypatch):
         },
     )
     assert tok.status_code == 200
-    claims = jwt.decode(tok.json()["access_token"], SECRET, algorithms=["HS256"], issuer=BASE)
+    claims = jwt.decode(
+        tok.json()["access_token"], SECRET, algorithms=["HS256"], issuer=BASE, audience=f"{BASE}/mcp"
+    )
     assert claims["sub"] == "alice"
 
 
@@ -583,3 +585,140 @@ def test_verify_id_token_rejects_blank_sub(env):
     p = oidc.provider("google")
     with pytest.raises(Exception):
         oidc.verify_id_token(p, _id_token(sub="   "), nonce="the-nonce")
+
+
+# --- the chokepoint, iss and resource on the OIDC path -----------------------------------------------
+
+CLIENT_DOC_URL = "https://app.example.com/oauth/client.json"
+DOC_REDIRECT = "https://app.example.com/callback"
+
+
+@pytest.fixture
+def client_doc(monkeypatch):
+    """A client metadata document served with no network (see test_client_metadata.py)."""
+    import client_metadata
+    import httpx
+
+    doc = {"client_id": CLIENT_DOC_URL, "client_name": "Acme", "redirect_uris": [DOC_REDIRECT]}
+
+    async def body():
+        yield httpx.Response(200, json=doc).content
+
+    async def resolve(host, port):
+        return ["11.0.0.1"]
+
+    client_metadata._cache.clear()
+    monkeypatch.setattr(client_metadata, "_resolve", resolve)
+    monkeypatch.setattr(
+        client_metadata,
+        "_client",
+        lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body()))
+        ),
+    )
+    yield doc
+    client_metadata._cache.clear()
+
+
+def _oidc_start(c: TestClient, **overrides):
+    params = {
+        "provider": "google",
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT,
+        "code_challenge": CHALLENGE,
+        "state": "client-xyz",
+        **overrides,
+    }
+    return c.get("/oauth/oidc/start", params=params, follow_redirects=False)
+
+
+def test_oidc_callback_success_redirect_carries_iss(env, monkeypatch):
+    c = _client()
+    state, nonce = _start_and_capture(c)
+    monkeypatch.setattr(
+        oidc, "exchange_code", lambda p, *, code, redirect_uri: _id_token(nonce=nonce)
+    )
+    cb = c.get(
+        "/oauth/oidc/callback", params={"code": "idp-code", "state": state}, follow_redirects=False
+    )
+    assert parse_qs(urlparse(cb.headers["location"]).query)["iss"] == [BASE]
+
+
+def test_oidc_start_refuses_a_redirect_the_metadata_document_does_not_list(env, client_doc):
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=REDIRECT)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"
+    assert "location" not in r.headers
+
+
+def test_oidc_start_refuses_an_invalid_metadata_document(env, client_doc):
+    client_doc["redirect_uris"] = []
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_client"
+    assert "location" not in r.headers
+
+
+def test_oidc_start_accepts_a_listed_metadata_redirect(env, client_doc):
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 302 and r.headers["location"].startswith(f"{ISSUER}/authorize")
+
+
+@pytest.fixture
+def stores_open_during_fetch(monkeypatch, client_doc):
+    """How many datastore connections were open each time the metadata document was fetched. The fetch
+    can take seconds, and on Postgres every open store is a connection held for all of it."""
+    import client_metadata
+    import oauth_server
+
+    open_stores: list = []
+    seen: list[int] = []
+    real_open, real_fetch = oauth_server._open_store, client_metadata.redirect_uris
+
+    def tracked_open():
+        store = real_open()
+        if store is not None:
+            open_stores.append(store)
+            real_close = store.close
+            store.close = lambda: (open_stores.remove(store), real_close())
+        return store
+
+    async def tracked_fetch(client_id):
+        seen.append(len(open_stores))
+        return await real_fetch(client_id)
+
+    monkeypatch.setattr(oauth_server, "_open_store", tracked_open)
+    monkeypatch.setattr(client_metadata, "redirect_uris", tracked_fetch)
+    return seen
+
+
+def test_oidc_start_holds_no_store_open_during_the_metadata_fetch(env, stores_open_during_fetch):
+    r = _oidc_start(_client(), client_id=CLIENT_DOC_URL, redirect_uri=DOC_REDIRECT)
+    assert r.status_code == 302
+    assert stores_open_during_fetch == [0]
+
+
+def test_authorize_post_holds_no_store_open_during_the_metadata_fetch(env, stores_open_during_fetch):
+    data = {
+        "client_id": CLIENT_DOC_URL,
+        "redirect_uri": DOC_REDIRECT,
+        "code_challenge": CHALLENGE,
+        "state": "x",
+    }
+    r = _client().post("/oauth/authorize", data=data, follow_redirects=False)
+    assert r.status_code == 200  # an OIDC deployment re-renders the provider page after the gate
+    assert stores_open_during_fetch == [0]
+
+
+def test_oidc_start_redirects_a_wrong_resource_as_invalid_target_with_iss(env):
+    r = _oidc_start(_client(), resource="https://other.example.com/mcp")
+    assert r.status_code == 302
+    loc = urlparse(r.headers["location"])
+    assert f"{loc.scheme}://{loc.netloc}{loc.path}" == REDIRECT
+    expected = {"error": ["invalid_target"], "state": ["client-xyz"], "iss": [BASE]}
+    assert parse_qs(loc.query) == expected
+
+
+def test_the_provider_button_carries_the_resource(env):
+    html = _client().get(
+        "/oauth/authorize", params={"redirect_uri": REDIRECT, "resource": f"{BASE}/mcp"}
+    ).text
+    assert "resource=https%3A%2F%2Fyour-host.example.com%2Fmcp" in html

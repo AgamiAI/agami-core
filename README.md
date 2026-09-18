@@ -55,7 +55,7 @@ Each path is walked through in full below ([Quickstart](#quickstart-under-5-minu
 - 🧩 **A portable semantic model** — plain, git-native YAML you own (subject areas, tables, entities, metrics, relationships). No lock-in.
 - 🗄️ **Works with your database** — Postgres · Supabase · Redshift · MySQL · Snowflake · BigQuery · SQL Server · Oracle · Databricks · Trino · DuckDB · SQLite.
 - 🛠️ **Zero infra to start** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
-- 👥 **Shareable with your team** *(early access — in testing)* — self-host [one governed server](#self-hosted-team-server--early-access-in-testing) that your whole team and business users query from their own Claude over a URL, still zero-egress. The team layer is newer than the local path; we're validating it with early users.
+- 👥 **Shareable with your team** *(early access — in testing)* — self-host [one governed server](#self-hosted-team-server--early-access-in-testing) that your whole team and business users query from their own Claude over a URL, and your data still never leaves your environment. The team layer is newer than the local path; we're validating it with early users.
 
 ## Quickstart (under 5 minutes)
 
@@ -280,7 +280,8 @@ using the bundle? The [manual install + environment-variable reference](docs/sel
 that.) Admins sign in with a password; teammates get per-user access to `/mcp`.
 
 It's cloud-neutral (a VM + Postgres, or a serverless platform + managed Postgres), configured entirely
-by environment variables, and **LLM-free + zero-egress by default**. Self-hosting this for people
+by environment variables, and **LLM-free, with no customer data leaving your environment** (by default
+its one outbound call fetches the public metadata document a signing-in client names). Self-hosting this for people
 **inside your organization is free**; exposing data to people outside it is the paid line
 ([fair-code vs hosted](docs/open-vs-hosted.md)).
 

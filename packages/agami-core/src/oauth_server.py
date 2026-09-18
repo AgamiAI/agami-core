@@ -7,9 +7,11 @@ the issued JWT is what the transport will trust once a follow-up change wires th
 
 Security invariants enforced here: authorization codes are single-use + short-lived; PKCE (S256) is
 required; redirect URIs are allow-listed (the claude.ai callback, the public base URL, or a URI the
-client registered) so a code can't be sent to an attacker; the signing secret and tokens are never
-logged or echoed in an error body. This module makes NO network call — it only mints/validates
-locally and tells the browser where to redirect.
+client registered; for a client identified by a metadata-document URL, only a URI its document lists)
+so a code can't be sent to an attacker; the signing secret and tokens are never logged or echoed in an
+error body. This module makes no network call of its own — it mints/validates locally and tells the
+browser where to redirect. The one fetch a sign-in can cause, of a client's metadata document, is
+delegated to `client_metadata`.
 """
 
 from __future__ import annotations
@@ -120,15 +122,22 @@ def issue_jwt(subject: str, *, sid: str | None = None) -> str:
 
     `sid` identifies the CLIENT AUTHORIZATION this token belongs to, so one login driving two clients is
     distinguishable per request (see `_session_id`). Omitted when there is none — a token minted outside
-    the OAuth flow (a script, a test, an operator's hand-rolled bearer) carries exactly the claims it
-    always did, and consumers must treat its absence as "no session", never as an error.
+    the OAuth flow (a script, a test, an operator's hand-rolled bearer) carries no `sid`, and consumers
+    must treat its absence as "no session", never as an error. Every token carries `aud`, the MCP
+    resource it is for; validation refuses one without it.
     """
-    from mcp_http import public_base_url  # lazy: mcp_http imports these handlers at module load
+    from mcp_http import (  # lazy: mcp_http imports these handlers at module load
+        canonical_resource,
+        public_base_url,
+    )
 
     now = _now()
     payload = {
         "sub": subject,
         "iss": public_base_url(),
+        # The audience binds the token to this server's MCP resource, so a token minted here cannot be
+        # replayed against another resource that trusts the same issuer, and vice versa.
+        "aud": canonical_resource(),
         "iat": int(now.timestamp()),
         "exp": int((now + _access_ttl()).timestamp()),
     }
@@ -144,11 +153,12 @@ class JwtAuthProvider:
     """Validates the self-signed HS256 JWTs `issue_jwt` mints — the transport's real token gate.
 
     Conforms structurally to the `ports.AuthProvider` protocol (validate_token → Principal | None).
-    Pins the algorithm to HS256 (no `alg=none`/confusion), requires sub/exp/iss, and checks the
-    issuer == PUBLIC_BASE_URL. Any bad/expired/forged token returns None (fail closed → 401)."""
+    Pins the algorithm to HS256 (no `alg=none`/confusion), requires sub/exp/iss/aud, and checks the
+    issuer == PUBLIC_BASE_URL and the audience == this server's MCP resource. Any bad/expired/forged
+    token returns None (fail closed → 401)."""
 
     def validate_token(self, token: str) -> Principal | None:
-        from mcp_http import public_base_url  # lazy: avoid the import cycle
+        from mcp_http import canonical_resource, public_base_url  # lazy: avoid the import cycle
 
         try:
             claims = jwt.decode(
@@ -156,10 +166,11 @@ class JwtAuthProvider:
                 _signing_secret(),
                 algorithms=["HS256"],
                 issuer=public_base_url(),
-                options={"require": ["exp", "sub", "iss"]},
+                audience=canonical_resource(),
+                options={"require": ["exp", "sub", "iss", "aud"]},
             )
         except Exception:
-            # Invalid signature, expired, wrong issuer, malformed, or no secret → reject.
+            # Invalid signature, expired, wrong issuer or audience, malformed, or no secret → reject.
             return None
         sub = claims.get("sub")
         # `Principal.subject` is a str — reject a non-string or blank sub rather than carry a
@@ -194,18 +205,92 @@ def _same_origin(a: str, b: str) -> bool:
     return bool(pa.scheme) and pa.scheme == pb.scheme and pa.netloc == pb.netloc
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _redirect_matches(uri: str, allowed: str) -> bool:
+    """`uri` is `allowed` exactly, or both are the same plain-http loopback callback on any port.
+
+    A native client listens on whatever port the OS hands it at sign-in, so it cannot name the port in
+    advance (RFC 8252 §7.3). Only the port is relaxed: the scheme, loopback name, path and query must
+    agree, and userinfo is refused. The name is compared as a parsed hostname from a fixed set, so
+    `127.0.0.1.example.com` is not loopback. IPv6 `[::1]` is left exact on purpose; nothing needs it."""
+    if uri == allowed:
+        return True
+    try:
+        a, b = urlsplit(uri), urlsplit(allowed)
+        # The port is ignored but must be one: `127.0.0.1:53123.evil.example.com` parses as hostname
+        # 127.0.0.1 and fails only here.
+        a.port, b.port  # noqa: B018
+    except ValueError:
+        return False
+    return (
+        a.scheme == b.scheme == "http"
+        and "@" not in a.netloc
+        and a.hostname in _LOOPBACK_HOSTS
+        and a.hostname == b.hostname
+        and (a.path, a.query, a.fragment) == (b.path, b.query, b.fragment)
+    )
+
+
 def _redirect_allowed(redirect_uri: str, registered: str | None) -> bool:
     """Allow only the claude.ai callback, a same-origin URI under PUBLIC_BASE_URL, or one the client
-    registered (exact match) — so an authorization code can never be redirected to an attacker host."""
+    registered (see `_redirect_matches`) — so an authorization code can never be redirected to an
+    attacker host."""
     from mcp_http import public_base_url
 
     if not redirect_uri:
         return False
     if redirect_uri in _CLAUDE_CALLBACKS:
         return True
-    if registered and redirect_uri in registered.split():
+    if registered and any(_redirect_matches(redirect_uri, r) for r in registered.split()):
         return True
     return _same_origin(redirect_uri, public_base_url())
+
+
+async def _client_redirect_error(client_id: str, redirect_uri: str) -> JSONResponse | None:
+    """The one gate on where a sign-in may send its code, shared by the password POST and the OIDC
+    start. None when `redirect_uri` is allowed for `client_id`; otherwise the error to return, which is
+    never a redirect (the target is exactly what is not trusted).
+
+    A client identified by a metadata-document URL may use only the redirect URIs its document lists:
+    the claude.ai and same-origin fallbacks below exist for registered clients, and extending them to a
+    URL anyone can publish would let any document claim a code bound for Claude.
+
+    It opens a store only to look up a registered client, and callers open theirs after it returns: the
+    metadata fetch can take seconds, and a store open across it holds a database connection that long."""
+    import client_metadata  # lazy: the egress module, like oidc
+
+    if client_metadata.is_metadata_client_id(client_id):
+        try:
+            listed = await client_metadata.redirect_uris(client_id)
+        except client_metadata.ClientMetadataError:
+            return _oauth_error("invalid_client", "client metadata document could not be used")
+        if not redirect_uri or not any(_redirect_matches(redirect_uri, u) for u in listed):
+            return _oauth_error("invalid_request", "redirect_uri not allowed")
+        return None
+    store = _open_store()
+    if store is None:
+        return _oauth_error("server_error", "no datastore configured", status=500)
+    try:
+        client = store.query(
+            "SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (client_id,)
+        )
+    finally:
+        store.close()
+    registered = client[0]["redirect_uris"] if client else None
+    if not _redirect_allowed(redirect_uri, registered):
+        return _oauth_error("invalid_request", "redirect_uri not allowed")
+    return None
+
+
+def _authorization_redirect(redirect_uri: str, params: dict[str, str]) -> RedirectResponse:
+    """302 back to the client with `params` plus `iss` (RFC 9207), on success and on error alike, so a
+    client talking to several authorization servers can tell which one answered."""
+    from mcp_http import public_base_url
+
+    query = urlencode({**params, "iss": public_base_url()})
+    return RedirectResponse(f"{redirect_uri}?{query}", status_code=302)
 
 
 async def _form(request: Request) -> dict[str, str]:
@@ -217,6 +302,16 @@ async def _form(request: Request) -> dict[str, str]:
 def _oauth_error(error: str, description: str, status: int = 400) -> JSONResponse:
     # OAuth-style error; never includes a token, secret, or the submitted password.
     return JSONResponse({"error": error, "error_description": description}, status_code=status)
+
+
+def _resource_ok(resource: str) -> bool:
+    """RFC 8707: a client may name the resource it wants a token for. Absent is fine (the token is for
+    this server's MCP resource regardless); present, it must be that resource, give or take one trailing
+    slash, because a token minted for a resource the client did not ask for is the confusion the
+    parameter exists to prevent."""
+    from mcp_http import canonical_resource
+
+    return not resource or resource.removesuffix("/") == canonical_resource()
 
 
 def _open_store() -> Store | None:
@@ -257,7 +352,7 @@ async def register(request: Request) -> Response:
         store.close()
 
 
-_OAUTH_CONTEXT_KEYS = ("client_id", "redirect_uri", "code_challenge", "state")
+_OAUTH_CONTEXT_KEYS = ("client_id", "redirect_uri", "code_challenge", "state", "resource")
 
 
 def _login_form(
@@ -269,9 +364,20 @@ def _login_form(
     return HTMLResponse(login_body_html(params, error=error, providers=providers, wrap=True))
 
 
-def _client_label(redirect_uri: str) -> str | None:
+def _client_label(redirect_uri: str, client_id: str) -> str | None:
     """A friendly name for the connecting client, derived from its callback. claude.ai/.com → 'Claude';
-    otherwise None (we don't store a per-client name, so show a generic sign-in)."""
+    otherwise None (we don't store a per-client name, so show a generic sign-in).
+
+    A client identified by a metadata-document URL is named by the host its code goes back to, never by
+    the document's `client_name`: anyone can publish a document calling itself Claude, but the redirect
+    host is what the person is actually handing access to."""
+    import client_metadata  # lazy: the egress module, like oidc
+
+    if client_metadata.is_metadata_client_id(client_id):
+        try:
+            return urlsplit(redirect_uri).hostname
+        except ValueError:
+            return None
     if "claude.ai" in redirect_uri or "claude.com" in redirect_uri:
         return "Claude"
     return None
@@ -284,7 +390,7 @@ def login_body_html(
     render it with sample values without going through a request."""
     carried = {k: params.get(k, "") for k in _OAUTH_CONTEXT_KEYS}
     alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
-    client = _client_label(params.get("redirect_uri", ""))
+    client = _client_label(params.get("redirect_uri", ""), params.get("client_id", ""))
     # Consent banner mirrors the web app: a quiet "Allow <client> to connect to your data". When the
     # client isn't a recognised AI assistant we just show the logo (no banner) — no filler text.
     #
@@ -333,19 +439,21 @@ async def authorize(request: Request) -> Response:
         return _login_form(dict(request.query_params), providers=providers)
 
     form = await _form(request)
+    redirect_uri = form.get("redirect_uri", "")
+    client_id = form.get("client_id", "")
+    # Validate the redirect target BEFORE authenticating — never send a code to an unvetted URL.
+    error = await _client_redirect_error(client_id, redirect_uri)
+    if error is not None:
+        return error
     store = _open_store()
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
-        redirect_uri = form.get("redirect_uri", "")
-        client_id = form.get("client_id", "")
-        client = store.query(
-            "SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (client_id,)
-        )
-        registered = client[0]["redirect_uris"] if client else None
-        # Validate the redirect target BEFORE authenticating — never send a code to an unvetted URL.
-        if not _redirect_allowed(redirect_uri, registered):
-            return _oauth_error("invalid_request", "redirect_uri not allowed")
+        # Only now is the redirect trusted enough to carry an error back to the client.
+        if not _resource_ok(form.get("resource", "")):
+            return _authorization_redirect(
+                redirect_uri, {"error": "invalid_target", "state": form.get("state", "")}
+            )
         # PKCE is mandatory: reject a missing challenge now rather than persist a code that could
         # never be redeemed (the token step requires a verifier that matches it).
         code_challenge = form.get("code_challenge", "")
@@ -417,8 +525,7 @@ def _issue_authorization_code(
         ),
     )
     store.commit()
-    query = urlencode({"code": code, "state": client_state})
-    return RedirectResponse(f"{redirect_uri}?{query}", status_code=302)
+    return _authorization_redirect(redirect_uri, {"code": code, "state": client_state})
 
 
 def _hash_token(token: str) -> str:
@@ -521,6 +628,9 @@ async def token(request: Request) -> Response:
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
+        # One check ahead of the dispatch covers both grants.
+        if not _resource_ok(form.get("resource", "")):
+            return _oauth_error("invalid_target", "resource is not this server's MCP endpoint")
         if grant == "authorization_code":
             return _grant_authorization_code(store, form)
         if grant == "refresh_token":
@@ -747,18 +857,14 @@ async def oidc_start(request: Request) -> Response:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
     redirect_uri = q.get("redirect_uri", "")
     code_challenge = q.get("code_challenge", "")
-    store = _open_store()
-    if store is None:
-        return _oauth_error("server_error", "no datastore configured", status=500)
-    try:
-        client = store.query(
-            "SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (q.get("client_id", ""),)
+    error = await _client_redirect_error(q.get("client_id", ""), redirect_uri)
+    if error is not None:
+        return error
+    # The resource is checked here rather than carried in the state: nothing after the IdP changes it.
+    if not _resource_ok(q.get("resource", "")):
+        return _authorization_redirect(
+            redirect_uri, {"error": "invalid_target", "state": q.get("state", "")}
         )
-        registered = client[0]["redirect_uris"] if client else None
-    finally:
-        store.close()
-    if not _redirect_allowed(redirect_uri, registered):
-        return _oauth_error("invalid_request", "redirect_uri not allowed")
     if not code_challenge:
         return _oauth_error("invalid_request", "code_challenge is required (PKCE)")
 
