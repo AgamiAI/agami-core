@@ -36,6 +36,35 @@ below corresponds to one such version.
   ending `; -- done` used to be wrapped as two statements, which the guard refused, and that refusal
   was written nowhere. (ACE-155)
 
+### Added
+
+- **Reconcile can ask agami through agami's own tools, so a row's answer comes from the surface a
+  person uses.** `run_golden_eval.py --via mcp` serves the cold client the local stdio MCP server and
+  lets it work: it calls `get_datasource_schema` and `get_prompt_examples` itself, scoping them as it
+  sees fit, and runs its own statement. Until now that client had every tool switched off and was
+  handed one pre-fetched schema blob, so a reconcile run never exercised the things that decide
+  whether a real question succeeds: how a question gets scoped, whether the prompt examples surface
+  the one that would have carried it, `execute_sql`'s safety pass, or the server's own
+  instructions. A run could therefore pass on a semantic model nobody could query,
+  and fail on one that works, with no way to tell which. Two rules make the result comparable
+  anyway, and both are enforced by the server rather than asked for in the prompt, because an
+  instruction can be partly obeyed and then nobody knows what the run measured. A query that did not
+  run ENDS the row: the failure is the finding, since a statement the database rejected or
+  the safety check blocked says the semantic model or the tool fetching is broken, and a client free
+  to retry would paper over exactly that. Successful queries are NOT capped, because a client reading a
+  column's values before it filters on one is a person doing the same; capping them would end the
+  row and report a defect against a model that works, which is the most expensive error this report
+  can make. The count of those probes is the measurement instead: it reads how much the semantic
+  model failed to say up front. The client names the query it answered from and the run checks that
+  against the server's own trace, so reporting a number with no query behind it, or a statement it
+  never ran, is an error row rather than an ordinary answer. The run also writes agami's result for
+  reconcile itself, in code: a statement the server did not run is never run again, and one that ran
+  is run once more, only for its result, through `execute_sql`'s guarded envelope, from the server's
+  own record of the statement rather than the client's copy. Leaving that run to
+  the skill let it pick a command-line tier with no guard, so a statement the server had blocked could
+  have reached the database another way. `--via context` stays the default, so every golden score
+  remains comparable with the runs before it.
+
 ### Fixed
 
 - **A reconcile row whose query never ran said something else happened.** When agami's query was
