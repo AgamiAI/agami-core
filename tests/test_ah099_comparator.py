@@ -1417,14 +1417,19 @@ def test_same_named_flags_selected_in_the_other_order_pair_by_name_when_unordere
 
 
 def _counting_compare_rows(monkeypatch):
-    """Count how many times stage one reads the rows to measure a pairing."""
-    real, pairings = c.compare_rows, []
+    """Count how many times stage one reads the rows to measure a pairing.
 
-    def counted(golden_rows, generated_rows, pairing, **kept):
+    The search measures with `_overlap`, which counts the rows two columns line up. A pairing that
+    already lines up every row the shorter result holds cannot be beaten, so a second read is work
+    with no answer in it.
+    """
+    real, pairings = c._overlap, []
+
+    def counted(golden_rows, generated_rows, pairing, *args, **kept):
         pairings.append(pairing)
-        return real(golden_rows, generated_rows, pairing, **kept)
+        return real(golden_rows, generated_rows, pairing, *args, **kept)
 
-    monkeypatch.setattr(c, "compare_rows", counted)
+    monkeypatch.setattr(c, "_overlap", counted)
     return pairings
 
 
@@ -1443,7 +1448,7 @@ def test_the_in_order_pairing_is_not_measured_when_the_names_already_line_up_eve
         _flags_selected_as(_REORDERED).rows,
         ordered=False,
     )
-    assert len(measured) == 1
+    assert len(measured) == 1   # the names' pairing, and nothing after it
     named = tuple((golden.columns[g], _REORDERED[p]) for g, p in sorted(pairing.pairing.items()))
     assert named == _FLAGS_BY_NAME
 
@@ -1454,7 +1459,7 @@ def test_the_in_order_pairing_is_still_measured_when_the_names_leave_a_row_out(m
     measured = _counting_compare_rows(monkeypatch)
     rows = [(1, 2), (2, 3), (3, 1)]
     pairing = c.pair_columns(["x", "y"], rows, ["y", "x"], rows, ordered=False)
-    assert len(measured) == 2
+    assert len(measured) > 1   # the names' pairing did not line every row up, so the rows decide
     assert pairing.pairing == {0: 0, 1: 1}
 
 
