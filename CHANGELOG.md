@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-09-17
+
 ### Security
 
 - **A statement a person hands to reconcile now reaches the database only through the guard.**
