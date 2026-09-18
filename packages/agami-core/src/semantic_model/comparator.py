@@ -507,9 +507,11 @@ def _equal_classes(
 # What bounds the worst case is that both terms are read counts, and each read is one pass over the
 # distinct rows. The first descent, which the budget never stops, reads each result a few dozen
 # times (27 times for six equal columns, and once per option for a wide one). The budget adds
-# `_SEARCH_ROW_FACTOR` reads on top, against the roughly 3,200 an exhaustive search of six equal
-# columns would take. So one comparison costs a bounded number of passes over the result, and grows
-# with the rows rather than with the ways to pair them.
+# `_SEARCH_ROW_FACTOR` reads on top. For scale, the whole tree for six equal columns is 3,193 reads
+# — that is the shape of the tree, counted, not a measurement — and a hard case, two results with
+# equal columns whose rows were drawn independently so almost nothing prunes, walked 326 of them. So
+# one comparison costs a bounded number of passes over the result, and grows with the rows rather
+# than with the ways to pair them.
 #
 # Past the budget the search keeps the best assignment it has found, which never lines up fewer rows
 # than the pairing it started from but can fall short of the best. What usually gets there is a
