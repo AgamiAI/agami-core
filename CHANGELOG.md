@@ -14,6 +14,21 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A reconcile row whose query never ran said something else happened.** When agami's query was
+  refused or failed, the run still left an empty `actual.csv` behind, and `reconcile.py record` read
+  that empty file as a result with no columns and no rows. So the row skipped the sentence "agami's
+  statement did not run" and said the two results were tables that were not compared. On a row that
+  was only a question, it was worse: the row waited for a person to judge an answer agami never
+  gave. Now an empty result file is never a result, because a real one always has a header row that
+  names its columns. A file holding only a blank line counts as empty too. A run record that is
+  there and does not say `ok` means there is no result either, whatever file sits beside it. A run
+  record whose own file is empty or not JSON says nothing about the run, so the result file decides.
+  That is the file being unreadable, not the session saying the run went wrong: a run record holding
+  only an error the session wrote is a record of a run that failed, and the file beside it is not its
+  result. The same holds for your own query: when it did not run, the page no longer shows your
+  result as "0 rows". A query that ran and returned a header with no rows is still a result, and is
+  still compared.
+
 - **An identical answer no longer scores as different when two of its columns hold the same values
   on different rows.** When row order is not compared (reconcile always, and a golden run whose
   answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
@@ -23,6 +38,7 @@ below corresponds to one such version.
   first. A name can mislead too, when a statement swaps two labels or aliases one of two columns
   that share a label, so that pairing is checked against the old one and the one that lines up
   more rows is kept.
+
 - **A column that mostly repeats one value no longer pairs with a different column.** A flag that
   is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
   the rows differed and blamed a column that was right, when the real finding was a missing
@@ -33,6 +49,7 @@ below corresponds to one such version.
   Two costs are accepted. A renamed column of that kind that is wrong on one row is now reported
   missing too, rather than as a column that differs on one row. And a score without row order can
   change for such items. A different column that holds exactly the same values still pairs.
+
 - **A right answer now scores 1.0 when its equal columns are renamed or have their labels swapped.**
   When row order is not compared, columns that hold the same values look the same. The comparator
   pairs them by name first, or in order when that lines up more rows. When every column is renamed,
@@ -47,6 +64,7 @@ below corresponds to one such version.
   than the old one, but it can fall short of the best. The budget counts reads of the result and not
   rows, because a flat count bought a hundred reads of a 20,000-row result and only twenty of a
   100,000-row one — and at 100,000 rows a right answer with every column renamed then scored 0.0.
+
 - **A wrong answer's score can drop, and when it drops it usually drops to 0.0.** The search can
   take the generated column that carried a golden column's values and give it to a different golden
   column. The first column is then left with no partner. Over 6,000 near misses — a right answer
@@ -96,6 +114,7 @@ below corresponds to one such version.
   be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
   blank id is now rejected as an input validation error — a deployment turning the flag on should
   confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
+
 ## [0.9.2] — 2026-09-16
 
 ### Added
