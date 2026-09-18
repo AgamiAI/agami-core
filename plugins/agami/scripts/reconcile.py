@@ -586,19 +586,27 @@ def _part(part: str, verdict: str, *, kind: str | None = None, depends_on=(),
             "evidence": evidence or {}, "note": note}
 
 
+# The key `_load_json` puts on its own error objects, so a reader can tell "this file could not be
+# read" from a file whose author wrote an `error` of their own. Several row files are written by the
+# session rather than by code, and `{"error": "the client timed out"}` in one of them is a record of
+# a run that failed, not a parser message. Nothing on disk carries this key, because nothing but the
+# loader writes it.
+_LOAD_ERROR = "__load_error__"
+
+
 def _load_json(path: Path) -> Any:
-    """The JSON in `path`; None when the file is absent; `{"error": ...}` when it is empty or is not
-    JSON. A verb that crashed leaves a zero-byte redirect behind, and that must read as "this input
-    is unusable", never as "checked and clean"."""
+    """The JSON in `path`; None when the file is absent; `{"error": ..., _LOAD_ERROR: True}` when it
+    is empty or is not JSON. A verb that crashed leaves a zero-byte redirect behind, and that must
+    read as "this input is unusable", never as "checked and clean"."""
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-8")
     if not text.strip():
-        return {"error": "empty_file"}
+        return {"error": "empty_file", _LOAD_ERROR: True}
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        return {"error": "unreadable_json", "detail": str(exc).splitlines()[0]}
+        return {"error": "unreadable_json", "detail": str(exc).splitlines()[0], _LOAD_ERROR: True}
 
 
 def _usable(payload: Any, key: str) -> "tuple[dict | None, str | None]":
@@ -2948,13 +2956,16 @@ def stamp_for(run: str, items: list[dict]) -> str:
 def _csv_shape(path: Path) -> tuple[dict | None, Any]:
     """A result CSV as the record carries it: one cell as `{"columns", "rows": [[cell]]}`, anything
     else as `{"columns", "row_count"}`. Never result rows beyond one cell. The second value is that one
-    cell, as a number when it reads as one."""
+    cell, as a number when it reads as one. Nothing when the file is absent or names no column."""
     if not path.exists():
         return None, None
     with path.open(newline="", encoding="utf-8") as fh:
         rows = [row for row in csv.reader(fh)]
-    if not rows:
-        return {"columns": [], "row_count": 0}, None
+    if not rows or not any(cell.strip() for cell in rows[0]):
+        # A zero-byte file is a run that returned nothing, never a result of no rows: the execution
+        # tier writes CSV only on success, and a real result always has a header row that names its
+        # columns. A blank line, or a header of nothing but spaces, names none, so it is no result either.
+        return None, None
     columns, data = rows[0], [r for r in rows[1:] if any(cell.strip() for cell in r)]
     if len(data) == 1 and len(data[0]) == 1:
         cell = data[0][0]
@@ -2962,6 +2973,25 @@ def _csv_shape(path: Path) -> tuple[dict | None, Any]:
         kept = value if value is not None else cell
         return {"columns": columns, "rows": [[kept]]}, kept
     return {"columns": columns, "row_count": len(data)}, None
+
+
+def _run_result(path: Path, run: Any) -> tuple[dict | None, Any]:
+    """`_csv_shape` of the CSV a run wrote, or nothing when the run record beside it is there and does
+    not say `ok`: a refused or failed run can still leave its CSV behind. No run record says nothing
+    either way, so the CSV decides alone."""
+    if run is not None and not (isinstance(run, dict) and run.get("status") == "ok"):
+        return None, None
+    return _csv_shape(path)
+
+
+def _run_record(path: Path) -> Any:
+    """The run record at `path`, or None when it is absent or cannot be read. An empty or broken file
+    is `_load_json`'s own error object, marked `_LOAD_ERROR`. It says nothing about how the run went,
+    so it counts as no record: the CSV beside it decides, and no parser message becomes the reason a
+    statement did not run. The mark is what tells it from a record the session wrote by hand, which
+    carries only an `error` of its own and is a real record of a run that did not succeed."""
+    run = _optional_json(path)
+    return None if isinstance(run, dict) and run.get(_LOAD_ERROR) else run
 
 
 def _optional_json(path: Path) -> Any:
@@ -3179,10 +3209,11 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         raise RecordError(f"rows/{row}/agami-answer.json is missing or unreadable; ask agami (Phase 2b) first")
     sql = answer.get("sql") if isinstance(answer.get("sql"), str) and answer["sql"].strip() else None
     statements = [st for st in (answer.get("statements") or []) if isinstance(st, str) and st.strip()]
-    agami_run = _optional_json(row_dir / "agami-run.json")
-    recorded, actual_cell = _csv_shape(row_dir / "actual.csv")
+    agami_run = _run_record(row_dir / "agami-run.json")
+    recorded, actual_cell = _run_result(row_dir / "actual.csv", agami_run)
     statement = base.get("statement") or None
-    statement_recorded, statement_cell = _csv_shape(row_dir / "statement.csv") if statement else (None, None)
+    statement_recorded, statement_cell = (
+        _run_result(row_dir / "statement.csv", _run_record(row_dir / "run.json")) if statement else (None, None))
     exp = base.get("expected")
     if exp is None and statement and isinstance(statement_cell, (int, float)) and not isinstance(statement_cell, bool):
         exp = float(statement_cell)  # Phase 1.5f: the statement's own result is the expected value
@@ -3202,6 +3233,9 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
     if sql is None:
         error = answer.get("error") or "agami wrote no statement"
     elif recorded is None:
+        # Why it did not run, from the run record when it says: the tier's own fields first, then an
+        # `error` the session wrote by hand. A record that says none of them leaves only the plain
+        # sentence, which is the same one a row with no run record at all gets.
         detail = agami_run if isinstance(agami_run, dict) else {}
         if detail.get("source") == "trace" and detail.get("status") in _DID_NOT_RUN:
             # Who stopped it and why, in plain words: the run file's own `status` ("refused") names a
@@ -3211,8 +3245,9 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
             stopped = {"status": detail["status"], "detail": detail.get("detail") or answer.get("error")}
             error = _no_result_lead(stopped) + ". " + _why_it_did_not_run(stopped["status"], stopped["detail"])
         else:
-            error = detail.get("detail") or detail.get("kind") or detail.get("status") or "agami's statement was not run, or its result was not recorded"
-            error = f"agami's statement did not run: {error}" if detail else error
+            why = detail.get("detail") or detail.get("kind") or detail.get("status") or detail.get("error")
+            error = f"agami's statement did not run: {why}" if why else \
+                "agami's statement was not run, or its result was not recorded"
     elif exp is None and statement is None:
         # A question on its own: the person supplied no statement and no number, so there is nothing
         # of theirs to compare against and NO file on disk can change that. `comparison.json` and
