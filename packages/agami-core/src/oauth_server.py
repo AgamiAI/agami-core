@@ -218,6 +218,9 @@ def _redirect_matches(uri: str, allowed: str) -> bool:
         return True
     try:
         a, b = urlsplit(uri), urlsplit(allowed)
+        # The port is ignored but must be one: `127.0.0.1:53123.evil.example.com` parses as hostname
+        # 127.0.0.1 and fails only here.
+        a.port, b.port  # noqa: B018
     except ValueError:
         return False
     return (

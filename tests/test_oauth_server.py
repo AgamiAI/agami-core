@@ -1166,6 +1166,8 @@ def test_a_registered_client_loopback_redirect_matches_on_any_port(env):
         ("http://evil@127.0.0.1:53123/callback", "http://127.0.0.1/callback", False),
         ("https://app.example.com:8443/callback", "https://app.example.com/callback", False),
         ("http://[bad:53123/callback", "http://127.0.0.1/callback", False),  # unparseable
+        # A "port" that runs on into a name: the hostname still parses as loopback, the port does not.
+        ("http://127.0.0.1:53123.evil.example.com/callback", "http://127.0.0.1/callback", False),
     ],
 )
 def test_redirect_matches(uri, allowed, expected):
