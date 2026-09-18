@@ -2212,12 +2212,13 @@ def _summaries(rows: list[dict], result: dict, rec: dict) -> dict:
     elif not [r for r in sql_rows if r is not fit]:
         # The same rule the checks line below already keeps: a silence must not read as a pass.
         # `differs` is empty both when the two queries agreed on everything and when neither was
-        # ever compared, and on a row whose query did not run the second is what happened — so "the
-        # two queries ask for the same things" was the card stating agreement it had no evidence for,
-        # on the one row a person opened to find out what went wrong. The fit check lives in this
+        # ever compared, and on a row whose query returned nothing the second is what happened — so
+        # "the two queries ask for the same things" was the card stating agreement it had no evidence
+        # for, on the one row a person opened to find out what went wrong. The fit check lives in this
         # section too, but it reads your query rather than comparing two, so it does not count.
-        sql = ("agami's query did not run, so the two were never compared."
-               if _rejected_query(rec) is not None else "The two queries were not compared.")
+        rejected = _rejected_query(rec)
+        sql = (f"{_no_result_lead(rejected)}, so the two were never compared."
+               if rejected is not None else "The two queries were not compared.")
     else:
         sql = ("The two queries differ in " + _and_list(differs) + ".") if differs else "The two queries ask for the same things."
     if fit and fit["state"] != "held":
@@ -2265,13 +2266,14 @@ _NOT_GRADED = {"data": "not_graded", "query": "not_comparable", "label": "not gr
 
 _ERROR_LEAD = {
     "agami_failed": "agami's query failed",
-    # Separate from `agami_failed` because it wants the opposite fix: the safety check blocked the
-    # statement or the database rejected it, so the semantic model and the database disagree.
-    "agami_query_rejected": "agami's query did not run",
     "yours_failed": "your query did not run",
     "nothing_to_compare": "both queries returned no rows, so there is nothing to compare",
     "unknown": "the run's files do not say why",
 }
+# `agami_query_rejected` has no fixed lead here. It is a cause of its own, separate from
+# `agami_failed`, because it wants the opposite fix: agami stopped the statement or the database
+# rejected it, so the semantic model and the database may disagree. But WHAT is true of it depends
+# on which of those happened, so `_no_result_lead` reads that from the row's own trace.
 
 
 def _first_line(text: Any) -> str:
@@ -2324,7 +2326,7 @@ def _rejected_query(rec: dict) -> dict | None:
     return None
 
 
-#: The statuses a query that did not run carries: the safety check blocked it, or the database
+#: The statuses a query that came back with no result carries: agami stopped it, or the database
 #: rejected it. `raised` (the tool itself threw) is deliberately not one of them.
 _DID_NOT_RUN = ("refused", "failed")
 
@@ -2376,16 +2378,54 @@ def _blocked_because(part: str) -> str | None:
     return match[1] + (f" ({named})" if named else "")
 
 
-def _why_it_did_not_run(status: Any, detail: Any) -> str:
-    """One plain sentence for a query that did not run, naming who stopped it and why."""
+def _blocked_reasons(status: Any, detail: Any) -> list[str] | None:
+    """Every reason a refusal carries, in plain words — or None when it is not a refusal one of the
+    pre-execution gates explains.
+
+    `refused` covers two different moments. The scope gates and the SELECT * gate run BEFORE the
+    statement is sent, so a query they stop never reaches the database. The resource limits are
+    refusals too and they fire AFTER it ran: the row cap drops a result the executor had already
+    returned, the statement timeout cancels a statement the database was busy with, and the executor
+    bound abandons one that may still be running. Telling a reader those were "blocked before it
+    reached the database" sends them hunting for a scope problem instead of narrowing their query,
+    so only the reasons `_BLOCKED_BECAUSE` recognises earn those words.
+    """
+    if status != "refused":
+        return None
+    # One refusal can carry several reasons, one sentence each ("…not in the semantic model: a —
+    # only tables declared… query references table(s) whose name matches…: b."). It counts as
+    # pre-execution only when EVERY reason is one of the gates; one unrecognised reason and we no
+    # longer know when it stopped.
     said = _first_line(detail).rstrip(".")
+    reasons = [_blocked_because(part) for part in re.split(r"(?<=\.) (?=query )", said)] if said else []
+    return [r for r in reasons if r is not None] if reasons and all(reasons) else None
+
+
+def _no_result_lead(entry: dict | None) -> str:
+    """How a row whose query produced no result opens, in the strongest words its evidence supports.
+
+    A statement a pre-execution gate blocked never ran, and neither did one the database rejected.
+    A statement stopped at a resource limit DID run, so on that path the card says only what it can
+    see: no result came back. This changes what the card SAYS and never where it sends the reader —
+    a resource limit still routes to "ask agami again", exactly as it did.
+    """
+    entry = entry or {}
+    if entry.get("status") != "refused" or _blocked_reasons(entry.get("status"), entry.get("detail")) is not None:
+        return "agami's query did not run"
+    return "agami's query returned no result"
+
+
+def _why_it_did_not_run(status: Any, detail: Any) -> str:
+    """One plain sentence for a query that produced no result, naming who stopped it and why."""
+    said = _first_line(detail).rstrip(".")
+    reasons = _blocked_reasons(status, detail)
+    if reasons is not None:
+        return "agami's safety check blocked it before it reached the database: " + "; ".join(reasons) + "."
     if status == "refused":
-        # One refusal can carry several reasons, one sentence each ("…not in the semantic model: a —
-        # only tables declared… query references table(s) whose name matches…: b.").
-        reasons = [_blocked_because(part) for part in re.split(r"(?<=\.) (?=query )", said)] if said else []
-        if reasons and all(reasons):
-            return "agami's safety check blocked it before it reached the database: " + "; ".join(reasons) + "."
-        return "agami's safety check blocked it before it reached the database" + (f": {said}." if said else ".")
+        # A refusal none of the gates explains: a resource limit, or a rule added since. All the
+        # evidence supports is that agami stopped it, so that is all this claims — and the limit's
+        # own sentence, which follows, already says a result was too large or a bound elapsed.
+        return "agami stopped it" + (f": {said}." if said else ".")
     if status == "failed":
         return "The database returned an error" + (f": {said}." if said else ".")
     return "It did not run" + (f": {said}." if said else ".")
@@ -2588,7 +2628,7 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
             # What stopped it and why, in plain words, because that names the thing that is not
             # there. The generic "decide which definition your team means" below is for a row where
             # two definitions disagree; here nothing disagreed, the query never ran.
-            change = ["agami's query did not run. " + _why_it_did_not_run(rejected.get("status"), rejected.get("detail")),
+            change = [_no_result_lead(rejected) + ". " + _why_it_did_not_run(rejected.get("status"), rejected.get("detail")),
                       "Asking again would hit the same problem. Correct the semantic model through "
                       "/agami-save-correction, or re-introspect the datasource with /agami-connect if "
                       "the database has changed, then run this row again."]
@@ -2615,7 +2655,7 @@ def _change_for_fix(fix: str, rec: dict, diff: list[dict]) -> tuple[list[str], l
     elif fix == "ask_again":
         rejected = _rejected_query(rec) if cause == "agami_query_rejected" else None
         if rejected is not None:
-            change = ["agami's query did not run. " + _why_it_did_not_run(rejected.get("status"), rejected.get("detail")),
+            change = [_no_result_lead(rejected) + ". " + _why_it_did_not_run(rejected.get("status"), rejected.get("detail")),
                       "That does not point at the semantic model, so ask the question again."]
             todo = ["agami: ask again."]
         elif cause == "agami_failed":
@@ -2762,7 +2802,9 @@ def _sentence(rec: dict, diff: list[dict]) -> str:
         # is a sentence already ("…re-introspect the datasource."), and appending regardless put two
         # full stops on the line a person reads first.
         said = (": " + error.rstrip().rstrip(".")) if with_error and error else ""
-        return f"This row could not be compared: {_ERROR_LEAD[cause]}{said}."
+        lead = (_no_result_lead(_rejected_query(rec)) if cause == "agami_query_rejected"
+                else _ERROR_LEAD[cause])
+        return f"This row could not be compared: {lead}{said}."
     # What the two QUERIES differ in is the SQL section's summary; repeating it here made the card
     # say one thing twice and, on a row whose paired columns all agreed, contradict itself. This
     # sentence says what happened to the ANSWER, and leaves the queries to their own section.
@@ -3164,7 +3206,8 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
             # mechanism a reader who has never seen the safety check cannot decode. Only for an outcome
             # copied from agami's own session: a statement that ran there and was refused when run
             # again for its result did run, and saying it did not would be false.
-            error = "agami's query did not run. " + _why_it_did_not_run(detail["status"], detail.get("detail") or answer.get("error"))
+            stopped = {"status": detail["status"], "detail": detail.get("detail") or answer.get("error")}
+            error = _no_result_lead(stopped) + ". " + _why_it_did_not_run(stopped["status"], stopped["detail"])
         else:
             error = detail.get("detail") or detail.get("kind") or detail.get("status") or "agami's statement was not run, or its result was not recorded"
             error = f"agami's statement did not run: {error}" if detail else error
@@ -3216,13 +3259,11 @@ def record(run_dir: Path, row: int, *, tolerance: float = 0.01, report_path: str
         "ledger": ledger, "ledger_verdict": ledger_verdict, "comparison": comparison, "claims": claims,
         "finding_keys": [],
         "agami_statements": [] if not sql or len(statements) < 2 else statements,
-        # How agami was asked, and what it did on the way. Present only when the run served agami's
-        # own tools (`run_golden_eval.py --via mcp`), because only then is there a trace to carry:
-        # `probes` is the server's record of the call, and it is what lets a failed row say whether
-        # the WAREHOUSE rejected the statement or the client never answered at all. Those two want
-        # opposite fixes, and telling them apart by reading an error sentence would be guesswork.
-        **({"mode": answer["mode"]} if isinstance(answer.get("mode"), str) else {}),
-        **({"probe_count": answer["probe_count"]} if isinstance(answer.get("probe_count"), int) else {}),
+        # What agami did on the way. Present only when the run served agami's own tools
+        # (`run_golden_eval.py --via mcp`), because only then is there a trace to carry: `probes` is
+        # the server's record of the call, and it is what lets a failed row say whether the WAREHOUSE
+        # rejected the statement or the client never answered at all. Those two want opposite fixes,
+        # and telling them apart by reading an error sentence would be guesswork.
         **({"probes": answer["probes"]} if isinstance(answer.get("probes"), list) else {}),
         # Every query agami tried, graded: the ones that did not run, and the one it tried next, which
         # the run executed afterwards. `probes` is the raw trace; this is what a person reads.
