@@ -12,47 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-## [0.9.3] — 2026-09-17
-
-### Added
-
-- **A hosted `execute_sql` now requires proof the client looked at the examples (#376).** Clients
-  skipped `get_prompt_examples`: the schema is indispensable for writing SQL, the examples feel
-  optional, and the pointer and instruction line from #301 were advice a client could weigh below its
-  own judgement. After a model change this also meant a change to the examples never reached the
-  conversation. When a datasource has stored examples, the call now carries `example` — an `id` the
-  lookup returned and `use`, either `followed` or `shown_only`. A missing example, an id the
-  datasource does not store (including one a model change removed), or any other `use` is refused on
-  the new rule `example_required`, and the remediation says exactly what to send. `shown_only` is
-  always accepted, so nothing pushes a statement toward a poor match, and `followed` is not verified.
-  Both values are recorded on the call (migration `026`), so the activity log shows how often the
-  examples fit. A datasource with no examples, and the local path, require nothing. Like
-  `model_version`, the field is optional in the input schema and enforced in the handler.
-
-- **Every refused `execute_sql` writes one line to the server log.** Refusals were recorded only in
-  the app database, so an operator watching the server's own log (a container's stderr, or a cloud
-  log sink) saw a blocked query as an ordinary `200`. The line names the rule, the datasource, the
-  organization and the `audit_id` that joins it to its `query_executions` row. The datasource is the
-  caller's own text, so it is written escaped and cut to 200 characters: a newline in it cannot
-  start a forged line. The line never carries the statement, the refusal's own sentences or the
-  caller's identity. It is written at WARNING because the served entrypoint configures no logging
-  and Python's fallback handler drops anything lower. For `audit_unavailable`, which writes no row
-  by design, it is the only trace.
-
 ### Fixed
 
-- **A served deployment no longer names a datasource the organization does not have.** With no
-  `datasource` named and `AGAMI_PROFILE` unset, the server resolved a profile from
-  `.config.active_profile` — a setting the local CLI writes — before looking at what the deployment
-  actually serves. A leftover `.config` on a dev box or a mounted artifacts directory therefore won:
-  on an organization with one datasource, an omitted call ran against a name from someone's
-  machine, and `list_datasources` reported that name as active. A served deployment now ignores
-  `.config`, and `list_datasources` reports `active_datasource` as `null` rather than `default`
-  when several datasources are served and none is named. The local CLI is unchanged. (#253)
-- **`AGAMI_REQUIRE_THREAD_ID` no longer accepts a blank `thread_id`.** A required field only has to
-  be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
-  blank id is now rejected as an input validation error — a deployment turning the flag on should
-  confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
 - **An identical answer no longer scores as different when two of its columns hold the same values
   on different rows.** When row order is not compared (reconcile always, and a golden run whose
   answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
@@ -94,6 +55,47 @@ below corresponds to one such version.
   values of X" about a column whose values a generated column holds exactly. So a near miss that
   read as mostly right can now read as entirely wrong, and name a column that is there.
 
+## [0.9.3] — 2026-09-17
+
+### Added
+
+- **A hosted `execute_sql` now requires proof the client looked at the examples (#376).** Clients
+  skipped `get_prompt_examples`: the schema is indispensable for writing SQL, the examples feel
+  optional, and the pointer and instruction line from #301 were advice a client could weigh below its
+  own judgement. After a model change this also meant a change to the examples never reached the
+  conversation. When a datasource has stored examples, the call now carries `example` — an `id` the
+  lookup returned and `use`, either `followed` or `shown_only`. A missing example, an id the
+  datasource does not store (including one a model change removed), or any other `use` is refused on
+  the new rule `example_required`, and the remediation says exactly what to send. `shown_only` is
+  always accepted, so nothing pushes a statement toward a poor match, and `followed` is not verified.
+  Both values are recorded on the call (migration `026`), so the activity log shows how often the
+  examples fit. A datasource with no examples, and the local path, require nothing. Like
+  `model_version`, the field is optional in the input schema and enforced in the handler.
+
+- **Every refused `execute_sql` writes one line to the server log.** Refusals were recorded only in
+  the app database, so an operator watching the server's own log (a container's stderr, or a cloud
+  log sink) saw a blocked query as an ordinary `200`. The line names the rule, the datasource, the
+  organization and the `audit_id` that joins it to its `query_executions` row. The datasource is the
+  caller's own text, so it is written escaped and cut to 200 characters: a newline in it cannot
+  start a forged line. The line never carries the statement, the refusal's own sentences or the
+  caller's identity. It is written at WARNING because the served entrypoint configures no logging
+  and Python's fallback handler drops anything lower. For `audit_unavailable`, which writes no row
+  by design, it is the only trace.
+
+### Fixed
+
+- **A served deployment no longer names a datasource the organization does not have.** With no
+  `datasource` named and `AGAMI_PROFILE` unset, the server resolved a profile from
+  `.config.active_profile` — a setting the local CLI writes — before looking at what the deployment
+  actually serves. A leftover `.config` on a dev box or a mounted artifacts directory therefore won:
+  on an organization with one datasource, an omitted call ran against a name from someone's
+  machine, and `list_datasources` reported that name as active. A served deployment now ignores
+  `.config`, and `list_datasources` reports `active_datasource` as `null` rather than `default`
+  when several datasources are served and none is named. The local CLI is unchanged. (#253)
+- **`AGAMI_REQUIRE_THREAD_ID` no longer accepts a blank `thread_id`.** A required field only has to
+  be present, so `""` or whitespace satisfied it without naming a conversation. With the flag on, a
+  blank id is now rejected as an input validation error — a deployment turning the flag on should
+  confirm its clients send a real id. Deployments with the flag off are unchanged. (#257)
 ## [0.9.2] — 2026-09-16
 
 ### Added
@@ -799,7 +801,6 @@ scripted generator for the real one — silently, the way it already happened on
 Everything below came out of running the golden-dataset feature against a live warehouse for the
 first time. One fix is the difference between the feature working and not working at all; the rest
 is what a first real run and its review turned up.
-
 
 ### Added
 
