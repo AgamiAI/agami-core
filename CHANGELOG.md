@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-09-19
+
 ### Fixed
 
 - **A caller's `datasource` is bounded before it reaches the audit row (#370).** The name is
