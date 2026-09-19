@@ -114,6 +114,19 @@ def _isolate_artifacts_dir(tmp_path_factory, monkeypatch):
     # gives a wrong answer, writing to it takes something away. A migration test that wants a legacy
     # home builds one and overrides this, as with the two paths above.
     monkeypatch.setattr(agami_paths, "LEGACY_HOME", empty / "legacy-agami")
+    # **The three above only bind in THIS process** (raised in review). Every path this module
+    # resolves is derived from `Path.home()` at import, so a subprocess — the forked execution path
+    # among them — imports a fresh `agami_paths` and resolves the developer's real home all over
+    # again, `migrate_legacy_home()` included. Moving `HOME` itself is what reaches a child: it is
+    # the one input all three derive from, so a child computes temp paths without this file having
+    # to know which of them it will read. `USERPROFILE` is the same input on Windows.
+    monkeypatch.setenv("HOME", str(empty / "home"))
+    monkeypatch.setenv("USERPROFILE", str(empty / "home"))
+    # And the env var that wins over both patched values, in the child as well as here. Removed
+    # rather than set: a test that wants an artifacts dir names one, and inheriting whichever
+    # directory happens to be exported in the contributor's shell is the ambient state this whole
+    # fixture exists to take away. `raising=False` because it is usually absent.
+    monkeypatch.delenv("AGAMI_ARTIFACTS_DIR", raising=False)
     yield
 
 
