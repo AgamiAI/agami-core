@@ -114,6 +114,23 @@ def test_the_migrations_in_the_wheel_are_the_ones_on_disk(wheel_names) -> None:
     assert not missing, f"{len(missing)} migration(s) never reached the wheel: {missing[:5]}"
 
 
+def test_the_static_assets_in_the_wheel_are_the_ones_on_disk(wheel_names) -> None:
+    """Every asset, for the reason the migrations are compared as a set (raised in review).
+
+    Naming one file proves the directory is packaged and nothing more. The server reads several —
+    the favicon, the provider logos, the web fonts — and a `package-data` glob that stopped matching
+    a suffix would keep the named one and drop the rest. Every serving test runs against the source
+    tree, so such a wheel passes the whole suite and fails only for a user.
+    """
+    root = PACKAGE_DIR / "src" / "static"
+    on_disk = {
+        f"static/{p.relative_to(root).as_posix()}" for p in root.rglob("*") if p.is_file()
+    }
+    assert on_disk, "no static assets found on disk — this test is looking in the wrong place"
+    missing = sorted(on_disk - wheel_names)
+    assert not missing, f"{len(missing)} static asset(s) never reached the wheel: {missing[:5]}"
+
+
 def test_the_flat_modules_are_not_nested_under_a_package(wheel_names) -> None:
     """`store.py` and its siblings must sit at the wheel's root.
 

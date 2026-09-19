@@ -106,6 +106,14 @@ def _isolate_artifacts_dir(tmp_path_factory, monkeypatch):
     empty = tmp_path_factory.mktemp("no-artifacts")
     monkeypatch.setattr(agami_paths, "POINTER_PATH", empty / "config" / "agami" / "path")
     monkeypatch.setattr(agami_paths, "DEFAULT_ARTIFACTS_DIR", empty / "agami-artifacts")
+    # **And the legacy home, which the suite could MOVE rather than merely read** (raised in
+    # review). `bootstrap()` runs `migrate_legacy_home()`, which relocates `~/.agami` into the
+    # artifacts dir and leaves a tombstone — and several tests call `bootstrap_paths()`. So on a
+    # contributor with a pre-consolidation install, running the tests could consolidate their real
+    # home directory as a side effect. That is a step beyond the leak above: reading the machine
+    # gives a wrong answer, writing to it takes something away. A migration test that wants a legacy
+    # home builds one and overrides this, as with the two paths above.
+    monkeypatch.setattr(agami_paths, "LEGACY_HOME", empty / "legacy-agami")
     yield
 
 
