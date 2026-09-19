@@ -899,6 +899,39 @@ def test_an_oversized_statement_is_refused_and_stored_bounded(env):
     assert row["rule"] == guardrail.RULE_READ_ONLY and row["datasource"] == PROFILE
 
 
+def test_an_oversized_datasource_name_is_bounded_in_the_audit_row(env):
+    """`datasource` is CALLER-written text and reaches the row before anything establishes that it
+    names a datasource we serve (#370). The statement beside it has always been capped; this column
+    was not, so one call could write an arbitrarily long value into the store.
+
+    Asserted on a REFUSED call, because that is the path that reaches the row without the name ever
+    being resolved — a served name is bounded by being real, an unserved one only by this.
+    """
+    oversized = "d" * (tools.LOG_DATASOURCE_MAX_CHARS * 4)
+
+    body = json.loads(tools.tool_execute_sql({"sql": "SELECT id FROM orders",
+                                              "datasource": oversized,
+                                              "raw_query": QUESTION}))
+
+    # It does not execute — the name resolves to nothing. Which non-ok status it carries is not the
+    # claim here; that a row was written carrying the caller's text is.
+    assert body["status"] != "ok"
+    (row,) = _rows(env.app_db)
+    assert len(row["datasource"]) == tools.LOG_DATASOURCE_MAX_CHARS
+    assert row["datasource"] == oversized[:tools.LOG_DATASOURCE_MAX_CHARS]  # a prefix, not a summary
+
+
+def test_a_real_datasource_name_is_stored_whole(env):
+    """The bound must not be rewriting ordinary rows: every real name is far inside it, so a cut
+    value means the name was never one."""
+    body = json.loads(tools.tool_execute_sql({"sql": "SELECT id FROM orders", "datasource": PROFILE,
+                                              "raw_query": QUESTION}))
+
+    assert body["status"] == "ok"
+    (row,) = _rows(env.app_db)
+    assert row["datasource"] == PROFILE
+
+
 def test_a_normal_statement_is_stored_whole_and_says_it_was_not_cut(env):
     """The bound must not be silently rewriting ordinary rows: a statement under it is stored
     verbatim and flagged as untruncated, so `sql_truncated` distinguishes something rather than

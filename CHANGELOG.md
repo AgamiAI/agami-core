@@ -12,6 +12,31 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A caller's `datasource` is bounded before it reaches the audit row (#370).** The name is
+  caller-written text and arrives at `_record_execution` before anything establishes that it names a
+  datasource we serve, so an arbitrarily long value was stored once per call. The statement beside
+  it has always been capped; this column was missed. It now shares `LOG_DATASOURCE_MAX_CHARS` with
+  the refusal log line, so the line and the row cannot disagree about what was sent. Every real name
+  is far inside the limit — a value that is cut was never one.
+
+### Internal
+
+- **The wheel's contents are asserted (#122).** Every test runs against an editable install, where
+  `migrations/` and `static/` resolve into the source tree whatever the packaging config says — so
+  that config was the one part of the repo the suite could not see, and it has shipped broken once
+  (a missing `migrations/` globbed to nothing and the server booted on an empty schema with no
+  error). A new test builds a wheel and looks inside it; `build` is declared in the test
+  dependencies so the guard cannot quietly skip.
+
+- **The test suite no longer reads the developer's own artifacts directory (#293).** `artifacts_dir()`
+  resolves a pointer at `~/.config/agami/path` and then `~/agami-artifacts`, one level earlier than
+  the fixtures that isolate files inside that directory — so `organization.yaml`'s real minted
+  `org_id` leaked into tests asserting `local`. 41 tests failed on a maintainer's machine and none
+  in CI. Both are now redirected per test; `AGAMI_ARTIFACTS_DIR` is left alone, because a test that
+  sets it is saying which directory it wants.
+
 ## [0.9.4] — 2026-09-17
 
 ### Security
