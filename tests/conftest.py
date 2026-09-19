@@ -73,6 +73,43 @@ def _reset_org_cache():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_artifacts_dir(tmp_path_factory, monkeypatch):
+    """Keep the developer's own artifacts directory out of the suite entirely (#293).
+
+    **One level EARLIER in the resolution chain than the two fixtures below**, and that gap is what
+    the issue reported: they redirect `tools.CONFIG_PATH` and `tools.QUERY_LOG`, which are files
+    *inside* the artifacts dir, while `agami_paths.artifacts_dir()` was still resolving the dir
+    itself from the machine. Anything reading straight out of that directory — `organization.yaml`
+    above all, which carries a real minted `org_id` once a deployment has introspected — bypassed
+    both and leaked real content into the test.
+
+    The symptom is the one a test can least explain: ~39 failures reporting a value from a file no
+    test mentions, on a contributor's machine, while CI stays green because CI has neither the
+    pointer nor the directory. Confirmed by renaming `~/.config/agami/path`, which made every one of
+    them pass with no other change.
+
+    **Both doors, not only the pointer.** `artifacts_dir()` reads `AGAMI_ARTIFACTS_DIR`, then the
+    pointer file, then `DEFAULT_ARTIFACTS_DIR` — and a contributor who accepted the default has a
+    populated `~/agami-artifacts` with no pointer at all, so redirecting the pointer alone would fix
+    one machine and not the next. The env var is deliberately left alone: a test that sets it is
+    saying which directory it wants, and this fixture must not overrule that.
+
+    Both are redirected to paths under a tmp dir that are never created, which is exactly the state
+    CI runs in. A test wanting a real artifacts dir sets one up and overwrites this, as it does with
+    the two fixtures below.
+    """
+    try:
+        import agami_paths
+    except Exception:
+        yield
+        return
+    empty = tmp_path_factory.mktemp("no-artifacts")
+    monkeypatch.setattr(agami_paths, "POINTER_PATH", empty / "config" / "agami" / "path")
+    monkeypatch.setattr(agami_paths, "DEFAULT_ARTIFACTS_DIR", empty / "agami-artifacts")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_query_log(tmp_path_factory, monkeypatch):
     """Keep the suite's audit writes out of the developer's own artifacts directory.
 
