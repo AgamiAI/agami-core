@@ -1593,6 +1593,16 @@ class _StarWalk:
         self.sources = _sources_by_select(tree)
         self.memo: dict[int, bool] = {}
         self.spent = 0
+        # **Whole-statement, not per-relation** — see `_reads_a_table_beside_a_derived_source`.
+        # Computed once here because the answer is a property of the statement, and because the
+        # per-relation version of this check was wrong twice: first it looked only at the source a
+        # star named, then only at that source's own select. A projection with no star of its own
+        # can forward a skipped column up from a select nested below it, and chasing that by depth
+        # is how a third shape gets found after this one. One statement, one answer.
+        self.any_unchecked_select = any(
+            _reads_a_table_beside_a_derived_source(select, self)
+            for select in tree.find_all(exp.Select)
+        )
 
     def over_budget(self) -> bool:
         self.spent += 1
@@ -1627,12 +1637,18 @@ def _reads_a_table_beside_a_derived_source(select: "exp.Select", walk: "_StarWal
     This gate's whole argument for reading a star over a named projection is that those columns
     were already judged where they were written. Where that is untrue the argument collapses, and
     a star forwarding them would let an undeclared column through that the old blanket ban stopped.
-    So this shape is treated as not-named and refuses.
 
-    Conservative on purpose: it also refuses a star over a CTE that legitimately joins a table to
-    another CTE. That costs a refusal the caller can repair by naming columns, where being wrong
-    the other way costs a column nobody declared. **Revisit when #339 is closed** — once such a
-    column is bound or refused rather than skipped, this restriction is no longer earning anything.
+    **One such select anywhere disables star resolution for the whole statement**, which is blunter
+    than it needs to be and is the point. Scoping it to the relation a star names missed a nested
+    case; scoping it to that relation's own select missed a deeper one, because an explicit
+    projection forwards a skipped column upward without a star of its own to catch. Each fix was
+    correct about the shape in front of it and wrong about the next one. A whole-statement answer
+    has no next one.
+
+    The cost is refusing stars in statements that also contain an unrelated mixed-source select.
+    That is a refusal the caller repairs by naming columns; the other direction is a column nobody
+    declared. **Revisit when #339 is closed** — once such a column is bound or refused rather than
+    skipped, this restriction stops earning anything and can go.
     """
     has_table = False
     has_derived = False
@@ -1674,7 +1690,7 @@ def _projection_is_named(node, walk: "_StarWalk", active: frozenset) -> bool:
             _projection_is_named(arm, walk, active)
             for arm in (node.this, node.args.get("expression"))
         )
-    elif isinstance(node, exp.Select) and not _reads_a_table_beside_a_derived_source(node, walk):
+    elif isinstance(node, exp.Select):
         result = all(
             _star_is_resolvable(proj, node, walk, active)
             for proj in node.expressions
@@ -1691,6 +1707,11 @@ def _star_is_resolvable(star, select, walk: "_StarWalk", active: frozenset) -> b
     select reads, because it expands over all of them and one unnamed source is enough to make the
     projection unknowable. A qualifier matching no source refuses rather than being ignored.
     """
+    if walk.any_unchecked_select:
+        # Somewhere in this statement a select mixes a table with a derived source, so
+        # `check_column_scope` skips at least one written column and "already judged where it was
+        # written" is not true of this statement. Nothing here is resolvable while that holds.
+        return False
     qualifier = (
         star.table.lower() if isinstance(star, exp.Column) and star.table else None
     )

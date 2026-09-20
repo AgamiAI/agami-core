@@ -215,6 +215,39 @@ def test_a_star_over_a_source_whose_columns_were_never_checked_is_refused() -> N
     assert _refused(sql)
 
 
+def test_a_skipped_column_forwarded_up_through_named_projections_is_refused() -> None:
+    """**The same hole one level deeper, and why the restriction is whole-statement.**
+
+    The first fix scoped the mixed-source check to the relation a star named. The second scoped it
+    to that relation's own select. Both missed this: the innermost select mixes a table with a CTE,
+    so `check_column_scope` skips `secret_col`; the select above it names that column explicitly,
+    with no star of its own to catch anything; the outer star then forwards it. Each fix was right
+    about the shape in front of it and wrong about the next one, so the check now asks the question
+    of the whole statement, which has no next one.
+    """
+    sql = (
+        "WITH c AS (SELECT 1 AS n) "
+        "SELECT * FROM (SELECT x.secret_col FROM (SELECT secret_col FROM orders, c) x) p"
+    )
+    assert _refused(sql)
+
+
+def test_the_real_hierarchy_query_still_resolves() -> None:
+    """The statement this whole change exists for, in the shape it actually takes: levels built in
+    CTEs over physical tables, then a projection carried forward beside a window function. No
+    select in it mixes a table with a derived source, so the whole-statement restriction above
+    costs it nothing — which is the margin that makes that restriction affordable."""
+    sql = (
+        "WITH tree AS ("
+        "  SELECT d.id, d.name, d.parent_id FROM departments d "
+        "  LEFT JOIN departments d2 ON d2.id = d.parent_id"
+        "), pathed AS (SELECT id, name FROM tree), "
+        "ranked AS (SELECT p.*, ROW_NUMBER() OVER (ORDER BY name) AS rn FROM pathed p) "
+        "SELECT rn, name FROM ranked"
+    )
+    assert _star(sql) is None
+
+
 def test_the_mixed_source_restriction_is_about_the_shape_not_the_column() -> None:
     """It refuses on the SHAPE, without needing to know which columns are declared — this gate
     judges no model. A star over a CTE that joins a table to another CTE is refused too, which is
