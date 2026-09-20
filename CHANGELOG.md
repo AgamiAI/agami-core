@@ -12,6 +12,20 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `SELECT *` is refused when it cannot be RESOLVED, not merely for being a star (#387).** The
+  gate refused every star on the stated grounds that "the column list behind `*` lives in the
+  catalog" — true of a star over a table, false of one over a CTE or derived table, whose columns
+  are written out in the query itself. A recursive-hierarchy query carrying an already-named
+  projection forward with `SELECT p.*` was therefore told it had not named its columns when it had,
+  and the rewrite demanded was longer than what was refused and no more checkable. Each star is now
+  followed to its sources: over a table it refuses exactly as before, over a CTE or subquery whose
+  own projection is named it is read as written, and anything unresolvable — a cycle, a shadowed
+  CTE name, a set-operation arm that stars over a table, a qualifier naming no source — refuses.
+  Every uncertainty resolves to a refusal, so an error in the walk makes the gate stricter and
+  never leakier.
+
 ## [0.9.5] — 2026-09-19
 
 ### Fixed

@@ -1518,6 +1518,113 @@ def check_table_scope(sql: str, org: Datasource,
 # ---------------------------------------------------------------------------
 
 
+def _cte_bodies(tree: "exp.Expression") -> "dict[str, exp.Expression]":
+    """CTE name -> its body, for names the statement defines exactly ONCE.
+
+    A name bound twice — an inner `WITH` shadowing an outer one — is left out, so a star over it is
+    unresolvable and refuses. Resolving it would mean re-deriving `_cte_references`' lexical
+    visibility rules a second time, and two copies of that reasoning is how one of them goes wrong
+    quietly. Ambiguity refusing is both simpler and the safe direction.
+    """
+    bodies: dict[str, Any] = {}
+    shadowed: set[str] = set()
+    for cte in tree.find_all(exp.CTE):
+        name = (cte.alias_or_name or "").lower()
+        if not name:
+            continue
+        if name in bodies:
+            shadowed.add(name)
+        bodies[name] = cte.this
+    return {n: body for n, body in bodies.items() if n not in shadowed and body is not None}
+
+
+def _sources_of(tree: "exp.Expression", select: "exp.Select") -> list:
+    """The FROM/JOIN sources belonging to this SELECT.
+
+    Walked from the `From`/`Join` nodes rather than read off `select.args`, because the argument
+    key for a FROM was renamed between sqlglot majors and every other gate in this file walks the
+    nodes for that reason. `From.expressions` carries a comma-join's extra sources on the versions
+    that do not normalize them into a `Join`.
+    """
+    out = []
+    for node in tree.find_all(exp.From, exp.Join):
+        if _enclosing_select(node) is not select:
+            continue
+        for src in [node.this, *(node.args.get("expressions") or [])]:
+            if src is not None:
+                out.append(src)
+    return out
+
+
+def _is_star(proj: "exp.Expression") -> bool:
+    """`*` or `t.*` in a projection list. `COUNT(*)` is neither — the star is inside the call."""
+    return isinstance(proj, exp.Star) or (
+        isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star)
+    )
+
+
+def _source_is_named(src, tree, bodies, cte_refs, seen: frozenset) -> bool:
+    """Whether every column this FROM/JOIN source produces is written down in the statement."""
+    if isinstance(src, exp.Subquery):
+        return _projection_is_named(src.this, tree, bodies, cte_refs, seen)
+    if isinstance(src, exp.Table):
+        # A CTE reference carries its columns in its own body; a physical table carries them in the
+        # catalog, which this guard deliberately never reads. That difference IS the rule.
+        if id(src) in cte_refs:
+            return _projection_is_named(
+                bodies.get((src.name or "").lower()), tree, bodies, cte_refs, seen
+            )
+        return False
+    # A table function, LATERAL, VALUES, UNNEST: `check_unscopable_sources` refuses these outright,
+    # and if one ever reaches here it is not something whose columns are written down.
+    return False
+
+
+def _projection_is_named(node, tree, bodies, cte_refs, seen: frozenset) -> bool:
+    """Whether the relation `node` produces a column list the statement spells out.
+
+    Recursive, because a star may sit over a CTE that itself stars over another. Every exit that is
+    not a proven "yes" is a no: an unrecognised node, a cycle (a `WITH RECURSIVE` body naming
+    itself), a missing body. A wrong answer here makes the gate STRICTER, never leakier, which is
+    the only direction a guard may be wrong in.
+    """
+    if node is None or id(node) in seen:
+        return False
+    seen = seen | {id(node)}
+    while isinstance(node, (exp.Subquery, exp.Paren)) and node.this is not None:
+        node = node.this
+    if isinstance(node, (exp.Union, exp.Except, exp.Intersect)):
+        # Both arms contribute columns, so both must be named. `expression` is the right-hand arm.
+        return all(
+            _projection_is_named(arm, tree, bodies, cte_refs, seen)
+            for arm in (node.this, node.args.get("expression"))
+        )
+    if not isinstance(node, exp.Select):
+        return False
+    for proj in node.expressions:
+        if _is_star(proj) and not _star_is_resolvable(proj, node, tree, bodies, cte_refs, seen):
+            return False
+    return True
+
+
+def _star_is_resolvable(star, select, tree, bodies, cte_refs, seen: frozenset) -> bool:
+    """Whether this star expands to a column list the statement already spells out.
+
+    `t.*` is judged against the ONE source that alias names; a bare `*` against every source the
+    select reads, because it expands over all of them and one unnamed source is enough to make the
+    projection unknowable. A qualifier matching no source refuses rather than being ignored.
+    """
+    qualifier = (
+        star.table.lower() if isinstance(star, exp.Column) and star.table else None
+    )
+    sources = _sources_of(tree, select)
+    if qualifier is not None:
+        sources = [s for s in sources if (s.alias_or_name or "").lower() == qualifier]
+    if not sources:
+        return False
+    return all(_source_is_named(s, tree, bodies, cte_refs, seen) for s in sources)
+
+
 def check_no_select_star(sql: str,
                          ctx: "GuardContext | None" = None,
                          *,
@@ -1526,19 +1633,41 @@ def check_no_select_star(sql: str,
                          # standalone call would read a backtick-quoted projection generically and
                          # miss the star it is looking for.
                          dialect: "str | None" = None) -> "guardrail.Refusal | None":
-    """Refuse a query whose projection list contains `*` or `t.*`.
+    """Refuse a query whose projection contains a star this statement does not spell out.
 
     **The boundary, stated: this is a 4c gate, not a 4b one.** A star is not a reach — it may well
-    resolve to nothing but declared columns. It is an *inability to decide whether there is one*:
-    the column list behind `*` lives in the catalog, the guard judges against the model alone, so
-    the question "does this projection stay inside the declared surface" has no answer here. The
-    refusal says we could not determine, which is why the reason is `undetermined` and not
-    `out_of_scope`. A star defeats column-level scoping (an undeclared column hides behind it) and
-    stops `check_column_scope` from validating what is actually returned, so every
-    projected column must be named. Applies to EVERY select in the tree — outer
-    query, subqueries, CTE bodies, and set-operation (UNION/…) arms — so a star
-    can't hide one level down. `COUNT(*)` and other `agg(*)` are fine: the star sits
-    inside the aggregate, so the projection itself is not a star.
+    resolve to nothing but declared columns. It is an *inability to decide whether there is one*,
+    and the refusal says we could not determine, which is why the reason is `undetermined` and not
+    `out_of_scope`.
+
+    **So the rule is "a star we cannot resolve", not "a star"** (#387). The original rule was the
+    sentence above applied to every star, on the grounds that "the column list behind `*` lives in
+    the catalog". That is true of a star over a TABLE and false of a star over a CTE or a derived
+    table, whose columns are written out in the query itself, a few lines up. A recursive-hierarchy
+    query — levels built in CTEs, `SELECT p.*` carrying a projection already spelled out — was
+    refused on the stated grounds that its columns could not be determined, when they could be
+    determined by reading the statement. It is the one refusal with no repair: the rewrite it asks
+    for is longer than what was refused and no more checkable.
+
+    So each star is followed to its sources:
+
+      * over a **physical table** — the columns are in the catalog this guard never reads. Refuse,
+        exactly as before, and this is the case that matters: `SELECT *` there is what hides an
+        undeclared column from `check_column_scope`.
+      * over a **CTE or derived table whose own projection is named** — expand-by-reading. Those
+        columns were written down, and `check_column_scope` already judged them where they were
+        written, so nothing escapes by being forwarded.
+      * over anything that **cannot be resolved** — a cycle, a shadowed CTE name, a set-operation
+        arm that stars over a table, a qualifier naming no source. Refuse. Every uncertainty
+        resolves to a refusal, so an error in the walk makes this gate stricter and never leakier.
+
+    **This also closes the hole from the other side (#339).** A `SELECT *` inside a CTE body over a
+    declared table used to pass, carrying every physical column forward for a later reference to
+    read. Under this rule that star is over a table, so it refuses where it used to be silent.
+
+    Applies to EVERY select in the tree — outer query, subqueries, CTE bodies, and set-operation
+    arms — so a star cannot hide one level down. `COUNT(*)` and other `agg(*)` are fine: the star
+    sits inside the aggregate, so the projection itself is not a star.
 
     Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, or it is
     not a SELECT-bearing statement (the upstream read-only guard owns non-SELECTs).
@@ -1554,17 +1683,26 @@ def check_no_select_star(sql: str,
         tree = _parse_sql(sql, dialect)
     if tree is None or tree.find(exp.Select) is None:
         return None
+    bodies = _cte_bodies(tree)
+    cte_refs = _cte_references(tree)
     for select in tree.find_all(exp.Select):
         for proj in select.expressions:
-            if isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star)):
-                # Wholly static text — this refusal names no identifier at all, because the
-                # offending token IS `*`.
-                return guardrail.refuse(
-                    guardrail.RULE_SELECT_STAR,
-                    detail="query uses SELECT * — every column must be named so it can be "
-                           "checked against the semantic model.",
-                    remediation="List the columns explicitly instead of '*'.",
-                )
+            if not _is_star(proj):
+                continue
+            if _star_is_resolvable(proj, select, tree, bodies, cte_refs, frozenset()):
+                continue
+            # Wholly static text — this refusal names no identifier at all, because the
+            # offending token IS `*`.
+            # **The sentence is unchanged from when this gate refused every star**, and that is
+            # deliberate: it is pinned by the verdict-parity table, and it stays true of every
+            # case that still refuses. A star reaching here is over a table (or over something
+            # unresolvable), where naming the columns really is what the caller must do.
+            return guardrail.refuse(
+                guardrail.RULE_SELECT_STAR,
+                detail="query uses SELECT * — every column must be named so it can be "
+                       "checked against the semantic model.",
+                remediation="List the columns explicitly instead of '*'.",
+            )
     return None
 
 

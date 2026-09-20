@@ -164,8 +164,13 @@ GOLDEN_VERDICTS: tuple[tuple[str, str, str, tuple[str, ...], str, str, tuple[str
      'allow', (), 'refuse', 'allow', ()),
     ('table_scope', 'WITH t AS (SELECT * FROM secret_table) SELECT * FROM t',
      'refuse', ('secret_table',), 'refuse', 'allow', ()),
+    # **This row's star verdict CHANGED, deliberately (#387).** The derived table names its one
+    # column, so the star expands to a projection the statement spells out and the gate can check
+    # it — the old 'refuse' asserted we could not determine something determinable by reading two
+    # lines up. Every other star row here is over a TABLE and is untouched, including the two
+    # above: a star inside a CTE body still refuses, which is the case that matters.
     ('table_scope', 'SELECT * FROM (SELECT id FROM orders) x',
-     'allow', (), 'refuse', 'allow', ()),
+     'allow', (), 'allow', 'allow', ()),
     ('table_scope', 'SELECT * FROM public.orders',
      'allow', (), 'refuse', 'allow', ()),
     ('table_scope', 'SELECT * FROM ORDERS',
