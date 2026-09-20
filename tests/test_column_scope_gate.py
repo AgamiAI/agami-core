@@ -54,9 +54,10 @@ def _assert_star_refused(refusal) -> None:
     assert refusal is not None
     assert refusal.rule == guardrail.RULE_SELECT_STAR
     assert refusal.reason == "undetermined"
-    assert refusal.detail == ("query uses SELECT * — every column must be named so it can be "
-                              "checked against the semantic model.")
-    assert refusal.remediation == "List the columns explicitly instead of '*'."
+    assert refusal.detail == ("query uses SELECT * — a star returns columns the statement never "
+                              "names, so they cannot be checked against the semantic model.")
+    assert refusal.remediation == ("List the columns explicitly instead of '*', including over a "
+                                   "CTE or subquery that already names them.")
 
 
 def _assert_columns_refused(refusal, *columns: str) -> None:

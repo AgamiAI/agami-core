@@ -1561,9 +1561,19 @@ def check_no_select_star(sql: str,
                 # offending token IS `*`.
                 return guardrail.refuse(
                     guardrail.RULE_SELECT_STAR,
-                    detail="query uses SELECT * — every column must be named so it can be "
-                           "checked against the semantic model.",
-                    remediation="List the columns explicitly instead of '*'.",
+                    # **Says what is true of the star, not what we happen not to know** (#387).
+                    # The previous wording — "every column must be named so it can be checked" —
+                    # was read alongside the docstring's "the column list behind `*` lives in the
+                    # catalog", and a caller whose star sat over a CTE that named its own columns
+                    # two lines up reasonably concluded the refusal was mistaken about their query.
+                    # It was not: a star RETURNS columns the statement never names, whatever can be
+                    # inferred about which ones they are, and that is the fact the gate turns on.
+                    # The remediation now also says the CTE case explicitly, because that is where
+                    # a caller is most likely to believe the rule cannot mean them.
+                    detail="query uses SELECT * — a star returns columns the statement never "
+                           "names, so they cannot be checked against the semantic model.",
+                    remediation="List the columns explicitly instead of '*', including over a CTE "
+                                "or subquery that already names them.",
                 )
     return None
 

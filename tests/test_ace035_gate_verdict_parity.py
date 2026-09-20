@@ -129,10 +129,15 @@ def _table_scope_detail(names: tuple[str, ...]) -> str:
 _TABLE_SCOPE_REMEDIATION = ("Add the table to the model (agami-connect / '/agami-model'), "
                             "or remove it from the query.")
 
-_SELECT_STAR_DETAIL = ("query uses SELECT * — every column must be named so it can be "
-                       "checked against the semantic model.")
+# Reworded (#387) to state what is true of a star rather than what we happen not to know: the old
+# sentence read as a claim that the columns were undeterminable, which a caller whose star sat over
+# a CTE naming its own columns reasonably read as a mistake about their query. The VERDICT is
+# unchanged — every star still refuses — so this table's star column is untouched.
+_SELECT_STAR_DETAIL = ("query uses SELECT * — a star returns columns the statement never "
+                       "names, so they cannot be checked against the semantic model.")
 
-_SELECT_STAR_REMEDIATION = "List the columns explicitly instead of '*'."
+_SELECT_STAR_REMEDIATION = ("List the columns explicitly instead of '*', including over a CTE "
+                            "or subquery that already names them.")
 
 
 def _column_scope_detail(names: tuple[str, ...]) -> str:

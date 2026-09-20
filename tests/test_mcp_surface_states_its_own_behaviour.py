@@ -274,3 +274,33 @@ def test_the_surface_admits_it_cannot_save_a_correction(monkeypatch):
     for label, text in _instruction_variants(monkeypatch).items():
         assert "Corrections:" in text, f"{label}: the absence reads as an oversight"
         assert "not persisted" in text, f"{label}: does not say the correction is not saved"
+
+
+def test_the_star_ban_is_stated_before_a_client_meets_it(_=None):
+    """A rule the gate ENFORCES has to be stated where a client reads before writing SQL (#387).
+
+    This is the lesson #360 already paid for once: "only columns declared on the model's tables may
+    be queried" existed solely inside the refusal a statement received for breaking it, so an agent
+    learned it by being refused — five in a row on one deployment. The star ban was in the same
+    position. It is the strictest rule this surface has, it applies in places a caller does not
+    expect (a CTE body, a subquery, `t.*`), and a client that has never been told meets it for the
+    first time in the one situation where it is least able to reason about it.
+
+    Asserted against the rule the gate actually carries rather than a copy of the sentence: delete
+    `RULE_SELECT_STAR` and this test goes with it, which is the coupling that keeps the instruction
+    honest if the gate is ever relaxed.
+    """
+    import guardrail
+    import tools
+
+    assert hasattr(guardrail, "RULE_SELECT_STAR"), (
+        "no star rule to state — if the gate went, the instruction should go with it"
+    )
+    instructions = tools.SERVER_INSTRUCTIONS
+    assert "SELECT *" in instructions, (
+        "the gate refuses every star and the served instructions never mention it, so a client "
+        "meets the rule for the first time as a refusal"
+    )
+    # The places a caller is least likely to expect it, which is where the refusal surprises.
+    for where in ("CTE", "subquery"):
+        assert where in instructions, f"the star ban does not say it reaches a {where}"
