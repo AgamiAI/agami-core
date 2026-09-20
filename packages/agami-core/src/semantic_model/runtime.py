@@ -1538,21 +1538,27 @@ def _cte_bodies(tree: "exp.Expression") -> "dict[str, exp.Expression]":
     return {n: body for n, body in bodies.items() if n not in shadowed and body is not None}
 
 
-def _sources_of(tree: "exp.Expression", select: "exp.Select") -> list:
-    """The FROM/JOIN sources belonging to this SELECT.
+def _sources_by_select(tree: "exp.Expression") -> "dict[int, list]":
+    """Every SELECT's FROM/JOIN sources, built in ONE walk of the tree.
 
-    Walked from the `From`/`Join` nodes rather than read off `select.args`, because the argument
-    key for a FROM was renamed between sqlglot majors and every other gate in this file walks the
-    nodes for that reason. `From.expressions` carries a comma-join's extra sources on the versions
-    that do not normalize them into a `Join`.
+    Built once and handed down rather than recomputed per star (raised in review): resolving a star
+    consults its select's sources, and a chain of CTEs each forwarding one would otherwise rescan
+    the whole tree at every link, turning a long statement into quadratic work inside a gate that
+    runs on the request path.
+
+    Walked from the `From`/`Join` nodes rather than read off `select.args`, because the argument key
+    for a FROM was renamed between sqlglot majors and every other gate in this file walks the nodes
+    for that reason. `From.expressions` carries a comma-join's extra sources on the versions that do
+    not normalize them into a `Join`.
     """
-    out = []
+    out: dict[int, list] = {}
     for node in tree.find_all(exp.From, exp.Join):
-        if _enclosing_select(node) is not select:
+        select = _enclosing_select(node)
+        if select is None:
             continue
         for src in [node.this, *(node.args.get("expressions") or [])]:
             if src is not None:
-                out.append(src)
+                out.setdefault(id(select), []).append(src)
     return out
 
 
@@ -1563,16 +1569,46 @@ def _is_star(proj: "exp.Expression") -> bool:
     )
 
 
-def _source_is_named(src, tree, bodies, cte_refs, seen: frozenset) -> bool:
+# How many relations one star may resolve through before the walk gives up and refuses. Far above
+# any statement a person or a model writes — the deepest real one seen is a five-link CTE chain —
+# and far below Python's recursion limit, which is what this is really protecting: the read-only
+# guard accepts 50,000 characters, which is room for a chain long enough to raise `RecursionError`
+# where the contract promises a refusal. Exceeding it returns "not named", so the overflow refuses
+# like every other thing this walk cannot establish.
+_STAR_RESOLUTION_BUDGET = 64
+
+
+class _StarWalk:
+    """The per-statement state of the star resolution: what the tree holds, and what it has cost.
+
+    One object rather than six parameters threaded through three mutually recursive functions, and
+    it is what carries the two things review found missing — a memo, so a relation reached twice is
+    judged once, and a budget, so a pathological statement refuses instead of raising.
+    """
+
+    def __init__(self, tree: "exp.Expression") -> None:
+        self.tree = tree
+        self.bodies = _cte_bodies(tree)
+        self.cte_refs = _cte_references(tree)
+        self.sources = _sources_by_select(tree)
+        self.memo: dict[int, bool] = {}
+        self.spent = 0
+
+    def over_budget(self) -> bool:
+        self.spent += 1
+        return self.spent > _STAR_RESOLUTION_BUDGET
+
+
+def _source_is_named(src, walk: "_StarWalk", active: frozenset) -> bool:
     """Whether every column this FROM/JOIN source produces is written down in the statement."""
     if isinstance(src, exp.Subquery):
-        return _projection_is_named(src.this, tree, bodies, cte_refs, seen)
+        return _projection_is_named(src.this, walk, active)
     if isinstance(src, exp.Table):
         # A CTE reference carries its columns in its own body; a physical table carries them in the
         # catalog, which this guard deliberately never reads. That difference IS the rule.
-        if id(src) in cte_refs:
+        if id(src) in walk.cte_refs:
             return _projection_is_named(
-                bodies.get((src.name or "").lower()), tree, bodies, cte_refs, seen
+                walk.bodies.get((src.name or "").lower()), walk, active
             )
         return False
     # A table function, LATERAL, VALUES, UNNEST: `check_unscopable_sources` refuses these outright,
@@ -1580,34 +1616,75 @@ def _source_is_named(src, tree, bodies, cte_refs, seen: frozenset) -> bool:
     return False
 
 
-def _projection_is_named(node, tree, bodies, cte_refs, seen: frozenset) -> bool:
+def _reads_a_table_beside_a_derived_source(select: "exp.Select", walk: "_StarWalk") -> bool:
+    """Whether this SELECT mixes a physical table with a CTE or derived table.
+
+    **The one shape whose named columns are NOT actually checked** (raised in review, and it is
+    #339's open half). `check_column_scope` fails open on an unqualified column in such a select —
+    it cannot bind the column to a source without knowing the derived one's columns — so the
+    columns being *written* there does not mean they were *judged*.
+
+    This gate's whole argument for reading a star over a named projection is that those columns
+    were already judged where they were written. Where that is untrue the argument collapses, and
+    a star forwarding them would let an undeclared column through that the old blanket ban stopped.
+    So this shape is treated as not-named and refuses.
+
+    Conservative on purpose: it also refuses a star over a CTE that legitimately joins a table to
+    another CTE. That costs a refusal the caller can repair by naming columns, where being wrong
+    the other way costs a column nobody declared. **Revisit when #339 is closed** — once such a
+    column is bound or refused rather than skipped, this restriction is no longer earning anything.
+    """
+    has_table = False
+    has_derived = False
+    for src in walk.sources.get(id(select), ()):
+        if isinstance(src, exp.Subquery):
+            has_derived = True
+        elif isinstance(src, exp.Table):
+            if id(src) in walk.cte_refs:
+                has_derived = True
+            else:
+                has_table = True
+    return has_table and has_derived
+
+
+def _projection_is_named(node, walk: "_StarWalk", active: frozenset) -> bool:
     """Whether the relation `node` produces a column list the statement spells out.
 
     Recursive, because a star may sit over a CTE that itself stars over another. Every exit that is
     not a proven "yes" is a no: an unrecognised node, a cycle (a `WITH RECURSIVE` body naming
-    itself), a missing body. A wrong answer here makes the gate STRICTER, never leakier, which is
-    the only direction a guard may be wrong in.
+    itself), a missing body, an exhausted budget. A wrong answer here makes the gate STRICTER,
+    never leakier, which is the only direction a guard may be wrong in.
+
+    `active` is the chain currently being resolved, for cycle detection; `walk.memo` is the settled
+    answers, so a relation two stars both reach is judged once.
     """
-    if node is None or id(node) in seen:
+    if node is None or id(node) in active or walk.over_budget():
         return False
-    seen = seen | {id(node)}
+    cached = walk.memo.get(id(node))
+    if cached is not None:
+        return cached
+    key = id(node)
+    active = active | {key}
     while isinstance(node, (exp.Subquery, exp.Paren)) and node.this is not None:
         node = node.this
+    result = False
     if isinstance(node, (exp.Union, exp.Except, exp.Intersect)):
         # Both arms contribute columns, so both must be named. `expression` is the right-hand arm.
-        return all(
-            _projection_is_named(arm, tree, bodies, cte_refs, seen)
+        result = all(
+            _projection_is_named(arm, walk, active)
             for arm in (node.this, node.args.get("expression"))
         )
-    if not isinstance(node, exp.Select):
-        return False
-    for proj in node.expressions:
-        if _is_star(proj) and not _star_is_resolvable(proj, node, tree, bodies, cte_refs, seen):
-            return False
-    return True
+    elif isinstance(node, exp.Select) and not _reads_a_table_beside_a_derived_source(node, walk):
+        result = all(
+            _star_is_resolvable(proj, node, walk, active)
+            for proj in node.expressions
+            if _is_star(proj)
+        )
+    walk.memo[key] = result
+    return result
 
 
-def _star_is_resolvable(star, select, tree, bodies, cte_refs, seen: frozenset) -> bool:
+def _star_is_resolvable(star, select, walk: "_StarWalk", active: frozenset) -> bool:
     """Whether this star expands to a column list the statement already spells out.
 
     `t.*` is judged against the ONE source that alias names; a bare `*` against every source the
@@ -1617,12 +1694,12 @@ def _star_is_resolvable(star, select, tree, bodies, cte_refs, seen: frozenset) -
     qualifier = (
         star.table.lower() if isinstance(star, exp.Column) and star.table else None
     )
-    sources = _sources_of(tree, select)
+    sources = walk.sources.get(id(select), [])
     if qualifier is not None:
         sources = [s for s in sources if (s.alias_or_name or "").lower() == qualifier]
     if not sources:
         return False
-    return all(_source_is_named(s, tree, bodies, cte_refs, seen) for s in sources)
+    return all(_source_is_named(s, walk, active) for s in sources)
 
 
 def check_no_select_star(sql: str,
@@ -1683,13 +1760,12 @@ def check_no_select_star(sql: str,
         tree = _parse_sql(sql, dialect)
     if tree is None or tree.find(exp.Select) is None:
         return None
-    bodies = _cte_bodies(tree)
-    cte_refs = _cte_references(tree)
+    walk = _StarWalk(tree)
     for select in tree.find_all(exp.Select):
         for proj in select.expressions:
             if not _is_star(proj):
                 continue
-            if _star_is_resolvable(proj, select, tree, bodies, cte_refs, frozenset()):
+            if _star_is_resolvable(proj, select, walk, frozenset()):
                 continue
             # Wholly static text — this refusal names no identifier at all, because the
             # offending token IS `*`.

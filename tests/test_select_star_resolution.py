@@ -192,3 +192,59 @@ def test_the_gate_still_degrades_to_allow_on_unparseable_input() -> None:
     """Unchanged, and stated here because the resolution walk is new code on that path: a
     statement that does not parse is the read-only guard's refusal, not this one's."""
     assert _star("SELECT * FROM (((") is None
+
+
+# ---------------------------------------------------------------------------------------------
+# What the review found: the argument for reading a star has to actually hold
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_star_over_a_source_whose_columns_were_never_checked_is_refused() -> None:
+    """**The regression this change introduced, and the reason the rule is not simply "named".**
+
+    Reading a star is justified by the claim that its columns were already judged where they were
+    written. `check_column_scope` fails open on an unqualified column in a select that mixes a
+    physical table with a CTE or derived table — #339's open half — so in that one shape the
+    columns are written and NOT judged, and the claim is false.
+
+    Left alone, this change would have turned a statement the blanket ban refused into one that
+    forwards an undeclared column through both gates. Confirmed at the time: before the fix, this
+    SQL was allowed by the star gate and by column scope together.
+    """
+    sql = "SELECT * FROM (WITH c AS (SELECT 1 AS n) SELECT secret_col FROM orders, c) x"
+    assert _refused(sql)
+
+
+def test_the_mixed_source_restriction_is_about_the_shape_not_the_column() -> None:
+    """It refuses on the SHAPE, without needing to know which columns are declared — this gate
+    judges no model. A star over a CTE that joins a table to another CTE is refused too, which is
+    conservative and deliberate: the cost is a refusal the caller repairs by naming columns."""
+    sql = (
+        "WITH a AS (SELECT id FROM customers), "
+        "     b AS (SELECT a.id FROM orders JOIN a ON a.id = orders.id) "
+        "SELECT * FROM b"
+    )
+    assert _refused(sql)
+
+
+def test_a_chain_far_past_the_budget_refuses_instead_of_raising() -> None:
+    """The read-only guard accepts 50,000 characters, which is room for a CTE chain long enough to
+    exhaust Python's stack. The contract here is a refusal, not a `RecursionError`, so the walk
+    carries a budget and an overflow answers "not named" like any other thing it cannot establish.
+    """
+    chain = "WITH a0 AS (SELECT id FROM orders)" + "".join(
+        f", a{i} AS (SELECT * FROM a{i - 1})" for i in range(1, 400)
+    ) + " SELECT * FROM a399"
+
+    assert _refused(chain), "a statement past the budget must refuse, not raise"
+
+
+def test_a_chain_of_a_realistic_depth_still_resolves() -> None:
+    """The budget exists for pathological input and must not refuse ordinary queries. The deepest
+    real chain seen is five links; thirty still resolves, so there is a wide margin between what
+    people write and where this gives up."""
+    chain = "WITH a0 AS (SELECT id FROM orders)" + "".join(
+        f", a{i} AS (SELECT * FROM a{i - 1})" for i in range(1, 30)
+    ) + " SELECT * FROM a29"
+
+    assert _star(chain) is None
