@@ -18,7 +18,9 @@ below corresponds to one such version.
   refused wherever it appears — the outer query, a subquery, a CTE body, `t.*` — and the served
   instructions never said so, so a client met the strictest rule on this surface for the first time
   as a refusal. This is the same gap #360 closed for column scope, in the same place, for the same
-  reason. The gate is unchanged: every star still refuses.
+  reason. The gate is unchanged: every projected star still refuses, and `COUNT(*)` and other
+  aggregates over a star are unaffected — there the star is inside the call, not the
+  projection, and the instruction says so rather than reading as a wider ban than the gate.
 
 - **And the refusal says what is true of a star** rather than what we happen not to know. The old
   sentence — "every column must be named so it can be checked" — read alongside the reasoning that

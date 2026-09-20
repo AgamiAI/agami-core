@@ -296,11 +296,26 @@ def test_the_star_ban_is_stated_before_a_client_meets_it(_=None):
     assert hasattr(guardrail, "RULE_SELECT_STAR"), (
         "no star rule to state — if the gate went, the instruction should go with it"
     )
-    instructions = tools.SERVER_INSTRUCTIONS
-    assert "SELECT *" in instructions, (
-        "the gate refuses every star and the served instructions never mention it, so a client "
-        "meets the rule for the first time as a refusal"
-    )
-    # The places a caller is least likely to expect it, which is where the refusal surprises.
-    for where in ("CTE", "subquery"):
-        assert where in instructions, f"the star ban does not say it reaches a {where}"
+    # **Both spellings of the instructions**, which is the hazard `test_hosted_instruction_truth`
+    # exists for: `SERVER_INSTRUCTIONS` is the back-compat LOCAL constant, and what a hosted
+    # deployment actually serves comes from `server_instructions()`. A rule added to one and not
+    # the other reaches half the surfaces, and the half it misses is the paid one.
+    for name, instructions in (
+        ("SERVER_INSTRUCTIONS", tools.SERVER_INSTRUCTIONS),
+        ("server_instructions()", tools.server_instructions()),
+    ):
+        assert "`*`" in instructions or "SELECT *" in instructions, (
+            f"{name}: the gate refuses every projected star and this text never mentions it, so a "
+            "client meets the rule for the first time as a refusal"
+        )
+        # The places a caller is least likely to expect it, which is where the refusal surprises.
+        for where in ("CTE", "subquery"):
+            assert where in instructions, f"{name}: the star ban does not say it reaches a {where}"
+        # **And the exemption, stated as loudly as the ban.** `COUNT(*)` is allowed — the star sits
+        # inside the call — and an instruction that reads as "never write a star" would steer a
+        # client off the commonest aggregate there is. Asserted because the first draft of this
+        # rule said "refused wherever it appears", which is false and would have done exactly that.
+        assert "COUNT(*)" in instructions, (
+            f"{name}: the ban does not say that an aggregate over a star is fine, so it reads as "
+            "wider than the gate actually is"
+        )
