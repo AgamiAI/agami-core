@@ -12,6 +12,33 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **The HTTP server runs on MCP SDK 2 and serves protocol 2026-07-28 beside 2025-06-18.** The server
+  extra now requires `mcp>=2.2,<3`; the 1.x line gets security fixes only. Tool names, descriptions
+  and input schemas are unchanged, and a client on either protocol era sees the same answers as
+  before, except in four places an operator or client author should know about:
+  - **A crashed tool's reason no longer reaches the client.** A handler that raises, or an audit
+    write that fails, now answers `isError` with the fixed text `Error executing tool <name>`. The
+    exception's own words could name a column the caller never sent. They go to the server log, as
+    one ERROR record per failure with its traceback (two when the handler raises and the audit
+    write then fails too), and to the new operator-only `tool_calls.error_detail` column, cut to
+    the same bound as `query_executions.error_detail`. Migration 027 adds the column and runs on
+    startup.
+  - **A hidden or unknown tool now answers JSON-RPC error `-32602` `Unknown tool: <name>`** rather
+    than an `isError` result. A hidden tool and a name nobody registered get byte-identical answers
+    on both eras, including when the arguments are invalid, and the stdio server answers the same.
+  - **`/mcp` refuses a request whose `Host` is not `PUBLIC_BASE_URL`'s host with 421, and one whose
+    `Origin` is some other origin with 403.** This guards against DNS rebinding. A loopback base URL
+    also accepts `localhost`, `127.0.0.1` and `[::1]` on any port. Server-to-server clients send no
+    `Origin` and are unaffected, but a browser-based client served from another origin is now
+    refused. A proxy in front of the server must pass the public `Host` through. Discovery and
+    OAuth routes are not checked.
+  - **On 2026-07-28, `tools/list` and `server/discover` carry cache hints** (`ttlMs: 60000`,
+    `cacheScope: "private"`), so a client may reuse a tool list for a minute within one
+    authorization. `server/discover` returns the same instructions as `initialize`, a consumer's
+    `extra_instructions` included.
+
 ## [0.9.5] — 2026-09-19
 
 ### Fixed

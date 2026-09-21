@@ -375,7 +375,7 @@ def test_end_to_end_oauth_then_mcp_tools_list(env):
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.build_app()) as c:
+    with TestClient(mcp_http.build_app(), base_url=BASE) as c:
         bearer = {"Authorization": f"Bearer {_mint_jwt(c)}", **headers}
         init = c.post(
             "/mcp",

@@ -344,20 +344,19 @@ def test_only_our_execute_sql_description_is_rewritten(monkeypatch):
 
 def test_the_http_server_lists_the_callers_numbers(monkeypatch):
     pytest.importorskip("mcp")
-    import mcp.types as mt
     import mcp_http
 
     tools.set_statement_limits_provider(_by_org)
     server = mcp_http.build_server()
-    handler = server.request_handlers[mt.ListToolsRequest]
+    handler = server.get_request_handler("tools/list").handler
 
     async def _list_as(org_id: str) -> str:
         token = tools._current_org_ctx.set(org_id)
         try:
-            result = await handler(mt.ListToolsRequest(method="tools/list"))
+            result = await handler(None, None)
         finally:
             tools._current_org_ctx.reset(token)
-        listed = {t.name: t.description for t in result.root.tools}
+        listed = {t.name: t.description for t in result.tools}
         return listed["execute_sql"]
 
     assert "5,000 rows" in asyncio.run(_list_as("acme"))
@@ -401,18 +400,17 @@ def test_create_app_registers_the_adapters_provider(monkeypatch):
 
 def test_listing_tools_without_a_provider_does_not_hop_threads(monkeypatch):
     pytest.importorskip("mcp")
-    import mcp.types as mt
     import mcp_http
 
     async def _no_hop(*args, **kwargs):
         raise AssertionError("listed on a worker thread with no provider registered")
 
     monkeypatch.setattr(mcp_http, "run_blocking", _no_hop)
-    handler = mcp_http.build_server().request_handlers[mt.ListToolsRequest]
+    handler = mcp_http.build_server().get_request_handler("tools/list").handler
 
-    result = asyncio.run(handler(mt.ListToolsRequest(method="tools/list")))
+    result = asyncio.run(handler(None, None))
 
-    assert "execute_sql" in {t.name for t in result.root.tools}
+    assert "execute_sql" in {t.name for t in result.tools}
 
 
 def test_naming_an_org_inside_a_call_asks_the_provider_again():
@@ -560,7 +558,6 @@ def test_the_visibility_predicate_runs_in_the_request_task_when_a_provider_is_re
     """`build_server` promises the predicate the request task. A provider moves the descriptions onto
     a worker thread; it must not move the predicate with them."""
     pytest.importorskip("mcp")
-    import mcp.types as mt
     import mcp_http
 
     tools.set_statement_limits_provider(_by_org)
@@ -573,15 +570,15 @@ def test_the_visibility_predicate_runs_in_the_request_task_when_a_provider_is_re
             in_request_task.append(False)
         return True
 
-    handler = mcp_http.build_server(visibility=_predicate).request_handlers[mt.ListToolsRequest]
+    handler = mcp_http.build_server(visibility=_predicate).get_request_handler("tools/list").handler
 
     async def _list() -> dict:
         token = tools._current_org_ctx.set("acme")
         try:
-            result = await handler(mt.ListToolsRequest(method="tools/list"))
+            result = await handler(None, None)
         finally:
             tools._current_org_ctx.reset(token)
-        return {t.name: t.description for t in result.root.tools}
+        return {t.name: t.description for t in result.tools}
 
     listed = asyncio.run(_list())
 

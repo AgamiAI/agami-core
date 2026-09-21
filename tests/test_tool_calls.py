@@ -311,7 +311,7 @@ def _mcp_tool_call(subject: str, name: str) -> None:
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.build_app()) as c:
+    with TestClient(mcp_http.build_app(), base_url=BASE) as c:
         init = c.post("/mcp", headers=headers, json={
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -343,6 +343,8 @@ def test_a_raising_tool_is_still_logged_as_an_error(db, monkeypatch):
     _mcp_tool_call("jordan@example.com", "list_datasources")
     rows = [r for r in _rows(db) if r["tool_name"] == "list_datasources"]
     assert rows and rows[0]["success"] == 0 and rows[0]["error_kind"] == "exception"
+    # The reason no longer reaches the client (ACE-152), so the row is where an operator reads it.
+    assert rows[0]["error_detail"] == "RuntimeError: nope"
 
 
 # --- the session plumbing ----------------------------------------------------
@@ -759,3 +761,38 @@ def test_a_body_whose_execution_id_is_not_a_string_records_none(db):
 
     (r,) = _rows(db)
     assert r["audit_id"] is None
+
+
+# --- why a call crashed (027) ------------------------------------------------
+
+
+def test_027_adds_error_detail(db):
+    s = Store.connect(db)
+    try:
+        cols = [r["name"] for r in s.query("PRAGMA table_info(tool_calls)")]
+    finally:
+        s.close()
+    assert cols.count("error_detail") == 1
+
+
+def test_error_detail_is_cut_to_the_bound(db):
+    """An exception's message is as unbounded as a driver's error, and the same bound applies: a
+    crashing call must not become a way to grow the store."""
+    tools.record_tool_call(
+        name="a_tool", arguments={}, result_text=None, execution_ms=1, actor="a",
+        raised=True, error_detail="x" * (tools.AUDIT_ERROR_DETAIL_MAX_CHARS + 500),
+    )
+    (r,) = _rows(db)
+    assert r["error_detail"] == "x" * tools.AUDIT_ERROR_DETAIL_MAX_CHARS
+
+
+def test_error_detail_is_dropped_on_a_non_raised_call(db):
+    """The column holds why a call CRASHED. A call that returned has a body that says how it went,
+    and a detail stated beside it would be describing something that did not happen."""
+    tools.record_tool_call(
+        name="execute_sql", arguments={"sql": "SELECT 1"},
+        result_text='{"error": {"kind": "syntax"}}', execution_ms=1, actor="a",
+        error_detail="RuntimeError: not what happened",
+    )
+    (r,) = _rows(db)
+    assert r["success"] == 0 and r["error_detail"] is None

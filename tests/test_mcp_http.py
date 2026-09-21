@@ -161,7 +161,7 @@ def test_mcp_bare_path_is_not_307_redirected(base_url):
             "clientInfo": {"name": "t", "version": "1"},
         },
     }
-    with TestClient(mcp_http.build_app(), follow_redirects=False) as c:
+    with TestClient(mcp_http.build_app(), base_url=BASE, follow_redirects=False) as c:
         # Auth still gates the bare path (the shim must not become a bypass) — no bearer → 401, not a 307.
         assert c.post("/mcp", json=init).status_code == 401
         bare = c.post("/mcp", headers=headers, json=init)
@@ -179,7 +179,7 @@ def test_http_tools_list_is_the_same_four(base_url):
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.build_app()) as c:
+    with TestClient(mcp_http.build_app(), base_url=BASE) as c:
         init = c.post(
             "/mcp",
             headers=headers,
@@ -264,7 +264,7 @@ def test_the_session_id_reaches_a_tool_handler(base_url, monkeypatch):
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(app) as c:
+    with TestClient(app, base_url=BASE) as c:
         c.post(
             "/mcp",
             headers=headers,
@@ -351,7 +351,7 @@ def _call_probe(c, headers, rid=2) -> str:
 
 def test_a_json_tool_result_is_stamped_with_the_caller_identity(base_url):
     app = _identity_app(lambda a: json.dumps({"ok": True}))
-    with TestClient(app) as c:
+    with TestClient(app, base_url=BASE) as c:
         _handshake(c)
         text = _call_probe(c, _headers("jordan@example.com"))
     assert json.loads(text) == {"ok": True, "caller_identity": "jordan@example.com"}
@@ -361,7 +361,7 @@ def test_a_bare_string_tool_result_is_left_byte_identical(base_url):
     """The additive/non-corrupting guarantee: a tool that answers plain text (not JSON) — the shape
     some existing test tools return — must come back completely unchanged, never wrapped or altered."""
     app = _identity_app(lambda a: "ran")
-    with TestClient(app) as c:
+    with TestClient(app, base_url=BASE) as c:
         _handshake(c)
         text = _call_probe(c, _headers("jordan@example.com"))
     assert text == "ran"
@@ -369,7 +369,7 @@ def test_a_bare_string_tool_result_is_left_byte_identical(base_url):
 
 def test_two_callers_each_get_their_own_identity_not_the_others(base_url):
     app = _identity_app(lambda a: json.dumps({"ok": True}))
-    with TestClient(app) as c:
+    with TestClient(app, base_url=BASE) as c:
         _handshake(c)
         text_a = _call_probe(c, _headers("alex@example.com"), rid=2)
         text_b = _call_probe(c, _headers("sam@example.com"), rid=3)
@@ -420,7 +420,7 @@ def test_a_tool_results_own_caller_identity_key_is_overwritten_not_trusted(base_
     domain data happens to use that exact field name must not be able to spoof the asker — the
     instructions unconditionally tell the model to trust whatever value arrives under that key."""
     app = _identity_app(lambda a: json.dumps({"caller_identity": "attacker@evil.example"}))
-    with TestClient(app) as c:
+    with TestClient(app, base_url=BASE) as c:
         _handshake(c)
         text = _call_probe(c, _headers("jordan@example.com"))
     assert json.loads(text)["caller_identity"] == "jordan@example.com"
@@ -467,7 +467,7 @@ def test_stamping_runs_off_the_event_loop_thread(base_url):
         stamp_thread["thread"] = threading.get_ident()
         return orig(result_text, actor)
 
-    with TestClient(app) as c:
+    with TestClient(app, base_url=BASE) as c:
         mcp_http._with_caller_identity = _spy
         try:
             _handshake(c)
@@ -523,7 +523,7 @@ def _handshake(c):
 
 def test_no_visibility_predicate_leaves_the_surface_unchanged(base_url):
     """The default must be byte-identical to before the seam existed — this is an additive hook."""
-    with TestClient(_visibility_app(None)) as c:
+    with TestClient(_visibility_app(None), base_url=BASE) as c:
         _handshake(c)
         names = {t["name"] for t in _mcp(c, "tools/list", {}, rid=2).json()["result"]["tools"]}
     assert "probe" in names
@@ -531,7 +531,7 @@ def test_no_visibility_predicate_leaves_the_surface_unchanged(base_url):
 
 
 def test_a_hidden_tool_is_absent_from_the_list(base_url):
-    with TestClient(_visibility_app(lambda name: name != "probe")) as c:
+    with TestClient(_visibility_app(lambda name: name != "probe"), base_url=BASE) as c:
         _handshake(c)
         listed = _mcp(c, "tools/list", {}, rid=2).json()["result"]["tools"]
         names = {t["name"] for t in listed}
@@ -541,14 +541,14 @@ def test_a_hidden_tool_is_absent_from_the_list(base_url):
 
 def test_a_hidden_tool_is_also_not_callable(base_url):
     """Listing alone would leave it callable by name — a surface that looks narrowed but is not."""
-    with TestClient(_visibility_app(lambda name: name != "probe")) as c:
+    with TestClient(_visibility_app(lambda name: name != "probe"), base_url=BASE) as c:
         _handshake(c)
         r = _mcp(c, "tools/call", {"name": "probe", "arguments": {}}, rid=2)
     assert "Unknown tool" in r.text  # answers as ABSENT, not as refused — the list is no oracle
 
 
 def test_a_visible_tool_still_runs(base_url):
-    with TestClient(_visibility_app(lambda name: True)) as c:
+    with TestClient(_visibility_app(lambda name: True), base_url=BASE) as c:
         _handshake(c)
         r = _mcp(c, "tools/call", {"name": "probe", "arguments": {}}, rid=2)
     assert "ran" in r.text
@@ -560,7 +560,7 @@ def test_a_predicate_that_raises_hides_rather_than_grants(base_url):
     def boom(name):
         raise RuntimeError("classification blew up")
 
-    with TestClient(_visibility_app(boom)) as c:
+    with TestClient(_visibility_app(boom), base_url=BASE) as c:
         _handshake(c)
         names = {t["name"] for t in _mcp(c, "tools/list", {}, rid=2).json()["result"]["tools"]}
         called = _mcp(c, "tools/call", {"name": "execute_sql", "arguments": {}}, rid=3)
@@ -576,7 +576,7 @@ def test_the_predicate_sees_the_request_context(base_url):
         seen["actor"] = mcp_http._actor_ctx.get()
         return True
 
-    with TestClient(_visibility_app(by_caller)) as c:
+    with TestClient(_visibility_app(by_caller), base_url=BASE) as c:
         _handshake(c)
         _mcp(c, "tools/list", {}, rid=2)
     assert "actor" in seen  # ran inside the request, not at composition time
@@ -584,7 +584,7 @@ def test_the_predicate_sees_the_request_context(base_url):
 
 def test_a_surviving_tools_schema_is_untouched(base_url):
     """Subtractive only — a filter may remove a tool but never reshape one that survives."""
-    with TestClient(_visibility_app(lambda name: name != "probe")) as c:
+    with TestClient(_visibility_app(lambda name: name != "probe"), base_url=BASE) as c:
         _handshake(c)
         listed = {t["name"]: t for t in _mcp(c, "tools/list", {}, rid=2).json()["result"]["tools"]}
     assert listed["execute_sql"]["inputSchema"] == tools.TOOLS["execute_sql"]["inputSchema"]

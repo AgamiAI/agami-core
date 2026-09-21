@@ -1,0 +1,110 @@
+{
+  "ok": {
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"status\": \"ok\",\n  \"columns\": [\n    \"id\"\n  ],\n  \"rows\": [\n    [\n      \"1\"\n    ],\n    [\n      \"2\"\n    ]\n  ],\n  \"row_count\": 2,\n  \"units\": {},\n  \"markdown\": \"| id |\\n| --- |\\n| 1 |\\n| 2 |\",\n  \"sql\": \"SELECT id FROM orders\",\n  \"execution_ms\": \"<volatile>\",\n  \"receipt\": {\n    \"model_version\": null,\n    \"columns\": {\n      \"items\": [\n        {\n          \"kind\": \"output\",\n          \"column\": \"id\",\n          \"aggregate\": false,\n          \"scope\": \"main\",\n          \"status\": \"unmatched\",\n          \"name\": null,\n          \"area\": null,\n          \"definition_prose\": null,\n          \"expression\": null,\n          \"confidence\": null,\n          \"origin\": null,\n          \"review_state\": null,\n          \"signed_off_by\": null,\n          \"signed_off_role\": null,\n          \"signed_off_at\": null,\n          \"source_tables\": null\n        },\n        {\n          \"kind\": \"reference\",\n          \"column\": \"public.orders.id\"\n        }\n      ],\n      \"undetermined\": null\n    },\n    \"tables\": {\n      \"items\": [\n        {\n          \"ref\": \"orders\",\n          \"alias\": null,\n          \"qname\": \"public.orders\",\n          \"declared\": true,\n          \"rows\": null,\n          \"rows_as_of\": null,\n          \"freshness\": null,\n          \"scope\": \"main\",\n          \"filters\": []\n        }\n      ],\n      \"undetermined\": null\n    },\n    \"joins\": {\n      \"items\": [],\n      \"undetermined\": null\n    },\n    \"aggregates\": {\n      \"items\": [],\n      \"undetermined\": null\n    },\n    \"assumptions\": {\n      \"items\": [],\n      \"undetermined\": null\n    }\n  },\n  \"audit_id\": \"<volatile>\",\n  \"caller_identity\": \"jordan@example.com\"\n}"
+        }
+      ],
+      "isError": false
+    },
+    "row": {
+      "id": "<volatile>",
+      "ts": "<volatile>",
+      "org_id": "local",
+      "actor": "jordan@example.com",
+      "tool_name": "execute_sql",
+      "datasource": "acme",
+      "sql": "SELECT id FROM orders",
+      "row_count": 2,
+      "execution_ms": "<volatile>",
+      "success": 1,
+      "error_kind": null,
+      "source": "mcp_server",
+      "user_question": null,
+      "agent_query": null,
+      "thread_id": null,
+      "correlation_id": null,
+      "refusal_detail": null,
+      "refusal_remediation": null,
+      "audit_id": "<volatile>",
+      "basis": null,
+      "conversation_id": "<volatile>",
+      "client_model": null,
+      "datasource_source": "explicit"
+    }
+  },
+  "refused": {
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"status\": \"refused\",\n  \"refusal\": {\n    \"reason\": \"unsafe\",\n    \"rule\": \"read_only\",\n    \"detail\": \"only SELECT / WITH...SELECT is allowed (statement starts with DELETE)\",\n    \"remediation\": \"Rewrite as a read-only SELECT or WITH\\u2026SELECT.\"\n  },\n  \"sql\": \"DELETE FROM orders\",\n  \"receipt\": {\n    \"model_version\": null,\n    \"columns\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"tables\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"joins\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"aggregates\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"assumptions\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    }\n  },\n  \"audit_id\": \"<volatile>\",\n  \"caller_identity\": \"jordan@example.com\"\n}"
+        }
+      ],
+      "isError": false
+    },
+    "row": {
+      "id": "<volatile>",
+      "ts": "<volatile>",
+      "org_id": "local",
+      "actor": "jordan@example.com",
+      "tool_name": "execute_sql",
+      "datasource": "acme",
+      "sql": "DELETE FROM orders",
+      "row_count": 0,
+      "execution_ms": "<volatile>",
+      "success": 0,
+      "error_kind": "read_only",
+      "source": "mcp_server",
+      "user_question": null,
+      "agent_query": null,
+      "thread_id": null,
+      "correlation_id": null,
+      "refusal_detail": "only SELECT / WITH...SELECT is allowed (statement starts with DELETE)",
+      "refusal_remediation": "Rewrite as a read-only SELECT or WITH…SELECT.",
+      "audit_id": "<volatile>",
+      "basis": null,
+      "conversation_id": "<volatile>",
+      "client_model": null,
+      "datasource_source": "explicit"
+    }
+  },
+  "failed": {
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"status\": \"failed\",\n  \"failure\": {\n    \"kind\": \"table_not_found\",\n    \"message\": \"The statement referenced a table this database does not have. If the model was built against an older schema, re-introspect the datasource.\"\n  },\n  \"sql\": \"SELECT id FROM returns\",\n  \"execution_ms\": \"<volatile>\",\n  \"receipt\": {\n    \"model_version\": null,\n    \"columns\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    },\n    \"tables\": {\n      \"items\": [\n        {\n          \"ref\": \"returns\",\n          \"declared\": true\n        }\n      ],\n      \"undetermined\": \"A refused statement is told which of the names it wrote the model declares, and nothing further about any of them: no resolved name, no row estimate, no freshness.\"\n    },\n    \"joins\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    },\n    \"aggregates\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    },\n    \"assumptions\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    }\n  },\n  \"audit_id\": \"<volatile>\",\n  \"caller_identity\": \"jordan@example.com\"\n}"
+        }
+      ],
+      "isError": false
+    },
+    "row": {
+      "id": "<volatile>",
+      "ts": "<volatile>",
+      "org_id": "local",
+      "actor": "jordan@example.com",
+      "tool_name": "execute_sql",
+      "datasource": "acme",
+      "sql": "SELECT id FROM returns",
+      "row_count": 0,
+      "execution_ms": "<volatile>",
+      "success": 0,
+      "error_kind": "failed",
+      "source": "mcp_server",
+      "user_question": null,
+      "agent_query": null,
+      "thread_id": null,
+      "correlation_id": null,
+      "refusal_detail": null,
+      "refusal_remediation": null,
+      "audit_id": "<volatile>",
+      "basis": null,
+      "conversation_id": "<volatile>",
+      "client_model": null,
+      "datasource_source": "explicit"
+    }
+  }
+}

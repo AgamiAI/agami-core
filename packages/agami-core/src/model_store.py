@@ -611,8 +611,9 @@ class DbActivitySink:
             "INSERT INTO tool_calls (id, ts, org_id, actor, tool_name, datasource, sql, row_count, "
             "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
             "correlation_id, refusal_detail, refusal_remediation, audit_id, basis, "
-            "conversation_id, client_model, datasource_source, example_id, example_use) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "conversation_id, client_model, datasource_source, example_id, example_use, "
+            "error_detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -659,6 +660,9 @@ class DbActivitySink:
                 # above so an embedder on an older record shape writes NULLs.
                 getattr(record, "example_id", None),
                 getattr(record, "example_use", None),
+                # Why the call crashed (027, ACE-152), operator-only. `getattr`-guarded like the
+                # seven above; NULL on every call that did not raise.
+                getattr(record, "error_detail", None),
             ),
         )
         self._store.commit()
