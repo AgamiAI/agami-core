@@ -358,6 +358,12 @@ class ToolCallRecord(_Contract):
     # Where `datasource` came from (025, #328): 'explicit' when the client sent it, 'resolved' when
     # the server chose it because the client sent none. NULL for a tool about no single datasource.
     datasource_source: str | None = None
+    # The example the client says it consulted before an `execute_sql` (026, #376): an id returned by
+    # `get_prompt_examples`, and 'followed' or 'shown_only'. The id was checked to exist before the
+    # statement ran; the use is self-reported like `basis` and never checked against the SQL. NULL on
+    # every other tool and on a call that sent neither.
+    example_id: str | None = None
+    example_use: str | None = None
     # Why the call crashed (027, ACE-152): the exception the transport caught, as
     # `<type>: <message>`. Operator-only, like `QueryExecutionRecord.error_detail` — it is the text
     # that no longer reaches the client, and for the same reason. Bounded by the writer

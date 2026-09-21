@@ -109,3 +109,46 @@ def test_migrate_sweeps_resurrected_legacy_config(monkeypatch, tmp_path):
     assert P.migrate_legacy_home() is False         # consolidated → no re-migration
     assert not (legacy / ".config").exists()        # ...but the stale shadow is swept
     assert (legacy / "MOVED.txt").exists()          # tombstone preserved
+
+
+def test_a_subprocess_inherits_the_suite_s_isolation(tmp_path):
+    """**The isolation reaches a CHILD, not only this process** (raised in review on #293).
+
+    `conftest._isolate_artifacts_dir` patches three module attributes, and a patched attribute binds
+    only in the process that patched it. Every path this module resolves derives from `Path.home()`
+    at import, so a subprocess — the forked execution path among them — imports a fresh
+    `agami_paths` and resolves the developer's real home again, `migrate_legacy_home()` included,
+    which MOVES `~/.agami`. Redirecting `HOME` is what crosses that boundary.
+
+    **Asserted against the OS-level home, not `$HOME`.** The first version of this test compared the
+    child's paths to `os.environ["HOME"]` and passed with the redirect removed — of course it did:
+    without the redirect both sides are the real home and the comparison is circular. `pwd` reads
+    the account's home independently of the environment, which is the only way to state the claim.
+    """
+    import os
+    import subprocess
+
+    pwd = __import__("importlib").import_module("pwd") if os.name == "posix" else None
+    if pwd is None:  # pragma: no cover - the suite runs on POSIX in CI
+        import pytest
+
+        pytest.skip("no os-level home lookup outside POSIX")
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+
+    probe = (
+        "import sys; sys.path.insert(0, %r); import agami_paths as P; "
+        "print(P.LEGACY_HOME); print(P.DEFAULT_ARTIFACTS_DIR)"
+        % str(REPO_ROOT / "plugins" / "agami" / "scripts")
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+
+    assert out, "the probe printed nothing"
+    for line in out:
+        resolved = Path(line).resolve()
+        assert not resolved.is_relative_to(real_home), (
+            f"a child resolved {resolved}, under the account's real home {real_home} — "
+            "the isolation did not cross the process boundary, and `bootstrap()` in such a child "
+            "would migrate the developer's own ~/.agami"
+        )

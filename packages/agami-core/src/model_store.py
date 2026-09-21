@@ -611,8 +611,9 @@ class DbActivitySink:
             "INSERT INTO tool_calls (id, ts, org_id, actor, tool_name, datasource, sql, row_count, "
             "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
             "correlation_id, refusal_detail, refusal_remediation, audit_id, basis, "
-            "conversation_id, client_model, datasource_source, error_detail) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "conversation_id, client_model, datasource_source, example_id, example_use, "
+            "error_detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -655,6 +656,10 @@ class DbActivitySink:
                 # Whether the client named `datasource` or the server resolved it (025, #328).
                 # `getattr`-guarded like the six above.
                 getattr(record, "datasource_source", None),
+                # The example the client consulted (026, #376), `getattr`-guarded like the columns
+                # above so an embedder on an older record shape writes NULLs.
+                getattr(record, "example_id", None),
+                getattr(record, "example_use", None),
                 # Why the call crashed (027, ACE-152), operator-only. `getattr`-guarded like the
                 # seven above; NULL on every call that did not raise.
                 getattr(record, "error_detail", None),
@@ -677,7 +682,9 @@ _TOOL_CALL_COLS = (
     # Selected as well as inserted, which is the half that is easy to miss: this list is narrower
     # than the INSERT (`org_id` and `audit_id` are written and never read), so a column added to one
     # and not the other is recorded faithfully and reaches no reader at all.
-    "client_model, datasource_source"
+    "client_model, datasource_source, "
+    # The example the client says it consulted (026, #376), so the activity view can show it.
+    "example_id, example_use"
 )
 
 
