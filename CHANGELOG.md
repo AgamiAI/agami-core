@@ -12,6 +12,20 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **On protocol 2026-07-28, `get_datasource_schema` asks the person which datasource they meant.**
+  When `datasource` is omitted on an organization serving several, a client that declared form
+  elicitation gets an input-required result with one form listing the served names, and the retry
+  carrying the choice returns that datasource's schema. A declined or cancelled form, a 2025-06-18
+  request, a client without elicitation, stdio, and a server with no `AGAMI_SIGNING_SECRET` all get
+  the `datasource_required` answer, unchanged. The question's `requestState` is sealed under a key
+  derived from `AGAMI_SIGNING_SECRET` and bound to the caller, organization, tool, arguments and a
+  ten-minute expiry; anything else is refused with `-32602`. A state opens on any instance sharing
+  the secret, so nothing is kept between the rounds, and both rounds write a `tool_calls` row. Tool
+  authors can ask the same way: return `tools.NeedsInput(key, message, schema)` when
+  `tools.can_ask()` is true, and read the reply from `tools.current_answer()`.
+
 ### Changed
 
 - **The HTTP server runs on MCP SDK 2 and serves protocol 2026-07-28 beside 2025-06-18.** The server

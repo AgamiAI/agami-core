@@ -15,9 +15,14 @@ nothing about the sealing is faked. Datasource names are synthetic.
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import secrets
+import time
+from contextlib import redirect_stdout
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +31,7 @@ pytest.importorskip("starlette")
 pytest.importorskip("pydantic")
 pytest.importorskip("yaml")
 
+import mcp_harness  # noqa: E402
 import mcp_http  # noqa: E402
 import tools  # noqa: E402
 from mcp.server import request_state  # noqa: E402
@@ -234,3 +240,270 @@ def test_a_question_that_may_not_be_asked_never_leaves_unsealed(era, monkeypatch
 def test_can_ask_is_false_and_there_is_no_answer_outside_a_call():
     assert tools.can_ask() is False
     assert tools.current_answer() is None
+
+
+# --- the question in get_datasource_schema ------------------------------------------------------
+
+
+def test_a_modern_elicitation_client_is_asked_which_datasource():
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        result = _call(client)["result"]
+    assert result["resultType"] == "input_required"
+    assert isinstance(result["requestState"], str)
+    (key, request), *rest = result["inputRequests"].items()
+    assert rest == []
+    assert key == "datasource"
+    assert request["method"] == "elicitation/create"
+    assert request["params"]["mode"] == "form"
+    assert request["params"]["requestedSchema"] == CHOICE_SCHEMA
+
+
+def test_an_accepted_choice_returns_what_naming_it_returns():
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        state = _call(client)["result"]["requestState"]
+        answered = _call(client, inputResponses=_accept("acme_crm"), requestState=state)
+        named = _call(client, arguments={"datasource": "acme_crm"})
+    assert answered["result"]["resultType"] == "complete"
+    assert _text(answered) == _text(named)
+    assert json.JSONDecoder().raw_decode(_text(named))[0].get("error") is None
+
+
+@pytest.mark.parametrize("action", ["decline", "cancel"])
+def test_a_declined_or_cancelled_form_gets_todays_answer(action):
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        state = _call(client)["result"]["requestState"]
+        answer = {"datasource": {"action": action}}
+        retried = _call(client, inputResponses=answer, requestState=state)
+    assert _text(retried) == _todays_answer()
+
+
+@pytest.mark.parametrize(
+    "era,capabilities",
+    [(MODERN, {}), (LEGACY, ELICIT)],
+    ids=["modern-no-elicitation", "legacy-declaring-elicitation"],
+)
+def test_a_client_that_cannot_be_asked_gets_todays_answer(era, capabilities):
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        message = _call(client, era=era, capabilities=capabilities)
+    assert message["result"].get("resultType", "complete") == "complete"
+    assert _text(message) == _todays_answer()
+
+
+def test_stdio_gets_todays_answer():
+    """The harness never sets `can_ask()`, whatever the request claims about the client."""
+    params = {
+        "name": TOOL,
+        "arguments": {},
+        "_meta": {"io.modelcontextprotocol/clientCapabilities": ELICIT},
+        "inputResponses": _accept("acme_crm"),
+        "requestState": "datasource",
+    }
+    out = io.StringIO()
+    with redirect_stdout(out):
+        mcp_harness._handle_tools_call(1, params)
+    (block,) = json.loads(out.getvalue())["result"]["content"]
+    assert block["text"] == tools._choose_datasource_error(ORG, SERVED)
+
+
+def test_no_signing_secret_means_no_question(monkeypatch):
+    monkeypatch.delenv("AGAMI_SIGNING_SECRET")
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        message = _call(client)
+    assert message["result"].get("resultType", "complete") == "complete"
+    assert _text(message) == _todays_answer()
+
+
+def test_one_served_datasource_is_not_a_question(monkeypatch):
+    monkeypatch.setattr(tools, "_served_datasources", lambda _org: ["acme_crm"])
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        message = _call(client)
+    assert message["result"]["resultType"] == "complete"
+    assert json.JSONDecoder().raw_decode(_text(message))[0].get("error") is None
+
+
+def test_an_unreachable_store_is_not_a_question(monkeypatch):
+    monkeypatch.setattr(tools, "_served_datasources", lambda _org: None)
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        message = _call(client)
+    assert message["result"]["resultType"] == "complete"
+
+
+# --- the sealed state is the control --------------------------------------------------------------
+
+
+def _flip_one_byte(state: str) -> str:
+    raw = bytearray(base64.urlsafe_b64decode(state[3:] + "=" * (-len(state[3:]) % 4)))
+    raw[20] ^= 0x01
+    return "v1." + base64.urlsafe_b64encode(bytes(raw)).decode().rstrip("=")
+
+
+def _clock(monkeypatch, offset: float) -> None:
+    """Move only the request-state module's clock: the rest of the process keeps real time."""
+    now = time.time
+    monkeypatch.setattr(request_state, "time", SimpleNamespace(time=lambda: now() + offset))
+
+
+_PROBE = {
+    "probe": {
+        "handler": lambda args: "ran",
+        "description": "probe",
+        "inputSchema": {"type": "object"},
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "one-byte-flipped",
+        "other-subject",
+        "other-org",
+        "other-tool",
+        "other-arguments",
+        "datasource-added",
+        "expired",
+        "minted-in-the-future",
+        "not-a-string",
+    ],
+)
+def test_a_tampered_or_stale_state_is_refused_and_no_answer_reaches_the_handler(
+    tamper, monkeypatch
+):
+    answers: list = []
+    with TestClient(_app({**_spied(answers), **_PROBE}), base_url=PUBLIC_BASE_URL) as client:
+        if tamper == "minted-in-the-future":
+            _clock(monkeypatch, 120)
+        state = _call(client)["result"]["requestState"]
+        if tamper == "minted-in-the-future":
+            # Back to real time for the retry, which then sees an `iat` two minutes ahead.
+            monkeypatch.setattr(request_state, "time", time)
+        retry: dict = {"inputResponses": _accept("acme_crm"), "requestState": state}
+        if tamper == "one-byte-flipped":
+            retry["requestState"] = _flip_one_byte(state)
+        elif tamper == "other-subject":
+            retry["bearer"] = f"someone@example.com|{ORG}"
+        elif tamper == "other-org":
+            retry["bearer"] = f"{SUBJECT}|org-other"
+        elif tamper == "other-tool":
+            retry["name"] = "probe"
+        elif tamper == "other-arguments":
+            retry["arguments"] = {"mode": "full"}
+        elif tamper == "datasource-added":
+            retry["arguments"] = {"datasource": "acme_erp"}
+        elif tamper == "expired":
+            _clock(monkeypatch, 601)
+        elif tamper == "not-a-string":
+            retry["requestState"] = 12345
+        message = _call(client, **retry)
+    assert message["error"]["code"] == -32602
+    # The first round ran with no answer; the refused retry never reached the handler at all.
+    assert answers == [None]
+
+
+def test_a_state_opens_on_a_second_instance_sharing_the_secret_and_not_on_a_third(monkeypatch):
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as a:
+        state = _call(a)["result"]["requestState"]
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as b:
+        shared = _call(b, inputResponses=_accept("acme_crm"), requestState=state)
+    monkeypatch.setenv("AGAMI_SIGNING_SECRET", secrets.token_hex(32))
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as c:
+        other = _call(c, inputResponses=_accept("acme_crm"), requestState=state)
+    assert shared["result"]["resultType"] == "complete"
+    assert json.JSONDecoder().raw_decode(_text(shared))[0].get("error") is None
+    assert other["error"]["code"] == -32602
+
+
+@pytest.mark.parametrize(
+    "content",
+    [{"datasource": "acme_hr"}, {"datasource": 5}, {"datasource": True}, {}, None],
+    ids=["outside-the-list", "a-number", "a-bool", "empty", "absent"],
+)
+def test_an_accepted_answer_outside_the_served_list_never_resolves(content, monkeypatch):
+    resolved: list = []
+    real = tools._resolve_call_datasource
+    monkeypatch.setattr(
+        tools, "_resolve_call_datasource", lambda args: resolved.append(args) or real(args)
+    )
+    answer = {
+        "datasource": {"action": "accept", **({} if content is None else {"content": content})}
+    }
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        state = _call(client)["result"]["requestState"]
+        retried = _call(client, inputResponses=answer, requestState=state)
+    assert _text(retried) == _todays_answer()
+    assert resolved == []
+
+
+def test_both_rounds_write_a_tool_calls_row(store_url):
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        state = _call(client)["result"]["requestState"]
+        _call(client, inputResponses=_accept("acme_crm"), requestState=state)
+    asked, answered = _tool_calls(store_url)
+    assert (asked["tool_name"], asked["success"], asked["error_kind"]) == (TOOL, 1, None)
+    assert asked["row_count"] is None
+    assert answered["tool_name"] == TOOL
+    assert (answered["datasource"], answered["datasource_source"]) == ("acme_crm", "resolved")
+
+
+def test_an_sdk_client_asks_answers_and_gets_the_schema():
+    """End to end: the SDK's own client, on 2026-07-28, drives the question through its elicitation
+    callback and its retry loop, over the real HTTP app."""
+    import anyio
+    import httpx2
+    import mcp.types as mt
+    from mcp.client import Client
+    from mcp.client.streamable_http import streamable_http_client
+
+    app = _app()
+    asked: list = []
+
+    async def choose(context, params):
+        asked.append(params.requested_schema)
+        return mt.ElicitResult(action="accept", content={"datasource": "acme_crm"})
+
+    async def run() -> mt.CallToolResult:
+        async with app.router.lifespan_context(app):
+            http = httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app),
+                base_url=PUBLIC_BASE_URL,
+                headers={"Authorization": f"Bearer {BEARER}"},
+            )
+            async with http:
+                transport = streamable_http_client(f"{PUBLIC_BASE_URL}/mcp", http_client=http)
+                async with Client(transport, mode=MODERN, elicitation_callback=choose) as client:
+                    return await client.call_tool(TOOL, {})
+
+    result = anyio.run(run)
+    assert asked == [CHOICE_SCHEMA]
+    assert result.is_error is False
+    body = json.JSONDecoder().raw_decode(result.content[0].text)[0]
+    assert body.get("error") is None
+
+
+def test_a_forged_state_answers_a_hidden_tool_and_an_absent_one_identically(store_url):
+    forged = "v1." + base64.urlsafe_b64encode(secrets.token_bytes(48)).decode().rstrip("=")
+    retry = {"name": "probe", "inputResponses": _accept("acme_crm"), "requestState": forged}
+    with TestClient(_app(_PROBE, visibility=lambda n: n != "probe"), base_url=PUBLIC_BASE_URL) as c:
+        hidden = rpc(
+            c, MODERN, "tools/call", {"arguments": {}, **retry}, bearer=BEARER, capabilities=ELICIT
+        )
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as c:
+        absent = rpc(
+            c, MODERN, "tools/call", {"arguments": {}, **retry}, bearer=BEARER, capabilities=ELICIT
+        )
+    assert envelope(hidden)["error"]["code"] == -32602
+    assert hidden.status_code == absent.status_code
+    assert hidden.content == absent.content
+    # A refused call writes no row, hidden or absent alike, exactly as a refused call always has.
+    assert _tool_calls(store_url) == []
+
+
+def test_answers_without_a_state_or_under_another_key_are_ignored():
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        unsealed = _call(client, inputResponses=_accept("acme_crm"))
+        state = _call(client)["result"]["requestState"]
+        wrong_key = {"other": {"action": "accept", "content": {"datasource": "acme_crm"}}}
+        misfiled = _call(client, inputResponses=wrong_key, requestState=state)
+    # Neither is an answer, so the person is asked (again).
+    assert unsealed["result"]["resultType"] == "input_required"
+    assert misfiled["result"]["resultType"] == "input_required"

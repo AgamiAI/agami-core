@@ -1594,7 +1594,28 @@ def _schema_payload(
     return result
 
 
-def tool_get_datasource_schema(args: dict[str, Any]) -> str:
+def _choice_schema(choices: list[str]) -> dict:
+    """The form asking which datasource: one required choice among the served names."""
+    return {
+        "type": "object",
+        "properties": {"datasource": {"type": "string", "enum": choices, "title": "Datasource"}},
+        "required": ["datasource"],
+    }
+
+
+def _accepted_datasource(answer: dict | None, choices: list[str]) -> str | None:
+    """The datasource an accepted answer chose, when it is one of `choices`, else None.
+
+    Checked against the served list here, on the retry. The form's enum shapes what the person sees;
+    it is not the control, and a client can send back any name it likes.
+    """
+    if answer is None or answer.get("action") != "accept":
+        return None
+    chosen = (answer.get("content") or {}).get("datasource")
+    return chosen if isinstance(chosen, str) and chosen in choices else None
+
+
+def tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     """`_tool_get_datasource_schema` inside the per-request resolve-once scope, so the version this
     response reports and the one `get_cached_org` loads the model under are a single read (#364)."""
     cache_token = begin_request_cache()
@@ -1604,7 +1625,7 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         end_request_cache(cache_token)
 
 
-def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
+def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     """Return the semantic model for a datasource, **sized to fit the client's context**.
 
     **Scope is what the caller DECLARES**, and nothing inside it is hidden. `area="<name>"` narrows
@@ -1621,12 +1642,25 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
     # With several datasources served, an omission is refused before it can resolve to a fallback
-    # (#327); `_choose_datasource_error` names the choices.
+    # (#327); `_choose_datasource_error` names the choices. A client that can ask the person is
+    # asked instead, and an accepted choice proceeds as though it had been named. A declined or
+    # cancelled form, or anything else, gets the refusal, so the AI can still recover by naming one.
     choices = _datasources_to_choose_from(args)
     if choices is not None:
-        choose = _choose_datasource_error(_current_org_id(), served=choices)
-        if choose is not None:
-            return choose
+        answer = current_answer()
+        chosen = _accepted_datasource(answer, choices)
+        if chosen is not None:
+            args = {**args, "datasource": chosen}
+        elif answer is None and can_ask():
+            return NeedsInput(
+                "datasource",
+                "Which datasource should this question use?",
+                _choice_schema(choices),
+            )
+        else:
+            choose = _choose_datasource_error(_current_org_id(), served=choices)
+            if choose is not None:
+                return choose
     profile = _resolve_call_datasource(args)
     # Read BEFORE the model loads. A deploy landing between the two reads then pairs new content
     # with the old version, and the client's next execute_sql is refused and re-fetches; the other
