@@ -427,6 +427,44 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     return json.dumps(body, indent=2) + suffix
 
 
+def _declared_pages(registry: dict) -> dict[str, dict]:
+    """Every `ui://` page the registry declares, by URI: its HTML and the tools that link to it.
+
+    Checked here, in `build_server`, because `create_app` builds its server at construction: one
+    chokepoint, so a malformed declaration fails composition naming its tool on both entry points,
+    not later as a 500 inside `resources/read`."""
+    pages: dict[str, dict] = {}
+    for tool_name, meta in registry.items():
+        if not isinstance(meta.get("app_only", False), bool):
+            raise ValueError(f"extra tool {tool_name!r} app_only must be a bool")
+        page = meta.get("page")
+        if page is None:
+            continue
+        # Exactly these two keys. A page that could name a CSP relaxation, a domain or a device
+        # permission could ask the host to let it reach the network; without them it runs in the
+        # host's default sandbox, and the HTML itself need not be read to know that.
+        if not isinstance(page, dict) or set(page) != {"uri", "html"}:
+            raise ValueError(
+                f"extra tool {tool_name!r} page may declare only uri and html "
+                "(no csp, domain or permissions)"
+            )
+        uri, html = page["uri"], page["html"]
+        if not isinstance(uri, str) or not uri.startswith("ui://"):
+            raise ValueError(f"extra tool {tool_name!r} page uri must use the ui:// scheme")
+        if not isinstance(html, str):
+            raise ValueError(f"extra tool {tool_name!r} page html must be a str")
+        # Two tools may share a page; they may not disagree about what it is, or which body a
+        # client got would depend on registry order.
+        declared = pages.setdefault(uri, {"html": html, "tools": []})
+        if declared["html"] != html:
+            raise ValueError(
+                f"extra tool {tool_name!r} page {uri!r} differs from the html another tool "
+                "declared for it"
+            )
+        declared["tools"].append(tool_name)
+    return pages
+
+
 def build_server(
     registry: dict | None = None,
     extra_instructions: str | None = None,
@@ -458,6 +496,7 @@ def build_server(
     import mcp.types as mt
     import referencing
     from mcp.server import Server, ServerRequestContext
+    from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
     from mcp.server.caching import CacheHint
     from mcp.shared.exceptions import MCPError
 
@@ -471,6 +510,7 @@ def build_server(
     # it after would mean a hidden tool still had its schema rewritten, which is work for nothing.
     if thread_id_is_required():
         registry = require_thread_id(registry)
+    pages = _declared_pages(registry)
 
     # One validator per tool, built once. `jsonschema.validate` re-checks the schema against its
     # metaschema on every call, which is ~2ms of pure repetition, and raises SchemaError mid-call for a
@@ -514,6 +554,16 @@ def build_server(
     if extra_instructions:
         instructions = f"{instructions}\n{extra_instructions}"
 
+    def _ui_meta(entry: dict) -> dict | None:
+        # From the registry entry, never from the visibility predicate: the link beside a tool is
+        # part of what the consumer registered, and the schema a client reads is untouched by it.
+        ui: dict = {}
+        if entry.get("page") is not None:
+            ui["resourceUri"] = entry["page"]["uri"]
+        if entry.get("app_only"):
+            ui["visibility"] = ["app"]
+        return {"ui": ui} if ui else None
+
     def _described(names: list[str]) -> list:
         return [
             # `tool_description` states execute_sql's limits for THIS caller's organisation (#329).
@@ -523,6 +573,7 @@ def build_server(
                 name=name,
                 description=tool_description(name, registry[name]["description"]),
                 input_schema=registry[name]["inputSchema"],
+                meta=_ui_meta(registry[name]),
             )
             for name in names
         ]
@@ -541,6 +592,36 @@ def build_server(
         if not has_statement_limits_provider():
             return mt.ListToolsResult(tools=_described(names))
         return mt.ListToolsResult(tools=await run_blocking(_described, names))
+
+    def _page_visible(page: dict) -> bool:
+        # A page is as visible as the most visible tool that links it. Checked on the loop, in the
+        # request task, as `_on_list_tools` checks tools, so the predicate sees the same context.
+        return any(_visible(tool_name) for tool_name in page["tools"])
+
+    async def _on_list_resources(
+        ctx: ServerRequestContext, params: mt.PaginatedRequestParams | None
+    ) -> mt.ListResourcesResult:
+        return mt.ListResourcesResult(
+            resources=[
+                mt.Resource(uri=uri, name=uri, mime_type=APP_MIME_TYPE)
+                for uri, page in pages.items()
+                if _page_visible(page)
+            ]
+        )
+
+    async def _on_read_resource(
+        ctx: ServerRequestContext, params: mt.ReadResourceRequestParams
+    ) -> mt.ReadResourceResult:
+        page = pages.get(params.uri)
+        # A hidden page answers as an undeclared one, byte for byte, for the reason a hidden tool
+        # answers `Unknown tool`: a different answer would say the page exists but is withheld.
+        if page is None or not _page_visible(page):
+            raise MCPError(code=mt.INVALID_PARAMS, message=f"Unknown resource: {params.uri}")
+        return mt.ReadResourceResult(
+            contents=[
+                mt.TextResourceContents(uri=params.uri, mime_type=APP_MIME_TYPE, text=page["html"])
+            ]
+        )
 
     def _crashed(name: str) -> mt.CallToolResult:
         """The one answer to a call that raised, whatever raised. The exception's own words are an
@@ -692,14 +773,26 @@ def build_server(
     # the SDK's default handler already returns `instructions` below, so it needs only the hint.
     # Sent on 2026-07-28 only: the 2025-06-18 results have no fields for it.
     hint = CacheHint(ttl_ms=60_000, scope="private")
-    return Server(
+    cache_hints = {"tools/list": hint, "server/discover": hint}
+    # The resource handlers are registered only when a page is declared, because the SDK advertises
+    # the `resources` capability from whether they are: with no page, a client sees exactly the
+    # server it saw before pages existed, "method not found" included. Pages follow the tools'
+    # visibility, so their answers are per caller too, and get the same private hint.
+    if pages:
+        cache_hints |= {"resources/list": hint, "resources/read": hint}
+    server = Server(
         SERVER_NAME,
         version=server_version(),
         instructions=instructions,
-        cache_hints={"tools/list": hint, "server/discover": hint},
+        cache_hints=cache_hints,
         on_list_tools=_on_list_tools,
         on_call_tool=_on_call_tool,
+        on_list_resources=_on_list_resources if pages else None,
+        on_read_resource=_on_read_resource if pages else None,
     )
+    if pages:
+        server.extensions[EXTENSION_ID] = {}
+    return server
 
 
 def _is_loopback(base: str) -> bool:
