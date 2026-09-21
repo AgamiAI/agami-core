@@ -715,6 +715,43 @@ def reset_call_source(token: Token[str]) -> None:
     _source_ctx.reset(token)
 
 
+class NeedsInput(NamedTuple):
+    """What a handler returns, in place of its text, to ask the person one question.
+
+    `key` names the answer, `message` is shown to the person, and `schema` is the form's JSON schema.
+    Return it only when `can_ask()` is true: the HTTP transport turns it into an input-required
+    result and, on the retry, hands the answer back through `current_answer()`. Stdlib only, like the
+    rest of this module, so the stdio harness and the lean install never import the SDK for it.
+    """
+
+    key: str
+    message: str
+    schema: dict
+
+
+# Both are set by the HTTP transport inside the context it hands the handler, and nowhere else. They
+# are context variables rather than handler parameters because every handler shares one
+# `(args) -> str` signature with the stdio harness, and folding the answer into `args` would change
+# the argument digest the sealed request state is bound to. The defaults are the stdio answer: no.
+_can_ask_ctx: ContextVar[bool] = ContextVar("agami_can_ask", default=False)
+_answer_ctx: ContextVar[dict | None] = ContextVar("agami_input_answer", default=None)
+
+
+def can_ask() -> bool:
+    """True only on a 2026-07-28 request whose client declared form elicitation, on a deployment that
+    can seal the question's state. A handler checks it before returning `NeedsInput`."""
+    return _can_ask_ctx.get()
+
+
+def current_answer() -> dict | None:
+    """The person's reply to this tool's question, as `{"action": ..., "content": ...}`, or None.
+
+    Only ever set from a request state this server sealed and has verified, under the key that state
+    named, so a client cannot supply an answer to a question it was never asked.
+    """
+    return _answer_ctx.get()
+
+
 @functools.lru_cache(maxsize=None)
 def resolved_org_id() -> str:
     """The single-tenant deployment org id, resolved once per process (F14 / ACE-056; relocated by

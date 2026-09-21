@@ -50,6 +50,9 @@ from store import Store
 from tools import (
     SERVER_NAME,
     TOOLS,
+    NeedsInput,
+    _answer_ctx,
+    _can_ask_ctx,
     _current_org_ctx,
     bootstrap_paths,
     has_statement_limits_provider,
@@ -161,6 +164,37 @@ def _build_auth_provider() -> AuthProvider:
         _signing_secret()  # raises on an empty/weak secret — no insecure fallback on misconfig
         return JwtAuthProvider()
     return PresenceAuthProvider()
+
+
+def _request_state_key() -> bytes | None:
+    """The key that seals a clarifying question's `requestState`, or None when there is no secret.
+
+    None is a decision, not a gap: a local presence-auth server has no secret, and a process-local key
+    would strand every question on a restart or a second worker, so without one nothing is asked. The
+    same presence test as `_build_auth_provider`, so the two never disagree about whether a secret is
+    configured. Derived under its own label rather than used raw, so the sealing key is never the
+    token-signing key and a leak of one says nothing about the other.
+    """
+    if "AGAMI_SIGNING_SECRET" not in os.environ:
+        return None
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from oauth_server import _signing_secret
+
+    return HKDF(algorithm=SHA256(), length=32, salt=None, info=b"agami-mcp-request-state").derive(
+        _signing_secret().encode()
+    )
+
+
+def _bound_caller(ctx: object) -> str:
+    """The principal a sealed `requestState` is bound to: this request's subject and organization.
+
+    Ours rather than the SDK's default, which reads the SDK's own auth context. This server never sets
+    that context, so the default would bind nothing and a state minted for one caller would open for
+    any other. Always a string, even with neither known, so the claim is present on every state and an
+    unbound state can never verify where a bound one is expected.
+    """
+    return json.dumps([_actor_ctx.get(), _current_org_ctx.get()])
 
 
 def _build_org_resolver() -> SingleTenantOrgResolver:
@@ -431,6 +465,7 @@ def build_server(
     registry: dict | None = None,
     extra_instructions: str | None = None,
     visibility: Callable[[str], bool] | None = None,
+    request_state_key: bytes | None = None,
 ):
     """A low-level MCP Server whose tool surface IS the given registry — list_tools / call_tool read
     from it, so HTTP advertises exactly what stdio does (no duplicate defs). Defaults to the shared
@@ -453,13 +488,19 @@ def build_server(
     SUBTRACTIVE ONLY. It filters the one shared registry; it never adds, renames, or reshapes a tool. A
     surviving tool's description and inputSchema pass through untouched, so a consumer cannot fork the
     surface into a private variant under cover of "visibility".
+
+    `request_state_key` lets a tool ask the person a question (`tools.NeedsInput`). With a key, the
+    SDK's request-state boundary seals every question's state on the way out and verifies it on the
+    retry; without one, `tools.can_ask()` is false on every call and nothing is ever asked.
     """
     import jsonschema
     import mcp.types as mt
     import referencing
     from mcp.server import Server, ServerRequestContext
     from mcp.server.caching import CacheHint
+    from mcp.server.request_state import RequestStateBoundary, RequestStateSecurity
     from mcp.shared.exceptions import MCPError
+    from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
     registry = TOOLS if registry is None else registry
     # Applied to whatever registry is being served, consumer tools included: a conversation is
@@ -552,9 +593,20 @@ def build_server(
             is_error=True,
         )
 
+    def _asking(ctx: ServerRequestContext) -> bool:
+        """Whether this call may ask a question: a sealing key, a 2026-07-28 request, and a client
+        that declared form elicitation on it. The capabilities are this request's own `_meta`
+        envelope, since a stateless modern request has no handshake to remember them from."""
+        if request_state_key is None or ctx.protocol_version not in MODERN_PROTOCOL_VERSIONS:
+            return False
+        capabilities = ctx.session.client_capabilities
+        elicitation = capabilities.elicitation if capabilities is not None else None
+        # An empty capability means form: the protocol's reading for clients that predate modes.
+        return elicitation is not None and (elicitation.form is not None or elicitation.url is None)
+
     async def _on_call_tool(
         ctx: ServerRequestContext, params: mt.CallToolRequestParams
-    ) -> mt.CallToolResult:
+    ) -> mt.CallToolResult | mt.InputRequiredResult:
         # `or {}` as SDK 1.x did before anything else saw them, so the schema check, the handler and
         # the audit row all read the same value they always have.
         name, arguments = params.name, params.arguments or {}
@@ -589,8 +641,18 @@ def build_server(
                 ],
                 is_error=True,
             )
+        # By now the boundary has replaced a `requestState` with the plaintext this server sealed, or
+        # refused the request, so a state here is one we minted: the key of the question it asked.
+        # Only the response filed under that key is an answer. Responses with no state, or under any
+        # other key, are the client's say-so and are dropped.
+        asking = _asking(ctx)
+        answer = None
+        if asking and params.request_state is not None:
+            response = (params.input_responses or {}).get(params.request_state)
+            if response is not None:
+                answer = response.model_dump(mode="json", exclude_none=True)
         try:
-            return await _recorded_call(name, arguments, meta)
+            return await _recorded_call(name, arguments, meta, asking, answer)
         except Exception:
             # Only a failure while recording the call reaches here — the audit write, or reading or
             # resetting the typed outcome around it: `_recorded_call` answers a raising handler
@@ -603,11 +665,14 @@ def build_server(
             )
             return _crashed(name)
 
-    async def _recorded_call(name: str, arguments: dict, meta: dict) -> mt.CallToolResult:
+    async def _recorded_call(
+        name: str, arguments: dict, meta: dict, asking: bool, answer: dict | None
+    ) -> mt.CallToolResult | mt.InputRequiredResult:
         # Record every tool call to the admin activity log — timed, attributed to the authenticated
         # actor, never allowed to break the tool (logging is best-effort + double-guarded).
         started = time.monotonic()
         result_text = None
+        question: NeedsInput | None = None
         crash: Exception | None = None
         handler_ctx = contextvars.copy_context()
         # Cleared inside the context we own, before the handler can run. `copy_context()`
@@ -615,6 +680,9 @@ def build_server(
         # inherited here and read back as THIS tool's outcome — and a tool that never
         # reaches `execute_guarded` has nothing else to clear it.
         handler_ctx.run(reset_typed_outcome)
+        # Set in the same owned context, so they reach the worker thread and never the request's.
+        handler_ctx.run(_can_ask_ctx.set, asking)
+        handler_ctx.run(_answer_ctx.set, answer)
         try:
             # Run the tool handler OFF the event loop. The heavy handlers block for the whole query —
             # execute_sql runs it under the executor's own bounds (the per-statement budget, plus the
@@ -639,10 +707,31 @@ def build_server(
             # contextvar reads of its own.
             actor = _actor_ctx.get()
 
-            def _run_and_stamp() -> str:
-                return _with_caller_identity(meta["handler"](arguments), actor)
+            def _run_and_stamp() -> str | NeedsInput:
+                result = meta["handler"](arguments)
+                if isinstance(result, NeedsInput):
+                    return result
+                return _with_caller_identity(result, actor)
 
-            result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
+            outcome = await run_blocking(handler_ctx.run, _run_and_stamp)
+            if isinstance(outcome, NeedsInput):
+                # A handler that asks without checking `can_ask()` fails here rather than being
+                # answered: with no boundary, or on 2025-06-18, its state would go out unsealed.
+                if not asking:
+                    raise RuntimeError(f"tool {name!r} asked a question it may not ask")
+                question = outcome
+                # The plaintext state is the question's key; the boundary seals it on the way out.
+                return mt.InputRequiredResult(
+                    input_requests={
+                        outcome.key: mt.ElicitRequest(
+                            params=mt.ElicitRequestFormParams(
+                                message=outcome.message, requested_schema=outcome.schema
+                            )
+                        )
+                    },
+                    request_state=outcome.key,
+                )
+            result_text = outcome
             return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])
         except Exception as exc:
             # Logged here, once, with its traceback: this is the only place the reason is kept for
@@ -668,6 +757,11 @@ def build_server(
             # deployments apart. Raising from a `finally` replaces the handler's own result, which is
             # the intended outcome: a call whose record was lost must not read as a success. The
             # caller, `_on_call_tool`, turns that raise into the same failed answer a crash gets.
+            overrides = typed_outcome_overrides(handler_ctx)
+            if question is not None:
+                # A question has no body to derive an outcome from. It is a successful call, and the
+                # override seam takes all three together or none.
+                overrides = {**overrides, "success": True, "error_kind": None, "row_count": None}
             await run_blocking(
                 record_tool_call,
                 name=name,
@@ -681,7 +775,7 @@ def build_server(
                 # The classified outcome, when the handler produced one (ACE-098). Empty for every
                 # tool that does not speak the Envelope, which means "derive it the way you always
                 # have" — so those tools keep the body parse and nothing about them changes.
-                **typed_outcome_overrides(handler_ctx),
+                **overrides,
             )
 
     # A minute, and private. Private because both lists are per caller: the visibility predicate and
@@ -692,7 +786,7 @@ def build_server(
     # the SDK's default handler already returns `instructions` below, so it needs only the hint.
     # Sent on 2026-07-28 only: the 2025-06-18 results have no fields for it.
     hint = CacheHint(ttl_ms=60_000, scope="private")
-    return Server(
+    server = Server(
         SERVER_NAME,
         version=server_version(),
         instructions=instructions,
@@ -700,6 +794,15 @@ def build_server(
         on_list_tools=_on_list_tools,
         on_call_tool=_on_call_tool,
     )
+    if request_state_key is not None:
+        # The SDK seals and verifies; this only states the policy. Ten minutes, bound to the caller
+        # and organization, and to this server's name so another service sharing the secret cannot
+        # replay a state here.
+        security = RequestStateSecurity(
+            keys=[request_state_key], ttl=600.0, bind_principal=_bound_caller, audience=SERVER_NAME
+        )
+        server.middleware.append(RequestStateBoundary(security, default_audience=SERVER_NAME))
+    return server
 
 
 def _is_loopback(base: str) -> bool:
@@ -833,6 +936,7 @@ def create_app(
             registry,
             extra_instructions=extra_instructions,
             visibility=getattr(adapters, "tool_visibility", None),
+            request_state_key=_request_state_key(),
         ),
         json_response=True,
         stateless=True,
