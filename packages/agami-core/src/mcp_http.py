@@ -23,10 +23,10 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import admin
 import onboarding
@@ -469,6 +469,7 @@ def build_server(
     registry: dict | None = None,
     extra_instructions: str | None = None,
     visibility: Callable[[str], bool] | None = None,
+    result_hook: Callable[[str, Mapping[str, Any], str], Mapping[str, Any] | None] | None = None,
 ):
     """A low-level MCP Server whose tool surface IS the given registry — list_tools / call_tool read
     from it, so HTTP advertises exactly what stdio does (no duplicate defs). Defaults to the shared
@@ -633,6 +634,29 @@ def build_server(
             is_error=True,
         )
 
+    def _structured(name: str, arguments: dict, result_text: str) -> dict | None:
+        """The result hook's object for this call, or None. Never raises: the hook adds output, so
+        its failure must not become the call's failure — the text it would have sat beside is
+        already a complete answer."""
+        try:
+            returned = result_hook(name, arguments, result_text)
+            if returned is None:
+                return None
+            if not isinstance(returned, Mapping):
+                raise TypeError(f"returned {type(returned).__name__}, not an object")
+            structured = dict(returned)
+            # Checked here, not left to the SDK: a value JSON cannot carry would fail while the
+            # answer is being written, after this call has already been recorded as a success.
+            json.dumps(structured)
+        except Exception:
+            _log.warning(
+                "tool %r: the result hook failed; answered without structuredContent",
+                name,
+                exc_info=True,
+            )
+            return None
+        return structured
+
     async def _on_call_tool(
         ctx: ServerRequestContext, params: mt.CallToolRequestParams
     ) -> mt.CallToolResult:
@@ -724,7 +748,18 @@ def build_server(
                 return _with_caller_identity(meta["handler"](arguments), actor)
 
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
-            return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])
+            structured = None
+            if result_hook is not None:
+                # Off the loop for the handler's reason — the hook is the consumer's code — and in
+                # the handler's own context, so the actor, session and organisation are all live.
+                structured = await run_blocking(
+                    handler_ctx.run, _structured, name, arguments, result_text
+                )
+            # None is the field's default, so without a hook the answer is built exactly as before.
+            return mt.CallToolResult(
+                content=[mt.TextContent(type="text", text=result_text)],
+                structured_content=structured,
+            )
         except Exception as exc:
             # Logged here, once, with its traceback: this is the only place the reason is kept for
             # an operator, now that it no longer reaches the client. (If the audit write then fails
@@ -926,6 +961,7 @@ def create_app(
             registry,
             extra_instructions=extra_instructions,
             visibility=getattr(adapters, "tool_visibility", None),
+            result_hook=getattr(adapters, "tool_result_hook", None),
         ),
         json_response=True,
         stateless=True,
