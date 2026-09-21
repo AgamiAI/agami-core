@@ -35,6 +35,7 @@ downstream: a join that could not be graded leaves the fan-out check on its aggr
 | `values_declared:<t>.<c>` | `filter-values.judge.json` `columns` | one per filtered column. `populated` → confirmed; `absent` or `empty` with the distinct probe `listed` (under 26 values) → model_gap of kind `description`, the same finding family as a stale list; `overflow` → noted, no list is expected of a wide column; `empty` → noted; `failed` or `not_run` → unresolved; a sensitive column → noted |
 | `dropped_rows:<a>-<b>` | `<join id>.dropped_rows.csv` | noted, never a grade: `<dropped> of <total> <left> rows have no <right> partner`, counted over the whole table before the statement's own filters, and naming the other side as not counted (an inner join drops from both); a probe planned but not run → noted, nothing claimed; no probe planned → no part |
 | `question_fit` | `question_fit.json`, the skill's Phase 1.5g reading of whether the statement answers its question | `plausible` → confirmed, by reading, and the note says so; `doubtful` → unresolved with the reason, so the row grades `match_unverified` at best and never reaches the keep-offer; `no_question` → no part, and only for a statement that came with no question: against a row that carries one it is a contradiction, and the findings verb and the report page refuse to keep such a row; absent after a run that succeeded → unresolved, the fit was not checked. The one part graded by judgment: it can withhold a row and never proves anything about the semantic model |
+| `value_pair:<your column>` | `comparison.json` and `statement.csv`, only with `--with-claims` | a table the comparator scored at accuracy `1.0` where one of the person's columns paired with a column of agami's whose name differs after the comparator's folding (lowercase, qualifier off), and one value fills more than half of the person's column's rows, at least two of them → unresolved (kind `value_pair`), naming both columns: the comparator pairs on values, and a different column holding the same repeated value pairs as surely as a renamed one. No part otherwise: a same-named pair, a column whose values tell, a table that did not match, a one-row result and a number row are left as they are. The evidence carries the two names and the row count, never the value, because `rows.jsonl` carries the ledger. The report page shows it in the Data section, and the row's sentence names both columns |
 | `predicates`, `date_window` | `claims.json`, only with `--with-claims` | `agrees` → confirmed; `differs` → noted (kind `different_query`, both sides named; a fact about the pair that never grades yours, shown on the report page as "same answer, different query"); `unknown` → unresolved, except a `date_window` that is `null` on both sides when `unreadable` says both statements parsed and `temporal_predicates` is zero on both sides, which is confirmed (neither writes a date filter, so there is nothing to disagree about); a count above zero is a window written in a shape the reader does not fold, and stays open. A difference is reported, never judged here. The other six claims (tables, what is selected, group keys, join keys, ordering, limit) are not parts: the report page reads them from `claims.json` as rows of the diff grid, and a difference in any of them makes the two statements a different query. The `ordering` claim is the one place row order is judged; `sm compare-results --unordered` never compares it |
 
 **The verdict is the weakest part:** `query_defect` outranks `unresolved`, which outranks
@@ -51,7 +52,7 @@ would make a crashed verb read as a clean statement.
 ## The row directory
 
 The skill writes one directory per row, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`, with fixed
-filenames, and `reconcile.py ledger --row-dir <dir> [--with-claims]` reads them, once per row after the
+filenames, most of them through `check_statement.py` ([`statement-check.md`](statement-check.md)), and `reconcile.py ledger --row-dir <dir> [--with-claims]` reads them, once per row after the
 two statements have been compared (with `--with-claims`) or once without it when there is nothing to
 compare against. The verb is idempotent
 and writes `ledger.json` beside the inputs.
@@ -59,17 +60,20 @@ and writes `ledger.json` beside the inputs.
 | File | Written by | Holds |
 |---|---|---|
 | `statement.sql` | the skill | the person's statement, verbatim |
-| `run.json` | the skill | `{"status": "ok" \| "refused" \| "failed" \| "not_run", "rule": ..., "kind": ..., "detail": ...}` from the tier's exit, the refusal line, or the error classifier |
-| `statement.csv` | the tier | the statement's result; only its shape and one cell are ever copied onward |
+| `run.json` | `check_statement.py` | `{"status": "ok" \| "refused" \| "failed", "exit": ..., "rule": ..., "kind": ..., "detail": ..., "remediation": ...}` from the guard's refusal or the classified failure, never the engine's own text |
+| `zero-row.sql` | `check_statement.py` | the statement wrapped to return no rows, the check that it runs at all |
+| `zero-row.run.json` | `check_statement.py`, through the guard | that wrap's own outcome, in `run.json`'s shape. A refusal here is the check not run, never a fault in the statement: the wrap is agami's statement, not the person's |
+| `statement.csv` | `check_statement.py`, through the guard | the statement's result; only its shape and one cell are ever copied onward |
 | `statement-prepare.json` | `sm prepare --sql-file` | aggregates, findings, `unchecked` |
 | `statement-receipt.json` | `sm receipt --sql-file` | the receipt of the person's statement |
 | `join-probes.json` | `sm join-probes --sql-file` | every join written with its status, what the semantic model declares about it (`declared_cardinality`, `unique_by_model`), the probes to run, and a top-level `cardinality` map of one probe per column |
-| `<join id>.overlap.<i>.csv` | the tier | the `i`-th overlap probe's `matched` count |
-| `<join id>.dropped_rows.csv` | the tier | `total, dropped` for the join's left table: its rows with no partner on the right |
-| `cardinality.<table>.<column>.csv` | the tier | `total, distinct_count, null_count` for one column, shared by every join that reads it; not written for a column the semantic model declares a key |
+| `<join id>.overlap.<i>.csv` | the batch door, through the guard | the `i`-th overlap probe's `matched` count |
+| `<join id>.dropped_rows.csv` | the batch door, through the guard | `total, dropped` for the join's left table: its rows with no partner on the right |
+| `cardinality.<table>.<column>.csv` | the batch door, through the guard | `total, distinct_count, null_count` for one column, shared by every join that reads it; not written for a column the semantic model declares a key |
 | `filter-values.plan.json` | `sm filter-values plan --sql-file` | every typed value and its probes, and a `columns` map of one distinct-values probe per column |
-| `<column key>.distinct.csv` | the tier | one column's distinct values, bounded one past the enum ceiling |
-| `<literal id>.exists.csv`, `<literal id>.exists_folded.csv` | the tier | one value's row count, and the folded near miss, run only when `exists` returned 0 |
+| `<column key>.distinct.csv` | the batch door, through the guard | one column's distinct values, bounded one past the enum ceiling |
+| `<literal id>.exists.csv`, `<literal id>.exists_folded.csv` | the batch door, through the guard | one value's row count, and the folded near miss, run only when `exists` returned 0 |
+| `<probe>.sql`, `<probe>.run.json`, `probes.plan.json`, `probes.folded.plan.json` and their `.manifest.json` | `check_statement.py`, the batch door | each probe as sent, its outcome (`status`, `exit`, `kind`, `rule`, `detail`), and the plans that ran them; the folded plan exists only when an `exists` probe counted 0 |
 | `filter-values.judge.json` | `sm filter-values judge` | one grade per typed value |
 | `claims.json` | `sm claims` | the diff against the AI's own statement, once both exist |
 | `question_fit.json` | the skill, Phase 1.5g | `{"fit": "plausible" \| "doubtful" \| "no_question", "reason": "<one sentence, or null>"}`: whether the statement plausibly answers the question it came with, decided by reading |
@@ -88,8 +92,8 @@ mentions about that column and its table, at most twenty. A `values_named_differ
 lands in `evidence.prose_flags` and the note says two descriptions disagree. Never a grade: the words
 that shaped the SQL sit beside the number that went wrong, for a person to read.
 
-**A zero-byte probe CSV is a probe that failed**, because the tier writes CSV to stdout only on
-success. The ledger reads it as unresolved and says so. A header-only CSV is a probe that ran and
+**A zero-byte probe CSV is a probe that failed**, because the batch door writes rows only for a
+probe that ran, and an empty file for one the guard refused or the database failed. The ledger reads it as unresolved and says so. A header-only CSV is a probe that ran and
 found nothing.
 
 ## The findings file

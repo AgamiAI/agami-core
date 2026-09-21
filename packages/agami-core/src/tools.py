@@ -114,6 +114,11 @@ _HOSTED_PREAMBLE = (
     "The model can change between your calls. get_datasource_schema returns a `model_version`; "
     "pass it on every execute_sql. A `stale_model` refusal means the schema and examples you hold "
     "are out of date, even from earlier in this conversation: fetch both again and rewrite.\n"
+    # #376. Hosted only, because only the hosted path enforces it.
+    "When a datasource has stored examples, execute_sql also needs `example`: an id "
+    "get_prompt_examples returned, and whether you 'followed' it or it was 'shown_only'. So call "
+    "get_prompt_examples before your first execute_sql on a datasource; 'shown_only' is always "
+    "an acceptable answer when no example fits, and never bend the SQL to fit an example.\n"
 )
 # What a `get_datasource_schema` response tells a client when the datasource has stored examples
 # (#301). The only instruction to call get_prompt_examples lived in the instructions above, which a
@@ -639,6 +644,90 @@ def _resolve_model_version(profile: str) -> str | None:
         return SN.newest_version(resolve_artifacts_dir() / profile)
     except Exception:
         return None
+
+
+def _example_refusal(args: dict[str, Any], profile: str) -> Refusal | None:
+    """Refuse a statement whose client has not looked at this datasource's examples (#376).
+
+    Clients skip `get_prompt_examples`: the schema is indispensable for writing SQL and the examples
+    feel optional, so the pointer in the schema response and the line in the instructions (#301) are
+    advice a client weighs below its own judgement. Asking for an id the lookup returned is the one
+    thing a client cannot supply without making the call. It is not asked to follow that example:
+    `shown_only` is always accepted, so nothing pushes a statement toward a poor match. Whether
+    `followed` is true is not checked — there is no reliable way to tell from the SQL.
+
+    Served deployments with stored examples only, like `_stale_model_refusal`: locally nothing is
+    enforced, and a datasource with no examples has nothing to look at. A store that cannot be read
+    stands aside; the audit gate owns refusing on an unusable store."""
+    from execute_sql import _hosted
+
+    if not _hosted():
+        return None
+    claim = args.get("example")
+    use = claim.get("use") if isinstance(claim, dict) else None
+    # A string before the membership test: `use` is caller JSON, and a list or an object is
+    # unhashable, so testing it against a frozenset would raise instead of refusing.
+    use_ok = isinstance(use, str) and use in EXAMPLE_USES
+    try:
+        # The id is looked up only when `use` is valid, so a bad `use` costs no lookup and its
+        # refusal cannot depend on whether the id exists.
+        stored, known = _example_facts(profile, claim if use_ok else None)
+    except Exception as e:
+        _LOG.warning("examples unavailable for %r: %s", profile, type(e).__name__)
+        return None
+    if not stored:
+        return None
+    from guardrail import RULE_EXAMPLE_REQUIRED, refuse
+
+    fetch = (
+        f"Call get_prompt_examples for {profile!r} with the user's question as `query`, then pass "
+        "`example` on execute_sql: `id` set to one id it returned (the closest match) and `use` set "
+        "to 'followed' if the statement is based on that example, or 'shown_only' if none of them "
+        "answers this question. Never bend the statement to fit an example."
+    )
+    if not isinstance(claim, dict) or not isinstance(claim.get("id"), str) or not claim["id"]:
+        return refuse(
+            RULE_EXAMPLE_REQUIRED,
+            detail="this call named no example; this datasource has stored examples",
+            remediation=fetch,
+        )
+    if not use_ok:
+        return refuse(
+            RULE_EXAMPLE_REQUIRED,
+            detail="`example.use` must be 'followed' or 'shown_only'",
+            remediation="Send `use` as exactly 'followed' or 'shown_only', then run it again.",
+        )
+    if not known:
+        return refuse(
+            RULE_EXAMPLE_REQUIRED,
+            detail="the example this call named is not one of this datasource's examples",
+            remediation="That example no longer exists, or never did. " + fetch,
+        )
+    return None
+
+
+def _example_facts(profile: str, claim: Any) -> tuple[int, bool]:
+    """How many examples `profile` stores, and whether `claim` names one of them — on one
+    connection, since both are asked on every hosted statement. Only reached on a hosted deployment,
+    so the store is configured; one that fails to open raises to the caller, which stands aside."""
+    from store import Store
+
+    store = Store.from_env()
+    try:
+        from model_store import count_examples, example_by_id
+
+        org_id = _current_org_id()
+        stored = count_examples(store, profile, org_id=org_id)
+        ex_id = claim.get("id") if isinstance(claim, dict) else None
+        known = bool(
+            stored
+            and isinstance(ex_id, str)
+            and ex_id
+            and example_by_id(store, org_id=org_id, datasource=profile, example_id=ex_id)
+        )
+        return stored, known
+    finally:
+        store.close()
 
 
 def _stale_model_refusal(args: dict[str, Any], profile: str) -> Refusal | None:
@@ -2364,6 +2453,51 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
     return _replace(env, refusal=_replace(refusal, remediation=remediation))
 
 
+def _log_refusal(env: Envelope, profile: str | None) -> None:
+    """One server-log line per refused statement, beside the audit rows `_record_execution` writes.
+
+    The audit rows are the record; this is what an operator watching the server's own log sees
+    without a database prompt — and for `audit_unavailable`, which writes no row by construction, it
+    is the only trace. Every path reaches here through `_emit`, so one call covers both transports and
+    both execution paths.
+
+    **Value-free, by the same contract as the refusal itself, and narrower.** The rule and the
+    identifiers that join this line to its row — never the statement, never `detail` (it echoes
+    identifiers the caller sent), never the caller's identity (the row carries that; a log sink is
+    usually read more widely). Not the reason either: it is one of three coarse categories, and
+    `undetermined` — correct for a call stopped before any check — reads in a log as "unknown cause"
+    beside a rule that names the cause exactly. WARNING, because the served entrypoint configures no logging and
+    Python's fallback handler prints WARNING and above only: at INFO a self-hosted server would drop
+    it.
+
+    `datasource` is the one caller-written field, and a read-only refusal is reached before anything
+    checks that the name exists — so it is cut to a bound and written as a repr. Bare, a newline in it
+    started a second line of exactly this shape, naming whatever rule and organization the caller
+    chose."""
+    if env.status != "refused" or env.refusal is None:
+        return
+    _LOG.warning(
+        "execute_sql refused: rule=%s datasource=%r org_id=%s audit_id=%s",
+        env.refusal.rule,
+        (profile or "")[:LOG_DATASOURCE_MAX_CHARS],
+        _current_org_id(),
+        env.audit_id or "-",
+    )
+
+
+# How much of a caller's `datasource` a refusal's log line keeps. Far above any real name; a cut
+# means the name was not one.
+#
+# **The audit row is bounded by the same number** (#370). It used to be the line this comment
+# pointed at for the whole value — "the audit row is where the whole call is recorded" — which was
+# true and was also the hole: `datasource` is caller-written text that reaches `_record_execution`
+# before anything checks it names a served datasource, so an arbitrarily long string was stored
+# once per call. The statement beside it has always been capped (`AUDIT_SQL_MAX_CHARS`); this
+# column was simply missed. One constant for both, so the log line and the row cannot disagree
+# about what was sent.
+LOG_DATASOURCE_MAX_CHARS = 200
+
+
 def _emit(
     env: Envelope,
     *,
@@ -2432,6 +2566,10 @@ def _emit(
     body["receipt"] = asdict(env.receipt)
     body["audit_id"] = env.audit_id
 
+    # Logged BEFORE the audit write: on a served deployment that write is load-bearing and re-raises
+    # when it fails (`_record_query`), and a refusal whose row could not be written is exactly the one
+    # an operator most needs to see in the server log.
+    _log_refusal(env, profile)
     _record_execution(env, sql=sql, profile=profile, args=args, row_count=row_count)
     # Publish the TYPED outcome for the tool-call recorder (ACE-098). It runs later, in the
     # transport's `finally`, where the Envelope no longer exists and only this serialized string
@@ -2564,6 +2702,36 @@ def _bounded_basis(raw: Any) -> str | None:
 CLIENT_MODEL_MAX_CHARS = 200
 
 
+#: What `execute_sql`'s `example.use` may say (#376). Checked in the handler rather than declared as a
+#: schema `enum`, for `BASIS_KINDS`' reason: an `enum` fails validation before the handler, with a
+#: message that names no fix.
+EXAMPLE_USES = frozenset({"followed", "shown_only"})
+
+#: How much of a caller's `example.id` is kept. Real ids are 12 hex characters (`model_store.example_id`)
+#: or a curator's short label; a cut means the value was never one.
+EXAMPLE_ID_MAX_CHARS = 200
+
+#: How much of `example.use` is kept. Only two short words are accepted; anything longer was refused,
+#: and the row keeps enough of it to show what was sent.
+EXAMPLE_USE_MAX_CHARS = 40
+
+
+#: What the two example columns hold for every call that is not an `execute_sql` naming one.
+_NO_EXAMPLE_CLAIM: dict[str, str | None] = {"example_id": None, "example_use": None}
+
+
+def _example_claim(raw: Any) -> dict[str, str | None]:
+    """`execute_sql`'s `example` argument as the tool-call row stores it (#376): the id and the use,
+    each a bounded string or None. Guarded for the reason `_bounded_client_model` is — JSON hands back
+    any type. A call that sends no `example` records NULLs."""
+    claim = raw if isinstance(raw, dict) else {}
+    ex_id, use = claim.get("id"), claim.get("use")
+    return {
+        "example_id": ex_id[:EXAMPLE_ID_MAX_CHARS] if isinstance(ex_id, str) and ex_id else None,
+        "example_use": use[:EXAMPLE_USE_MAX_CHARS] if isinstance(use, str) and use else None,
+    }
+
+
 def _bounded_client_model(raw: Any) -> str | None:
     """The model the client says it is running, as it will be stored (ACE-113).
 
@@ -2655,7 +2823,10 @@ def _record_execution(
             "id": env.audit_id,
             "error_detail": (raw_detail[:AUDIT_ERROR_DETAIL_MAX_CHARS] if raw_detail else None),
             "ts": _now_iso(),
-            "profile": profile or "",
+            # Bounded, because it is the CALLER's text and reaches this row before anything
+            # establishes that it names a datasource we serve. A real name is far inside the
+            # limit; a value that is cut was never one. See `LOG_DATASOURCE_MAX_CHARS`.
+            "profile": (profile or "")[:LOG_DATASOURCE_MAX_CHARS],
             "question": (args or {}).get("raw_query"),
             "sql": stored_sql,
             "sql_truncated": sql_truncated,
@@ -2887,7 +3058,7 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
     # After read-only, so a mutation is still refused for what it is whatever version it carried;
     # before either execution path, so a statement written from a stale schema never reaches the
     # warehouse (#364). The version read here is the one the receipt pins later in this request.
-    refusal = _stale_model_refusal(args, profile)
+    refusal = _stale_model_refusal(args, profile) or _example_refusal(args, profile)
     if refusal is not None:
         return _emit(
             _envelope("refused", refusal=refusal, receipt=_refusal_receipt(profile, sql, refusal)),
@@ -3389,6 +3560,12 @@ def record_tool_call(
         # above rather than exposed as a caller override: an embedder knows its own thread and its
         # own actor, but it is no better placed than we are to know what model the client is on.
         "client_model": _bounded_client_model(args.get("client_model")),
+        # The example the client consulted (#376). Read off the arguments like the self-reported
+        # fields above; the gate in `tool_execute_sql` is what checked the id before anything ran.
+        # Only from `execute_sql`, the one tool that declares it and the one whose gate checked it: a
+        # consumer tool carrying an `example` key of its own would otherwise write a claim nothing
+        # verified into columns the migration says are NULL for every other tool.
+        **(_example_claim(args.get("example")) if name == "execute_sql" else _NO_EXAMPLE_CLAIM),
         "thread_id": thread_id if thread_id is not None else args.get("thread_id"),
         "correlation_id": (  # the turn (one user question)
             correlation_id if correlation_id is not None else args.get("correlation_id")
@@ -3851,7 +4028,9 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Fetch the curated few-shot NL→SQL examples for a datasource, grouped by subject area. "
             "Use before generating SQL to ground dialect and house style; match on the question, "
             "then reuse the tagged tables/columns/SQL. On a served deployment each example carries "
-            "a stable `id` — cite it as a basis ref on execute_sql to say which one you followed. "
+            "a stable `id` — send one of them as `example.id` on execute_sql, with `example.use` "
+            "'followed' or 'shown_only' (a hosted deployment refuses a statement without it), and "
+            "cite it as a `basis` ref too when you followed it. "
             "Pass the user's question as `query`."
         ),
         "inputSchema": {
@@ -4006,7 +4185,13 @@ TOOLS: dict[str, dict[str, Any]] = {
             "On a hosted deployment, ALWAYS send `model_version` — the value the "
             "get_datasource_schema response you wrote this statement from carried. A statement "
             "with a different one, or none, is refused on rule `stale_model`: the model changed "
-            "since you read it, so fetch the schema and examples again and rewrite before retrying."
+            "since you read it, so fetch the schema and examples again and rewrite before retrying.\n"
+            # #376. The choice this asks for is deliberately not "which example did you follow".
+            "On a hosted deployment whose datasource has stored examples, ALSO send `example`: an "
+            "`id` get_prompt_examples returned and `use` — 'followed' or 'shown_only'. Pick the "
+            "closest example; if none answers the question, say 'shown_only' and write the SQL "
+            "from the schema. Never bend the SQL to fit an example. Without it the statement is "
+            "refused on rule `example_required`."
         ),
         "inputSchema": {
             "type": "object",
@@ -4021,6 +4206,21 @@ TOOLS: dict[str, dict[str, Any]] = {
                         "The `model_version` from the get_datasource_schema response this statement "
                         "was written from. Required on a hosted deployment."
                     ),
+                },
+                # Optional in the schema for `model_version`'s reason, and `use` carries no `enum`
+                # for `BASIS_KINDS`' — both are checked in the handler, whose refusal names the fix.
+                "example": {
+                    "type": "object",
+                    "description": (
+                        "Required on a hosted deployment when the datasource has stored examples. "
+                        "`id`: one id get_prompt_examples returned for this question (the closest "
+                        "match). `use`: 'followed' if this statement is based on that example, "
+                        "'shown_only' if none of the examples answers this question."
+                    ),
+                    "properties": {
+                        "id": {"type": "string"},
+                        "use": {"type": "string"},
+                    },
                 },
                 "datasource": {
                     "type": "string",

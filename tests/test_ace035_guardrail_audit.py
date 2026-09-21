@@ -676,7 +676,13 @@ def _refused_envelope() -> guardrail.Envelope:
 
 
 def _warnings(caplog) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.name == "tools"]
+    """The sink's own warnings. The one-line record of the refusal itself (`tools._log_refusal`) is
+    left out: it is written on every refused call, broken sink or not, and says nothing about one."""
+    return [
+        r
+        for r in caplog.records
+        if r.name == "tools" and not r.getMessage().startswith("execute_sql refused:")
+    ]
 
 
 def test_a_sink_whose_write_raises_fails_the_call(env, monkeypatch):
@@ -707,6 +713,7 @@ def test_a_sink_whose_write_raises_fails_the_call(env, monkeypatch):
         tools._emit(_refused_envelope(), sql="DELETE FROM orders", execution_ms=None)
 
     assert len(_rows(env.app_db)) == 1  # and nothing new landed
+
 
 
 def test_a_store_that_cannot_even_be_opened_fails_the_call(env, monkeypatch):
@@ -761,6 +768,7 @@ def test_locally_a_broken_sink_still_changes_nothing_and_says_so(env, caplog, mo
     assert broken == healthy  # byte-identical answer
     assert [r.levelname for r in _warnings(caplog)] == ["WARNING"]
     assert _warnings(caplog)[0].exc_info is not None  # the cause is in the log, not just the fact
+    assert "execute_sql refused: rule=read_only" in caplog.text  # and the refusal is still logged
 
 
 # ---------------------------------------------------------------------------
@@ -889,6 +897,39 @@ def test_an_oversized_statement_is_refused_and_stored_bounded(env):
     assert row["sql"] == oversized[:tools.AUDIT_SQL_MAX_CHARS]  # a prefix, not a summary
     assert row["sql_truncated"]
     assert row["rule"] == guardrail.RULE_READ_ONLY and row["datasource"] == PROFILE
+
+
+def test_an_oversized_datasource_name_is_bounded_in_the_audit_row(env):
+    """`datasource` is CALLER-written text and reaches the row before anything establishes that it
+    names a datasource we serve (#370). The statement beside it has always been capped; this column
+    was not, so one call could write an arbitrarily long value into the store.
+
+    Asserted on a REFUSED call, because that is the path that reaches the row without the name ever
+    being resolved — a served name is bounded by being real, an unserved one only by this.
+    """
+    oversized = "d" * (tools.LOG_DATASOURCE_MAX_CHARS * 4)
+
+    body = json.loads(tools.tool_execute_sql({"sql": "SELECT id FROM orders",
+                                              "datasource": oversized,
+                                              "raw_query": QUESTION}))
+
+    # It does not execute — the name resolves to nothing. Which non-ok status it carries is not the
+    # claim here; that a row was written carrying the caller's text is.
+    assert body["status"] != "ok"
+    (row,) = _rows(env.app_db)
+    assert len(row["datasource"]) == tools.LOG_DATASOURCE_MAX_CHARS
+    assert row["datasource"] == oversized[:tools.LOG_DATASOURCE_MAX_CHARS]  # a prefix, not a summary
+
+
+def test_a_real_datasource_name_is_stored_whole(env):
+    """The bound must not be rewriting ordinary rows: every real name is far inside it, so a cut
+    value means the name was never one."""
+    body = json.loads(tools.tool_execute_sql({"sql": "SELECT id FROM orders", "datasource": PROFILE,
+                                              "raw_query": QUESTION}))
+
+    assert body["status"] == "ok"
+    (row,) = _rows(env.app_db)
+    assert row["datasource"] == PROFILE
 
 
 def test_a_normal_statement_is_stored_whole_and_says_it_was_not_cut(env):
