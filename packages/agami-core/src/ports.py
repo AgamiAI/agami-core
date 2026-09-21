@@ -168,15 +168,18 @@ class Adapters:
     # assembled once at composition time cannot answer "may THIS caller see this tool", and for a
     # consumer running a server-side agent that gap is the difference between a control and a
     # suggestion: the model chooses what to call, so withholding the tool is the control. Subtractive
-    # only — it filters the one shared registry and never adds or reshapes a tool. See
-    # `mcp_http.build_server` for where it is applied (both list AND call, deliberately).
+    # only — it filters the one shared registry and never adds or reshapes a tool; a tool's `_meta.ui`
+    # and its page come from the registry, never from this predicate. See `mcp_http.build_server` for
+    # where it is applied (both list AND call, deliberately).
     tool_visibility: Callable[[str], bool] | None = None
     # `tool_result_hook(tool_name, arguments, result_text) -> Mapping | None` adds a JSON object as
     # `structuredContent` beside a tool's result, for an MCP App page to render. None (the default) is
     # exactly today's behaviour. Additive output only: the text a client and the model read, and the
     # audit row, are unchanged whatever it returns, and a hook that raises or returns anything but an
     # object is logged and dropped. See `mcp_http.build_server` for when it runs and in what context.
-    tool_result_hook: Callable[[str, Mapping[str, Any], str], Mapping[str, Any] | None] | None = None
+    tool_result_hook: Callable[[str, Mapping[str, Any], str], Mapping[str, Any] | None] | None = (
+        None
+    )
     # `statement_limits(org_id) -> {"max_rows": int | None, "timeout_s": int | None} | None` supplies an
     # organisation's own row cap and statement deadline (#329). None (the default) is today's
     # behaviour: every organisation gets `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`. Core stores no

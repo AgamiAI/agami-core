@@ -491,7 +491,24 @@ def build_server(
 
     SUBTRACTIVE ONLY. It filters the one shared registry; it never adds, renames, or reshapes a tool. A
     surviving tool's description and inputSchema pass through untouched, so a consumer cannot fork the
-    surface into a private variant under cover of "visibility".
+    surface into a private variant under cover of "visibility". A tool's `_meta.ui` and its page come
+    from the registry entry, never from the predicate.
+
+    A registry entry may carry two optional MCP App keys. `"page": {"uri": "ui://…", "html": str}`
+    links a page to the tool through `_meta.ui.resourceUri` and serves it over `resources/list` and
+    `resources/read`; a page declares nothing else (no csp, domain or permissions), and a malformed
+    one fails the build naming its tool. A page is visible when any tool linking it is, and a hidden
+    page answers exactly as an undeclared one. `"app_only": True` marks the tool
+    `_meta.ui.visibility: ["app"]`, which asks a host to keep it from the model. **It is a marking,
+    not a control: any client can still call an app-only tool, so its handler must check its own
+    scope.** With no page declared, no resource handler is registered, so the capabilities are
+    exactly what they were.
+
+    `result_hook(name, arguments, result_text) -> Mapping | None` adds its object as
+    `structuredContent` beside a result's unchanged text. It runs off the loop in the handler's
+    context, only on a result a handler returned — never on an unknown, hidden, invalid or crashed
+    call — and one that raises or returns anything but a JSON object is logged and dropped. None
+    (the default) is exactly today's behaviour.
     """
     import jsonschema
     import mcp.types as mt
@@ -916,7 +933,12 @@ def create_app(
 
     `extra_instructions` is APPENDED to the base MCP instructions and surfaced to the model via the
     MCP `initialize` and `server/discover` results (never replaces the base protocol — see
-    `build_server`). None = no-op."""
+    `build_server`). None = no-op.
+
+    An `extra_tools` entry may also carry `"page": {"uri": "ui://…", "html": str}` and
+    `"app_only": True`, and `adapters.tool_result_hook` may add `structuredContent` to a result; see
+    `build_server`. An app-only tool is still callable by any client, so its handler must check its
+    own scope."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
