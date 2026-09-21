@@ -27,7 +27,7 @@ _PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 _CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
 
 # The methods whose request names a target, which a 2026-07-28 request repeats in `Mcp-Name`.
-_NAME_BEARING = {"tools/call": "name", "prompts/get": "name"}
+_NAME_BEARING = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
 
 
 def base_headers(bearer: str = "present") -> dict[str, str]:
