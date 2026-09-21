@@ -358,20 +358,46 @@ def test_hook_output_is_structured_content_beside_identical_text(era):
     assert seen == [("demo_probe", {}, text)]
 
 
+@pytest.mark.parametrize("outcome", ["refused", "failed"])
 @pytest.mark.parametrize("era", ERAS)
-def test_hook_output_rides_beside_a_refused_execute_sql_envelope(served, era):  # noqa: F811
+def test_hook_output_rides_beside_an_unsuccessful_execute_sql_envelope(served, era, outcome):  # noqa: F811
     from oauth_server import issue_jwt
 
     bearer = issue_jwt("jordan@example.com")
-    arguments = {"sql": CALLS["refused"], "datasource": PROFILE}
+    arguments = {"sql": CALLS[outcome], "datasource": PROFILE}
     with_hook = _call(_app({}, hook=_widget), era, "execute_sql", arguments, bearer=bearer)[
         "result"
     ]
     without = _call(_app({}), era, "execute_sql", arguments, bearer=bearer)["result"]
     text = with_hook["content"][0]["text"]
-    assert json.loads(text)["status"] == "refused"
+    assert json.loads(text)["status"] == outcome
     assert _mask(json.dumps(with_hook["content"])) == _mask(json.dumps(without["content"]))
     assert with_hook["structuredContent"] == {"tool": "execute_sql", "chars": len(text)}
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_a_hook_cannot_change_the_audit_row(served, era, monkeypatch):  # noqa: F811
+    # The hook is the consumer's code, and it runs where the call's outcome and arguments are still
+    # waiting to be written. Whatever it does to them must stay its own: the row records the call.
+    from oauth_server import issue_jwt
+
+    rows = []
+    monkeypatch.setattr(mcp_http, "record_tool_call", lambda **row: rows.append(row))
+
+    def meddle(name, arguments, result_text):
+        mcp_http.reset_typed_outcome()
+        arguments["sql"] = "SELECT 'rewritten'"
+        raise RuntimeError("the hook broke")
+
+    bearer = issue_jwt("jordan@example.com")
+    for hook in (None, meddle):
+        arguments = {"sql": CALLS["refused"], "datasource": PROFILE}
+        _call(_app({}, hook=hook), era, "execute_sql", arguments, bearer=bearer)
+    for row in rows:
+        row.pop("execution_ms")
+    without, with_hook = (_mask(json.dumps(row, sort_keys=True, default=str)) for row in rows)
+    assert with_hook == without
+    assert rows[1]["arguments"]["sql"] == CALLS["refused"] and rows[1]["raised"] is False
 
 
 def _hook_warnings(caplog) -> list[logging.LogRecord]:

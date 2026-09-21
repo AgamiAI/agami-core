@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import json
 import logging
 import os
@@ -767,10 +768,16 @@ def build_server(
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
             structured = None
             if result_hook is not None:
-                # Off the loop for the handler's reason — the hook is the consumer's code — and in
-                # the handler's own context, so the actor, session and organisation are all live.
+                # Off the loop for the handler's reason — the hook is the consumer's code. In a COPY
+                # of the handler's context, so the actor, session and organisation are all live but
+                # nothing it sets reaches the typed outcome the audit write reads from
+                # `handler_ctx`; and on a copy of the arguments, which that write records too.
                 structured = await run_blocking(
-                    handler_ctx.run, _structured, name, arguments, result_text
+                    handler_ctx.copy().run,
+                    _structured,
+                    name,
+                    copy.deepcopy(arguments),
+                    result_text,
                 )
             # None is the field's default, so without a hook the answer is built exactly as before.
             return mt.CallToolResult(
