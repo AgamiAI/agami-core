@@ -599,6 +599,10 @@ def build_server(
         envelope, since a stateless modern request has no handshake to remember them from."""
         if request_state_key is None or ctx.protocol_version not in MODERN_PROTOCOL_VERSIONS:
             return False
+        # No subject, no question: the state would bind to nobody in particular, and every other
+        # caller without one would match it. The JWT path always has one; a custom provider may not.
+        if not _actor_ctx.get():
+            return False
         capabilities = ctx.session.client_capabilities
         elicitation = capabilities.elicitation if capabilities is not None else None
         # An empty capability means form: the protocol's reading for clients that predate modes.
@@ -672,7 +676,6 @@ def build_server(
         # actor, never allowed to break the tool (logging is best-effort + double-guarded).
         started = time.monotonic()
         result_text = None
-        question: NeedsInput | None = None
         crash: Exception | None = None
         handler_ctx = contextvars.copy_context()
         # Cleared inside the context we own, before the handler can run. `copy_context()`
@@ -719,7 +722,6 @@ def build_server(
                 # answered: with no boundary, or on 2025-06-18, its state would go out unsealed.
                 if not asking:
                     raise RuntimeError(f"tool {name!r} asked a question it may not ask")
-                question = outcome
                 # The plaintext state is the question's key; the boundary seals it on the way out.
                 return mt.InputRequiredResult(
                     input_requests={
@@ -757,11 +759,6 @@ def build_server(
             # deployments apart. Raising from a `finally` replaces the handler's own result, which is
             # the intended outcome: a call whose record was lost must not read as a success. The
             # caller, `_on_call_tool`, turns that raise into the same failed answer a crash gets.
-            overrides = typed_outcome_overrides(handler_ctx)
-            if question is not None:
-                # A question has no body to derive an outcome from. It is a successful call, and the
-                # override seam takes all three together or none.
-                overrides = {**overrides, "success": True, "error_kind": None, "row_count": None}
             await run_blocking(
                 record_tool_call,
                 name=name,
@@ -775,7 +772,7 @@ def build_server(
                 # The classified outcome, when the handler produced one (ACE-098). Empty for every
                 # tool that does not speak the Envelope, which means "derive it the way you always
                 # have" — so those tools keep the body parse and nothing about them changes.
-                **overrides,
+                **typed_outcome_overrides(handler_ctx),
             )
 
     # A minute, and private. Private because both lists are per caller: the visibility predicate and

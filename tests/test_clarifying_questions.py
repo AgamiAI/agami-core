@@ -313,6 +313,15 @@ def test_no_signing_secret_means_no_question(monkeypatch):
     assert _text(message) == _todays_answer()
 
 
+def test_a_caller_with_no_subject_is_not_asked():
+    # A state bound to no subject would open for every other caller without one.
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        message = _call(client, bearer="|acme")
+    assert message["result"].get("resultType", "complete") == "complete"
+    body = json.JSONDecoder().raw_decode(_text(message))[0]
+    assert body["error"]["kind"] == "datasource_required"
+
+
 def test_one_served_datasource_is_not_a_question(monkeypatch):
     monkeypatch.setattr(tools, "_served_datasources", lambda _org: ["acme_crm"])
     with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
