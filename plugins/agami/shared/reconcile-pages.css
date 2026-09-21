@@ -161,6 +161,9 @@
     .sql2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
     .sql1 b, .sql2 b { display: block; font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #5b6875); margin-bottom: 4px; }
     .sql1 pre, .sql2 pre { margin: 0; padding: 8px 10px; background: var(--code-bg, #f3f5f7); border: 1px solid var(--border, #d9dde3); border-radius: 6px; font-size: var(--t-micro); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+    /* The empty half of a two-pane statement section: a dashed box, so a reader sees at a glance
+       that nothing is there rather than reading a sentence as if it were a statement. */
+    .sql1 .none, .sql2 .none { margin: 0; padding: 8px 10px; background: var(--bg-elev, #fff); border: 1px dashed var(--border, #d9dde3); border-radius: 6px; font-size: var(--t-micro); color: var(--muted, #5b6875); font-style: italic; }
     @media (max-width: 640px) { .sql2 { grid-template-columns: 1fr; } }
     /* the result pill's companion tag, and the result count row */
     .tag.unchecked { font-size: var(--t-micro); font-weight: 600; background: var(--open-bg); color: var(--open); border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; white-space: nowrap; }

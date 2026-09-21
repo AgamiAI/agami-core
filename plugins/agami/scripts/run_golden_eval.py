@@ -43,7 +43,9 @@ credential is whatever the environment supplies to the client.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
 import re
 import subprocess
 import sys
@@ -61,7 +63,11 @@ _SM = Path(__file__).resolve().parent / "sm"
 # that knows all three, and every other runtime script in this directory calls it — resolving the
 # path here instead would have covered the checkout and told a marketplace user to pip-install a
 # library their plugin already ships.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+#: This script's own directory. On `sys.path` so the sibling runtime scripts import, and named
+#: so the tool-driven server (a sibling module) can be found by the interpreter that runs it.
+_HERE = Path(__file__).resolve().parent
+
+sys.path.insert(0, str(_HERE))
 import _agami_lib  # noqa: E402
 
 _agami_lib.ensure_importable()
@@ -79,11 +85,14 @@ try:
     from semantic_model.comparator import ItemScore
     from semantic_model.golden import GoldenDataset, load_golden_datasets
     from semantic_model.golden_run import (
+        _GENERATION_NO_TOOLS,
         _GENERATION_UNAVAILABLE,
         ClaudeCliGenerator,
+        ClaudeMcpGenerator,
         GeneratedSql,
         GenerationContext,
         GoldenRunResult,
+        McpServer,
         run_golden_dataset,
     )
     from semantic_model.sql_dialect import DialectUnresolved, resolve_datasource_dialect
@@ -143,6 +152,129 @@ def _effort(args: argparse.Namespace) -> dict[str, str]:
     somebody actually asks for a level.
     """
     return {"effort": args.effort} if args.effort else {}
+
+
+# The tool-driven generator, named for the same reason `GENERATOR` is: a test substitutes the name,
+# never the class, so a substitution cannot go on passing while a real client runs behind it.
+MCP_GENERATOR = ClaudeMcpGenerator
+
+#: The two ways of asking. `mcp` serves the client the agami tools and lets it fetch its own context,
+#: which is what a person's session does. `context` is the original: the run pre-fetches one schema
+#: and pastes it in, and the client calls nothing. `context` stays the default because `agami-eval`
+#: scores whole datasets with it and those scores are comparable across every prior run; reconcile
+#: asks for `mcp` explicitly.
+VIA_CHOICES = ("context", "mcp")
+
+#: The module the client's `--mcp-config` points at: `mcp_harness` plus the two rules a measured run
+#: needs. It lives beside this script, which is why the scripts directory goes on the server's
+#: `PYTHONPATH` below.
+_MCP_SERVER_MODULE = "reconcile_mcp_server"
+
+_PREFLIGHT_PROTOCOL = "2024-11-05"
+_EXPECTED_TOOLS = {"list_datasources", "get_datasource_schema", "get_prompt_examples", "execute_sql"}
+
+
+def _mcp_server(args: argparse.Namespace) -> "McpServer":
+    """The stdio server one question's client will talk to.
+
+    `sys.executable` is the right interpreter by construction: this process has already imported
+    `tools`, so the interpreter running it is one with the package and the database driver. Resolving
+    a second one would be a way to get a different answer than the run is about to report.
+
+    Everything the server needs to find the semantic model goes in ITS environment, and none of it in
+    the client's. That division is what lets the client hold the agami tools without also holding a
+    route to the answer key: `golden_run._CHILD_ENV_KEYS` still withholds every path from the client,
+    and the client still has no tool that could open one.
+    """
+    inherited = os.environ.get("PYTHONPATH", "")
+    return McpServer(
+        command=sys.executable,
+        args=("-m", _MCP_SERVER_MODULE),
+        env={
+            "AGAMI_PROFILE": args.profile,
+            "AGAMI_ARTIFACTS_DIR": str(agami_paths.artifacts_dir()),
+            "PYTHONPATH": os.pathsep.join(p for p in (str(_HERE), inherited) if p),
+        },
+    )
+
+
+def _tools_came_up(server: "McpServer") -> Optional[str]:
+    """None when the four tools answered a handshake, or the sentence to stop the run with.
+
+    Run once, before any question. A tool surface that will not come up is broken tool fetching,
+    which is a finding about the deployment — so the run says so and stops, rather than quietly
+    answering every row by some other route and printing the numbers under agami's name.
+    """
+    handshake = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _PREFLIGHT_PROTOCOL,
+                "capabilities": {},
+                "clientInfo": {"name": "reconcile-preflight", "version": "0"},
+            },
+        },
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    try:
+        completed = subprocess.run(
+            [server.command, *server.args],
+            input="".join(json.dumps(message) + "\n" for message in handshake),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=60,
+            env={**os.environ, **(server.env or {})},
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _GENERATION_NO_TOOLS
+    served: set[str] = set()
+    for line in completed.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        for tool in (message.get("result") or {}).get("tools") or []:
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+                served.add(tool["name"])
+    return None if _EXPECTED_TOOLS <= served else _GENERATION_NO_TOOLS
+
+
+def _answer_payload(row: Any, question: Optional[str], generated: Any, mode: str) -> dict[str, Any]:
+    """One row's answer file. The fields a one-shot generation cannot fill are simply absent from it
+    rather than present and null, so a reader never has to tell "no probes" from "probes not
+    recorded"."""
+    sql = generated.sql.strip() if generated.sql else ""
+    payload: dict[str, Any] = {
+        "row": row,
+        "question": question,
+        "sql": sql or None,
+        "statements": _statements(generated, sql),
+        "error": generated.error,
+        "mode": mode,
+    }
+    trace = tuple(getattr(generated, "trace", ()) or ())
+    if not trace:
+        return payload
+    queries = [entry for entry in trace if entry.get("tool") == "execute_sql"]
+    # `status == "ok"`, never "not a failure": a call the server STOPPED carries no status at all,
+    # and reading a missing status as success named the stopped statement as the last one that
+    # worked — on exactly the rows somebody is reading to find out what broke.
+    answered = [entry for entry in queries if entry.get("status") == "ok" and not entry.get("stopped")]
+    payload.update(
+        {
+            "client_value": getattr(generated, "value", None),
+            # Successful queries that were not the answer. This is the measurement to watch: it
+            # reads how much the semantic model failed to say up front. A row with an error has no
+            # answering query, so every query that ran on it was a probe.
+            "probe_count": max(len(answered) - (0 if generated.error else 1), 0),
+            "probes": list(trace),
+        }
+    )
+    return payload
 
 
 def _section(outcome: Any) -> str:
@@ -1034,21 +1166,110 @@ def _ask(args: argparse.Namespace) -> int:
     if not args.ask.strip():
         _stop("--ask needs the question's text")
         return _CANNOT_START
-    try:
-        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
-    except SmFailed as exc:
-        _stop(f"cannot build the model context for profile {args.profile!r} — {exc}")
+    generator, failed = _generator_for(args)
+    if generator is None:
+        _stop(failed or "")
         return _CANNOT_START
-    generator = GENERATOR(lambda question: _model_context(cached, question), timeout_s=args.timeout_s, **_effort(args))
     generated = generator.generate(args.ask, tools.resolved_org_id(), args.profile)
     sql = generated.sql.strip() if generated.sql else ""
-    payload = {"question": args.ask, "sql": sql or None, "statements": _statements(generated, sql), "error": generated.error}
+    payload = _answer_payload(None, args.ask, generated, args.via)
+    payload.pop("row")
     if args.out:
         out = Path(args.out).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        if args.via == "mcp":
+            _write_agami_result(out.parent, payload, args.profile)
     print(json.dumps(payload, indent=2))
     return 0 if sql and generated.error is None else _NO_STATEMENT
+
+
+def _write_agami_result(row_dir: Path, answer: dict[str, Any], profile: str) -> None:
+    """Write `actual.csv` and `agami-run.json` beside a row answered through agami's own tools.
+
+    Reconcile compares agami's result with the person's, and the server hands that result to the
+    client, not to the run. Leaving the run of `agami.sql` to the skill let it take any execution tier,
+    some of which have no guard at all, so a statement the server had blocked could reach the database
+    by another road. The run does it here instead, in code: a statement the server did not run is never
+    run again (its outcome is copied from the trace), and one that ran is run once more, only for its
+    result, through `execute_sql`'s guarded envelope, the chokepoint the tool itself went through.
+
+    What runs is the server's own record of the statement, with the `area` it ran under, never the
+    client's copy of it. A statement this cannot find in the trace, character for character, is not
+    run at all.
+    """
+    # A file left by an earlier run of this row is not this answer's, whatever happens next. The
+    # comparison goes with them: `record` reads it for the row's verdict, so a comparison of the
+    # PREVIOUS answer left beside a new result reports a match the new result does not support.
+    for stale in ("actual.csv", "agami-run.json", "comparison.json", "diff.json"):
+        (row_dir / stale).unlink(missing_ok=True)
+    sql = (answer.get("sql") or "").strip()
+    probes = answer.get("probes")
+    if not sql or not isinstance(probes, list):
+        return
+    queries = [p for p in probes if isinstance(p, dict) and p.get("tool") == "execute_sql"]
+    failed = next((p for p in queries if p.get("status") not in (None, "ok") and not p.get("stopped")), None)
+    if failed is not None:
+        # `run.json`'s vocabulary is ok / refused / failed / not_run, and the trace has one status it
+        # does not: `raised`, the tool itself throwing. Nothing came back and no guard reported an
+        # outcome, so it is recorded as not run, with the exception's type as the reason. Writing
+        # `raised` into a file every other reader treats as a run record would invent a fifth status.
+        status = failed.get("status")
+        run = {"status": status if status in ("refused", "failed") else "not_run",
+               "exit": None, "kind": None, "rule": None,
+               "detail": failed.get("detail"), "source": "trace"}
+    else:
+        ran = next((p for p in reversed(queries) if p.get("status") == "ok" and not p.get("stopped")
+                    and str(p.get("args", {}).get("sql") or "").strip() == sql), None)
+        if ran is None:
+            return
+        area = ran.get("args", {}).get("area") or None
+        env = execute_sql.execute_guarded(sql, profile, area, executor=execute_sql.BUILTIN_EXECUTOR)
+        if env.status == "ok":
+            with (row_dir / "actual.csv").open("w", newline="", encoding="utf-8") as fh:
+                if env.data.columns:
+                    writer = csv.writer(fh)
+                    writer.writerow(env.data.columns)
+                    writer.writerows(env.data.rows)
+            run = {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None}
+        elif env.status == "refused":
+            run = {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
+                   "detail": getattr(env.refusal, "detail", None)}
+        else:
+            run = {"status": "failed", "exit": None, "kind": env.failure.kind, "rule": None,
+                   "detail": env.failure.message}
+    (row_dir / "agami-run.json").write_text(json.dumps(run, indent=2), encoding="utf-8")
+
+
+def _generator_for(args: argparse.Namespace) -> tuple[Any, Optional[str]]:
+    """The generator this run asks with, or the sentence saying why there is not one.
+
+    The two modes need different things before they can start, and neither pays for the other's: the
+    tool-driven one never pre-fetches a context (its client fetches its own), and the context one
+    never spawns a server. So the preparation lives here with the choice rather than above it.
+    """
+    if args.via == "mcp":
+        server = _mcp_server(args)
+        # Once, before any question. Every row would otherwise fail identically with a sentence that
+        # reads as a catastrophic model regression and is actually a server that did not start.
+        if not args.skip_preflight:
+            failed = _tools_came_up(server)
+            if failed is not None:
+                return None, (
+                    f"{failed}. The run asks agami through its own MCP tools: check that "
+                    f"`{sys.executable} -m {_MCP_SERVER_MODULE}` starts, that profile "
+                    f"{args.profile!r} is served, and that its credentials are readable."
+                )
+        return MCP_GENERATOR(server, timeout_s=args.timeout_s, **_effort(args)), None
+
+    try:
+        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
+    except SmFailed as exc:
+        return None, f"cannot build the model context for profile {args.profile!r} — {exc}"
+    return (
+        GENERATOR(lambda question: _model_context(cached, question), timeout_s=args.timeout_s, **_effort(args)),
+        None,
+    )
 
 
 def _statements(generated: Any, sql: str) -> list[str]:
@@ -1089,21 +1310,17 @@ def _ask_many(args: argparse.Namespace) -> int:
     if not questions:
         _stop("the questions file holds no rows")
         return _CANNOT_START
-    try:
-        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
-    except SmFailed as exc:
-        _stop(f"cannot build the model context for profile {args.profile!r} — {exc}")
+    generator, failed = _generator_for(args)
+    if generator is None:
+        _stop(failed or "")
         return _CANNOT_START
-    generator = GENERATOR(lambda question: _model_context(cached, question), timeout_s=args.timeout_s, **_effort(args))
     org = tools.resolved_org_id()
 
     def one(q: dict[str, Any]) -> dict[str, Any]:
         if not q["question"]:
-            return {"row": q["row"], "question": None, "sql": None, "statements": [], "error": "the row carries no question"}
-        generated = generator.generate(q["question"], org, args.profile)
-        sql = generated.sql.strip() if generated.sql else ""
-        return {"row": q["row"], "question": q["question"], "sql": sql or None,
-                "statements": _statements(generated, sql), "error": generated.error}
+            return {"row": q["row"], "question": None, "sql": None, "statements": [],
+                    "error": "the row carries no question", "mode": args.via}
+        return _answer_payload(q["row"], q["question"], generator.generate(q["question"], org, args.profile), args.via)
 
     from concurrent.futures import ThreadPoolExecutor
     workers = max(1, min(args.parallel, len(questions)))
@@ -1115,6 +1332,11 @@ def _ask_many(args: argparse.Namespace) -> int:
             target = base / str(answer["row"]) / "agami-answer.json"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps(answer, indent=2), encoding="utf-8")
+        # Every answer is on disk before any result is run: the clients are already paid for, and a
+        # run that stops part way through the results must not lose the answers behind it.
+        if args.via == "mcp":
+            for answer in answers:
+                _write_agami_result(base / str(answer["row"]), answer, args.profile)
     missing = sum(1 for a in answers if not a["sql"])
     print(json.dumps({"asked": len(answers), "answered": len(answers) - missing, "parallel": workers, "answers": answers}, indent=2))
     return 0 if missing == 0 else _NO_STATEMENT
@@ -1176,6 +1398,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--out-dir", help="with --ask-file, write each answer to <out-dir>/<row>/agami-answer.json")
     parser.add_argument("--parallel", type=int, default=4, help="with --ask-file, how many clients to spawn at once")
+    parser.add_argument(
+        "--via",
+        choices=VIA_CHOICES,
+        default="context",
+        help="how the question is asked. `mcp` serves the client agami's own tools and lets it fetch "
+        "its context and run its statement, which is what a person's session does — so a row's "
+        "answer comes from the surface a person uses, and the client's probing is on the record. "
+        "`context` (the default) pre-fetches one schema into the prompt and gives the client no "
+        "tools, which is what every golden score so far was measured with",
+    )
     args = parser.parse_args(argv)
     if args.ask is not None or args.ask_file is not None:
         if args.dataset or args.list or args.tag or args.rerun_failures:

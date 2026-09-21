@@ -90,7 +90,7 @@ always had stays, with the same meaning: `label`, `question`, `expected`, `actua
 | Status | When |
 |---|---|
 | `match` | the numbers agree within tolerance, and every graded part is `confirmed` (or there was no statement to grade) |
-| `match_unverified` | the numbers agree, but a part of the person's statement is not `confirmed`. Never offered in Phase 3e: a match nobody could verify may be luck. A doubtful `question_fit` (Phase 1.5g: the statement may not answer its question) is such a part, so a sound statement paired with the wrong question is never kept as an example |
+| `match_unverified` | the numbers agree, but a part of the person's statement is not `confirmed`. Never offered in Phase 3e: a match nobody could verify may be luck. A doubtful `question_fit` (Phase 1.5g: the statement may not answer its question) is such a part, so a sound statement paired with the wrong question is never kept as an example. So is a table that matched only because a column of the person's paired with a differently named column of agami's holding one value on most rows (`value_pair`) |
 | `mismatch` | the numbers differ and the person's statement has no `query_defect`, so the AI is the likelier culprit |
 | `expected_doubtful` | the numbers differ and the person's statement has a `query_defect`, so the expected value itself is in doubt. Kept out of the mismatch tally |
 | `error` | the row could not run; `recorded` is `null` and the statement is kept, so what failed can be read |

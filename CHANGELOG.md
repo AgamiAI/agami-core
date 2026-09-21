@@ -59,6 +59,177 @@ below corresponds to one such version.
     authorization. `server/discover` returns the same instructions as `initialize`, a consumer's
     `extra_instructions` included.
 
+## [0.9.5] — 2026-09-19
+
+### Fixed
+
+- **A caller's `datasource` is bounded before it reaches the audit row (#370).** The name is
+  caller-written text and arrives at `_record_execution` before anything establishes that it names a
+  datasource we serve, so an arbitrarily long value was stored once per call. The statement beside
+  it has always been capped; this column was missed. It now shares `LOG_DATASOURCE_MAX_CHARS` with
+  the refusal log line, so the line and the row cannot disagree about what was sent. Every real name
+  is far inside the limit — a value that is cut was never one.
+
+### Internal
+
+- **The wheel's contents are asserted (#122).** Every test runs against an editable install, where
+  `migrations/` and `static/` resolve into the source tree whatever the packaging config says — so
+  that config was the one part of the repo the suite could not see, and it has shipped broken once
+  (a missing `migrations/` globbed to nothing and the server booted on an empty schema with no
+  error). A new test builds a wheel and looks inside it; `build` is declared in the test
+  dependencies so the guard cannot quietly skip.
+
+- **The test suite no longer reads the developer's own artifacts directory (#293).** `artifacts_dir()`
+  resolves a pointer at `~/.config/agami/path` and then `~/agami-artifacts`, one level earlier than
+  the fixtures that isolate files inside that directory — so `organization.yaml`'s real minted
+  `org_id` leaked into tests asserting `local`. 41 tests failed on a maintainer's machine and none
+  in CI. Both are now redirected per test; `AGAMI_ARTIFACTS_DIR` is left alone, because a test that
+  sets it is saying which directory it wants.
+
+## [0.9.4] — 2026-09-17
+
+### Security
+
+- **A statement a person hands to reconcile now reaches the database only through the guard.**
+  Phase 1.5 used to have the session run the person's statement, its zero-row check and every probe
+  by hand, on whatever tier the profile queries on. On psql, mysql, snowsql, sqlite3 or DuckDB
+  nothing checked that the statement was read-only, in scope or bounded, so a pasted statement that
+  writes met the database with only the database role in its way. The new
+  `plugins/agami/scripts/check_statement.py` does those steps for one row directory, in code: the
+  guard's own read-only and recon gates first (a refusal is written to `run.json` as `refused` with
+  its rule, and nothing runs after it), then the zero-row check and the statement through
+  `execute_sql.execute_guarded` with the built-in executor, the semantic-model verbs in process, and
+  the probes through `execute_sql`'s batch door, each still through the guard on its own. It writes
+  the same files the ledger read before, plus `probes.folded.plan.json` when a near-miss probe runs.
+  The skill and `shared/statement-check.md` now call it once per row; the question-fit step stays
+  a judgment the session makes by reading. Grading now needs the database's Python driver in `$PY`
+  on every tier: without it the script exits `3` with `driver_missing` and the install line, and the
+  run stops. The run also stops when the semantic model declares an engine its credentials do not
+  connect to. Checking a row again first clears the files the last check wrote, so an earlier
+  statement's files are never graded as the new one's. The zero-row check now writes its own outcome
+  to `zero-row.run.json` whatever it was, so no execution in this phase is unrecorded, and the wrap
+  it runs drops the statement's terminating semicolon along with any comment around it: a statement
+  ending `; -- done` used to be wrapped as two statements, which the guard refused, and that refusal
+  was written nowhere. (ACE-155)
+
+### Added
+
+- **Reconcile can ask agami through agami's own tools, so a row's answer comes from the surface a
+  person uses.** `run_golden_eval.py --via mcp` serves the cold client the local stdio MCP server and
+  lets it work: it calls `get_datasource_schema` and `get_prompt_examples` itself, scoping them as it
+  sees fit, and runs its own statement. Until now that client had every tool switched off and was
+  handed one pre-fetched schema blob, so a reconcile run never exercised the things that decide
+  whether a real question succeeds: how a question gets scoped, whether the prompt examples surface
+  the one that would have carried it, `execute_sql`'s safety pass, or the server's own
+  instructions. A run could therefore pass on a semantic model nobody could query,
+  and fail on one that works, with no way to tell which. Two rules make the result comparable
+  anyway, and both are enforced by the server rather than asked for in the prompt, because an
+  instruction can be partly obeyed and then nobody knows what the run measured. A query that did not
+  run ENDS the row: the failure is the finding, since a statement the database rejected or
+  the safety check blocked says the semantic model or the tool fetching is broken, and a client free
+  to retry would paper over exactly that. Successful queries are NOT capped, because a client reading a
+  column's values before it filters on one is a person doing the same; capping them would end the
+  row and report a defect against a model that works, which is the most expensive error this report
+  can make. The count of those probes is the measurement instead: it reads how much the semantic
+  model failed to say up front. The client names the query it answered from and the run checks that
+  against the server's own trace, so reporting a number with no query behind it, or a statement it
+  never ran, is an error row rather than an ordinary answer. The run also writes agami's result for
+  reconcile itself, in code: a statement the server did not run is never run again, and one that ran
+  is run once more, only for its result, through `execute_sql`'s guarded envelope, from the server's
+  own record of the statement rather than the client's copy. Leaving that run to
+  the skill let it pick a command-line tier with no guard, so a statement the server had blocked could
+  have reached the database another way. `--via context` stays the default, so every golden score
+  remains comparable with the runs before it.
+
+### Fixed
+
+- **A reconcile card showed nothing of what agami answered.** On a run read from a dashboard
+  screenshot, every card's Data section read "1 row" and the rows that could not be compared read
+  "failed", so a reader could not see the numbers that in fact matched. Three display faults, none of
+  them touching a verdict. The data sample was fetched only for a row whose own query was being
+  graded, which a screenshot row never is. "Failed" was written for any error row, including one where
+  agami's query ran and answered and only the comparison could not be made — that row now reads "not
+  compared", and "failed" is kept for a query that did not run, read from the row's attempts or from
+  the run record beside the result. And a row where only agami wrote a query rendered one SQL pane,
+  sitting where the person's query sits in the grid above it, so agami's statement read as theirs:
+  both panes now render, and the empty one says why it is empty.
+
+- **A reconcile row whose query never ran said something else happened.** When agami's query was
+  refused or failed, the run still left an empty `actual.csv` behind, and `reconcile.py record` read
+  that empty file as a result with no columns and no rows. So the row skipped the sentence "agami's
+  statement did not run" and said the two results were tables that were not compared. On a row that
+  was only a question, it was worse: the row waited for a person to judge an answer agami never
+  gave. Now an empty result file is never a result, because a real one always has a header row that
+  names its columns. A file holding only a blank line counts as empty too. A run record that is
+  there and does not say `ok` means there is no result either, whatever file sits beside it. A run
+  record whose own file is empty or not JSON says nothing about the run, so the result file decides.
+  That is the file being unreadable, not the session saying the run went wrong: a run record holding
+  only an error the session wrote is a record of a run that failed, and the file beside it is not its
+  result. The same holds for your own query: when it did not run, the page no longer shows your
+  result as "0 rows". A query that ran and returned a header with no rows is still a result, and is
+  still compared.
+
+- **An identical answer no longer scores as different when two of its columns hold the same values
+  on different rows.** When row order is not compared (reconcile always, and a golden run whose
+  answer key has no ORDER BY), each column's values are sorted before columns are paired. Two
+  flags that are each true on half the rows then look the same, and the comparator paired
+  whichever came first. Pairing each flag with the other's partner misaligned every row, so a
+  right answer scored below 1.0. A golden column now takes a generated column of its own name
+  first. A name can mislead too, when a statement swaps two labels or aliases one of two columns
+  that share a label, so that pairing is checked against the old one and the one that lines up
+  more rows is kept.
+
+- **A column that mostly repeats one value no longer pairs with a different column.** A flag that
+  is N on every row agreed with any other mostly-N column on nine rows of ten. So a report said
+  the rows differed and blamed a column that was right, when the real finding was a missing
+  column. A column with no same-named partner now pairs on its values only when those values can
+  tell it apart. When row order is compared, no one value may fill more than half the rows. When
+  it is not, more than half the values must be distinct, because two flags with similar counts
+  overlap on most rows as multisets whatever they hold. Otherwise the column is reported missing.
+  Two costs are accepted. A renamed column of that kind that is wrong on one row is now reported
+  missing too, rather than as a column that differs on one row. And a score without row order can
+  change for such items. A different column that holds exactly the same values still pairs.
+
+- **A reconcile table that matched only because a different column holds the same repeated value
+  is now marked unverified.** Reconcile compares two tables by pairing each of your columns with the
+  column of agami's that holds the same values. So when your `is_gift` is "N" on every row and
+  agami returned `is_express`, also "N" on every row, the two paired and the row scored as a match.
+  Values alone cannot tell a renamed column from a different one, so the comparator is unchanged.
+  Reconcile has the names and your result. The answers still match (`match` stays `true`), but the
+  row's status is now `match_unverified`, not `match`, and it reads "same answer, but part of your
+  query could not be checked". The card says why, naming both columns, and asks you to check that
+  agami returned the column you meant. The rule is narrow, so a legitimate rename stays a match: it
+  needs a full match, a pair whose names differ (ignoring case and a table prefix), and a column of
+  yours where one value fills more than half the rows. A column whose values vary, a one-row result
+  and a single number are left as they were.
+
+## [0.9.3] — 2026-09-17
+
+### Added
+
+- **A hosted `execute_sql` now requires proof the client looked at the examples (#376).** Clients
+  skipped `get_prompt_examples`: the schema is indispensable for writing SQL, the examples feel
+  optional, and the pointer and instruction line from #301 were advice a client could weigh below its
+  own judgement. After a model change this also meant a change to the examples never reached the
+  conversation. When a datasource has stored examples, the call now carries `example` — an `id` the
+  lookup returned and `use`, either `followed` or `shown_only`. A missing example, an id the
+  datasource does not store (including one a model change removed), or any other `use` is refused on
+  the new rule `example_required`, and the remediation says exactly what to send. `shown_only` is
+  always accepted, so nothing pushes a statement toward a poor match, and `followed` is not verified.
+  Both values are recorded on the call (migration `026`), so the activity log shows how often the
+  examples fit. A datasource with no examples, and the local path, require nothing. Like
+  `model_version`, the field is optional in the input schema and enforced in the handler.
+
+- **Every refused `execute_sql` writes one line to the server log.** Refusals were recorded only in
+  the app database, so an operator watching the server's own log (a container's stderr, or a cloud
+  log sink) saw a blocked query as an ordinary `200`. The line names the rule, the datasource, the
+  organization and the `audit_id` that joins it to its `query_executions` row. The datasource is the
+  caller's own text, so it is written escaped and cut to 200 characters: a newline in it cannot
+  start a forged line. The line never carries the statement, the refusal's own sentences or the
+  caller's identity. It is written at WARNING because the served entrypoint configures no logging
+  and Python's fallback handler drops anything lower. For `audit_unavailable`, which writes no row
+  by design, it is the only trace.
+
 ### Fixed
 
 - **A served deployment no longer names a datasource the organization does not have.** With no
@@ -779,7 +950,6 @@ scripted generator for the real one — silently, the way it already happened on
 Everything below came out of running the golden-dataset feature against a live warehouse for the
 first time. One fix is the difference between the feature working and not working at all; the rest
 is what a first real run and its review turned up.
-
 
 ### Added
 

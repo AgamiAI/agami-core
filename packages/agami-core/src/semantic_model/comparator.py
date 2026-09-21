@@ -24,9 +24,10 @@ comparator must never do.
 On top of those keys sits the comparison itself, in three steps that are deliberately separate:
 whether the answer key asked for an ordering at all, which generated column answers which golden
 one, and how far the rows agree once the columns are paired. Column identity is decided by VALUES
-and never by name or position — a generated statement is free to alias a total and to select it
-second — and rows are compared as a multiset unless the author ordered them, because duplicates
-are signal and order usually is not.
+first — a generated statement is free to alias a total and to select it second. A name decides
+only what the values leave open: which of several columns with equal values pairs with which, and
+which column a near miss that agrees on only some rows belongs to. Rows are compared as a multiset
+unless the author ordered them, because duplicates are signal and order usually is not.
 
 ``compare_result_sets`` is the one way in. It is TOTAL: a malformed result, an unreadable
 statement or a band that cannot be applied all come back as a score with an error status, never as
@@ -351,6 +352,64 @@ def _agreement(
 _MAJORITY = 0.5
 
 
+def _telling(vector: tuple[tuple[str, Any], ...], ordered: bool) -> bool:
+    """Whether agreeing with this column on most rows is evidence of being the same column.
+
+    When the order counts, not when one value fills more than half the rows: any column that
+    repeats that value clears the majority bar by coincidence. A flag that is N on every row agrees
+    with every other mostly-N flag, and pairing on that put one column's difference on another
+    column's name.
+
+    When the order does not count, agreement is the overlap of two multisets, and two columns with
+    a similar spread overlap on most rows whatever they hold: a flag True on five rows of ten
+    agrees on nine with an unrelated flag True on six. So there most of the values must be
+    distinct, which makes a shared value a particular one rather than a common one.
+
+    One row is never telling. Agreeing on it means the whole vector is equal, which stage one
+    decides.
+    """
+    if len(vector) < 2:
+        return False
+    if ordered:
+        return Counter(vector).most_common(1)[0][1] / len(vector) <= _MAJORITY
+    return len(set(vector)) / len(vector) > _MAJORITY
+
+
+def _pair_equal_vectors(
+    golden_columns: Sequence[str],
+    golden_vectors: Sequence[tuple[tuple[str, Any], ...]],
+    generated_columns: Sequence[str],
+    generated_vectors: Sequence[tuple[tuple[str, Any], ...]],
+    *,
+    names_first: bool,
+) -> dict[int, int]:
+    """Stage one of `pair_columns`: each golden column with an unclaimed generated column whose
+    vector is equal to its own.
+
+    Without `names_first`, each golden column in turn takes the first partner left. With it, every
+    golden column first takes a partner of its own name, and only then do the rest take the first
+    partner left. Two passes and not one, so a column with no namesake cannot take the partner that
+    a later column's name was waiting for.
+    """
+    unclaimed: dict[tuple[tuple[str, Any], ...], list[int]] = {}
+    for index, vector in enumerate(generated_vectors):
+        unclaimed.setdefault(vector, []).append(index)
+    pairing: dict[int, int] = {}
+    if names_first:
+        for index, vector in enumerate(golden_vectors):
+            wanted = _folded_name(golden_columns[index])
+            partners = unclaimed.get(vector, [])
+            named = [i for i in partners if _folded_name(generated_columns[i]) == wanted]
+            if named:
+                partners.remove(named[0])
+                pairing[index] = named[0]
+    for index, vector in enumerate(golden_vectors):
+        partners = unclaimed.get(vector)
+        if index not in pairing and partners:
+            pairing[index] = partners.pop(0)
+    return pairing
+
+
 def pair_columns(
     golden_columns: Sequence[str],
     golden_rows: Sequence[Sequence[Any]],
@@ -362,19 +421,32 @@ def pair_columns(
 ) -> ColumnPairing:
     """Pair golden columns with generated columns, by values first and then by best effort.
 
-    Stage one pairs on whole value-vector equality and consults neither a column's name nor its
-    position: a generated statement that aliases the total and selects it second still answered the
-    question. It is greedy and deliberately NOT a maximum-matching algorithm: equality is transitive,
-    so the candidate sets are equivalence classes, partners inside one class are interchangeable, and
-    taking the first unclaimed one can never strand a later column that had an option of its own.
+    Stage one pairs on whole value-vector equality, whatever the name or position: a generated
+    statement that aliases the total and selects it second still answered the question. It is
+    greedy and deliberately NOT a maximum-matching algorithm: equality is transitive, so the
+    candidate sets are equivalence classes, and taking any unclaimed partner can never strand a
+    later column that had an option of its own.
 
-    Stage two is for what stage one left: one differing cell would otherwise unpair a column that is
-    plainly there, and the score would read "no generated column carries the values of total" for a
-    column agreeing on nine rows of ten. Over the golden columns still unmatched, in order, and the
-    generated columns still unclaimed: a candidate with the same folded name pairs at any agreement
-    (the name says it is the same column; the agreement says how much of it differs); otherwise the
-    candidate with the highest share of agreeing rows pairs when that share is above one half, ties
-    going to generated order. A golden column with no such partner is reported unmatched, as before.
+    Inside a class the partners are interchangeable for the pairing, but not always for the rows.
+    When the order does not count, the vectors are sorted. Two different flags that are each Y on
+    half the rows are then equal vectors, and pairing each with the other's partner misaligns every
+    row, so an identical answer scored as a mismatch. So a golden column takes a partner of its own
+    name first (see `_pair_equal_vectors`). A name can mislead too: a statement can swap two labels,
+    or alias one of two columns that share a label. So when the order does not count, the pairing
+    by names is checked against the plain in-order one, and the one that lines up more rows is
+    kept, a tie going to the names. The check is skipped when the names already line up every row,
+    since nothing lines up more. When the order counts there is nothing to check: equal vectors are
+    equal row for row, so every choice inside a class lines up the same rows.
+
+    Stage two is for what stage one left: one differing cell would otherwise unpair a column that
+    is plainly there, and the score would read "no generated column carries the values of total"
+    for a column agreeing on nine rows of ten. Over the golden columns still unmatched, in order,
+    and the generated columns still unclaimed: a candidate with the same folded name pairs at any
+    agreement (the name says it is the same column; the agreement says how much of it differs).
+    Without a namesake, a golden column pairs by values only when its values are telling (see
+    `_telling`); a flag that is N on most rows is not. Then the candidate with the highest share of
+    agreeing rows pairs when that share is above one half, ties going to generated order. A golden
+    column with no such partner is reported unmatched.
     """
     golden_vectors = _column_vectors(
         golden_columns, golden_rows, ordered=ordered, quantize=quantize
@@ -382,16 +454,24 @@ def pair_columns(
     generated_vectors = _column_vectors(
         generated_columns, generated_rows, ordered=ordered, quantize=quantize
     )
-    unclaimed: dict[tuple[tuple[str, Any], ...], list[int]] = {}
-    for index, vector in enumerate(generated_vectors):
-        unclaimed.setdefault(vector, []).append(index)
-    pairing: dict[int, int] = {}
-    agreement: dict[int, float] = {}
-    for index, vector in enumerate(golden_vectors):
-        partners = unclaimed.get(vector)
-        if partners:
-            pairing[index] = partners.pop(0)
-            agreement[index] = 1.0
+    columns = (golden_columns, golden_vectors, generated_columns, generated_vectors)
+    pairing = _pair_equal_vectors(*columns, names_first=True)
+    if not ordered:
+        in_order = _pair_equal_vectors(*columns, names_first=False)
+        if in_order != pairing:
+            overlap = compare_rows(
+                golden_rows, generated_rows, pairing, ordered=False, quantize=quantize
+            )[0]
+            # Both pairings pair the same golden columns, so no pairing can line up more rows than
+            # the shorter result holds. Once the names have lined up that many, reading the rows a
+            # second time can only tie, and a tie goes to the names.
+            if overlap < min(len(golden_rows), len(generated_rows)):
+                in_order_overlap = compare_rows(
+                    golden_rows, generated_rows, in_order, ordered=False, quantize=quantize
+                )[0]
+                if in_order_overlap > overlap:
+                    pairing = in_order
+    agreement: dict[int, float] = dict.fromkeys(pairing, 1.0)
 
     claimed = set(pairing.values())
     for index, vector in enumerate(golden_vectors):
@@ -404,6 +484,10 @@ def pair_columns(
         by_name = [i for i in candidates if _folded_name(generated_columns[i]) == wanted]
         if by_name:
             chosen = by_name[0]
+        elif not _telling(vector, ordered):
+            # Named nowhere and not distinctive enough to find by its values: reported unmatched,
+            # which is what it is, rather than paired with a column that agrees with it by chance.
+            continue
         else:
             shares = [(_agreement(vector, generated_vectors[i], ordered), -i) for i in candidates]
             best_share, negative_index = max(shares)
