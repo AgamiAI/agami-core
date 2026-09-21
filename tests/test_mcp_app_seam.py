@@ -146,17 +146,34 @@ def _tool(handler=lambda args: "ran", **extra) -> dict:
     return {"handler": handler, "description": "probe", "inputSchema": dict(SCHEMA), **extra}
 
 
-def _app(extra_tools: dict, *, visibility=None, hook=None, auth=None):
-    """An app built the way a consumer builds one: extra tools, and the adapters it swaps."""
+_open_clients: list[TestClient] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_clients():
+    yield
+    while _open_clients:
+        _open_clients.pop().__exit__(None, None, None)
+
+
+def _app(extra_tools: dict, *, visibility=None, hook=None, auth=None) -> TestClient:
+    """An app built the way a consumer builds one: extra tools, and the adapters it swaps.
+
+    Returned as one started client, closed after the test: the SDK's session manager runs once
+    per app, so every request to an app has to go through the same lifespan."""
     swapped = {"tool_visibility": visibility, "tool_result_hook": hook, "auth_provider": auth}
     swapped = {k: v for k, v in swapped.items() if v is not None}
     adapters = replace(mcp_http.default_adapters(), **swapped) if swapped else None
-    return mcp_http.create_app(extra_tools=extra_tools, adapters=adapters)
+    client = TestClient(
+        mcp_http.create_app(extra_tools=extra_tools, adapters=adapters), base_url=PUBLIC_BASE_URL
+    )
+    client.__enter__()
+    _open_clients.append(client)
+    return client
 
 
-def _answer(app, era: str, method: str, params: dict | None = None, **kw) -> dict:
-    with TestClient(app, base_url=PUBLIC_BASE_URL) as client:
-        return envelope(rpc(client, era, method, params, **kw))
+def _answer(client: TestClient, era: str, method: str, params: dict | None = None, **kw) -> dict:
+    return envelope(rpc(client, era, method, params, **kw))
 
 
 def _listed(app, era: str) -> dict[str, dict]:
@@ -210,7 +227,12 @@ def test_a_page_is_listed_read_and_linked(era):
 def test_a_page_advertises_resources_and_the_apps_extension(era):
     capabilities = _capabilities(_app({"demo_probe": _tool(page={"uri": PAGE, "html": HTML})}), era)
     assert "resources" in capabilities
-    assert capabilities["extensions"] == {EXTENSION_ID: {}}
+    # `capabilities.extensions` exists from 2026-07-28 on; a 2025-06-18 `initialize` has no such
+    # field, and the SDK does not send it there. That era learns of a page from `_meta.ui` alone.
+    if era == LEGACY:
+        assert "extensions" not in capabilities
+    else:
+        assert capabilities["extensions"] == {EXTENSION_ID: {}}
     assert "tools" in capabilities
 
 
@@ -261,9 +283,8 @@ def test_an_undeclared_uri_is_unknown(era):
     assert error["message"] == f"Unknown resource: {OTHER_PAGE}"
 
 
-def _read_raw(app, era: str, uri: str) -> tuple[int, str]:
-    with TestClient(app, base_url=PUBLIC_BASE_URL) as client:
-        response = rpc(client, era, "resources/read", {"uri": uri})
+def _read_raw(client: TestClient, era: str, uri: str) -> tuple[int, str]:
+    response = rpc(client, era, "resources/read", {"uri": uri})
     return response.status_code, response.text
 
 
