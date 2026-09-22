@@ -3888,14 +3888,30 @@ def tool_description(name: str, description: str) -> str:
     return description.replace(_EXECUTE_SQL_LIMITS_AT_IMPORT, _execute_sql_limits_sentence())
 
 
+def tool_annotations(meta: dict[str, Any]) -> dict[str, bool] | None:
+    """The MCP tool annotations a registry entry advertises, in the spec's field names, or None for
+    an entry that declares none. Called by both MCP servers at list-tools time so the two transports
+    state the same hints.
+
+    `read_only: True` becomes `readOnlyHint` with `destructiveHint` off — the spec defaults that one
+    to ON, so leaving it implicit would contradict the read-only claim. The hints are what a client's
+    confirmation policy keys off: Gemini Enterprise assumes an un-annotated tool can mutate data and
+    asks the person before each call, so a reading tool without the hint costs a prompt per query,
+    per distinct argument set. Opt-in, and only by the literal `True`: an entry without the flag, or
+    with a config-sourced `"false"` string on it, advertises nothing and keeps whatever caution the
+    client applies by default, which is what a consumer tool that writes (feedback, say) must get.
+    Every core tool carries the flag because every one reads — the three model lookups by
+    construction, `execute_sql` by the guard, which admits one SELECT and nothing else."""
+    if meta.get("read_only") is not True:
+        return None
+    return {"readOnlyHint": True, "destructiveHint": False}
+
+
 TOOLS: dict[str, dict[str, Any]] = {
     "list_datasources": {
         "handler": tool_list_datasources,
-        # Every core tool reads: the three model lookups by construction, execute_sql by the guard,
-        # which admits one SELECT and nothing else. The flag is advertised as the MCP `readOnlyHint`
-        # (see `mcp_http._annotations`), which is what a client that confirms mutating calls with the
-        # person keys off — Gemini Enterprise asks before EVERY un-annotated call, once per distinct
-        # argument set, so without it each query costs a prompt. A tool that writes must not carry it.
+        # Advertised as the MCP `readOnlyHint`; see `tool_annotations` for why and for the bar a
+        # tool must clear to carry it.
         "read_only": True,
         "description": (
             "List the datasources this deployment serves. Each entry carries `datasource`, "
@@ -4264,12 +4280,22 @@ def register(
     handler: Callable[[dict[str, Any]], str],
     description: str,
     inputSchema: dict[str, Any],
+    read_only: bool = False,
 ) -> None:
     """Add a tool to the shared TOOLS registry — the supported consumer extension point.
 
     Raises on a duplicate name so a consumer can't silently shadow a core tool (e.g. execute_sql).
     Note create_app merges a consumer's extra tools over a *copy* of TOOLS; register() mutates the
-    module global directly (the stdio path uses it), so its dup-guard is the safety net either way."""
+    module global directly (the stdio path uses it), so its dup-guard is the safety net either way.
+    `read_only` is the tool's own claim that it never mutates data (see `tool_annotations`); the
+    default keeps a client's confirmation prompt for it."""
     if name in TOOLS:
         raise ValueError(f"tool {name!r} is already registered")
-    TOOLS[name] = {"handler": handler, "description": description, "inputSchema": inputSchema}
+    if not isinstance(read_only, bool):
+        raise ValueError(f"tool {name!r} read_only must be a bool")
+    TOOLS[name] = {
+        "handler": handler,
+        "description": description,
+        "inputSchema": inputSchema,
+        "read_only": read_only,
+    }

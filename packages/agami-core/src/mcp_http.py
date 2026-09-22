@@ -61,6 +61,7 @@ from tools import (
     set_injected_executor,
     set_statement_limits_provider,
     thread_id_is_required,
+    tool_annotations,
     tool_description,
     typed_outcome_overrides,
 )
@@ -486,16 +487,9 @@ def build_server(
     server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
     def _annotations(meta: dict) -> mt.ToolAnnotations | None:
-        # `read_only: True` becomes `readOnlyHint` with `destructiveHint` off (the spec defaults that
-        # one to ON, so leaving it implicit would contradict the read-only claim). These hints are
-        # what a client's confirmation policy keys off: Gemini Enterprise assumes an un-annotated
-        # tool can mutate data and asks the person before each call, so a reading tool without the
-        # hint costs a prompt per query, per distinct argument set. Opt-in only — an entry without
-        # the flag advertises nothing and keeps whatever caution the client applies by default,
-        # which is what a consumer tool that writes (feedback, say) must get.
-        if not meta.get("read_only"):
-            return None
-        return mt.ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+        # Spec-shaped dict from the registry (see `tools.tool_annotations`), typed here for the SDK.
+        hints = tool_annotations(meta)
+        return mt.ToolAnnotations(**hints) if hints else None
 
     def _described(names: list[str]) -> list:
         return [
@@ -683,6 +677,11 @@ def create_app(
             )
         if not callable(meta["handler"]):
             raise ValueError(f"extra tool {tool_name!r} handler must be callable")
+        # A non-bool here is a config value that leaked in as a string; `tool_annotations` would
+        # already ignore it, but silently withholding the hint the consumer meant to set is a worse
+        # failure than refusing at construction.
+        if "read_only" in meta and not isinstance(meta["read_only"], bool):
+            raise ValueError(f"extra tool {tool_name!r} read_only must be a bool")
     # Merge the consumer's extra tools over a COPY of TOOLS — the module global is never mutated.
     registry = {**TOOLS, **(extra_tools or {})}
     session_manager = StreamableHTTPSessionManager(
