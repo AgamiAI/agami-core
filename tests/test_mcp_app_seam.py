@@ -340,8 +340,17 @@ def _widget(name, arguments, result_text):
     return {"tool": name, "chars": len(result_text)}
 
 
+def _hook_meta(result: dict) -> dict:
+    """The result's `_meta` without the protocol's own keys: on 2026-07-28 the SDK stamps `serverInfo`
+    into every result's `_meta`, so what a hook added is everything else."""
+    meta = result.get("_meta") or {}
+    return {
+        key: value for key, value in meta.items() if not key.startswith("io.modelcontextprotocol/")
+    }
+
+
 @pytest.mark.parametrize("era", ERAS)
-def test_hook_output_is_structured_content_beside_identical_text(era):
+def test_hook_output_is_result_meta_beside_identical_text(era):
     seen = []
 
     def hook(name, arguments, result_text):
@@ -352,10 +361,20 @@ def test_hook_output_is_structured_content_beside_identical_text(era):
     with_hook = _call(_app({"demo_probe": _tool(handler)}, hook=hook), era, "demo_probe")["result"]
     without = _call(_app({"demo_probe": _tool(handler)}), era, "demo_probe")["result"]
     assert with_hook["content"] == without["content"]
-    assert "structuredContent" not in without
+    assert _hook_meta(without) == {}
     text = with_hook["content"][0]["text"]
-    assert with_hook["structuredContent"] == {"tool": "demo_probe", "chars": len(text)}
+    assert _hook_meta(with_hook) == {"tool": "demo_probe", "chars": len(text)}
     assert seen == [("demo_probe", {}, text)]
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_hook_output_never_becomes_structured_content(era):
+    # A client may give the model a result's `structuredContent` in place of its text, so an object
+    # a hook adds for a page must never land there: the model would read it instead of the answer.
+    handler = lambda args: json.dumps({"ok": True})  # noqa: E731
+    result = _call(_app({"demo_probe": _tool(handler)}, hook=_widget), era, "demo_probe")["result"]
+    assert "structuredContent" not in result
+    assert _hook_meta(result) == {"tool": "demo_probe", "chars": len(result["content"][0]["text"])}
 
 
 @pytest.mark.parametrize("outcome", ["refused", "failed"])
@@ -372,7 +391,8 @@ def test_hook_output_rides_beside_an_unsuccessful_execute_sql_envelope(served, e
     text = with_hook["content"][0]["text"]
     assert json.loads(text)["status"] == outcome
     assert _mask(json.dumps(with_hook["content"])) == _mask(json.dumps(without["content"]))
-    assert with_hook["structuredContent"] == {"tool": "execute_sql", "chars": len(text)}
+    assert _hook_meta(with_hook) == {"tool": "execute_sql", "chars": len(text)}
+    assert "structuredContent" not in with_hook
 
 
 @pytest.mark.parametrize("era", ERAS)
@@ -405,7 +425,7 @@ def _hook_warnings(caplog) -> list[logging.LogRecord]:
 
 
 @pytest.mark.parametrize("era", ERAS)
-def test_a_raising_hook_drops_structured_content_and_warns_once(era, caplog):
+def test_a_raising_hook_drops_its_meta_and_warns_once(era, caplog):
     def hook(name, arguments, result_text):
         raise RuntimeError("the hook broke")
 
@@ -413,7 +433,7 @@ def test_a_raising_hook_drops_structured_content_and_warns_once(era, caplog):
         result = _call(_app({"demo_probe": _tool()}, hook=hook), era, "demo_probe")["result"]
     assert result["content"][0]["text"] == "ran"
     assert not result.get("isError")
-    assert "structuredContent" not in result
+    assert _hook_meta(result) == {} and "structuredContent" not in result
     assert len(_hook_warnings(caplog)) == 1
 
 
@@ -427,7 +447,20 @@ def test_a_non_object_hook_return_is_dropped(era, returned, caplog):
             "result"
         ]
     assert result["content"][0]["text"] == "ran"
-    assert "structuredContent" not in result
+    assert _hook_meta(result) == {} and "structuredContent" not in result
+    assert len(_hook_warnings(caplog)) == 1
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_a_hook_key_under_the_reserved_prefix_is_dropped(era, caplog):
+    returned = {"io.modelcontextprotocol/serverInfo": {"name": "spoofed"}, "demo/kept": 1}
+    with caplog.at_level(logging.WARNING, logger="mcp_http"):
+        result = _call(_app({"demo_probe": _tool()}, hook=lambda *a: returned), era, "demo_probe")[
+            "result"
+        ]
+    assert _hook_meta(result) == {"demo/kept": 1}
+    stamped = (result.get("_meta") or {}).get("io.modelcontextprotocol/serverInfo")
+    assert stamped != {"name": "spoofed"}  # the SDK's own stamp on 2026-07-28, absent on 2025-06-18
     assert len(_hook_warnings(caplog)) == 1
 
 
@@ -437,7 +470,7 @@ def test_a_hook_returning_none_adds_nothing_and_warns_nothing(era, caplog):
         result = _call(_app({"demo_probe": _tool()}, hook=lambda *a: None), era, "demo_probe")[
             "result"
         ]
-    assert "structuredContent" not in result
+    assert _hook_meta(result) == {} and "structuredContent" not in result
     assert _hook_warnings(caplog) == []
 
 
@@ -479,7 +512,7 @@ def test_the_hook_does_not_run_on_unknown_hidden_invalid_or_crashed_calls(era):
     assert "error" in _call(app, era, "demo_missing")
     assert "error" in _call(app, era, "demo_hidden")
     invalid = _call(app, era, "demo_probe", {"unexpected": 1})["result"]
-    assert invalid["isError"] and "structuredContent" not in invalid
+    assert invalid["isError"] and _hook_meta(invalid) == {}
     crashed = _call(app, era, "demo_crash")["result"]
-    assert crashed["isError"] and "structuredContent" not in crashed
+    assert crashed["isError"] and _hook_meta(crashed) == {}
     assert calls == []

@@ -172,11 +172,12 @@ class Adapters:
     # and its page come from the registry, never from this predicate. See `mcp_http.build_server` for
     # where it is applied (both list AND call, deliberately).
     tool_visibility: Callable[[str], bool] | None = None
-    # `tool_result_hook(tool_name, arguments, result_text) -> Mapping | None` adds a JSON object as
-    # `structuredContent` beside a tool's result, for an MCP App page to render. None (the default) is
-    # exactly today's behaviour. Additive output only: the text a client and the model read, and the
-    # audit row, are unchanged whatever it returns, and a hook that raises or returns anything but an
-    # object is logged and dropped. See `mcp_http.build_server` for when it runs and in what context.
+    # `tool_result_hook(tool_name, arguments, result_text) -> Mapping | None` adds a JSON object to a
+    # tool result's `_meta`, for an MCP App page to render. `_meta` rather than `structuredContent`,
+    # because a client may give the model `structuredContent` in place of the text. None (the default)
+    # is exactly today's behaviour. Additive output only: the text a client and the model read, and
+    # the audit row, are unchanged whatever it returns, and a hook that raises or returns anything but
+    # an object is logged and dropped. See `mcp_http.build_server` for when it runs and in what context.
     tool_result_hook: Callable[[str, Mapping[str, Any], str], Mapping[str, Any] | None] | None = (
         None
     )

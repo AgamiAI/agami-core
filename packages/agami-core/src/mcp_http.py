@@ -72,6 +72,8 @@ if TYPE_CHECKING:
     from mcp.server.transport_security import TransportSecuritySettings
 
 _log = logging.getLogger(__name__)
+# The `_meta` key prefix the MCP specification reserves for itself; a result hook never writes under it.
+_RESERVED_META_PREFIX = "io.modelcontextprotocol/"
 
 # The authenticated user for the in-flight tool call. Set in `handle_mcp` (the raw-ASGI endpoint, which
 # runs in the request's task) so it propagates into the MCP dispatch — the tool handler `_call_tool`
@@ -505,11 +507,15 @@ def build_server(
     scope.** With no page declared, no resource handler is registered, so the capabilities are
     exactly what they were.
 
-    `result_hook(name, arguments, result_text) -> Mapping | None` adds its object as
-    `structuredContent` beside a result's unchanged text. It runs off the loop in the handler's
-    context, only on a result a handler returned — never on an unknown, hidden, invalid or crashed
-    call — and one that raises or returns anything but a JSON object is logged and dropped. None
-    (the default) is exactly today's behaviour.
+    `result_hook(name, arguments, result_text) -> Mapping | None` adds its object to the result's
+    `_meta`, beside the unchanged text. `_meta` and not `structuredContent`: a client may hand a
+    result's `structuredContent` to the model in place of its text, so an object meant for a page
+    there would replace the answer the model reads, while no client puts `_meta` in front of the
+    model and an MCP Apps host passes the whole result, `_meta` included, to the page. It runs off
+    the loop in the handler's context, only on a result a handler returned — never on an unknown,
+    hidden, invalid or crashed call. A hook that raises or returns anything but a JSON object is
+    logged and dropped, and a key under the protocol's reserved `io.modelcontextprotocol/` prefix is
+    dropped with a warning. None (the default) is exactly today's behaviour.
     """
     import jsonschema
     import mcp.types as mt
@@ -652,28 +658,37 @@ def build_server(
             is_error=True,
         )
 
-    def _structured(name: str, arguments: dict, result_text: str) -> dict | None:
-        """The result hook's object for this call, or None. Never raises: the hook adds output, so
-        its failure must not become the call's failure — the text it would have sat beside is
-        already a complete answer."""
+    def _result_meta(name: str, arguments: dict, result_text: str) -> dict | None:
+        """The result hook's object for this call's `_meta`, or None. Never raises: the hook adds
+        output, so its failure must not become the call's failure — the text it would have sat
+        beside is already a complete answer."""
         try:
             returned = result_hook(name, arguments, result_text)
             if returned is None:
                 return None
             if not isinstance(returned, Mapping):
                 raise TypeError(f"returned {type(returned).__name__}, not an object")
-            structured = dict(returned)
+            added = dict(returned)
             # Checked here, not left to the SDK: a value JSON cannot carry would fail while the
             # answer is being written, after this call has already been recorded as a success.
-            json.dumps(structured)
+            json.dumps(added)
         except Exception:
             _log.warning(
-                "tool %r: the result hook failed; answered without structuredContent",
+                "tool %r: the result hook failed; answered without its _meta",
                 name,
                 exc_info=True,
             )
             return None
-        return structured
+        # The protocol writes its own keys under this prefix (the SDK stamps `serverInfo` into the
+        # same `_meta` on 2026-07-28); a consumer's key there would contradict it, so it never lands.
+        reserved = [key for key in added if str(key).startswith(_RESERVED_META_PREFIX)]
+        if reserved:
+            _log.warning(
+                "tool %r: the result hook's reserved _meta keys dropped: %s", name, reserved
+            )
+            for key in reserved:
+                del added[key]
+        return added or None
 
     async def _on_call_tool(
         ctx: ServerRequestContext, params: mt.CallToolRequestParams
@@ -766,15 +781,15 @@ def build_server(
                 return _with_caller_identity(meta["handler"](arguments), actor)
 
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
-            structured = None
+            result_meta = None
             if result_hook is not None:
                 # Off the loop for the handler's reason — the hook is the consumer's code. In a COPY
                 # of the handler's context, so the actor, session and organisation are all live but
                 # nothing it sets reaches the typed outcome the audit write reads from
                 # `handler_ctx`; and on a copy of the arguments, which that write records too.
-                structured = await run_blocking(
+                result_meta = await run_blocking(
                     handler_ctx.copy().run,
-                    _structured,
+                    _result_meta,
                     name,
                     copy.deepcopy(arguments),
                     result_text,
@@ -782,7 +797,7 @@ def build_server(
             # None is the field's default, so without a hook the answer is built exactly as before.
             return mt.CallToolResult(
                 content=[mt.TextContent(type="text", text=result_text)],
-                structured_content=structured,
+                meta=result_meta,
             )
         except Exception as exc:
             # Logged here, once, with its traceback: this is the only place the reason is kept for
@@ -943,7 +958,7 @@ def create_app(
     `build_server`). None = no-op.
 
     An `extra_tools` entry may also carry `"page": {"uri": "ui://…", "html": str}` and
-    `"app_only": True`, and `adapters.tool_result_hook` may add `structuredContent` to a result; see
+    `"app_only": True`, and `adapters.tool_result_hook` may add to a result's `_meta`; see
     `build_server`. An app-only tool is still callable by any client, so its handler must check its
     own scope."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager

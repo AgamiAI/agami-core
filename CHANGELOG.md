@@ -27,10 +27,11 @@ below corresponds to one such version.
   `capabilities.extensions["io.modelcontextprotocol/ui"]` on 2026-07-28, appear only when a page is
   declared. **App-only is a marking, not a control: any client can still call the tool, so its
   handler must check its own scope.** `Adapters.tool_result_hook(name, arguments, result_text)`
-  returns an object sent as `structuredContent` beside the unchanged text; it runs off the event loop
-  in the request's context, only on a result a handler returned, and a hook that raises or returns
-  anything but a JSON object is logged once and dropped without touching the call's outcome or its
-  audit row. `None` (the OSS default) is byte-identical to prior behaviour.
+  returns an object added to the result's `_meta` beside the unchanged text (not `structuredContent`,
+  which a client may give the model in place of the text); it runs off the event loop in the
+  request's context, only on a result a handler returned, keys under the reserved
+  `io.modelcontextprotocol/` prefix are dropped, and a hook that raises or returns anything but a JSON
+  object is logged once and dropped without touching the call's outcome or its audit row. `None` (the OSS default) is byte-identical to prior behaviour.
 
 ### Changed
 
