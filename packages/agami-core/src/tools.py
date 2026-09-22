@@ -3891,6 +3891,12 @@ def tool_description(name: str, description: str) -> str:
 TOOLS: dict[str, dict[str, Any]] = {
     "list_datasources": {
         "handler": tool_list_datasources,
+        # Every core tool reads: the three model lookups by construction, execute_sql by the guard,
+        # which admits one SELECT and nothing else. The flag is advertised as the MCP `readOnlyHint`
+        # (see `mcp_http._annotations`), which is what a client that confirms mutating calls with the
+        # person keys off — Gemini Enterprise asks before EVERY un-annotated call, once per distinct
+        # argument set, so without it each query costs a prompt. A tool that writes must not carry it.
+        "read_only": True,
         "description": (
             "List the datasources this deployment serves. Each entry carries `datasource`, "
             "`database_type` and `table_count`, plus the `description` its model declares WHEN it "
@@ -3923,6 +3929,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "get_datasource_schema": {
         "handler": tool_get_datasource_schema,
+        "read_only": True,
         "description": (
             "Fetch the semantic model for a datasource, sized to fit context. Narrow it two "
             "ways: `area` to one subject area; `dataset_names=[...]` to those tables, which also "
@@ -4002,6 +4009,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "get_prompt_examples": {
         "handler": tool_get_prompt_examples,
+        "read_only": True,
         "description": (
             "Fetch the curated few-shot NL→SQL examples for a datasource, grouped by subject area. "
             "Use before generating SQL to ground dialect and house style; match on the question, "
@@ -4058,6 +4066,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "execute_sql": {
         "handler": tool_execute_sql,
+        "read_only": True,
         "description": (
             "Execute a single read-only SELECT / WITH...SELECT against the datasource. "
             "Executed by execute_sql.py — locally on a skill install, on the server for a hosted "

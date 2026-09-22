@@ -12,6 +12,16 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Read-only tools now say so on the wire.** Every core tool (`list_datasources`,
+  `get_datasource_schema`, `get_prompt_examples`, `execute_sql`) is listed with the MCP
+  `readOnlyHint` annotation, `destructiveHint` off. A client's confirmation policy keys off these
+  hints: Gemini Enterprise treated each un-annotated tool as potentially destructive and asked the
+  person before every call, once per distinct argument set, so each query cost a prompt. The hint is
+  opt-in per registry entry (`read_only: True`), so a consumer tool that writes keeps the client's
+  default caution. After deploying, reload the connector's actions so the hints are re-imported.
+
 ## [0.9.4] — 2026-09-17
 
 ### Security

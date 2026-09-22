@@ -485,6 +485,18 @@ def build_server(
         instructions = f"{instructions}\n{extra_instructions}"
     server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
+    def _annotations(meta: dict) -> mt.ToolAnnotations | None:
+        # `read_only: True` becomes `readOnlyHint` with `destructiveHint` off (the spec defaults that
+        # one to ON, so leaving it implicit would contradict the read-only claim). These hints are
+        # what a client's confirmation policy keys off: Gemini Enterprise assumes an un-annotated
+        # tool can mutate data and asks the person before each call, so a reading tool without the
+        # hint costs a prompt per query, per distinct argument set. Opt-in only — an entry without
+        # the flag advertises nothing and keeps whatever caution the client applies by default,
+        # which is what a consumer tool that writes (feedback, say) must get.
+        if not meta.get("read_only"):
+            return None
+        return mt.ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+
     def _described(names: list[str]) -> list:
         return [
             # `tool_description` states execute_sql's limits for THIS caller's organisation (#329).
@@ -494,6 +506,7 @@ def build_server(
                 name=name,
                 description=tool_description(name, registry[name]["description"]),
                 inputSchema=registry[name]["inputSchema"],
+                annotations=_annotations(registry[name]),
             )
             for name in names
         ]
