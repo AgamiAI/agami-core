@@ -27,6 +27,49 @@ below corresponds to one such version.
 - **`mcp` floor raised to 1.7**, the first release whose `mcp.types` carries `ToolAnnotations`. An
   older SDK would fail every `tools/list`.
 
+- **The `SELECT *` ban is now stated up front, not only inside the refusal (#387).** A star is
+  refused wherever it appears — the outer query, a subquery, a CTE body, `t.*` — and the served
+  instructions never said so, so a client met the strictest rule on this surface for the first time
+  as a refusal. This is the same gap #360 closed for column scope, in the same place, for the same
+  reason. The gate is unchanged: every projected star still refuses, and `COUNT(*)` and other
+  aggregates over a star are unaffected — there the star is inside the call, not the
+  projection, and the instruction says so rather than reading as a wider ban than the gate.
+
+- **And the refusal says what is true of a star** rather than what we happen not to know. The old
+  sentence — "every column must be named so it can be checked" — read alongside the reasoning that
+  a star's columns "live in the catalog" led a caller whose star sat over a CTE naming its own
+  columns two lines up to conclude the refusal was mistaken about their query. It was not: a star
+  returns columns the statement never names, whatever can be inferred about which ones they are.
+  The remediation now names the CTE case explicitly, because that is where a caller is most likely
+  to believe the rule cannot mean them.
+
+## [0.9.5] — 2026-09-19
+
+### Fixed
+
+- **A caller's `datasource` is bounded before it reaches the audit row (#370).** The name is
+  caller-written text and arrives at `_record_execution` before anything establishes that it names a
+  datasource we serve, so an arbitrarily long value was stored once per call. The statement beside
+  it has always been capped; this column was missed. It now shares `LOG_DATASOURCE_MAX_CHARS` with
+  the refusal log line, so the line and the row cannot disagree about what was sent. Every real name
+  is far inside the limit — a value that is cut was never one.
+
+### Internal
+
+- **The wheel's contents are asserted (#122).** Every test runs against an editable install, where
+  `migrations/` and `static/` resolve into the source tree whatever the packaging config says — so
+  that config was the one part of the repo the suite could not see, and it has shipped broken once
+  (a missing `migrations/` globbed to nothing and the server booted on an empty schema with no
+  error). A new test builds a wheel and looks inside it; `build` is declared in the test
+  dependencies so the guard cannot quietly skip.
+
+- **The test suite no longer reads the developer's own artifacts directory (#293).** `artifacts_dir()`
+  resolves a pointer at `~/.config/agami/path` and then `~/agami-artifacts`, one level earlier than
+  the fixtures that isolate files inside that directory — so `organization.yaml`'s real minted
+  `org_id` leaked into tests asserting `local`. 41 tests failed on a maintainer's machine and none
+  in CI. Both are now redirected per test; `AGAMI_ARTIFACTS_DIR` is left alone, because a test that
+  sets it is saying which directory it wants.
+
 ## [0.9.4] — 2026-09-17
 
 ### Security

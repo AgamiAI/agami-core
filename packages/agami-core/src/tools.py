@@ -140,7 +140,13 @@ _SHARED_INSTRUCTIONS = (
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
     "Columns: write the statement from the columns the schema returned for those tables, and "
-    "nothing else. A plausible name is not a declared one, and a column missing from the table's "
+    "nothing else. **Name every column you PROJECT — never a bare `*` or `t.*`**, in the outer "
+    "query, a subquery and a CTE body alike: a star returns columns the statement never names, so "
+    "nothing can check them against the model, and it is refused anywhere it stands as a "
+    "projection. Name them even where the same list appears a few lines above. `COUNT(*)` and "
+    "other aggregates over `*` are fine — there the star is inside the call and the projection is "
+    "the aggregate, so it is not affected by any of this. "
+    "A plausible name is not a declared one, and a column missing from the table's "
     "own entry is out of scope however obvious it looks beside the ones that are there. A "
     "response sized down to `summary` or `index` carries no columns at all, so ask for the "
     "tables you are about to write (`dataset_names`) before concluding a column is missing.\n"
@@ -2486,7 +2492,15 @@ def _log_refusal(env: Envelope, profile: str | None) -> None:
 
 
 # How much of a caller's `datasource` a refusal's log line keeps. Far above any real name; a cut
-# means the name was not one, and the audit row is where the whole call is recorded.
+# means the name was not one.
+#
+# **The audit row is bounded by the same number** (#370). It used to be the line this comment
+# pointed at for the whole value — "the audit row is where the whole call is recorded" — which was
+# true and was also the hole: `datasource` is caller-written text that reaches `_record_execution`
+# before anything checks it names a served datasource, so an arbitrarily long string was stored
+# once per call. The statement beside it has always been capped (`AUDIT_SQL_MAX_CHARS`); this
+# column was simply missed. One constant for both, so the log line and the row cannot disagree
+# about what was sent.
 LOG_DATASOURCE_MAX_CHARS = 200
 
 
@@ -2814,7 +2828,10 @@ def _record_execution(
             "id": env.audit_id,
             "error_detail": (raw_detail[:AUDIT_ERROR_DETAIL_MAX_CHARS] if raw_detail else None),
             "ts": _now_iso(),
-            "profile": profile or "",
+            # Bounded, because it is the CALLER's text and reaches this row before anything
+            # establishes that it names a datasource we serve. A real name is far inside the
+            # limit; a value that is cut was never one. See `LOG_DATASOURCE_MAX_CHARS`.
+            "profile": (profile or "")[:LOG_DATASOURCE_MAX_CHARS],
             "question": (args or {}).get("raw_query"),
             "sql": stored_sql,
             "sql_truncated": sql_truncated,
