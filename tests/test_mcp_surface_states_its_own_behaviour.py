@@ -276,7 +276,7 @@ def test_the_surface_admits_it_cannot_save_a_correction(monkeypatch):
         assert "not persisted" in text, f"{label}: does not say the correction is not saved"
 
 
-def test_the_star_ban_is_stated_before_a_client_meets_it(_=None):
+def test_the_star_ban_is_stated_before_a_client_meets_it():
     """A rule the gate ENFORCES has to be stated where a client reads before writing SQL (#387).
 
     This is the lesson #360 already paid for once: "only columns declared on the model's tables may
