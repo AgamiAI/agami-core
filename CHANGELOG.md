@@ -12,6 +12,24 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **The `SELECT *` ban is now stated up front, not only inside the refusal (#387).** A star is
+  refused wherever it appears — the outer query, a subquery, a CTE body, `t.*` — and the served
+  instructions never said so, so a client met the strictest rule on this surface for the first time
+  as a refusal. This is the same gap #360 closed for column scope, in the same place, for the same
+  reason. The gate is unchanged: every projected star still refuses, and `COUNT(*)` and other
+  aggregates over a star are unaffected — there the star is inside the call, not the
+  projection, and the instruction says so rather than reading as a wider ban than the gate.
+
+- **And the refusal says what is true of a star** rather than what we happen not to know. The old
+  sentence — "every column must be named so it can be checked" — read alongside the reasoning that
+  a star's columns "live in the catalog" led a caller whose star sat over a CTE naming its own
+  columns two lines up to conclude the refusal was mistaken about their query. It was not: a star
+  returns columns the statement never names, whatever can be inferred about which ones they are.
+  The remediation now names the CTE case explicitly, because that is where a caller is most likely
+  to believe the rule cannot mean them.
+
 ## [0.9.5] — 2026-09-19
 
 ### Fixed

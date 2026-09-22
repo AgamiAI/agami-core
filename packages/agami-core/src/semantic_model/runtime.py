@@ -1528,17 +1528,30 @@ def check_no_select_star(sql: str,
                          dialect: "str | None" = None) -> "guardrail.Refusal | None":
     """Refuse a query whose projection list contains `*` or `t.*`.
 
+    **The ban is unconditional, and that is a decision rather than a limitation** (#387). A
+    projected star returns columns the statement never names, so nothing downstream can check them
+    against the model — and that is true whatever could be inferred about which columns they would
+    turn out to be. It holds for a star over a CTE that names its own columns two lines up, and the
+    refusal is not mistaken about such a query even though it may read that way.
+
+    That distinction was tested rather than assumed. #390 implemented the other reading — resolve a
+    star whose columns the statement does spell out — and three review rounds found three separate
+    ways it let an undeclared column through this gate AND `check_column_scope`. Measured against
+    that risk: zero `select_star` refusals in 106 recorded calls on a live deployment. **A column is
+    left out of the model precisely to make it unreadable, and a star is the one construct that
+    returns columns nobody wrote**, so this is the last gate to relax for a caller's convenience.
+
     **The boundary, stated: this is a 4c gate, not a 4b one.** A star is not a reach — it may well
-    resolve to nothing but declared columns. It is an *inability to decide whether there is one*:
-    the column list behind `*` lives in the catalog, the guard judges against the model alone, so
-    the question "does this projection stay inside the declared surface" has no answer here. The
-    refusal says we could not determine, which is why the reason is `undetermined` and not
-    `out_of_scope`. A star defeats column-level scoping (an undeclared column hides behind it) and
-    stops `check_column_scope` from validating what is actually returned, so every
-    projected column must be named. Applies to EVERY select in the tree — outer
-    query, subqueries, CTE bodies, and set-operation (UNION/…) arms — so a star
-    can't hide one level down. `COUNT(*)` and other `agg(*)` are fine: the star sits
-    inside the aggregate, so the projection itself is not a star.
+    resolve to nothing but declared columns. What the gate cannot do is DECIDE that, from the model
+    alone, which is why the reason is `undetermined` and not `out_of_scope`. A star defeats
+    column-level scoping (an undeclared column hides behind it) and stops `check_column_scope` from
+    validating what is actually returned, so every projected column must be named.
+
+    Applies to EVERY select in the tree — outer query, subqueries, CTE bodies, and set-operation
+    (UNION/…) arms — so a star can't hide one level down. `COUNT(*)` and other `agg(*)` are fine:
+    the star sits inside the aggregate, so the projection itself is not a star, and the served
+    instructions say so beside the ban — a rule that read wider than this gate would cost a caller
+    the commonest aggregate there is.
 
     Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, or it is
     not a SELECT-bearing statement (the upstream read-only guard owns non-SELECTs).
@@ -1561,9 +1574,19 @@ def check_no_select_star(sql: str,
                 # offending token IS `*`.
                 return guardrail.refuse(
                     guardrail.RULE_SELECT_STAR,
-                    detail="query uses SELECT * — every column must be named so it can be "
-                           "checked against the semantic model.",
-                    remediation="List the columns explicitly instead of '*'.",
+                    # **Says what is true of the star, not what we happen not to know** (#387).
+                    # The previous wording — "every column must be named so it can be checked" —
+                    # was read alongside the docstring's "the column list behind `*` lives in the
+                    # catalog", and a caller whose star sat over a CTE that named its own columns
+                    # two lines up reasonably concluded the refusal was mistaken about their query.
+                    # It was not: a star RETURNS columns the statement never names, whatever can be
+                    # inferred about which ones they are, and that is the fact the gate turns on.
+                    # The remediation now also says the CTE case explicitly, because that is where
+                    # a caller is most likely to believe the rule cannot mean them.
+                    detail="query uses SELECT * — a star returns columns the statement never "
+                           "names, so they cannot be checked against the semantic model.",
+                    remediation="List the columns explicitly instead of '*', including over a CTE "
+                                "or subquery that already names them.",
                 )
     return None
 
