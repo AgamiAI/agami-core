@@ -46,18 +46,22 @@ def rpc(
     *,
     rid: int = 2,
     bearer: str = "present",
+    capabilities: dict | None = None,
 ) -> Any:
     """POST one JSON-RPC request on `era` and return the raw HTTP response.
 
     On 2025-06-18 this runs the handshake first, on the same client, so every request is preceded
     by what a real client of that era sends. The transport is stateless, so the handshake binds
     nothing; it is sent because skipping it is not what a client does.
+
+    `capabilities` is what the client declares: in `initialize` on 2025-06-18, and in every
+    request's `_meta` on 2026-07-28. None declares none, as before.
     """
     headers = base_headers(bearer)
     body: dict[str, Any] = {"jsonrpc": "2.0", "id": rid, "method": method}
     params = dict(params or {})
     if era == LEGACY:
-        _handshake(client, headers)
+        _handshake(client, headers, capabilities or {})
         headers["MCP-Protocol-Version"] = LEGACY
     else:
         headers["MCP-Protocol-Version"] = era
@@ -67,14 +71,14 @@ def rpc(
         params["_meta"] = {
             **params.get("_meta", {}),
             _PROTOCOL_VERSION_META_KEY: era,
-            _CLIENT_CAPABILITIES_META_KEY: {},
+            _CLIENT_CAPABILITIES_META_KEY: capabilities or {},
         }
     if params:
         body["params"] = params
     return client.post("/mcp", headers=headers, json=body)
 
 
-def _handshake(client: Any, headers: dict[str, str]) -> None:
+def _handshake(client: Any, headers: dict[str, str], capabilities: dict) -> None:
     init = client.post(
         "/mcp",
         headers=headers,
@@ -84,7 +88,7 @@ def _handshake(client: Any, headers: dict[str, str]) -> None:
             "method": "initialize",
             "params": {
                 "protocolVersion": LEGACY,
-                "capabilities": {},
+                "capabilities": capabilities,
                 "clientInfo": {"name": "t", "version": "1"},
             },
         },

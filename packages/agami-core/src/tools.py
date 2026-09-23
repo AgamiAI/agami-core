@@ -804,6 +804,43 @@ def reset_call_source(token: Token[str]) -> None:
     _source_ctx.reset(token)
 
 
+class NeedsInput(NamedTuple):
+    """What a handler returns, in place of its text, to ask the person one question.
+
+    `key` names the answer, `message` is shown to the person, and `schema` is the form's JSON schema.
+    Return it only when `can_ask()` is true: the HTTP transport turns it into an input-required
+    result and, on the retry, hands the answer back through `current_answer()`. Stdlib only, like the
+    rest of this module, so the stdio harness and the lean install never import the SDK for it.
+    """
+
+    key: str
+    message: str
+    schema: dict
+
+
+# Both are set by the HTTP transport inside the context it hands the handler, and nowhere else. They
+# are context variables rather than handler parameters because every handler shares one
+# `(args) -> str` signature with the stdio harness, and folding the answer into `args` would change
+# the argument digest the sealed request state is bound to. The defaults are the stdio answer: no.
+_can_ask_ctx: ContextVar[bool] = ContextVar("agami_can_ask", default=False)
+_answer_ctx: ContextVar[dict | None] = ContextVar("agami_input_answer", default=None)
+
+
+def can_ask() -> bool:
+    """True only on a 2026-07-28 request whose client declared form elicitation, on a deployment that
+    can seal the question's state. A handler checks it before returning `NeedsInput`."""
+    return _can_ask_ctx.get()
+
+
+def current_answer() -> dict | None:
+    """The person's reply to this tool's question, as `{"action": ..., "content": ...}`, or None.
+
+    Only ever set from a request state this server sealed and has verified, under the key that state
+    named, so a client cannot supply an answer to a question it was never asked.
+    """
+    return _answer_ctx.get()
+
+
 @functools.lru_cache(maxsize=None)
 def resolved_org_id() -> str:
     """The single-tenant deployment org id, resolved once per process (F14 / ACE-056; relocated by
@@ -1646,7 +1683,28 @@ def _schema_payload(
     return result
 
 
-def tool_get_datasource_schema(args: dict[str, Any]) -> str:
+def _choice_schema(choices: list[str]) -> dict:
+    """The form asking which datasource: one required choice among the served names."""
+    return {
+        "type": "object",
+        "properties": {"datasource": {"type": "string", "enum": choices, "title": "Datasource"}},
+        "required": ["datasource"],
+    }
+
+
+def _accepted_datasource(answer: dict | None, choices: list[str]) -> str | None:
+    """The datasource an accepted answer chose, when it is one of `choices`, else None.
+
+    Checked against the served list here, on the retry. The form's enum shapes what the person sees;
+    it is not the control, and a client can send back any name it likes.
+    """
+    if answer is None or answer.get("action") != "accept":
+        return None
+    chosen = (answer.get("content") or {}).get("datasource")
+    return chosen if isinstance(chosen, str) and chosen in choices else None
+
+
+def tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     """`_tool_get_datasource_schema` inside the per-request resolve-once scope, so the version this
     response reports and the one `get_cached_org` loads the model under are a single read (#364)."""
     cache_token = begin_request_cache()
@@ -1656,7 +1714,7 @@ def tool_get_datasource_schema(args: dict[str, Any]) -> str:
         end_request_cache(cache_token)
 
 
-def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
+def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     """Return the semantic model for a datasource, **sized to fit the client's context**.
 
     **Scope is what the caller DECLARES**, and nothing inside it is hidden. `area="<name>"` narrows
@@ -1673,12 +1731,48 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
     # With several datasources served, an omission is refused before it can resolve to a fallback
-    # (#327); `_choose_datasource_error` names the choices.
+    # (#327); `_choose_datasource_error` names the choices. A client that can ask the person is
+    # asked instead, and an accepted choice proceeds as though it had been named. A declined or
+    # cancelled form, or anything else, gets the refusal, so the AI can still recover by naming one.
+    answer = current_answer()
     choices = _datasources_to_choose_from(args)
+    if choices is None and answer is not None and not args.get("datasource"):
+        # **An answer we cannot check is not an answer.** `choices` is None when the served set is no
+        # longer ambiguous — it shrank to one, or the store cannot say — which can happen between the
+        # form and the retry. Falling through here would drop the person's choice on the floor and let
+        # the old chain pick the sole, active or configured datasource instead: they chose `acme_erp`
+        # and the answer would come from `acme_crm`, saying nothing. So the choice is checked against
+        # what IS served now, and a choice that is not served is refused the way a declined form is.
+        served = _served_datasources(_current_org_id())
+        chosen = _accepted_datasource(answer, served or [])
+        if chosen is not None:
+            args = {**args, "datasource": chosen}
+        else:
+            return _choose_datasource_error(_current_org_id(), served=served) or json.dumps(
+                {
+                    "error": {
+                        "kind": "datasource_required",
+                        "remediation": (
+                            "that datasource is no longer available; name one in `datasource`."
+                        ),
+                    }
+                },
+                indent=2,
+            )
     if choices is not None:
-        choose = _choose_datasource_error(_current_org_id(), served=choices)
-        if choose is not None:
-            return choose
+        chosen = _accepted_datasource(answer, choices)
+        if chosen is not None:
+            args = {**args, "datasource": chosen}
+        elif answer is None and can_ask():
+            return NeedsInput(
+                "datasource",
+                "Which datasource should I use?",
+                _choice_schema(choices),
+            )
+        else:
+            choose = _choose_datasource_error(_current_org_id(), served=choices)
+            if choose is not None:
+                return choose
     profile = _resolve_call_datasource(args)
     # Read BEFORE the model loads. A deploy landing between the two reads then pairs new content
     # with the old version, and the client's next execute_sql is refused and re-fetches; the other
@@ -4275,7 +4369,7 @@ TOOLS: dict[str, dict[str, Any]] = {
 
 def register(
     name: str,
-    handler: Callable[[dict[str, Any]], str],
+    handler: Callable[[dict[str, Any]], str | NeedsInput],
     description: str,
     inputSchema: dict[str, Any],
 ) -> None:
@@ -4283,7 +4377,13 @@ def register(
 
     Raises on a duplicate name so a consumer can't silently shadow a core tool (e.g. execute_sql).
     Note create_app merges a consumer's extra tools over a *copy* of TOOLS; register() mutates the
-    module global directly (the stdio path uses it), so its dup-guard is the safety net either way."""
+    module global directly (the stdio path uses it), so its dup-guard is the safety net either way.
+
+    A handler may return `NeedsInput` to ask the person one question, and the type says so — a
+    consumer checking its types could not otherwise return what the docs advertise. **Only behind
+    `can_ask()`**, which is false wherever a question cannot be asked: on stdio, and on any request
+    whose client did not declare elicitation. A `NeedsInput` returned regardless reaches a transport
+    that has no form to show and is answered as a crash, which is why the guard is the contract."""
     if name in TOOLS:
         raise ValueError(f"tool {name!r} is already registered")
     TOOLS[name] = {"handler": handler, "description": description, "inputSchema": inputSchema}
