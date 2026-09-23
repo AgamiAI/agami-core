@@ -661,17 +661,26 @@ def build_server(
     def _result_meta(name: str, arguments: dict, result_text: str) -> dict | None:
         """The result hook's object for this call's `_meta`, or None. Never raises: the hook adds
         output, so its failure must not become the call's failure — the text it would have sat
-        beside is already a complete answer."""
+        beside is already a complete answer.
+
+        The hook is handed a COPY of the arguments, so what it does to them stays its own and the
+        audit row still records the call. Copied here rather than at the call site because this runs
+        on a worker thread and that does not: arguments carry a statement, and a deep copy of one on
+        the event loop is a stall every call would pay for having a hook at all."""
         try:
-            returned = result_hook(name, arguments, result_text)
+            returned = result_hook(name, copy.deepcopy(arguments), result_text)
             if returned is None:
                 return None
             if not isinstance(returned, Mapping):
                 raise TypeError(f"returned {type(returned).__name__}, not an object")
             added = dict(returned)
+            if any(not isinstance(key, str) for key in added):
+                raise TypeError("returned an object with a non-string key")
             # Checked here, not left to the SDK: a value JSON cannot carry would fail while the
             # answer is being written, after this call has already been recorded as a success.
-            json.dumps(added)
+            # `allow_nan=False` because `json.dumps` takes NaN and the infinities by default and
+            # writes them as bare words no JSON reader is obliged to accept.
+            json.dumps(added, allow_nan=False)
         except Exception:
             _log.warning(
                 "tool %r: the result hook failed; answered without its _meta",
@@ -788,11 +797,7 @@ def build_server(
                 # nothing it sets reaches the typed outcome the audit write reads from
                 # `handler_ctx`; and on a copy of the arguments, which that write records too.
                 result_meta = await run_blocking(
-                    handler_ctx.copy().run,
-                    _result_meta,
-                    name,
-                    copy.deepcopy(arguments),
-                    result_text,
+                    handler_ctx.copy().run, _result_meta, name, arguments, result_text
                 )
             # None is the field's default, so without a hook the answer is built exactly as before.
             return mt.CallToolResult(

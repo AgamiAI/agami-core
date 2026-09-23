@@ -438,7 +438,15 @@ def test_a_raising_hook_drops_its_meta_and_warns_once(era, caplog):
 
 
 @pytest.mark.parametrize(
-    "returned", [["not", "an", "object"], {"when": object()}], ids=["list", "unserializable"]
+    "returned",
+    [
+        ["not", "an", "object"],
+        {"when": object()},
+        {"ratio": float("nan")},
+        {"also": float("inf")},
+        {1: "a key JSON cannot carry"},
+    ],
+    ids=["list", "unserializable", "nan", "infinity", "non-string-key"],
 )
 @pytest.mark.parametrize("era", ERAS)
 def test_a_non_object_hook_return_is_dropped(era, returned, caplog):
@@ -472,6 +480,31 @@ def test_a_hook_returning_none_adds_nothing_and_warns_nothing(era, caplog):
         ]
     assert _hook_meta(result) == {} and "structuredContent" not in result
     assert _hook_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("era", ERAS)
+def test_the_hook_is_handed_a_copy_of_the_arguments(era, monkeypatch):
+    """What the hook does to the arguments stays its own: the audit row records the call. The copy is
+    taken on the worker, not on the event loop, where a deep copy of a statement would stall every
+    call that has a hook at all."""
+    rows = []
+    monkeypatch.setattr(mcp_http, "record_tool_call", lambda **row: rows.append(row))
+    seen = {}
+
+    def meddle(name, arguments, result_text):
+        seen["got"] = dict(arguments)
+        arguments["where"] = "rewritten by the hook"
+        return None
+
+    taking_where = {
+        "type": "object",
+        "properties": {"where": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    app = _app({"demo_probe": _tool(inputSchema=taking_where)}, hook=meddle)
+    _call(app, era, "demo_probe", {"where": "the caller's own"})
+    assert seen["got"] == {"where": "the caller's own"}
+    assert rows[0]["arguments"] == {"where": "the caller's own"}
 
 
 @pytest.mark.parametrize("era", ERAS)

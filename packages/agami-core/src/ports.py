@@ -172,6 +172,17 @@ class Adapters:
     # and its page come from the registry, never from this predicate. See `mcp_http.build_server` for
     # where it is applied (both list AND call, deliberately).
     tool_visibility: Callable[[str], bool] | None = None
+    # `statement_limits(org_id) -> {"max_rows": int | None, "timeout_s": int | None} | None` supplies an
+    # organisation's own row cap and statement deadline (#329). None (the default) is today's
+    # behaviour: every organisation gets `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`. Core stores no
+    # such setting — the consumer owns the storage and the admin screen, core only asks — and a
+    # missing, None or unusable value falls back to the environment. See
+    # `tools.set_statement_limits_provider` for the contract and `tools.pinned_statement_limits` for how
+    # one call's answer is held identical on both sides of the fork.
+    statement_limits: Callable[[str], Mapping[str, Any] | None] | None = None
+    # **Appended, and new fields must be too.** `Adapters` is public and not keyword-only, so a
+    # consumer calling it positionally binds by POSITION: inserting a field above an existing one
+    # silently rebinds theirs (a `statement_limits` provider arriving as this hook, and no limits).
     # `tool_result_hook(tool_name, arguments, result_text) -> Mapping | None` adds a JSON object to a
     # tool result's `_meta`, for an MCP App page to render. `_meta` rather than `structuredContent`,
     # because a client may give the model `structuredContent` in place of the text. None (the default)
@@ -181,11 +192,3 @@ class Adapters:
     tool_result_hook: Callable[[str, Mapping[str, Any], str], Mapping[str, Any] | None] | None = (
         None
     )
-    # `statement_limits(org_id) -> {"max_rows": int | None, "timeout_s": int | None} | None` supplies an
-    # organisation's own row cap and statement deadline (#329). None (the default) is today's
-    # behaviour: every organisation gets `AGAMI_SQL_MAX_ROWS` / `AGAMI_SQL_TIMEOUT_S`. Core stores no
-    # such setting — the consumer owns the storage and the admin screen, core only asks — and a
-    # missing, None or unusable value falls back to the environment. See
-    # `tools.set_statement_limits_provider` for the contract and `tools.pinned_statement_limits` for how
-    # one call's answer is held identical on both sides of the fork.
-    statement_limits: Callable[[str], Mapping[str, Any] | None] | None = None
