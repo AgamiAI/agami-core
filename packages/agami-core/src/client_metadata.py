@@ -48,8 +48,13 @@ class ClientMetadataError(Exception):
 
 def is_metadata_client_id(client_id: str) -> bool:
     """True when `client_id` is a URL. An `http` URL counts, so it is refused here rather than looked up
-    as a registered id that happens to start with a scheme."""
-    return client_id.startswith(("https://", "http://"))
+    as a registered id that happens to start with a scheme.
+
+    **Case-insensitively, because a scheme is** (RFC 3986 §3.1), and this decides which rules apply:
+    a `HTTPS://` id read as a registered one would take the fallbacks a registered client gets and
+    skip the document's own redirect list, which is the whole control for a client that never
+    registered."""
+    return client_id.lower().startswith(("https://", "http://"))
 
 
 async def redirect_uris(client_id: str) -> list[str]:
@@ -82,6 +87,11 @@ def _check_url(url: str) -> SplitResult:
         raise ClientMetadataError("client_id is not a valid URL") from exc
     if parts.scheme != "https" or not parts.hostname or not parts.path:
         raise ClientMetadataError("client_id must be an https URL with a host and a path")
+    # `:0` parses, and `port or 443` two calls down would then read it as "no port given" and connect
+    # on 443 — validating a document the id does not name. No port at all is still 443; an explicit
+    # zero is not a port.
+    if parts.port == 0:
+        raise ClientMetadataError("client_id must not name port 0")
     if "#" in url or "@" in parts.netloc:
         raise ClientMetadataError("client_id must not carry a fragment or userinfo")
     # The name goes out as a Host header and TLS SNI, which take ASCII only; the idna codec is what TLS

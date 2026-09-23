@@ -111,12 +111,22 @@ def test_a_valid_document_yields_its_redirect_uris(net):
     [
         (URL, True),
         ("http://app.example.com/client.json", True),  # routed here so it is REFUSED, not looked up
+        # A scheme is case-insensitive (RFC 3986 §3.1). Read as a registered id instead, one of these
+        # would take a registered client's redirect fallbacks and never open the document at all.
+        ("HTTPS://app.example.com/client.json", True),
+        ("Http://app.example.com/client.json", True),
         ("3f2a9c", False),
         ("", False),
     ],
 )
 def test_is_metadata_client_id(client_id, expected):
     assert client_metadata.is_metadata_client_id(client_id) is expected
+
+
+def test_a_client_id_naming_port_zero_is_refused(net):
+    """`:0` parses, and reading it as "no port" would fetch on 443 — a document the id does not name."""
+    with pytest.raises(client_metadata.ClientMetadataError, match="port 0"):
+        _redirect_uris("https://app.example.com:0/client.json")
 
 
 # --- the document itself -----------------------------------------------------------------------------
