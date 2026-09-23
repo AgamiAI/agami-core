@@ -14,6 +14,19 @@ below corresponds to one such version.
 
 ### Changed
 
+- **Read-only tools now say so on the wire.** Every core tool (`list_datasources`,
+  `get_datasource_schema`, `get_prompt_examples`, `execute_sql`) is listed with the MCP
+  `readOnlyHint` annotation, `destructiveHint` off, on both transports (HTTP and the stdio harness
+  `/agami-serve` wires into Claude Desktop). A client's confirmation policy keys off these hints:
+  Gemini Enterprise treated each un-annotated tool as potentially destructive and asked the person
+  before every call, once per distinct argument set, so each query cost a prompt. The hint is opt-in
+  per registry entry (`read_only: True`, or `tools.register(..., read_only=True)`) and only by the
+  literal `True`; `create_app` refuses a non-bool value. A consumer tool that writes keeps the
+  client's default caution. After deploying, reload the connector's actions so the hints are
+  re-imported.
+- **`mcp` floor raised to 1.7**, the first release whose `mcp.types` carries `ToolAnnotations`. An
+  older SDK would fail every `tools/list`.
+
 - **The `SELECT *` ban is now stated up front, not only inside the refusal (#387).** A star is
   refused wherever it appears — the outer query, a subquery, a CTE body, `t.*` — and the served
   instructions never said so, so a client met the strictest rule on this surface for the first time
