@@ -19,14 +19,15 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import json
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import admin
 import onboarding
@@ -71,6 +72,8 @@ if TYPE_CHECKING:
     from mcp.server.transport_security import TransportSecuritySettings
 
 _log = logging.getLogger(__name__)
+# The `_meta` key prefix the MCP specification reserves for itself; a result hook never writes under it.
+_RESERVED_META_PREFIX = "io.modelcontextprotocol/"
 
 # The authenticated user for the in-flight tool call. Set in `handle_mcp` (the raw-ASGI endpoint, which
 # runs in the request's task) so it propagates into the MCP dispatch — the tool handler `_call_tool`
@@ -427,10 +430,49 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     return json.dumps(body, indent=2) + suffix
 
 
+def _declared_pages(registry: dict) -> dict[str, dict]:
+    """Every `ui://` page the registry declares, by URI: its HTML and the tools that link to it.
+
+    Checked here, in `build_server`, because `create_app` builds its server at construction: one
+    chokepoint, so a malformed declaration fails composition naming its tool on both entry points,
+    not later as a 500 inside `resources/read`."""
+    pages: dict[str, dict] = {}
+    for tool_name, meta in registry.items():
+        if not isinstance(meta.get("app_only", False), bool):
+            raise ValueError(f"extra tool {tool_name!r} app_only must be a bool")
+        page = meta.get("page")
+        if page is None:
+            continue
+        # Exactly these two keys. A page that could name a CSP relaxation, a domain or a device
+        # permission could ask the host to let it reach the network; without them it runs in the
+        # host's default sandbox, and the HTML itself need not be read to know that.
+        if not isinstance(page, dict) or set(page) != {"uri", "html"}:
+            raise ValueError(
+                f"extra tool {tool_name!r} page may declare only uri and html "
+                "(no csp, domain or permissions)"
+            )
+        uri, html = page["uri"], page["html"]
+        if not isinstance(uri, str) or not uri.startswith("ui://"):
+            raise ValueError(f"extra tool {tool_name!r} page uri must use the ui:// scheme")
+        if not isinstance(html, str):
+            raise ValueError(f"extra tool {tool_name!r} page html must be a str")
+        # Two tools may share a page; they may not disagree about what it is, or which body a
+        # client got would depend on registry order.
+        declared = pages.setdefault(uri, {"html": html, "tools": []})
+        if declared["html"] != html:
+            raise ValueError(
+                f"extra tool {tool_name!r} page {uri!r} differs from the html another tool "
+                "declared for it"
+            )
+        declared["tools"].append(tool_name)
+    return pages
+
+
 def build_server(
     registry: dict | None = None,
     extra_instructions: str | None = None,
     visibility: Callable[[str], bool] | None = None,
+    result_hook: Callable[[str, Mapping[str, Any], str], Mapping[str, Any] | None] | None = None,
 ):
     """A low-level MCP Server whose tool surface IS the given registry — list_tools / call_tool read
     from it, so HTTP advertises exactly what stdio does (no duplicate defs). Defaults to the shared
@@ -452,12 +494,34 @@ def build_server(
 
     SUBTRACTIVE ONLY. It filters the one shared registry; it never adds, renames, or reshapes a tool. A
     surviving tool's description and inputSchema pass through untouched, so a consumer cannot fork the
-    surface into a private variant under cover of "visibility".
+    surface into a private variant under cover of "visibility". A tool's `_meta.ui` and its page come
+    from the registry entry, never from the predicate.
+
+    A registry entry may carry two optional MCP App keys. `"page": {"uri": "ui://…", "html": str}`
+    links a page to the tool through `_meta.ui.resourceUri` and serves it over `resources/list` and
+    `resources/read`; a page declares nothing else (no csp, domain or permissions), and a malformed
+    one fails the build naming its tool. A page is visible when any tool linking it is, and a hidden
+    page answers exactly as an undeclared one. `"app_only": True` marks the tool
+    `_meta.ui.visibility: ["app"]`, which asks a host to keep it from the model. **It is a marking,
+    not a control: any client can still call an app-only tool, so its handler must check its own
+    scope.** With no page declared, no resource handler is registered, so the capabilities are
+    exactly what they were.
+
+    `result_hook(name, arguments, result_text) -> Mapping | None` adds its object to the result's
+    `_meta`, beside the unchanged text. `_meta` and not `structuredContent`: a client may hand a
+    result's `structuredContent` to the model in place of its text, so an object meant for a page
+    there would replace the answer the model reads, while no client puts `_meta` in front of the
+    model and an MCP Apps host passes the whole result, `_meta` included, to the page. It runs off
+    the loop in the handler's context, only on a result a handler returned — never on an unknown,
+    hidden, invalid or crashed call. A hook that raises or returns anything but a JSON object is
+    logged and dropped, and a key under the protocol's reserved `io.modelcontextprotocol/` prefix is
+    dropped with a warning. None (the default) is exactly today's behaviour.
     """
     import jsonschema
     import mcp.types as mt
     import referencing
     from mcp.server import Server, ServerRequestContext
+    from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
     from mcp.server.caching import CacheHint
     from mcp.shared.exceptions import MCPError
 
@@ -471,6 +535,7 @@ def build_server(
     # it after would mean a hidden tool still had its schema rewritten, which is work for nothing.
     if thread_id_is_required():
         registry = require_thread_id(registry)
+    pages = _declared_pages(registry)
 
     # One validator per tool, built once. `jsonschema.validate` re-checks the schema against its
     # metaschema on every call, which is ~2ms of pure repetition, and raises SchemaError mid-call for a
@@ -514,6 +579,16 @@ def build_server(
     if extra_instructions:
         instructions = f"{instructions}\n{extra_instructions}"
 
+    def _ui_meta(entry: dict) -> dict | None:
+        # From the registry entry, never from the visibility predicate: the link beside a tool is
+        # part of what the consumer registered, and the schema a client reads is untouched by it.
+        ui: dict = {}
+        if entry.get("page") is not None:
+            ui["resourceUri"] = entry["page"]["uri"]
+        if entry.get("app_only"):
+            ui["visibility"] = ["app"]
+        return {"ui": ui} if ui else None
+
     def _described(names: list[str]) -> list:
         return [
             # `tool_description` states execute_sql's limits for THIS caller's organisation (#329).
@@ -523,6 +598,7 @@ def build_server(
                 name=name,
                 description=tool_description(name, registry[name]["description"]),
                 input_schema=registry[name]["inputSchema"],
+                meta=_ui_meta(registry[name]),
             )
             for name in names
         ]
@@ -542,6 +618,36 @@ def build_server(
             return mt.ListToolsResult(tools=_described(names))
         return mt.ListToolsResult(tools=await run_blocking(_described, names))
 
+    def _page_visible(page: dict) -> bool:
+        # A page is as visible as the most visible tool that links it. Checked on the loop, in the
+        # request task, as `_on_list_tools` checks tools, so the predicate sees the same context.
+        return any(_visible(tool_name) for tool_name in page["tools"])
+
+    async def _on_list_resources(
+        ctx: ServerRequestContext, params: mt.PaginatedRequestParams | None
+    ) -> mt.ListResourcesResult:
+        return mt.ListResourcesResult(
+            resources=[
+                mt.Resource(uri=uri, name=uri, mime_type=APP_MIME_TYPE)
+                for uri, page in pages.items()
+                if _page_visible(page)
+            ]
+        )
+
+    async def _on_read_resource(
+        ctx: ServerRequestContext, params: mt.ReadResourceRequestParams
+    ) -> mt.ReadResourceResult:
+        page = pages.get(params.uri)
+        # A hidden page answers as an undeclared one, byte for byte, for the reason a hidden tool
+        # answers `Unknown tool`: a different answer would say the page exists but is withheld.
+        if page is None or not _page_visible(page):
+            raise MCPError(code=mt.INVALID_PARAMS, message=f"Unknown resource: {params.uri}")
+        return mt.ReadResourceResult(
+            contents=[
+                mt.TextResourceContents(uri=params.uri, mime_type=APP_MIME_TYPE, text=page["html"])
+            ]
+        )
+
     def _crashed(name: str) -> mt.CallToolResult:
         """The one answer to a call that raised, whatever raised. The exception's own words are an
         enumeration channel — a driver's error can name a column the caller never sent (migration
@@ -551,6 +657,47 @@ def build_server(
             content=[mt.TextContent(type="text", text=f"Error executing tool {name}")],
             is_error=True,
         )
+
+    def _result_meta(name: str, arguments: dict, result_text: str) -> dict | None:
+        """The result hook's object for this call's `_meta`, or None. Never raises: the hook adds
+        output, so its failure must not become the call's failure — the text it would have sat
+        beside is already a complete answer.
+
+        The hook is handed a COPY of the arguments, so what it does to them stays its own and the
+        audit row still records the call. Copied here rather than at the call site because this runs
+        on a worker thread and that does not: arguments carry a statement, and a deep copy of one on
+        the event loop is a stall every call would pay for having a hook at all."""
+        try:
+            returned = result_hook(name, copy.deepcopy(arguments), result_text)
+            if returned is None:
+                return None
+            if not isinstance(returned, Mapping):
+                raise TypeError(f"returned {type(returned).__name__}, not an object")
+            added = dict(returned)
+            if any(not isinstance(key, str) for key in added):
+                raise TypeError("returned an object with a non-string key")
+            # Checked here, not left to the SDK: a value JSON cannot carry would fail while the
+            # answer is being written, after this call has already been recorded as a success.
+            # `allow_nan=False` because `json.dumps` takes NaN and the infinities by default and
+            # writes them as bare words no JSON reader is obliged to accept.
+            json.dumps(added, allow_nan=False)
+        except Exception:
+            _log.warning(
+                "tool %r: the result hook failed; answered without its _meta",
+                name,
+                exc_info=True,
+            )
+            return None
+        # The protocol writes its own keys under this prefix (the SDK stamps `serverInfo` into the
+        # same `_meta` on 2026-07-28); a consumer's key there would contradict it, so it never lands.
+        reserved = [key for key in added if str(key).startswith(_RESERVED_META_PREFIX)]
+        if reserved:
+            _log.warning(
+                "tool %r: the result hook's reserved _meta keys dropped: %s", name, reserved
+            )
+            for key in reserved:
+                del added[key]
+        return added or None
 
     async def _on_call_tool(
         ctx: ServerRequestContext, params: mt.CallToolRequestParams
@@ -643,7 +790,20 @@ def build_server(
                 return _with_caller_identity(meta["handler"](arguments), actor)
 
             result_text = await run_blocking(handler_ctx.run, _run_and_stamp)
-            return mt.CallToolResult(content=[mt.TextContent(type="text", text=result_text)])
+            result_meta = None
+            if result_hook is not None:
+                # Off the loop for the handler's reason — the hook is the consumer's code. In a COPY
+                # of the handler's context, so the actor, session and organisation are all live but
+                # nothing it sets reaches the typed outcome the audit write reads from
+                # `handler_ctx`; and on a copy of the arguments, which that write records too.
+                result_meta = await run_blocking(
+                    handler_ctx.copy().run, _result_meta, name, arguments, result_text
+                )
+            # None is the field's default, so without a hook the answer is built exactly as before.
+            return mt.CallToolResult(
+                content=[mt.TextContent(type="text", text=result_text)],
+                meta=result_meta,
+            )
         except Exception as exc:
             # Logged here, once, with its traceback: this is the only place the reason is kept for
             # an operator, now that it no longer reaches the client. (If the audit write then fails
@@ -692,14 +852,26 @@ def build_server(
     # the SDK's default handler already returns `instructions` below, so it needs only the hint.
     # Sent on 2026-07-28 only: the 2025-06-18 results have no fields for it.
     hint = CacheHint(ttl_ms=60_000, scope="private")
-    return Server(
+    cache_hints = {"tools/list": hint, "server/discover": hint}
+    # The resource handlers are registered only when a page is declared, because the SDK advertises
+    # the `resources` capability from whether they are: with no page, a client sees exactly the
+    # server it saw before pages existed, "method not found" included. Pages follow the tools'
+    # visibility, so their answers are per caller too, and get the same private hint.
+    if pages:
+        cache_hints |= {"resources/list": hint, "resources/read": hint}
+    server = Server(
         SERVER_NAME,
         version=server_version(),
         instructions=instructions,
-        cache_hints={"tools/list": hint, "server/discover": hint},
+        cache_hints=cache_hints,
         on_list_tools=_on_list_tools,
         on_call_tool=_on_call_tool,
+        on_list_resources=_on_list_resources if pages else None,
+        on_read_resource=_on_read_resource if pages else None,
     )
+    if pages:
+        server.extensions[EXTENSION_ID] = {}
+    return server
 
 
 def _is_loopback(base: str) -> bool:
@@ -788,7 +960,12 @@ def create_app(
 
     `extra_instructions` is APPENDED to the base MCP instructions and surfaced to the model via the
     MCP `initialize` and `server/discover` results (never replaces the base protocol — see
-    `build_server`). None = no-op."""
+    `build_server`). None = no-op.
+
+    An `extra_tools` entry may also carry `"page": {"uri": "ui://…", "html": str}` and
+    `"app_only": True`, and `adapters.tool_result_hook` may add to a result's `_meta`; see
+    `build_server`. An app-only tool is still callable by any client, so its handler must check its
+    own scope."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Fail fast at construction if PUBLIC_BASE_URL is unset — not per-request inside the middleware
@@ -833,6 +1010,7 @@ def create_app(
             registry,
             extra_instructions=extra_instructions,
             visibility=getattr(adapters, "tool_visibility", None),
+            result_hook=getattr(adapters, "tool_result_hook", None),
         ),
         json_response=True,
         stateless=True,
