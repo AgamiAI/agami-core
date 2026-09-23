@@ -443,6 +443,80 @@ def test_an_accepted_answer_outside_the_served_list_never_resolves(content, monk
     assert resolved == []
 
 
+def _shrinking(served_then: list | None, monkeypatch):
+    """`_served_datasources` that answers `SERVED` until the form is issued, then `served_then` —
+    a deploy, an entitlement change or a store blip landing between the question and the retry."""
+    calls: list[int] = []
+
+    def served(_org):
+        calls.append(1)
+        return list(SERVED) if len(calls) <= 1 else served_then
+
+    monkeypatch.setattr(tools, "_served_datasources", served)
+    tools._sole_served_datasource.cache_clear()
+    tools._SOLE_SERVED.clear()
+
+
+def test_a_choice_that_is_no_longer_served_is_refused_not_quietly_swapped(monkeypatch):
+    """The served set can shrink between the form and the retry, and then there is nothing to check
+    the answer against. Falling through would drop the choice and let the old chain pick the sole
+    datasource instead: they chose `acme_erp` and the numbers would come from `acme_crm`."""
+    resolved: list = []
+    real = tools._resolve_call_datasource
+    monkeypatch.setattr(
+        tools, "_resolve_call_datasource", lambda args: resolved.append(args) or real(args)
+    )
+    _shrinking(["acme_crm"], monkeypatch)
+
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        state = _call(client)["result"]["requestState"]
+        retried = _call(client, inputResponses=_accept("acme_erp"), requestState=state)
+
+    body = json.JSONDecoder().raw_decode(_text(retried))[0]
+    assert body["error"]["kind"] == "datasource_required"
+    assert body["error"]["datasources"] == ["acme_crm"]
+    assert resolved == []
+
+
+def test_a_choice_still_served_alone_is_honoured(monkeypatch, tmp_path):
+    """The other half: the set shrank TO the chosen one, so the answer is still the answer."""
+    _write_profile(tmp_path / "acme_erp")
+    resolved: list = []
+    real = tools._resolve_call_datasource
+    monkeypatch.setattr(
+        tools, "_resolve_call_datasource", lambda args: resolved.append(args) or real(args)
+    )
+    _shrinking(["acme_erp"], monkeypatch)
+
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        state = _call(client)["result"]["requestState"]
+        retried = _call(client, inputResponses=_accept("acme_erp"), requestState=state)
+
+    assert json.JSONDecoder().raw_decode(_text(retried))[0].get("error") is None
+    # The choice reached the resolver, rather than the sole-served chain picking for the person.
+    assert [args.get("datasource") for args in resolved] == ["acme_erp"]
+
+
+def test_a_choice_that_cannot_be_checked_at_all_is_refused(monkeypatch):
+    """The store cannot say what is served on the retry. An unverifiable answer is not an answer, and
+    the old chain must not pick for the person instead."""
+    resolved: list = []
+    real = tools._resolve_call_datasource
+    monkeypatch.setattr(
+        tools, "_resolve_call_datasource", lambda args: resolved.append(args) or real(args)
+    )
+    _shrinking(None, monkeypatch)
+
+    with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
+        state = _call(client)["result"]["requestState"]
+        retried = _call(client, inputResponses=_accept("acme_erp"), requestState=state)
+
+    body = json.JSONDecoder().raw_decode(_text(retried))[0]
+    assert body["error"]["kind"] == "datasource_required"
+    assert "no longer available" in body["error"]["remediation"]
+    assert resolved == []
+
+
 def test_both_rounds_write_a_tool_calls_row(store_url):
     with TestClient(_app(), base_url=PUBLIC_BASE_URL) as client:
         state = _call(client)["result"]["requestState"]

@@ -1734,16 +1734,39 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     # (#327); `_choose_datasource_error` names the choices. A client that can ask the person is
     # asked instead, and an accepted choice proceeds as though it had been named. A declined or
     # cancelled form, or anything else, gets the refusal, so the AI can still recover by naming one.
+    answer = current_answer()
     choices = _datasources_to_choose_from(args)
+    if choices is None and answer is not None and not args.get("datasource"):
+        # **An answer we cannot check is not an answer.** `choices` is None when the served set is no
+        # longer ambiguous — it shrank to one, or the store cannot say — which can happen between the
+        # form and the retry. Falling through here would drop the person's choice on the floor and let
+        # the old chain pick the sole, active or configured datasource instead: they chose `acme_erp`
+        # and the answer would come from `acme_crm`, saying nothing. So the choice is checked against
+        # what IS served now, and a choice that is not served is refused the way a declined form is.
+        served = _served_datasources(_current_org_id())
+        chosen = _accepted_datasource(answer, served or [])
+        if chosen is not None:
+            args = {**args, "datasource": chosen}
+        else:
+            return _choose_datasource_error(_current_org_id(), served=served) or json.dumps(
+                {
+                    "error": {
+                        "kind": "datasource_required",
+                        "remediation": (
+                            "that datasource is no longer available; name one in `datasource`."
+                        ),
+                    }
+                },
+                indent=2,
+            )
     if choices is not None:
-        answer = current_answer()
         chosen = _accepted_datasource(answer, choices)
         if chosen is not None:
             args = {**args, "datasource": chosen}
         elif answer is None and can_ask():
             return NeedsInput(
                 "datasource",
-                "Which datasource should this question use?",
+                "Which datasource should I use?",
                 _choice_schema(choices),
             )
         else:
@@ -4346,7 +4369,7 @@ TOOLS: dict[str, dict[str, Any]] = {
 
 def register(
     name: str,
-    handler: Callable[[dict[str, Any]], str],
+    handler: Callable[[dict[str, Any]], str | NeedsInput],
     description: str,
     inputSchema: dict[str, Any],
 ) -> None:
@@ -4354,7 +4377,13 @@ def register(
 
     Raises on a duplicate name so a consumer can't silently shadow a core tool (e.g. execute_sql).
     Note create_app merges a consumer's extra tools over a *copy* of TOOLS; register() mutates the
-    module global directly (the stdio path uses it), so its dup-guard is the safety net either way."""
+    module global directly (the stdio path uses it), so its dup-guard is the safety net either way.
+
+    A handler may return `NeedsInput` to ask the person one question, and the type says so — a
+    consumer checking its types could not otherwise return what the docs advertise. **Only behind
+    `can_ask()`**, which is false wherever a question cannot be asked: on stdio, and on any request
+    whose client did not declare elicitation. A `NeedsInput` returned regardless reaches a transport
+    that has no form to show and is answered as a crash, which is why the guard is the contract."""
     if name in TOOLS:
         raise ValueError(f"tool {name!r} is already registered")
     TOOLS[name] = {"handler": handler, "description": description, "inputSchema": inputSchema}
