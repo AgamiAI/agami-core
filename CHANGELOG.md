@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-09-23
+
 ### Changed
 
 - **Read-only tools now say so on the wire.** Every core tool (`list_datasources`,
