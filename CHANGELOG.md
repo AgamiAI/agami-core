@@ -12,6 +12,38 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_datasource_schema` stops repeating the join graph at both tiers.** Two wire-shape
+  changes to the same response, each measured on a wide model (22 subject areas, 76 tables).
+
+  `mode="index"` sent `cross_area_relationships` as one entry per declared cross-area edge. The
+  projection drops the join columns on purpose — mechanics belong on the `dataset_names` tier —
+  but the column is the only thing telling apart several edges that reach the same pair of
+  tables, so those serialized identically and every copy was sent: 283 entries for 181 distinct
+  facts, 32,596 chars. It is now an adjacency map, `{"joins": {table: [table, …]}, "areas":
+  {table: subject_area}}`, at 7,640 chars. `areas` keeps the area names the per-edge form carried
+  and is the only place a response names the subject area a table belongs to; it resolves from
+  where a table is *defined*, so a model using TableRef multi-membership gets a stable answer
+  rather than one that depends on declaration order. The key is omitted entirely when there is
+  nothing to route — an empty map is truthy where the old empty list was not.
+
+  `dataset_names` sent every relationship *touching* a requested table in full. On a hub table —
+  a user or group dimension half the warehouse references — that is the whole graph: a two-table
+  request returned 136 edges, of which 4 joined the two tables asked for, and the block ran
+  98,724 of the response's 129,858 chars. Every edge still ships, because the scope gate admits
+  any table the model declares and a correlated `EXISTS` needs only the join key. What changes is
+  the detail: an edge between two requested tables is unchanged, and every other edge carries its
+  join — endpoints, columns or the `on:` expression, schemas, cardinality, join type — without
+  the sign-off block, review state, confidence, subject-area labels or the generated description.
+  The trust block costs nothing to omit: the receipt recomputes review state and sign-off for
+  each join the statement actually wrote. `executable` survives whenever it is not `same_engine`,
+  since a `split` edge written as a `JOIN` cannot run.
+
+  Both tiers now also drop `for_questions_about` (deprecated, never written) and `executable` at
+  its default, so one response no longer omits the common value on one edge and states it on the
+  next.
+
 ## [0.9.6] — 2026-09-23
 
 ### Changed

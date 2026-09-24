@@ -574,16 +574,38 @@ def _lean_edge(d: dict[str, Any]) -> dict[str, Any]:
     """An edge projected to its join, for a table the caller did not ask for.
 
     Dropped: the sign-off block, `review_state`/`confidence`, the subject-area labels, and
-    `description` — which only restates the two columns present in the same object. None of it
-    reaches the SQL, and on a wide model it is most of the bytes.
+    `description` — whose GENERATED form restates the two columns present in the same object
+    (a curator can write a real one, and that is the case this trades away).
+
+    Dropping the trust block costs the agent nothing, which is the part worth stating: the
+    receipt recomputes `review_state` and the sign-off for each join the STATEMENT actually
+    wrote, from the model, at execution time (`runtime.py`). An unreviewed-join warning does not
+    depend on these fields having ridden along in the schema response.
 
     `executable` survives whenever it is NOT `same_engine`: it says whether one statement can
     perform this join at all, so dropping it on a `split` edge invites a join that cannot run.
-    Omitting the common value keeps the usual case free and the federated case correct.
+    Omitting the common value keeps the ordinary case free and the cross-engine case correct.
+    (`federated` is not reachable here — `Relationship` rejects it outright as metric-only, so
+    the values that survive this branch are `split` and `informational`.)
     """
     out = {k: d[k] for k in _JOIN_KEYS if k in d}
-    if d.get("executable") and d["executable"] != "same_engine":
+    # `executable` has a non-optional default, so `exclude_none` always leaves it present.
+    if d["executable"] != "same_engine":
         out["executable"] = d["executable"]
+    return out
+
+
+def _full_edge(d: dict[str, Any]) -> dict[str, Any]:
+    """An edge for a table pair the caller asked for — everything, minus what says nothing.
+
+    `for_questions_about` is deprecated and never written (see its note on `Relationship`), so it
+    rides along as an empty list on every edge. `executable` is dropped at its default for the
+    reason `_lean_edge` drops it: naming the ordinary case on every edge is repetition, and a
+    response that omits it on one edge and states it on the next is worse than either rule.
+    """
+    out = {k: v for k, v in d.items() if k != "for_questions_about"}
+    if out.get("executable") == "same_engine":
+        del out["executable"]
     return out
 
 
@@ -592,15 +614,14 @@ def _relationships_among(
 ) -> list[dict[str, Any]]:
     """Every edge touching a requested table — in full where BOTH ends were requested.
 
-    An edge to a table the caller did not ask for cannot be written as an explicit join: the
-    caller has no columns for the other side. It is still worth sending, because the scope gate
-    admits any table the model declares and a correlated `EXISTS` needs only the join key — so
-    dropping those edges would force a round trip for the subquery case. Sending them in full is
-    the other extreme: on a hub table (a user or group dimension half the warehouse references)
-    the block reached 98,724 chars for a two-table request, of which four edges joined the two
-    tables asked for.
+    An edge to a table the caller did not ask for cannot SELECT from the other side: the caller
+    has no columns for it. It is still worth sending, because the scope gate admits any table the
+    model declares and a correlated `EXISTS` needs only the join key — so dropping those edges
+    would force a round trip for the subquery case. Sending them in full is the other extreme: on
+    a hub table (a user or group dimension half the warehouse references) the block reached
+    98,724 chars for a two-table request, of which four edges joined the two tables asked for.
 
-    So: full detail where the join will be written, the join itself everywhere else.
+    So: full detail where the caller can read both sides, the join itself everywhere else.
     """
     names = {_table_alias(t) for t in tables} | set(tables)
 
@@ -616,12 +637,12 @@ def _relationships_among(
         for rel in sa.relationships:
             if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
                 d = rel.model_dump(exclude_none=True)
-                out.append(d if _both_ends_requested(rel) else _lean_edge(d))
+                out.append(_full_edge(d) if _both_ends_requested(rel) else _lean_edge(d))
     # cross-area edges touching these tables
     for rel in org.cross_subject_area_relationships:
         if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
             d = rel.model_dump(exclude_none=True)
-            out.append(d if _both_ends_requested(rel) else _lean_edge(d))
+            out.append(_full_edge(d) if _both_ends_requested(rel) else _lean_edge(d))
     return out
 
 

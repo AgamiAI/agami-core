@@ -579,7 +579,8 @@ class Relationship(_Base):
     # lists). It is a natural-language field, so it could only come from LLM enrichment, and that
     # pass covers subject areas and tables but not edges. `get_datasource_schema` used to project
     # it onto every cross-area edge, so a long edge list carried a fraction of its length in
-    # distinct facts; the payload now names the endpoint tables instead.
+    # distinct facts; that tier is an adjacency map now, and the `dataset_names` tier drops the
+    # field from each edge it emits.
     #
     # Kept DECLARED rather than deleted: these models `forbid` unknown keys, so removing the field
     # would fail every model already on disk that carries `for_questions_about: []` — which is what

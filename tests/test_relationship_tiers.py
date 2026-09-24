@@ -133,6 +133,14 @@ def test_an_edge_between_two_requested_tables_keeps_its_full_detail(org):
     assert edge[0]["description"] and edge[0]["review_state"] == "approved"
 
 
+def test_the_full_tier_drops_the_dead_field_and_the_default_executable_too(org):
+    """One response must not omit `same_engine` on one edge and state it on the next, and the
+    deprecated field rides along as an empty list on every edge that does not exclude it."""
+    for e in _rels(org, ["orders", "returns"]):
+        assert "for_questions_about" not in e
+        assert e.get("executable") != "same_engine"
+
+
 def test_an_edge_to_a_table_the_caller_did_not_ask_for_is_the_join_alone(org):
     lean = [e for e in _rels(org, ["orders"]) if e["to_table"] == "users"]
     assert len(lean) == 1
@@ -141,12 +149,54 @@ def test_an_edge_to_a_table_the_caller_did_not_ask_for_is_the_join_alone(org):
 
 
 def test_the_tiers_are_assigned_by_whether_both_ends_were_requested(org):
-    """Field-by-field, so a field added to the model later cannot silently leak into the lean
-    tier or fall out of the full one."""
+    """Checked against the governance list above rather than by diffing the two dumps, so a
+    field newly added to the model is invisible here until someone adds it to that list."""
     for e in _rels(org, ["orders", "returns"]):
         both = {e["from_table"], e["to_table"]} <= {"orders", "returns"}
         carries = [k for k in GOVERNANCE if k in e]
         assert bool(carries) is both, f"tier mismatch on {e['from_table']}->{e['to_table']}"
+
+
+def test_the_schemas_survive_the_lean_tier_when_they_are_set(tmp_path):
+    """`from_schema`/`to_schema` are optional — None on schema-less DBs and on models written
+    before schema-qualified relationships shipped — so the other fixtures leave them off and
+    `exclude_none` strips them. Dropping them from the projection would therefore pass every
+    other test here, and would tell an agent to write `FROM users` for `analytics.users`."""
+    import yaml
+
+    root = tmp_path / "acme"
+    _model(root)
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    for rel in doc["cross_subject_area_relationships"]:
+        rel["from_schema"], rel["to_schema"] = "public", "analytics"
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+
+    lean = [e for e in _rels(L.load_datasource(root), ["orders"]) if e["to_table"] == "users"]
+    assert lean and lean[0]["from_schema"] == "public" and lean[0]["to_schema"] == "analytics"
+
+
+def test_a_schema_qualified_request_still_reaches_the_full_tier(tmp_path):
+    """The tier test normalises both endpoints through `_table_alias`, the same way the
+    membership filter above it does. Without that, a schema-qualified `from_table` against a bare
+    request would silently fall to the lean tier — and every other fixture here uses bare names
+    on both sides, so nothing would say so."""
+    import yaml
+
+    root = tmp_path / "acme"
+    _model(root)
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    doc["cross_subject_area_relationships"] = [
+        {**e, "from_table": f"public.{e['from_table']}", "to_table": "public.users"}
+        for e in doc["cross_subject_area_relationships"]]
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+
+    rels = _rels(L.load_datasource(root), ["orders", "users"])
+    by_pair = {(e["from_table"], e["to_table"]): e for e in rels}
+    assert "description" in by_pair[("public.orders", "public.users")], \
+        "a schema-qualified edge between two requested tables must still be full detail"
+    # And the control: `returns` was not requested, so its edge stays lean even though both
+    # endpoints are spelled the same way.
+    assert "description" not in by_pair[("public.returns", "public.users")]
 
 
 def test_the_on_expression_survives_the_lean_tier(tmp_path):

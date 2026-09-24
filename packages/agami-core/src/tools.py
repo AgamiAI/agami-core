@@ -1405,15 +1405,24 @@ def _cross_area_map(org, scope) -> dict[str, Any]:
     names the subject area a table belongs to, and an agent that wants to scope its next call by
     area has nowhere else to read it.
     """
+    # Resolve the area from where the table is DEFINED, not from whichever edge named it last. A
+    # TableRef lets one table be a member of several areas without being duplicated (the validator
+    # documents that as supported and does not check an edge's declared area against the table's
+    # membership), so two edges can legitimately disagree about a table and reading the area off
+    # the edges makes the answer depend on declaration order in datasource.yaml.
+    defined_in = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+
     joins: dict[str, list[str]] = {}
     areas: dict[str, str] = {}
     for r in org.cross_subject_area_relationships:
         if scope.level != "datasource" and scope.area not in (r.from_subject_area,
                                                               r.to_subject_area):
             continue
-        # A table belongs to one area, so the last writer wins and they agree by construction.
-        areas[r.from_table] = r.from_subject_area
-        areas[r.to_table] = r.to_subject_area
+        # The edge's own labels are the fallback for a table no area defines — an edge may name a
+        # table that is only ever referenced, and a bridge with no area at all is worse than one
+        # resolved the old way.
+        areas[r.from_table] = defined_in.get(r.from_table, r.from_subject_area)
+        areas[r.to_table] = defined_in.get(r.to_table, r.to_subject_area)
         seen = joins.setdefault(r.from_table, [])
         if r.to_table not in seen:
             seen.append(r.to_table)
@@ -1632,6 +1641,12 @@ def _schema_payload(
         "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
         "large_tables": _large_tables(org),
     }
+    # Omitted outright when there is nothing to route, which the table tier already does with this
+    # key. It also keeps the old emptiness test working: the block was a list, so a client writing
+    # `if response["cross_area_relationships"]:` read False on a model with no cross-area edges —
+    # and an empty MAP is truthy, so leaving it in place would silently flip that branch.
+    if not result["cross_area_relationships"]["joins"]:
+        del result["cross_area_relationships"]
     # At area scope the map is that one area. `subject_areas` is not emitted at all on the table
     # tier — that branch does not call this function.
     areas = [sa for sa in org.subject_areas if scope.level == "datasource" or sa.name == scope.area]
@@ -1831,7 +1846,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             # The two blocks this call used to compute and throw away. Without them the call whose
             # whole purpose is per-table detail returned columns and no way to join them — while
             # this tool's own description promised both. `relationships` ships as the loader
-            # produced it (join columns, `on`, cardinality, trust block); `metrics` is re-projected
+            # produced it — in full for an edge between two requested tables, as the join alone
+            # for one reaching a table the caller has no columns for; `metrics` is re-projected
             # through `_metric_full` rather than shipped raw, because the loader's dump carries the
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
             "relationships": ctx["relationships"],

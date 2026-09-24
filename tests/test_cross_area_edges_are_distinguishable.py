@@ -35,7 +35,8 @@ def _model(root: Path) -> None:
     (root / "datasources" / "c").mkdir(parents=True)
     (root / "datasources" / "c" / "storage.yaml").write_text(
         yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
-    for area, tables in (("sales", ["orders", "returns"]), ("people", ["users"])):
+    for area, tables in (("sales", ["orders", "returns"]), ("people", ["users"]),
+                         ("finance", ["ledger", "budgets"])):
         adir = root / "subject_areas" / area
         (adir / "tables").mkdir(parents=True)
         for t in tables:
@@ -60,12 +61,22 @@ def _model(root: Path) -> None:
     (root / "datasource.yaml").write_text(yaml.safe_dump({
         "datasource": "acme", "version": 1,
         "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
-        "subject_areas": ["subject_areas/sales", "subject_areas/people"],
-        # orders→users three times, by three different columns: the case that repeated.
+        "subject_areas": ["subject_areas/sales", "subject_areas/people",
+                          "subject_areas/finance"],
+        # orders→users three times, by three different columns: the case that repeated. The
+        # finance edge touches neither of the other areas, so an area scope has something to drop.
         "cross_subject_area_relationships": [_edge("orders", "assigned_to"),
                                              _edge("orders", "created_by"),
                                              _edge("orders", "approved_by"),
-                                             _edge("returns", "created_by")]}))
+                                             _edge("returns", "created_by"),
+                                             {"from_table": "budgets", "to_table": "ledger",
+                                              "from_column": "assigned_to", "to_column": "id",
+                                              "join_type": "LEFT",
+                                              "relationship": "many_to_one",
+                                              "confidence": "proposed",
+                                              "review_state": "unreviewed",
+                                              "from_subject_area": "finance",
+                                              "to_subject_area": "finance"}]}))
 
 
 @pytest.fixture()
@@ -82,20 +93,23 @@ def _block(profile: str) -> dict:
 
 
 def test_each_bridge_is_named_once(profile):
-    assert _block(profile)["joins"] == {"orders": ["users"], "returns": ["users"]}
+    assert _block(profile)["joins"] == {"budgets": ["ledger"], "orders": ["users"],
+                                        "returns": ["users"]}
 
 
-def test_four_declared_edges_collapse_to_two_bridges(profile):
-    """Three of the four reach orders→users by different columns. The routing answer is one."""
+def test_five_declared_edges_collapse_to_three_bridges(profile):
+    """Three of the five reach orders→users by different columns. The routing answer is one."""
     joins = _block(profile)["joins"]
-    assert sum(len(v) for v in joins.values()) == 2, \
+    assert sum(len(v) for v in joins.values()) == 3, \
         "edges differing only by join column must not repeat the bridge they name"
 
 
 def test_the_area_each_table_belongs_to_survives(profile):
     """The per-edge form carried `from`/`to` area names. Dropping them would be a regression —
     and this is the only place a response says which area a table is in."""
-    assert _block(profile)["areas"] == {"orders": "sales", "returns": "sales", "users": "people"}
+    assert _block(profile)["areas"] == {"budgets": "finance", "ledger": "finance",
+                                        "orders": "sales", "returns": "sales",
+                                        "users": "people"}
 
 
 def test_every_table_named_in_joins_has_an_area(profile):
@@ -104,7 +118,9 @@ def test_every_table_named_in_joins_has_an_area(profile):
     assert named <= set(block["areas"]), "a bridge names a table with no declared area"
 
 
-def test_an_area_scope_keeps_only_that_areas_bridges(tmp_path, monkeypatch):
+def test_an_area_scope_drops_a_bridge_that_touches_neither_end(tmp_path, monkeypatch):
+    """The finance bridge touches neither `people` nor `sales`, so scoping to `people` must lose
+    it. Without an edge outside the scoped pair this assertion holds whatever the filter does."""
     art = tmp_path / "art"
     _model(art / "acme")
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
@@ -112,6 +128,29 @@ def test_an_area_scope_keeps_only_that_areas_bridges(tmp_path, monkeypatch):
         {"datasource": "acme", "mode": "index", "area": "people"})
     block = json.JSONDecoder().raw_decode(out)[0]["cross_area_relationships"]
     assert block["joins"] == {"orders": ["users"], "returns": ["users"]}
+    assert "budgets" not in block["joins"] and "ledger" not in block["areas"]
+
+
+def test_a_table_defined_in_one_area_keeps_that_area_when_an_edge_says_otherwise(
+        tmp_path, monkeypatch):
+    """A TableRef makes multi-area membership legal and the validator does not check an edge's
+    declared area against the table's. Reading the area off the edges made the answer depend on
+    declaration order in datasource.yaml; it is resolved from where the table is DEFINED."""
+    import yaml
+
+    art = tmp_path / "art"
+    root = art / "acme"
+    _model(root)
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    doc["cross_subject_area_relationships"].append({
+        "from_table": "users", "to_table": "ledger", "from_column": "id", "to_column": "id",
+        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
+        "review_state": "unreviewed",
+        # This edge claims `users` is in sales. `users` is DEFINED in people.
+        "from_subject_area": "sales", "to_subject_area": "finance"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    assert _block("acme")["areas"]["users"] == "people"
 
 
 def test_the_dead_field_is_no_longer_projected(profile):
@@ -133,4 +172,4 @@ def test_a_model_still_loads_when_it_declares_the_deprecated_field(tmp_path, mon
         rel["for_questions_about"] = []
     (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
     org = L.load_datasource(root)
-    assert len(org.cross_subject_area_relationships) == 4
+    assert len(org.cross_subject_area_relationships) == 5
