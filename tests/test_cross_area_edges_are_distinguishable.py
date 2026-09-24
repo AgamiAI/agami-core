@@ -247,6 +247,44 @@ def test_two_same_named_tables_in_different_schemas_stay_two_nodes(tmp_path, mon
     assert block["areas"]["archive.orders"] == "finance"
 
 
+def test_ambiguity_folds_case_the_way_the_validator_does(tmp_path, monkeypatch):
+    """`_check_table_name_across_schemas` lowercases both halves, so `Orders` in one schema and
+    `orders` in another are ONE ambiguous name to the model — and it says such a table "must use
+    the qualified form". A case-sensitive ambiguity test sees two distinct names, publishes both
+    bare, and hands the caller a name its own scope gate would refuse.
+
+    The published name keeps the model's spelling; only the test folds.
+    """
+    import yaml
+
+    art = tmp_path / "art"
+    root = art / "acme"
+    _model(root)
+    fin = root / "subject_areas" / "finance"
+    (fin / "tables" / "Orders.yaml").write_text(yaml.safe_dump({
+        "name": "Orders", "schema": "archive", "storage_connection": "c", "grain": ["id"],
+        "description": "archived orders",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "assigned_to", "type": "integer"}]}))
+    sa = yaml.safe_load((fin / "subject_area.yaml").read_text())
+    sa["tables"].append({"storage_connection": "c", "schema": "archive", "table": "Orders"})
+    (fin / "subject_area.yaml").write_text(yaml.safe_dump(sa))
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    doc["cross_subject_area_relationships"].append({
+        "from_table": "Orders", "from_schema": "archive", "to_table": "ledger",
+        "to_schema": "public", "from_column": "assigned_to", "to_column": "id",
+        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
+        "review_state": "unreviewed",
+        "from_subject_area": "finance", "to_subject_area": "finance"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    joins = _block("acme")["joins"]
+    assert "archive.Orders" in joins and "public.orders" in joins
+    assert "orders" not in joins and "Orders" not in joins, \
+        "a name the validator calls ambiguous must not be published bare, whatever its case"
+
+
 def test_an_unambiguous_name_is_not_needlessly_qualified(profile):
     """The counterpart: qualifying every name would be noise, and the model's own convention is
     that an author need not qualify what is unambiguous."""

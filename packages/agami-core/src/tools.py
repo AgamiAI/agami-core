@@ -1415,20 +1415,31 @@ def _cross_area_map(org, scope) -> dict[str, Any]:
     # relationships` resolves the same question. A bare-only key merges `sales.orders` and
     # `archive.orders` — which the model permits and `_check_table_name_across_schemas` only WARNS
     # about — into one entry whose area is whichever was written last.
-    defined_in: dict[tuple[Optional[str], str], str] = {}
+    # Folded the way `_check_table_name_across_schemas` folds — case-insensitively, and with a
+    # missing schema and an empty one the same thing. That check is what DECIDES a name is
+    # ambiguous, so comparing any other way publishes a bare name in a model the validator has
+    # already said must be queried qualified (`Orders` in one schema, `orders` in another is one
+    # ambiguous name to it and two distinct ones to a case-sensitive key).
+    def _key(schema: Optional[str], name: str) -> tuple[str, str]:
+        return (schema or "").lower(), _bare_name(name).lower()
+
+    defined_in: dict[tuple[str, str], str] = {}
     bare_defined_in: dict[str, str] = {}
-    schemas_per_name: dict[str, set[Optional[str]]] = {}
+    schemas_per_name: dict[str, set[str]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            bare = _bare_name(t.name)
-            defined_in[(t.schema_name, bare)] = sa.name
+            sch, bare = _key(t.schema_name, t.name)
+            # Both first-wins. Two areas CAN define the same (schema, name) — the validator does
+            # not complain — and for a duplicate definition there is no right answer, so the two
+            # lookups must at least agree with each other and be stable across runs.
+            defined_in.setdefault((sch, bare), sa.name)
             bare_defined_in.setdefault(bare, sa.name)
-            schemas_per_name.setdefault(bare, set()).add(t.schema_name)
+            schemas_per_name.setdefault(bare, set()).add(sch)
 
     def _area_of(table: str, schema: Optional[str], declared: str) -> str:
         """Where `table` is defined; the edge's own label for a table no area defines."""
-        bare = _bare_name(table)
-        return defined_in.get((schema, bare)) or bare_defined_in.get(bare) or declared
+        sch, bare = _key(schema, table)
+        return defined_in.get((sch, bare)) or bare_defined_in.get(bare) or declared
 
     def _node(table: str, schema: Optional[str]) -> str:
         """The name this table is published under: bare, or qualified when bare is ambiguous.
@@ -1437,9 +1448,11 @@ def _cross_area_map(org, scope) -> dict[str, Any]:
         an author need not qualify an unambiguous name, and an unqualified reference to an
         ambiguous one is refused. Qualifying exactly where the bare form would be refused keeps
         every name here one the caller can pass straight back to `dataset_names`.
+
+        The name is published as the model spells it; only the ambiguity TEST folds case.
         """
         bare = _bare_name(table)
-        if schema and len(schemas_per_name.get(bare, ())) > 1:
+        if schema and len(schemas_per_name.get(bare.lower(), ())) > 1:
             return f"{schema}.{bare}"
         return bare
 
