@@ -153,6 +153,56 @@ def test_a_table_defined_in_one_area_keeps_that_area_when_an_edge_says_otherwise
     assert _block("acme")["areas"]["users"] == "people"
 
 
+def test_a_schema_qualified_endpoint_still_resolves_to_where_it_is_defined(tmp_path, monkeypatch):
+    """Endpoints may be schema-qualified (`public.users`) while the table definition is not, so
+    the membership lookup normalises both sides. Unnormalised it would miss and fall back to the
+    edge's label — silently, and exactly in the case the resolution exists to fix."""
+    import yaml
+
+    art = tmp_path / "art"
+    root = art / "acme"
+    _model(root)
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    doc["cross_subject_area_relationships"].append({
+        "from_table": "public.users", "to_table": "public.ledger", "from_column": "id",
+        "to_column": "id", "join_type": "LEFT", "relationship": "many_to_one",
+        "confidence": "proposed", "review_state": "unreviewed",
+        # Qualified, and claiming an area `users` is not defined in.
+        "from_subject_area": "sales", "to_subject_area": "finance"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    block = _block("acme")
+    assert block["areas"]["users"] == "people"
+    # And one table is one entry, however its edges spell it.
+    assert "public.users" not in block["joins"] and "public.users" not in block["areas"]
+    assert block["joins"]["users"] == ["ledger"]
+
+
+def test_an_area_scope_keeps_a_bridge_whose_endpoint_is_defined_in_that_area(
+        tmp_path, monkeypatch):
+    """The filter runs on the RESOLVED areas, so a scoped map is a subset of the unscoped one.
+    Filtering on the edge's labels while reporting the resolved area lets the two disagree."""
+    import yaml
+
+    art = tmp_path / "art"
+    root = art / "acme"
+    _model(root)
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    doc["cross_subject_area_relationships"].append({
+        "from_table": "users", "to_table": "ledger", "from_column": "id", "to_column": "id",
+        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
+        "review_state": "unreviewed",
+        # `users` is DEFINED in people; this edge labels it sales. Scoping to people must keep it.
+        "from_subject_area": "sales", "to_subject_area": "finance"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    out = tools.tool_get_datasource_schema(
+        {"datasource": "acme", "mode": "index", "area": "people"})
+    block = json.JSONDecoder().raw_decode(out)[0]["cross_area_relationships"]
+    assert block["joins"].get("users") == ["ledger"], \
+        "a bridge the unscoped map reports under `people` must survive a `people` scope"
+
+
 def test_the_dead_field_is_no_longer_projected(profile):
     assert "for_questions_about" not in json.dumps(_block(profile))
 

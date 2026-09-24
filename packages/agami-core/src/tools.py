@@ -1410,22 +1410,36 @@ def _cross_area_map(org, scope) -> dict[str, Any]:
     # documents that as supported and does not check an edge's declared area against the table's
     # membership), so two edges can legitimately disagree about a table and reading the area off
     # the edges makes the answer depend on declaration order in datasource.yaml.
-    defined_in = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+    defined_in = {_bare_name(t.name): sa.name
+                  for sa in org.subject_areas for t in sa.tables_defined}
 
-    joins: dict[str, list[str]] = {}
+    def _area_of(table: str, declared: str) -> str:
+        """Where `table` is defined, falling back to the edge's own label.
+
+        Both sides go through `_bare_name`: an endpoint may be schema-qualified (`public.orders`)
+        while the definition is not, and an unnormalised lookup would miss and silently fall back
+        — which is the case this whole resolution exists to fix. The fallback is for a table no
+        area defines (one only ever referenced); a bridge with no area is worse than one resolved
+        the old way.
+        """
+        return defined_in.get(_bare_name(table), declared)
+
+    joins: dict[str, set[str]] = {}
     areas: dict[str, str] = {}
     for r in org.cross_subject_area_relationships:
-        if scope.level != "datasource" and scope.area not in (r.from_subject_area,
-                                                              r.to_subject_area):
+        from_area = _area_of(r.from_table, r.from_subject_area)
+        to_area = _area_of(r.to_table, r.to_subject_area)
+        # Scope on the RESOLVED areas, so a scoped map is a subset of the unscoped one. Filtering
+        # on the edge's labels while reporting the resolved area lets the two disagree: a bridge
+        # whose endpoint is defined in the scoped area would be dropped here yet listed under that
+        # area when unscoped.
+        if scope.level != "datasource" and scope.area not in (from_area, to_area):
             continue
-        # The edge's own labels are the fallback for a table no area defines — an edge may name a
-        # table that is only ever referenced, and a bridge with no area at all is worse than one
-        # resolved the old way.
-        areas[r.from_table] = defined_in.get(r.from_table, r.from_subject_area)
-        areas[r.to_table] = defined_in.get(r.to_table, r.to_subject_area)
-        seen = joins.setdefault(r.from_table, [])
-        if r.to_table not in seen:
-            seen.append(r.to_table)
+        # Keyed bare, like `dataset_names` resolves them, so one table is one entry however its
+        # edges spell it and the name a caller reads here is one it can pass straight back.
+        from_table, to_table = _bare_name(r.from_table), _bare_name(r.to_table)
+        areas[from_table], areas[to_table] = from_area, to_area
+        joins.setdefault(from_table, set()).add(to_table)
     return {"joins": {t: sorted(v) for t, v in sorted(joins.items())},
             "areas": dict(sorted(areas.items()))}
 
