@@ -559,10 +559,55 @@ def _column_detail(col: Column, include: list[str]) -> dict[str, Any]:
     return d
 
 
+# The join, and what governs whether it can run. Everything an agent needs to WRITE the join —
+# so an edge reduced to these keys is still usable, which is why the lean tier below is a
+# projection and not a removal.
+#
+# `on` is here because an edge carries EITHER from_column/to_column OR that SQL-expression escape
+# hatch (CAST, compound and function-based joins), never both. Omitting it would leave the lean
+# form of such an edge with no join condition at all.
+_JOIN_KEYS = ("from_table", "to_table", "from_column", "to_column", "on",
+              "from_schema", "to_schema", "join_type", "relationship")
+
+
+def _lean_edge(d: dict[str, Any]) -> dict[str, Any]:
+    """An edge projected to its join, for a table the caller did not ask for.
+
+    Dropped: the sign-off block, `review_state`/`confidence`, the subject-area labels, and
+    `description` — which only restates the two columns present in the same object. None of it
+    reaches the SQL, and on a wide model it is most of the bytes.
+
+    `executable` survives whenever it is NOT `same_engine`: it says whether one statement can
+    perform this join at all, so dropping it on a `split` edge invites a join that cannot run.
+    Omitting the common value keeps the usual case free and the federated case correct.
+    """
+    out = {k: d[k] for k in _JOIN_KEYS if k in d}
+    if d.get("executable") and d["executable"] != "same_engine":
+        out["executable"] = d["executable"]
+    return out
+
+
 def _relationships_among(
     org: Datasource, tables: list[str], area: Optional[str]
 ) -> list[dict[str, Any]]:
+    """Every edge touching a requested table — in full where BOTH ends were requested.
+
+    An edge to a table the caller did not ask for cannot be written as an explicit join: the
+    caller has no columns for the other side. It is still worth sending, because the scope gate
+    admits any table the model declares and a correlated `EXISTS` needs only the join key — so
+    dropping those edges would force a round trip for the subquery case. Sending them in full is
+    the other extreme: on a hub table (a user or group dimension half the warehouse references)
+    the block reached 98,724 chars for a two-table request, of which four edges joined the two
+    tables asked for.
+
+    So: full detail where the join will be written, the join itself everywhere else.
+    """
     names = {_table_alias(t) for t in tables} | set(tables)
+
+    def _both_ends_requested(rel) -> bool:
+        return (_table_alias(rel.from_table) in names
+                and _table_alias(rel.to_table) in names)
+
     out: list[dict[str, Any]] = []
     areas = [org.subject_area(area)] if area else org.subject_areas
     for sa in areas:
@@ -570,11 +615,13 @@ def _relationships_among(
             continue
         for rel in sa.relationships:
             if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
-                out.append(rel.model_dump(exclude_none=True))
+                d = rel.model_dump(exclude_none=True)
+                out.append(d if _both_ends_requested(rel) else _lean_edge(d))
     # cross-area edges touching these tables
     for rel in org.cross_subject_area_relationships:
         if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
-            out.append(rel.model_dump(exclude_none=True))
+            d = rel.model_dump(exclude_none=True)
+            out.append(d if _both_ends_requested(rel) else _lean_edge(d))
     return out
 
 
