@@ -1393,6 +1393,34 @@ def _large_tables(org) -> dict[str, int]:
     return out
 
 
+def _cross_area_map(org, scope) -> dict[str, Any]:
+    """The cross-area edges as an adjacency map: `{"joins": {t: [t, …]}, "areas": {t: area}}`.
+
+    Several declared edges can reach the same pair of tables through different columns — nine
+    reference columns on one table all pointing at the user table, say. This tier carries no
+    columns, so as a list those edges were indistinguishable and the block repeated itself. A map
+    states each bridge once.
+
+    `areas` keeps what the per-edge form carried on `from`/`to`: it is the only place a response
+    names the subject area a table belongs to, and an agent that wants to scope its next call by
+    area has nowhere else to read it.
+    """
+    joins: dict[str, list[str]] = {}
+    areas: dict[str, str] = {}
+    for r in org.cross_subject_area_relationships:
+        if scope.level != "datasource" and scope.area not in (r.from_subject_area,
+                                                              r.to_subject_area):
+            continue
+        # A table belongs to one area, so the last writer wins and they agree by construction.
+        areas[r.from_table] = r.from_subject_area
+        areas[r.to_table] = r.to_subject_area
+        seen = joins.setdefault(r.from_table, [])
+        if r.to_table not in seen:
+            seen.append(r.to_table)
+    return {"joins": {t: sorted(v) for t, v in sorted(joins.items())},
+            "areas": dict(sorted(areas.items()))}
+
+
 def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
     """Full get_table_context for the named tables: `{"tables": {name: ctx}, "relationships": [...]}`.
 
@@ -1582,34 +1610,25 @@ def _schema_payload(
         "datasource": profile,
         "organization": org.description or None,
         "mode": mode,
-        # One entry per declared cross-area edge, named by its ENDPOINT TABLES.
+        # The cross-area routing map: which table bridges to which, and the area each sits in.
         #
-        # This used to project `{from, to, for_questions_about}`, and `for_questions_about` has no
-        # writer anywhere — it is `setdefault`-ed empty and never filled, including in the sample
-        # model this product ships. So each entry was a bare pair of area names, and a model with
-        # a dozen distinct FK edges from `sales` to `people` (assigned_to, created_by,
-        # approved_by, …) emitted `sales → people` a dozen identical times. On a wide model
-        # that is a long list carrying a fraction of its length in distinct facts.
+        # This was one entry per declared edge, projected to `{from, to, from_table, to_table}`.
+        # An earlier revision projected `{from, to, for_questions_about}` and a model with a dozen
+        # distinct FK edges from `sales` to `people` (assigned_to, created_by, approved_by, …)
+        # emitted `sales → people` a dozen identical times; naming the endpoint tables fixed that
+        # for edges between DIFFERENT table pairs but not for the several that reach the SAME pair
+        # through different columns. Those still serialized identically, because the column is the
+        # only thing telling them apart and this tier does not carry columns. On a wide model the
+        # block ran 283 entries for 181 distinct facts.
         #
-        # The endpoints are what tell them apart, and they are the routing question this block
-        # answers — WHICH table bridges the areas, so the agent knows what to ask for next. The join
-        # mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately: a
-        # `dataset_names` call returns them in full on its own `relationships` block, so repeating
-        # every relationship object here would restate what the next call states better.
+        # An adjacency map states each fact once. It answers the same routing question — WHICH
+        # table bridges the areas, so the agent knows what to ask for next — and `areas` keeps the
+        # area names the per-edge form carried, without repeating them on every edge.
         #
-        # That last sentence was FALSE when this comment was written: `_table_contexts` resolved
-        # those relationships and discarded them, so the detail this tier defers to did not exist
-        # on any surface. ACE-107 made the deferral true by emitting them.
-        "cross_area_relationships": [
-            {
-                "from": r.from_subject_area,
-                "to": r.to_subject_area,
-                "from_table": r.from_table,
-                "to_table": r.to_table,
-            }
-            for r in org.cross_subject_area_relationships
-            if scope.level == "datasource" or scope.area in (r.from_subject_area, r.to_subject_area)
-        ],
+        # The join mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately:
+        # a `dataset_names` call returns them in full on its own `relationships` block, so
+        # repeating every relationship object here would restate what the next call states better.
+        "cross_area_relationships": _cross_area_map(org, scope),
         "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
         "large_tables": _large_tables(org),
     }

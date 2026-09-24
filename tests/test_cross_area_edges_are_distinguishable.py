@@ -1,11 +1,15 @@
-"""The schema payload's cross-area edge list must say WHICH tables bridge two areas.
+"""The schema payload's cross-area block must say WHICH tables bridge two areas, once each.
 
 It used to project `{from, to, for_questions_about}`, and nothing anywhere populates
 `for_questions_about` — it was `setdefault`-ed empty when an edge was generated and never filled,
 including in the sample model this product ships. So each entry was a bare pair of AREA names, and
 a model whose `sales` area reaches `people` through a dozen different columns (assigned_to,
-created_by, approved_by, …) emitted `sales → people` a dozen identical times, with nothing left
-to tell the agent which edge mattered.
+created_by, approved_by, …) emitted `sales → people` a dozen identical times.
+
+Naming the endpoint tables fixed that for edges between DIFFERENT table pairs. It did not fix the
+several edges that reach the SAME pair through different columns: the column is the only thing
+telling those apart and this tier carries no columns, so they still serialized identically. An
+adjacency map states each bridge once.
 
 The join mechanics stay off this tier on purpose — a `dataset_names` call returns each edge in full
 (columns, `on`, cardinality, trust block) via `loader._relationships_among`. This tier answers the
@@ -25,7 +29,7 @@ import tools  # noqa: E402
 
 
 def _model(root: Path) -> None:
-    """Two areas, and TWO distinct edges between the same pair — the case that collapsed."""
+    """Two areas; two edges to distinct tables, and three that reach ONE pair by three columns."""
     import yaml
 
     (root / "datasources" / "c").mkdir(parents=True)
@@ -40,7 +44,8 @@ def _model(root: Path) -> None:
                 "description": f"{t} table",
                 "columns": [{"name": "id", "type": "integer", "primary_key": True},
                             {"name": "assigned_to", "type": "integer"},
-                            {"name": "created_by", "type": "integer"}]}))
+                            {"name": "created_by", "type": "integer"},
+                            {"name": "approved_by", "type": "integer"}]}))
         (adir / "subject_area.yaml").write_text(yaml.safe_dump({
             "name": area, "description": f"{area} area",
             "tables": [{"storage_connection": "c", "schema": "public", "table": t}
@@ -56,7 +61,10 @@ def _model(root: Path) -> None:
         "datasource": "acme", "version": 1,
         "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
         "subject_areas": ["subject_areas/sales", "subject_areas/people"],
+        # orders→users three times, by three different columns: the case that repeated.
         "cross_subject_area_relationships": [_edge("orders", "assigned_to"),
+                                             _edge("orders", "created_by"),
+                                             _edge("orders", "approved_by"),
                                              _edge("returns", "created_by")]}))
 
 
@@ -68,27 +76,46 @@ def profile(tmp_path, monkeypatch):
     return "acme"
 
 
-def _edges(profile: str) -> list[dict]:
+def _block(profile: str) -> dict:
     out = tools.tool_get_datasource_schema({"datasource": profile, "mode": "index"})
     return json.JSONDecoder().raw_decode(out)[0]["cross_area_relationships"]
 
 
-def test_each_edge_names_its_endpoint_tables(profile):
-    assert _edges(profile) == [
-        {"from": "sales", "to": "people", "from_table": "orders", "to_table": "users"},
-        {"from": "sales", "to": "people", "from_table": "returns", "to_table": "users"},
-    ]
+def test_each_bridge_is_named_once(profile):
+    assert _block(profile)["joins"] == {"orders": ["users"], "returns": ["users"]}
 
 
-def test_two_edges_between_one_pair_of_areas_are_not_identical(profile):
-    edges = _edges(profile)
-    assert len(edges) == 2
-    assert len({json.dumps(e, sort_keys=True) for e in edges}) == 2, \
-        "distinct FK edges must not serialize to the same object"
+def test_four_declared_edges_collapse_to_two_bridges(profile):
+    """Three of the four reach orders→users by different columns. The routing answer is one."""
+    joins = _block(profile)["joins"]
+    assert sum(len(v) for v in joins.values()) == 2, \
+        "edges differing only by join column must not repeat the bridge they name"
+
+
+def test_the_area_each_table_belongs_to_survives(profile):
+    """The per-edge form carried `from`/`to` area names. Dropping them would be a regression —
+    and this is the only place a response says which area a table is in."""
+    assert _block(profile)["areas"] == {"orders": "sales", "returns": "sales", "users": "people"}
+
+
+def test_every_table_named_in_joins_has_an_area(profile):
+    block = _block(profile)
+    named = set(block["joins"]) | {t for v in block["joins"].values() for t in v}
+    assert named <= set(block["areas"]), "a bridge names a table with no declared area"
+
+
+def test_an_area_scope_keeps_only_that_areas_bridges(tmp_path, monkeypatch):
+    art = tmp_path / "art"
+    _model(art / "acme")
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    out = tools.tool_get_datasource_schema(
+        {"datasource": "acme", "mode": "index", "area": "people"})
+    block = json.JSONDecoder().raw_decode(out)[0]["cross_area_relationships"]
+    assert block["joins"] == {"orders": ["users"], "returns": ["users"]}
 
 
 def test_the_dead_field_is_no_longer_projected(profile):
-    assert all("for_questions_about" not in e for e in _edges(profile))
+    assert "for_questions_about" not in json.dumps(_block(profile))
 
 
 def test_a_model_still_loads_when_it_declares_the_deprecated_field(tmp_path, monkeypatch):
@@ -106,4 +133,4 @@ def test_a_model_still_loads_when_it_declares_the_deprecated_field(tmp_path, mon
         rel["for_questions_about"] = []
     (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
     org = L.load_datasource(root)
-    assert len(org.cross_subject_area_relationships) == 2
+    assert len(org.cross_subject_area_relationships) == 4
