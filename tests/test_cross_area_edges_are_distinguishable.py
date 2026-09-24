@@ -54,7 +54,8 @@ def _model(root: Path) -> None:
 
     def _edge(from_table, column):
         return {"from_table": from_table, "to_table": "users", "from_column": column,
-                "to_column": "id", "join_type": "LEFT", "relationship": "many_to_one",
+                "to_column": "id", "from_schema": "public", "to_schema": "public",
+                "join_type": "LEFT", "relationship": "many_to_one",
                 "confidence": "proposed", "review_state": "unreviewed",
                 "from_subject_area": "sales", "to_subject_area": "people"}
 
@@ -70,6 +71,7 @@ def _model(root: Path) -> None:
                                              _edge("orders", "approved_by"),
                                              _edge("returns", "created_by"),
                                              {"from_table": "budgets", "to_table": "ledger",
+                                              "from_schema": "public", "to_schema": "public",
                                               "from_column": "assigned_to", "to_column": "id",
                                               "join_type": "LEFT",
                                               "relationship": "many_to_one",
@@ -201,6 +203,55 @@ def test_an_area_scope_keeps_a_bridge_whose_endpoint_is_defined_in_that_area(
     block = json.JSONDecoder().raw_decode(out)[0]["cross_area_relationships"]
     assert block["joins"].get("users") == ["ledger"], \
         "a bridge the unscoped map reports under `people` must survive a `people` scope"
+
+
+def test_two_same_named_tables_in_different_schemas_stay_two_nodes(tmp_path, monkeypatch):
+    """The model permits one table name under two schemas — `_check_table_name_across_schemas`
+    only WARNS, and cross-area extraction keys by (schema, name). Publishing both under one bare
+    key would merge two bridges into one and report whichever area was written last.
+
+    Qualified only where bare would be ambiguous, which is the rule `_resolve_dataset` states:
+    an author need not qualify an unambiguous name, and an ambiguous unqualified one is refused.
+    """
+    import yaml
+
+    art = tmp_path / "art"
+    root = art / "acme"
+    _model(root)
+    # A second `orders`, in another schema, defined in finance.
+    fin = root / "subject_areas" / "finance"
+    (fin / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "archive", "storage_connection": "c", "grain": ["id"],
+        "description": "archived orders",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "assigned_to", "type": "integer"}]}))
+    sa = yaml.safe_load((fin / "subject_area.yaml").read_text())
+    sa["tables"].append({"storage_connection": "c", "schema": "archive", "table": "orders"})
+    (fin / "subject_area.yaml").write_text(yaml.safe_dump(sa))
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    doc["cross_subject_area_relationships"].append({
+        "from_table": "orders", "from_schema": "archive", "to_table": "ledger",
+        "to_schema": "public", "from_column": "assigned_to", "to_column": "id",
+        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
+        "review_state": "unreviewed",
+        "from_subject_area": "finance", "to_subject_area": "finance"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    block = _block("acme")
+    # Two distinct nodes, each qualified because the bare name no longer identifies one table.
+    assert "public.orders" in block["joins"] and "archive.orders" in block["joins"]
+    assert "orders" not in block["joins"], "an ambiguous bare name must not be published"
+    # And each keeps the area it is DEFINED in, rather than the last one written.
+    assert block["areas"]["public.orders"] == "sales"
+    assert block["areas"]["archive.orders"] == "finance"
+
+
+def test_an_unambiguous_name_is_not_needlessly_qualified(profile):
+    """The counterpart: qualifying every name would be noise, and the model's own convention is
+    that an author need not qualify what is unambiguous."""
+    block = _block(profile)
+    assert "users" in block["joins"].get("orders", []) and "public.users" not in block["areas"]
 
 
 def test_the_dead_field_is_no_longer_projected(profile):
