@@ -218,7 +218,7 @@ def test_the_corpus_is_the_shape_the_coverage_claim_rests_on():
     is exactly how a gate gets walked around. An equality is what turns "this rule has no vector"
     from an invisible state into a red build.
     """
-    assert len(CASES) == 84
+    assert len(CASES) == 93
     assert len([c for c in CASES if c.rule is None]) == 16
     expected_rules = {c.rule for c in CASES if c.rule is not None}
     assert expected_rules == set(guardrail.REASON_FOR_RULE) - _RULES_NO_VECTOR_CAN_PRODUCE

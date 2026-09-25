@@ -12,6 +12,29 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The read-only guard now speaks every dialect it serves (#395).** `execute_sql` advertises the
+  MCP `readOnlyHint`, but the dangerous-function deny-list held Postgres primitives only, so a
+  single `SELECT` could still carry a side effect on every other engine: `SELECT SLEEP(30)` and
+  `SELECT GET_LOCK('x', 10)` on MySQL, `SELECT SYSTEM$ABORT_SESSION(…)` on Snowflake,
+  `SELECT reflect('java.lang.Runtime', …)` on Databricks, `SELECT … FROM OPENROWSET(BULK
+  '/etc/passwd', …)` on SQL Server, `SELECT UTL_HTTP.REQUEST('http://…')` on Oracle,
+  `SELECT EXTERNAL_QUERY(…)` on BigQuery, `SELECT load_extension(…)` on SQLite / DuckDB. The
+  deny-list is now organized by engine and covers all of them, and the whole Snowflake `SYSTEM$…`
+  namespace is refused rather than a member list that would go stale.
+- **Three Postgres holes in families the list already claimed.** `pg_notify` — the function
+  spelling of the denied `NOTIFY` keyword, which `\bNOTIFY\b` cannot see because `_` is a word
+  character. The advisory-lock family beyond the four names listed (`pg_try_advisory_lock` and the
+  `_shared` variants — eleven functions, matched by one prefix now). And the siblings of the
+  already-denied `pg_drop_replication_slot`: `pg_promote`, WAL-replay pause/resume, backup
+  start/stop, slot create/copy, `pg_logical_emit_message`, and `pg_logical_slot_get_changes`, which
+  is a destructive read — it advances the slot, so a downstream consumer loses those rows.
+- No behavior changes for valid analytics SQL. The false-positive corpus was extended with the
+  names most able to collide (`sleep_minutes`, `AVG(sleep)`, `lock_count`, `reflection_score`,
+  `OPENJSON`), and the deny-list names SQL Server's four `OPEN…` functions individually rather than
+  matching `OPEN\w+`, so `OPENJSON` still runs.
+
 ## [0.9.6] — 2026-09-23
 
 ### Changed
