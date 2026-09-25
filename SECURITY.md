@@ -45,9 +45,11 @@ database connection is opened:
   double-quoted identifiers;
 - data-modifying CTEs (`WITH ... DELETE/INSERT/UPDATE ... RETURNING`);
 - transaction-control, session-state, and prepared statements, and row-level locks;
-- dangerous server-side functions — file I/O (`pg_read_file`, `lo_export`), OS/command
-  execution (`copy_program`), remote SQL (`dblink*`), and resource-exhaustion (`pg_sleep`,
-  advisory locks).
+- dangerous server-side functions, on every engine it dispatches to — file I/O
+  (`pg_read_file`, `LOAD_FILE`, `OPENROWSET`), OS/command execution (`copy_program`,
+  `reflect`), remote SQL (`dblink*`, `OPENQUERY`, `EXTERNAL_QUERY`, `UTL_HTTP`),
+  notification (`pg_notify`), and resource-exhaustion (`pg_sleep`, `SLEEP`, `BENCHMARK`,
+  advisory locks, `GET_LOCK`, the Snowflake `SYSTEM$…` namespace).
 
 This is defense in depth at the application layer; you should still connect with a
 read-only database role. A guard bypass — SQL that mutates data or reaches a blocked

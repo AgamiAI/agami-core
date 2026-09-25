@@ -8,9 +8,10 @@ server, the HTTP/OAuth server, the agami-query skill, and cron are all protected
 identically — not just whichever path happened to read a prose rule.
 
 It is defense in depth at the application layer; the underlying connection is *also*
-expected to run under a read-only role. Postgres / Redshift are the primary concern
-(the dangerous functions below are Postgres server-side primitives), but the checks
-are neutral enough to be safe across the other supported engines.
+expected to run under a read-only role. The statement-shape checks are dialect-neutral;
+the dangerous-function deny-list is not, so it names the side-effecting primitives of
+every engine the executor dispatches to — Postgres / Redshift, MySQL, Snowflake,
+Databricks, SQL Server, BigQuery, Oracle, SQLite / DuckDB — and not Postgres alone.
 
 `check_read_only(sql)` returns `None` when the SQL is a single safe read-only
 statement, else a `guardrail.Refusal` carrying `rule=read_only`, the rejection text as
@@ -62,8 +63,8 @@ _REMEDIATION: dict[str, str] = {
     ),
     "row_lock": "Remove the row-lock clause; an analytic read never needs one.",
     "dangerous_function": (
-        "Remove the call — server-file, OS, process-control, sleep and remote-SQL "
-        "functions are never executed here."
+        "Remove the call — server-file, OS, process-control, sleep, lock, notification "
+        "and remote-SQL functions are never executed here, on any engine."
     ),
 }
 
@@ -374,6 +375,18 @@ _ROW_LOCK_RE = re.compile(r"\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)
 # that bypasses the `SET` keyword deny, hold session-survival advisory locks, or
 # execute a nested SQL string passed as a function arg (the `query_to_xml(text)`
 # family). Match against `name(` so identifiers sharing a prefix aren't matched.
+#
+# **Every dialect the executor serves, not only Postgres.** The list was Postgres-only, so
+# `execute_sql` advertised the MCP `readOnlyHint` while a single SELECT carried a side effect on
+# every other engine: `SELECT SLEEP(30)` and `SELECT GET_LOCK('x', 10)` on MySQL,
+# `SELECT SYSTEM$ABORT_SESSION(...)` on Snowflake, `SELECT reflect('java.lang.Runtime', ...)` on
+# Databricks, `SELECT ... FROM OPENROWSET(BULK '/etc/passwd', ...)` on SQL Server,
+# `SELECT UTL_HTTP.REQUEST('http://…')` on Oracle. The claim on the wire is one claim, so the gate
+# that backs it has to speak every dialect underneath it. Sections below are ordered by engine.
+#
+# A package-qualified Oracle call is matched as `PKG . MEMBER` rather than the member alone: the
+# callable name is the pair, and a bare `REQUEST` / `GETXML` / `GET_HOST_ADDRESS` would refuse those
+# ordinary words as function names on every other engine.
 _DANGEROUS_FN_RE = re.compile(
     r"\b("
     # Time wasters / DoS
@@ -403,14 +416,74 @@ _DANGEROUS_FN_RE = re.compile(
     # `pg_stat_reset_shared` / `_single_table_counters` / etc.
     r"pg_stat_reset\w*|pg_stat_statements_reset|pg_switch_wal|"
     r"pg_create_restore_point|pg_drop_replication_slot|pg_replication_slot_advance|"
+    # Backup / recovery / replication control — promote a standby, pause WAL replay,
+    # open a backup that holds until it is closed, create or copy a replication slot,
+    # or emit into the WAL. Same side-effecting family as the log/conf calls above;
+    # `pg_drop_replication_slot` was already here and its siblings were not.
+    # `pg_logical_slot_get_changes` is a DESTRUCTIVE read — it advances the slot, so
+    # replaying it returns nothing and the downstream consumer loses those rows.
+    r"pg_promote|pg_wal_replay_pause|pg_wal_replay_resume|"
+    r"pg_backup_start|pg_backup_stop|pg_start_backup|pg_stop_backup|"
+    r"pg_(?:create|copy)_(?:physical|logical)_replication_slot|"
+    r"pg_logical_emit_message|pg_logical_slot_get_\w+|pg_replication_origin_\w+|"
+    # Notification — `pg_notify` is the function spelling of the denied `NOTIFY` keyword,
+    # and the keyword deny cannot see it: `\bNOTIFY\b` does not fire inside `pg_notify`
+    # because `_` is a word character. A SELECT that wakes a LISTENer is a side effect.
+    r"pg_notify|"
     # Session-state mutation that bypasses the `SET` keyword deny.
     r"set_config|current_setting|"
-    # Session-survival advisory locks — survive connection return and can DoS.
-    r"pg_advisory_lock|pg_advisory_xact_lock|"
-    r"pg_advisory_unlock|pg_advisory_unlock_all|"
+    # Session-survival advisory locks — survive connection return and can DoS. One prefix
+    # rather than the four names that were here: the family is 11 functions once the
+    # `try_` and `_shared` variants are counted, and `pg_try_advisory_lock(1)` passed.
+    r"pg_(?:try_)?advisory_\w+|"
     # Nested-SQL execution via XML/JSON conversion — these execute the SQL passed
     # as a string argument server-side, bypassing the outer gate.
-    r"query_to_xml|query_to_xmlschema|query_to_json|cursor_to_xml"
+    r"query_to_xml|query_to_xmlschema|query_to_json|cursor_to_xml|"
+    # --- MySQL / MariaDB ---------------------------------------------------------------
+    # `SLEEP`/`BENCHMARK` burn a worker; the lock family survives the connection's return
+    # to the pool exactly as the Postgres advisory locks do; `LOAD_FILE` is the MySQL
+    # spelling of `pg_read_file`; the replica-wait calls block until a position is
+    # reached, which is an unbounded sleep with a timeout argument.
+    # `SLEEP` also catches Oracle's `DBMS_LOCK.SLEEP(n)`, which is spelled with the same
+    # callable name. `IS_FREE_LOCK` / `IS_USED_LOCK` are deliberately NOT here: they read
+    # lock state and take none.
+    r"sleep|benchmark|load_file|"
+    r"get_lock|release_lock|release_all_locks|"
+    r"master_pos_wait|source_pos_wait|wait_for_executed_gtid_set|"
+    # --- Snowflake ---------------------------------------------------------------------
+    # The whole `SYSTEM$…` namespace, as a namespace. It holds `SYSTEM$ABORT_SESSION`,
+    # `SYSTEM$CANCEL_ALL_QUERIES`, `SYSTEM$WAIT` and `SYSTEM$PIPE_FORCE_RESUME` beside
+    # read-only members like `SYSTEM$CLUSTERING_INFORMATION`, and denying the namespace
+    # over-refuses the read-only ones on purpose: they are account administration and
+    # introspection, never a query over the tables the model declares, so nothing a
+    # caller is meant to send loses. A per-member list would go stale the next release.
+    # (`$` here is a literal inside a `SYSTEM$NAME` identifier, not a dollar-quote opener —
+    # `_neutralize` only consumes `$…$` pairs, which this is not.)
+    r"system\$\w+|"
+    # --- Databricks / Spark SQL --------------------------------------------------------
+    # Arbitrary JVM reflection from a SELECT — the Spark equivalent of `copy_program`.
+    r"reflect|java_method|"
+    # --- SQL Server --------------------------------------------------------------------
+    # Remote SQL and server-file access from the FROM clause — the `dblink` shape.
+    # `OPENROWSET(BULK …)` reads a path off the database server's own filesystem.
+    # Spelled out rather than `OPEN\w+`, which would deny the ordinary `OPENJSON`.
+    # `OPENXML` is NOT here: it takes a document handle only `sp_xml_preparedocument` can
+    # make, and that needs an `EXEC` the opening-keyword step already refuses.
+    r"openrowset|openquery|opendatasource|"
+    # --- BigQuery ----------------------------------------------------------------------
+    # Federated query against another engine — remote SQL, same shape as `dblink`.
+    r"external_query|"
+    # --- Oracle ------------------------------------------------------------------------
+    # The package-qualified side-effect and egress primitives: session sleep and pipes,
+    # job/scheduler submission, nested-SQL execution (`DBMS_XMLGEN.GETXML` is Oracle's
+    # `query_to_xml`), and the network/file packages that reach off the box. Matched as
+    # `PKG . MEMBER`, so an unrelated `REQUEST(...)` on another engine is untouched.
+    r"dbms_(?:lock|pipe|scheduler|job|aq|xmlgen|xslprocessor)\s*\.\s*\w+|"
+    r"utl_(?:http|smtp|tcp|file|inaddr)\s*\.\s*\w+|"
+    r"httpuritype|"
+    # --- SQLite / DuckDB ---------------------------------------------------------------
+    # Loading a shared library from a SELECT is code execution in the database process.
+    r"load_extension"
     r")\s*\(",
     re.IGNORECASE,
 )
@@ -435,7 +508,8 @@ def check_read_only(sql: str | None) -> Refusal | None:
       3. Doesn't open with SELECT or WITH (leading `(` tolerated)
       4. Contains a forbidden keyword (DML/DDL/TCL/session/pub-sub/lock/prepared/INTO)
       5. Contains a row-level lock clause (`FOR UPDATE` etc.)
-      6. Calls a dangerous function (`pg_sleep`, `pg_read_file`, `dblink`, ...)
+      6. Calls a dangerous function, in any dialect the executor serves (`pg_sleep`,
+          `pg_read_file`, `dblink`, `SLEEP`, `GET_LOCK`, `SYSTEM$…`, `OPENROWSET`, ...)
     """
     if not sql or not sql.strip():
         return refuse(RULE_READ_ONLY, detail="empty statement", remediation=_REMEDIATION["empty"])
@@ -506,7 +580,8 @@ def check_read_only(sql: str | None) -> Refusal | None:
             RULE_READ_ONLY,
             detail=(
                 f"function `{fn.group(1)}` is not allowed — server-file / OS / "
-                "process-control / sleep / remote-SQL functions are blocked"
+                "process-control / sleep / lock / notification / remote-SQL functions "
+                "are blocked"
             ),
             remediation=_REMEDIATION["dangerous_function"],
         )

