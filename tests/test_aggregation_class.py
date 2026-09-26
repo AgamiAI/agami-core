@@ -237,13 +237,14 @@ def test_suggest_metrics_inherits_column_unit():
 
 def test_suggest_metrics_auto_approve_stamps_signoff_timestamp():
     from semantic_model import dialects as D
-    # The caveats are what make these two worth naming at all: they say something the aggregation
-    # class cannot, and the metric carries them (#404).
-    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
-                description="o", caveats=["Voided orders are still rows"], columns=[
+    # Both survive #404 without a caveat: the composite grain means COUNT(*) may not be counting
+    # things, and the unit is something SUM(amount) carries that the class does not. Neither adds
+    # unverified prose, so both are still judgment-free and still auto-approve.
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id", "line_no"],
+                description="o", columns=[
                     m.Column(name="id", type="integer", primary_key=True),
-                    m.Column(name="amount", type="decimal", aggregation="additive",
-                             caveats=["Excludes tax"])])
+                    m.Column(name="line_no", type="integer"),
+                    m.Column(name="amount", type="decimal", aggregation="additive", unit="USD")])
     mets = {x["name"]: x for x in build.suggest_metrics(
         t, D.get_dialect("postgresql"), now="2026-06-16T00:00:00Z")}
     # the trivial COUNT/SUM carry the full sign-off block (Rule-1 trust parity)
@@ -268,6 +269,52 @@ def test_a_caveat_that_justifies_a_plain_metric_arrives_with_it():
         "Number of orders records. Voided orders are still rows."
     assert mets["orders_total_amount"]["calculation"] == \
         "Total amount across orders. Excludes tax."
+
+
+def test_a_caveat_keeps_a_trivial_metric_out_of_the_auto_approve_lane():
+    """The binding is still `COUNT(*)`, but the caveat is unverified prose and it is the whole
+    reason the metric exists — so it goes to the review queue, like a rate or a duration. Before
+    #404 the same metric was proposed for every table and auto-approving it claimed only that
+    COUNT(*) is COUNT(*)."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", caveats=["Voided orders are still rows"], columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive",
+                             unit="USD", caveats=["Excludes tax"])])
+    mets = {x["name"]: x for x in build.suggest_metrics(
+        t, D.get_dialect("postgresql"), now="2026-06-16T00:00:00Z")}
+    for nm in ("orders_count", "orders_total_amount"):
+        assert mets[nm]["review_state"] == "unreviewed", nm
+        assert mets[nm]["confidence"] == "proposed", nm
+        assert "signed_off_at" not in mets[nm], nm
+    # A unit alone is not prose, so it does not cost the metric its sign-off.
+    plain = m.Table(name="items", schema="public", storage_connection="c", grain=["id"],
+                    description="i", columns=[
+                        m.Column(name="id", type="integer", primary_key=True),
+                        m.Column(name="qty", type="integer", aggregation="additive", unit="each")])
+    only = build.suggest_metrics(plain, D.get_dialect("postgresql"))[0]
+    assert only["name"] == "items_total_qty" and only["review_state"] == "approved"
+
+
+@pytest.mark.parametrize("grain,proposed", [
+    (["id"], False),            # one key, and it IS the grain → COUNT(*) counts things
+    (["id", "line_no"], True),  # composite grain → a row is not a thing
+    ([], True),                 # no declared grain → we cannot claim it counts things
+    (["order_id"], True),       # key declared, grain says otherwise → believe the grain
+])
+def test_count_is_proposed_only_where_a_row_might_not_be_a_thing(grain, proposed):
+    """The other arm of the COUNT(*) gate (#404). Both clauses matter: an introspected model
+    derives `primary_key` FROM `grain` so they agree, but a curated one can mark a key that the
+    declared grain contradicts, and the grain is the one that says what a row is."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=grain,
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="line_no", type="integer"),
+                    m.Column(name="order_id", type="integer")])
+    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert ("orders_count" in names) is proposed
 
 
 def test_a_default_filter_alone_does_not_license_a_plain_metric():

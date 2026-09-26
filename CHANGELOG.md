@@ -54,6 +54,12 @@ below corresponds to one such version.
   told where to get the rules. On a wide model the `mode="index"` call goes from 50,178 to 48,470
   chars, and the saving repeats per call.
 
+  All three fields are conditional, and absent rather than null when they do not apply: `engine`
+  and `dialect` when the model declares no single engine (no connection, or two that disagree —
+  "which dialect" has no answer then, and guessing is worse than saying nothing), `dialect_rules`
+  when the engine has no known gaps. `contracts.DatasourceInfo` and `DatasourceSchemaResult`
+  declare them accordingly.
+
   `engine` is emitted beside `database_type`, not instead of it: that field is derived from the
   DSN and reports the connection's scheme, which is `postgres` for a Redshift warehouse reached
   the usual way. The two can disagree, so the one the MODEL declares is the one the rules are
@@ -76,6 +82,15 @@ below corresponds to one such version.
   duration pairs are unaffected — those encode a choice. Re-run against the same wide model, the
   generator's plain-aggregate proposals fall from 203 to 58. A curator can still add any plain
   metric by hand; this is only what the generator proposes unprompted.
+
+  Two consequences worth stating. **A caveat-justified metric no longer auto-approves.** A trivial
+  binding used to skip the review queue with a system sign-off, and that claimed only that
+  `SUM(col)` is `SUM(col)`. Such a metric now survives precisely because someone attached a caveat,
+  the caveat is its whole justification, and it rides as prose nothing verified — so it waits for a
+  person, for the same reason a flag rate does. A metric carrying only a `unit` is still
+  judgment-free and still auto-approves. And **`--max-per-table 0` now returns no metrics** rather
+  than one: the cap was floored at 1 to protect a row count that was unconditional, and it is not
+  unconditional any more.
 
 ## [0.9.6] — 2026-09-23
 

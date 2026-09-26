@@ -641,9 +641,16 @@ def _is_trivial_measure(binding_sql: str) -> bool:
 def _with_caveats(prose: str, caveats: list[str]) -> str:
     """The caveat is the reason the metric was proposed, so it has to arrive with it.
 
-    `Metric` has no caveats field — its one prose field is `calculation` — and a metric proposed
-    *because* a caveat exists, that then ships without it, is the empty metric #404 removes wearing
-    a better justification. Appended, not substituted, so the intent still reads first.
+    `Metric` has no caveats field, and of its two prose fields `calculation` is the one that is
+    always populated and is what a question is matched against — so the caveat goes there. A metric
+    proposed *because* a caveat exists, that then ships without it, is the empty metric #404
+    removes wearing a better justification. Appended, not substituted, so the intent reads first.
+
+    `description` is left empty, as it already was for every generated metric. That has a cost
+    worth naming: `tools`' `metric_index` falls back to the metric's own NAME when `description` is
+    empty, so on the `mode="index"` tier a caveat-justified metric still shows name-as-description
+    and the caveat appears only once the table is in scope. Filling it is a separate change with
+    its own shape (#406) rather than a second prose field written from the first.
     """
     return prose if not caveats else prose + ". " + " ".join(
         c if c.rstrip().endswith((".", "!", "?")) else c.rstrip() + "." for c in caveats)
@@ -660,7 +667,9 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
       • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
         pattern — `AVG(end − start)` via the dialect's day-difference form).
     Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
-    bulk in the explorer. Capped at max_per_table.
+    bulk in the explorer. Capped at max_per_table. A mechanically trivial binding auto-approves
+    with a system sign-off UNLESS its prose carries a caveat — that caveat is unverified words, and
+    words are the part a person has to confirm.
 
     Columns agami couldn't read (`description_source == "ai_unknown"`) are SKIPPED — we don't
     propose a metric on a column we can't explain (its prose would just restate opaque SQL).
@@ -684,14 +693,23 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     # still add any plain metric by hand; this is only what the generator proposes unprompted.
     #
     # One primary key means one row per thing, so COUNT(*) counts things. A composite or absent
-    # grain means it may not, and THAT is worth naming.
+    # grain means it may not, and THAT is worth naming. The two clauses agree on an INTROSPECTED
+    # model — `introspect` derives `primary_key` from `grain`, so they can differ only in order —
+    # and the grain clause is there for the curated case, where a column can be marked a key
+    # without being part of the declared grain.
     pk_cols = [c.name for c in table.columns if c.primary_key]
-    counts_things = len(pk_cols) == 1 and list(getattr(table, "grain", []) or []) == pk_cols
-    t_caveats = list(getattr(table, "caveats", None) or [])
+    counts_things = len(pk_cols) == 1 and list(table.grain or []) == pk_cols
+    t_caveats = list(table.caveats or [])
+    # Names whose prose carries a caveat, so the sign-off pass below can tell them from the
+    # genuinely judgment-free ones. Tracked by name rather than a key on the dict, which would
+    # have to be stripped again before `curate.write_items` validates it as a Metric.
+    caveated: set[str] = set()
     if t_caveats or not counts_things:
         out.append({"name": f"{t}_count",
                     "calculation": _with_caveats(f"Number of {t} records", t_caveats),
                     "bindings": {st: "COUNT(*)"}, "source_tables": [t]})
+        if t_caveats:
+            caveated.add(f"{t}_count")
     ts_cols: list[str] = []
     for c in table.columns:
         if c.primary_key:
@@ -710,7 +728,7 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
         # A plain SUM/AVG is proposed only when something beyond the aggregation class rides on
         # the metric itself: a unit the formatter needs, or a caveat the aggregate must respect.
         # Without one of those the class already says everything the metric would.
-        c_caveats = list(getattr(c, "caveats", None) or [])
+        c_caveats = list(c.caveats or [])
         worth_naming = bool(c_caveats) or bool(c.unit)
         if c.aggregation == "additive" and worth_naming:
             m = {"name": f"{t}_total_{c.name}",
@@ -719,6 +737,8 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
             if c.unit:  # SUM(col) carries the column's unit — USD column → USD total
                 m["unit"] = c.unit
             out.append(m)
+            if c_caveats:
+                caveated.add(m["name"])
         elif c.aggregation == "averageable" and worth_naming:
             m = {"name": f"{t}_avg_{c.name}",
                  "calculation": _with_caveats(f"Average {c.name} in {t}", c_caveats),
@@ -726,6 +746,8 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
             if c.unit:  # AVG(col) is in the same unit as the column
                 m["unit"] = c.unit
             out.append(m)
+            if c_caveats:
+                caveated.add(m["name"])
         if c.type in _TS_TYPES:
             ts_cols.append(c.name)
     starts = [c for c in ts_cols if _START_NAME_RE.search(c)]
@@ -739,7 +761,14 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     out = out[:max_per_table]
     for m in out:
         binding = next(iter(m.get("bindings", {}).values()), "")
-        if _is_trivial_measure(binding):
+        # A caveat-carrying metric is NOT judgment-free, however trivial its binding. Before #404
+        # a plain aggregate was proposed for every eligible column and auto-approving it claimed
+        # only that `SUM(col)` is `SUM(col)`; now such a metric survives precisely because someone
+        # attached a caveat to the column or table, that caveat is the metric's whole justification,
+        # and it is carried as prose the engine did not verify. So it goes to the review queue for
+        # the same reason a rate or a duration does — the part a person has to confirm is words,
+        # not arithmetic.
+        if _is_trivial_measure(binding) and m["name"] not in caveated:
             # mechanically sound (COUNT(*) / SUM(col) / AVG(col)) — auto-approve with a system
             # sign-off so it skips the review queue, exactly like an enforced FK join.
             m["confidence"] = "confirmed"

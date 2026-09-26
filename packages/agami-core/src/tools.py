@@ -1214,31 +1214,43 @@ def _local_engine(profile_dir: Path) -> "str | None":
 
     `list_datasources` is the cheap call — it reports a table count by globbing, not by loading —
     so this reads the one key it needs rather than paying a full parse for a listing entry. Same
-    rule as the served path: one declared engine or nothing.
+    one-declared-engine-or-nothing rule as the served path (`model_store.model_engines`).
 
-    A connection is written EITHER inline with its `storage_type` OR as a `{name, ref}` pointer
-    into `datasources/<name>/storage.yaml`, and the generator writes the pointer form — so
-    reading only the inline key finds nothing on a real model. Both are followed, the way
-    `loader.load_datasource` follows them.
+    It reads all three connection forms `loader.load_datasource` accepts, and resolves them in the
+    loader's order — `ref` first, then inline `storage_type`, then a bare name standing for
+    `datasources/<name>/storage.yaml`. The order is only observable on a connection carrying both
+    keys, but a listing that disagreed with the model the next call loads would be worse than
+    useless, so it follows rather than approximates. The generator writes the pointer form, so
+    reading the inline key alone finds nothing on a real model.
+
+    Every read is best-effort: this is a listing, and a model too malformed to parse should cost
+    its own entry's `engine`, not the whole call. That is also why `_read` insists on a mapping —
+    a YAML file holding a scalar or a list parses fine and then has no `.get`.
     """
     import yaml
 
     def _read(path: Path) -> dict:
         try:
-            return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, ValueError):
             return {}
+        return doc if isinstance(doc, dict) else {}
+
+    def _declared(c: Any) -> "str | None":
+        if not isinstance(c, dict):  # a bare name: `storage_connections: [warehouse]`
+            return _read(profile_dir / "datasources" / str(c) / "storage.yaml").get("storage_type")
+        if c.get("ref"):
+            return _read(profile_dir / c["ref"]).get("storage_type")
+        if c.get("storage_type"):
+            return c["storage_type"]
+        return _read(
+            profile_dir / "datasources" / str(c.get("name")) / "storage.yaml"
+        ).get("storage_type")
 
     doc = _read(profile_dir / "datasource.yaml")
-    engines: set[str] = set()
-    for c in doc.get("storage_connections") or []:
-        if not isinstance(c, dict):
-            continue
-        if c.get("storage_type"):
-            engines.add(c["storage_type"])
-            continue
-        ref = c.get("ref") or f"datasources/{c.get('name')}/storage.yaml"
-        engines.add(_read(profile_dir / ref).get("storage_type"))
+    engines = {_declared(c) for c in (doc.get("storage_connections") or [])}
+    # A connection that declares nothing is not a second opinion about the engine (see
+    # `model_engines`): dropping it keeps an engine we do know instead of manufacturing ambiguity.
     engines.discard(None)
     return engines.pop() if len(engines) == 1 else None
 

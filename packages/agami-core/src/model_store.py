@@ -219,9 +219,16 @@ def model_engines(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, str]:
     is not a promoted column, so this decodes the doc; still one query and one pass, not a model
     load per datasource, which is the cost `list_datasources` exists to avoid.
 
-    A datasource is omitted when its connections declare no engine, or declare two different ones
-    — the same rule `tools._engine_of` applies, because "which dialect" has no single answer then
-    and guessing one is worse than saying nothing.
+    A datasource is omitted when its connections declare no engine, or declare two different ones:
+    "which dialect" has no single answer then, and guessing one is worse than saying nothing. That
+    one-or-nothing rule is `tools._engine_of`'s and `runtime._storage_type_of`'s, restated here
+    because this reads the RAW doc rather than a loaded model.
+
+    Which is also the only reason the empty case is filtered: `StorageConnection.storage_type` is
+    required, so a connection that went through validation always declares one. A doc missing it
+    predates the field or was not written by `save_model`, and a connection that declares nothing
+    is not a second opinion about the engine — treating it as one would turn every such model into
+    an ambiguity and drop an engine we do know.
     """
     out: dict[str, str] = {}
     rows = store.query(

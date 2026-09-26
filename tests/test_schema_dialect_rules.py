@@ -20,11 +20,13 @@ pytest.importorskip("yaml")
 import contracts  # noqa: E402
 import sql_dialect_rules  # noqa: E402
 import tools  # noqa: E402
+import yaml  # noqa: E402
 from semantic_model import build  # noqa: E402
 from semantic_model.models import Datasource, StorageConnection, SubjectArea  # noqa: E402
 
 
-def _serve(tmp_path, monkeypatch, storage_type: str) -> None:
+def _serve(tmp_path, monkeypatch, storage_type: str, *, second_engine: str | None = None,
+           dangling_ref: bool = False) -> None:
     for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", "AGAMI_PROFILE", "AGAMI_ORG_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
@@ -33,12 +35,22 @@ def _serve(tmp_path, monkeypatch, storage_type: str) -> None:
     # a model on disk with no profile beside it is listed nowhere. The schema tools don't need it.
     (tmp_path / "local").mkdir(parents=True, exist_ok=True)
     (tmp_path / "local" / "credentials").write_text("[crm]\nurl = postgresql://u:p@h/db\n")
+    conns = [StorageConnection(name="warehouse", storage_type=storage_type)]
+    if second_engine:
+        conns.append(StorageConnection(name="lake", storage_type=second_engine))
     org = Datasource(
         datasource="crm",
-        storage_connections=[StorageConnection(name="warehouse", storage_type=storage_type)],
+        storage_connections=conns,
         subject_areas=[SubjectArea(name="Sales", description="Sales area")],
     )
     build.write_tree(org, tmp_path / "crm")
+    if dangling_ref:
+        # A second connection whose pointer resolves to nothing. Written after `write_tree` because
+        # the model itself could not hold one — `storage_type` is required on a StorageConnection,
+        # which is exactly why the empty case only arises on the raw on-disk form.
+        doc = yaml.safe_load((tmp_path / "crm" / "datasource.yaml").read_text())
+        doc["storage_connections"].append({"name": "missing", "ref": "datasources/gone/x.yaml"})
+        (tmp_path / "crm" / "datasource.yaml").write_text(yaml.safe_dump(doc))
     tools.bootstrap_paths()
 
 
@@ -85,12 +97,52 @@ def test_the_pointer_costs_a_fraction_of_the_rules(tmp_path, monkeypatch):
         sql_dialect_rules.dialect_rules_for("Redshift"))
 
 
-def test_an_engine_without_known_gaps_gets_nothing(tmp_path, monkeypatch):
+def test_an_engine_without_known_gaps_is_named_but_carries_no_rules(tmp_path, monkeypatch):
+    """Asserted on the LISTING, which is where the rules live now. On the schema response the
+    claim would be vacuous — no engine carries them there any more, so it would pass whatever
+    engine the model declared."""
     _serve(tmp_path, monkeypatch, "PostgreSQL")
 
-    head = _head(tools.tool_get_datasource_schema({"datasource": "crm"}))
+    entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
 
-    assert "dialect_rules" not in head
+    assert entry["engine"] == "PostgreSQL"
+    assert "dialect_rules" not in entry
+    assert _head(tools.tool_get_datasource_schema({"datasource": "crm"}))["dialect"] == {
+        "engine": "PostgreSQL", "rules_from": "list_datasources"}
+
+
+def test_a_model_that_names_two_engines_claims_neither(tmp_path, monkeypatch):
+    """"Which dialect" has no single answer then, and a guess sends the client to write SQL in the
+    wrong one. Asserted because both resolvers state this as their safety property, and a version
+    that picked one arbitrarily passed the whole suite."""
+    _serve(tmp_path, monkeypatch, "Redshift", second_engine="Snowflake")
+
+    entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
+
+    assert "engine" not in entry and "dialect_rules" not in entry
+    assert "dialect" not in _head(tools.tool_get_datasource_schema({"datasource": "crm"}))
+
+
+def test_a_connection_that_declares_nothing_does_not_hide_the_engine(tmp_path, monkeypatch):
+    """A pointer that does not resolve is a connection we know nothing about, not a second opinion
+    — treating it as one would drop an engine the model does state."""
+    _serve(tmp_path, monkeypatch, "Redshift", dangling_ref=True)
+
+    entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
+
+    assert entry["engine"] == "Redshift"
+
+
+def test_a_malformed_model_costs_its_own_engine_not_the_whole_listing(tmp_path, monkeypatch):
+    """This path never parsed these files before #405. A listing that dies on one unparseable
+    model would be a worse regression than the saving is a win."""
+    _serve(tmp_path, monkeypatch, "Redshift")
+    (tmp_path / "crm" / "datasource.yaml").write_text("just a string, not a mapping\n")
+
+    entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
+
+    assert entry["datasource"] == "crm"
+    assert "engine" not in entry and "dialect_rules" not in entry
 
 
 def test_unknown_or_missing_engines_have_no_rules():
@@ -98,10 +150,18 @@ def test_unknown_or_missing_engines_have_no_rules():
     assert sql_dialect_rules.dialect_rules_for("NotAnEngine") is None
 
 
-def test_the_field_is_declared_and_the_client_is_told_to_follow_it():
-    assert "dialect_rules" in contracts.DatasourceSchemaResult.model_fields
-    assert "dialect_rules" in tools.TOOLS["get_datasource_schema"]["description"]
+def test_the_fields_are_declared_where_they_are_now_sent():
+    """The contract has to move with the payload. Asserting `dialect_rules` on the schema result
+    was how this test kept passing after the field stopped being sent from there — a consumer
+    building against `contracts` would have been told the opposite of what ships."""
+    assert "dialect_rules" not in contracts.DatasourceSchemaResult.model_fields
+    assert "dialect" in contracts.DatasourceSchemaResult.model_fields
+    for field in ("engine", "dialect_rules"):
+        assert field in contracts.DatasourceInfo.model_fields
+    # And the client is pointed at the call that carries them.
+    assert "dialect_rules" in tools.TOOLS["list_datasources"]["description"]
     assert "dialect_rules" in tools._SHARED_INSTRUCTIONS
+    assert "list_datasources" in tools.TOOLS["get_datasource_schema"]["description"]
 
 
 def test_rewrites_keep_the_result_not_just_avoid_the_error():
