@@ -1627,7 +1627,8 @@ def _schema_payload(
         "datasource": profile,
         "organization": org.description or None,
         "mode": mode,
-        # The cross-area routing map: which table bridges to which, and the area each sits in.
+        # The cross-area routing map: `{from_table: [to_table, …]}` — which table bridges to which,
+        # so the agent knows what to ask `dataset_names` for next.
         #
         # This was one entry per declared edge, projected to `{from, to, from_table, to_table}`.
         # An earlier revision projected `{from, to, for_questions_about}` and a model with a dozen
