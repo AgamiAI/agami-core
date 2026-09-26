@@ -12,6 +12,40 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The read-only guard now speaks every dialect it serves (#395).** `execute_sql` advertises the
+  MCP `readOnlyHint`, but the dangerous-function deny-list held Postgres primitives only, so a
+  single `SELECT` could still carry a side effect on every other engine: `SELECT SLEEP(30)` and
+  `SELECT GET_LOCK('x', 10)` on MySQL, `SELECT SYSTEM$ABORT_SESSION(…)` on Snowflake,
+  `SELECT reflect('java.lang.Runtime', …)` on Databricks, `SELECT … FROM OPENROWSET(BULK
+  '/etc/passwd', …)` on SQL Server, `SELECT UTL_HTTP.REQUEST('http://…')` on Oracle,
+  `SELECT EXTERNAL_QUERY(…)` on BigQuery, `SELECT load_extension(…)` on SQLite / DuckDB. The
+  deny-list is now organized by engine and covers all of them, and the whole Snowflake `SYSTEM$…`
+  namespace is refused rather than a member list that would go stale.
+- **Three Postgres holes in families the list already claimed.** `pg_notify` — the function
+  spelling of the denied `NOTIFY` keyword, which `\bNOTIFY\b` cannot see because `_` is a word
+  character. The advisory-lock family beyond the four names listed (`pg_try_advisory_lock` and the
+  `_shared` variants — eleven functions, matched by one prefix now). And the siblings of the
+  already-denied `pg_drop_replication_slot`: `pg_promote`, WAL-replay pause/resume, backup
+  start/stop, slot create/copy, `pg_logical_emit_message`, and `pg_logical_slot_get_changes`, which
+  is a destructive read — it advances the slot, so a downstream consumer loses those rows.
+- The deny-list names SQL Server's `OPEN…` functions individually rather than matching `OPEN\w+`,
+  so the ordinary `OPENJSON` still runs, and the false-positive corpus was extended with the names
+  most able to collide (`sleep_minutes`, `AVG(sleep)`, `lock_count`, `reflection_score`).
+- **One deliberate over-refusal, since these are the first deny-list entries that are ordinary
+  English words.** `WORD(` is also the column-list form of a CTE or derived table, so
+  `WITH benchmark (region, target) AS (…)` and `JOIN (…) AS benchmark (region)` are now refused,
+  naming a function the statement does not contain. A lookaround narrow enough to admit them would
+  let a real call through in some position, and this gate fails closed, so the behaviour is pinned
+  as `REJECT_CTE_NAME_COLLISION` instead of worked around. If the trade is judged the wrong way
+  round, the fix is to drop `sleep` and `benchmark` — both are pure time-wasters already bounded by
+  the executor's per-statement timeout.
+- `docs/mcp-server.md` carried a third copy of the Postgres-only function list, beside `SECURITY.md`
+  and `plugins/agami/shared/sql-generation-rules.md`; all three now say "every engine it dispatches
+  to". `load_extension` is labelled SQLite-only — DuckDB loads extensions with `INSTALL` / `LOAD`,
+  statements the opening-keyword step already refuses — and Trino likewise adds no entry.
+
 ## [0.9.6] — 2026-09-23
 
 ### Changed

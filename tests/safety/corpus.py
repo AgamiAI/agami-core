@@ -496,6 +496,54 @@ CASES: list[Case] = [
         guardrail.RULE_READ_ONLY,
         "copy-to-program",
     ),
+    # The same three capabilities — sleep, lock, file, remote SQL, OS — on the OTHER engines the
+    # executor dispatches to. Every vector above this line is spelled in Postgres, and the
+    # dangerous-function deny-list was Postgres-only, so the class read as covered while a single
+    # SELECT carried a side effect on MySQL, Snowflake, Databricks, SQL Server and Oracle. The tool
+    # advertises one `readOnlyHint` over all of them, so the corpus that backs it holds one vector
+    # per engine rather than one dialect's. No `engines` pin: the gate refuses before a connection
+    # is opened, so the verdict does not depend on which warehouse the harness built.
+    Case("integrity", "SELECT SLEEP(30)", guardrail.RULE_READ_ONLY, "mysql-sleep"),
+    Case("integrity", "SELECT GET_LOCK('x', 10)", guardrail.RULE_READ_ONLY, "mysql-get-lock"),
+    Case(
+        "integrity",
+        "SELECT SYSTEM$ABORT_SESSION(123)",
+        guardrail.RULE_READ_ONLY,
+        "snowflake-abort-session",
+    ),
+    Case(
+        "integrity",
+        "SELECT reflect('java.lang.Runtime', 'getRuntime')",
+        guardrail.RULE_READ_ONLY,
+        "spark-jvm-reflection",
+    ),
+    # `pg_notify` is the function spelling of the denied `NOTIFY` keyword, which `\bNOTIFY\b`
+    # cannot see because `_` is a word character — a side effect that leaves the database.
+    Case("integrity", "SELECT pg_notify('deploy', 'go')", guardrail.RULE_READ_ONLY, "pg-notify"),
+    Case(
+        "file_fn",
+        "SELECT LOAD_FILE('/etc/passwd')",
+        guardrail.RULE_READ_ONLY,
+        "mysql-load-file",
+    ),
+    Case(
+        "file_fn",
+        "SELECT x FROM OPENROWSET(BULK '/etc/passwd', SINGLE_CLOB) AS t(x)",
+        guardrail.RULE_READ_ONLY,
+        "sqlserver-openrowset",
+    ),
+    Case(
+        "network_fn",
+        "SELECT UTL_HTTP.REQUEST('http://example.com') FROM dual",
+        guardrail.RULE_READ_ONLY,
+        "oracle-utl-http",
+    ),
+    Case(
+        "network_fn",
+        "SELECT x FROM EXTERNAL_QUERY('conn', 'SELECT 1')",
+        guardrail.RULE_READ_ONLY,
+        "bigquery-external-query",
+    ),
     # The line comment swallows the statement separator, so a splitter that trusts `;` sees ONE
     # statement — the keyword check reads what is actually there and still refuses.
     Case(
