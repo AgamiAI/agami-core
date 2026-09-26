@@ -56,6 +56,33 @@ def bare_name(qualified: str) -> str:
     return qualified.split(".")[-1]
 
 
+def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
+    """The comparable identity of a table reference: ``(schema, bare name)``, folded.
+
+    One helper because comparing table references two different ways is how one half of a
+    comparison comes to disagree with the other. Three rules, all of them borrowed rather than
+    invented:
+
+    * **The schema may be embedded in the name.** ``public.orders`` with no ``schema`` field is a
+      shape the loader accepts and models on disk use, so the qualifier is parsed out when the
+      field is absent. Reading only the field treats such a reference as schema-less, and it then
+      collides with a same-named table in another schema.
+    * **Case is folded**, and a missing schema and an empty one are the same schema — exactly what
+      ``validator._check_table_name_across_schemas`` does. That check DECIDES when a bare name is
+      ambiguous, so any other fold disagrees with the authority on the question.
+    * **The bare half is the last dotted segment** (`bare_name`), and an embedded schema is the
+      segment immediately before it — so `catalog.schema.table` reads its schema as `schema`,
+      the way a qualified reference is read, rather than as `catalog.schema`.
+
+    Returns a tuple suitable as a dict key or for equality; never for display, since both halves
+    are lower-cased.
+    """
+    parts = (name or "").split(".")
+    bare = bare_name(name or "")
+    embedded = parts[-2] if len(parts) > 1 else None
+    return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
+
+
 # ---------------------------------------------------------------------------
 # Shared enums / literals
 # ---------------------------------------------------------------------------
@@ -579,7 +606,8 @@ class Relationship(_Base):
     # lists). It is a natural-language field, so it could only come from LLM enrichment, and that
     # pass covers subject areas and tables but not edges. `get_datasource_schema` used to project
     # it onto every cross-area edge, so a long edge list carried a fraction of its length in
-    # distinct facts; the payload now names the endpoint tables instead.
+    # distinct facts; that tier is an adjacency map now, and the `dataset_names` tier drops the
+    # field from each edge it emits.
     #
     # Kept DECLARED rather than deleted: these models `forbid` unknown keys, so removing the field
     # would fail every model already on disk that carries `for_questions_about: []` — which is what

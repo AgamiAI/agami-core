@@ -1393,6 +1393,38 @@ def _large_tables(org) -> dict[str, int]:
     return out
 
 
+def _cross_area_map(org, scope) -> dict[str, list[str]]:
+    """The cross-area edges as an adjacency map: `{from_table: [to_table, …]}`.
+
+    Several declared edges can reach the same pair of tables through different columns — nine
+    reference columns on one table all pointing at the user table, say. This tier carries no
+    columns, so as a list those edges were indistinguishable and the block repeated itself. A map
+    states each bridge once.
+
+    Only the bridges. A `{table: subject_area}` half was carried here briefly (#402): the
+    per-edge form it replaced repeated the two area names on every edge, but the routing answer
+    an agent acts on is a TABLE NAME — which is what `dataset_names` takes — and the one
+    parameter an area would serve is `area`, which the instructions tell clients to omit.
+    """
+    # Names are published BARE, which is the only form the next call can honour: `_resolve_scope`
+    # strips every qualifier from `dataset_names`, and the bare name then resolves first-match. A
+    # qualified node would look precise and select a different table — publishing `public.orders`
+    # and receiving `archive.orders` is worse than publishing an ambiguity the caller can see.
+    #
+    # So where one name is declared under two schemas, both edges land on one node here. That is a
+    # fiction only in the sense the whole path is one: `dataset_names` cannot tell those tables
+    # apart either. #258 is the fix — the served model has no schema column at all, so the
+    # qualifier is gone before this tool answers. When it lands, this block should publish the
+    # qualified name, and `models.table_key` is the comparison to do it with.
+    joins: dict[str, set[str]] = {}
+    for r in org.cross_subject_area_relationships:
+        if scope.level != "datasource" and scope.area not in (r.from_subject_area,
+                                                              r.to_subject_area):
+            continue
+        joins.setdefault(_bare_name(r.from_table), set()).add(_bare_name(r.to_table))
+    return {t: sorted(v) for t, v in sorted(joins.items())}
+
+
 def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
     """Full get_table_context for the named tables: `{"tables": {name: ctx}, "relationships": [...]}`.
 
@@ -1582,37 +1614,34 @@ def _schema_payload(
         "datasource": profile,
         "organization": org.description or None,
         "mode": mode,
-        # One entry per declared cross-area edge, named by its ENDPOINT TABLES.
+        # The cross-area routing map: `{from_table: [to_table, …]}` — which table bridges to which,
+        # so the agent knows what to ask `dataset_names` for next.
         #
-        # This used to project `{from, to, for_questions_about}`, and `for_questions_about` has no
-        # writer anywhere — it is `setdefault`-ed empty and never filled, including in the sample
-        # model this product ships. So each entry was a bare pair of area names, and a model with
-        # a dozen distinct FK edges from `sales` to `people` (assigned_to, created_by,
-        # approved_by, …) emitted `sales → people` a dozen identical times. On a wide model
-        # that is a long list carrying a fraction of its length in distinct facts.
+        # This was one entry per declared edge, projected to `{from, to, from_table, to_table}`.
+        # An earlier revision projected `{from, to, for_questions_about}` and a model with a dozen
+        # distinct FK edges from `sales` to `people` (assigned_to, created_by, approved_by, …)
+        # emitted `sales → people` a dozen identical times; naming the endpoint tables fixed that
+        # for edges between DIFFERENT table pairs but not for the several that reach the SAME pair
+        # through different columns. Those still serialized identically, because the column is the
+        # only thing telling them apart and this tier does not carry columns. On a wide model the
+        # block ran 283 entries for 181 distinct facts.
         #
-        # The endpoints are what tell them apart, and they are the routing question this block
-        # answers — WHICH table bridges the areas, so the agent knows what to ask for next. The join
-        # mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately: a
-        # `dataset_names` call returns them in full on its own `relationships` block, so repeating
-        # every relationship object here would restate what the next call states better.
+        # An adjacency map states each fact once, and answers the same routing question — WHICH
+        # table bridges the areas, so the agent knows what to ask for next.
         #
-        # That last sentence was FALSE when this comment was written: `_table_contexts` resolved
-        # those relationships and discarded them, so the detail this tier defers to did not exist
-        # on any surface. ACE-107 made the deferral true by emitting them.
-        "cross_area_relationships": [
-            {
-                "from": r.from_subject_area,
-                "to": r.to_subject_area,
-                "from_table": r.from_table,
-                "to_table": r.to_table,
-            }
-            for r in org.cross_subject_area_relationships
-            if scope.level == "datasource" or scope.area in (r.from_subject_area, r.to_subject_area)
-        ],
+        # The join mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately:
+        # a `dataset_names` call returns them in full on its own `relationships` block, so
+        # repeating every relationship object here would restate what the next call states better.
+        "cross_area_relationships": _cross_area_map(org, scope),
         "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
         "large_tables": _large_tables(org),
     }
+    # Omitted outright when there is nothing to route, which the table tier already does with this
+    # key. It also keeps the old emptiness test working: the block was a list, so a client writing
+    # `if response["cross_area_relationships"]:` read False on a model with no cross-area edges —
+    # and an empty MAP is truthy, so leaving it in place would silently flip that branch.
+    if not result["cross_area_relationships"]:
+        del result["cross_area_relationships"]
     # At area scope the map is that one area. `subject_areas` is not emitted at all on the table
     # tier — that branch does not call this function.
     areas = [sa for sa in org.subject_areas if scope.level == "datasource" or sa.name == scope.area]
@@ -1812,7 +1841,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             # The two blocks this call used to compute and throw away. Without them the call whose
             # whole purpose is per-table detail returned columns and no way to join them — while
             # this tool's own description promised both. `relationships` ships as the loader
-            # produced it (join columns, `on`, cardinality, trust block); `metrics` is re-projected
+            # produced it — in full for an edge between two requested tables, as the join alone
+            # for one reaching a table the caller has no columns for; `metrics` is re-projected
             # through `_metric_full` rather than shipped raw, because the loader's dump carries the
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
             "relationships": ctx["relationships"],

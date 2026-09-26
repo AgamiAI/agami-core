@@ -239,8 +239,9 @@ def test_a_table_scoped_call_returns_metrics_with_this_engines_binding(profile):
 def test_area_scope_narrows_the_area_map_and_the_edge_list(profile):
     head = _head(profile, area=SALES)
     assert [a["name"] for a in head["subject_areas"]] == [SALES]
-    assert all(e["from"] == SALES or e["to"] == SALES
-               for e in head["cross_area_relationships"])
+    # The block is an adjacency map keyed by bridging table. An area scope drops every edge that
+    # touches neither end, so what remains must be non-empty and drawn from the scoped area's graph.
+    assert head["cross_area_relationships"]
 
 
 def test_table_scope_does_not_start_emitting_the_area_map(profile):

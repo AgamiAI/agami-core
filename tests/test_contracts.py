@@ -18,7 +18,6 @@ pytest.importorskip("pydantic")
 
 import contracts  # noqa: E402
 from contracts import (  # noqa: E402
-    CrossAreaRelationship,
     DatasourceSchemaResult,
     ExecuteSqlResult,
     ListDatasourcesResult,
@@ -64,9 +63,7 @@ def test_get_datasource_schema_index_roundtrip_is_subject_area_primary():
         "subject_areas": [
             {"name": "sales", "description": "Orders + revenue", "table_count": 2},
         ],
-        "cross_area_relationships": [
-            {"from": "sales", "to": "finance", "from_table": "orders", "to_table": "ledger"},
-        ],
+        "cross_area_relationships": {"orders": ["ledger"]},
         "note": "Per-table detail is lazy-loaded.",
     }
     out = _roundtrip(DatasourceSchemaResult, sample)
@@ -100,10 +97,15 @@ def test_get_datasource_schema_summary_roundtrip_carries_named_tables():
     assert _roundtrip(DatasourceSchemaResult, sample) == sample
 
 
-def test_cross_area_relationship_from_alias():
-    rel = CrossAreaRelationship.model_validate({"from": "a", "to": "b"})
-    assert rel.from_ == "a" and rel.to == "b"
-    assert rel.model_dump(by_alias=True, exclude_unset=True) == {"from": "a", "to": "b"}
+def test_cross_area_map_is_a_plain_adjacency_dict():
+    """`{from_table: [to_table, …]}` and nothing else. A `{table: area}` half rode here briefly
+    (#402); the routing answer an agent acts on is a table name, which `dataset_names` takes."""
+    sample = {
+        "datasource": "acme",
+        "mode": "index",
+        "cross_area_relationships": {"orders": ["ledger", "users"]},
+    }
+    assert _roundtrip(DatasourceSchemaResult, sample) == sample
 
 
 def test_prompt_examples_empty_roundtrip():
